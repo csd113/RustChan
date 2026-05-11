@@ -7,8 +7,8 @@
 //   delete_post        calls super::paths_safe_to_delete.
 //
 use crate::models::Post;
-use anyhow::{Context, Result};
-use rusqlite::{params, OptionalExtension};
+use anyhow::{Context as _, Result};
+use rusqlite::{params, OptionalExtension as _};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -1417,7 +1417,7 @@ pub fn update_post_thumb_path(
     if updated == 0 {
         return Err(anyhow::Error::new(StaleMediaTargetError {
             post_id,
-            expected_path: expected_file_path.to_string(),
+            expected_path: expected_file_path.to_owned(),
         }));
     }
     Ok(())
@@ -1467,7 +1467,7 @@ pub fn replace_transcoded_media(
         if !target_exists {
             return Err(anyhow::Error::new(StaleMediaTargetError {
                 post_id,
-                expected_path: old_path.to_string(),
+                expected_path: old_path.to_owned(),
             }));
         }
 
@@ -1565,11 +1565,11 @@ mod tests {
         let post = NewPost {
             thread_id: 0,
             board_id: board.id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
             subject: Some(format!("{board_short} subject")),
-            body: body.to_string(),
-            body_html: body.to_string(),
+            body: body.to_owned(),
+            body_html: body.to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -1581,7 +1581,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "token".to_string(),
+            deletion_token: "token".to_owned(),
             is_op: true,
         };
         let (thread_id, post_id, _) =
@@ -1599,23 +1599,23 @@ mod tests {
         let post = NewPost {
             thread_id: 0,
             board_id: board.id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
             subject: Some(format!("{board_short} subject")),
-            body: "media body".to_string(),
-            body_html: "media body".to_string(),
+            body: "media body".to_owned(),
+            body_html: "media body".to_owned(),
             ip_hash: None,
-            file_path: Some(file_path.to_string()),
-            file_name: Some("media".to_string()),
+            file_path: Some(file_path.to_owned()),
+            file_name: Some("media".to_owned()),
             file_size: Some(10),
             thumb_path: None,
-            mime_type: Some("video/mp4".to_string()),
-            media_type: Some("video".to_string()),
+            mime_type: Some("video/mp4".to_owned()),
+            media_type: Some("video".to_owned()),
             audio_file_path: None,
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "token".to_string(),
+            deletion_token: "token".to_owned(),
             is_op: true,
         };
         let (_thread_id, post_id, _) =
@@ -1663,7 +1663,7 @@ mod tests {
     fn search_query_strips_chan_punctuation_without_crashing() {
         assert_eq!(search_terms(">>1"), vec!["1"]);
         assert_eq!(search_terms("💥💥💥   >>1 ' \" %"), vec!["1"]);
-        assert_eq!(to_fts_query(">>1"), Some("\"1\"*".to_string()));
+        assert_eq!(to_fts_query(">>1"), Some("\"1\"*".to_owned()));
     }
 
     #[test]
@@ -1674,7 +1674,7 @@ mod tests {
         );
         assert_eq!(
             to_fts_query("hello world"),
-            Some("\"hello\"* AND \"world\"*".to_string())
+            Some("\"hello\"* AND \"world\"*".to_owned())
         );
     }
 
@@ -1828,7 +1828,7 @@ mod tests {
         assert_eq!(recovery.media_posts_reset, 0);
         assert_eq!(
             background_job_status(&conn, job_id),
-            ("pending".to_string(), 0, None)
+            ("pending".to_owned(), 0, None)
         );
     }
 
@@ -1849,7 +1849,7 @@ mod tests {
         assert_eq!(background_job_status(&conn, done_id).0, "done");
         assert_eq!(
             background_job_status(&conn, failed_id),
-            ("failed".to_string(), 3, Some("bad input".to_string()))
+            ("failed".to_owned(), 3, Some("bad input".to_owned()))
         );
     }
 
@@ -1897,7 +1897,7 @@ mod tests {
             .expect("claim recovered job")
             .expect("job should be claimable");
 
-        assert_eq!(claimed, (job_id, payload.to_string()));
+        assert_eq!(claimed, (job_id, payload.to_owned()));
         assert_eq!(background_job_status(&conn, job_id).0, "running");
     }
 
@@ -1958,11 +1958,11 @@ mod tests {
         let op = NewPost {
             thread_id: 0,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
-            subject: Some("subject".to_string()),
-            body: "body".to_string(),
-            body_html: "body".to_string(),
+            subject: Some("subject".to_owned()),
+            body: "body".to_owned(),
+            body_html: "body".to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -1974,7 +1974,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "token".to_string(),
+            deletion_token: "token".to_owned(),
             is_op: true,
         };
         let (thread_id, _post_id, _) =
@@ -1985,11 +1985,11 @@ mod tests {
         let reply = NewPost {
             thread_id,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
             subject: None,
-            body: "reply".to_string(),
-            body_html: "reply".to_string(),
+            body: "reply".to_owned(),
+            body_html: "reply".to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -2001,7 +2001,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "token".to_string(),
+            deletion_token: "token".to_owned(),
             is_op: false,
         };
         let reply_id =
@@ -2022,11 +2022,11 @@ mod tests {
         let op = NewPost {
             thread_id: 0,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
-            subject: Some("subject".to_string()),
-            body: "body".to_string(),
-            body_html: "body".to_string(),
+            subject: Some("subject".to_owned()),
+            body: "body".to_owned(),
+            body_html: "body".to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -2038,7 +2038,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "token".to_string(),
+            deletion_token: "token".to_owned(),
             is_op: true,
         };
         let (thread_id, _post_id, _) =
@@ -2048,11 +2048,11 @@ mod tests {
         let reply = NewPost {
             thread_id,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
             subject: None,
-            body: "reply".to_string(),
-            body_html: "reply".to_string(),
+            body: "reply".to_owned(),
+            body_html: "reply".to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -2064,7 +2064,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "token".to_string(),
+            deletion_token: "token".to_owned(),
             is_op: false,
         };
         let reply_id =
@@ -2099,11 +2099,11 @@ mod tests {
         let op = NewPost {
             thread_id: 0,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
-            subject: Some("subject".to_string()),
-            body: "body".to_string(),
-            body_html: "body".to_string(),
+            subject: Some("subject".to_owned()),
+            body: "body".to_owned(),
+            body_html: "body".to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -2115,7 +2115,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "op-token".to_string(),
+            deletion_token: "op-token".to_owned(),
             is_op: true,
         };
         let (thread_id, _post_id, _) =
@@ -2125,11 +2125,11 @@ mod tests {
         let reply = NewPost {
             thread_id,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
             subject: None,
-            body: "reply".to_string(),
-            body_html: "reply".to_string(),
+            body: "reply".to_owned(),
+            body_html: "reply".to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -2141,7 +2141,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "reply-token".to_string(),
+            deletion_token: "reply-token".to_owned(),
             is_op: false,
         };
         let reply_id =
@@ -2175,11 +2175,11 @@ mod tests {
         let op = NewPost {
             thread_id: 0,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
-            subject: Some("subject".to_string()),
-            body: "body".to_string(),
-            body_html: "body".to_string(),
+            subject: Some("subject".to_owned()),
+            body: "body".to_owned(),
+            body_html: "body".to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -2191,7 +2191,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "op-token".to_string(),
+            deletion_token: "op-token".to_owned(),
             is_op: true,
         };
         let (thread_id, op_id, _) =
@@ -2201,11 +2201,11 @@ mod tests {
         let reply = NewPost {
             thread_id,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
             subject: None,
-            body: "reply".to_string(),
-            body_html: "reply".to_string(),
+            body: "reply".to_owned(),
+            body_html: "reply".to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -2217,7 +2217,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "reply-token".to_string(),
+            deletion_token: "reply-token".to_owned(),
             is_op: false,
         };
         create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");

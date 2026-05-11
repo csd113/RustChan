@@ -35,7 +35,7 @@ struct HealthPayload {
 
 #[derive(Serialize)]
 // This type mirrors serialized or render state, so the boolean count is an intentional tradeoff.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 struct ReadyPayload {
     status: &'static str,
     database_ready: bool,

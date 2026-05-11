@@ -1,8 +1,8 @@
 use axum::{
     http::{header, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
+    response::{IntoResponse as _, Response},
 };
-use tower::ServiceExt;
+use tower::ServiceExt as _;
 use tower_http::services::ServeFile;
 
 fn favicon_content_type(file_name: &str) -> &'static str {

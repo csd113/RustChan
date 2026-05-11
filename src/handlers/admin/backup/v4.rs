@@ -1,6 +1,6 @@
 use crate::error::{AppError, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::{Read, Write};
@@ -77,7 +77,7 @@ pub(crate) enum BackupFileKind {
 }
 
 // The serialized manifest intentionally exposes independent inclusion bits for admin readability and compatibility.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub(crate) struct BackupIncludeFlags {
     pub database: bool,
@@ -296,7 +296,7 @@ pub(crate) fn detect_saved_backup_layout(root: &Path) -> Option<SavedBackupLayou
     }
     Some(SavedBackupLayout {
         root_dir: root.to_path_buf(),
-        backup_ref: root.file_name()?.to_str()?.to_string(),
+        backup_ref: root.file_name()?.to_str()?.to_owned(),
         manifest_path,
         metadata_path,
     })
@@ -875,11 +875,11 @@ fn validate_declared_file_metadata(
     }
 
     Ok(VerifiedSavedV4File {
-        logical_path: logical_path.to_string(),
+        logical_path: logical_path.to_owned(),
         board: board.map(ToOwned::to_owned),
         kind,
         size,
-        sha256: sha256.to_string(),
+        sha256: sha256.to_owned(),
         source,
     })
 }
@@ -1100,7 +1100,7 @@ fn parse_split_part_index(filename: &str) -> Result<u32> {
             "Backup v4 split part path '{filename}' must match parts/part-0001.zip."
         )));
     }
-    let index = digits.parse::<u32>().map_err(|_| {
+    let index = digits.parse::<u32>().map_err(|_error| {
         AppError::BadRequest(format!(
             "Backup v4 split part path '{filename}' has an invalid part index."
         ))
@@ -1235,9 +1235,9 @@ fn verify_split_zip_files(
                     )));
                 }
                 let part_entries = declared_by_part
-                    .entry(part_filename.to_string())
+                    .entry(part_filename.to_owned())
                     .or_default();
-                if part_entries.insert(entry_path.to_string(), entry).is_some() {
+                if part_entries.insert(entry_path.to_owned(), entry).is_some() {
                     return Err(AppError::BadRequest(format!(
                         "Saved backup {layout_ref} contains duplicate ZIP entry path '{entry_path}'."
                     )));
@@ -1261,7 +1261,9 @@ fn verify_split_zip_files(
         verified_files.insert(entry.logical_path.clone(), verified);
     }
 
-    for (part_filename, part_path) in &part_paths {
+    let mut sorted_part_paths: Vec<_> = part_paths.iter().collect();
+    sorted_part_paths.sort_by_key(|(part_filename, _)| *part_filename);
+    for (part_filename, part_path) in sorted_part_paths {
         let Some(expected_entries) = declared_by_part.get(part_filename) else {
             return Err(AppError::BadRequest(format!(
                 "Backup v4 split part '{part_filename}' has no declared file entries."
@@ -1277,7 +1279,7 @@ fn verify_split_zip_files(
             let mut zip_entry = archive.by_index(index).map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Read split ZIP entry {index}: {error}"))
             })?;
-            let entry_name = zip_entry.name().to_string();
+            let entry_name = zip_entry.name().to_owned();
             verify_zip_entry_name(&entry_name)?;
             if !seen_entries.insert(entry_name.clone()) {
                 return Err(AppError::BadRequest(format!(
@@ -1317,7 +1319,9 @@ fn verify_split_zip_files(
             )?;
             verified_files.insert(manifest_entry.logical_path.clone(), verified);
         }
-        for entry_name in expected_entries.keys() {
+        let mut expected_entry_names: Vec<_> = expected_entries.keys().collect();
+        expected_entry_names.sort();
+        for entry_name in expected_entry_names {
             if !seen_entries.contains(entry_name) {
                 return Err(AppError::BadRequest(format!(
                     "Backup v4 split part '{part_filename}' is missing declared ZIP entry '{entry_name}'."
@@ -1561,10 +1565,10 @@ pub(crate) fn verify_saved_v4_root(
     }
 
     let mut allowed_files = HashSet::from([
-        README_FILE_NAME.to_string(),
-        BACKUP_METADATA_FILE_NAME.to_string(),
-        MANIFEST_FILE_NAME.to_string(),
-        CHECKSUMS_FILE_NAME.to_string(),
+        README_FILE_NAME.to_owned(),
+        BACKUP_METADATA_FILE_NAME.to_owned(),
+        MANIFEST_FILE_NAME.to_owned(),
+        CHECKSUMS_FILE_NAME.to_owned(),
     ]);
     allowed_files.extend(split_part_allowed_files);
     if let Some(snapshot) = &db_snapshot {
@@ -1587,7 +1591,9 @@ pub(crate) fn verify_saved_v4_root(
     let mut site_banner_files = Vec::new();
     let mut tor_key_files = Vec::new();
 
-    for verified in verified_files.values() {
+    let mut sorted_verified_files: Vec<_> = verified_files.values().collect();
+    sorted_verified_files.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+    for verified in sorted_verified_files {
         if verified_file_is_root_stored(verified) {
             allowed_files.insert(verified.logical_path.clone());
         }
@@ -1696,7 +1702,9 @@ pub(crate) fn verify_saved_v4_root(
     }
 
     let mut boards = HashMap::new();
-    for (board_short, board_summary) in &included_boards {
+    let mut sorted_included_boards: Vec<_> = included_boards.iter().collect();
+    sorted_included_boards.sort_by_key(|(board_short, _)| *board_short);
+    for (board_short, board_summary) in sorted_included_boards {
         let board_json_file = board_json.remove(board_short).ok_or_else(|| {
             AppError::BadRequest(format!(
                 "Saved backup {} is missing board.json for /{board_short}/.",
@@ -1813,7 +1821,7 @@ pub(crate) fn write_saved_v4_fixture_for_test(
         .file_name()
         .and_then(|name| name.to_str())
         .expect("backup id")
-        .to_string();
+        .to_owned();
     let created_at = completed_at - 60;
     let mut manifest_files = Vec::new();
     if let Some(db_bytes) = db_snapshot.as_ref() {
@@ -1833,19 +1841,19 @@ pub(crate) fn write_saved_v4_fixture_for_test(
     let included_boards = match scope {
         BackupScope::Board | BackupScope::SelectedBoards | BackupScope::FullSite => {
             vec![crate::models::BackupBoardSummary {
-                short_name: "tech".to_string(),
-                name: "Technology".to_string(),
+                short_name: "tech".to_owned(),
+                name: "Technology".to_owned(),
             }]
         }
         BackupScope::PreMaintenance => Vec::new(),
     };
     let manifest = BackupManifest {
-        format: BACKUP_V4_FORMAT.to_string(),
-        archive_container: BACKUP_V4_ARCHIVE_CONTAINER.to_string(),
+        format: BACKUP_V4_FORMAT.to_owned(),
+        archive_container: BACKUP_V4_ARCHIVE_CONTAINER.to_owned(),
         backup_id: backup_id.clone(),
         created_at,
         completed_at: Some(completed_at),
-        rustchan_version: "test".to_string(),
+        rustchan_version: "test".to_owned(),
         scope,
         storage_mode: BackupStorageMode::Directory,
         included_boards: included_boards.clone(),
@@ -1859,7 +1867,7 @@ pub(crate) fn write_saved_v4_fixture_for_test(
             file_inventory: scope != BackupScope::PreMaintenance,
         },
         db_snapshot: db_snapshot.as_ref().map(|bytes| DbSnapshotInfo {
-            path: "db/rustchan.sqlite3".to_string(),
+            path: "db/rustchan.sqlite3".to_owned(),
             size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
             sha256: sha256_hex_for_bytes(bytes),
             integrity_check: None,
@@ -1870,7 +1878,7 @@ pub(crate) fn write_saved_v4_fixture_for_test(
         maintenance: None,
     };
     let metadata = BackupMetadata {
-        format: BACKUP_V4_FORMAT.to_string(),
+        format: BACKUP_V4_FORMAT.to_owned(),
         backup_id,
         scope,
         storage_mode: BackupStorageMode::Directory,
@@ -1898,7 +1906,7 @@ pub(crate) fn test_file_entry_for_test(
     bytes: &[u8],
 ) -> BackupFileEntry {
     BackupFileEntry {
-        logical_path: logical_path.to_string(),
+        logical_path: logical_path.to_owned(),
         runtime_logical_path: None,
         board: board.map(ToOwned::to_owned),
         kind,
@@ -2053,7 +2061,7 @@ mod tests {
                 let entry = manifest.files.get_mut(*file_index).expect("entry");
                 entry.zip_part = Some(part_filename.clone());
                 entry.zip_entry_path = Some(entry.logical_path.clone());
-                entry.compression_method = Some("stored".to_string());
+                entry.compression_method = Some("stored".to_owned());
                 std::fs::remove_file(root.join(&entry.logical_path)).expect("remove root file");
             }
             let metadata = std::fs::metadata(&part_path).expect("part metadata");
@@ -2100,7 +2108,7 @@ mod tests {
         let mut zip_entries = Vec::new();
         for index in 0..archive.len() {
             let mut zip_entry = archive.by_index(index).expect("zip entry");
-            let name = zip_entry.name().to_string();
+            let name = zip_entry.name().to_owned();
             let mut bytes = Vec::new();
             zip_entry.read_to_end(&mut bytes).expect("read zip entry");
             if name == entry_path {
@@ -2169,7 +2177,7 @@ mod tests {
     #[test]
     fn verify_saved_v4_root_rejects_absolute_path() {
         let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_absolute");
-        media_entry_mut(&mut manifest).logical_path = "/tmp/escape.txt".to_string();
+        media_entry_mut(&mut manifest).logical_path = "/tmp/escape.txt".to_owned();
         rewrite_manifest(&root, &manifest);
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
@@ -2181,7 +2189,7 @@ mod tests {
     fn verify_saved_v4_root_rejects_backslash_path() {
         let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_backslash");
         media_entry_mut(&mut manifest).logical_path =
-            "boards\\tech\\media\\src\\example.txt".to_string();
+            "boards\\tech\\media\\src\\example.txt".to_owned();
         rewrite_manifest(&root, &manifest);
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
@@ -2192,7 +2200,7 @@ mod tests {
     #[test]
     fn verify_saved_v4_root_rejects_windows_drive_path() {
         let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_drive");
-        media_entry_mut(&mut manifest).logical_path = "C:/backup/example.txt".to_string();
+        media_entry_mut(&mut manifest).logical_path = "C:/backup/example.txt".to_owned();
         rewrite_manifest(&root, &manifest);
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
@@ -2357,7 +2365,7 @@ mod tests {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_nested-part");
         let mut manifest = convert_fixture_to_split(&root, 16);
         manifest.parts.first_mut().expect("part").filename =
-            "parts/nested/part-0001.zip".to_string();
+            "parts/nested/part-0001.zip".to_owned();
         rewrite_manifest(&root, &manifest);
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
@@ -2369,7 +2377,7 @@ mod tests {
     fn verify_saved_v4_root_rejects_bad_split_part_name() {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_bad-part-name");
         let mut manifest = convert_fixture_to_split(&root, 16);
-        manifest.parts.first_mut().expect("part").filename = "parts/foo.zip".to_string();
+        manifest.parts.first_mut().expect("part").filename = "parts/foo.zip".to_owned();
         rewrite_manifest(&root, &manifest);
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
@@ -2449,7 +2457,7 @@ mod tests {
         let mut manifest = convert_fixture_to_split(&root, 16);
         let original_filename = manifest.parts.first().expect("part").filename.clone();
         let original = root.join(original_filename);
-        let replacement_filename = "parts/part-9999.zip".to_string();
+        let replacement_filename = "parts/part-9999.zip".to_owned();
         manifest.parts.first_mut().expect("part").filename = replacement_filename.clone();
         std::fs::copy(original, root.join(replacement_filename)).expect("copy part");
         rewrite_manifest(&root, &manifest);
@@ -2564,7 +2572,7 @@ mod tests {
             .iter_mut()
             .find(|entry| entry.logical_path == "boards/tech/media/src/example.txt")
         {
-            entry.logical_path = "boards/tech/media/src/link/escape.txt".to_string();
+            entry.logical_path = "boards/tech/media/src/link/escape.txt".to_owned();
             entry.sha256 = sha256_hex_for_bytes(b"secret");
             entry.size = 6;
         }

@@ -1,4 +1,4 @@
-use rand_core::{OsRng, RngCore};
+use rand_core::{OsRng, RngCore as _};
 
 /// Try to extract a (`embed_type`, `video_id`) pair from a URL.
 ///
@@ -166,9 +166,9 @@ fn replace_emoji_shortcodes(text: &str) -> String {
         (":owo:", "👁️👄👁️"),
     ];
     if !text.contains(':') {
-        return text.to_string();
+        return text.to_owned();
     }
-    let mut out = text.to_string();
+    let mut out = text.to_owned();
     for (code, emoji) in CODES {
         if out.contains(code) {
             out = out.replace(code, emoji);
@@ -205,7 +205,7 @@ mod tests {
     fn extracts_youtube_embed() {
         assert_eq!(
             extract_video_embed("https://youtu.be/dQw4w9WgXcQ?t=43"),
-            Some(("youtube", "dQw4w9WgXcQ".to_string()))
+            Some(("youtube", "dQw4w9WgXcQ".to_owned()))
         );
     }
 }

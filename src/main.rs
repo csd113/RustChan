@@ -21,7 +21,8 @@
 // Terminal console and startup banner live in server/console/.
 // ChanNet / RustWave gateway lives in chan_net/mod.rs (second listener, port 7070).
 
-use clap::Parser;
+use clap::Parser as _;
+use std::io::Write as _;
 
 mod banner;
 mod cache;
@@ -67,7 +68,7 @@ fn main() -> anyhow::Result<()> {
     //
     // RUSTCHAN_SPAWNED prevents the child from looping back here.
     {
-        use std::io::IsTerminal;
+        use std::io::IsTerminal as _;
         if !std::io::stdout().is_terminal() && std::env::var("RUSTCHAN_SPAWNED").is_err() {
             #[cfg(target_os = "linux")]
             {
@@ -113,14 +114,23 @@ fn main() -> anyhow::Result<()> {
     // file appender can open the directory immediately on startup.
     let data_dir = crate::config::data_dir();
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
-        eprintln!("Warning: could not create rustchan-data directory: {e}");
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "Warning: could not create rustchan-data directory: {e}"
+        );
     }
     if let Err(e) = crate::config::migrate_runtime_layout_if_needed() {
-        eprintln!("Warning: could not migrate runtime layout: {e}");
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "Warning: could not migrate runtime layout: {e}"
+        );
     }
     let log_dir = crate::config::logs_dir();
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
-        eprintln!("Warning: could not create rustchan-data/logs directory: {e}");
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "Warning: could not create rustchan-data/logs directory: {e}"
+        );
     }
     generate_settings_file_if_missing();
 

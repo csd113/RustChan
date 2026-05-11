@@ -17,9 +17,7 @@ pub async fn clear_board_favicon_override(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<ClearBoardFaviconForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let board_short = tokio::task::spawn_blocking({
@@ -54,9 +52,7 @@ pub async fn update_site_favicon(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     mut multipart: Multipart,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_same_origin_request(&headers, Some(peer))?;
 
     let mut csrf = None;
@@ -120,9 +116,7 @@ pub async fn update_board_favicon(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     mut multipart: Multipart,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_same_origin_request(&headers, Some(peer))?;
 
     let mut csrf = None;

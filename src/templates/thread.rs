@@ -9,9 +9,9 @@ use crate::models::{Board, Post, Thread};
 use crate::utils::{
     files::format_file_size, redirect::encode_query_component, sanitize::escape_html,
 };
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
-use std::fmt::Write;
+use std::fmt::Write as _;
 
 use super::{
     base_layout, base_layout_with_preferences, compress_modal_script, fmt_ts, fmt_ts_short,
@@ -267,9 +267,9 @@ pub fn render_archive_state_badges(sticky: bool) -> String {
 
 #[must_use]
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn thread_page(
     board: &Board,
     thread: &Thread,
@@ -422,7 +422,7 @@ pub fn thread_page(
             RenderPostOpts {
                 show_delete: true,
                 is_admin,
-                admin_csrf_token: admin_csrf_token.map(str::to_string),
+                admin_csrf_token: admin_csrf_token.map(str::to_owned),
                 show_media: true,
                 allow_editing: board.allow_editing,
                 allow_self_delete: board.allow_self_delete,
@@ -547,7 +547,7 @@ fn render_poll(
     let now = chrono::Utc::now().timestamp();
     let time_left = pd.poll.expires_at.saturating_sub(now);
     let expires_str = if pd.is_expired {
-        "closed".to_string()
+        "closed".to_owned()
     } else if time_left < 3600 {
         format!("closes in {}m", time_left / 60)
     } else if time_left < 86400 {
@@ -586,7 +586,7 @@ fn render_poll(
         html.push_str(r#"<div class="poll-results">"#);
         for opt in &pd.options {
             // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+            #[expect(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
             let pct = (opt.vote_count as f64 / total as f64 * 100.0).round() as i64;
             let is_voted = pd.user_voted_option == Some(opt.id);
             let _ = write!(
@@ -645,7 +645,7 @@ fn render_poll(
 // ─── Single post renderer ─────────────────────────────────────────────────────
 
 /// Options that control which controls are rendered for a post.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 #[derive(Clone, Default)]
 pub struct RenderPostOpts {
     pub show_delete: bool,
@@ -733,7 +733,7 @@ fn poster_id_chip_style(poster_id: &str) -> String {
 
 fn annotate_op_quotelinks(body_html: &str, thread_op_id: Option<i64>) -> String {
     let Some(op_id) = thread_op_id else {
-        return body_html.to_string();
+        return body_html.to_owned();
     };
     let target = format!(
         r##"<a href="#p{op_id}" class="quotelink" data-pid="{op_id}">&gt;&gt;{op_id}</a>"##
@@ -769,7 +769,7 @@ fn render_media_thumb(
 
 fn truncate_file_name_stem(input: &str) -> String {
     if input.chars().count() <= FILE_NAME_STEM_PREFIX_DISPLAY_CHARS {
-        return input.to_string();
+        return input.to_owned();
     }
 
     let prefix: String = input
@@ -786,7 +786,7 @@ fn display_file_name(name: &str) -> String {
             if stem.chars().count() > FILE_NAME_STEM_PREFIX_DISPLAY_CHARS {
                 format!("{}{}", truncate_file_name_stem(stem), ext)
             } else {
-                name.to_string()
+                name.to_owned()
             }
         }
         _ => truncate_file_name_stem(name),
@@ -826,7 +826,7 @@ fn effective_media_type(post: &Post) -> crate::models::MediaType {
 /// user-supplied string in this function must continue to pass through
 /// `escape_html()`. Do not change the `body_html` insertion without ensuring
 /// the upstream sanitiser is still in place.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub fn render_post(
     post: &Post,
     board_short: &str,
@@ -886,15 +886,14 @@ pub fn render_post(
     };
     let media_processing_badge = match post.media_processing_state.as_deref() {
         Some("pending") => {
-            r#" <span class="post-edited" title="Background media processing is still running.">(processing media)</span>"#
-                .to_string()
+            r#" <span class="post-edited" title="Background media processing is still running.">(processing media)</span>"#.to_owned()
         }
         Some("failed") => {
             let title = post
                 .media_processing_error
                 .as_deref()
                 .map_or_else(
-                    || "Background media processing failed.".to_string(),
+                    || "Background media processing failed.".to_owned(),
                     escape_html,
                 );
             format!(
@@ -902,8 +901,7 @@ pub fn render_post(
             )
         }
         Some("pruned") => {
-            r#" <span class="post-edited" title="Original file removed by active media pruning.">(original file removed)</span>"#
-                .to_string()
+            r#" <span class="post-edited" title="Original file removed by active media pruning.">(original file removed)</span>"#.to_owned()
         }
         _ => String::new(),
     };

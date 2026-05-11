@@ -50,14 +50,14 @@ use crate::{
 use axum::{
     extract::{Query, State},
     http::{header, HeaderMap, Uri},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::VecDeque;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Seek as _, SeekFrom};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -91,7 +91,7 @@ fn require_admin_session_with_name(
     session_id: Option<&str>,
 ) -> Result<(i64, String)> {
     let admin_id = require_admin_session_sid(conn, session_id)?;
-    let name = db::get_admin_name_by_id(conn, admin_id)?.unwrap_or_else(|| "unknown".to_string());
+    let name = db::get_admin_name_by_id(conn, admin_id)?.unwrap_or_else(|| "unknown".to_owned());
     Ok((admin_id, name))
 }
 
@@ -149,7 +149,7 @@ pub(super) fn require_same_origin_request(
     }
     let source_uri = source
         .parse::<Uri>()
-        .map_err(|_| AppError::Forbidden("Invalid Origin/Referer header.".into()))?;
+        .map_err(|_error| AppError::Forbidden("Invalid Origin/Referer header.".into()))?;
     let source_scheme = source_uri
         .scheme_str()
         .ok_or_else(|| AppError::Forbidden("Origin/Referer header has no scheme.".into()))?;
@@ -288,7 +288,7 @@ pub(super) fn ensure_admin_csrf(jar: CookieJar) -> Result<(CookieJar, String)> {
         .get("csrf_token")
         .map(axum_extra::extract::cookie::Cookie::value)
         .filter(|value| !value.is_empty())
-        .map(str::to_string);
+        .map(str::to_owned);
     let mut jar = jar;
     let raw = if let Some(raw) = raw {
         raw
@@ -301,7 +301,7 @@ pub(super) fn ensure_admin_csrf(jar: CookieJar) -> Result<(CookieJar, String)> {
         .get(SESSION_COOKIE)
         .map(axum_extra::extract::cookie::Cookie::value)
         .ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
-    let session_id = session_id.to_string();
+    let session_id = session_id.to_owned();
     Ok((
         jar,
         make_scoped_csrf_form_token(&raw, &CONFIG.cookie_secret, &session_id),
@@ -352,7 +352,7 @@ fn request_origin_uses_https(headers: &HeaderMap) -> bool {
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
-        .map(|authority| authority.host().to_string());
+        .map(|authority| authority.host().to_owned());
 
     let Some(request_host) = request_host.as_deref() else {
         return false;
@@ -539,7 +539,7 @@ pub struct LiveLogQuery {
     pub bytes: Option<usize>,
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 struct AdminPanelSnapshot {
     boards: Vec<crate::models::Board>,
     bans: Vec<crate::models::Ban>,
@@ -591,7 +591,6 @@ struct OverviewDomainData {
     backup_summary: BackupSummary,
 }
 
-#[allow(clippy::struct_excessive_bools)]
 struct SiteHealthSnapshot {
     server_status: String,
     database_integrity_status: String,
@@ -640,7 +639,7 @@ struct ModerationDomainData {
     appeals: Vec<crate::models::BanAppeal>,
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 struct AppearanceDomainData {
     site_name: String,
     site_subtitle: String,
@@ -661,7 +660,7 @@ struct BackupsDomainData {
     board_backups: Vec<BackupInfo>,
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 // This is a flat snapshot of independent maintenance capability flags read from app state.
 struct MaintenanceDomainData {
     db_size_bytes: i64,
@@ -695,18 +694,18 @@ fn load_site_health_snapshot(
         .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
         .ok()
         .filter(|value| *value == 1)
-        .map_or_else(|| "degraded".to_string(), |_| "ready".to_string());
+        .map_or_else(|| "degraded".to_owned(), |_| "ready".to_owned());
     let database_integrity_status = db_integrity_status(&state.db_maintenance_jobs.snapshot());
     let last_successful_backup = full_backups
         .iter()
         .find(|backup| backup.verified)
-        .map_or_else(|| "none saved".to_string(), format_backup_time);
+        .map_or_else(|| "none saved".to_owned(), format_backup_time);
     let next_scheduled_backup =
         next_scheduled_backup_label(full_backups, auto_full_backup_settings.interval_hours);
     let data_dir_usage = safe_dir_size_label(&crate::config::data_dir());
     let upload_dir_size = safe_dir_size_label(Path::new(&CONFIG.upload_dir));
     let jobs = load_site_health_jobs_snapshot(conn, state);
-    let recent_warnings = recent_warning_lines().unwrap_or_else(|| "not available".to_string());
+    let recent_warnings = recent_warning_lines().unwrap_or_else(|| "not available".to_owned());
 
     SiteHealthSnapshot {
         server_status,
@@ -716,16 +715,16 @@ fn load_site_health_snapshot(
         data_dir_usage,
         upload_dir_size,
         tor_status: if CONFIG.enable_tor_support {
-            "enabled".to_string()
+            "enabled".to_owned()
         } else {
-            "disabled".to_string()
+            "disabled".to_owned()
         },
         tor_bootstrap_state: if !CONFIG.enable_tor_support {
-            "not configured".to_string()
+            "not configured".to_owned()
         } else if onion_address_val.is_some() {
-            "ready".to_string()
+            "ready".to_owned()
         } else {
-            "bootstrapping or unknown".to_string()
+            "bootstrapping or unknown".to_owned()
         },
         running_jobs: jobs.running,
         queued_jobs: jobs.queued,
@@ -756,7 +755,7 @@ fn load_site_health_jobs_snapshot(
         recent_completed: job_summary.recent_completed,
         failed: job_summary.failed,
         backup: backup_jobs_label(state.backup_progress.as_ref()),
-        restore: "not available".to_string(),
+        restore: "not available".to_owned(),
         thumbnail_transcode: job_summary.thumbnail_transcode,
     }
 }
@@ -769,13 +768,13 @@ fn format_backup_time(backup: &BackupInfo) -> String {
 
 fn next_scheduled_backup_label(full_backups: &[BackupInfo], interval_hours: u64) -> String {
     if interval_hours == 0 {
-        return "not scheduled".to_string();
+        return "not scheduled".to_owned();
     }
     let Some(latest_verified) = full_backups.iter().find(|backup| backup.verified) else {
-        return "after first scheduler check".to_string();
+        return "after first scheduler check".to_owned();
     };
     let Some(modified_epoch) = latest_verified.modified_epoch else {
-        return "unknown".to_string();
+        return "unknown".to_owned();
     };
     let interval_secs = i64::try_from(interval_hours.saturating_mul(3600)).unwrap_or(i64::MAX);
     fmt_epoch(modified_epoch.saturating_add(interval_secs))
@@ -783,7 +782,7 @@ fn next_scheduled_backup_label(full_backups: &[BackupInfo], interval_hours: u64)
 
 fn fmt_epoch(timestamp: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0).map_or_else(
-        || "unknown".to_string(),
+        || "unknown".to_owned(),
         |datetime| datetime.format("%Y-%m-%d %H:%M UTC").to_string(),
     )
 }
@@ -792,40 +791,40 @@ fn db_integrity_status(status: &crate::middleware::DbMaintenanceJobStatus) -> St
     match status {
         crate::middleware::DbMaintenanceJobStatus::Finished { report, .. } => {
             if report.after.as_ref().unwrap_or(&report.before).ok() {
-                "passed at last check".to_string()
+                "passed at last check".to_owned()
             } else {
-                "failed at last check".to_string()
+                "failed at last check".to_owned()
             }
         }
-        crate::middleware::DbMaintenanceJobStatus::Running { .. } => "check running".to_string(),
-        crate::middleware::DbMaintenanceJobStatus::Failed { .. } => "last check failed".to_string(),
-        crate::middleware::DbMaintenanceJobStatus::Idle => "not checked".to_string(),
+        crate::middleware::DbMaintenanceJobStatus::Running { .. } => "check running".to_owned(),
+        crate::middleware::DbMaintenanceJobStatus::Failed { .. } => "last check failed".to_owned(),
+        crate::middleware::DbMaintenanceJobStatus::Idle => "not checked".to_owned(),
     }
 }
 
 fn backup_jobs_label(progress: &crate::middleware::BackupProgress) -> String {
     use std::sync::atomic::Ordering;
     match progress.phase.load(Ordering::Relaxed) {
-        crate::middleware::backup_phase::IDLE => "idle".to_string(),
-        crate::middleware::backup_phase::SNAPSHOT_DB => "snapshotting database".to_string(),
-        crate::middleware::backup_phase::COUNT_FILES => "counting files".to_string(),
+        crate::middleware::backup_phase::IDLE => "idle".to_owned(),
+        crate::middleware::backup_phase::SNAPSHOT_DB => "snapshotting database".to_owned(),
+        crate::middleware::backup_phase::COUNT_FILES => "counting files".to_owned(),
         crate::middleware::backup_phase::COMPRESS => {
             let done = progress.files_done.load(Ordering::Relaxed);
             let total = progress.files_total.load(Ordering::Relaxed);
             if total == 0 {
-                "compressing".to_string()
+                "compressing".to_owned()
             } else {
                 format!("compressing ({done}/{total} files)")
             }
         }
-        crate::middleware::backup_phase::DONE => "last run complete".to_string(),
-        _ => "unknown".to_string(),
+        crate::middleware::backup_phase::DONE => "last run complete".to_owned(),
+        _ => "unknown".to_owned(),
     }
 }
 
 fn safe_dir_size_label(path: &Path) -> String {
     safe_dir_size(path).map_or_else(
-        || "unknown".to_string(),
+        || "unknown".to_owned(),
         |bytes| {
             let display_bytes = i64::try_from(bytes).unwrap_or(i64::MAX);
             crate::utils::files::format_file_size(display_bytes)
@@ -871,13 +870,9 @@ fn safe_dir_size(root: &Path) -> Option<u64> {
 
 fn recent_warning_lines() -> Option<String> {
     let log_path = latest_log_file(&crate::config::logs_dir())?;
-    let mut file = std::fs::File::open(log_path).ok()?;
-    let len = file.metadata().ok()?.len();
-    let max_bytes = 65_536_u64;
-    let start = len.saturating_sub(max_bytes);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).ok()?;
+    let buf = std::fs::read(log_path).ok()?;
+    let start = buf.len().saturating_sub(65_536);
+    let buf = String::from_utf8_lossy(buf.get(start..).unwrap_or_default()).into_owned();
     let warnings: Vec<&str> = buf
         .lines()
         .rev()
@@ -890,7 +885,7 @@ fn recent_warning_lines() -> Option<String> {
         .take(5)
         .collect();
     if warnings.is_empty() {
-        Some("none in recent log tail".to_string())
+        Some("none in recent log tail".to_owned())
     } else {
         Some(warnings.into_iter().rev().collect::<Vec<_>>().join("\n"))
     }
@@ -972,7 +967,7 @@ fn load_maintenance_domain_data(
         ffmpeg_vp9_available: state.ffmpeg_vp9_available,
         ffmpeg_vp9_encoder_available: state.ffmpeg_vp9_encoder_available,
         ffmpeg_opus_available: state.ffmpeg_opus_available,
-        pdf_thumbnail_renderer: state.pdf_thumbnail_renderer.map(str::to_string),
+        pdf_thumbnail_renderer: state.pdf_thumbnail_renderer.map(str::to_owned),
     }
 }
 
@@ -1050,10 +1045,9 @@ fn build_backup_summary(full_backups: &[BackupInfo]) -> BackupSummary {
     let Some(latest) = full_backups.first() else {
         return BackupSummary {
             warning: Some(
-                "No saved full backup found. Create and download a verified full backup before relying on this node."
-                    .to_string(),
+                "No saved full backup found. Create and download a verified full backup before relying on this node.".to_owned(),
             ),
-            status_line: "Latest full backup: none saved.".to_string(),
+            status_line: "Latest full backup: none saved.".to_owned(),
         };
     };
 
@@ -1063,7 +1057,7 @@ fn build_backup_summary(full_backups: &[BackupInfo]) -> BackupSummary {
         .map(|ts| now.saturating_sub(ts).max(0) / 3600);
     let age_text = age_hours
         .map(|hours| format!("{hours}h ago"))
-        .unwrap_or_else(|| "unknown age".to_string());
+        .unwrap_or_else(|| "unknown age".to_owned());
     let status_line = format!(
         "Latest full backup: {} ({age_text}) — {}.",
         latest.filename, latest.verification_note
@@ -1281,7 +1275,7 @@ pub async fn admin_panel(
     // Move auth check and all DB calls into spawn_blocking.
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let cookie_secure = should_set_secure_cookie(&headers, Some(peer));
-    let mut session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let mut session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     let mut jar = jar;
     if session_id.is_none() {
         if let Some(bootstrap_token) = params.bootstrap.as_deref() {
@@ -1314,13 +1308,13 @@ pub async fn admin_panel(
     } else if let Some(board) = params.board_restored {
         Some((false, format!("Board /{board}/ restored successfully.")))
     } else if params.backup_created.is_some() {
-        Some((false, "Backup saved on the server.".to_string()))
+        Some((false, "Backup saved on the server.".to_owned()))
     } else if params.backup_deleted.is_some() {
-        Some((false, "Backup deleted.".to_string()))
+        Some((false, "Backup deleted.".to_owned()))
     } else if params.restored.is_some() {
-        Some((false, "Restore completed successfully.".to_string()))
+        Some((false, "Restore completed successfully.".to_owned()))
     } else if params.settings_saved.is_some() {
-        Some((false, "Site settings saved.".to_string()))
+        Some((false, "Site settings saved.".to_owned()))
     } else {
         None
     };
@@ -1370,7 +1364,7 @@ pub async fn admin_site_health_jobs(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
 
     let jobs = tokio::task::spawn_blocking({
         let state = state.clone();
@@ -1390,15 +1384,15 @@ pub async fn admin_site_health_jobs(
         [
             (
                 header::CONTENT_TYPE,
-                "application/json; charset=utf-8".to_string(),
+                "application/json; charset=utf-8".to_owned(),
             ),
             (
                 header::CACHE_CONTROL,
-                "private, no-cache, no-store, must-revalidate, no-transform".to_string(),
+                "private, no-cache, no-store, must-revalidate, no-transform".to_owned(),
             ),
-            (header::PRAGMA, "no-cache".to_string()),
-            (header::EXPIRES, "0".to_string()),
-            (header::VARY, "Cookie".to_string()),
+            (header::PRAGMA, "no-cache".to_owned()),
+            (header::EXPIRES, "0".to_owned()),
+            (header::VARY, "Cookie".to_owned()),
         ],
         payload,
     )
@@ -1410,7 +1404,7 @@ pub async fn admin_live_log(
     jar: CookieJar,
     Query(params): Query<LiveLogQuery>,
 ) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     let max_bytes = params.bytes.unwrap_or(65_536).clamp(4_096, 262_144);
 
     let payload = tokio::task::spawn_blocking({
@@ -1450,19 +1444,19 @@ pub async fn admin_live_log(
         [
             (
                 header::CONTENT_TYPE,
-                "application/json; charset=utf-8".to_string(),
+                "application/json; charset=utf-8".to_owned(),
             ),
             (
                 header::CACHE_CONTROL,
-                "private, no-cache, no-store, must-revalidate, no-transform".to_string(),
+                "private, no-cache, no-store, must-revalidate, no-transform".to_owned(),
             ),
-            (header::PRAGMA, "no-cache".to_string()),
-            (header::EXPIRES, "0".to_string()),
+            (header::PRAGMA, "no-cache".to_owned()),
+            (header::EXPIRES, "0".to_owned()),
             (
                 header::HeaderName::from_static("x-accel-buffering"),
-                "no".to_string(),
+                "no".to_owned(),
             ),
-            (header::VARY, "Cookie".to_string()),
+            (header::VARY, "Cookie".to_owned()),
         ],
         payload,
     )
@@ -1502,11 +1496,10 @@ fn read_log_tail(path: &std::path::Path, max_bytes: usize) -> Result<(String, bo
     file.seek(SeekFrom::Start(start))
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Seek log: {e}")))?;
 
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Read log: {e}")))?;
-
-    let text = String::from_utf8_lossy(&buf).into_owned();
+    let buf =
+        std::fs::read(path).map_err(|e| AppError::Internal(anyhow::anyhow!("Read log: {e}")))?;
+    let start = usize::try_from(start).unwrap_or(usize::MAX);
+    let text = String::from_utf8_lossy(buf.get(start..).unwrap_or_default()).into_owned();
     let truncated = start > 0;
     let content = if truncated {
         match text.find('\n') {
@@ -1529,7 +1522,7 @@ fn admin_bootstrap_now_secs() -> u64 {
 pub(super) fn create_admin_session_bootstrap(session_id: &str) -> String {
     let token = crate::utils::crypto::new_session_id();
     let expires_at = admin_bootstrap_now_secs().saturating_add(ADMIN_BOOTSTRAP_TTL_SECS);
-    ADMIN_SESSION_BOOTSTRAPS.insert(token.clone(), (session_id.to_string(), expires_at));
+    ADMIN_SESSION_BOOTSTRAPS.insert(token.clone(), (session_id.to_owned(), expires_at));
     token
 }
 

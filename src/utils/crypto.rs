@@ -23,12 +23,14 @@
 
 use anyhow::Result;
 use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{
+        rand_core::OsRng, PasswordHash, PasswordHasher as _, PasswordVerifier as _, SaltString,
+    },
     Algorithm, Argon2, Params, Version,
 };
 use dashmap::DashMap;
-use rand_core::RngCore;
-use sha2::{Digest, Sha256};
+use rand_core::RngCore as _;
+use sha2::{Digest as _, Sha256};
 use std::sync::LazyLock;
 
 /// Maximum allowed nonce length in characters.

@@ -40,7 +40,7 @@
 // Respects the RUST_LOG environment variable if set.
 
 use std::fmt;
-use std::io::{self, Write};
+use std::io::{self, Write as _};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, OnceLock};
@@ -51,7 +51,7 @@ use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::fmt::{FmtContext, MakeWriter};
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter};
 
 // ─── Shared console write lock ────────────────────────────────────────────────
 
@@ -154,16 +154,16 @@ fn extract_component(target: &str) -> &str {
 fn display_component(target: &str) -> String {
     if is_tor_target(target) {
         match extract_component(target) {
-            "bootstrap" | "dirmgr" | "state" | "sqlite" => "tor-dir".to_string(),
-            "guard" | "guardmgr" => "tor-net".to_string(),
-            "chanmgr" => "tor-chan".to_string(),
-            "circmgr" | "mgr" | "reactor" => "tor-circ".to_string(),
-            "hspool" | "publish" | "descriptor" => "onion".to_string(),
-            "config" => "tor-cfg".to_string(),
-            other => other.to_string(),
+            "bootstrap" | "dirmgr" | "state" | "sqlite" => "tor-dir".to_owned(),
+            "guard" | "guardmgr" => "tor-net".to_owned(),
+            "chanmgr" => "tor-chan".to_owned(),
+            "circmgr" | "mgr" | "reactor" => "tor-circ".to_owned(),
+            "hspool" | "publish" | "descriptor" => "onion".to_owned(),
+            "config" => "tor-cfg".to_owned(),
+            other => other.to_owned(),
         }
     } else {
-        extract_component(target).to_string()
+        extract_component(target).to_owned()
     }
 }
 
@@ -229,30 +229,30 @@ fn strip_ansi(input: &str) -> String {
 
 fn humanize_field_name(name: &str) -> String {
     match name {
-        "addr" => "address".to_string(),
-        "admin_id" => "admin ID".to_string(),
-        "archived_cap" => "archive limit".to_string(),
-        "board_id" => "board ID".to_string(),
-        "bytes" => "size".to_string(),
-        "error" => "error".to_string(),
-        "failure_rate" => "failure rate".to_string(),
-        "files_removed" => "files removed".to_string(),
-        "freed_kib" => "freed KiB".to_string(),
-        "has_csrf_cookie" => "CSRF cookie".to_string(),
-        "has_session_cookie" => "session cookie".to_string(),
-        "attempts" => "attempts".to_string(),
-        "reason" => "reason".to_string(),
-        "uri" => "URI".to_string(),
-        "id" => "ID".to_string(),
-        "latency_ms" => "latency".to_string(),
-        "mime" => "MIME type".to_string(),
-        "post_id" => "post ID".to_string(),
-        "remaining_kib" => "remaining KiB".to_string(),
-        "retry_in" => "retry in".to_string(),
-        "saved_as" => "saved as".to_string(),
-        "thread_id" => "thread ID".to_string(),
-        "thumb" => "thumbnail".to_string(),
-        "url" => "URL".to_string(),
+        "addr" => "address".to_owned(),
+        "admin_id" => "admin ID".to_owned(),
+        "archived_cap" => "archive limit".to_owned(),
+        "board_id" => "board ID".to_owned(),
+        "bytes" => "size".to_owned(),
+        "error" => "error".to_owned(),
+        "failure_rate" => "failure rate".to_owned(),
+        "files_removed" => "files removed".to_owned(),
+        "freed_kib" => "freed KiB".to_owned(),
+        "has_csrf_cookie" => "CSRF cookie".to_owned(),
+        "has_session_cookie" => "session cookie".to_owned(),
+        "attempts" => "attempts".to_owned(),
+        "reason" => "reason".to_owned(),
+        "uri" => "URI".to_owned(),
+        "id" => "ID".to_owned(),
+        "latency_ms" => "latency".to_owned(),
+        "mime" => "MIME type".to_owned(),
+        "post_id" => "post ID".to_owned(),
+        "remaining_kib" => "remaining KiB".to_owned(),
+        "retry_in" => "retry in".to_owned(),
+        "saved_as" => "saved as".to_owned(),
+        "thread_id" => "thread ID".to_owned(),
+        "thumb" => "thumbnail".to_owned(),
+        "url" => "URL".to_owned(),
         other => other.replace('_', " "),
     }
 }
@@ -295,7 +295,7 @@ fn title_case_message(message: &str) -> String {
         Some(first) if first.is_ascii_lowercase() => {
             format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
         }
-        _ => message.to_string(),
+        _ => message.to_owned(),
     }
 }
 
@@ -328,7 +328,7 @@ fn parse_formatted_duration(value: &str) -> Option<String> {
 fn format_duration_parts(total_nanos: u128) -> String {
     let total_millis = (total_nanos.saturating_add(500_000)) / 1_000_000;
     if total_millis == 0 {
-        return "0s".to_string();
+        return "0s".to_owned();
     }
 
     let total_secs = (total_millis.saturating_add(500)) / 1000;
@@ -386,7 +386,7 @@ fn normalize_duration(value: &str) -> Option<String> {
 }
 
 fn scrub_tor_value(value: &str) -> String {
-    let mut out = value.to_string();
+    let mut out = value.to_owned();
 
     while let Some(start) = out.find("GuardId(") {
         let Some(end) = out[start..].find(')') else {
@@ -412,7 +412,7 @@ fn normalize_field_value(name: &str, value: &str) -> String {
     }
 
     if name == "guard" && value.starts_with("GuardId(") {
-        return "[scrubbed]".to_string();
+        return "[scrubbed]".to_owned();
     }
 
     if name == "latency_ms" {
@@ -446,7 +446,7 @@ impl LogEventFields {
         if should_hide_field(field.name(), &clean) {
             return;
         }
-        self.fields.push((field.name().to_string(), clean));
+        self.fields.push((field.name().to_owned(), clean));
     }
 }
 
@@ -492,7 +492,7 @@ fn upsert_field(fields: &mut Vec<(String, String)>, name: &str, value: String) {
     if let Some((_, existing)) = fields.iter_mut().find(|(field_name, _)| field_name == name) {
         *existing = value;
     } else {
-        fields.push((name.to_string(), value));
+        fields.push((name.to_owned(), value));
     }
 }
 
@@ -522,13 +522,13 @@ fn extract_attempt_count(message: &str) -> Option<String> {
 fn short_tor_error(error: &str) -> String {
     let lower = error.to_ascii_lowercase();
     if lower.contains("invalid document from directory server") {
-        "directory server sent invalid data".to_string()
+        "directory server sent invalid data".to_owned()
     } else if lower.contains("timed out") || lower.contains("timeout") {
-        "network timeout".to_string()
+        "network timeout".to_owned()
     } else if lower.contains("unusable guard") || lower.contains("could not connect to guard") {
-        "could not connect to a Tor guard".to_string()
+        "could not connect to a Tor guard".to_owned()
     } else if lower.contains("consensus") && lower.contains("expired") {
-        "network directory consensus expired".to_string()
+        "network directory consensus expired".to_owned()
     } else {
         scrub_tor_value(error)
     }
@@ -650,7 +650,7 @@ fn normalize_message_text(message: &str) -> String {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields) {
     let Some(message) = fields.message.clone() else {
         return;
@@ -663,19 +663,19 @@ fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields
         "guard" => {
             if let Some((_, retry)) = message.split_once("Retrying in ") {
                 let retry = retry.trim_end_matches('.');
-                let retry = normalize_duration(retry).unwrap_or_else(|| retry.to_string());
-                fields.message = Some("Tor guard connection failed".to_string());
+                let retry = normalize_duration(retry).unwrap_or_else(|| retry.to_owned());
+                fields.message = Some("Tor guard connection failed".to_owned());
                 upsert_field(&mut fields.fields, "retry_in", retry);
             } else if message.contains("Next retry time unknown") {
-                fields.message = Some("Tor guard connection failed".to_string());
-                upsert_field(&mut fields.fields, "retry_in", "unknown".to_string());
+                fields.message = Some("Tor guard connection failed".to_owned());
+                upsert_field(&mut fields.fields, "retry_in", "unknown".to_owned());
             } else if message.starts_with("Questionable guard:") {
-                fields.message = Some("Tor marked a guard as unstable".to_string());
+                fields.message = Some("Tor marked a guard as unstable".to_owned());
                 if let Some(rate) = extract_percent(&message) {
                     upsert_field(&mut fields.fields, "failure_rate", rate);
                 }
             } else if message.starts_with("Disabling guard:") {
-                fields.message = Some("Tor disabled an unstable guard".to_string());
+                fields.message = Some("Tor disabled an unstable guard".to_owned());
                 if let Some(rate) = extract_percent(&message) {
                     upsert_field(&mut fields.fields, "failure_rate", rate);
                 }
@@ -684,15 +684,15 @@ fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields
         "hspool" => {
             if message == "Too many preemptive onion service circuits failed; waiting a while." {
                 fields.message = Some(
-                    "Tor onion-service circuits are failing; waiting before retrying".to_string(),
+                    "Tor onion-service circuits are failing; waiting before retrying".to_owned(),
                 );
             } else if message.starts_with("unknown vanguard mode") {
-                fields.message = Some("Tor onion-service vanguard mode is unknown".to_string());
+                fields.message = Some("Tor onion-service vanguard mode is unknown".to_owned());
             }
         }
         "reactor" => {
             if message.eq_ignore_ascii_case("removing circuit leg") {
-                fields.message = Some("Tor circuit closed".to_string());
+                fields.message = Some("Tor circuit closed".to_owned());
                 remove_field(&mut fields.fields, "tunnel_id");
             } else if message.contains("descriptor upload")
                 || message.contains("Unable to upload")
@@ -704,9 +704,9 @@ fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields
         }
         "bootstrap" => {
             if message == "Unable to advance downloading state" {
-                fields.message = Some("Tor directory bootstrap stalled".to_string());
+                fields.message = Some("Tor directory bootstrap stalled".to_owned());
             } else if message.starts_with("We failed ") && message.contains("times to bootstrap") {
-                fields.message = Some("Tor directory bootstrap failed".to_string());
+                fields.message = Some("Tor directory bootstrap failed".to_owned());
                 if let Some(attempts) = extract_attempt_count(&message) {
                     upsert_field(&mut fields.fields, "attempts", attempts);
                 }
@@ -715,44 +715,44 @@ fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields
         "lib" => {
             if message == "Bootstrapping task exited before finishing." {
                 fields.message =
-                    Some("Tor directory bootstrap stopped before finishing".to_string());
+                    Some("Tor directory bootstrap stopped before finishing".to_owned());
             } else if message == "Got a new NetDir, but it's older than the one we currently have!"
             {
                 fields.message = Some(
-                    "Tor received an older network directory; keeping current copy".to_string(),
+                    "Tor received an older network directory; keeping current copy".to_owned(),
                 );
             }
         }
         "state" => {
             if message.starts_with("Problem with certificate received from") {
-                fields.message = Some("Tor directory certificate was rejected".to_string());
+                fields.message = Some("Tor directory certificate was rejected".to_owned());
             } else if message.starts_with("Discarding certificates") {
                 fields.message =
-                    Some("Tor discarded unrequested directory certificates".to_string());
+                    Some("Tor discarded unrequested directory certificates".to_owned());
             } else if message.starts_with("Received microdescriptor") {
-                fields.message = Some("Tor discarded an unrequested relay descriptor".to_string());
+                fields.message = Some("Tor discarded an unrequested relay descriptor".to_owned());
             } else if message == "Found a mismatched microdescriptor in cache; ignoring" {
                 fields.message =
-                    Some("Tor ignored a mismatched cached relay descriptor".to_string());
+                    Some("Tor ignored a mismatched cached relay descriptor".to_owned());
             }
         }
         "sqlite" if message.starts_with("Removing unreferenced file") => {
-            fields.message = Some("Tor removed an unreferenced cache file".to_string());
+            fields.message = Some("Tor removed an unreferenced cache file".to_owned());
         }
         "mgr" => {
             if message == "All tunnel attempts failed due to timeout" {
-                fields.message = Some("Tor circuit build timed out".to_string());
+                fields.message = Some("Tor circuit build timed out".to_owned());
             } else if message == "Reached circuit build retry limit, exiting..." {
-                fields.message = Some("Tor circuit build retry limit reached".to_string());
+                fields.message = Some("Tor circuit build retry limit reached".to_owned());
             } else if message == "Request failed" {
-                fields.message = Some("Tor circuit request failed".to_string());
+                fields.message = Some("Tor circuit request failed".to_owned());
             }
         }
         _ => {}
     }
 
     if message.starts_with("Error while adding directory info") {
-        fields.message = Some("Tor directory update failed".to_string());
+        fields.message = Some("Tor directory update failed".to_owned());
         if let Some(error) = remove_field(&mut fields.fields, "error") {
             upsert_field(&mut fields.fields, "reason", short_tor_error(&error));
         }
@@ -1007,7 +1007,7 @@ impl<'a> MakeWriter<'a> for ConsoleLock {
 /// replace `FileFormatter` with `.json()` and add `.with_file(true)
 /// .with_line_number(true)` to the layer builder.
 pub fn init_logging(log_dir: &Path) {
-    use std::io::IsTerminal;
+    use std::io::IsTerminal as _;
 
     let tty = io::stdout().is_terminal();
     IS_TTY.store(tty, Ordering::Relaxed);
@@ -1059,7 +1059,10 @@ pub fn init_logging(log_dir: &Path) {
         .filename_suffix("log")
         .build(log_dir)
         .unwrap_or_else(|e| {
-            eprintln!("Warning: could not create log file appender: {e}");
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "Warning: could not create log file appender: {e}"
+            );
             tracing_appender::rolling::never(log_dir, "rustchan.log")
         });
 
@@ -1130,7 +1133,7 @@ mod tests {
 
     fn rewrite_for_test(target: &str, message: &str, fields: &[(&str, &str)]) -> LogEventFields {
         let mut event_fields = LogEventFields {
-            message: Some(message.to_string()),
+            message: Some(message.to_owned()),
             fields: fields
                 .iter()
                 .filter_map(|(name, value)| {
@@ -1216,7 +1219,7 @@ mod tests {
         );
         assert_eq!(
             fields.fields,
-            vec![("retry_in".to_string(), "30s".to_string())]
+            vec![("retry_in".to_owned(), "30s".to_owned())]
         );
 
         let fields = rewrite_for_test(
@@ -1230,7 +1233,7 @@ mod tests {
         );
         assert_eq!(
             fields.fields,
-            vec![("failure_rate".to_string(), "72.5%".to_string())]
+            vec![("failure_rate".to_owned(), "72.5%".to_owned())]
         );
     }
 
@@ -1251,8 +1254,8 @@ mod tests {
         assert_eq!(
             fields.fields,
             vec![(
-                "reason".to_string(),
-                "directory server sent invalid data".to_string()
+                "reason".to_owned(),
+                "directory server sent invalid data".to_owned()
             )]
         );
 
@@ -1265,10 +1268,7 @@ mod tests {
             fields.message.as_deref(),
             Some("Tor directory bootstrap failed")
         );
-        assert_eq!(
-            fields.fields,
-            vec![("attempts".to_string(), "3".to_string())]
-        );
+        assert_eq!(fields.fields, vec![("attempts".to_owned(), "3".to_owned())]);
     }
 
     #[test]
@@ -1291,7 +1291,7 @@ mod tests {
         assert_eq!(fields.message.as_deref(), Some("Tor circuit closed"));
         assert_eq!(
             fields.fields,
-            vec![("reason".to_string(), "closed".to_string())]
+            vec![("reason".to_owned(), "closed".to_owned())]
         );
     }
 
@@ -1299,7 +1299,7 @@ mod tests {
     fn suppresses_repetitive_onion_retry_warning() {
         let mut fields = LogEventFields {
             message: Some(
-                "Too many preemptive onion service circuits failed; waiting a while.".to_string(),
+                "Too many preemptive onion service circuits failed; waiting a while.".to_owned(),
             ),
             fields: Vec::new(),
         };

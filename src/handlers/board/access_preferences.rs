@@ -177,8 +177,8 @@ pub fn remember_owned_post_until_with_secure(
     grants.push(OwnedPostGrant {
         post_id,
         thread_id,
-        board_short: board_short.to_string(),
-        deletion_token: deletion_token.to_string(),
+        board_short: board_short.to_owned(),
+        deletion_token: deletion_token.to_owned(),
         expires_at,
     });
     let grants = prune_owned_post_grants_for_cookie(grants);
@@ -472,7 +472,7 @@ pub fn ensure_csrf(jar: CookieJar) -> (CookieJar, String) {
     }
 
     if let Some(cookie) = jar.get("csrf_token") {
-        let token = cookie.value().to_string();
+        let token = cookie.value().to_owned();
         if !token.is_empty() {
             return (
                 jar,
@@ -525,7 +525,7 @@ pub async fn set_theme(
         .get("return_to")
         .map(|value| safe_return_to(Some(value.as_str()), "/"))
         .or_else(|| safe_referer_return_to(&headers))
-        .unwrap_or_else(|| "/".to_string());
+        .unwrap_or_else(|| "/".to_owned());
     Ok((jar, Redirect::to(&redirect_to)).into_response())
 }
 
@@ -617,19 +617,19 @@ pub async fn set_user_preferences(
     let jar = jar
         .add(public_preference_cookie(
             USER_HIDE_NSFW_COOKIE,
-            hide_nsfw.to_string(),
+            hide_nsfw.to_owned(),
         ))
         .add(public_preference_cookie(
             USER_VIDEO_AUDIO_COOKIE,
-            video_audio.to_string(),
+            video_audio.to_owned(),
         ))
         .add(public_preference_cookie(
             USER_PREFERRED_VIEW_COOKIE,
-            preferred_board_view.to_string(),
+            preferred_board_view.to_owned(),
         ))
         .add(public_preference_cookie(
             USER_ACTIVITY_BADGES_COOKIE,
-            show_badges.to_string(),
+            show_badges.to_owned(),
         ));
 
     let redirect_to = safe_return_to(form.return_to.as_deref(), "/");
@@ -649,7 +649,7 @@ fn safe_referer_return_to(headers: &HeaderMap) -> Option<String> {
     }
     let path_and_query = uri.path_and_query()?.as_str();
     crate::utils::redirect::is_strict_safe_internal_path(path_and_query)
-        .then(|| path_and_query.to_string())
+        .then(|| path_and_query.to_owned())
 }
 
 fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
@@ -747,7 +747,7 @@ pub async fn board_unlock_page(
     let (jar, csrf) = ensure_csrf(jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
     let access_context = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -816,7 +816,7 @@ pub async fn unlock_board_access(
     let (jar, csrf) = ensure_csrf(jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
     let access_context = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -993,7 +993,7 @@ pub async fn update_thread_preference(
     let thread_id = form.thread_id;
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
 
     tokio::task::spawn_blocking({
@@ -1058,8 +1058,8 @@ mod tests {
             &[OwnedPostGrant {
                 post_id: 42,
                 thread_id: 7,
-                board_short: "test".to_string(),
-                deletion_token: "token".to_string(),
+                board_short: "test".to_owned(),
+                deletion_token: "token".to_owned(),
                 expires_at: chrono::Utc::now().timestamp() + SELF_DELETE_WINDOW_SECS,
             }],
             true,
@@ -1081,8 +1081,8 @@ mod tests {
             &[OwnedPostGrant {
                 post_id: 42,
                 thread_id: 7,
-                board_short: "test".to_string(),
-                deletion_token: "token".to_string(),
+                board_short: "test".to_owned(),
+                deletion_token: "token".to_owned(),
                 expires_at: chrono::Utc::now().timestamp() + SELF_DELETE_WINDOW_SECS,
             }],
             false,
@@ -1138,8 +1138,8 @@ mod tests {
         let value = owned_posts_cookie_value(&[OwnedPostGrant {
             post_id: 42,
             thread_id: 7,
-            board_short: "test".to_string(),
-            deletion_token: "token".to_string(),
+            board_short: "test".to_owned(),
+            deletion_token: "token".to_owned(),
             expires_at: chrono::Utc::now().timestamp() + SELF_DELETE_WINDOW_SECS,
         }])
         .expect("owned posts cookie value");
@@ -1155,8 +1155,8 @@ mod tests {
     #[test]
     fn malformed_owned_posts_cookie_entries_are_ignored_safely() {
         for value in [
-            "not-signed".to_string(),
-            "zz.bad-signature".to_string(),
+            "not-signed".to_owned(),
+            "zz.bad-signature".to_owned(),
             "x".repeat(4_096),
         ] {
             let jar = axum_extra::extract::cookie::CookieJar::new().add(

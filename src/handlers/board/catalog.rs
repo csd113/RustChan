@@ -25,7 +25,7 @@ pub async fn catalog(
     let viewer_key = viewer_preference_key(&client_ip, &jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
     let access_context = match board_access_preflight(
         &state,
@@ -168,7 +168,7 @@ pub async fn catalog(
             crate::utils::crypto::sha256_hex(badge_parts.join("|").as_bytes())
         )
     } else {
-        "-na0".to_string()
+        "-na0".to_owned()
     };
     let etag = format!(
         "\"{etag_signature}-catalog{admin_tag}{post_tag}{greentext_tag}-t{theme_tag}-b{}{activity_tag}-{}\"",
@@ -267,7 +267,7 @@ pub async fn hidden_threads(
     let viewer_key = viewer_preference_key(&client_ip, &jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
     let access_context = match board_access_preflight(
         &state,
@@ -344,7 +344,7 @@ pub async fn board_archive(
     let (jar, csrf) = ensure_csrf(jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
 
     let page: i64 = params
@@ -430,7 +430,7 @@ pub async fn search(
     let (jar, csrf) = ensure_csrf(jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
 
     // Cap query length to prevent excessively large LIKE pattern scans.

@@ -3,9 +3,9 @@
 use crate::config::CONFIG;
 use crate::models::{Board, Pagination, Theme, SEARCH_QUERY_MAX_CHARS};
 use crate::utils::sanitize::escape_html;
-use chrono::{Local, TimeZone};
+use chrono::{Local, TimeZone as _};
 use parking_lot::RwLock;
-use std::fmt::Write;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -144,7 +144,7 @@ fn compute_static_asset_version() -> String {
         .and_then(|metadata| metadata.modified().ok())
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
         .map_or_else(
-            || env!("CARGO_PKG_VERSION").to_string(),
+            || env!("CARGO_PKG_VERSION").to_owned(),
             |duration| duration.as_secs().to_string(),
         )
 }
@@ -223,7 +223,7 @@ fn fallback_theme_slug() -> String {
                 .find(|theme| theme.enabled)
                 .map(|theme| theme.slug.clone())
         })
-        .unwrap_or_else(|| crate::theme::HARD_DEFAULT_THEME.to_string())
+        .unwrap_or_else(|| crate::theme::HARD_DEFAULT_THEME.to_owned())
 }
 
 fn resolve_page_default_theme(board_default_theme: Option<&str>) -> String {
@@ -432,7 +432,7 @@ pub const fn thread_autoupdate_script() -> &'static str {
 pub fn fmt_ts(ts: i64) -> String {
     match Local.timestamp_opt(ts, 0) {
         chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-        _ => "unknown".to_string(),
+        _ => "unknown".to_owned(),
     }
 }
 
@@ -440,7 +440,7 @@ pub fn fmt_ts(ts: i64) -> String {
 pub fn fmt_ts_short(ts: i64) -> String {
     match Local.timestamp_opt(ts, 0) {
         chrono::LocalResult::Single(dt) => dt.format("%m/%d/%y(%a)%H:%M:%S").to_string(),
-        _ => "?".to_string(),
+        _ => "?".to_owned(),
     }
 }
 
@@ -508,9 +508,8 @@ pub fn urlencoding_simple(s: &str) -> String {
 
 // ─── Base layout ─────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 #[must_use]
 pub fn base_layout(
     title: &str,
@@ -538,7 +537,7 @@ pub fn base_layout(
 }
 
 #[must_use]
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn base_layout_with_preferences(
     title: &str,
     board_short: Option<&str>,
@@ -938,10 +937,10 @@ mod tests {
 
     fn builtin_theme(slug: &str, display_name: &str, sort_order: i64) -> Theme {
         Theme {
-            slug: slug.to_string(),
-            display_name: display_name.to_string(),
+            slug: slug.to_owned(),
+            display_name: display_name.to_owned(),
             description: format!("{display_name} description"),
-            swatch_hex: "#123456".to_string(),
+            swatch_hex: "#123456".to_owned(),
             enabled: true,
             sort_order,
             is_builtin: true,

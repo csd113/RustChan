@@ -1,5 +1,5 @@
 use super::{escape_html, format_file_size, AdminPanelViewModel};
-use std::fmt::Write;
+use std::fmt::Write as _;
 
 struct MaintenanceSectionView<'a> {
     csrf_token: &'a str,
@@ -101,7 +101,7 @@ fn render_media_detection_cards(view: &AdminPanelViewModel<'_>) -> String {
     {
         format!("selected renderer: {pdf_renderer}")
     } else {
-        "using built-in generic PDF placeholder thumbnail".to_string()
+        "using built-in generic PDF placeholder thumbnail".to_owned()
     };
 
     let mut cards = String::new();
@@ -157,7 +157,7 @@ fn render_media_detection_cards(view: &AdminPanelViewModel<'_>) -> String {
     cards
 }
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String {
     format!(
         r#"<div class="admin-panel-maintenance" id="maintenance">

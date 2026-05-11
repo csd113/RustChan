@@ -11,7 +11,7 @@ use crate::models::{
 };
 use crate::utils::{files::format_file_size, sanitize::escape_html};
 use std::collections::BTreeSet;
-use std::fmt::Write;
+use std::fmt::Write as _;
 
 use super::{base_layout, fmt_ts, fmt_ts_short, render_pagination, urlencoding_simple};
 
@@ -100,7 +100,7 @@ pub struct AdminPanelModerationView<'a> {
     pub appeals: &'a [crate::models::BanAppeal],
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 pub struct AdminPanelAppearanceView<'a> {
     pub site_name: &'a str,
     pub site_subtitle: &'a str,
@@ -305,13 +305,11 @@ fn render_banner_upload_form(
   <label class="admin-inline-checkbox"><input type="checkbox" name="enabled" value="1" checked> Enabled</label>
   <label class="admin-inline-checkbox"><input type="checkbox" name="show_on_index" value="1" checked> Show on board index</label>
   <label class="admin-inline-checkbox"><input type="checkbox" name="show_on_catalog" value="1" checked> Show on catalog</label>
-</div>"#
-            .to_string()
+</div>"#.to_owned()
     } else {
         r#"<div class="admin-banner-toggle-group">
   <label class="admin-inline-checkbox"><input type="checkbox" name="enabled" value="1" checked> Enabled</label>
-</div>"#
-        .to_string()
+</div>"#.to_owned()
     };
     format!(
         r#"<form method="POST" action="{action}" enctype="multipart/form-data" class="admin-banner-upload-form admin-banner-editor" data-banner-editor="1">
@@ -550,7 +548,7 @@ fn render_board_backup_actions(board: &Board, csrf_token: &str) -> String {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 fn render_board_settings_card(
     board: &Board,
     index: usize,
@@ -1025,7 +1023,7 @@ pub fn admin_vacuum_result_page(
 ) -> String {
     let saved = size_before.saturating_sub(size_after);
     // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::cast_precision_loss
@@ -1075,7 +1073,7 @@ pub fn admin_vacuum_result_page(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 #[must_use]
 pub fn admin_db_health_result_page(
     report: &DbHealthReport,
@@ -1167,7 +1165,7 @@ pub fn admin_db_health_result_page(
     let backup_html = report.repair_backup.as_ref().map_or_else(
         || {
             report.repair_backup_error.as_ref().map_or_else(
-                || r"<p><strong>Pre-repair backup:</strong> Not run</p>".to_string(),
+                || r"<p><strong>Pre-repair backup:</strong> Not run</p>".to_owned(),
                 |error| {
                     format!(
                         r#"<p><strong>Pre-repair backup:</strong> <span class="admin-status-error">Failed</span> <code>{}</code></p>"#,
@@ -1191,7 +1189,7 @@ pub fn admin_db_health_result_page(
     );
     let before_checks_html = render_db_health_snapshot(&report.before);
     let after_checks_html = report.after.as_ref().map_or_else(
-        || r"<p><strong>After:</strong> Not run</p>".to_string(),
+        || r"<p><strong>After:</strong> Not run</p>".to_owned(),
         render_db_health_snapshot,
     );
 
@@ -1279,8 +1277,7 @@ pub fn admin_db_repair_idle_page(csrf_token: &str, current_theme: Option<&str>) 
   <a href="/admin/panel">&#8592; back to admin panel</a>
 </p>
 </section>
-</div>"#
-        .to_string();
+</div>"#.to_owned();
 
     base_layout(
         "Database repair",
@@ -1359,7 +1356,7 @@ pub fn admin_db_repair_stale_page(
 </section>
 </div>"#,
         current_job_html = current_job_id.map_or_else(
-            || "<p>No maintenance rebuild is currently active.</p>".to_string(),
+            || "<p>No maintenance rebuild is currently active.</p>".to_owned(),
             |job_id| {
                 format!(
                     r#"<p>The current maintenance rebuild is <code>{job_id}</code>. <a href="/admin/db/repair/status?job_id={job_id}">Open that status page.</a></p>"#
@@ -1461,7 +1458,7 @@ fn render_db_check_result(label: &str, result: &crate::db::DbCheckResult) -> Str
 
 // ─── IP history ───────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 #[must_use]
 pub fn admin_ip_history_page(
     ip_hash: &str,
@@ -1481,7 +1478,7 @@ pub fn admin_ip_history_page(
     for (post, _) in posts_with_boards {
         let name = post.name.trim();
         if !name.is_empty() && name != "Anonymous" {
-            seen_names.insert(name.to_string());
+            seen_names.insert(name.to_owned());
         }
 
         if let Some(tripcode) = post
@@ -1490,7 +1487,7 @@ pub fn admin_ip_history_page(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            seen_tripcodes.insert(tripcode.to_string());
+            seen_tripcodes.insert(tripcode.to_owned());
         }
     }
 
@@ -2001,7 +1998,7 @@ mod tests {
                     ffprobe: AdminDetectionStatus::Detected,
                     webp_encoder: AdminDetectionStatus::Detected,
                     vp9_pipeline: AdminDetectionStatus::Detected,
-                    pdf_thumbnail_renderer: Some("pdftoppm".to_string()),
+                    pdf_thumbnail_renderer: Some("pdftoppm".to_owned()),
                 },
             },
             tor_address: None,

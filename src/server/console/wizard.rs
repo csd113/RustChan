@@ -49,7 +49,10 @@ pub fn run_wizard(kind: &WizardKind, pool: &DbPool, mode: &SharedConsoleMode) {
         // 3. Hold so the operator can read the result.
         {
             use std::io::Write as _;
-            print!("\n  Press Enter to return to the dashboard\u{2026}");
+            let _ = write!(
+                stdout(),
+                "\n  Press Enter to return to the dashboard\u{2026}"
+            );
             let _ = stdout().flush();
         }
         let mut buf = String::new();
@@ -133,7 +136,7 @@ fn prompt_username(reader: &mut dyn BufRead) -> Option<String> {
             }
             Ok(_) => {}
         }
-        let u = s.trim().to_string();
+        let u = s.trim().to_owned();
         if u.is_empty() {
             crate::logging::console_println("  Username cannot be empty.");
             continue;
@@ -166,7 +169,7 @@ fn prompt_password(reader: &mut dyn BufRead) -> Option<String> {
             }
             Ok(_) => {}
         }
-        let p1 = p1.trim().to_string();
+        let p1 = p1.trim().to_owned();
         if let Err(e) = crate::utils::crypto::validate_password(&p1) {
             crate::logging::console_println(&format!("  {}{}{} {e}", c(RED), err_mark(), c(RST)));
             continue;
@@ -177,7 +180,7 @@ fn prompt_password(reader: &mut dyn BufRead) -> Option<String> {
             crate::logging::console_println("\n  Skipped.");
             return None;
         }
-        let p2 = p2.trim().to_string();
+        let p2 = p2.trim().to_owned();
         if p1 != p2 {
             crate::logging::console_println(&format!(
                 "  {}{}{} Passwords do not match. Try again.",
@@ -193,14 +196,13 @@ fn prompt_password(reader: &mut dyn BufRead) -> Option<String> {
 
 // ─── kb_create_board ─────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
 pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
     let prompt = |msg: &str, reader: &mut dyn BufRead| -> Option<String> {
         crate::logging::console_prompt(msg);
         let mut s = String::new();
         match reader.read_line(&mut s) {
             Ok(0) | Err(_) => None,
-            Ok(_) => Some(s.trim().to_string()),
+            Ok(_) => Some(s.trim().to_owned()),
         }
     };
 
@@ -305,7 +307,6 @@ pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
 
 // ─── kb_create_admin ─────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
 pub fn kb_create_admin(pool: &DbPool, reader: &mut dyn BufRead) {
     crate::logging::console_print_raw(&format!("\n  {}{}{}\n\n", c(CYN), section_rule(), c(RST)));
 

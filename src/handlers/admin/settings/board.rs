@@ -46,7 +46,7 @@ fn parse_board_upload_limit_bytes(raw_value: Option<&str>, fallback_bytes: i64) 
 
     let fallback_mb = (fallback_bytes / MIB).max(1);
     let parsed_mb = match raw_value.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(value) => value.parse::<i64>().map_err(|_| {
+        Some(value) => value.parse::<i64>().map_err(|_error| {
             AppError::BadRequest(
                 "Board upload size limits must be positive whole MiB values.".into(),
             )
@@ -92,7 +92,7 @@ fn resolve_board_access_password_hash(
         hash_password(submitted_password)?
     };
 
-    if access_mode.is_password_protected() && access_password_hash.is_empty() {
+    if access_mode.requires_post_password() && access_password_hash.is_empty() {
         return Err(AppError::BadRequest(
             "Password-protected boards require a saved password. Enter a new board password or switch access mode to Public before removing it.".into(),
         ));
@@ -108,9 +108,7 @@ pub async fn update_board_settings(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<BoardSettingsForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let bump_limit = form

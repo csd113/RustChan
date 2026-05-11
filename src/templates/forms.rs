@@ -161,7 +161,7 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
         "upload"
     };
     let primary_accept = if audio_image_dual_mode {
-        AUDIO_ACCEPT.to_string()
+        AUDIO_ACCEPT.to_owned()
     } else {
         file_accept
     };
@@ -181,7 +181,6 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
 }
 
 /// New-thread submission form. Embedded on board index and catalog pages.
-#[allow(clippy::too_many_lines)]
 pub(super) fn new_thread_form(
     board_short: &str,
     csrf_token: &str,
@@ -199,7 +198,7 @@ pub(super) fn new_thread_form(
     let uploads_disabled_row = if upload_policy.uploads_enabled {
         String::new()
     } else {
-        render_uploads_disabled_row().to_string()
+        render_uploads_disabled_row().to_owned()
     };
 
     // PoW CAPTCHA block — only rendered when the board has it enabled.
@@ -309,7 +308,7 @@ pub(super) fn reply_form(
     let uploads_disabled_row = if upload_policy.uploads_enabled {
         String::new()
     } else {
-        render_uploads_disabled_row().to_string()
+        render_uploads_disabled_row().to_owned()
     };
 
     // PoW CAPTCHA block — only rendered when the board has it enabled.

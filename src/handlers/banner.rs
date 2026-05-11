@@ -8,11 +8,11 @@ use crate::{
 use axum::{
     extract::{Path, Query, Request, State},
     http::{header, HeaderValue, StatusCode},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
-use tower::ServiceExt;
+use tower::ServiceExt as _;
 use tower_http::services::ServeFile;
 
 const VERSIONED_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA;
@@ -66,7 +66,7 @@ pub async fn serve_banner_asset(
         .is_some_and(|query| query.split('&').any(|part| part.starts_with("v=")));
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
 
     let asset = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -136,7 +136,7 @@ pub async fn external_banner_warning_page(
 ) -> Result<Response> {
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
     let return_to = banner::safe_return_to(query.return_to.as_deref().unwrap_or("/"));
@@ -209,7 +209,7 @@ pub async fn external_banner_continue(
 ) -> Result<Response> {
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let target = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let jar = jar.clone();

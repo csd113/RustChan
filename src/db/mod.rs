@@ -1,8 +1,8 @@
 // src/db/mod.rs
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use rusqlite::params;
-use rusqlite::OptionalExtension;
+use rusqlite::OptionalExtension as _;
 use std::collections::HashSet;
 
 pub mod admin;

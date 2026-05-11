@@ -23,7 +23,7 @@ use crate::{
 use axum::{
     extract::{Form, State},
     http::HeaderMap,
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use chrono::Utc;
@@ -60,7 +60,7 @@ fn login_now_secs() -> u64 {
 }
 
 fn login_ip_key(ip: &str) -> String {
-    use sha2::{Digest, Sha256};
+    use sha2::{Digest as _, Sha256};
     let mut h = Sha256::new();
     h.update(ip.as_bytes());
     hex::encode(h.finalize())
@@ -69,7 +69,7 @@ fn login_ip_key(ip: &str) -> String {
 fn redact_login_username(username: &str) -> String {
     let trimmed = username.trim();
     if trimmed.is_empty() {
-        return "<empty>".to_string();
+        return "<empty>".to_owned();
     }
 
     let safe_prefix = trimmed
@@ -100,11 +100,11 @@ fn is_login_locked(ip_key: &str) -> bool {
 }
 
 /// Record a failed login attempt; returns the new failure count.
-#[allow(clippy::significant_drop_tightening)]
+#[expect(clippy::significant_drop_tightening)]
 fn record_login_fail(ip_key: &str) -> u32 {
     let now = login_now_secs();
     let mut entry = ADMIN_LOGIN_FAILS
-        .entry(ip_key.to_string())
+        .entry(ip_key.to_owned())
         .or_insert((0, now));
     let (count, window_start) = entry.value_mut();
     if now.saturating_sub(*window_start) > LOGIN_FAIL_WINDOW {
@@ -141,7 +141,7 @@ fn ensure_admin_login_csrf(
 ) -> (CookieJar, String) {
     let token = jar
         .get("csrf_token")
-        .map(|cookie| cookie.value().to_string())
+        .map(|cookie| cookie.value().to_owned())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(new_csrf_token);
 
@@ -198,9 +198,7 @@ pub async fn admin_index(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> Result<Response> {
     // Move DB I/O into spawn_blocking.
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
 
     let (is_logged_in, boards) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -245,7 +243,7 @@ pub struct LoginForm {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub async fn admin_login(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -283,7 +281,7 @@ pub async fn admin_login(
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
-    let username = form.username.trim().to_string();
+    let username = form.username.trim().to_owned();
     let username_log = redact_login_username(&username);
     if username.is_empty() || username.len() > 64 {
         return render_admin_login_response(&state, jar, &headers, peer, Some("Invalid username."))
@@ -390,7 +388,7 @@ pub async fn admin_logout(
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     if let Some(session_cookie) = jar.get(super::SESSION_COOKIE) {
-        let session_id = session_cookie.value().to_string();
+        let session_id = session_cookie.value().to_owned();
         // DB call in spawn_blocking
         tokio::task::spawn_blocking({
             let pool = state.db.clone();
@@ -446,7 +444,7 @@ mod tests {
         CookieJar::new()
             .add(Cookie::new(
                 super::super::SESSION_COOKIE,
-                session_id.to_string(),
+                session_id.to_owned(),
             ))
             .add(Cookie::new("csrf_token", TEST_CSRF_COOKIE))
     }
@@ -754,7 +752,7 @@ mod tests {
             let origin = format!("https://{host}");
             (host, origin)
         } else {
-            ("localhost".to_string(), TEST_ADMIN_ORIGIN.to_string())
+            ("localhost".to_owned(), TEST_ADMIN_ORIGIN.to_owned())
         };
         let response = router
             .oneshot(
@@ -847,7 +845,7 @@ mod tests {
             .with_state(state);
         let response = router
             .oneshot(admin_login_request(
-                "username=admin&password=hunter2&_csrf=csrf123".to_string(),
+                "username=admin&password=hunter2&_csrf=csrf123".to_owned(),
             ))
             .await
             .expect("response");

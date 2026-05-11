@@ -5,8 +5,8 @@
 // and the list_admins helper used by CLI tooling.
 //
 use crate::models::{AdminSession, AdminUser, Ban, WordFilter};
-use anyhow::{Context, Result};
-use rusqlite::{params, OptionalExtension};
+use anyhow::{Context as _, Result};
+use rusqlite::{params, OptionalExtension as _};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BanAppealSubmission {
@@ -31,7 +31,7 @@ impl DbCheckResult {
     #[must_use]
     pub fn output(&self) -> String {
         if self.messages.is_empty() {
-            return "ok".to_string();
+            return "ok".to_owned();
         }
         self.messages.join(" | ")
     }
@@ -469,7 +469,7 @@ pub fn resolve_report(conn: &rusqlite::Connection, report_id: i64, admin_id: i64
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn log_mod_action(
     conn: &rusqlite::Connection,
     admin_id: i64,
@@ -838,7 +838,7 @@ fn integrity_check_status(conn: &rusqlite::Connection) -> DbCheckResult {
     if messages.is_empty() {
         return DbCheckResult {
             ok: false,
-            messages: vec!["integrity_check returned no rows".to_string()],
+            messages: vec!["integrity_check returned no rows".to_owned()],
         };
     }
 
@@ -862,7 +862,7 @@ fn foreign_key_check_status(conn: &rusqlite::Connection) -> DbCheckResult {
         let rowid: Option<i64> = row.get(1)?;
         let parent: String = row.get(2)?;
         let fkid: i64 = row.get(3)?;
-        let rowid = rowid.map_or_else(|| "unknown".to_string(), |value| value.to_string());
+        let rowid = rowid.map_or_else(|| "unknown".to_owned(), |value| value.to_string());
         Ok(format!(
             "table={table} rowid={rowid} parent={parent} fkid={fkid}"
         ))
@@ -890,7 +890,7 @@ fn foreign_key_check_status(conn: &rusqlite::Connection) -> DbCheckResult {
     if messages.is_empty() {
         return DbCheckResult {
             ok: true,
-            messages: vec!["ok".to_string()],
+            messages: vec!["ok".to_owned()],
         };
     }
 
@@ -967,34 +967,33 @@ pub fn attempt_db_repair(
 
     if before.ok() {
         repair_summary.push(
-            "No database health problems were detected before the maintenance run.".to_string(),
+            "No database health problems were detected before the maintenance run.".to_owned(),
         );
         repair_summary.push(
-            "No corruption-specific fixes were required; the system only ran maintenance and index rebuild steps."
-                .to_string(),
+            "No corruption-specific fixes were required; the system only ran maintenance and index rebuild steps.".to_owned(),
         );
     } else {
         repair_summary.push(
             "The initial database health check reported a problem, so repair steps were attempted."
-                .to_string(),
+                .to_owned(),
         );
     }
 
     match conn.execute_batch("REINDEX;") {
-        Ok(()) => repair_steps.push("Rebuilt SQLite indexes.".to_string()),
+        Ok(()) => repair_steps.push("Rebuilt SQLite indexes.".to_owned()),
         Err(error) => repair_steps.push(format!("Could not rebuild SQLite indexes: {error}")),
     }
 
     match rebuild_posts_fts(conn) {
         Ok(()) => repair_steps
-            .push("Rebuilt the post search index and recreated its update triggers.".to_string()),
+            .push("Rebuilt the post search index and recreated its update triggers.".to_owned()),
         Err(error) => repair_steps.push(format!(
             "Could not rebuild the post search index and triggers: {error}"
         )),
     }
 
     match conn.execute_batch("PRAGMA optimize;") {
-        Ok(()) => repair_steps.push("Optimized SQLite query-planner statistics.".to_string()),
+        Ok(()) => repair_steps.push("Optimized SQLite query-planner statistics.".to_owned()),
         Err(error) => repair_steps.push(format!(
             "Could not optimize SQLite query-planner statistics: {error}"
         )),
@@ -1004,18 +1003,16 @@ pub fn attempt_db_repair(
 
     if before.ok() && after.ok() {
         repair_summary.push(
-            "The final database health check still passed, confirming that no additional repairs were needed."
-                .to_string(),
+            "The final database health check still passed, confirming that no additional repairs were needed.".to_owned(),
         );
     } else if after.ok() {
         repair_summary.push(
-            "The final database health check passed after the repair run, so the detected problem was cleared."
-                .to_string(),
+            "The final database health check passed after the repair run, so the detected problem was cleared.".to_owned(),
         );
     } else {
         repair_summary.push(
             "The repair run finished, but the final database health check still reports a problem."
-                .to_string(),
+                .to_owned(),
         );
     }
 
@@ -1038,10 +1035,10 @@ pub fn db_repair_aborted_for_backup_failure(
         before: db_health_snapshot(conn),
         repair_attempted: false,
         repair_backup: None,
-        repair_backup_error: Some(backup_error.to_string()),
+        repair_backup_error: Some(backup_error.to_owned()),
         repair_summary: vec![
             format!("Pre-repair backup failed: {backup_error}"),
-            "No repair or maintenance actions were run.".to_string(),
+            "No repair or maintenance actions were run.".to_owned(),
         ],
         repair_steps: Vec::new(),
         after: None,
@@ -1099,17 +1096,17 @@ mod tests {
         let report = attempt_db_repair(
             &conn,
             Some(DbRepairBackup {
-                backup_id: "2026-05-06_1215_pre-repair-db_c81f20".to_string(),
-                backup_type: "DB + config".to_string(),
+                backup_id: "2026-05-06_1215_pre-repair-db_c81f20".to_owned(),
+                backup_type: "DB + config".to_owned(),
                 backup_path: "/tmp/rustchan-data/backups/2026-05-06_1215_pre-repair-db_c81f20"
-                    .to_string(),
+                    .to_owned(),
                 verified: true,
             }),
         );
         assert!(report.before.ok());
         assert_eq!(
             report.after.as_ref().map(|after| after.integrity.output()),
-            Some("ok".to_string())
+            Some("ok".to_owned())
         );
         assert_eq!(
             report.after.as_ref().map(super::DbHealthSnapshot::ok),
@@ -1184,12 +1181,12 @@ mod tests {
         let post = NewPost {
             thread_id: 0,
             board_id: board.id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
-            subject: Some("subject".to_string()),
-            body: "body".to_string(),
-            body_html: "<p>body</p>".to_string(),
-            ip_hash: Some(ip_hash.to_string()),
+            subject: Some("subject".to_owned()),
+            body: "body".to_owned(),
+            body_html: "<p>body</p>".to_owned(),
+            ip_hash: Some(ip_hash.to_owned()),
             file_path: None,
             file_name: None,
             file_size: None,
@@ -1200,7 +1197,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "token".to_string(),
+            deletion_token: "token".to_owned(),
             is_op: true,
         };
 

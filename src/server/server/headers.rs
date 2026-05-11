@@ -3,7 +3,7 @@
 use crate::config::CONFIG;
 use axum::{
     http::{self, header},
-    response::IntoResponse,
+    response::IntoResponse as _,
 };
 use std::net::{IpAddr, SocketAddr};
 
@@ -85,7 +85,7 @@ pub(super) async fn public_cache_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let path = req.uri().path().to_string();
+    let path = req.uri().path().to_owned();
     let mut resp = next.run(req).await;
     if public_dynamic_html_path(&path) {
         crate::cache::insert_cache_control_if_absent(
@@ -100,7 +100,7 @@ pub(super) async fn admin_cache_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let path = req.uri().path().to_string();
+    let path = req.uri().path().to_owned();
     let mut resp = next.run(req).await;
     let cache_control = if sensitive_admin_html_path(&path)
         && response_content_type_starts_with(resp.headers(), "text/html")
@@ -274,7 +274,7 @@ fn request_host_parts(headers: &http::HeaderMap) -> Option<(String, Option<u16>)
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<http::uri::Authority>().ok())
-        .map(|authority| (authority.host().to_string(), authority.port_u16()))
+        .map(|authority| (authority.host().to_owned(), authority.port_u16()))
 }
 
 fn host_is_configured_public_host(host: &str) -> bool {
@@ -303,7 +303,7 @@ mod tests {
         body::Body,
         http::{header, Request},
         middleware::from_fn,
-        response::IntoResponse,
+        response::IntoResponse as _,
         routing::get,
         Router,
     };
@@ -312,7 +312,7 @@ mod tests {
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::{Path, PathBuf},
     };
-    use tower::ServiceExt;
+    use tower::ServiceExt as _;
 
     #[test]
     fn csp_allows_core_end_user_media_features() {

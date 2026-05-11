@@ -40,7 +40,7 @@ pub fn multipart_body(
     fields: &[(&str, &str)],
     file: Option<(&str, &str, &[u8], &str)>,
 ) -> (String, Vec<u8>) {
-    let boundary = "rustchan-test-boundary".to_string();
+    let boundary = "rustchan-test-boundary".to_owned();
     let mut body = Vec::new();
 
     for (name, value) in fields {

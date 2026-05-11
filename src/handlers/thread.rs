@@ -22,7 +22,7 @@ use crate::{
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
@@ -46,7 +46,7 @@ fn is_xml_http_request(headers: &HeaderMap) -> bool {
 
 // ─── GET /:board/thread/:id ───────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub async fn view_thread(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
@@ -62,7 +62,7 @@ pub async fn view_thread(
     let owned_post_grants = crate::handlers::board::owned_post_grants_from_jar(&jar);
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
     let return_to = format!("/{board_short}/thread/{thread_id}");
     let access_context = match crate::handlers::board::board_access_preflight(
@@ -257,7 +257,7 @@ pub async fn view_thread(
 
 // ─── POST /:board/thread/:id — post reply ────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub async fn post_reply(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
@@ -271,7 +271,7 @@ pub async fn post_reply(
     let user_preferences = crate::handlers::board::user_preferences_from_jar(&jar);
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
     let access_decision = crate::handlers::board::board_access_preflight(
         &state,
@@ -292,7 +292,7 @@ pub async fn post_reply(
         }
     };
 
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_owned());
     let form = tokio::time::timeout(
         crate::handlers::PUBLIC_UPLOAD_TIMEOUT,
         parse_post_multipart(
@@ -304,7 +304,7 @@ pub async fn post_reply(
         ),
     )
     .await
-    .map_err(|_| AppError::BadRequest("Upload timed out. Please try again.".into()))??;
+    .map_err(|_error| AppError::BadRequest("Upload timed out. Please try again.".into()))??;
 
     if !form.csrf_verified {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
@@ -328,7 +328,7 @@ pub async fn post_reply(
     let identity_key_err = identity_key.clone();
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let job_queue = state.job_queue.clone();
+        let job_queue = std::sync::Arc::clone(&state.job_queue);
         let ffmpeg_available = state.ffmpeg_available;
         let ffprobe_available = state.ffprobe_available;
         let ffmpeg_webp_available = state.ffmpeg_webp_available;
@@ -473,7 +473,7 @@ async fn load_self_action_post_context(
 ) -> Result<SelfActionPostContext> {
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let board_short = board_short.to_string();
+        let board_short = board_short.to_owned();
         move || -> Result<SelfActionPostContext> {
             let conn = pool.get()?;
             let board = db::get_board_by_short(&conn, &board_short)?
@@ -525,7 +525,7 @@ async fn render_edit_post_error_page(
         load_self_action_post_context(state, board_short, post_id, admin_session_id, access_cookie)
             .await?;
     let mut post = context.post.clone();
-    post.body = body.to_string();
+    body.clone_into(&mut post.body);
     let boards = crate::templates::live_boards();
     let html = crate::templates::thread::edit_post_page(
         &context.board,
@@ -555,7 +555,7 @@ pub async fn edit_post_get(
     let (jar, csrf) = ensure_csrf(jar);
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
     let context = load_self_action_post_context(
         &state,
@@ -668,7 +668,7 @@ pub async fn edit_post_post(
         )?;
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
     let can_post = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -735,8 +735,7 @@ pub async fn edit_post_post(
             }
 
             let body_text = crate::utils::sanitize::validate_body(&raw_body)
-                .map_err(AppError::BadRequest)?
-                .to_string();
+                .map_err(AppError::BadRequest)?.to_owned();
 
             let filters: Vec<(String, String)> = db::get_word_filters(&conn)?
                 .into_iter()
@@ -824,7 +823,7 @@ pub async fn delete_post_get(
     let (jar, csrf) = ensure_csrf(jar);
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
     let context = load_self_action_post_context(
         &state,
@@ -922,7 +921,7 @@ pub async fn delete_own_post(
         )?;
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
     let can_post = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -1075,7 +1074,7 @@ pub async fn vote_handler(
     let (_poll_id, thread_id, board_short) = context;
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
     let can_post = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -1230,7 +1229,7 @@ pub async fn thread_updates(
     let refresh_post_ids = parse_refresh_post_ids(params.refresh.as_deref());
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
     let can_view = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -1255,7 +1254,7 @@ pub async fn thread_updates(
         return Ok((
             axum::http::StatusCode::FORBIDDEN,
             [(axum::http::header::CONTENT_TYPE, "application/json")],
-            r#"{"error":"forbidden"}"#.to_string(),
+            r#"{"error":"forbidden"}"#.to_owned(),
         )
             .into_response());
     }
@@ -1534,11 +1533,11 @@ mod tests {
         let post = crate::db::NewPost {
             thread_id: 0,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
-            subject: Some("subject".to_string()),
-            body: "original body".to_string(),
-            body_html: "original body".to_string(),
+            subject: Some("subject".to_owned()),
+            body: "original body".to_owned(),
+            body_html: "original body".to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -1550,7 +1549,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "edit-token".to_string(),
+            deletion_token: "edit-token".to_owned(),
             is_op: true,
         };
         let (thread_id, post_id, _) = crate::db::create_thread_with_optional_poll(
@@ -1578,7 +1577,7 @@ mod tests {
             .get("rustchan_owned_posts")
             .expect("owned posts cookie")
             .value()
-            .to_string();
+            .to_owned();
         (thread_id, post_id, cookie)
     }
 
@@ -1877,11 +1876,11 @@ mod tests {
             let post = crate::db::NewPost {
                 thread_id: 0,
                 board_id,
-                name: "anon".to_string(),
+                name: "anon".to_owned(),
                 tripcode: None,
-                subject: Some("subject".to_string()),
-                body: "op body".to_string(),
-                body_html: "op body".to_string(),
+                subject: Some("subject".to_owned()),
+                body: "op body".to_owned(),
+                body_html: "op body".to_owned(),
                 ip_hash: Some(ip_hash),
                 file_path: None,
                 file_name: None,
@@ -1893,7 +1892,7 @@ mod tests {
                 audio_file_name: None,
                 audio_file_size: None,
                 audio_mime_type: None,
-                deletion_token: "token".to_string(),
+                deletion_token: "token".to_owned(),
                 is_op: true,
             };
             let (thread_id, _, _) = crate::db::create_thread_with_optional_poll(

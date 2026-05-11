@@ -4,8 +4,8 @@
 // guard via super::paths_safe_to_delete), and aggregate site statistics.
 //
 use crate::models::{Board, BoardAccessMode, BoardBannerMode};
-use anyhow::{Context, Result};
-use rusqlite::{params, OptionalExtension};
+use anyhow::{Context as _, Result};
+use rusqlite::{params, OptionalExtension as _};
 use std::collections::{HashMap, HashSet};
 
 const BOARD_ORDER_SQL: &str = "nsfw ASC, display_order ASC, id ASC";
@@ -232,7 +232,7 @@ pub fn get_site_subtitle(conn: &rusqlite::Connection) -> String {
             None
         })
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "select board to proceed".to_string())
+        .unwrap_or_else(|| "select board to proceed".to_owned())
 }
 
 /// Convenience: read the admin-configured default UI theme.
@@ -246,14 +246,13 @@ pub fn get_default_user_theme(conn: &rusqlite::Connection) -> String {
 }
 
 fn parse_site_bool(value: Option<String>) -> Option<bool> {
-    value.and_then(|value| {
-        let trimmed = value.trim();
-        match trimmed {
-            "1" | "true" | "TRUE" | "True" => Some(true),
-            "0" | "false" | "FALSE" | "False" => Some(false),
-            _ => None,
-        }
-    })
+    let value = value?;
+    let trimmed = value.trim();
+    match trimmed {
+        "1" | "true" | "TRUE" | "True" => Some(true),
+        "0" | "false" | "FALSE" | "False" => Some(false),
+        _ => None,
+    }
 }
 
 fn get_site_bool_with_legacy_fallback(
@@ -547,9 +546,9 @@ pub fn create_board(
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-#[allow(clippy::fn_params_excessive_bools)]
+#[expect(clippy::fn_params_excessive_bools)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn create_board_with_media_flags(
     conn: &rusqlite::Connection,
     short: &str,
@@ -658,11 +657,11 @@ pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Re
 ///
 /// # Errors
 /// Returns an error if the database operation fails or the board id is not found.
-#[allow(clippy::fn_params_excessive_bools)]
+#[expect(clippy::fn_params_excessive_bools)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 // Keeping the SQL branches inline makes the nsfw reorder/update behavior easier to verify in one place.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub fn update_board_settings(
     conn: &mut rusqlite::Connection,
     id: i64,
@@ -996,7 +995,7 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
         total_audio_checks.push("mime_type LIKE 'audio/%'");
     }
     let total_audio_expr = if total_audio_checks.is_empty() {
-        "0".to_string()
+        "0".to_owned()
     } else {
         format!(
             "SUM(CASE WHEN {} THEN 1 ELSE 0 END)",
@@ -1025,7 +1024,7 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
                   THEN audio_file_size ELSE 0 END)"
         )
     } else {
-        "0".to_string()
+        "0".to_owned()
     };
 
     let query = format!(
@@ -1324,7 +1323,7 @@ mod tests {
         let pending_op = pending.first().expect("pending op");
         let payload: crate::pending_fs::DeleteFilesPayload =
             serde_json::from_str(&pending_op.payload_json).expect("pending payload");
-        assert_eq!(payload.dirs, vec!["gone".to_string()]);
+        assert_eq!(payload.dirs, vec!["gone".to_owned()]);
 
         crate::pending_fs::reconcile_pending_fs_ops(
             &pool,

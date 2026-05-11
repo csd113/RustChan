@@ -80,9 +80,7 @@ pub async fn update_full_backup_settings(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<FullBackupSettingsForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let settings = parse_full_backup_settings_form(&form)?;
@@ -143,11 +141,11 @@ mod tests {
     fn automatic_backup_settings_parse_directory_output_mode() {
         let parsed = parse_full_backup_settings_form(&FullBackupSettingsForm {
             csrf: None,
-            auto_full_backup_interval_hours: Some("12".to_string()),
-            auto_full_backup_copies_to_keep: Some("3".to_string()),
+            auto_full_backup_interval_hours: Some("12".to_owned()),
+            auto_full_backup_copies_to_keep: Some("3".to_owned()),
             auto_full_backup_include_tor_hidden_service_keys: None,
-            auto_full_backup_storage_mode: Some("directory".to_string()),
-            auto_full_backup_split_zip_part_size_gib: Some("8".to_string()),
+            auto_full_backup_storage_mode: Some("directory".to_owned()),
+            auto_full_backup_split_zip_part_size_gib: Some("8".to_owned()),
         })
         .expect("directory settings");
 
@@ -163,11 +161,11 @@ mod tests {
     fn automatic_backup_settings_parse_split_zip_output_mode() {
         let parsed = parse_full_backup_settings_form(&FullBackupSettingsForm {
             csrf: None,
-            auto_full_backup_interval_hours: Some("24".to_string()),
-            auto_full_backup_copies_to_keep: Some("5".to_string()),
-            auto_full_backup_include_tor_hidden_service_keys: Some("1".to_string()),
-            auto_full_backup_storage_mode: Some("split_zip".to_string()),
-            auto_full_backup_split_zip_part_size_gib: Some("2".to_string()),
+            auto_full_backup_interval_hours: Some("24".to_owned()),
+            auto_full_backup_copies_to_keep: Some("5".to_owned()),
+            auto_full_backup_include_tor_hidden_service_keys: Some("1".to_owned()),
+            auto_full_backup_storage_mode: Some("split_zip".to_owned()),
+            auto_full_backup_split_zip_part_size_gib: Some("2".to_owned()),
         })
         .expect("split ZIP settings");
 

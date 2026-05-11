@@ -29,7 +29,7 @@ pub(super) async fn track_requests(
     );
 
     {
-        use sha2::{Digest, Sha256};
+        use sha2::{Digest as _, Sha256};
         let real_ip = crate::middleware::extract_ip(&req);
         let mut h = Sha256::new();
         h.update(real_ip.as_bytes());

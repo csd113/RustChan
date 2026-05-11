@@ -47,9 +47,7 @@ pub async fn update_site_settings(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<SiteSettingsForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let is_banner_settings_only = form.site_name.is_none()
         && form.site_subtitle.is_none()
@@ -113,11 +111,11 @@ pub async fn update_site_settings(
             let new_theme = if let Some(value) = form.default_theme.as_deref() {
                 let candidate = db::sanitize_theme_slug(value);
                 if candidate.is_empty() {
-                    crate::theme::HARD_DEFAULT_THEME.to_string()
+                    crate::theme::HARD_DEFAULT_THEME.to_owned()
                 } else if db::get_theme(&conn, &candidate)?.is_some_and(|theme| theme.enabled) {
                     candidate
                 } else {
-                    crate::theme::HARD_DEFAULT_THEME.to_string()
+                    crate::theme::HARD_DEFAULT_THEME.to_owned()
                 }
             } else {
                 db::get_default_user_theme(&conn)

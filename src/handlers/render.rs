@@ -6,7 +6,7 @@ use crate::{
     templates,
     utils::crypto::hash_ip,
 };
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 
 pub struct BoardPageData {
     pub board: Board,
@@ -112,7 +112,7 @@ pub fn load_board_page_data(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn render_board_page(
     data: &BoardPageData,
     csrf_token: &str,
@@ -176,7 +176,7 @@ pub fn load_thread_page_data(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn render_thread_page(
     data: &ThreadPageData,
     csrf_token: &str,

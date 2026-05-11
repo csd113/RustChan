@@ -59,7 +59,7 @@ pub async fn serve_board_media(
 ) -> Response {
     use axum::http::StatusCode;
     use std::path::PathBuf;
-    use tower::ServiceExt;
+    use tower::ServiceExt as _;
     use tower_http::services::ServeFile;
 
     // Reject path-traversal attempts and absolute-path escapes.
@@ -73,11 +73,11 @@ pub async fn serve_board_media(
 
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, board_short);
     let access_context = match tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let board_short = board_short.to_string();
+        let board_short = board_short.to_owned();
         move || -> Result<BoardAccessContext> {
             let conn = pool.get()?;
             load_board_access_context(
@@ -258,7 +258,7 @@ pub async fn api_post_preview(
     let user_preferences = user_preferences_from_jar(&jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -315,15 +315,15 @@ pub async fn api_post_preview(
         Ok(Ok(Some((html, thread_id)))) => {
             let body =
                 serde_json::to_string(&serde_json::json!({ "html": html, "thread_id": thread_id }))
-                    .unwrap_or_else(|_| r#"{"html":"","thread_id":0}"#.to_string());
+                    .unwrap_or_else(|_| r#"{"html":"","thread_id":0}"#.to_owned());
             (axum::http::StatusCode::OK, json_ct, body).into_response()
         }
         Ok(Ok(None)) => {
-            let body = r#"{"error":"not found"}"#.to_string();
+            let body = r#"{"error":"not found"}"#.to_owned();
             (axum::http::StatusCode::NOT_FOUND, json_ct, body).into_response()
         }
         _ => {
-            let body = r#"{"error":"internal error"}"#.to_string();
+            let body = r#"{"error":"internal error"}"#.to_owned();
             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, json_ct, body).into_response()
         }
     }
@@ -348,7 +348,7 @@ pub async fn redirect_to_post(
     let board_short_for_url = board_short.clone();
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();

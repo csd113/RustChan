@@ -86,7 +86,7 @@ pub async fn chan_refresh(
         .get("tx_id")
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .to_string();
+        .to_owned();
 
     Ok(Json(json!({
         "status":          "ok",

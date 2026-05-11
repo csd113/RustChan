@@ -1,7 +1,7 @@
 // Thumbnail generation for uploaded media.
 
-use anyhow::{Context, Result};
-use image::{imageops::FilterType, GenericImageView, ImageFormat};
+use anyhow::{Context as _, Result};
+use image::{imageops::FilterType, GenericImageView as _, ImageFormat};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -316,7 +316,7 @@ fn image_crate_thumbnail(
 
     let (w, h) = img.dimensions();
     // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
-    #[allow(
+    #[expect(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
@@ -362,7 +362,7 @@ fn image_crate_thumbnail_or_placeholder(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 fn pdf_first_page_thumbnail(
     input_path: &Path,
     output_path: &Path,

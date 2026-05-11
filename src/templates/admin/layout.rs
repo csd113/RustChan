@@ -123,5 +123,5 @@ fn render_admin_overview_section() -> String {
 </details>
 </section>
 </div>"#
-        .to_string()
+        .to_owned()
 }

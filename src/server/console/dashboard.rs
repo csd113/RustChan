@@ -45,7 +45,7 @@ fn colour(code: &str, s: &str) -> String {
     if crate::logging::ansi_enabled() {
         format!("\x1b[{code}m{s}\x1b[0m")
     } else {
-        s.to_string()
+        s.to_owned()
     }
 }
 
@@ -117,7 +117,7 @@ fn row(out: &mut String, label: &str, value: &str) {
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
 
-#[allow(clippy::cast_precision_loss)]
+#[expect(clippy::cast_precision_loss)]
 fn fmt_bytes(b: i64) -> String {
     const KIB: i64 = 1024;
     const MIB: i64 = 1024 * 1024;
@@ -154,7 +154,7 @@ fn https_cert_label() -> &'static str {
 
 // ─── render_dashboard() ───────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub fn render_dashboard(stats: &ChanStats) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(2048);
@@ -398,7 +398,7 @@ fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
 }
 
 fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool), String> {
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::{Seek as _, SeekFrom};
 
     let mut file = std::fs::File::open(path).map_err(|e| format!("Open log: {e}"))?;
     let len = file
@@ -409,11 +409,9 @@ fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool), String
     file.seek(SeekFrom::Start(start))
         .map_err(|e| format!("Seek log: {e}"))?;
 
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)
-        .map_err(|e| format!("Read log: {e}"))?;
-
-    let text = String::from_utf8_lossy(&buf).into_owned();
+    let buf = std::fs::read(path).map_err(|e| format!("Read log: {e}"))?;
+    let start = usize::try_from(start).unwrap_or(usize::MAX);
+    let text = String::from_utf8_lossy(buf.get(start..).unwrap_or_default()).into_owned();
     let truncated = start > 0;
     let content = if truncated {
         match text.find('\n') {

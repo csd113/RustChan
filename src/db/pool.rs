@@ -1,5 +1,5 @@
 use crate::config::CONFIG;
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::path::Path;

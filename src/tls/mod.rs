@@ -153,7 +153,7 @@ pub(crate) fn load_pem_as_acceptor(
     cert_path: &Path,
     key_path: &Path,
 ) -> Result<(Arc<TlsAcceptor>, Arc<rustls::ServerConfig>)> {
-    use rustls_pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
+    use rustls_pki_types::{pem::PemObject as _, CertificateDer, PrivateKeyDer};
 
     // --- certificate chain ---------------------------------------------------
     let cert_pem = std::fs::read(cert_path)

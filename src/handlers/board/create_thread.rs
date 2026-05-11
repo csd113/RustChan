@@ -8,7 +8,7 @@ use super::*;
 
 // ─── POST /:board/ — create new thread ───────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub async fn create_thread(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
@@ -23,7 +23,7 @@ pub async fn create_thread(
     let xhr_request = is_xml_http_request(&req_headers);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
     let access_context = match board_access_preflight(
         &state,
@@ -42,7 +42,7 @@ pub async fn create_thread(
         }
     };
 
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_owned());
     let form = tokio::time::timeout(
         crate::handlers::PUBLIC_UPLOAD_TIMEOUT,
         parse_post_multipart(
@@ -54,7 +54,7 @@ pub async fn create_thread(
         ),
     )
     .await
-    .map_err(|_| AppError::BadRequest("Upload timed out. Please try again.".into()))??;
+    .map_err(|_error| AppError::BadRequest("Upload timed out. Please try again.".into()))??;
 
     if !form.csrf_verified {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
@@ -78,7 +78,7 @@ pub async fn create_thread(
     let identity_key = identity_key(&client_ip, &jar);
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let job_queue = state.job_queue.clone();
+        let job_queue = std::sync::Arc::clone(&state.job_queue);
         let ffmpeg_available = state.ffmpeg_available;
         let ffprobe_available = state.ffprobe_available;
         let ffmpeg_webp_available = state.ffmpeg_webp_available;

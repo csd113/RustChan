@@ -6,7 +6,7 @@ use crate::theme_builder::{
     builder_defaults_for_preset, parse_builder_config, ThemeBuilderConfig, ThemeDensity,
     ThemeFontFamily, BUILDER_PRESETS,
 };
-use std::fmt::Write;
+use std::fmt::Write as _;
 
 pub(super) fn render_site_settings(view: &AdminPanelViewModel<'_>) -> String {
     let global_favicon_exists = crate::favicon::global_has_custom_favicon();
@@ -105,7 +105,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     );
     let (builtin_theme_cards, custom_theme_cards) = render_theme_cards(view);
     let custom_theme_cards_or_empty = if custom_theme_cards.is_empty() {
-        r#"<div class="theme-empty-state">No custom themes yet. Create one above and it will show up here.</div>"#.to_string()
+        r#"<div class="theme-empty-state">No custom themes yet. Create one above and it will show up here.</div>"#.to_owned()
     } else {
         custom_theme_cards
     };
@@ -169,7 +169,6 @@ fn render_board_appearance_cards(view: &AdminPanelViewModel<'_>) -> String {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
 fn render_preset_options(selected_slug: &str) -> String {
     let mut out = String::new();
     for preset in BUILDER_PRESETS {
@@ -220,7 +219,7 @@ fn render_color_group(title: &str, description: &str, controls: &str) -> String 
     )
 }
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 fn render_builder_sections(config: &ThemeBuilderConfig) -> String {
     let basics = format!(
         r#"<details class="theme-builder-section" open>
@@ -623,7 +622,6 @@ fn render_theme_metadata_fields(theme: &crate::models::Theme) -> String {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
 fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
     let mut builtin_theme_cards = String::new();
     let mut custom_theme_cards = String::new();
@@ -631,8 +629,7 @@ fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
         let theme_editor = if theme.is_builtin {
             r#"<div class="theme-editor-built-in-note">
 <p>Built-in themes are maintained in <code>static/style.css</code>. You can toggle them here for the picker, but guided editing is reserved for custom themes so the shipped presets stay stable.</p>
-</div>"#
-                .to_string()
+</div>"#.to_owned()
         } else if let Some(builder_config) = parse_builder_config(&theme.custom_css) {
             render_builder_editor(&theme.slug, &builder_config)
         } else {
@@ -681,7 +678,7 @@ fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
                 r#" <span class="tag locked">disabled</span>"#
             },
             description = if theme.description.trim().is_empty() {
-                "No description yet.".to_string()
+                "No description yet.".to_owned()
             } else {
                 escape_html(&theme.description)
             },
@@ -712,7 +709,7 @@ fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
 }
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_admin_site_settings_section(
     csrf_token: &str,
     site_name_val: &str,
@@ -814,9 +811,9 @@ fn render_admin_site_settings_section(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_admin_appearance_section(
     csrf_token: &str,
     banner_rotation_interval_minutes: i64,

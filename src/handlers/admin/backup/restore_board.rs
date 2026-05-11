@@ -50,9 +50,9 @@ fn validate_board_backup_access_settings(
         BoardAccessMode::from_db_str(&manifest.board.access_mode).ok_or_else(|| {
             AppError::BadRequest("Board backup contains an invalid access mode.".into())
         })?;
-    manifest.board.access_mode = access_mode.as_str().to_string();
+    manifest.board.access_mode = access_mode.as_str().to_owned();
 
-    if access_mode.is_password_protected() && manifest.board.access_password_hash.is_empty() {
+    if access_mode.requires_post_password() && manifest.board.access_password_hash.is_empty() {
         return Err(AppError::BadRequest(
             "Protected board backups must include a password hash.".into(),
         ));
@@ -106,7 +106,7 @@ fn map_board_restore_sqlite_error(
     if message.contains("database disk image is malformed")
         || matches!(
             error,
-            rusqlite::Error::SqliteFailure(ref inner, _)
+            rusqlite::Error::SqliteFailure(inner, _)
                 if inner.code == rusqlite::ErrorCode::DatabaseCorrupt
                     || inner.code == rusqlite::ErrorCode::NotADatabase
         )
@@ -135,10 +135,10 @@ fn can_reuse_row_ids<I>(conn: &rusqlite::Connection, table: &'static str, ids: I
 where
     I: IntoIterator<Item = i64>,
 {
-    debug_assert!(matches!(
-        table,
-        "threads" | "posts" | "polls" | "poll_options"
-    ));
+    debug_assert!(
+        matches!(table, "threads" | "posts" | "polls" | "poll_options"),
+        "unexpected table passed to can_reuse_row_ids"
+    );
     let sql = format!("SELECT 1 FROM {table} WHERE id = ?1 LIMIT 1");
     let mut stmt = conn.prepare_cached(&sql).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Prepare {table} ID probe: {error}"))
@@ -161,10 +161,10 @@ fn sync_autoincrement_sequence(
     table: &'static str,
     max_id: Option<i64>,
 ) -> Result<()> {
-    debug_assert!(matches!(
-        table,
-        "threads" | "posts" | "polls" | "poll_options"
-    ));
+    debug_assert!(
+        matches!(table, "threads" | "posts" | "polls" | "poll_options"),
+        "unexpected table passed to sync_autoincrement_sequence"
+    );
     let Some(max_id) = max_id else {
         return Ok(());
     };
@@ -320,7 +320,7 @@ impl BoardRestoreWorkspace {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+#[expect(clippy::too_many_lines)]
 pub(super) fn execute_board_restore<F>(
     conn: &mut rusqlite::Connection,
     upload_dir: &str,
@@ -860,7 +860,7 @@ enum ExtractBoardFromFullBackupOutcome {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub async fn extract_board_from_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -868,9 +868,7 @@ pub async fn extract_board_from_full_backup(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<ExtractBoardFromFullBackupForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
@@ -915,7 +913,7 @@ pub async fn extract_board_from_full_backup(
                 "restore" => {
                     let restore_result = (|| -> Result<String> {
                         let zip_file =
-                            std::fs::File::open(&temp_board_backup_path).map_err(|_| {
+                            std::fs::File::open(&temp_board_backup_path).map_err(|_error| {
                                 AppError::NotFound("Extracted board backup file not found.".into())
                             })?;
                         let mut manifest_archive = zip::ZipArchive::new(std::io::BufReader::new(
@@ -925,7 +923,7 @@ pub async fn extract_board_from_full_backup(
                         let manifest = parse_board_backup_manifest_from_zip(&mut manifest_archive)?;
 
                         let extract_file =
-                            std::fs::File::open(&temp_board_backup_path).map_err(|_| {
+                            std::fs::File::open(&temp_board_backup_path).map_err(|_error| {
                                 AppError::NotFound("Extracted board backup file not found.".into())
                             })?;
                         let mut extract_archive = zip::ZipArchive::new(std::io::BufReader::new(
@@ -998,7 +996,6 @@ pub async fn extract_board_from_full_backup(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
 pub async fn restore_saved_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1006,9 +1003,7 @@ pub async fn restore_saved_board_backup(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
@@ -1035,12 +1030,12 @@ pub async fn restore_saved_board_backup(
             let archive_path = temp_v4_zip.as_deref().unwrap_or(&legacy_zip_path);
 
             let zip_file = std::fs::File::open(archive_path)
-                .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
+                .map_err(|_error| AppError::NotFound("Backup file not found.".into()))?;
             let mut manifest_archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
                 .map_err(|e| AppError::BadRequest(format!("Invalid zip: {e}")))?;
             let manifest = parse_board_backup_manifest_from_zip(&mut manifest_archive)?;
             let extract_file = std::fs::File::open(archive_path)
-                .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
+                .map_err(|_error| AppError::NotFound("Backup file not found.".into()))?;
             let mut extract_archive =
                 zip::ZipArchive::new(std::io::BufReader::new(extract_file))
                     .map_err(|e| AppError::BadRequest(format!("Invalid zip: {e}")))?;
@@ -1079,7 +1074,7 @@ pub async fn restore_saved_board_backup(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub async fn board_restore(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1121,7 +1116,7 @@ pub async fn board_restore(
         tokio::task::spawn_blocking({
             let pool = state.db.clone();
             move || -> Result<String> {
-                use std::io::Read;
+                use std::io::Read as _;
 
                 let mut conn = pool.get()?;
                 super::require_admin_session_sid(&conn, session_id.as_deref())?;
@@ -1173,7 +1168,7 @@ pub async fn board_restore(
                     let entry_names = archive
                         .file_names()
                         .take(8)
-                        .map(str::to_string)
+                        .map(str::to_owned)
                         .collect::<Vec<_>>();
                     let has_board_json = entry_names.iter().any(|name| name == "board.json")
                         || archive.file_names().any(|name| name == "board.json");

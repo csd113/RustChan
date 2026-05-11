@@ -216,8 +216,8 @@ pub fn start(
         tracing::error!(target: "console", error = %e, "Failed to spawn console-input thread");
     }
 
-    let stats_r = stats.clone();
-    let mode_r = mode.clone();
+    let stats_r = std::sync::Arc::clone(stats);
+    let mode_r = std::sync::Arc::clone(mode);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         let mut last_rendered = String::new();
@@ -237,9 +237,9 @@ pub fn start(
 /// Mutates the delta-tracking locals in place so req/s and other deltas
 /// are accurate across calls. Runs on the calling thread — use
 /// `tokio::task::block_in_place` at the call site when inside an async context.
-#[allow(clippy::cast_precision_loss)]
+#[expect(clippy::cast_precision_loss)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn collect_stats(
     pool: &crate::db::DbPool,
     job_queue: &crate::workers::JobQueue,
@@ -430,7 +430,7 @@ fn first_admin_prompt_u(reader: &mut dyn std::io::BufRead) -> Option<String> {
             }
             Ok(_) => {}
         }
-        let u = s.trim().to_string();
+        let u = s.trim().to_owned();
         if u.is_empty() {
             crate::logging::console_println("  Username cannot be empty.");
             continue;
@@ -467,7 +467,7 @@ fn first_admin_prompt_p(reader: &mut dyn std::io::BufRead) -> Option<String> {
             }
             Ok(_) => {}
         }
-        let p1 = p1.trim().to_string();
+        let p1 = p1.trim().to_owned();
         if let Err(e) = crate::utils::crypto::validate_password(&p1) {
             crate::logging::console_println(&format!(
                 "  {}{}{} {e}",
@@ -487,7 +487,7 @@ fn first_admin_prompt_p(reader: &mut dyn std::io::BufRead) -> Option<String> {
             crate::logging::console_println("\n  Skipped.");
             return None;
         }
-        let p2 = p2.trim().to_string();
+        let p2 = p2.trim().to_owned();
         if p1 != p2 {
             crate::logging::console_println(&format!(
                 "  {}{}{} Passwords do not match. Try again.",
@@ -505,7 +505,6 @@ fn first_admin_prompt_p(reader: &mut dyn std::io::BufRead) -> Option<String> {
 
 /// First-run wizard. Called before the TUI starts, so stdout is in normal
 /// terminal mode — no raw mode toggling needed here.
-#[allow(clippy::too_many_lines)]
 pub fn prompt_create_first_admin(pool: &crate::db::DbPool, reader: &mut dyn std::io::BufRead) {
     crate::logging::console_print_raw(&format!(
         "\n\

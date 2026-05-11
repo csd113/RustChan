@@ -24,7 +24,7 @@ use crate::{
 use axum::{
     extract::{Form, Multipart, Query, State},
     http::{header, HeaderMap, HeaderValue},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
@@ -61,7 +61,7 @@ fn format_favicon_upload_error(error: &anyhow::Error) -> String {
         .map(std::string::ToString::to_string)
         .filter(|msg| !msg.trim().is_empty() && !msg.starts_with("write "))
         .last()
-        .unwrap_or_else(|| "Favicon upload failed.".to_string())
+        .unwrap_or_else(|| "Favicon upload failed.".to_owned())
 }
 
 fn format_banner_upload_error(error: &anyhow::Error) -> String {
@@ -70,7 +70,7 @@ fn format_banner_upload_error(error: &anyhow::Error) -> String {
         .map(std::string::ToString::to_string)
         .filter(|msg| !msg.trim().is_empty() && !msg.starts_with("write "))
         .last()
-        .unwrap_or_else(|| "Banner upload failed.".to_string())
+        .unwrap_or_else(|| "Banner upload failed.".to_owned())
 }
 
 fn checkbox_is_on(value: Option<&str>) -> bool {

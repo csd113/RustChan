@@ -1,6 +1,6 @@
 // src/utils/files/storage.rs
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -19,7 +19,7 @@ pub struct UploadedFile {
     pub dedup_reused: bool,
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 // These booleans are independent upload policy and media capability flags.
 pub struct SaveUploadOptions<'a> {
     pub original_filename: &'a str,
@@ -58,14 +58,14 @@ pub fn classify_upload_mime(
     allow_any_files: bool,
 ) -> Result<String> {
     let detected = match detect_mime_type(sniff_bytes) {
-        Ok(mime) => mime.to_string(),
-        Err(_) if allow_any_files => super::fallback_download_mime_type().to_string(),
+        Ok(mime) => mime.to_owned(),
+        Err(_) if allow_any_files => super::fallback_download_mime_type().to_owned(),
         Err(error) => return Err(error),
     };
 
     if detected == "video/webm" && ffprobe_available {
         match crate::media::ffmpeg::probe_stream_kind(input_path) {
-            Ok(crate::media::ffmpeg::StreamKind::AudioOnly) => return Ok("audio/webm".to_string()),
+            Ok(crate::media::ffmpeg::StreamKind::AudioOnly) => return Ok("audio/webm".to_owned()),
             Ok(crate::media::ffmpeg::StreamKind::Video) => {}
             Err(error) => {
                 tracing::debug!(
@@ -115,7 +115,7 @@ pub fn save_upload_from_path(
 /// # Errors
 /// Returns an error if the audio MIME check fails, the file exceeds the board
 /// limit, disk-space checks fail, or the file cannot be persisted.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn save_audio_with_image_thumb_from_path(
     input_path: &Path,
     sniff_bytes: &[u8],
@@ -209,7 +209,7 @@ pub fn delete_file_checked(boards_dir: &str, relative_path: &str) -> Result<()> 
 
 #[must_use]
 // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
-#[allow(clippy::cast_precision_loss)]
+#[expect(clippy::cast_precision_loss)]
 pub fn format_file_size(bytes: i64) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
@@ -482,7 +482,7 @@ fn arbitrary_file_ext(original_filename: &str) -> String {
                 .collect::<String>()
         })
         .filter(|ext| !ext.is_empty())
-        .map_or_else(|| "bin".to_string(), |ext| ext.to_ascii_lowercase())
+        .map_or_else(|| "bin".to_owned(), |ext| ext.to_ascii_lowercase())
 }
 
 fn validate_decodable_image(input_path: &Path, mime_type: &str) -> Result<()> {
@@ -514,7 +514,7 @@ fn validate_decodable_image(input_path: &Path, mime_type: &str) -> Result<()> {
 }
 
 fn validate_pdf_structure(input_path: &Path) -> Result<()> {
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::{Read as _, Seek as _, SeekFrom};
 
     let mut file = std::fs::File::open(input_path)
         .with_context(|| format!("Failed to open {} for PDF validation", input_path.display()))?;
@@ -563,7 +563,7 @@ fn validate_png_structure(data: &[u8]) -> Result<()> {
             .get(offset..offset + 4)
             .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?
             .try_into()
-            .map_err(|_| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+            .map_err(|error| anyhow::anyhow!("{MALFORMED_PNG_ERROR}: {error}"))?;
         let length = u32::from_be_bytes(length_bytes) as usize;
         let chunk_type = data
             .get(offset + 4..offset + 8)
@@ -583,12 +583,12 @@ fn validate_png_structure(data: &[u8]) -> Result<()> {
                 .get(chunk_data_start..chunk_data_start + 4)
                 .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?
                 .try_into()
-                .map_err(|_| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+                .map_err(|error| anyhow::anyhow!("{MALFORMED_PNG_ERROR}: {error}"))?;
             let height_bytes: [u8; 4] = data
                 .get(chunk_data_start + 4..chunk_data_start + 8)
                 .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?
                 .try_into()
-                .map_err(|_| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+                .map_err(|error| anyhow::anyhow!("{MALFORMED_PNG_ERROR}: {error}"))?;
             let width = u32::from_be_bytes(width_bytes);
             let height = u32::from_be_bytes(height_bytes);
             if width == 0 || height == 0 {

@@ -307,8 +307,9 @@ async fn upload_banner_for_scope(
                 &storage_key,
                 i64::from(width),
                 i64::from(height),
-                i64::try_from(file_size)
-                    .map_err(|_| AppError::BadRequest("Banner file size is too large.".into()))?,
+                i64::try_from(file_size).map_err(|_error| {
+                    AppError::BadRequest("Banner file size is too large.".into())
+                })?,
                 parsed.enabled,
                 sort_order,
                 target_type,
@@ -366,7 +367,7 @@ pub async fn upload_global_banner(
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     super::require_same_origin_request(&headers, Some(peer))?;
     let parsed = parse_banner_upload(multipart).await?;
     super::check_admin_csrf_jar(&jar, parsed.csrf.as_deref())?;
@@ -402,7 +403,7 @@ pub async fn upload_home_banner(
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     super::require_same_origin_request(&headers, Some(peer))?;
     let parsed = parse_banner_upload(multipart).await?;
     super::check_admin_csrf_jar(&jar, parsed.csrf.as_deref())?;
@@ -438,7 +439,7 @@ pub async fn upload_board_banner(
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     super::require_same_origin_request(&headers, Some(peer))?;
     let parsed = parse_banner_upload(multipart).await?;
     super::check_admin_csrf_jar(&jar, parsed.csrf.as_deref())?;
@@ -486,7 +487,7 @@ pub async fn update_banner_meta(
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -554,7 +555,7 @@ pub async fn delete_banner(
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let anchor = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -587,7 +588,7 @@ pub async fn move_banner(
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let move_up = match form.direction.as_str() {
         "up" => true,
@@ -631,7 +632,7 @@ pub async fn clear_board_banner_override(
 ) -> Result<Response> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let board_short = tokio::task::spawn_blocking({
         let pool = state.db.clone();

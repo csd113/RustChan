@@ -170,7 +170,7 @@ fn scrub_full_restore_runtime_state(conn: &rusqlite::Connection) -> Result<()> {
 }
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     live_conn: &mut rusqlite::Connection,
     admin_id: i64,
@@ -279,7 +279,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         let mut entry = archive
             .by_index(index)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip[{index}]: {error}")))?;
-        let name = entry.name().to_string();
+        let name = entry.name().to_owned();
         validate_restore_safe_entry_name(&name)?;
 
         if name == "chan.db" {
@@ -297,7 +297,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
 
             let mut header = [0u8; 16];
             {
-                use std::io::Read;
+                use std::io::Read as _;
                 let mut file = std::fs::File::open(&temp_db).map_err(|error| {
                     AppError::Internal(anyhow::anyhow!("Magic check open: {error}"))
                 })?;
@@ -623,7 +623,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
 fn restrict_private_key_material_permissions(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::PermissionsExt as _;
 
         let metadata = std::fs::metadata(path).map_err(|error| {
             AppError::Internal(anyhow::anyhow!("Inspect {}: {error}", path.display()))
@@ -684,7 +684,6 @@ fn full_restore_success_response(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
 pub async fn admin_restore(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -799,7 +798,6 @@ pub async fn admin_restore(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
 pub async fn restore_saved_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -807,9 +805,7 @@ pub async fn restore_saved_full_backup(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
@@ -835,7 +831,7 @@ pub async fn restore_saved_full_backup(
             let archive_path = temp_v4_zip.as_deref().unwrap_or(&legacy_zip_path);
 
             let zip_file = std::fs::File::open(archive_path)
-                .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
+                .map_err(|_error| AppError::NotFound("Backup file not found.".into()))?;
             let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
                 .map_err(|e| AppError::BadRequest(format!("Invalid zip: {e}")))?;
             let restore_result = execute_full_restore(
@@ -1062,7 +1058,7 @@ mod tests {
             CookieJar::new(),
             &headers,
             std::net::SocketAddr::from(([127, 0, 0, 1], 41000)),
-            "fresh-session".to_string(),
+            "fresh-session".to_owned(),
             false,
         );
 
@@ -1130,14 +1126,8 @@ mod tests {
         assert_eq!(
             live_tree,
             BTreeMap::from([
-                (
-                    "hs_ed25519_public_key".to_string(),
-                    "live-public".to_string()
-                ),
-                (
-                    "hs_ed25519_secret_key".to_string(),
-                    "live-secret".to_string()
-                ),
+                ("hs_ed25519_public_key".to_owned(), "live-public".to_owned()),
+                ("hs_ed25519_secret_key".to_owned(), "live-secret".to_owned()),
             ])
         );
     }
@@ -1504,12 +1494,12 @@ mod tests {
             read_tree(&tor_keys_dir),
             BTreeMap::from([
                 (
-                    "hs_ed25519_public_key".to_string(),
-                    "backup-public".to_string()
+                    "hs_ed25519_public_key".to_owned(),
+                    "backup-public".to_owned()
                 ),
                 (
-                    "hs_ed25519_secret_key".to_string(),
-                    "backup-secret".to_string()
+                    "hs_ed25519_secret_key".to_owned(),
+                    "backup-secret".to_owned()
                 ),
             ])
         );
@@ -1565,12 +1555,12 @@ mod tests {
             live_tree,
             BTreeMap::from([
                 (
-                    "hs_ed25519_public_key".to_string(),
-                    "backup-public".to_string()
+                    "hs_ed25519_public_key".to_owned(),
+                    "backup-public".to_owned()
                 ),
                 (
-                    "hs_ed25519_secret_key".to_string(),
-                    "backup-secret".to_string()
+                    "hs_ed25519_secret_key".to_owned(),
+                    "backup-secret".to_owned()
                 ),
             ])
         );
@@ -1606,7 +1596,7 @@ mod tests {
         std::fs::create_dir_all(&upload_dir).expect("create uploads");
 
         crate::pending_fs::set_private_permission_failure_for_test(Some(
-            "simulated Tor key permission failure".to_string(),
+            "simulated Tor key permission failure".to_owned(),
         ));
         let _private_permission_failure_reset = PrivatePermissionFailureReset;
         let error = execute_full_restore(
@@ -1658,12 +1648,12 @@ mod tests {
             read_tree(&tor_keys_dir),
             BTreeMap::from([
                 (
-                    "hs_ed25519_public_key".to_string(),
-                    "backup-public".to_string()
+                    "hs_ed25519_public_key".to_owned(),
+                    "backup-public".to_owned()
                 ),
                 (
-                    "hs_ed25519_secret_key".to_string(),
-                    "backup-secret".to_string()
+                    "hs_ed25519_secret_key".to_owned(),
+                    "backup-secret".to_owned()
                 ),
             ])
         );
@@ -1739,10 +1729,7 @@ mod tests {
 
         assert_eq!(
             read_tree(&tor_keys_dir),
-            BTreeMap::from([(
-                "hs_ed25519_secret_key".to_string(),
-                "live-secret".to_string()
-            )])
+            BTreeMap::from([("hs_ed25519_secret_key".to_owned(), "live-secret".to_owned())])
         );
     }
 }

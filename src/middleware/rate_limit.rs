@@ -4,7 +4,7 @@ use crate::config::CONFIG;
 use axum::{
     extract::Request,
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::{IntoResponse as _, Response},
 };
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,7 +35,7 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
 
     let ip = extract_ip(&req);
     let ip_key = {
-        use sha2::{Digest, Sha256};
+        use sha2::{Digest as _, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(ip.as_bytes());
         hasher.update(b"G");

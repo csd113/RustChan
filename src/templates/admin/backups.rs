@@ -1,5 +1,5 @@
 use super::{escape_html, format_file_size, render_board_backup_card, AdminPanelViewModel};
-use std::fmt::Write;
+use std::fmt::Write as _;
 
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let backup_warning_html = view
@@ -59,7 +59,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
     let mut full_backup_rows = String::new();
     if view.backups.full_backups.is_empty() {
@@ -92,8 +92,7 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
             r#"<label>
         Board short name
         <input type="text" name="board_short" maxlength="8" pattern="[A-Za-z0-9]{1,8}" required placeholder="tech">
-      </label>"#
-                .to_string()
+      </label>"#.to_owned()
         } else {
             format!(
                 r#"<label>
@@ -111,14 +110,14 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
             "Pick a board from this backup to restore it directly or download a board-only package."
         };
         let indexed_boards_summary = if bf.boards.is_empty() {
-            "boards not indexed".to_string()
+            "boards not indexed".to_owned()
         } else {
             format!("{} boards indexed", bf.boards.len())
         };
         let part_summary = if bf.part_count > 1 {
             format!("{} parts", bf.part_count)
         } else {
-            "1 part".to_string()
+            "1 part".to_owned()
         };
         let part_downloads = if bf.part_filenames.is_empty() {
             String::new()
@@ -159,8 +158,7 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
           <span class="admin-quick-help">Replaces the current onion identity with the one from this backup.</span>
         </span>
       </label>
-      <p class="backup-extract-help backup-tor-warning">Anyone with these keys can impersonate this onion service.</p>"#
-                .to_string()
+      <p class="backup-extract-help backup-tor-warning">Anyone with these keys can impersonate this onion service.</p>"#.to_owned()
         } else {
             String::new()
         };
@@ -296,8 +294,7 @@ fn render_full_backup_create_tor_option(view: &AdminPanelViewModel<'_>) -> Strin
         <strong>Include Tor hidden service keys</strong>
         <span class="admin-quick-help">Preserves the same .onion address after restore. Anyone with these keys can impersonate this onion service.</span>
       </span>
-    </label>"#
-        .to_string()
+    </label>"#.to_owned()
 }
 
 fn render_full_backup_restore_upload_tor_option(view: &AdminPanelViewModel<'_>) -> String {
@@ -312,8 +309,7 @@ fn render_full_backup_restore_upload_tor_option(view: &AdminPanelViewModel<'_>) 
         <span class="admin-quick-help">Only applies when the uploaded backup includes Tor hidden service keys. Replaces the current onion identity with the one from the backup and restores the old .onion address.</span>
       </span>
     </label>
-    <p class="backup-extract-help backup-tor-warning">Anyone with these keys can impersonate this onion service.</p>"#
-        .to_string()
+    <p class="backup-extract-help backup-tor-warning">Anyone with these keys can impersonate this onion service.</p>"#.to_owned()
 }
 
 fn render_board_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
@@ -417,9 +413,9 @@ fn split_zip_part_size_options(selected_gib: u64) -> String {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_admin_backups_section(
     csrf_token: &str,
     backup_warning_html: &str,

@@ -1,6 +1,6 @@
 // src/db/schema.rs
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 
 use super::migrations::{read_schema_version, stamp_schema_version, POST_SQUASH_SCHEMA_VERSION};
 
@@ -1365,9 +1365,9 @@ mod tests {
         assert_eq!(
             post,
             (
-                "legacy searchable body".to_string(),
-                Some("image".to_string()),
-                "old-ip".to_string()
+                "legacy searchable body".to_owned(),
+                Some("image".to_owned()),
+                "old-ip".to_owned()
             )
         );
 

@@ -265,7 +265,7 @@ pub fn build_post_body(
     } else {
         validate_body(raw_body)
             .map_err(AppError::BadRequest)?
-            .to_string()
+            .to_owned()
     };
     let filtered_body = apply_word_filters(&body_text, filters);
     let escaped_body = escape_html(&filtered_body);
@@ -346,7 +346,7 @@ pub fn process_uploads(
 }
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn build_new_post(
     thread_id: i64,
     board_id: i64,
@@ -377,7 +377,7 @@ pub fn build_new_post(
         file_size: primary.map(|u| u.file_size),
         thumb_path: primary.and_then(|u| (!u.thumb_path.is_empty()).then(|| u.thumb_path.clone())),
         mime_type: primary.map(|u| u.mime_type.clone()),
-        media_type: primary.map(|u| u.media_type.as_str().to_string()),
+        media_type: primary.map(|u| u.media_type.as_str().to_owned()),
         audio_file_path: audio.map(|u| u.file_path.clone()),
         audio_file_name: audio.map(|u| u.original_name.clone()),
         audio_file_size: audio.map(|u| u.file_size),
@@ -388,7 +388,7 @@ pub fn build_new_post(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub fn submit_post(
     conn: &rusqlite::Connection,
     job_queue: &crate::workers::JobQueue,
@@ -443,7 +443,7 @@ pub fn submit_post(
     if let Some(reason) = db::is_banned(conn, &ip_hash)? {
         return Err(AppError::BannedUser {
             reason: if reason.is_empty() {
-                "No reason given".to_string()
+                "No reason given".to_owned()
             } else {
                 reason
             },
@@ -545,10 +545,10 @@ pub fn submit_post(
                 deletion_token.clone(),
                 true,
             );
-            let q = poll_question.trim().to_string();
+            let q = poll_question.trim().to_owned();
             let valid_opts: Vec<String> = poll_options
                 .iter()
-                .map(|option| option.trim().to_string())
+                .map(|option| option.trim().to_owned())
                 .filter(|option| !option.is_empty())
                 .collect();
             let poll_insert = if q.is_empty() && valid_opts.is_empty() {
@@ -708,11 +708,11 @@ mod tests {
         crate::db::NewPost {
             thread_id,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
-            subject: is_op.then(|| "subject".to_string()),
-            body: body.to_string(),
-            body_html: body.to_string(),
+            subject: is_op.then(|| "subject".to_owned()),
+            body: body.to_owned(),
+            body_html: body.to_owned(),
             ip_hash,
             file_path: None,
             file_name: None,
@@ -724,7 +724,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "token".to_string(),
+            deletion_token: "token".to_owned(),
             is_op,
         }
     }
@@ -742,20 +742,20 @@ mod tests {
                 poll_options: Vec::new(),
                 poll_duration_secs: None,
             },
-            board_short: board_short.to_string(),
-            identity_key: TEST_IDENTITY_KEY.to_string(),
-            cookie_secret: TEST_COOKIE_SECRET.to_string(),
+            board_short: board_short.to_owned(),
+            identity_key: TEST_IDENTITY_KEY.to_owned(),
+            cookie_secret: TEST_COOKIE_SECRET.to_owned(),
             admin_session_id: None,
-            ban_csrf_token: "ban-csrf".to_string(),
-            submission_token: submission_token.to_string(),
-            name: "anon".to_string(),
-            body: body.to_string(),
+            ban_csrf_token: "ban-csrf".to_owned(),
+            submission_token: submission_token.to_owned(),
+            name: "anon".to_owned(),
+            body: body.to_owned(),
             deletion_token: String::new(),
             pow_nonce: String::new(),
             image_file_data: None,
             file_data: None,
             audio_file_data: None,
-            upload_dir: upload_dir.to_string(),
+            upload_dir: upload_dir.to_owned(),
             thumb_size: 250,
             ffmpeg_available: false,
             ffprobe_available: false,
@@ -775,24 +775,24 @@ mod tests {
         SubmitPostCommand {
             mode: SubmitPostMode::NewThread {
                 subject: String::new(),
-                poll_question: poll_question.to_string(),
-                poll_options: poll_options.into_iter().map(str::to_string).collect(),
+                poll_question: poll_question.to_owned(),
+                poll_options: poll_options.into_iter().map(str::to_owned).collect(),
                 poll_duration_secs,
             },
-            board_short: board_short.to_string(),
-            identity_key: TEST_IDENTITY_KEY.to_string(),
-            cookie_secret: TEST_COOKIE_SECRET.to_string(),
+            board_short: board_short.to_owned(),
+            identity_key: TEST_IDENTITY_KEY.to_owned(),
+            cookie_secret: TEST_COOKIE_SECRET.to_owned(),
             admin_session_id: None,
-            ban_csrf_token: "ban-csrf".to_string(),
-            submission_token: submission_token.to_string(),
-            name: "anon".to_string(),
-            body: body.to_string(),
+            ban_csrf_token: "ban-csrf".to_owned(),
+            submission_token: submission_token.to_owned(),
+            name: "anon".to_owned(),
+            body: body.to_owned(),
             deletion_token: String::new(),
             pow_nonce: String::new(),
             image_file_data: None,
             file_data: None,
             audio_file_data: None,
-            upload_dir: upload_dir.to_string(),
+            upload_dir: upload_dir.to_owned(),
             thumb_size: 250,
             ffmpeg_available: false,
             ffprobe_available: false,
@@ -812,20 +812,20 @@ mod tests {
                 thread_id,
                 sage: false,
             },
-            board_short: board_short.to_string(),
-            identity_key: TEST_IDENTITY_KEY.to_string(),
-            cookie_secret: TEST_COOKIE_SECRET.to_string(),
+            board_short: board_short.to_owned(),
+            identity_key: TEST_IDENTITY_KEY.to_owned(),
+            cookie_secret: TEST_COOKIE_SECRET.to_owned(),
             admin_session_id: None,
-            ban_csrf_token: "ban-csrf".to_string(),
-            submission_token: submission_token.to_string(),
-            name: "anon".to_string(),
-            body: body.to_string(),
+            ban_csrf_token: "ban-csrf".to_owned(),
+            submission_token: submission_token.to_owned(),
+            name: "anon".to_owned(),
+            body: body.to_owned(),
             deletion_token: String::new(),
             pow_nonce: String::new(),
             image_file_data: None,
             file_data: None,
             audio_file_data: None,
-            upload_dir: upload_dir.to_string(),
+            upload_dir: upload_dir.to_owned(),
             thumb_size: 250,
             ffmpeg_available: false,
             ffprobe_available: false,
@@ -845,7 +845,7 @@ mod tests {
                 sniff_bytes: bytes.to_vec(),
                 size_bytes: bytes.len(),
             },
-            name.to_string(),
+            name.to_owned(),
         )
     }
 
@@ -1260,7 +1260,7 @@ mod tests {
             &conn,
             board_id,
             Some("reply target"),
-            &sample_post(board_id, 0, "op body", true, Some("other-ip".to_string())),
+            &sample_post(board_id, 0, "op body", true, Some("other-ip".to_owned())),
             "",
             None,
             None,

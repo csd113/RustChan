@@ -161,7 +161,7 @@ mod tests {
             .filter_map(|value| value.to_str().ok())
             .find(|value| value.starts_with(prefix))
             .and_then(|value| value.split(';').next())
-            .map(str::to_string)
+            .map(str::to_owned)
             .expect("cookie pair")
     }
 
@@ -217,7 +217,7 @@ mod tests {
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .map(str::to_string)
+            .map(str::to_owned)
             .expect("location");
         let session_cookie = first_cookie_pair(&login_response, "chan_admin_session=");
         let rotated_csrf_cookie = first_cookie_pair(&login_response, "csrf_token=");

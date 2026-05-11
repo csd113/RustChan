@@ -37,7 +37,7 @@ use crate::{
 use axum::{
     extract::{ConnectInfo, Form, Multipart, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use dashmap::DashMap;
@@ -132,10 +132,9 @@ pub(crate) fn thread_unread_counts(
     threads
         .iter()
         .filter_map(|thread| {
-            markers.get(&thread.id).and_then(|marker| {
-                let unread = (thread.reply_count - marker.seen_reply_count).max(0);
-                (unread > 0).then_some((thread.id, unread))
-            })
+            let marker = markers.get(&thread.id)?;
+            let unread = (thread.reply_count - marker.seen_reply_count).max(0);
+            (unread > 0).then_some((thread.id, unread))
         })
         .collect()
 }
@@ -253,8 +252,8 @@ pub struct BannedPageQuery {
 }
 
 pub fn current_theme_from_jar(jar: &CookieJar) -> Option<String> {
-    jar.get(USER_THEME_COOKIE)
-        .and_then(|cookie| crate::templates::normalize_theme_slug(cookie.value()))
+    let cookie = jar.get(USER_THEME_COOKIE)?;
+    crate::templates::normalize_theme_slug(cookie.value())
 }
 
 pub fn user_preferences_from_jar(jar: &CookieJar) -> crate::templates::UserPreferences {
@@ -280,7 +279,7 @@ pub fn user_preferences_from_jar(jar: &CookieJar) -> crate::templates::UserPrefe
 }
 
 pub fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_owned());
     let admin_session = jar
         .get("chan_admin_session")
         .map(axum_extra::extract::cookie::Cookie::value);
@@ -326,7 +325,7 @@ pub fn board_access_cookie_name(board_short: &str) -> String {
 pub fn board_access_cookie_from_jar(jar: &CookieJar, board_short: &str) -> Option<String> {
     let cookie_name = board_access_cookie_name(board_short);
     jar.get(cookie_name.as_str())
-        .map(|cookie| cookie.value().to_string())
+        .map(|cookie| cookie.value().to_owned())
 }
 
 fn expected_board_access_cookie_value(board_short: &str, password_hash: &str) -> Option<String> {
@@ -400,7 +399,7 @@ pub(crate) async fn board_access_preflight(
 ) -> Result<BoardAccessDecision> {
     let access_context = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let board_short = board_short.to_string();
+        let board_short = board_short.to_owned();
         move || -> Result<BoardAccessContext> {
             let conn = pool.get()?;
             load_board_access_context(
@@ -475,13 +474,13 @@ pub async fn banned_page(Query(query): Query<BannedPageQuery>, jar: CookieJar) -
     let (jar, csrf) = ensure_csrf(jar);
     let reason = query
         .reason
-        .unwrap_or_else(|| "No reason given".to_string())
+        .unwrap_or_else(|| "No reason given".to_owned())
         .trim()
         .chars()
         .take(512)
         .collect::<String>();
     let reason = if reason.is_empty() {
-        "No reason given".to_string()
+        "No reason given".to_owned()
     } else {
         reason
     };
@@ -540,7 +539,7 @@ fn record_board_unlock_failure(attempt_key: &str) {
     let now_secs = board_unlock_now_secs();
     prune_board_unlock_failures(now_secs);
     let mut entry = BOARD_UNLOCK_FAILS
-        .entry(attempt_key.to_string())
+        .entry(attempt_key.to_owned())
         .or_insert((0, now_secs));
     let (count, window_start) = entry.value_mut();
     if now_secs.saturating_sub(*window_start) > BOARD_UNLOCK_FAIL_WINDOW_SECS {
@@ -627,12 +626,12 @@ pub(crate) fn board_access_rate_limited_response(
 }
 
 fn safe_return_to(path: Option<&str>, fallback: &str) -> String {
-    crate::utils::redirect::strict_safe_internal_path_or(path, fallback).to_string()
+    crate::utils::redirect::strict_safe_internal_path_or(path, fallback).to_owned()
 }
 
 pub fn identity_key(client_ip: &str, jar: &CookieJar) -> String {
     if client_ip.starts_with("tor:") {
-        return client_ip.to_string();
+        return client_ip.to_owned();
     }
 
     if client_ip == "127.0.0.1" || client_ip == "::1" || client_ip == "unknown" {
@@ -643,7 +642,7 @@ pub fn identity_key(client_ip: &str, jar: &CookieJar) -> String {
         }
     }
 
-    client_ip.to_string()
+    client_ip.to_owned()
 }
 
 fn viewer_preference_key(client_ip: &str, jar: &CookieJar) -> String {

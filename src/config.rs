@@ -1,7 +1,8 @@
 // Runtime configuration and settings-file loading.
-use rand_core::{OsRng, RngCore};
+use rand_core::{OsRng, RngCore as _};
 use serde::Deserialize;
 use std::env;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
@@ -14,7 +15,8 @@ fn binary_dir() -> PathBuf {
         .ok()
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
         .unwrap_or_else(|| {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "Warning: could not determine binary directory; \
                  using current working directory for data storage. \
                  Set CHAN_DB and CHAN_UPLOADS env vars to override."
@@ -303,7 +305,10 @@ fn load_settings_file() -> SettingsFile {
         return SettingsFile::default();
     };
     parse_settings_file_str(&raw).unwrap_or_else(|e| {
-        eprintln!("Warning: could not parse settings.toml: {e}");
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "Warning: could not parse settings.toml: {e}"
+        );
         SettingsFile::default()
     })
 }
@@ -329,8 +334,19 @@ pub fn generate_settings_file_if_missing() {
     let secret = hex::encode(secret_bytes);
     let content = template::settings_template(&secret);
     match std::fs::write(&path, content) {
-        Ok(()) => println!("Created settings.toml ({})", path.display()),
-        Err(e) => eprintln!("Warning: could not write settings.toml: {e}"),
+        Ok(()) => {
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                "Created settings.toml ({})",
+                path.display()
+            );
+        }
+        Err(e) => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "Warning: could not write settings.toml: {e}"
+            );
+        }
     }
 }
 
@@ -376,19 +392,15 @@ pub struct AcmeConfig {
     // this build cannot act on the fields.
     #[serde(default)]
     // Feature-gated, but still part of the stable settings shape.
-    #[allow(dead_code)]
     pub domains: Vec<String>,
     #[serde(default)]
     // Feature-gated, but still part of the stable settings shape.
-    #[allow(dead_code)]
     pub email: Option<String>,
     #[serde(default = "default_true")]
     // Feature-gated, but still part of the stable settings shape.
-    #[allow(dead_code)]
     pub staging: bool,
     #[serde(default = "default_acme_dir")]
     // Feature-gated, but still part of the stable settings shape.
-    #[allow(dead_code)]
     pub cache_dir: String,
 }
 
@@ -453,7 +465,7 @@ pub fn describe_timeout_secs(timeout_secs: u64) -> String {
     let seconds = timeout_secs % 60;
     match (minutes, seconds) {
         (0, secs) => format!("{secs} seconds"),
-        (1, 0) => "1 minute".to_string(),
+        (1, 0) => "1 minute".to_owned(),
         (mins, 0) => format!("{mins} minutes"),
         (1, secs) => format!("1 minute {secs} seconds"),
         (mins, secs) => format!("{mins} minutes {secs} seconds"),
@@ -461,7 +473,7 @@ pub fn describe_timeout_secs(timeout_secs: u64) -> String {
 }
 
 // This type mirrors serialized or render state, so the boolean count is an intentional tradeoff.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 pub struct Config {
     // ── Loaded from settings.toml (env vars still override) ──────────────────
     pub forum_name: String,
@@ -587,7 +599,7 @@ pub struct Config {
 impl Config {
     #[must_use]
     // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     pub fn from_env() -> Self {
         let s = load_settings_file();
         let tls = s.tls.clone().unwrap_or_default();
@@ -636,7 +648,7 @@ impl Config {
         let initial_enabled_builtin_themes = s.enabled_builtin_themes.unwrap_or_else(|| {
             crate::theme::builtin_theme_slugs()
                 .into_iter()
-                .map(str::to_string)
+                .map(str::to_owned)
                 .collect()
         });
         let port: u16 = env_parse("CHAN_PORT", s.port.unwrap_or(8080));
@@ -680,7 +692,8 @@ impl Config {
         } else if let Some(v) = s.cookie_secret {
             v
         } else {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "SECURITY WARNING: No cookie_secret found in environment or settings.toml. \
                  IP hashing is using an empty secret. Run the server once to auto-generate, \
                  or set CHAN_COOKIE_SECRET."
@@ -697,13 +710,13 @@ impl Config {
             s.rustwave_url
                 .as_deref()
                 .unwrap_or("http://localhost:7071")
-                .to_string()
+                .to_owned()
         });
         let chan_net_bind = env::var("CHAN_NET_BIND").unwrap_or_else(|_| {
             s.chan_net_bind
                 .as_deref()
                 .unwrap_or("127.0.0.1:7070")
-                .to_string()
+                .to_owned()
         });
         let chan_net_max_body: usize = env::var("CHAN_NET_MAX_BODY")
             .ok()
@@ -744,16 +757,16 @@ impl Config {
             tor_service_nickname: std::env::var("CHAN_TOR_NICKNAME")
                 .ok()
                 .or(s.tor_service_nickname)
-                .unwrap_or_else(|| "rustchan".to_string()),
+                .unwrap_or_else(|| "rustchan".to_owned()),
             require_ffmpeg: env_bool("CHAN_REQUIRE_FFMPEG", s.require_ffmpeg.unwrap_or(false)),
             ffmpeg_path: env::var("CHAN_FFMPEG_PATH")
                 .ok()
                 .or(s.ffmpeg_path)
-                .unwrap_or_else(|| "ffmpeg".to_string()),
+                .unwrap_or_else(|| "ffmpeg".to_owned()),
             ffprobe_path: env::var("CHAN_FFPROBE_PATH")
                 .ok()
                 .or(s.ffprobe_path)
-                .unwrap_or_else(|| "ffprobe".to_string()),
+                .unwrap_or_else(|| "ffprobe".to_owned()),
             enable_any_file_uploads_feature: env_bool(
                 "CHAN_ENABLE_ANY_FILE_UPLOADS_FEATURE",
                 s.enable_any_file_uploads_feature.unwrap_or(false),
@@ -799,7 +812,7 @@ impl Config {
                     s.auto_full_backup_storage_mode
                         .filter(|value| matches!(value.as_str(), "directory" | "split_zip"))
                 })
-                .unwrap_or_else(|| "directory".to_string()),
+                .unwrap_or_else(|| "directory".to_owned()),
             auto_full_backup_split_zip_part_size_bytes: env_parse::<u64>(
                 "CHAN_AUTO_FULL_BACKUP_SPLIT_ZIP_PART_SIZE_GIB",
                 s.auto_full_backup_split_zip_part_size_gib.unwrap_or(4),
@@ -876,7 +889,7 @@ impl Config {
     /// # Errors
     /// Returns an error if any configuration value is out of an acceptable range,
     /// or if the upload directory is not writable.
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     pub fn validate(&self) -> anyhow::Result<()> {
         fn url_host_is_loopback(url: &str) -> bool {
             reqwest::Url::parse(url).ok().is_some_and(|parsed| {
@@ -1007,7 +1020,7 @@ impl Config {
                 // permissions, but we restrict it too for defence-in-depth.
                 #[cfg(unix)]
                 {
-                    use std::os::unix::fs::PermissionsExt;
+                    use std::os::unix::fs::PermissionsExt as _;
                     let perms = std::fs::Permissions::from_mode(0o700);
                     std::fs::set_permissions(&dir, perms).map_err(|e| {
                         anyhow::anyhow!(
@@ -1017,7 +1030,7 @@ impl Config {
                     })?;
                 }
                 let probe = dir.join(".write_probe");
-                std::fs::write(&probe, b"").map_err(|_| {
+                std::fs::write(&probe, b"").map_err(|_error| {
                     anyhow::anyhow!(
                         "CONFIG ERROR: Tor dir {} is not writable — check permissions",
                         dir.display()
@@ -1113,7 +1126,7 @@ fn rewrite_settings_file_lines(
                     return format!("{key} = {value}");
                 }
             }
-            line.to_string()
+            line.to_owned()
         })
         .collect();
 
@@ -1305,7 +1318,7 @@ pub fn update_settings_file_media_pruning(enabled: bool, max_size_bytes: u64) {
 /// If the secret has rotated, all IP-based bans become invalid — warn loudly.
 /// On first run (no stored hash), silently stores the current hash and returns.
 pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
-    use sha2::{Digest, Sha256};
+    use sha2::{Digest as _, Sha256};
     const KEY: &str = "cookie_secret_hash";
     let current_hash = {
         let mut h = Sha256::new();
@@ -1319,7 +1332,7 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
             |r| r.get::<_, String>(0),
         )
         .ok();
-    if let Some(ref h) = stored {
+    if let Some(h) = &stored {
         if h == &current_hash {
             return; // Secret unchanged — nothing to do.
         }
@@ -1341,7 +1354,7 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
 
 // ─── Env helpers ──────────────────────────────────────────────────────────────
 fn env_str(key: &str, default: &str) -> String {
-    env::var(key).unwrap_or_else(|_| default.to_string())
+    env::var(key).unwrap_or_else(|_| default.to_owned())
 }
 
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
@@ -1360,14 +1373,14 @@ fn env_list(key: &str, file_value: Option<Vec<String>>, default: &[&str]) -> Vec
         .ok()
         .map(|value| split_list(&value))
         .or(file_value)
-        .unwrap_or_else(|| default.iter().map(|value| (*value).to_string()).collect())
+        .unwrap_or_else(|| default.iter().map(|value| (*value).to_owned()).collect())
 }
 
 fn split_list(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
+        .map(str::to_owned)
         .collect()
 }
 
@@ -1383,14 +1396,14 @@ pub fn normalize_public_host(host: &str) -> Option<String> {
         .unwrap_or(trimmed);
 
     if unbracketed.parse::<std::net::IpAddr>().is_ok() {
-        return Some(unbracketed.to_string());
+        return Some(unbracketed.to_owned());
     }
 
     if unbracketed.contains(':') || unbracketed.contains(char::is_whitespace) {
         return None;
     }
 
-    Some(unbracketed.to_string())
+    Some(unbracketed.to_owned())
 }
 
 fn split_bind_addr(addr: &str) -> Option<(&str, &str)> {
@@ -1432,7 +1445,8 @@ fn loopback_addr_for_family(addr: &str, port: u16) -> String {
 }
 
 fn port_from_bind_addr(addr: &str) -> Option<u16> {
-    split_bind_addr(addr).and_then(|(_, port)| port.parse().ok())
+    let (_, port) = split_bind_addr(addr)?;
+    port.parse().ok()
 }
 
 #[cfg(test)]
@@ -1451,15 +1465,15 @@ mod tests {
     fn valid_config() -> Config {
         const MIB: usize = 1024 * 1024;
         Config {
-            forum_name: "RustChan".to_string(),
-            initial_site_subtitle: "select board to proceed".to_string(),
+            forum_name: "RustChan".to_owned(),
+            initial_site_subtitle: "select board to proceed".to_owned(),
             initial_homepage_new_thread_badges_enabled: true,
             initial_homepage_new_reply_badges_enabled: true,
             initial_thread_new_reply_badges_enabled: true,
-            initial_default_theme: crate::theme::HARD_DEFAULT_THEME.to_string(),
+            initial_default_theme: crate::theme::HARD_DEFAULT_THEME.to_owned(),
             initial_enabled_builtin_themes: crate::theme::builtin_theme_slugs()
                 .into_iter()
-                .map(str::to_string)
+                .map(str::to_owned)
                 .collect(),
             port: 8080,
             max_image_size: 8 * MIB,
@@ -1469,21 +1483,21 @@ mod tests {
             tor_only: false,
             tor_bootstrap_timeout_secs: 120,
             tor_max_concurrent_streams: 512,
-            tor_service_nickname: "rustchan".to_string(),
+            tor_service_nickname: "rustchan".to_owned(),
             require_ffmpeg: false,
-            ffmpeg_path: "ffmpeg".to_string(),
-            ffprobe_path: "ffprobe".to_string(),
+            ffmpeg_path: "ffmpeg".to_owned(),
+            ffprobe_path: "ffprobe".to_owned(),
             enable_any_file_uploads_feature: false,
-            bind_addr: "0.0.0.0:8080".to_string(),
-            database_path: "chan.db".to_string(),
-            upload_dir: "__rustchan_test_uploads_does_not_exist__".to_string(),
+            bind_addr: "0.0.0.0:8080".to_owned(),
+            database_path: "chan.db".to_owned(),
+            upload_dir: "__rustchan_test_uploads_does_not_exist__".to_owned(),
             thumb_size: 250,
             rate_limit_gets: 60,
             rate_limit_window: 60,
             cookie_secret: "a".repeat(64),
             session_duration: 8 * 3600,
             behind_proxy: false,
-            trusted_proxy_cidrs: vec!["127.0.0.1/32".to_string(), "::1/128".to_string()],
+            trusted_proxy_cidrs: vec!["127.0.0.1/32".to_owned(), "::1/128".to_owned()],
             https_cookies: false,
             public_hosts: Vec::new(),
             wal_checkpoint_interval: 3600,
@@ -1491,7 +1505,7 @@ mod tests {
             auto_full_backup_interval_hours: 24,
             auto_full_backup_copies_to_keep: 1,
             auto_full_backup_include_tor_hidden_service_keys: false,
-            auto_full_backup_storage_mode: "directory".to_string(),
+            auto_full_backup_storage_mode: "directory".to_owned(),
             auto_full_backup_split_zip_part_size_bytes: 4 * 1024 * 1024 * 1024,
             poll_cleanup_interval_hours: 72,
             db_warn_threshold_bytes: 2048 * MIB as u64,
@@ -1503,8 +1517,8 @@ mod tests {
             waveform_cache_max_bytes: 200 * MIB as u64,
             blocking_threads: 4,
             db_pool_size: 8,
-            rustwave_url: "http://localhost:7071".to_string(),
-            chan_net_bind: "127.0.0.1:7070".to_string(),
+            rustwave_url: "http://localhost:7071".to_owned(),
+            chan_net_bind: "127.0.0.1:7070".to_owned(),
             chan_net_max_body: 10 * MIB,
             chan_net_command_max_body: 8 * 1024,
             chan_net_api_key: String::new(),
@@ -1540,16 +1554,16 @@ auto_full_backup_copies_to_keep = 1
         let output = rewrite_settings_file_lines(
             input,
             &[
-                ("forum_name", "\"BackupChan\"".to_string()),
-                ("default_theme", "\"terminal\"".to_string()),
-                ("auto_full_backup_interval_hours", "12".to_string()),
-                ("auto_full_backup_copies_to_keep", "3".to_string()),
+                ("forum_name", "\"BackupChan\"".to_owned()),
+                ("default_theme", "\"terminal\"".to_owned()),
+                ("auto_full_backup_interval_hours", "12".to_owned()),
+                ("auto_full_backup_copies_to_keep", "3".to_owned()),
                 (
                     "auto_full_backup_include_tor_hidden_service_keys",
-                    "true".to_string(),
+                    "true".to_owned(),
                 ),
-                ("auto_full_backup_storage_mode", "\"split_zip\"".to_string()),
-                ("auto_full_backup_split_zip_part_size_gib", "8".to_string()),
+                ("auto_full_backup_storage_mode", "\"split_zip\"".to_owned()),
+                ("auto_full_backup_split_zip_part_size_gib", "8".to_owned()),
             ],
             None,
         );
@@ -1582,14 +1596,14 @@ enabled = false
         let output = rewrite_settings_file_lines(
             input,
             &[
-                ("auto_full_backup_interval_hours", "24".to_string()),
-                ("auto_full_backup_copies_to_keep", "1".to_string()),
+                ("auto_full_backup_interval_hours", "24".to_owned()),
+                ("auto_full_backup_copies_to_keep", "1".to_owned()),
                 (
                     "auto_full_backup_include_tor_hidden_service_keys",
-                    "true".to_string(),
+                    "true".to_owned(),
                 ),
-                ("auto_full_backup_storage_mode", "\"directory\"".to_string()),
-                ("auto_full_backup_split_zip_part_size_gib", "4".to_string()),
+                ("auto_full_backup_storage_mode", "\"directory\"".to_owned()),
+                ("auto_full_backup_split_zip_part_size_gib", "4".to_owned()),
             ],
             Some("# ── Federation / ChanNet gateway"),
         );
@@ -1638,12 +1652,12 @@ port = 8080
         let output = rewrite_settings_file_lines(
             input,
             &[
-                ("forum_name", "\"NewChan\"".to_string()),
-                ("site_subtitle", "\"new subtitle\"".to_string()),
-                ("homepage_new_thread_badges_enabled", "false".to_string()),
-                ("homepage_new_reply_badges_enabled", "true".to_string()),
-                ("thread_new_reply_badges_enabled", "true".to_string()),
-                ("default_theme", "\"terminal\"".to_string()),
+                ("forum_name", "\"NewChan\"".to_owned()),
+                ("site_subtitle", "\"new subtitle\"".to_owned()),
+                ("homepage_new_thread_badges_enabled", "false".to_owned()),
+                ("homepage_new_reply_badges_enabled", "true".to_owned()),
+                ("thread_new_reply_badges_enabled", "true".to_owned()),
+                ("default_theme", "\"terminal\"".to_owned()),
             ],
             Some("# ── Network / web server"),
         );
@@ -1831,7 +1845,7 @@ port = 8080
     #[test]
     fn validate_rejects_short_chan_net_api_key() {
         let mut config = valid_config();
-        config.chan_net_api_key = "short-key".to_string();
+        config.chan_net_api_key = "short-key".to_owned();
 
         let error = validation_error(&config);
 
@@ -1902,7 +1916,7 @@ port = 8080
         let path = settings_file_path();
         let previous = std::fs::read_to_string(&path).ok();
         let parent = path.parent().expect("settings parent").to_path_buf();
-        let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string();
+        let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned();
         let template = settings_template(&secret);
 
         std::fs::create_dir_all(&parent).expect("create settings dir");

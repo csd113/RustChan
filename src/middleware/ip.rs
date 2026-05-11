@@ -61,14 +61,14 @@ fn forwarded_ip_from_headers(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return Some(value.to_string());
+        return Some(value.to_owned());
     }
 
     headers
         .get("x-forwarded-for")
         .and_then(|header_value| header_value.to_str().ok())
         .and_then(forwarded_client_ip)
-        .map(ToString::to_string)
+        .map(str::to_owned)
 }
 
 pub fn extract_ip(req: &Request) -> String {
@@ -91,7 +91,7 @@ pub fn extract_ip(req: &Request) -> String {
         }
     }
 
-    peer.map_or_else(|| "unknown".to_string(), |addr| addr.ip().to_string())
+    peer.map_or_else(|| "unknown".to_owned(), |addr| addr.ip().to_string())
 }
 
 pub struct ClientIp(pub String);
@@ -126,7 +126,7 @@ where
         }
 
         Ok(Self(peer.map_or_else(
-            || "unknown".to_string(),
+            || "unknown".to_owned(),
             |addr| addr.ip().to_string(),
         )))
     }
@@ -156,9 +156,9 @@ mod tests {
     #[test]
     fn trusted_proxy_accepts_loopback_and_private_networks() {
         let trusted = vec![
-            "127.0.0.1/32".to_string(),
-            "::1/128".to_string(),
-            "10.0.0.0/8".to_string(),
+            "127.0.0.1/32".to_owned(),
+            "::1/128".to_owned(),
+            "10.0.0.0/8".to_owned(),
         ];
         assert!(trusted_proxy_peer_with(
             Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080,)),
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn trusted_proxy_rejects_public_internet_peers() {
-        let trusted = vec!["127.0.0.1/32".to_string(), "::1/128".to_string()];
+        let trusted = vec!["127.0.0.1/32".to_owned(), "::1/128".to_owned()];
         assert!(!trusted_proxy_peer_with(
             Some(SocketAddr::new(
                 IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)),
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn trusted_proxy_rejects_private_peers_not_in_allowlist() {
-        let trusted = vec!["127.0.0.1/32".to_string(), "::1/128".to_string()];
+        let trusted = vec!["127.0.0.1/32".to_owned(), "::1/128".to_owned()];
         assert!(!trusted_proxy_peer_with(
             Some(SocketAddr::new(
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),

@@ -27,7 +27,7 @@
 //   - Thread subject:     `t.subject` — nullable, COALESCE to ''
 //   - Thread archive:     `t.archived` (INTEGER 0/1)
 
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Write as _};
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -105,13 +105,13 @@ pub fn build_full_snapshot(conn: &Connection, since: Option<u64>) -> Result<(Vec
     let tx_id = Uuid::new_v4();
     let metadata = GwMetadata {
         generated_at: now_secs(),
-        rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
+        rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
         post_count: posts.len() as u64,
         tx_id,
         since,
         is_delta: since.is_some(),
         includes_archive: false,
-        scope: "full".to_string(),
+        scope: "full".to_owned(),
     };
 
     let zip = pack_zip(&boards, &threads, &posts, &metadata)?;
@@ -135,13 +135,13 @@ pub fn build_board_snapshot(
     let tx_id = Uuid::new_v4();
     let metadata = GwMetadata {
         generated_at: now_secs(),
-        rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
+        rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
         post_count: posts.len() as u64,
         tx_id,
         since,
         is_delta: since.is_some(),
         includes_archive: false,
-        scope: "board".to_string(),
+        scope: "board".to_owned(),
     };
 
     let zip = pack_zip(&boards, &threads, &posts, &metadata)?;
@@ -169,13 +169,13 @@ pub fn build_thread_snapshot(
     let tx_id = Uuid::new_v4();
     let metadata = GwMetadata {
         generated_at: now_secs(),
-        rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
+        rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
         post_count: posts.len() as u64,
         tx_id,
         since,
         is_delta: since.is_some(),
         includes_archive: false,
-        scope: "thread".to_string(),
+        scope: "thread".to_owned(),
     };
 
     let zip = pack_zip(&boards, &threads, &posts, &metadata)?;
@@ -199,13 +199,13 @@ pub fn build_archive_snapshot(
     let tx_id = Uuid::new_v4();
     let metadata = GwMetadata {
         generated_at: now_secs(),
-        rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
+        rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
         post_count: posts.len() as u64,
         tx_id,
         since: None,
         is_delta: false,
         includes_archive: true,
-        scope: "archive".to_string(),
+        scope: "archive".to_owned(),
     };
 
     let zip = pack_zip(&boards, &threads, &posts, &metadata)?;
@@ -236,13 +236,13 @@ pub fn build_force_refresh_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)
     let tx_id = Uuid::new_v4();
     let metadata = GwMetadata {
         generated_at: now_secs(),
-        rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
+        rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
         post_count: posts.len() as u64,
         tx_id,
         since: None,
         is_delta: false,
         includes_archive: true,
-        scope: "force_refresh".to_string(),
+        scope: "force_refresh".to_owned(),
     };
 
     let zip = pack_zip(&boards, &threads, &posts, &metadata)?;
@@ -257,7 +257,7 @@ fn board_id_by_short_name(conn: &Connection, short_name: &str) -> Result<i64> {
         rusqlite::params![short_name],
         |r| r.get(0),
     )
-    .map_err(|_| anyhow::anyhow!("Board '{short_name}' not found"))
+    .map_err(|_error| anyhow::anyhow!("Board '{short_name}' not found"))
 }
 
 /// Load all boards for gateway snapshots.
@@ -410,7 +410,7 @@ fn fetch_posts(
     archived_only: bool,
 ) -> Result<Vec<GwPost>> {
     let archived_flag: i64 = i64::from(archived_only);
-    let since_val: i64 = since.unwrap_or(0).cast_signed();
+    let since_val = since.unwrap_or(0).cast_signed();
 
     // Fixed parameters: ?1 = archived_flag, ?2 = since_val.
     // Optional parameters appended in order: board_id (?3), thread_id (?3 or ?4).

@@ -68,7 +68,7 @@ pub(super) fn extract_sqlite_db_from_full_backup_archive<R: std::io::Read + std:
     archive: &mut zip::ZipArchive<R>,
     temp_db: &Path,
 ) -> Result<()> {
-    let mut db_entry = archive.by_name("chan.db").map_err(|_| {
+    let mut db_entry = archive.by_name("chan.db").map_err(|_error| {
         AppError::BadRequest("Invalid full backup: zip must contain 'chan.db' at the root.".into())
     })?;
     let mut out = std::fs::File::create(temp_db)
@@ -159,7 +159,7 @@ fn copy_board_upload_entries_from_full_backup<R: std::io::Read + std::io::Seek, 
         let mut entry = archive
             .by_index(index)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip[{index}]: {error}")))?;
-        let name = entry.name().to_string();
+        let name = entry.name().to_owned();
         common::validate_restore_safe_entry_name(&name)?;
         if !name.starts_with(&board_prefix) {
             continue;
@@ -204,8 +204,15 @@ pub(super) fn create_temp_legacy_full_backup_from_v4_path(root_dir: &Path) -> Re
 fn create_temp_legacy_full_backup_from_verified_v4(
     verified: &v4::VerifiedSavedV4Root,
 ) -> Result<PathBuf> {
-    debug_assert_eq!(verified.metadata.backup_id, verified.manifest.backup_id);
-    debug_assert_eq!(Some(verified.completed_at), verified.manifest.completed_at);
+    debug_assert_eq!(
+        verified.metadata.backup_id, verified.manifest.backup_id,
+        "verified metadata backup_id must match manifest backup_id"
+    );
+    debug_assert_eq!(
+        Some(verified.completed_at),
+        verified.manifest.completed_at,
+        "verified completion time must match manifest completion time"
+    );
 
     let manifest = &verified.manifest;
     let temp_zip = temp_legacy_zip_path("rustchan_v4_full_restore");
@@ -283,7 +290,9 @@ fn create_temp_legacy_full_backup_from_verified_v4(
     }
     write_v4_file_to_legacy_zip(&mut zip, "chan.db", &verified_db.file)?;
 
-    for board in verified.boards.values() {
+    let mut boards: Vec<_> = verified.boards.iter().collect();
+    boards.sort_by_key(|(board_short, _)| *board_short);
+    for (_, board) in boards {
         for entry in &board.upload_files {
             match entry.kind {
                 v4::BackupFileKind::OriginalMedia
@@ -368,7 +377,7 @@ fn create_temp_legacy_board_backup_from_verified_v4(
     board_short: Option<&str>,
 ) -> Result<(PathBuf, String)> {
     let board_short = match board_short {
-        Some(board_short) => board_short.to_string(),
+        Some(board_short) => board_short.to_owned(),
         None => verified
             .manifest
             .included_boards
@@ -430,7 +439,7 @@ pub(super) fn create_temp_board_backup_from_full_backup_path(
     })?;
 
     let zip_file = std::fs::File::open(full_backup_path)
-        .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
+        .map_err(|_error| AppError::NotFound("Backup file not found.".into()))?;
     let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
         .map_err(|error| AppError::BadRequest(format!("Invalid zip: {error}")))?;
     validate_full_restore_archive_layout(&archive)?;
@@ -519,7 +528,7 @@ mod tests {
     fn saved_full_v4_restore_rejects_db_snapshot_escape() {
         let (_dir, root) = full_fixture_root("2026-05-06_full-site_db-escape");
         let mut manifest = v4::load_manifest(&root.join(v4::MANIFEST_FILE_NAME)).expect("manifest");
-        manifest.db_snapshot.as_mut().expect("db snapshot").path = "../escape.db".to_string();
+        manifest.db_snapshot.as_mut().expect("db snapshot").path = "../escape.db".to_owned();
         v4::write_json_pretty(&root.join(v4::MANIFEST_FILE_NAME), &manifest).expect("manifest");
 
         let error = create_temp_legacy_full_backup_from_v4_path(&root)
@@ -588,7 +597,7 @@ mod tests {
             .iter_mut()
             .find(|entry| entry.kind == v4::BackupFileKind::BoardJson)
         {
-            entry.logical_path = "../board.json".to_string();
+            entry.logical_path = "../board.json".to_owned();
         }
         v4::write_json_pretty(&root.join(v4::MANIFEST_FILE_NAME), &manifest).expect("manifest");
 
@@ -606,7 +615,7 @@ mod tests {
             .iter_mut()
             .find(|entry| entry.kind == v4::BackupFileKind::BoardJson)
         {
-            entry.logical_path = "../board.json".to_string();
+            entry.logical_path = "../board.json".to_owned();
         }
         v4::write_json_pretty(&root.join(v4::MANIFEST_FILE_NAME), &manifest).expect("manifest");
 
@@ -629,7 +638,7 @@ mod tests {
             .iter_mut()
             .find(|entry| entry.logical_path == "boards/tech/media/src/example.txt")
         {
-            entry.logical_path = "boards/other/media/src/example.txt".to_string();
+            entry.logical_path = "boards/other/media/src/example.txt".to_owned();
         }
         v4::write_json_pretty(&root.join(v4::MANIFEST_FILE_NAME), &manifest).expect("manifest");
 

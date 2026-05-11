@@ -59,7 +59,7 @@ pub async fn chan_poll(
             .get(axum::http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
-            .to_string();
+            .to_owned();
 
         // ── Consume body exactly once ─────────────────────────────────────
         // IMPORTANT: reqwest::Response body is a single-pass stream. We read

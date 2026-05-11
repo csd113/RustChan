@@ -44,7 +44,7 @@ pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
         crate::logging::console_print_raw(
             "  Install ffmpeg from: https://ffmpeg.org/download.html\n\n",
         );
-        std::process::exit(1);
+        ToolStatus::Missing
     } else {
         tracing::warn!(
             target: "rustchan::detect",
@@ -312,8 +312,8 @@ fn webm_install_hint(has_vp9: bool, has_opus: bool) -> String {
 
 use arti_client::{config::TorClientConfigBuilder, TorClient};
 use dashmap::DashMap;
-use futures::StreamExt;
-use rand_core::{OsRng, RngCore};
+use futures::StreamExt as _;
+use rand_core::{OsRng, RngCore as _};
 use std::sync::LazyLock;
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
@@ -395,7 +395,7 @@ pub fn detect_tor(
             );
             let run_start = std::time::Instant::now();
             let result = tokio::select! {
-                r = run_arti(data_dir.clone(), bind_port, onion_address.clone()) => r,
+                r = run_arti(data_dir.clone(), bind_port, Arc::clone(&onion_address)) => r,
                 () = cancel.cancelled() => {
                     tracing::info!(target: "rustchan::detect", "Tor: shutdown signal — exiting");
                     *onion_address.write().await = None;
@@ -476,7 +476,7 @@ async fn run_arti(
     let tor_client =
         tokio::time::timeout(bootstrap_timeout, TorClient::create_bootstrapped(config))
             .await
-            .map_err(|_| {
+            .map_err(|_error| {
                 format!(
                     "Tor bootstrap timed out after {} s — check network connectivity \
              (increase tor_bootstrap_timeout_secs in settings.toml for censored networks)",
@@ -602,7 +602,7 @@ async fn publish_onion_address(onion_name: &str, onion_address: &RwLock<Option<S
     tracing::debug!(target: "rustchan::detect", "Tor: hidden service active");
     tracing::info!(target: "rustchan::detect", "Tor: hidden service active");
 
-    *onion_address.write().await = Some(onion_name.to_string());
+    *onion_address.write().await = Some(onion_name.to_owned());
 
     // When the full-screen TUI is active the dashboard shows the onion address
     // on its next render tick.  Printing the banner box here would corrupt the
@@ -641,7 +641,7 @@ async fn proxy_tor_stream(
         TcpStream::connect(local_addr),
     )
     .await
-    .map_err(|_| "timed out connecting to local HTTP server")?
+    .map_err(|_error| "timed out connecting to local HTTP server")?
     .map_err(|e| format!("local TCP connect failed: {e}"))?;
     // local port. axum's ConnectInfo sees this port as the peer port on the
     // incoming socket, so ClientIp / extract_ip can retrieve the token without
@@ -673,7 +673,7 @@ async fn proxy_tor_stream(
 ///
 /// Format: `base32( pubkey || sha3_256(".onion checksum" || pubkey || version)[..2] || version )`
 fn hsid_to_onion_address(hsid: HsId) -> String {
-    use sha3::{Digest, Sha3_256};
+    use sha3::{Digest as _, Sha3_256};
 
     let pubkey: &[u8; 32] = hsid.as_ref();
     let version: u8 = 3;

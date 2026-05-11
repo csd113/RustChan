@@ -1,6 +1,6 @@
 // src/utils/files/jpeg.rs
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use std::path::Path;
 
 pub(super) fn strip_jpeg_exif_file(input_path: &Path, output_path: &Path) -> Result<()> {

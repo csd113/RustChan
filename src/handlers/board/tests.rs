@@ -21,11 +21,11 @@ fn seed_post_password_board(state: &crate::middleware::AppState) -> (i64, i64, i
     let post = crate::db::NewPost {
         thread_id: 0,
         board_id,
-        name: "anon".to_string(),
+        name: "anon".to_owned(),
         tripcode: None,
-        subject: Some("subject".to_string()),
-        body: "protected posting body".to_string(),
-        body_html: "protected posting body".to_string(),
+        subject: Some("subject".to_owned()),
+        body: "protected posting body".to_owned(),
+        body_html: "protected posting body".to_owned(),
         ip_hash: None,
         file_path: None,
         file_name: None,
@@ -37,12 +37,12 @@ fn seed_post_password_board(state: &crate::middleware::AppState) -> (i64, i64, i
         audio_file_name: None,
         audio_file_size: None,
         audio_mime_type: None,
-        deletion_token: "edit-token".to_string(),
+        deletion_token: "edit-token".to_owned(),
         is_op: true,
     };
     let poll = crate::db::threads::PollInsert {
         question: "pick one",
-        options: &["yes".to_string(), "no".to_string()],
+        options: &["yes".to_owned(), "no".to_owned()],
         expires_at: chrono::Utc::now().timestamp() + 3600,
     };
     let (thread_id, post_id, poll_id) = crate::db::create_thread_with_optional_poll(
@@ -96,20 +96,20 @@ fn install_preference_test_themes() {
     crate::templates::set_live_default_theme("forest");
     crate::templates::set_live_themes(vec![
         crate::models::Theme {
-            slug: "forest".to_string(),
-            display_name: "Forest".to_string(),
-            description: "Forest theme".to_string(),
-            swatch_hex: "#123456".to_string(),
+            slug: "forest".to_owned(),
+            display_name: "Forest".to_owned(),
+            description: "Forest theme".to_owned(),
+            swatch_hex: "#123456".to_owned(),
             enabled: true,
             sort_order: 10,
             is_builtin: true,
             custom_css: String::new(),
         },
         crate::models::Theme {
-            slug: "blue-sky".to_string(),
-            display_name: "Blue Sky".to_string(),
-            description: "Blue Sky theme".to_string(),
-            swatch_hex: "#87ceeb".to_string(),
+            slug: "blue-sky".to_owned(),
+            display_name: "Blue Sky".to_owned(),
+            description: "Blue Sky theme".to_owned(),
+            swatch_hex: "#87ceeb".to_owned(),
             enabled: true,
             sort_order: 20,
             is_builtin: true,
@@ -130,11 +130,11 @@ fn seed_board_with_thread(
     let post = crate::db::NewPost {
         thread_id: 0,
         board_id,
-        name: "anon".to_string(),
+        name: "anon".to_owned(),
         tripcode: None,
-        subject: Some("subject".to_string()),
-        body: body.to_string(),
-        body_html: body.to_string(),
+        subject: Some("subject".to_owned()),
+        body: body.to_owned(),
+        body_html: body.to_owned(),
         ip_hash: None,
         file_path: None,
         file_name: None,
@@ -146,7 +146,7 @@ fn seed_board_with_thread(
         audio_file_name: None,
         audio_file_size: None,
         audio_mime_type: None,
-        deletion_token: "token".to_string(),
+        deletion_token: "token".to_owned(),
         is_op: true,
     };
     let (thread_id, _post_id, _) =
@@ -160,11 +160,11 @@ fn create_thread_on_board(state: &crate::middleware::AppState, board_id: i64, bo
     let post = crate::db::NewPost {
         thread_id: 0,
         board_id,
-        name: "anon".to_string(),
+        name: "anon".to_owned(),
         tripcode: None,
-        subject: Some("subject".to_string()),
-        body: body.to_string(),
-        body_html: body.to_string(),
+        subject: Some("subject".to_owned()),
+        body: body.to_owned(),
+        body_html: body.to_owned(),
         ip_hash: None,
         file_path: None,
         file_name: None,
@@ -176,7 +176,7 @@ fn create_thread_on_board(state: &crate::middleware::AppState, board_id: i64, bo
         audio_file_name: None,
         audio_file_size: None,
         audio_mime_type: None,
-        deletion_token: "token".to_string(),
+        deletion_token: "token".to_owned(),
         is_op: true,
     };
     let (thread_id, _post_id, _) =
@@ -195,11 +195,11 @@ fn create_reply_on_thread(
     let reply = crate::db::NewPost {
         thread_id,
         board_id,
-        name: "anon".to_string(),
+        name: "anon".to_owned(),
         tripcode: None,
         subject: None,
-        body: body.to_string(),
-        body_html: body.to_string(),
+        body: body.to_owned(),
+        body_html: body.to_owned(),
         ip_hash: None,
         file_path: None,
         file_name: None,
@@ -211,7 +211,7 @@ fn create_reply_on_thread(
         audio_file_name: None,
         audio_file_size: None,
         audio_mime_type: None,
-        deletion_token: "token".to_string(),
+        deletion_token: "token".to_owned(),
         is_op: false,
     };
     crate::db::create_reply_with_thread_update(&conn, &reply, "", true, None)
@@ -249,7 +249,7 @@ fn update_cookie_store(store: &mut HashMap<String, String>, headers: &HeaderMap)
         if cookie_value.is_empty() {
             store.remove(name);
         } else {
-            store.insert(name.to_string(), cookie_value.to_string());
+            store.insert(name.to_owned(), cookie_value.to_owned());
         }
     }
 }
@@ -302,8 +302,8 @@ async fn post_password_board_remains_viewable_without_unlock() {
         .with_state(state);
 
     for uri in [
-        "/secret".to_string(),
-        "/secret/catalog".to_string(),
+        "/secret".to_owned(),
+        "/secret/catalog".to_owned(),
         format!("/secret/thread/{thread_id}"),
     ] {
         let response = router
@@ -496,11 +496,11 @@ async fn self_delete_requires_owned_post_cookie() {
     let op = crate::db::NewPost {
         thread_id: 0,
         board_id,
-        name: "anon".to_string(),
+        name: "anon".to_owned(),
         tripcode: None,
-        subject: Some("subject".to_string()),
-        body: "body".to_string(),
-        body_html: "body".to_string(),
+        subject: Some("subject".to_owned()),
+        body: "body".to_owned(),
+        body_html: "body".to_owned(),
         ip_hash: None,
         file_path: None,
         file_name: None,
@@ -512,7 +512,7 @@ async fn self_delete_requires_owned_post_cookie() {
         audio_file_name: None,
         audio_file_size: None,
         audio_mime_type: None,
-        deletion_token: "op-token".to_string(),
+        deletion_token: "op-token".to_owned(),
         is_op: true,
     };
     let (thread_id, _op_id, _) =
@@ -521,11 +521,11 @@ async fn self_delete_requires_owned_post_cookie() {
     let reply = crate::db::NewPost {
         thread_id,
         board_id,
-        name: "anon".to_string(),
+        name: "anon".to_owned(),
         tripcode: None,
         subject: None,
-        body: "reply".to_string(),
-        body_html: "reply".to_string(),
+        body: "reply".to_owned(),
+        body_html: "reply".to_owned(),
         ip_hash: None,
         file_path: None,
         file_name: None,
@@ -537,7 +537,7 @@ async fn self_delete_requires_owned_post_cookie() {
         audio_file_name: None,
         audio_file_size: None,
         audio_mime_type: None,
-        deletion_token: "reply-token".to_string(),
+        deletion_token: "reply-token".to_owned(),
         is_op: false,
     };
     let reply_id = crate::db::create_reply_with_thread_update(&conn, &reply, "", false, None)
@@ -615,11 +615,11 @@ async fn search_returns_results_without_500() {
         let post = crate::db::NewPost {
             thread_id: 0,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
-            subject: Some("subject".to_string()),
-            body: "rust search body".to_string(),
-            body_html: "rust search body".to_string(),
+            subject: Some("subject".to_owned()),
+            body: "rust search body".to_owned(),
+            body_html: "rust search body".to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -631,7 +631,7 @@ async fn search_returns_results_without_500() {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "token".to_string(),
+            deletion_token: "token".to_owned(),
             is_op: true,
         };
         crate::db::create_thread_with_optional_poll(&conn, board_id, None, &post, "", None, None)
@@ -1661,13 +1661,11 @@ async fn catalog_baseline_tracks_only_highest_priority_threads_within_cookie_lim
         .iter()
         .filter_map(|value| value.to_str().ok())
         .find_map(|value| {
-            value
+            let (name, cookie_value) = value
                 .split(';')
                 .next()
-                .and_then(|pair| pair.split_once('='))
-                .and_then(|(name, cookie_value)| {
-                    (name == "rustchan_thread_activity").then(|| cookie_value.to_string())
-                })
+                .and_then(|pair| pair.split_once('='))?;
+            (name == "rustchan_thread_activity").then(|| cookie_value.to_owned())
         })
         .expect("thread activity cookie");
     let mut cookie_headers = HeaderMap::new();
@@ -1826,11 +1824,11 @@ async fn duplicate_report_redirects_back_without_500() {
         let post = crate::db::NewPost {
             thread_id: 0,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
-            subject: Some("subject".to_string()),
-            body: "report me".to_string(),
-            body_html: "report me".to_string(),
+            subject: Some("subject".to_owned()),
+            body: "report me".to_owned(),
+            body_html: "report me".to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -1842,7 +1840,7 @@ async fn duplicate_report_redirects_back_without_500() {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "token".to_string(),
+            deletion_token: "token".to_owned(),
             is_op: true,
         };
         let (thread_id, post_id, _) = crate::db::create_thread_with_optional_poll(
@@ -2155,7 +2153,7 @@ async fn changing_board_password_invalidates_existing_unlock_cookie() {
         .find(|value| value.contains(&super::board_access_cookie_name("secret")))
         .and_then(|value| value.split(';').next())
         .expect("board access cookie")
-        .to_string();
+        .to_owned();
 
     {
         let conn = state.db.get().expect("db connection");
@@ -2525,7 +2523,7 @@ async fn user_theme_overrides_configured_default_and_changes_etag() {
         .headers()
         .get(header::ETAG)
         .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
+        .map(str::to_owned)
         .expect("default etag");
 
     let themed_response = router
@@ -2546,7 +2544,7 @@ async fn user_theme_overrides_configured_default_and_changes_etag() {
         .headers()
         .get(header::ETAG)
         .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
+        .map(str::to_owned)
         .expect("themed etag");
     assert_ne!(default_etag, themed_etag);
     let body = String::from_utf8(
@@ -2605,9 +2603,9 @@ async fn preference_specific_html_responses_vary_on_cookie() {
     let router = activity_router(state);
 
     for uri in [
-        "/".to_string(),
-        "/tech".to_string(),
-        "/tech/catalog".to_string(),
+        "/".to_owned(),
+        "/tech".to_owned(),
+        "/tech/catalog".to_owned(),
         format!("/tech/thread/{thread_id}"),
     ] {
         let response = router

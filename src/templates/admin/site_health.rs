@@ -1,5 +1,5 @@
 use super::{escape_html, AdminDetectionStatus, AdminPanelViewModel};
-use std::fmt::Write;
+use std::fmt::Write as _;
 
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let open_attr = if view.open_section == Some("site-health") {

@@ -38,7 +38,7 @@ pub(super) fn resolve_tor_hidden_service_keys_availability(
     }
 
     let Some(dir) = configured_dir else {
-        return Err(AppError::BadRequest(unavailable_message.to_string()));
+        return Err(AppError::BadRequest(unavailable_message.to_owned()));
     };
 
     std::fs::read_dir(&dir).map_err(|error| {
@@ -61,7 +61,7 @@ pub(super) fn resolve_tor_hidden_service_keys_restore_target(
     }
 
     let Some(dir) = configured_dir else {
-        return Err(AppError::BadRequest(unavailable_message.to_string()));
+        return Err(AppError::BadRequest(unavailable_message.to_owned()));
     };
 
     if let Ok(metadata) = std::fs::symlink_metadata(&dir) {
@@ -151,7 +151,7 @@ pub(super) fn validate_board_short_name(short_name: &str) -> Result<()> {
 
 fn validated_media_upload_relative_path(path: &str, context: &str) -> Result<Vec<String>> {
     validate_restore_safe_entry_name(path)?;
-    let components = path.split('/').map(str::to_string).collect::<Vec<_>>();
+    let components = path.split('/').map(str::to_owned).collect::<Vec<_>>();
     if components.len() < 2 {
         return Err(AppError::BadRequest(format!(
             "{context} must include a board directory and file name."
@@ -184,7 +184,7 @@ pub(super) fn validate_restored_media_path_for_board(
 }
 
 fn remap_numeric_references(body: &str, prefix: &str, pairs: &[(String, String)]) -> String {
-    let mut result = body.to_string();
+    let mut result = body.to_owned();
     for (old, new) in pairs {
         let needle = format!("{prefix}{old}");
         let mut out = String::with_capacity(result.len());
@@ -222,7 +222,7 @@ pub(super) fn remap_body_quotelinks(
     pairs: &[(String, String)],
 ) -> String {
     if pairs.is_empty() {
-        return body.to_string();
+        return body.to_owned();
     }
 
     let result = remap_numeric_references(body, ">>", pairs);
@@ -337,7 +337,7 @@ pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(
         let mut entry = archive
             .by_index(i)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{i}]: {e}")))?;
-        let name = entry.name().to_string();
+        let name = entry.name().to_owned();
         let Some(rel_path) = restore_safe_relative_path_under_prefix(&name, "uploads/")? else {
             continue;
         };
@@ -418,7 +418,7 @@ pub(super) fn verify_full_backup_archive<R: std::io::Read + Seek>(
 ) -> Result<FullBackupManifest> {
     let manifest = read_full_backup_manifest_from_archive(archive)?;
 
-    let mut db_entry = archive.by_name("chan.db").map_err(|_| {
+    let mut db_entry = archive.by_name("chan.db").map_err(|_error| {
         AppError::BadRequest("Invalid full backup: zip must contain 'chan.db' at the root.".into())
     })?;
     let mut header = [0u8; 16];
@@ -440,7 +440,7 @@ pub(super) fn verify_full_backup_archive<R: std::io::Read + Seek>(
         let entry = archive.by_index(idx).map_err(|error| {
             AppError::Internal(anyhow::anyhow!("Read backup entry #{idx}: {error}"))
         })?;
-        let name = entry.name().to_string();
+        let name = entry.name().to_owned();
         validate_restore_safe_entry_name(&name)?;
         if entry.is_dir() {
             continue;
@@ -502,11 +502,13 @@ pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> 
 pub(super) fn read_full_backup_manifest_from_archive<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<FullBackupManifest> {
-    let mut entry = archive.by_name(FULL_BACKUP_MANIFEST_NAME).map_err(|_| {
-        AppError::BadRequest(format!(
-            "Invalid full backup: missing {FULL_BACKUP_MANIFEST_NAME}"
-        ))
-    })?;
+    let mut entry = archive
+        .by_name(FULL_BACKUP_MANIFEST_NAME)
+        .map_err(|_error| {
+            AppError::BadRequest(format!(
+                "Invalid full backup: missing {FULL_BACKUP_MANIFEST_NAME}"
+            ))
+        })?;
     let bytes = read_limited_bytes(
         &mut entry,
         BOARD_MANIFEST_MAX_BYTES,

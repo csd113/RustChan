@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 use tracing::warn;
@@ -529,7 +529,7 @@ fn validate_board_short_component(path: &Path) -> Result<String> {
     {
         anyhow::bail!("Board restore target name {short:?} is invalid");
     }
-    Ok(short.to_string())
+    Ok(short.to_owned())
 }
 
 fn validate_generated_suffix(file_name: &str, expected_prefix: &str) -> Result<()> {
@@ -689,7 +689,7 @@ pub fn finalize_delete_banner_assets_payload(
             id: 0,
             scope: asset.scope,
             board_id: None,
-            board_short: board_short.map(str::to_string),
+            board_short: board_short.map(str::to_owned),
             storage_key: asset.storage_key.clone(),
             width: 0,
             height: 0,
@@ -799,7 +799,7 @@ fn restrict_private_path_permissions(path: &Path) -> Result<()> {
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::PermissionsExt as _;
 
         let metadata = std::fs::metadata(path)
             .with_context(|| format!("Inspect private path {}", path.display()))?;
@@ -825,7 +825,6 @@ fn restrict_private_path_permissions(path: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 /// Configure a test-only failure injected during private permission repair.
 ///
 /// # Panics
@@ -1314,13 +1313,13 @@ mod tests {
 
         let payload = DeleteFilesPayload {
             paths: vec![
-                "tech/file.webp".to_string(),
-                "tech/thumbs/file.webp".to_string(),
+                "tech/file.webp".to_owned(),
+                "tech/thumbs/file.webp".to_owned(),
             ],
             dirs: Vec::new(),
         };
         let op = crate::pending_fs::PendingFsOpInsert {
-            id: "delete-files-op".to_string(),
+            id: "delete-files-op".to_owned(),
             kind: DELETE_FILES_KIND,
             payload_json: serde_json::to_string(&payload).expect("serialize payload"),
         };
@@ -1367,7 +1366,7 @@ mod tests {
             upload_dir.to_str().expect("utf8 upload dir"),
             None,
             &[],
-            &["tech".to_string()],
+            &["tech".to_owned()],
         )
         .expect("delete board dir");
         assert!(!board_dir.exists());
@@ -1378,7 +1377,7 @@ mod tests {
             upload_dir.to_str().expect("utf8 upload dir"),
             None,
             &[],
-            &["tech/thumbs".to_string()],
+            &["tech/thumbs".to_owned()],
         )
         .expect_err("nested dir rejected");
         assert!(error.to_string().contains("must name one board directory"));
@@ -1439,8 +1438,8 @@ mod tests {
         let payload = super::DeleteBannerAssetsPayload {
             assets: vec![super::BannerAssetCleanupPayload {
                 scope: crate::models::BannerScope::Board,
-                board_short: Some("../outside".to_string()),
-                storage_key: storage_key.to_string(),
+                board_short: Some("../outside".to_owned()),
+                storage_key: storage_key.to_owned(),
             }],
         };
 
@@ -1482,9 +1481,9 @@ mod tests {
         let conn = pool.get().expect("db connection");
         let payload = UploadFinalizePayload {
             stage_dir: stage_dir.display().to_string(),
-            relative_paths: vec!["../sentinel.txt".to_string()],
+            relative_paths: vec!["../sentinel.txt".to_owned()],
             primary_hash: None,
-            primary_file_path: Some("../sentinel.txt".to_string()),
+            primary_file_path: Some("../sentinel.txt".to_owned()),
             primary_thumb_path: None,
             primary_mime_type: None,
         };
@@ -1515,9 +1514,9 @@ mod tests {
         let conn = pool.get().expect("db connection");
         let payload = UploadFinalizePayload {
             stage_dir: stage_dir.display().to_string(),
-            relative_paths: vec!["tech/file.webp".to_string()],
+            relative_paths: vec!["tech/file.webp".to_owned()],
             primary_hash: None,
-            primary_file_path: Some("tech/file.webp".to_string()),
+            primary_file_path: Some("tech/file.webp".to_owned()),
             primary_thumb_path: None,
             primary_mime_type: None,
         };
@@ -1837,7 +1836,7 @@ mod tests {
         let pool = init_test_pool().expect("test pool");
         let conn = pool.get().expect("db connection");
         let op = crate::pending_fs::PendingFsOpInsert {
-            id: "malicious-full-restore".to_string(),
+            id: "malicious-full-restore".to_owned(),
             kind: FULL_RESTORE_SWAP_KIND,
             payload_json: serde_json::to_string(&payload).expect("payload json"),
         };
@@ -1943,7 +1942,7 @@ mod tests {
         let pool = init_test_pool().expect("test pool");
         let conn = pool.get().expect("db connection");
         let op = crate::pending_fs::PendingFsOpInsert {
-            id: "full-restore-global-assets".to_string(),
+            id: "full-restore-global-assets".to_owned(),
             kind: FULL_RESTORE_SWAP_KIND,
             payload_json: serde_json::to_string(&payload).expect("payload json"),
         };

@@ -124,9 +124,7 @@ pub async fn download_backup(
     Query(query): Query<DownloadBackupQuery>,
     axum::extract::Path((kind, filename)): axum::extract::Path<(String, String)>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
 
     let safe_filename = if query.part.is_some() && matches!(kind.as_str(), "full" | "board") {
         sanitize_saved_backup_ref(&filename)?
@@ -201,7 +199,7 @@ pub async fn download_backup(
         })?;
         let file_size = tokio::fs::metadata(&resolved)
             .await
-            .map_err(|_| AppError::NotFound("Backup part not found.".into()))?
+            .map_err(|_error| AppError::NotFound("Backup part not found.".into()))?
             .len();
         if file_size != part.size {
             return Err(AppError::BadRequest(
@@ -216,12 +214,12 @@ pub async fn download_backup(
         }
         let file = tokio::fs::File::open(&resolved)
             .await
-            .map_err(|_| AppError::NotFound("Backup part not found.".into()))?;
+            .map_err(|_error| AppError::NotFound("Backup part not found.".into()))?;
         let body = axum::body::Body::from_stream(ReaderStream::new(file));
         let disposition = format!("attachment; filename=\"{safe_part}\"");
         return Ok((
             [
-                (header::CONTENT_TYPE, "application/zip".to_string()),
+                (header::CONTENT_TYPE, "application/zip".to_owned()),
                 (header::CONTENT_DISPOSITION, disposition),
                 (header::CONTENT_LENGTH, file_size.to_string()),
             ],
@@ -241,12 +239,12 @@ pub async fn download_backup(
 
     let file_size = tokio::fs::metadata(&path)
         .await
-        .map_err(|_| AppError::NotFound("Backup file not found.".into()))?
+        .map_err(|_error| AppError::NotFound("Backup file not found.".into()))?
         .len();
 
     let file = tokio::fs::File::open(&path)
         .await
-        .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
+        .map_err(|_error| AppError::NotFound("Backup file not found.".into()))?;
     let cleanup_temp = kind == "temp-board" && query.cleanup.as_deref() == Some("1");
     let stream: Pin<
         Box<dyn Stream<Item = std::result::Result<axum::body::Bytes, std::io::Error>> + Send>,
@@ -260,7 +258,7 @@ pub async fn download_backup(
     let disposition = format!("attachment; filename=\"{safe_filename}\"");
     Ok((
         [
-            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (header::CONTENT_TYPE, "application/zip".to_owned()),
             (header::CONTENT_DISPOSITION, disposition),
             (header::CONTENT_LENGTH, file_size.to_string()),
         ],
@@ -273,9 +271,7 @@ pub async fn backup_progress_json(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
@@ -298,7 +294,7 @@ pub async fn backup_progress_json(
     );
 
     Ok((
-        [(header::CONTENT_TYPE, "application/json".to_string())],
+        [(header::CONTENT_TYPE, "application/json".to_owned())],
         json,
     )
         .into_response())
@@ -311,9 +307,7 @@ pub async fn delete_backup(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<DeleteBackupForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let safe_filename = sanitize_saved_backup_ref(&form.filename)?;

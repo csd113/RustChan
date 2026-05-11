@@ -83,13 +83,13 @@ impl IntoResponse for ChanError {
             AppError::InvalidMediaType(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg),
             AppError::DbBusy => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "Database busy — retry shortly.".to_string(),
+                "Database busy — retry shortly.".to_owned(),
             ),
             AppError::Internal(e) => {
                 tracing::error!("ChanNet internal error: {:?}", e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "An internal error occurred.".to_string(),
+                    "An internal error occurred.".to_owned(),
                 )
             }
             AppError::Tls(msg) => {

@@ -83,11 +83,11 @@ pub enum AdminAction {
 
 // ─── Admin CLI mode ───────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
     use crate::{db, utils::crypto};
-    use chrono::TimeZone;
-    use std::io::Write;
+    use chrono::TimeZone as _;
+    use std::io::Write as _;
 
     let db_path = std::path::Path::new(&crate::config::CONFIG.database_path);
     let db_parent = super::parent_dir_or_current(db_path);
@@ -101,7 +101,10 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
             crypto::validate_password(&password)?;
             let hash = crypto::hash_password(&password)?;
             let id = db::create_admin(&conn, &username, &hash)?;
-            println!("✓ Admin '{username}' created (id={id}).");
+            writeln!(
+                std::io::stdout().lock(),
+                "✓ Admin '{username}' created (id={id})."
+            )?;
         }
         AdminAction::ResetPassword {
             username,
@@ -112,21 +115,32 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("Admin '{username}' not found."))?;
             let hash = crypto::hash_password(&new_password)?;
             db::update_admin_password(&conn, &username, &hash)?;
-            println!("✓ Password updated for '{username}'.");
+            writeln!(
+                std::io::stdout().lock(),
+                "✓ Password updated for '{username}'."
+            )?;
         }
         AdminAction::ListAdmins => {
             let rows = db::list_admins(&conn)?;
             if rows.is_empty() {
-                println!("No admins. Run: rustchan-cli admin create-admin <user> <pass>");
+                writeln!(
+                    std::io::stdout().lock(),
+                    "No admins. Run: rustchan-cli admin create-admin <user> <pass>"
+                )?;
             } else {
-                println!("{:<6} {:<24} Created", "ID", "Username");
-                println!("{}", "-".repeat(45));
+                writeln!(
+                    std::io::stdout().lock(),
+                    "{:<6} {:<24} Created",
+                    "ID",
+                    "Username"
+                )?;
+                writeln!(std::io::stdout().lock(), "{}", "-".repeat(45))?;
                 for (id, user, ts) in &rows {
                     let date = chrono::Local
                         .timestamp_opt(*ts, 0)
                         .single()
-                        .map_or_else(|| "?".to_string(), |d| d.format("%Y-%m-%d").to_string());
-                    println!("{id:<6} {user:<24} {date}");
+                        .map_or_else(|| "?".to_owned(), |d| d.format("%Y-%m-%d").to_string());
+                    writeln!(std::io::stdout().lock(), "{id:<6} {user:<24} {date}")?;
                 }
             }
         }
@@ -166,37 +180,56 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                 if allow_video { "yes" } else { "no" },
                 if allow_audio { "yes" } else { "no" },
             );
-            println!("✓ Board /{short}/ — {name}{nsfw_str} created (id={id}).{media_info}");
+            writeln!(
+                std::io::stdout().lock(),
+                "✓ Board /{short}/ — {name}{nsfw_str} created (id={id}).{media_info}"
+            )?;
         }
         AdminAction::DeleteBoard { short } => {
             let board = db::get_board_by_short(&conn, &short)?
                 .ok_or_else(|| anyhow::anyhow!("Board /{short}/ not found."))?;
-            print!("Delete /{short}/ and ALL its content? Type 'yes' to confirm: ");
-            std::io::stdout().flush()?;
+            {
+                let mut stdout = std::io::stdout().lock();
+                write!(
+                    stdout,
+                    "Delete /{short}/ and ALL its content? Type 'yes' to confirm: "
+                )?;
+                stdout.flush()?;
+            }
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
             if input.trim() != "yes" {
-                println!("Aborted.");
+                writeln!(std::io::stdout().lock(), "Aborted.")?;
                 return Ok(());
             }
             db::delete_board(&conn, board.id)?;
-            println!("✓ Board /{short}/ deleted.");
+            writeln!(std::io::stdout().lock(), "✓ Board /{short}/ deleted.")?;
         }
         AdminAction::ListBoards => {
             let boards = db::get_all_boards(&conn)?;
             if boards.is_empty() {
-                println!("No boards. Run: rustchan-cli admin create-board <short> <n>");
+                writeln!(
+                    std::io::stdout().lock(),
+                    "No boards. Run: rustchan-cli admin create-board <short> <n>"
+                )?;
             } else {
-                println!("{:<5} {:<12} {:<22} NSFW", "ID", "Short", "Name");
-                println!("{}", "-".repeat(50));
+                writeln!(
+                    std::io::stdout().lock(),
+                    "{:<5} {:<12} {:<22} NSFW",
+                    "ID",
+                    "Short",
+                    "Name"
+                )?;
+                writeln!(std::io::stdout().lock(), "{}", "-".repeat(50))?;
                 for b in &boards {
-                    println!(
+                    writeln!(
+                        std::io::stdout().lock(),
                         "{:<5} /{:<11} {:<22} {}",
                         b.id,
                         format!("{}/", b.short_name),
                         b.name,
                         if b.nsfw { "yes" } else { "no" }
-                    );
+                    )?;
                 }
             }
         }
@@ -212,25 +245,31 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
             let exp_str = expires
                 .and_then(|ts| chrono::Local.timestamp_opt(ts, 0).single())
                 .map_or_else(
-                    || "permanent".to_string(),
+                    || "permanent".to_owned(),
                     |d| d.format("%Y-%m-%d %H:%M").to_string(),
                 );
-            println!("✓ Ban #{id} added (expires: {exp_str}).");
+            writeln!(
+                std::io::stdout().lock(),
+                "✓ Ban #{id} added (expires: {exp_str})."
+            )?;
         }
         AdminAction::Unban { ban_id } => {
             db::remove_ban(&conn, ban_id)?;
-            println!("✓ Ban #{ban_id} lifted.");
+            writeln!(std::io::stdout().lock(), "✓ Ban #{ban_id} lifted.")?;
         }
         AdminAction::ListBans => {
             let bans = db::list_bans(&conn)?;
             if bans.is_empty() {
-                println!("No active bans.");
+                writeln!(std::io::stdout().lock(), "No active bans.")?;
             } else {
-                println!(
+                writeln!(
+                    std::io::stdout().lock(),
                     "{:<5} {:<18} {:<28} Expires",
-                    "ID", "IP Hash (partial)", "Reason"
-                );
-                println!("{}", "-".repeat(75));
+                    "ID",
+                    "IP Hash (partial)",
+                    "Reason"
+                )?;
+                writeln!(std::io::stdout().lock(), "{}", "-".repeat(75))?;
                 for b in &bans {
                     // Use .get(..16) for the same defensive
                     // safety as the ip_list slice above.
@@ -239,12 +278,15 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                         .expires_at
                         .and_then(|ts| chrono::Local.timestamp_opt(ts, 0).single())
                         .map_or_else(
-                            || "Permanent".to_string(),
+                            || "Permanent".to_owned(),
                             |d| d.format("%Y-%m-%d %H:%M").to_string(),
                         );
                     let ban_id = b.id;
                     let reason = b.reason.as_deref().unwrap_or("");
-                    println!("{ban_id:<5} {partial:<18} {reason:<28} {expires}");
+                    writeln!(
+                        std::io::stdout().lock(),
+                        "{ban_id:<5} {partial:<18} {reason:<28} {expires}"
+                    )?;
                 }
             }
         }

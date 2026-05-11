@@ -15,10 +15,8 @@ pub(super) fn check_disk_space(dir: &Path, needed_bytes: usize) -> Result<()> {
             let mut stat: libc::statvfs = std::mem::zeroed();
             if libc::statvfs(path_cstr.as_ptr(), &raw mut stat) == 0 {
                 // The platform-specific type conversion is intentional here and keeps the libc call straightforward.
-                #[allow(clippy::unnecessary_cast)]
                 // The platform-specific type conversion is intentional here and keeps the libc call straightforward.
-                #[allow(clippy::useless_conversion, clippy::cast_lossless)]
-                let free_bytes = u64::from(stat.f_bavail).saturating_mul(u64::from(stat.f_frsize));
+                let free_bytes = u64::from(stat.f_bavail).saturating_mul(stat.f_frsize);
                 let needed = (needed_bytes as u64).saturating_mul(2);
                 if free_bytes < needed {
                     return Err(anyhow::anyhow!(

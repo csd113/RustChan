@@ -102,7 +102,7 @@ pub(crate) fn create_full_backup_to_server(
     let mut files = Vec::new();
     push_v4_file_entry(
         &mut files,
-        "db/rustchan.sqlite3".to_string(),
+        "db/rustchan.sqlite3".to_owned(),
         None,
         None,
         v4::BackupFileKind::Db,
@@ -117,7 +117,7 @@ pub(crate) fn create_full_backup_to_server(
         let (size, sha256) = copy_regular_file_to_backup(&settings_path, &destination)?;
         push_v4_file_entry(
             &mut files,
-            "config/settings.toml".to_string(),
+            "config/settings.toml".to_owned(),
             None,
             None,
             v4::BackupFileKind::Settings,
@@ -151,8 +151,8 @@ pub(crate) fn create_full_backup_to_server(
                 v4::runtime_upload_path_to_logical(board_short, runtime_rel)?;
             Ok((
                 logical_path,
-                Some(runtime_rel.to_string()),
-                Some(board_short.to_string()),
+                Some(runtime_rel.to_owned()),
+                Some(board_short.to_owned()),
                 kind,
             ))
         },
@@ -200,7 +200,7 @@ pub(crate) fn create_full_backup_to_server(
                 let logical_path = format!("tor-keys/{runtime_rel}");
                 Ok((
                     logical_path,
-                    Some(runtime_rel.to_string()),
+                    Some(runtime_rel.to_owned()),
                     None,
                     v4::BackupFileKind::TorKey,
                 ))
@@ -210,12 +210,12 @@ pub(crate) fn create_full_backup_to_server(
     }
 
     let mut manifest = v4::BackupManifest {
-        format: v4::BACKUP_V4_FORMAT.to_string(),
-        archive_container: v4::BACKUP_V4_ARCHIVE_CONTAINER.to_string(),
+        format: v4::BACKUP_V4_FORMAT.to_owned(),
+        archive_container: v4::BACKUP_V4_ARCHIVE_CONTAINER.to_owned(),
         backup_id,
         created_at: Utc::now().timestamp(),
         completed_at: None,
-        rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
+        rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
         scope: v4::BackupScope::FullSite,
         storage_mode,
         included_boards: boards,
@@ -229,7 +229,7 @@ pub(crate) fn create_full_backup_to_server(
             file_inventory: true,
         },
         db_snapshot: Some(v4::DbSnapshotInfo {
-            path: "db/rustchan.sqlite3".to_string(),
+            path: "db/rustchan.sqlite3".to_owned(),
             size: db_snapshot_size,
             sha256: db_snapshot_sha,
             integrity_check: snapshot_db_health_output(&conn, "integrity_check"),
@@ -328,7 +328,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
     let mut files = Vec::new();
     push_v4_file_entry(
         &mut files,
-        "db/rustchan.sqlite3".to_string(),
+        "db/rustchan.sqlite3".to_owned(),
         None,
         None,
         v4::BackupFileKind::Db,
@@ -342,7 +342,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
         let (size, sha256) = copy_regular_file_to_backup(&settings_path, &destination)?;
         push_v4_file_entry(
             &mut files,
-            "config/settings.toml".to_string(),
+            "config/settings.toml".to_owned(),
             None,
             None,
             v4::BackupFileKind::Settings,
@@ -366,7 +366,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
         write_pretty_json_file(&repair_request_path, &repair_request)?;
     push_v4_file_entry(
         &mut files,
-        "maintenance/repair-request.json".to_string(),
+        "maintenance/repair-request.json".to_owned(),
         None,
         None,
         v4::BackupFileKind::Maintenance,
@@ -383,7 +383,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
     })?;
     push_v4_file_entry(
         &mut files,
-        "maintenance/pre-integrity-check.txt".to_string(),
+        "maintenance/pre-integrity-check.txt".to_owned(),
         None,
         None,
         v4::BackupFileKind::Maintenance,
@@ -400,7 +400,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
     })?;
     push_v4_file_entry(
         &mut files,
-        "maintenance/pre-foreign-key-check.txt".to_string(),
+        "maintenance/pre-foreign-key-check.txt".to_owned(),
         None,
         None,
         v4::BackupFileKind::Maintenance,
@@ -435,7 +435,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
     })?;
     push_v4_file_entry(
         &mut files,
-        "maintenance/pre-schema.sql".to_string(),
+        "maintenance/pre-schema.sql".to_owned(),
         None,
         None,
         v4::BackupFileKind::Maintenance,
@@ -460,7 +460,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
         let (size, sha256) = write_pretty_json_file(&pending_fs_path, &snapshot)?;
         push_v4_file_entry(
             &mut files,
-            "maintenance/pending-fs-ops.json".to_string(),
+            "maintenance/pending-fs-ops.json".to_owned(),
             None,
             None,
             v4::BackupFileKind::PendingFsOps,
@@ -473,12 +473,12 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
     log_backup_phase(crate::middleware::backup_phase::DONE);
 
     let manifest = v4::BackupManifest {
-        format: v4::BACKUP_V4_FORMAT.to_string(),
-        archive_container: v4::BACKUP_V4_ARCHIVE_CONTAINER.to_string(),
+        format: v4::BACKUP_V4_FORMAT.to_owned(),
+        archive_container: v4::BACKUP_V4_ARCHIVE_CONTAINER.to_owned(),
         backup_id,
         created_at: Utc::now().timestamp(),
         completed_at: None,
-        rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
+        rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
         scope: v4::BackupScope::PreMaintenance,
         storage_mode: v4::BackupStorageMode::Directory,
         included_boards: Vec::new(),
@@ -492,7 +492,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
             file_inventory: false,
         },
         db_snapshot: Some(v4::DbSnapshotInfo {
-            path: "db/rustchan.sqlite3".to_string(),
+            path: "db/rustchan.sqlite3".to_owned(),
             size: db_snapshot_size,
             sha256: db_snapshot_sha,
             integrity_check: Some(pre_integrity.clone()),
@@ -501,14 +501,14 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
         files,
         parts: Vec::new(),
         maintenance: Some(v4::MaintenanceMetadata {
-            operation: Some(operation.to_string()),
+            operation: Some(operation.to_owned()),
             job_id: Some(job_id),
             requested_at: Some(Utc::now().timestamp()),
-            risk_class: Some("db_mutating".to_string()),
+            risk_class: Some("db_mutating".to_owned()),
             includes_uploads: false,
             includes_file_inventory: false,
             includes_tor_keys: false,
-            reason: Some(reason.to_string()),
+            reason: Some(reason.to_owned()),
             pre_integrity_check: Some(pre_integrity),
             pre_foreign_key_check: Some(pre_foreign_key),
         }),
@@ -683,7 +683,6 @@ fn parse_split_zip_part_size(form: &FullBackupCreateForm) -> Result<u64> {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
 pub async fn create_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -694,14 +693,14 @@ pub async fn create_full_backup(
     let _maintenance_guard = state.maintenance_gate.try_begin("Full backup creation")?;
     let session_id = jar
         .get(super::super::SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     super::super::require_admin_post_origin_and_csrf(
         &jar,
         &headers,
         Some(peer),
         form.csrf.as_deref(),
     )?;
-    let progress = state.backup_progress.clone();
+    let progress = std::sync::Arc::clone(&state.backup_progress);
     let copies_to_keep = state.auto_full_backup_settings.snapshot().copies_to_keep;
     let include_tor_hidden_service_keys = form.include_tor_hidden_service_keys;
     let storage_mode = parse_full_backup_storage_mode(&form)?;
@@ -741,7 +740,7 @@ pub struct BoardBackupCreateForm {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub async fn create_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -753,7 +752,7 @@ pub async fn create_board_backup(
 
     let session_id = jar
         .get(super::super::SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     super::super::require_admin_post_origin_and_csrf(
         &jar,
         &headers,
@@ -774,7 +773,7 @@ pub async fn create_board_backup(
     let download_after_create = form.download_after_create.as_deref() == Some("1");
 
     let upload_dir = CONFIG.upload_dir.clone();
-    let progress = state.backup_progress.clone();
+    let progress = std::sync::Arc::clone(&state.backup_progress);
 
     let filename = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -912,12 +911,12 @@ pub async fn create_board_backup(
             )?;
 
             let manifest_v4 = v4::BackupManifest {
-                format: v4::BACKUP_V4_FORMAT.to_string(),
-                archive_container: v4::BACKUP_V4_ARCHIVE_CONTAINER.to_string(),
+                format: v4::BACKUP_V4_FORMAT.to_owned(),
+                archive_container: v4::BACKUP_V4_ARCHIVE_CONTAINER.to_owned(),
                 backup_id,
                 created_at: Utc::now().timestamp(),
                 completed_at: None,
-                rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
+                rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
                 scope: v4::BackupScope::Board,
                 storage_mode: v4::BackupStorageMode::Directory,
                 included_boards: boards,
@@ -981,7 +980,7 @@ pub async fn create_board_backup(
             "board": board_short_for_flash,
         });
         return Ok((
-            [(header::CONTENT_TYPE, "application/json".to_string())],
+            [(header::CONTENT_TYPE, "application/json".to_owned())],
             body.to_string(),
         )
             .into_response());
@@ -1025,7 +1024,7 @@ pub(super) fn build_full_backup_manifest(
     Ok(super::common::FullBackupManifest {
         version: 3,
         generated_at: Utc::now().timestamp(),
-        rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
+        rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
         db_bytes,
         upload_file_count,
         favicon_file_count,
@@ -1085,7 +1084,7 @@ pub(super) fn build_board_backup_manifest(
                 })
             },
         )
-        .map_err(|_| AppError::NotFound(format!("Board '{board_short}' not found")))?;
+        .map_err(|_error| AppError::NotFound(format!("Board '{board_short}' not found")))?;
     super::common::validate_board_short_name(&board.short_name)?;
 
     let board_id = board.id;
@@ -1522,7 +1521,7 @@ fn materialize_split_zip_parts(
             })?;
             entry.zip_part = Some(part_filename.clone());
             entry.zip_entry_path = Some(entry.logical_path.clone());
-            entry.compression_method = Some("zip".to_string());
+            entry.compression_method = Some("zip".to_owned());
         }
         part_infos.push(v4::BackupPartInfo {
             filename: part_filename,
@@ -1714,7 +1713,7 @@ fn finalize_v4_backup_root(root_dir: &Path, mut manifest: v4::BackupManifest) ->
     manifest.completed_at = Some(Utc::now().timestamp());
 
     let mut metadata = v4::BackupMetadata {
-        format: v4::BACKUP_V4_FORMAT.to_string(),
+        format: v4::BACKUP_V4_FORMAT.to_owned(),
         backup_id: manifest.backup_id.clone(),
         scope: manifest.scope,
         storage_mode: manifest.storage_mode,
@@ -1958,23 +1957,23 @@ mod tests {
     fn split_zip_part_planner_does_not_create_empty_parts() {
         let files = vec![
             v4::BackupFileEntry {
-                logical_path: "b.txt".to_string(),
+                logical_path: "b.txt".to_owned(),
                 runtime_logical_path: None,
                 board: None,
                 kind: v4::BackupFileKind::Settings,
                 size: 6,
-                sha256: "b".to_string(),
+                sha256: "b".to_owned(),
                 zip_part: None,
                 zip_entry_path: None,
                 compression_method: None,
             },
             v4::BackupFileEntry {
-                logical_path: "a.txt".to_string(),
+                logical_path: "a.txt".to_owned(),
                 runtime_logical_path: None,
                 board: None,
                 kind: v4::BackupFileKind::Settings,
                 size: 6,
-                sha256: "a".to_string(),
+                sha256: "a".to_owned(),
                 zip_part: None,
                 zip_entry_path: None,
                 compression_method: None,
@@ -1990,12 +1989,12 @@ mod tests {
     #[test]
     fn split_zip_part_planner_marks_oversized_single_file_part() {
         let files = vec![v4::BackupFileEntry {
-            logical_path: "huge.bin".to_string(),
+            logical_path: "huge.bin".to_owned(),
             runtime_logical_path: None,
             board: None,
             kind: v4::BackupFileKind::OriginalMedia,
             size: 128,
-            sha256: "huge".to_string(),
+            sha256: "huge".to_owned(),
             zip_part: None,
             zip_entry_path: None,
             compression_method: None,
@@ -2033,8 +2032,8 @@ mod tests {
                 version: 1,
                 board: crate::handlers::admin::backup::types::board_backup_types::BoardRow {
                     id: 1,
-                    short_name: "a/b".to_string(),
-                    name: "Bad".to_string(),
+                    short_name: "a/b".to_owned(),
+                    name: "Bad".to_owned(),
                     description: String::new(),
                     nsfw: false,
                     max_threads: 100,
@@ -2054,8 +2053,8 @@ mod tests {
                     show_poster_ids: false,
                     collapse_greentext: false,
                     post_cooldown_secs: 0,
-                    banner_mode: "inherit".to_string(),
-                    access_mode: "public".to_string(),
+                    banner_mode: "inherit".to_owned(),
+                    access_mode: "public".to_owned(),
                     access_password_hash: String::new(),
                     created_at: 1,
                 },

@@ -64,7 +64,7 @@ fn parse_ffmpeg_timeout_secs_input(input: Option<&str>) -> Result<u64> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AppError::BadRequest("Video re-encoding timeout is required.".into()))?;
-    let timeout_secs = raw.parse::<u64>().map_err(|_| {
+    let timeout_secs = raw.parse::<u64>().map_err(|_error| {
         AppError::BadRequest("Video re-encoding timeout must be a whole number of seconds.".into())
     })?;
     crate::config::validate_ffmpeg_timeout_secs(timeout_secs)
@@ -94,7 +94,7 @@ fn parse_media_prune_size_input(
             "Maximum active content size cannot be negative.".into(),
         ));
     }
-    let amount = raw.parse::<u64>().map_err(|_| {
+    let amount = raw.parse::<u64>().map_err(|_error| {
         AppError::BadRequest("Maximum active content size must be a whole number.".into())
     })?;
     let multiplier = match unit.unwrap_or("mib") {
@@ -125,9 +125,7 @@ pub async fn update_media_settings(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<MediaSettingsForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let timeout_secs = match parse_ffmpeg_timeout_secs_input(form.ffmpeg_timeout_secs.as_deref()) {
@@ -195,9 +193,7 @@ pub async fn admin_vacuum(
     Form(form): Form<VacuumForm>,
 ) -> Result<Response> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
@@ -248,9 +244,7 @@ pub async fn admin_db_check(
     Form(form): Form<DbMaintenanceForm>,
 ) -> Result<Response> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
@@ -292,9 +286,7 @@ pub async fn admin_db_repair(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<DbMaintenanceForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
@@ -313,7 +305,7 @@ pub async fn admin_db_repair(
         .maintenance_gate
         .try_begin("Database maintenance rebuild")?;
     let job_id = state.db_maintenance_jobs.mark_running();
-    let progress = state.backup_progress.clone();
+    let progress = std::sync::Arc::clone(&state.backup_progress);
     let pool = state.db.clone();
     let db_maintenance_jobs = state.db_maintenance_jobs.clone();
 
@@ -345,7 +337,7 @@ pub async fn admin_db_repair(
                     &conn,
                     Some(db::DbRepairBackup {
                         backup_id: backup_id.clone(),
-                        backup_type: "DB + config".to_string(),
+                        backup_type: "DB + config".to_owned(),
                         backup_path: crate::config::backups_dir()
                             .join(&backup_id)
                             .display()
@@ -391,9 +383,7 @@ pub async fn admin_db_repair_progress_json(
     jar: CookieJar,
     Query(query): Query<DbRepairStatusQuery>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -412,7 +402,7 @@ pub async fn admin_db_repair_progress_json(
         query.job_id,
     );
     Ok((
-        [(header::CONTENT_TYPE, "application/json".to_string())],
+        [(header::CONTENT_TYPE, "application/json".to_owned())],
         payload.to_string(),
     )
         .into_response())
@@ -527,14 +517,14 @@ fn backup_percent(phase: u64, files_done: u64, files_total: u64) -> u64 {
 fn backup_progress_label(phase: u64, files_done: u64, files_total: u64) -> String {
     match phase {
         crate::middleware::backup_phase::SNAPSHOT_DB => {
-            "Creating Backup v4 DB snapshot...".to_string()
+            "Creating Backup v4 DB snapshot...".to_owned()
         }
         crate::middleware::backup_phase::COUNT_FILES => {
-            "Writing Backup v4 maintenance metadata...".to_string()
+            "Writing Backup v4 maintenance metadata...".to_owned()
         }
         crate::middleware::backup_phase::COMPRESS => {
             if files_total == 0 {
-                "Copying files into the Backup v4 folder...".to_string()
+                "Copying files into the Backup v4 folder...".to_owned()
             } else {
                 format!(
                     "Copying files into the Backup v4 folder... {files_done}/{files_total} files"
@@ -542,9 +532,9 @@ fn backup_progress_label(phase: u64, files_done: u64, files_total: u64) -> Strin
             }
         }
         crate::middleware::backup_phase::DONE => {
-            "Backup v4 pre-maintenance backup complete...".to_string()
+            "Backup v4 pre-maintenance backup complete...".to_owned()
         }
-        _ => "Preparing Backup v4 pre-maintenance backup...".to_string(),
+        _ => "Preparing Backup v4 pre-maintenance backup...".to_owned(),
     }
 }
 
@@ -553,9 +543,7 @@ pub async fn admin_db_repair_status(
     jar: CookieJar,
     Query(query): Query<DbRepairStatusQuery>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
 
     let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
     tokio::task::spawn_blocking({
@@ -580,7 +568,7 @@ pub async fn admin_db_repair_status(
 fn db_repair_status_url(job_id: Option<u64>) -> String {
     match job_id {
         Some(job_id) => format!("/admin/db/repair/status?job_id={job_id}"),
-        None => "/admin/db/repair".to_string(),
+        None => "/admin/db/repair".to_owned(),
     }
 }
 
@@ -751,11 +739,11 @@ mod tests {
         let post = crate::db::NewPost {
             thread_id: 0,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
-            subject: Some("repair thread".to_string()),
-            body: "repair test body".to_string(),
-            body_html: "repair test body".to_string(),
+            subject: Some("repair thread".to_owned()),
+            body: "repair test body".to_owned(),
+            body_html: "repair test body".to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -767,7 +755,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "repair-token".to_string(),
+            deletion_token: "repair-token".to_owned(),
             is_op: true,
         };
         crate::db::create_thread_with_optional_poll(
@@ -982,7 +970,7 @@ mod tests {
             let mut failure = PRE_REPAIR_BACKUP_FAILURE
                 .lock()
                 .expect("backup failure mutex");
-            *failure = Some("simulated pre-repair backup failure".to_string());
+            *failure = Some("simulated pre-repair backup failure".to_owned());
         }
 
         let router = repair_router(state.clone());

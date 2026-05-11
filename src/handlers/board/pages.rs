@@ -39,7 +39,7 @@ pub async fn index(
 
     let admin_session = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let admin_session_for_load = admin_session.clone();
     let (
         board_stats,
@@ -217,7 +217,7 @@ pub async fn board_index(
     let (jar, csrf) = ensure_csrf(jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
 
     let page: i64 = params
         .get("page")
@@ -311,12 +311,9 @@ pub async fn board_index(
             .summaries
             .iter()
             .filter_map(|summary| {
-                thread_activity_markers
-                    .get(&summary.thread.id)
-                    .and_then(|marker| {
-                        let unread = (summary.thread.reply_count - marker.seen_reply_count).max(0);
-                        (unread > 0).then_some((summary.thread.id, unread))
-                    })
+                let marker = thread_activity_markers.get(&summary.thread.id)?;
+                let unread = (summary.thread.reply_count - marker.seen_reply_count).max(0);
+                (unread > 0).then_some((summary.thread.id, unread))
             })
             .collect::<HashMap<_, _>>()
     } else {
@@ -354,7 +351,7 @@ pub async fn board_index(
             crate::utils::crypto::sha256_hex(badge_parts.join("|").as_bytes())
         )
     } else {
-        "-na0".to_string()
+        "-na0".to_owned()
     };
     let etag = format!(
         "\"{}-{}-{page}{admin_tag}{post_tag}{greentext_tag}-t{theme_tag}{banner_tag}{activity_tag}-{}\"",

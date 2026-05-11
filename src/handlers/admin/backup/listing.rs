@@ -2,7 +2,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
-use chrono::TimeZone;
+use chrono::TimeZone as _;
 use std::collections::HashSet;
 
 const BACKUP_LIST_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -36,8 +36,8 @@ pub enum BackupListKind {
 
 fn backup_cache_key(kind: BackupListKind) -> String {
     match kind {
-        BackupListKind::Full => "full".to_string(),
-        BackupListKind::Board => "board".to_string(),
+        BackupListKind::Full => "full".to_owned(),
+        BackupListKind::Board => "board".to_owned(),
     }
 }
 
@@ -83,10 +83,10 @@ const fn metadata_scope_matches(kind: BackupListKind, scope: v4::BackupScope) ->
 
 fn scope_label(scope: v4::BackupScope) -> String {
     match scope {
-        v4::BackupScope::FullSite => "Full site".to_string(),
-        v4::BackupScope::Board => "Board".to_string(),
-        v4::BackupScope::SelectedBoards => "Selected boards".to_string(),
-        v4::BackupScope::PreMaintenance => "Pre-maintenance".to_string(),
+        v4::BackupScope::FullSite => "Full site".to_owned(),
+        v4::BackupScope::Board => "Board".to_owned(),
+        v4::BackupScope::SelectedBoards => "Selected boards".to_owned(),
+        v4::BackupScope::PreMaintenance => "Pre-maintenance".to_owned(),
     }
 }
 
@@ -326,7 +326,7 @@ fn list_v4_backups(kind: BackupListKind) -> Vec<BackupInfo> {
             verified,
             verification_note: verified_note,
             scope: scope_label(metadata.scope),
-            mode: metadata.storage_mode.display_name().to_string(),
+            mode: metadata.storage_mode.display_name().to_owned(),
             part_count: metadata.part_count,
             part_filenames: manifest
                 .parts
@@ -335,7 +335,7 @@ fn list_v4_backups(kind: BackupListKind) -> Vec<BackupInfo> {
                     part.filename
                         .strip_prefix("parts/")
                         .unwrap_or(&part.filename)
-                        .to_string()
+                        .to_owned()
                 })
                 .collect(),
             contains_tor_hidden_service_keys: metadata.includes_tor_keys,
@@ -359,9 +359,7 @@ fn list_legacy_zip_backups(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> 
                 continue;
             }
             if let (Some(name), Ok(meta)) = (
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(ToString::to_string),
+                path.file_name().and_then(|n| n.to_str()).map(str::to_owned),
                 std::fs::metadata(&path),
             ) {
                 let modified_epoch = meta
@@ -377,15 +375,15 @@ fn list_legacy_zip_backups(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> 
                                 Ok(format!("verified legacy v{} backup", manifest.version)),
                                 manifest.boards,
                                 manifest.tor_hidden_service_keys_included,
-                                "Full site".to_string(),
-                                "Legacy ZIP".to_string(),
+                                "Full site".to_owned(),
+                                "Legacy ZIP".to_owned(),
                             ),
                             Err(error) => (
                                 Err(error),
                                 Vec::new(),
                                 false,
-                                "Full site".to_string(),
-                                "Legacy ZIP".to_string(),
+                                "Full site".to_owned(),
+                                "Legacy ZIP".to_owned(),
                             ),
                         },
                         BackupListKind::Board => match common::verify_board_backup_zip(&path) {
@@ -399,15 +397,15 @@ fn list_legacy_zip_backups(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> 
                                     name: manifest.board.name,
                                 }],
                                 false,
-                                "Board".to_string(),
-                                "Legacy ZIP".to_string(),
+                                "Board".to_owned(),
+                                "Legacy ZIP".to_owned(),
                             ),
                             Err(error) => (
                                 Err(error),
                                 Vec::new(),
                                 false,
-                                "Board".to_string(),
-                                "Legacy ZIP".to_string(),
+                                "Board".to_owned(),
+                                "Legacy ZIP".to_owned(),
                             ),
                         },
                     };

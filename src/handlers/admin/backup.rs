@@ -22,15 +22,15 @@ use crate::{
     utils::crypto::{new_session_id, verify_password},
 };
 use axum::{
-    extract::{Form, FromRequest, Multipart, Query, Request, State},
+    extract::{Form, FromRequest as _, Multipart, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use chrono::{Local, Utc};
 use futures::stream::Stream;
-use rusqlite::{backup::Backup, params, OptionalExtension};
+use rusqlite::{backup::Backup, params, OptionalExtension as _};
 use serde::Deserialize;
 use serde_json;
 use std::collections::HashMap;
@@ -141,16 +141,14 @@ use restore_full::refresh_live_site_state_from_db;
 use restore_full::restore_db_from_snapshot;
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
     let _maintenance_guard = state.maintenance_gate.try_begin("Full backup download")?;
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     let upload_dir = CONFIG.upload_dir.clone();
     let global_favicon_dir = crate::favicon::global_backup_source_dir();
     let global_banner_dir = crate::banner::backup_source_dir();
-    let progress = state.backup_progress.clone();
+    let progress = std::sync::Arc::clone(&state.backup_progress);
 
     let (tmp_path, filename, file_size) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -328,7 +326,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
     let disposition = format!("attachment; filename=\"{filename}\"");
     Ok((
         [
-            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (header::CONTENT_TYPE, "application/zip".to_owned()),
             (header::CONTENT_DISPOSITION, disposition),
             (header::CONTENT_LENGTH, file_size.to_string()),
         ],
@@ -502,7 +500,7 @@ pub(super) fn local_backup_timestamp_label() -> String {
 pub fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
     let candidate = dir.join(base_name);
     if !candidate.exists() {
-        return base_name.to_string();
+        return base_name.to_owned();
     }
 
     let stem = Path::new(base_name)
@@ -534,15 +532,12 @@ pub fn temp_board_download_dir() -> PathBuf {
 ///
 /// MEM-FIX: Same approach as `admin_backup` — build zip into a `NamedTempFile` on
 /// disk, then stream the result in 64 KiB chunks.
-#[allow(clippy::too_many_lines)]
 pub async fn board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     axum::extract::Path(board_short): axum::extract::Path<String>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     let safe_board = board_short
         .chars()
         .filter(char::is_ascii_alphanumeric)
@@ -563,7 +558,7 @@ pub async fn board_backup(
                 params![safe_board],
                 |_| Ok(()),
             )
-            .map_err(|_| AppError::NotFound(format!("Board '{safe_board}' not found")))?;
+            .map_err(|_error| AppError::NotFound(format!("Board '{safe_board}' not found")))?;
 
             latest_board_backup_filename(&safe_board).ok_or_else(|| {
                 AppError::NotFound(format!(
@@ -764,11 +759,10 @@ mod tests {
     }
 
     fn extract_location_query_param(location: &str, key: &str) -> Option<String> {
-        location.split_once('?').and_then(|(_, query)| {
-            query.split('&').find_map(|pair| {
-                let (name, value) = pair.split_once('=')?;
-                (name == key).then(|| value.to_string())
-            })
+        let (_, query) = location.split_once('?')?;
+        query.split('&').find_map(|pair| {
+            let (name, value) = pair.split_once('=')?;
+            (name == key).then(|| value.to_owned())
         })
     }
 
@@ -1209,7 +1203,7 @@ mod tests {
         crate::db::create_board(&source_conn, "tech", "Technology", "", false)
             .expect("create source board");
         let mut manifest = build_board_backup_manifest(&source_conn, "tech").expect("manifest");
-        manifest.board.access_mode = "definitely_not_valid".to_string();
+        manifest.board.access_mode = "definitely_not_valid".to_owned();
 
         let target_pool = crate::db::init_test_pool().expect("target pool");
         let mut target_conn = target_pool.get().expect("target conn");
@@ -1239,7 +1233,7 @@ mod tests {
         crate::db::create_board(&source_conn, "tech", "Technology", "", false)
             .expect("create source board");
         let mut manifest = build_board_backup_manifest(&source_conn, "tech").expect("manifest");
-        manifest.board.access_mode = "view_password".to_string();
+        manifest.board.access_mode = "view_password".to_owned();
         manifest.board.access_password_hash.clear();
 
         let target_pool = crate::db::init_test_pool().expect("target pool");
@@ -1440,7 +1434,7 @@ mod tests {
 
         assert_eq!(
             removed,
-            vec!["rustchan-backup-20260101_000000.zip".to_string()]
+            vec!["rustchan-backup-20260101_000000.zip".to_owned()]
         );
         assert!(!oldest.exists());
         assert!(middle.exists());

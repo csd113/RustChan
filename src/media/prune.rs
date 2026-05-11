@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use rusqlite::params;
 use std::path::{Component, Path, PathBuf};
 
@@ -201,7 +201,7 @@ fn candidate_path(
     };
     match safe_file_size(upload_root, &relative_path) {
         Ok(Some(size)) => CandidatePathLoad::Loaded(CandidatePath {
-            path: path.to_string(),
+            path: path.to_owned(),
             size,
         }),
         Ok(None) => db_size.and_then(|size| u64::try_from(size).ok()).map_or(
@@ -214,7 +214,7 @@ fn candidate_path(
                     "media file missing while DB still references it"
                 );
                 CandidatePathLoad::Loaded(CandidatePath {
-                    path: path.to_string(),
+                    path: path.to_owned(),
                     size,
                 })
             },

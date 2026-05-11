@@ -32,7 +32,7 @@ use crate::config::CONFIG;
 use crate::db::DbPool;
 use anyhow::Result;
 use dashmap::DashMap;
-use rand_core::{OsRng, RngCore};
+use rand_core::{OsRng, RngCore as _};
 use serde::{Deserialize, Serialize};
 use std::num::NonZero;
 use std::path::PathBuf;
@@ -263,7 +263,7 @@ pub fn start_worker_pool(
 
     (0..n)
         .map(|idx| {
-            let q = queue.clone();
+            let q = std::sync::Arc::clone(queue);
             tokio::spawn(async move {
                 worker_loop(idx, q, ffmpeg_available, ffmpeg_vp9_available).await;
             })
@@ -293,10 +293,8 @@ async fn worker_loop(
         // Atomically claim the next pending job (UPDATE … RETURNING).
         let pool_claim = queue.pool.clone();
         let claim = tokio::task::spawn_blocking(move || {
-            pool_claim
-                .get()
-                .map_err(anyhow::Error::from)
-                .and_then(|c| crate::db::claim_next_job(&c))
+            let c = pool_claim.get().map_err(anyhow::Error::from)?;
+            crate::db::claim_next_job(&c)
         })
         .await;
 
@@ -330,8 +328,8 @@ async fn worker_loop(
                     ffmpeg_available,
                     ffmpeg_vp9_available,
                     queue.pool.clone(),
-                    queue.in_progress.clone(),
-                    queue.active_video_jobs.clone(),
+                    std::sync::Arc::clone(&queue.in_progress),
+                    std::sync::Arc::clone(&queue.active_video_jobs),
                 )
                 .await;
                 // Previously pool_done.get() failures were
@@ -352,11 +350,11 @@ async fn worker_loop(
                                 )?;
                             }
                         }
-                        Err(ref e) if crate::db::is_stale_media_target_error(e) => {
+                        Err(e) if crate::db::is_stale_media_target_error(&e) => {
                             warn!("Worker {id}: job #{job_id} target is stale — {e}");
                             crate::db::complete_job(&c, job_id)?;
                         }
-                        Err(ref e) => {
+                        Err(e) => {
                             warn!("Worker {id}: job #{job_id} failed — {e}");
                             let failure_state = crate::db::fail_job(&c, job_id, &e.to_string())?;
                             if let Some(post_id) = media_post_id {
@@ -454,7 +452,6 @@ fn backoff_duration(consecutive_errors: u32) -> Duration {
 
 // ─── Job dispatch ─────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
 async fn handle_job(
     job: Job,
     ffmpeg_available: bool,
@@ -710,10 +707,10 @@ fn transcode_video_prepare(
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8: {}", src.display()))?;
         match crate::media::ffmpeg::probe_video_codec(src_str) {
-            Ok(ref codec) if codec == "av1" => {
+            Ok(codec) if codec == "av1" => {
                 tracing::info!(target: "workers", post_id = post_id, codec = "av1", "VideoTranscode: re-encoding WebM/AV1 to VP9");
             }
-            Ok(ref codec) => {
+            Ok(codec) => {
                 debug!(
                     "VideoTranscode: skipping WebM with codec '{}' for post {} (already VP8/VP9)",
                     codec, post_id
@@ -734,7 +731,7 @@ fn transcode_video_prepare(
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("Malformed filename: {}", src.display()))?
-        .to_string();
+        .to_owned();
 
     tracing::info!(target: "workers", post_id = post_id, file = %file_path, "VideoTranscode: starting");
 
@@ -753,11 +750,11 @@ fn transcode_video_prepare(
         .path()
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Temp file path is non-UTF-8"))?
-        .to_string();
+        .to_owned();
     let src_path_str = src
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8"))?
-        .to_string();
+        .to_owned();
 
     // Build the ffmpeg argument list as owned strings so it can cross the
     // async boundary without lifetime issues.
@@ -940,7 +937,7 @@ fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepar
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("Malformed audio filename: {}", src.display()))?
-        .to_string();
+        .to_owned();
     let thumb_size = CONFIG.thumb_size;
     let thumbs_dir = PathBuf::from(upload_dir).join(board_short).join("thumbs");
     std::fs::create_dir_all(&thumbs_dir)?;
@@ -955,12 +952,12 @@ fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepar
     let src_str = src
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8"))?
-        .to_string();
+        .to_owned();
     let tmp_str = tmp_png
         .path()
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Temp path is non-UTF-8"))?
-        .to_string();
+        .to_owned();
     let filter = format!(
         "showwavespic=s={thumb_size}x{}:colors=0x888888",
         thumb_size / 2
@@ -978,9 +975,9 @@ fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepar
         &tmp_str,
     ]
     .iter()
-    .map(|s| (*s).to_string())
+    .map(|s| (*s).to_owned())
     .collect();
-    Ok((args, png_abs, png_rel, src, file_path.to_string(), tmp_png))
+    Ok((args, png_abs, png_rel, src, file_path.to_owned(), tmp_png))
 }
 
 /// Blocking finalise phase for [`generate_waveform`]: atomically persist the
@@ -1199,7 +1196,7 @@ pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
 #[cfg(test)]
 mod tests {
     use super::{transcode_video_finalise, video_reencode_timeout_warning, waveform_finalise};
-    use std::io::Write;
+    use std::io::Write as _;
 
     fn file_hash_count(conn: &rusqlite::Connection, file_path: &str) -> i64 {
         conn.query_row(

@@ -13,7 +13,7 @@
 //   • If ffmpeg exits non-zero, the error includes the trimmed stderr so
 //     operators can diagnose codec or format issues without reading raw logs.
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use std::borrow::Cow;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -323,7 +323,7 @@ pub fn build_vp9_transcode_args(input: &str, output: &str) -> Vec<String> {
             "-cpu-used",
         ]
         .into_iter()
-        .map(str::to_string),
+        .map(str::to_owned),
     );
     args.push(cpu_used);
     args.extend(
@@ -333,7 +333,7 @@ pub fn build_vp9_transcode_args(input: &str, output: &str) -> Vec<String> {
             "-tile-columns",
         ]
         .into_iter()
-        .map(str::to_string),
+        .map(str::to_owned),
     );
     args.push(tile_columns);
     args.extend(
@@ -356,7 +356,7 @@ pub fn build_vp9_transcode_args(input: &str, output: &str) -> Vec<String> {
             output,
         ]
         .into_iter()
-        .map(str::to_string),
+        .map(str::to_owned),
     );
     args
 }

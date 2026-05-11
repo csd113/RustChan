@@ -52,7 +52,7 @@ pub(super) fn admin_xhr_error_response(error: &AppError) -> Response {
         AppError::Conflict(message) => Some((StatusCode::CONFLICT, message.clone())),
         AppError::DbBusy => Some((
             StatusCode::SERVICE_UNAVAILABLE,
-            "The server is temporarily busy. Please try again in a moment.".to_string(),
+            "The server is temporarily busy. Please try again in a moment.".to_owned(),
         )),
         AppError::Internal(error) => {
             tracing::error!("Internal admin restore XHR error: {:?}", error);
@@ -74,7 +74,7 @@ pub(super) fn admin_xhr_error_response(error: &AppError) -> Response {
         AppError::Tls(message) => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Unexpected admin restore error.".to_string(),
+            "Unexpected admin restore error.".to_owned(),
         ),
     };
 
@@ -320,7 +320,7 @@ pub(super) async fn restore_auth_preflight(
 ) -> Result<Option<String>> {
     let session_id = jar
         .get(super::SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     super::require_same_origin_request(headers, peer)?;
 
     {
@@ -360,7 +360,7 @@ pub(super) async fn stream_restore_upload_to_tempfile(
         .await
         .map_err(|error| AppError::BadRequest(format!("Multipart error: {error}")))?
     {
-        let field_name = field.name().unwrap_or("<unnamed>").to_string();
+        let field_name = field.name().unwrap_or("<unnamed>").to_owned();
         match field.name() {
             Some("_csrf") => {
                 if form_csrf.is_some() {
@@ -387,8 +387,8 @@ pub(super) async fn stream_restore_upload_to_tempfile(
                 restore_tor_hidden_service_keys = matches!(value.as_str(), "1" | "true" | "on");
             }
             Some("backup_file") => {
-                uploaded_filename = field.file_name().map(str::to_string);
-                uploaded_content_type = field.content_type().map(str::to_string);
+                uploaded_filename = field.file_name().map(str::to_owned);
+                uploaded_content_type = field.content_type().map(str::to_owned);
                 tracing::info!(
                     target: "admin",
                     route = kind.route(),
@@ -473,7 +473,7 @@ async fn read_restore_text_field(
         bytes.extend_from_slice(&chunk);
     }
     String::from_utf8(bytes)
-        .map_err(|_| AppError::BadRequest("Restore control field is not valid UTF-8.".into()))
+        .map_err(|_error| AppError::BadRequest("Restore control field is not valid UTF-8.".into()))
 }
 
 pub(super) fn validate_streamed_restore_upload(
@@ -605,7 +605,7 @@ mod tests {
     }
 
     fn restore_multipart_body(fields: &[(&str, &str)]) -> (String, Vec<u8>) {
-        let boundary = "rustchan-restore-test-boundary".to_string();
+        let boundary = "rustchan-restore-test-boundary".to_owned();
         let mut body = Vec::new();
         for (name, value) in fields {
             body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());

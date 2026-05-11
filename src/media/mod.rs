@@ -6,7 +6,7 @@ pub mod ffmpeg;
 pub mod prune;
 pub mod thumbnail;
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
 
 // ─── ProcessedMedia ───────────────────────────────────────────────────────────
@@ -184,7 +184,7 @@ impl MediaProcessor {
         Ok(ProcessedMedia {
             file_path: conv.final_path,
             thumbnail_path: actual_thumb_path,
-            mime_type: conv.final_mime.to_string(),
+            mime_type: conv.final_mime.to_owned(),
             was_converted: conv.was_converted,
             final_size: conv.final_size,
         })

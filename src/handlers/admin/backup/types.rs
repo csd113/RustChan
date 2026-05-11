@@ -5,7 +5,7 @@ pub(super) mod board_backup_types {
 
     #[derive(Serialize, Deserialize)]
     // This type mirrors serialized or render state, so the boolean count is an intentional tradeoff.
-    #[allow(clippy::struct_excessive_bools)]
+    #[expect(clippy::struct_excessive_bools)]
     pub struct BoardRow {
         pub id: i64,
         pub short_name: String,
@@ -66,11 +66,11 @@ pub(super) mod board_backup_types {
     }
 
     fn default_access_mode() -> String {
-        "public".to_string()
+        "public".to_owned()
     }
 
     fn default_banner_mode() -> String {
-        "inherit".to_string()
+        "inherit".to_owned()
     }
 
     #[derive(Serialize, Deserialize)]

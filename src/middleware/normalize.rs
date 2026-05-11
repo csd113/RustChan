@@ -4,7 +4,7 @@ use axum::{
     extract::Request,
     http::Uri,
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::{IntoResponse as _, Response},
 };
 
 pub async fn normalize_trailing_slash(req: Request, next: Next) -> Response {
@@ -14,7 +14,7 @@ pub async fn normalize_trailing_slash(req: Request, next: Next) -> Response {
     if path.len() > 1 && path.ends_with('/') {
         let stripped = path.trim_end_matches('/');
         let new_path_and_query = uri.query().map_or_else(
-            || stripped.to_string(),
+            || stripped.to_owned(),
             |query| format!("{stripped}?{query}"),
         );
 

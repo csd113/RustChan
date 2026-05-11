@@ -134,7 +134,6 @@ impl BoardAccessMode {
     #[must_use]
     // This alias remains for API clarity and backward-compatible call sites,
     // even though the newer helper is preferred in most code paths.
-    #[allow(dead_code)]
     pub const fn requires_post_password(self) -> bool {
         self.requires_unlock_for_posting()
     }
@@ -264,7 +263,7 @@ pub enum BannerPlacement {
 /// A board, e.g. /tech/ — Technology
 #[derive(Debug, Clone, Serialize, Deserialize)]
 // This type mirrors serialized or render state, so the boolean count is an intentional tradeoff.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 pub struct Board {
     pub id: i64,
     pub display_order: i64,

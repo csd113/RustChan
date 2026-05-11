@@ -20,7 +20,7 @@
 
 use anyhow::Result;
 use rusqlite::Connection;
-use rusqlite::OptionalExtension;
+use rusqlite::OptionalExtension as _;
 use uuid::Uuid;
 
 // SnapshotPost is defined in src/models.rs (not chan_net::snapshot) so that
@@ -222,10 +222,10 @@ pub fn insert_reply_into_thread(
     let gateway_post = crate::db::NewPost {
         thread_id,
         board_id,
-        name: author.to_string(),
+        name: author.to_owned(),
         tripcode: None,
         subject: None,
-        body: content.to_string(),
+        body: content.to_owned(),
         body_html,
         ip_hash: None,
         file_path: None,

@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
-use std::path::{Component, Path, PathBuf};
+use anyhow::{Context as _, Result};
+use std::path::{Path, PathBuf};
 
 /// Lexical prefix checks do not catch symlink escapes. Canonicalize both sides
 /// after rejecting symlink components so runtime paths stay inside their root.
@@ -43,34 +43,6 @@ pub fn canonical_parent_for_new_child(root: &Path, path: &Path) -> Result<PathBu
 
 /// Reject any existing symlink component in a path without following it.
 ///
-/// # Errors
-/// Returns an error if an existing path component is a symlink or the path
-/// contains parent-directory traversal.
-// Kept as a stricter building block for paths that are known not to traverse
-// platform-managed symlink roots such as macOS /var -> /private/var.
-#[allow(dead_code)]
-pub fn assert_no_symlink_path(path: &Path) -> Result<()> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir | Component::CurDir => {
-                current.push(component.as_os_str());
-            }
-            Component::Normal(part) => {
-                current.push(part);
-                let Ok(metadata) = std::fs::symlink_metadata(&current) else {
-                    continue;
-                };
-                if metadata.file_type().is_symlink() {
-                    anyhow::bail!("Runtime path contains a symlink.");
-                }
-            }
-            Component::ParentDir => anyhow::bail!("Runtime path contains parent traversal."),
-        }
-    }
-    Ok(())
-}
-
 /// Validate that a runtime path is a plain file, not a symlink or hardlink.
 ///
 /// # Errors

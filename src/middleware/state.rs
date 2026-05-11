@@ -94,12 +94,12 @@ impl MaintenanceGate {
         &self,
         label: &str,
     ) -> std::result::Result<MaintenanceGuard, crate::error::AppError> {
-        match self.semaphore.clone().try_acquire_owned() {
+        match std::sync::Arc::clone(&self.semaphore).try_acquire_owned() {
             Ok(permit) => {
-                *self.active_label.write() = Some(label.to_string());
+                *self.active_label.write() = Some(label.to_owned());
                 Ok(MaintenanceGuard {
                     _permit: permit,
-                    active_label: self.active_label.clone(),
+                    active_label: std::sync::Arc::clone(&self.active_label),
                 })
             }
             Err(_) => {
@@ -107,7 +107,7 @@ impl MaintenanceGate {
                     .active_label
                     .read()
                     .clone()
-                    .unwrap_or_else(|| "another maintenance operation".to_string());
+                    .unwrap_or_else(|| "another maintenance operation".to_owned());
                 Err(crate::error::AppError::Conflict(format!(
                     "{current} is already running. Try again after it finishes."
                 )))
@@ -270,7 +270,7 @@ impl Drop for MaintenanceGuard {
 }
 
 #[derive(Clone)]
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 // These booleans are independent runtime capability toggles shared across handlers.
 pub struct AppState {
     pub db: crate::db::DbPool,
@@ -345,7 +345,7 @@ mod tests {
 
         let second_job_id = jobs.mark_running();
         assert!(second_job_id > first_job_id);
-        assert!(jobs.mark_failed(second_job_id, "simulated failure".to_string()));
+        assert!(jobs.mark_failed(second_job_id, "simulated failure".to_owned()));
         match jobs.snapshot() {
             DbMaintenanceJobStatus::Failed { job_id, .. } => assert_eq!(job_id, second_job_id),
             DbMaintenanceJobStatus::Idle
@@ -417,7 +417,7 @@ mod tests {
         let first_job_id = jobs.mark_running();
         let second_job_id = jobs.mark_running();
 
-        assert!(!jobs.mark_failed(first_job_id, "stale failure".to_string()));
+        assert!(!jobs.mark_failed(first_job_id, "stale failure".to_owned()));
         match jobs.snapshot() {
             DbMaintenanceJobStatus::Running { job_id, .. } => assert_eq!(job_id, second_job_id),
             DbMaintenanceJobStatus::Idle
@@ -425,7 +425,7 @@ mod tests {
             | DbMaintenanceJobStatus::Failed { .. } => panic!("expected running status"),
         }
 
-        assert!(jobs.mark_failed(second_job_id, "current failure".to_string()));
+        assert!(jobs.mark_failed(second_job_id, "current failure".to_owned()));
         match jobs.snapshot() {
             DbMaintenanceJobStatus::Failed {
                 job_id, message, ..
@@ -445,7 +445,7 @@ mod tests {
         let first_job_id = jobs.mark_running();
         let second_job_id = jobs.mark_running();
 
-        assert!(!jobs.mark_failed(first_job_id, "join error".to_string()));
+        assert!(!jobs.mark_failed(first_job_id, "join error".to_owned()));
         match jobs.snapshot() {
             DbMaintenanceJobStatus::Running { job_id, phase, .. } => {
                 assert_eq!(job_id, second_job_id);

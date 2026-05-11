@@ -1,6 +1,6 @@
 // Tripcode parsing and hashing helpers.
 
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 
 /// Maximum allowed byte length for the raw name-field input.
 /// Prevents excessive memory allocation from adversarial inputs.
@@ -58,7 +58,6 @@ fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    // SAFETY: `is_char_boundary(end)` guarantees a valid split point.
     &s[..end]
 }
 
@@ -97,7 +96,7 @@ fn compute_tripcode(password: &str) -> String {
 /// - `input[i]`, `input[i+1]`, `input[i+2]` are guarded by `i + 2 < input.len()`.
 /// - `ALPHABET[x]` where `x` is produced by 6-bit masking (0‥63) into a
 ///   64-element array — always in bounds.
-#[allow(clippy::indexing_slicing)]
+#[expect(clippy::indexing_slicing)]
 fn base64url_encode(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 

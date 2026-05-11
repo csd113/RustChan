@@ -95,10 +95,10 @@ pub fn builtin_theme_rows(enabled_slugs: &[String]) -> Vec<Theme> {
     BUILTIN_THEMES
         .iter()
         .map(|theme| Theme {
-            slug: theme.slug.to_string(),
-            display_name: theme.display_name.to_string(),
-            description: theme.description.to_string(),
-            swatch_hex: theme.swatch_hex.to_string(),
+            slug: theme.slug.to_owned(),
+            display_name: theme.display_name.to_owned(),
+            description: theme.description.to_owned(),
+            swatch_hex: theme.swatch_hex.to_owned(),
             enabled: enabled_slugs
                 .iter()
                 .any(|slug| slug.eq_ignore_ascii_case(theme.slug)),

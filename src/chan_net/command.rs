@@ -72,7 +72,7 @@ where
                         format!("Malformed JSON: {rejection}")
                     }
                     JsonRejection::MissingJsonContentType(_) => {
-                        "Content-Type must be application/json".to_string()
+                        "Content-Type must be application/json".to_owned()
                     }
                     _ => rejection.to_string(),
                 };
@@ -246,7 +246,7 @@ pub async fn chan_command(
     Ok((
         axum::http::StatusCode::OK,
         [
-            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (header::CONTENT_TYPE, "application/zip".to_owned()),
             (header::CONTENT_DISPOSITION, disposition),
         ],
         zip_bytes,

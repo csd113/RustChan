@@ -4,8 +4,8 @@ use crate::error::{AppError, Result as AppResult};
 use crate::models::{
     BannerAsset, BannerPlacement, BannerScope, BannerTargetType, Board, BoardBannerMode,
 };
-use anyhow::{Context, Result};
-use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageFormat, ImageReader};
+use anyhow::{Context as _, Result};
+use image::{imageops::FilterType, DynamicImage, GenericImageView as _, ImageFormat, ImageReader};
 use std::{
     io::Cursor,
     path::{Component, Path, PathBuf},
@@ -102,8 +102,8 @@ pub fn board_appearance_anchor(board_short: &str) -> String {
 #[must_use]
 pub fn banner_admin_anchor(scope: BannerScope, board_short: Option<&str>) -> String {
     match scope {
-        BannerScope::Global => "global-banners".to_string(),
-        BannerScope::Home => "home-banners".to_string(),
+        BannerScope::Global => "global-banners".to_owned(),
+        BannerScope::Home => "home-banners".to_owned(),
         BannerScope::Board => board_appearance_anchor(board_short.unwrap_or_default()),
     }
 }
@@ -266,7 +266,7 @@ fn banner_target_value(
     target_value: &str,
 ) -> String {
     if selected_type == field_type {
-        target_value.to_string()
+        target_value.to_owned()
     } else {
         String::new()
     }
@@ -285,15 +285,15 @@ pub fn select_banner_target_value(
         BannerTargetType::InternalBoard => target_board_value_raw
             .unwrap_or_else(|| target_value_raw.unwrap_or_default())
             .trim()
-            .to_string(),
+            .to_owned(),
         BannerTargetType::InternalPath => target_thread_value_raw
             .unwrap_or_else(|| target_value_raw.unwrap_or_default())
             .trim()
-            .to_string(),
+            .to_owned(),
         BannerTargetType::ExternalUrl => target_external_url_raw
             .unwrap_or_else(|| target_value_raw.unwrap_or_default())
             .trim()
-            .to_string(),
+            .to_owned(),
     }
 }
 
@@ -317,7 +317,7 @@ pub fn parse_banner_target(
             })?;
             Ok((
                 BannerTargetType::InternalBoard,
-                board_path.trim_matches('/').to_string(),
+                board_path.trim_matches('/').to_owned(),
             ))
         }
         BannerTargetType::InternalPath => {
@@ -434,14 +434,14 @@ pub fn resolve_banner_href(
 
 #[must_use]
 pub fn safe_return_to(path: &str) -> String {
-    crate::utils::redirect::safe_internal_path_or(Some(path), "/").to_string()
+    crate::utils::redirect::safe_internal_path_or(Some(path), "/").to_owned()
 }
 
 #[must_use]
 pub fn normalize_internal_path(path: &str) -> Option<String> {
     let trimmed = path.trim();
     if crate::utils::redirect::is_basic_safe_internal_path(trimmed) {
-        Some(trimmed.to_string())
+        Some(trimmed.to_owned())
     } else {
         None
     }
@@ -477,16 +477,15 @@ pub fn choose_active_banner(
     settings: &BannerSiteSettings,
 ) -> (Option<BannerAsset>, String, bool) {
     if candidates.is_empty() {
-        return (None, "none".to_string(), false);
+        return (None, "none".to_owned(), false);
     }
     if candidates.len() == 1 {
         let only_asset = candidates.first().cloned();
         return (
             only_asset.clone(),
-            only_asset.as_ref().map_or_else(
-                || "none".to_string(),
-                |asset| format!("single-{}", asset.id),
-            ),
+            only_asset
+                .as_ref()
+                .map_or_else(|| "none".to_owned(), |asset| format!("single-{}", asset.id)),
             false,
         );
     }
@@ -500,7 +499,7 @@ pub fn choose_active_banner(
         let index = usize::try_from(bucket.rem_euclid(len)).unwrap_or(0);
         let asset = candidates.get(index).cloned();
         let fragment = asset.as_ref().map_or_else(
-            || "none".to_string(),
+            || "none".to_owned(),
             |item| format!("timer-{bucket}-{}", item.id),
         );
         return (asset, fragment, false);
@@ -511,7 +510,7 @@ pub fn choose_active_banner(
     let index = usize::try_from(nonce % len).unwrap_or(0);
     let asset = candidates.get(index).cloned();
     let fragment = asset.as_ref().map_or_else(
-        || "none".to_string(),
+        || "none".to_owned(),
         |item| format!("refresh-{nonce}-{}", item.id),
     );
     (asset, fragment, true)
@@ -614,7 +613,7 @@ fn resolve_from_candidates(
     let banner = asset.map(|asset| ResolvedBanner {
         image_url: banner_asset_url(&asset),
         href: resolve_banner_href(&asset, settings.allow_external_links, current_path),
-        alt: alt.to_string(),
+        alt: alt.to_owned(),
         asset,
     });
     BannerSelection {
@@ -777,7 +776,9 @@ fn stored_banner_path_after_write(target_path: &Path) -> PathBuf {
 fn preflight_banner_bytes(bytes: &[u8]) -> Result<BannerImagePreflight> {
     let reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|_| anyhow::anyhow!("Banner image must be a supported bitmap file."))?;
+        .map_err(|error| {
+            anyhow::anyhow!("Banner image must be a supported bitmap file: {error}")
+        })?;
     let format = reader
         .format()
         .ok_or_else(|| anyhow::anyhow!("Banner image must be a supported bitmap file."))?;

@@ -105,7 +105,7 @@ async fn read_text_field(
         bytes.extend_from_slice(&chunk);
     }
     String::from_utf8(bytes)
-        .map_err(|_| AppError::BadRequest("Multipart text field is not valid UTF-8.".into()))
+        .map_err(|_error| AppError::BadRequest("Multipart text field is not valid UTF-8.".into()))
 }
 
 pub async fn discard_unknown_multipart_field(
@@ -235,7 +235,7 @@ async fn read_upload_field(
     field_name: &'static str,
     budget: &mut PublicMultipartBudget,
 ) -> Result<Option<(TempUpload, String)>> {
-    let fname = field.file_name().unwrap_or(default_name).to_string();
+    let fname = field.file_name().unwrap_or(default_name).to_owned();
     let upload = stream_field_to_temp_file(field, max_bytes, field_name, budget).await?;
     Ok((upload.size_bytes > 0).then_some((upload, fname)))
 }
@@ -273,7 +273,7 @@ pub struct PostFormData {
 
 /// Drain all fields from a multipart form into [`PostFormData`].
 /// `csrf_cookie` is the value from the browser cookie for CSRF verification.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub async fn parse_post_multipart(
     mut multipart: Multipart,
     csrf_cookie: Option<&str>,
@@ -342,7 +342,7 @@ pub async fn parse_post_multipart(
             }
             Some("poll_option") => {
                 let v = read_text_field(field, &mut budget).await?;
-                let trimmed = v.trim().to_string();
+                let trimmed = v.trim().to_owned();
                 if !trimmed.is_empty() {
                     if poll_options.len() >= 20 {
                         return Err(AppError::BadRequest(
@@ -488,9 +488,9 @@ use crate::models::Board;
 ///
 /// Returns `Ok(None)` when `file_data` is `None` (no file attached).
 /// Must be called from inside a `spawn_blocking` closure.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub fn process_primary_upload(
     file_data: Option<(TempUpload, String)>,
     board: &Board,
@@ -707,7 +707,7 @@ pub fn process_audio_combo(
 }
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn process_audio_first_uploads(
     audio_file_data: Option<(TempUpload, String)>,
     image_file_data: Option<(TempUpload, String)>,
@@ -825,12 +825,12 @@ pub fn enqueue_post_jobs(
                 crate::models::MediaType::Video => Some(crate::workers::Job::VideoTranscode {
                     post_id,
                     file_path: up.file_path.clone(),
-                    board_short: board_short.to_string(),
+                    board_short: board_short.to_owned(),
                 }),
                 crate::models::MediaType::Audio => Some(crate::workers::Job::AudioWaveform {
                     post_id,
                     file_path: up.file_path.clone(),
-                    board_short: board_short.to_string(),
+                    board_short: board_short.to_owned(),
                 }),
                 crate::models::MediaType::Image
                 | crate::models::MediaType::Pdf
@@ -891,7 +891,7 @@ pub fn enqueue_post_jobs(
     // 2. Spam analysis
     let _ = job_queue.enqueue(&crate::workers::Job::SpamCheck {
         post_id,
-        ip_hash: ip_hash.to_string(),
+        ip_hash: ip_hash.to_owned(),
         body_len,
     });
 }
@@ -929,7 +929,7 @@ mod tests {
                 sniff_bytes: bytes.to_vec(),
                 size_bytes: bytes.len(),
             },
-            name.to_string(),
+            name.to_owned(),
         )
     }
 
@@ -1056,7 +1056,7 @@ trailer << /Root 1 0 R >>
         fields: &[(&str, &str)],
         files: &[(&str, &str, &[u8], &str)],
     ) -> (String, Vec<u8>) {
-        let boundary = "rustchan-test-boundary".to_string();
+        let boundary = "rustchan-test-boundary".to_owned();
         let mut body = Vec::new();
 
         for (name, value) in fields {

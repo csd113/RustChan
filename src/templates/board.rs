@@ -13,7 +13,7 @@
 use crate::models::{Board, Pagination, Post, Thread, ThreadSummary, SEARCH_QUERY_MAX_CHARS};
 use crate::utils::sanitize::escape_html;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write;
+use std::fmt::Write as _;
 
 use super::{
     base_layout, base_layout_with_preferences, compress_modal_script, embed_thumb_from_body,
@@ -72,8 +72,8 @@ fn render_new_activity_badge(count: i64, class_name: &str, label: &str) -> Strin
 }
 
 // These flags map directly to render or DB inputs, so bundling them would make the call sites less clear.
-#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines)]
 fn render_board_card(
     stats: &crate::models::BoardStats,
     unread_thread_count: Option<i64>,
@@ -198,10 +198,10 @@ pub(crate) fn board_access_badge(board: &Board) -> String {
     match board.access_mode {
         crate::models::BoardAccessMode::Public => String::new(),
         crate::models::BoardAccessMode::ViewPassword => {
-            r#" <span class="tag locked">PASSWORD</span>"#.to_string()
+            r#" <span class="tag locked">PASSWORD</span>"#.to_owned()
         }
         crate::models::BoardAccessMode::PostPassword => {
-            r#" <span class="tag sticky">POST PASSWORD</span>"#.to_string()
+            r#" <span class="tag sticky">POST PASSWORD</span>"#.to_owned()
         }
     }
 }
@@ -345,7 +345,7 @@ fn render_catalog_media_thumb(
     fallback_text: &str,
 ) -> String {
     let img_src = if src.starts_with("http://") || src.starts_with("https://") {
-        src.to_string()
+        src.to_owned()
     } else {
         format!("/boards/{src}")
     };
@@ -368,7 +368,7 @@ fn render_catalog_thumb(thread: &Thread) -> String {
                 .as_deref()
                 .and_then(embed_thumb_from_body)
                 .map_or_else(
-                    || r#"<div class="catalog-no-image">no img</div>"#.to_string(),
+                    || r#"<div class="catalog-no-image">no img</div>"#.to_owned(),
                     |embed_thumb| {
                         render_catalog_media_thumb(
                             "catalog-thumb embed-catalog-thumb",
@@ -386,7 +386,7 @@ fn render_catalog_thumb(thread: &Thread) -> String {
 }
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_catalog_actions(
     board_short: &str,
     thread: &Thread,
@@ -433,7 +433,7 @@ fn render_catalog_actions(
 }
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_catalog_card(
     board: &Board,
     thread: &Thread,
@@ -569,11 +569,11 @@ fn render_archive_row(board_short: &str, thread: &Thread) -> String {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn board_cards(
+#[expect(clippy::too_many_arguments)]
+fn board_cards<S: std::hash::BuildHasher>(
     list: &[&crate::models::BoardStats],
-    board_new_thread_badges: &HashMap<i64, i64>,
-    board_new_reply_badges: &HashMap<i64, i64>,
+    board_new_thread_badges: &HashMap<i64, i64, S>,
+    board_new_reply_badges: &HashMap<i64, i64, S>,
     nsfw_consent: bool,
     csrf_token: &str,
     admin_csrf_token: Option<&str>,
@@ -600,18 +600,18 @@ fn board_cards(
 
 #[must_use]
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines, clippy::implicit_hasher)]
+#[expect(clippy::too_many_lines)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
-pub fn index_page(
+#[expect(clippy::too_many_arguments)]
+pub fn index_page<S: std::hash::BuildHasher>(
     board_stats: &[crate::models::BoardStats],
     site_stats: Option<&crate::models::SiteStats>,
     csrf_token: &str,
     admin_csrf_token: Option<&str>,
     onion_address: Option<&str>,
     home_banner_html: &str,
-    board_badges: &HashMap<i64, i64>,
-    board_reply_badges: &HashMap<i64, i64>,
+    board_badges: &HashMap<i64, i64, S>,
+    board_reply_badges: &HashMap<i64, i64, S>,
     current_theme: Option<&str>,
     nsfw_prompt_board: Option<&Board>,
     nsfw_consent: bool,
@@ -654,12 +654,11 @@ pub fn index_page(
             r#"<div class="index-section index-stats-section">
 <h2 class="index-section-title">// Stats</h2>
 <p class="index-stats-unavailable">site statistics are temporarily unavailable.</p>
-</div>"#
-                .to_string()
+</div>"#.to_owned()
         },
         |site_stats| {
 // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
-            #[allow(clippy::cast_precision_loss)]
+            #[expect(clippy::cast_precision_loss)]
             let active_gb = site_stats.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
             format!(
                 r#"<div class="index-section index-stats-section">
@@ -791,14 +790,10 @@ pub fn index_page(
 
 #[must_use]
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(
-    clippy::too_many_lines,
-    clippy::fn_params_excessive_bools,
-    clippy::implicit_hasher
-)]
+#[expect(clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
-pub fn board_page(
+#[expect(clippy::too_many_arguments)]
+pub fn board_page<S: std::hash::BuildHasher>(
     board: &Board,
     summaries: &[ThreadSummary],
     pagination: &Pagination,
@@ -808,7 +803,7 @@ pub fn board_page(
     admin_csrf_token: Option<&str>,
     error: Option<&str>,
     new_thread_prefill: Option<&super::forms::PostFormState>,
-    thread_badges: &HashMap<i64, i64>,
+    thread_badges: &HashMap<i64, i64, S>,
     new_activity_enabled: bool,
     board_banner_html: &str,
     current_theme: Option<&str>,
@@ -937,7 +932,7 @@ pub fn board_page(
 
 // ─── Thread summary (used by board_page) ─────────────────────────────────────
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
 fn render_thread_summary(
     summary: &ThreadSummary,
     board_short: &str,
@@ -1138,7 +1133,7 @@ fn render_thread_summary(
             super::thread::RenderPostOpts {
                 show_delete: false,
                 is_admin,
-                admin_csrf_token: admin_csrf_token.map(str::to_string),
+                admin_csrf_token: admin_csrf_token.map(str::to_owned),
                 show_media: true,
                 allow_editing: false, // no edit link on board index previews
                 allow_self_delete: false,
@@ -1161,24 +1156,20 @@ fn render_thread_summary(
 
 #[must_use]
 // These flags map directly to render or DB inputs, so bundling them would make the call sites less clear.
-#[allow(
-    clippy::fn_params_excessive_bools,
-    clippy::too_many_lines,
-    clippy::implicit_hasher
-)]
+#[expect(clippy::fn_params_excessive_bools, clippy::too_many_lines)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
-pub fn catalog_page(
+#[expect(clippy::too_many_arguments)]
+pub fn catalog_page<S: std::hash::BuildHasher>(
     board: &Board,
     threads: &[Thread],
-    pinned_ids: &HashSet<i64>,
+    pinned_ids: &HashSet<i64, S>,
     hidden_count: usize,
     hidden_view: bool,
     csrf_token: &str,
     boards: &[Board],
     is_admin: bool,
     admin_csrf_token: Option<&str>,
-    thread_badges: &HashMap<i64, i64>,
+    thread_badges: &HashMap<i64, i64, S>,
     new_activity_enabled: bool,
     board_banner_html: &str,
     current_theme: Option<&str>,
@@ -1376,7 +1367,7 @@ pub fn catalog_page(
 
 #[must_use]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn search_page(
     board: &Board,
     query: &str,
@@ -1389,7 +1380,7 @@ pub fn search_page(
     user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let result_label = if pagination.total == 1 {
-        "1 result".to_string()
+        "1 result".to_owned()
     } else {
         format!("{} results", pagination.total)
     };
