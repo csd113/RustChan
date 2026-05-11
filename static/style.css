@@ -2815,6 +2815,21 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover 
   main { padding: 8px 4px; }
   .page-box { padding: 10px 8px; }
 
+  .site-footer {
+    flex-direction: column;
+    gap: 8px;
+    padding-bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+
+  .site-footer-theme {
+    position: static;
+    top: auto;
+    right: auto;
+    transform: none;
+    width: 100%;
+    justify-content: center;
+  }
+
   #theme-picker-btn {
     min-width: 0;
     min-height: 38px;
