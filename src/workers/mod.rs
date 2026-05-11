@@ -30,7 +30,7 @@
 
 use crate::config::CONFIG;
 use crate::db::DbPool;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use dashmap::DashMap;
 use rand_core::{OsRng, RngCore as _};
 use serde::{Deserialize, Serialize};
@@ -253,6 +253,7 @@ impl JobQueue {
 pub fn start_worker_pool(
     queue: &Arc<JobQueue>,
     ffmpeg_available: bool,
+    ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let n = std::thread::available_parallelism()
@@ -265,7 +266,14 @@ pub fn start_worker_pool(
         .map(|idx| {
             let q = std::sync::Arc::clone(queue);
             tokio::spawn(async move {
-                worker_loop(idx, q, ffmpeg_available, ffmpeg_vp9_available).await;
+                worker_loop(
+                    idx,
+                    q,
+                    ffmpeg_available,
+                    ffprobe_available,
+                    ffmpeg_vp9_available,
+                )
+                .await;
             })
         })
         .collect()
@@ -277,6 +285,7 @@ async fn worker_loop(
     id: usize,
     queue: Arc<JobQueue>,
     ffmpeg_available: bool,
+    ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
 ) {
     debug!("Worker {id} started");
@@ -326,6 +335,7 @@ async fn worker_loop(
                 let result = handle_job(
                     job,
                     ffmpeg_available,
+                    ffprobe_available,
                     ffmpeg_vp9_available,
                     queue.pool.clone(),
                     std::sync::Arc::clone(&queue.in_progress),
@@ -455,6 +465,7 @@ fn backoff_duration(consecutive_errors: u32) -> Duration {
 async fn handle_job(
     job: Job,
     ffmpeg_available: bool,
+    ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
     pool: DbPool,
     in_progress: Arc<DashMap<String, bool>>,
@@ -483,6 +494,7 @@ async fn handle_job(
                 file_path.clone(),
                 board_short,
                 ffmpeg_available,
+                ffprobe_available,
                 ffmpeg_vp9_available,
                 pool,
             )
@@ -581,11 +593,20 @@ async fn transcode_video(
     file_path: String,
     board_short: String,
     ffmpeg_available: bool,
+    ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
     pool: DbPool,
 ) -> Result<()> {
     if !ffmpeg_available {
         debug!("VideoTranscode skipped for post {post_id}: ffmpeg not available");
+        return Ok(());
+    }
+
+    if !ffprobe_available {
+        warn!(
+            "VideoTranscode skipped for post {post_id}: ffprobe not available. \
+             Install ffprobe alongside ffmpeg to enable safe video transcoding."
+        );
         return Ok(());
     }
 
@@ -682,15 +703,9 @@ fn transcode_video_prepare(
     file_path: &str,
     board_short: &str,
 ) -> Result<Option<TranscodePrepareParts>> {
-    let upload_dir = &CONFIG.upload_dir;
-    let src = PathBuf::from(upload_dir).join(file_path);
-
-    if !src.exists() {
-        return Err(anyhow::anyhow!(
-            "Source file not found for transcode: {}",
-            src.display()
-        ));
-    }
+    let upload_root = PathBuf::from(&CONFIG.upload_dir);
+    let board_dir = validated_board_media_dir(&upload_root, board_short)?;
+    let src = validated_board_media_file(&upload_root, file_path, board_short)?;
 
     let ext = src
         .extension()
@@ -735,10 +750,11 @@ fn transcode_video_prepare(
 
     tracing::info!(target: "workers", post_id = post_id, file = %file_path, "VideoTranscode: starting");
 
-    let board_dir = PathBuf::from(upload_dir).join(board_short);
-    let webm_name = format!("{stem}.webm");
+    let webm_name = transcoded_webm_name(&stem, &ext);
     let webm_abs = board_dir.join(&webm_name);
     let webm_rel = format!("{board_short}/{webm_name}");
+    crate::utils::fs_security::canonical_parent_for_new_child(&upload_root, &webm_abs)
+        .context("Transcode destination failed safety validation")?;
 
     // temp file in the same directory for POSIX-atomic rename.
     let tmp = tempfile::Builder::new()
@@ -763,6 +779,83 @@ fn transcode_video_prepare(
     Ok(Some((args, src, webm_abs, webm_rel, webm_name, tmp)))
 }
 
+fn validated_board_media_dir(upload_root: &std::path::Path, board_short: &str) -> Result<PathBuf> {
+    let board_component = single_normal_component(board_short)
+        .ok_or_else(|| anyhow::anyhow!("Transcode board name contains unsafe path components"))?;
+    let board_dir = upload_root.join(board_component);
+    crate::utils::fs_security::canonical_child_of(upload_root, &board_dir)
+        .context("Transcode board directory failed safety validation")?;
+    crate::utils::fs_security::assert_dir_no_symlink(&board_dir)
+        .context("Transcode board directory is not safe")?;
+    Ok(board_dir)
+}
+
+fn validated_board_media_file(
+    upload_root: &std::path::Path,
+    file_path: &str,
+    board_short: &str,
+) -> Result<PathBuf> {
+    let relative = std::path::Path::new(file_path);
+    if relative.is_absolute() {
+        anyhow::bail!("Transcode source path must be relative");
+    }
+
+    let mut components = relative.components();
+    let board_component = components
+        .next()
+        .and_then(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            std::path::Component::CurDir
+            | std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("Transcode source path is missing a board component"))?;
+    if board_component != board_short {
+        anyhow::bail!("Transcode source path does not belong to its board");
+    }
+    let filename = components
+        .next()
+        .and_then(|component| match component {
+            std::path::Component::Normal(value) => Some(value),
+            std::path::Component::CurDir
+            | std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("Transcode source path is missing a file name"))?;
+    if components.next().is_some() {
+        anyhow::bail!("Transcode source path must be an immediate board media file");
+    }
+
+    let src = upload_root.join(board_short).join(filename);
+    let src = crate::utils::fs_security::canonical_child_of(upload_root, &src)
+        .context("Transcode source failed safety validation")?;
+    crate::utils::fs_security::assert_regular_file_no_symlink(&src)
+        .context("Transcode source is not a safe regular file")?;
+    Ok(src)
+}
+
+fn single_normal_component(value: &str) -> Option<&std::ffi::OsStr> {
+    let mut components = std::path::Path::new(value).components();
+    let component = match components.next()? {
+        std::path::Component::Normal(component) => component,
+        std::path::Component::CurDir
+        | std::path::Component::ParentDir
+        | std::path::Component::RootDir
+        | std::path::Component::Prefix(_) => return None,
+    };
+    components.next().is_none().then_some(component)
+}
+
+fn transcoded_webm_name(stem: &str, source_ext: &str) -> String {
+    if source_ext.eq_ignore_ascii_case("webm") {
+        format!("{stem}.vp9.webm")
+    } else {
+        format!("{stem}.webm")
+    }
+}
+
 /// Finalise a completed video transcode: persist the temp file atomically,
 /// read the result for dedup, and update the database.
 ///
@@ -770,40 +863,73 @@ fn transcode_video_prepare(
 fn transcode_video_finalise(
     post_id: i64,
     file_path: &str,
-    src: &PathBuf,
-    webm_abs: &PathBuf,
+    src: &std::path::Path,
+    webm_abs: &std::path::Path,
     webm_rel: &str,
     tmp: tempfile::NamedTempFile,
     pool: &DbPool,
 ) -> Result<()> {
-    use anyhow::Context as _;
-
     let ext = src
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
 
+    match validate_transcoded_webm_output(src, tmp.path()) {
+        Ok(TranscodeOutputDecision::Accept) => {}
+        Ok(TranscodeOutputDecision::Skip { reason }) => {
+            tracing::warn!(
+                target: "workers",
+                post_id,
+                reason,
+                "VideoTranscode: keeping original media"
+            );
+            return Ok(());
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "workers",
+                post_id,
+                error = %error,
+                "VideoTranscode: output validation failed; keeping original media"
+            );
+            return Ok(());
+        }
+    }
+
+    persist_transcoded_webm(post_id, file_path, src, webm_abs, webm_rel, tmp, pool)?;
+    if ext != "webm" {
+        let _ = std::fs::remove_file(src);
+    }
+    Ok(())
+}
+
+fn persist_transcoded_webm(
+    post_id: i64,
+    file_path: &str,
+    src: &std::path::Path,
+    webm_abs: &std::path::Path,
+    webm_rel: &str,
+    tmp: tempfile::NamedTempFile,
+    pool: &DbPool,
+) -> Result<()> {
     tmp.persist(webm_abs)
         .map_err(|e| anyhow::anyhow!("Failed to atomically rename WebM output: {e}"))?;
-
-    let webm_bytes =
-        std::fs::read(webm_abs).context("Failed to read transcoded WebM for dedup hash")?;
-
+    let webm_sha256 = sha256_file_hex(webm_abs)?;
+    let webm_bytes = std::fs::metadata(webm_abs)
+        .with_context(|| format!("Failed to stat transcoded WebM {}", webm_abs.display()))?
+        .len();
     let conn = pool.get()?;
 
     // clean up on DB failure.
-    let db_result = {
-        let webm_sha256 = crate::utils::crypto::sha256_hex(&webm_bytes);
-        crate::db::replace_transcoded_media(
-            &conn,
-            post_id,
-            file_path,
-            webm_rel,
-            "video/webm",
-            &webm_sha256,
-        )
-    };
+    let db_result = crate::db::replace_transcoded_media(
+        &conn,
+        post_id,
+        file_path,
+        webm_rel,
+        "video/webm",
+        &webm_sha256,
+    );
 
     if let Err(e) = db_result {
         if let Err(cleanup_error) = std::fs::remove_file(webm_abs) {
@@ -816,12 +942,54 @@ fn transcode_video_finalise(
         return Err(e);
     }
 
-    if ext != "webm" {
-        let _ = std::fs::remove_file(src);
+    tracing::info!(target: "workers", post_id = post_id, source = %src.display(), output = %webm_rel, bytes = webm_bytes, "VideoTranscode done");
+    Ok(())
+}
+
+enum TranscodeOutputDecision {
+    Accept,
+    Skip { reason: &'static str },
+}
+
+fn validate_transcoded_webm_output(
+    source_path: &std::path::Path,
+    output_path: &std::path::Path,
+) -> Result<TranscodeOutputDecision> {
+    let source_size = std::fs::metadata(source_path)
+        .with_context(|| format!("Failed to stat source video {}", source_path.display()))?
+        .len();
+    let output_size = std::fs::metadata(output_path)
+        .with_context(|| format!("Failed to stat transcoded WebM {}", output_path.display()))?
+        .len();
+    if output_size == 0 {
+        return Ok(TranscodeOutputDecision::Skip {
+            reason: "transcoded output is empty",
+        });
+    }
+    if output_size >= source_size {
+        return Ok(TranscodeOutputDecision::Skip {
+            reason: "transcoded output is not smaller than the original",
+        });
     }
 
-    tracing::info!(target: "workers", post_id = post_id, output = %webm_rel, bytes = webm_bytes.len(), "VideoTranscode done");
-    Ok(())
+    if crate::media::ffmpeg::probe_stream_kind(output_path)?
+        != crate::media::ffmpeg::StreamKind::Video
+    {
+        return Ok(TranscodeOutputDecision::Skip {
+            reason: "transcoded output has no video stream",
+        });
+    }
+    let output_str = output_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Transcoded output path is non-UTF-8"))?;
+    let codec = crate::media::ffmpeg::probe_video_codec(output_str)?;
+    if codec != "vp9" {
+        return Ok(TranscodeOutputDecision::Skip {
+            reason: "transcoded output is not VP9",
+        });
+    }
+
+    Ok(TranscodeOutputDecision::Accept)
 }
 
 // ─── AudioWaveform ────────────────────────────────────────────────────────────
@@ -1195,7 +1363,10 @@ pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{transcode_video_finalise, video_reencode_timeout_warning, waveform_finalise};
+    use super::{
+        persist_transcoded_webm, transcode_video_finalise, transcoded_webm_name,
+        validated_board_media_file, video_reencode_timeout_warning, waveform_finalise,
+    };
     use std::io::Write as _;
 
     fn file_hash_count(conn: &rusqlite::Connection, file_path: &str) -> i64 {
@@ -1208,7 +1379,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_transcode_finalise_removes_unattached_webm_and_writes_no_hash() {
+    fn stale_transcode_persist_removes_unattached_webm_and_writes_no_hash() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let board_dir = temp_dir.path().join("b");
         std::fs::create_dir_all(&board_dir).expect("create board dir");
@@ -1222,7 +1393,7 @@ mod tests {
         tmp.write_all(b"webm").expect("write temp webm");
         let pool = crate::db::init_test_pool().expect("test pool");
 
-        let error = transcode_video_finalise(
+        let error = persist_transcoded_webm(
             999,
             "b/video.mp4",
             &src,
@@ -1237,6 +1408,59 @@ mod tests {
         assert!(!webm_abs.exists());
         let conn = pool.get().expect("db connection");
         assert_eq!(file_hash_count(&conn, "b/video.webm"), 0);
+    }
+
+    #[test]
+    fn transcode_finalise_skips_larger_output_and_cleans_temp_file() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let board_dir = temp_dir.path().join("b");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        let src = board_dir.join("video.mp4");
+        std::fs::write(&src, b"small").expect("write source");
+        let webm_abs = board_dir.join("video.webm");
+        let mut tmp = tempfile::Builder::new()
+            .suffix(".webm")
+            .tempfile_in(&board_dir)
+            .expect("temp webm");
+        tmp.write_all(b"larger than source")
+            .expect("write temp webm");
+        let tmp_path = tmp.path().to_path_buf();
+        let pool = crate::db::init_test_pool().expect("test pool");
+
+        transcode_video_finalise(
+            999,
+            "b/video.mp4",
+            &src,
+            &webm_abs,
+            "b/video.webm",
+            tmp,
+            &pool,
+        )
+        .expect("larger output should be skipped without failing the job");
+
+        assert!(src.exists());
+        assert!(!webm_abs.exists());
+        assert!(!tmp_path.exists());
+    }
+
+    #[test]
+    fn webm_reencode_uses_distinct_output_name() {
+        assert_eq!(transcoded_webm_name("clip", "mp4"), "clip.webm");
+        assert_eq!(transcoded_webm_name("clip", "webm"), "clip.vp9.webm");
+    }
+
+    #[test]
+    fn transcode_source_validation_rejects_escape_paths() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_root = temp_dir.path().join("uploads");
+        let board_dir = upload_root.join("b");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::write(board_dir.join("video.mp4"), b"source").expect("write source");
+
+        assert!(validated_board_media_file(&upload_root, "../video.mp4", "b").is_err());
+        assert!(validated_board_media_file(&upload_root, "other/video.mp4", "b").is_err());
+        assert!(validated_board_media_file(&upload_root, "b/thumbs/video.mp4", "b").is_err());
+        assert!(validated_board_media_file(&upload_root, "b/video.mp4", "b").is_ok());
     }
 
     #[test]

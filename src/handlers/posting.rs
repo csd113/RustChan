@@ -1176,6 +1176,10 @@ mod tests {
             .primary
             .as_ref()
             .is_some_and(|file| file.dedup_reused));
+        assert_eq!(
+            result.primary.as_ref().map(|file| file.file_size),
+            Some(i64::try_from(b"cached file".len()).expect("cached size fits"))
+        );
         assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
     }
 

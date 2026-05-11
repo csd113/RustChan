@@ -596,13 +596,18 @@ pub fn process_primary_upload(
 
         if file_ok && thumb_ok {
             let cached_media = crate::models::MediaType::from_mime(&cached.mime_type);
+            let cached_size =
+                std::fs::metadata(std::path::Path::new(upload_dir).join(&cached.file_path))
+                    .ok()
+                    .and_then(|metadata| i64::try_from(metadata.len()).ok())
+                    .unwrap_or_else(|| i64::try_from(upload.size_bytes).unwrap_or(0));
             return Ok((
                 Some(crate::utils::files::UploadedFile {
                     file_path: cached.file_path,
                     thumb_path: cached.thumb_path,
                     original_name: crate::utils::sanitize::sanitize_filename(&fname),
                     mime_type: cached.mime_type,
-                    file_size: i64::try_from(upload.size_bytes).unwrap_or(0),
+                    file_size: cached_size,
                     media_type: cached_media,
                     processing_pending: false,
                     dedup_reused: true,

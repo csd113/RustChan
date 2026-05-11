@@ -332,8 +332,12 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         }
     }
     let worker_queue = std::sync::Arc::new(crate::workers::JobQueue::new(pool.clone()));
-    let worker_handles =
-        crate::workers::start_worker_pool(&worker_queue, ffmpeg_available, ffmpeg_vp9_available);
+    let worker_handles = crate::workers::start_worker_pool(
+        &worker_queue,
+        ffmpeg_available,
+        ffprobe_available,
+        ffmpeg_vp9_available,
+    );
 
     let chan_ledger = if chan_net {
         let conn = pool.get()?;
