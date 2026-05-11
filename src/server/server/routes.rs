@@ -163,6 +163,10 @@ fn admin_auth_routes() -> Router<AppState> {
         .route("/admin/logout", post(crate::handlers::admin::admin_logout))
         .route("/admin/panel", get(crate::handlers::admin::admin_panel))
         .route(
+            "/admin/site-health/jobs",
+            get(crate::handlers::admin::admin_site_health_jobs),
+        )
+        .route(
             "/admin/log/live",
             get(crate::handlers::admin::admin_live_log),
         )

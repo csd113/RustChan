@@ -864,6 +864,44 @@
       });
   }
 
+  function initSiteHealthJobPolling() {
+    var container = document.querySelector('[data-admin-health-jobs-url]');
+    if (!container) return;
+
+    var url = container.getAttribute('data-admin-health-jobs-url');
+    if (!url) return;
+
+    var fieldNames = [
+      'running_jobs',
+      'queued_jobs',
+      'recent_completed_jobs',
+      'failed_jobs',
+      'backup_jobs',
+      'restore_jobs',
+      'thumbnail_transcode_jobs'
+    ];
+    var fields = {};
+    fieldNames.forEach(function (name) {
+      fields[name] = container.querySelector('[data-admin-health-job="' + name + '"]');
+    });
+
+    function applyJobs(data) {
+      fieldNames.forEach(function (name) {
+        if (!fields[name] || data[name] === undefined || data[name] === null) return;
+        fields[name].textContent = String(data[name]);
+      });
+    }
+
+    function poll() {
+      fetchJsonWithTimeout(url, 8000).then(applyJobs, function () {
+        // Keep the last known values visible; the next poll will retry.
+      });
+    }
+
+    poll();
+    window.setInterval(poll, 5000);
+  }
+
   function requestHeaders(headers) {
     var pairs = [];
     Object.keys(headers || {}).forEach(function (key) {
@@ -1380,6 +1418,8 @@
   }
 
   document.addEventListener('DOMContentLoaded', function () {
+    initSiteHealthJobPolling();
+
     var fullForm = document.getElementById('full-backup-create-form');
     if (fullForm) {
       fullForm.addEventListener('submit', function (e) {

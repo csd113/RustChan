@@ -54,7 +54,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use dashmap::DashMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
@@ -608,8 +608,25 @@ struct SiteHealthSnapshot {
     backup_jobs: String,
     restore_jobs: String,
     thumbnail_transcode_jobs: i64,
-    repair_vacuum_jobs: String,
     recent_warnings: String,
+}
+
+#[derive(Serialize)]
+struct SiteHealthJobsSnapshot {
+    #[serde(rename = "running_jobs")]
+    running: i64,
+    #[serde(rename = "queued_jobs")]
+    queued: i64,
+    #[serde(rename = "recent_completed_jobs")]
+    recent_completed: i64,
+    #[serde(rename = "failed_jobs")]
+    failed: i64,
+    #[serde(rename = "backup_jobs")]
+    backup: String,
+    #[serde(rename = "restore_jobs")]
+    restore: String,
+    #[serde(rename = "thumbnail_transcode_jobs")]
+    thumbnail_transcode: i64,
 }
 
 struct BoardsDomainData {
@@ -688,16 +705,7 @@ fn load_site_health_snapshot(
         next_scheduled_backup_label(full_backups, auto_full_backup_settings.interval_hours);
     let data_dir_usage = safe_dir_size_label(&crate::config::data_dir());
     let upload_dir_size = safe_dir_size_label(Path::new(&CONFIG.upload_dir));
-    let job_summary =
-        db::background_job_summary(conn).unwrap_or_else(|_| db::BackgroundJobSummary {
-            running: 0,
-            queued: state.job_queue.pending_count(),
-            recent_completed: 0,
-            failed: 0,
-            thumbnail_transcode: 0,
-        });
-    let backup_jobs = backup_jobs_label(state.backup_progress.as_ref());
-    let repair_vacuum_jobs = repair_vacuum_jobs_label(&state.db_maintenance_jobs.snapshot());
+    let jobs = load_site_health_jobs_snapshot(conn, state);
     let recent_warnings = recent_warning_lines().unwrap_or_else(|| "not available".to_string());
 
     SiteHealthSnapshot {
@@ -719,15 +727,37 @@ fn load_site_health_snapshot(
         } else {
             "bootstrapping or unknown".to_string()
         },
-        running_jobs: job_summary.running,
-        queued_jobs: job_summary.queued,
-        recent_completed_jobs: job_summary.recent_completed,
-        failed_jobs: job_summary.failed,
-        backup_jobs,
-        restore_jobs: "not available".to_string(),
-        thumbnail_transcode_jobs: job_summary.thumbnail_transcode,
-        repair_vacuum_jobs,
+        running_jobs: jobs.running,
+        queued_jobs: jobs.queued,
+        recent_completed_jobs: jobs.recent_completed,
+        failed_jobs: jobs.failed,
+        backup_jobs: jobs.backup,
+        restore_jobs: jobs.restore,
+        thumbnail_transcode_jobs: jobs.thumbnail_transcode,
         recent_warnings,
+    }
+}
+
+fn load_site_health_jobs_snapshot(
+    conn: &rusqlite::Connection,
+    state: &AppState,
+) -> SiteHealthJobsSnapshot {
+    let job_summary =
+        db::background_job_summary(conn).unwrap_or_else(|_| db::BackgroundJobSummary {
+            running: 0,
+            queued: state.job_queue.pending_count(),
+            recent_completed: 0,
+            failed: 0,
+            thumbnail_transcode: 0,
+        });
+    SiteHealthJobsSnapshot {
+        running: job_summary.running,
+        queued: job_summary.queued,
+        recent_completed: job_summary.recent_completed,
+        failed: job_summary.failed,
+        backup: backup_jobs_label(state.backup_progress.as_ref()),
+        restore: "not available".to_string(),
+        thumbnail_transcode: job_summary.thumbnail_transcode,
     }
 }
 
@@ -790,23 +820,6 @@ fn backup_jobs_label(progress: &crate::middleware::BackupProgress) -> String {
         }
         crate::middleware::backup_phase::DONE => "last run complete".to_string(),
         _ => "unknown".to_string(),
-    }
-}
-
-fn repair_vacuum_jobs_label(status: &crate::middleware::DbMaintenanceJobStatus) -> String {
-    match status {
-        crate::middleware::DbMaintenanceJobStatus::Idle => "idle".to_string(),
-        crate::middleware::DbMaintenanceJobStatus::Running { phase, .. } => match phase {
-            crate::middleware::DbMaintenanceJobPhase::Starting => "starting".to_string(),
-            crate::middleware::DbMaintenanceJobPhase::Backup => "backup before repair".to_string(),
-            crate::middleware::DbMaintenanceJobPhase::Repair => "repair running".to_string(),
-        },
-        crate::middleware::DbMaintenanceJobStatus::Finished { .. } => {
-            "last repair finished".to_string()
-        }
-        crate::middleware::DbMaintenanceJobStatus::Failed { .. } => {
-            "last repair failed".to_string()
-        }
     }
 }
 
@@ -1200,7 +1213,6 @@ fn build_site_health_view<'a>(
         backup_jobs: &snapshot.site_health.backup_jobs,
         restore_jobs: &snapshot.site_health.restore_jobs,
         thumbnail_transcode_jobs: snapshot.site_health.thumbnail_transcode_jobs,
-        repair_vacuum_jobs: &snapshot.site_health.repair_vacuum_jobs,
         diagnostics_text,
     }
 }
@@ -1354,6 +1366,45 @@ pub async fn admin_panel(
     Ok((jar, Html(html)))
 }
 
+pub async fn admin_site_health_jobs(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Response> {
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+
+    let jobs = tokio::task::spawn_blocking({
+        let state = state.clone();
+        move || -> Result<SiteHealthJobsSnapshot> {
+            let conn = state.db.get()?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
+            Ok(load_site_health_jobs_snapshot(&conn, &state))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    let payload =
+        serde_json::to_string(&jobs).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/json; charset=utf-8".to_string(),
+            ),
+            (
+                header::CACHE_CONTROL,
+                "private, no-cache, no-store, must-revalidate, no-transform".to_string(),
+            ),
+            (header::PRAGMA, "no-cache".to_string()),
+            (header::EXPIRES, "0".to_string()),
+            (header::VARY, "Cookie".to_string()),
+        ],
+        payload,
+    )
+        .into_response())
+}
+
 pub async fn admin_live_log(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1493,10 +1544,11 @@ pub(super) fn consume_admin_session_bootstrap(token: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_live_log, consume_admin_session_bootstrap, create_admin_session_bootstrap,
-        host_header_uses_https_port, hosts_match_for_same_origin, latest_log_file, read_log_tail,
-        request_origin_uses_https, require_same_origin_or_valid_csrf, require_same_origin_request,
-        LiveLogQuery, SESSION_COOKIE,
+        admin_live_log, admin_site_health_jobs, consume_admin_session_bootstrap,
+        create_admin_session_bootstrap, host_header_uses_https_port, hosts_match_for_same_origin,
+        latest_log_file, read_log_tail, request_origin_uses_https,
+        require_same_origin_or_valid_csrf, require_same_origin_request, LiveLogQuery,
+        SESSION_COOKIE,
     };
     use crate::error::AppError;
     use axum::{
@@ -1860,6 +1912,61 @@ mod tests {
             AppError::Forbidden(message) => assert_eq!(message, "Not logged in."),
             other => panic!("expected forbidden error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn site_health_jobs_requires_admin_auth() {
+        let state = crate::test_support::app_state();
+        let error = admin_site_health_jobs(State(state), CookieJar::new())
+            .await
+            .expect_err("missing session should fail");
+
+        match error {
+            AppError::Forbidden(message) => assert_eq!(message, "Not logged in."),
+            other => panic!("expected forbidden error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn site_health_jobs_returns_no_store_json_body() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let response = admin_site_health_jobs(
+            State(state),
+            CookieJar::new().add(Cookie::new(SESSION_COOKIE, "session123")),
+        )
+        .await
+        .expect("handler response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("application/json; charset=utf-8"))
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static(
+                "private, no-cache, no-store, must-revalidate, no-transform"
+            ))
+        );
+        assert_eq!(
+            response.headers().get(header::VARY),
+            Some(&HeaderValue::from_static("Cookie"))
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json payload");
+        assert_eq!(
+            payload
+                .get("backup_jobs")
+                .and_then(serde_json::Value::as_str),
+            Some("idle")
+        );
+        assert!(payload.get("running_jobs").is_some());
+        assert!(payload.get("thumbnail_transcode_jobs").is_some());
+        assert!(payload.get("repair_vacuum_jobs").is_none());
     }
 
     #[tokio::test]

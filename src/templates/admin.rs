@@ -148,7 +148,6 @@ pub struct AdminPanelSiteHealthView<'a> {
     pub backup_jobs: &'a str,
     pub restore_jobs: &'a str,
     pub thumbnail_transcode_jobs: i64,
-    pub repair_vacuum_jobs: &'a str,
     pub diagnostics_text: &'a str,
 }
 
@@ -1922,7 +1921,6 @@ mod tests {
             backup_jobs: "idle",
             restore_jobs: "not available",
             thumbnail_transcode_jobs: 0,
-            repair_vacuum_jobs: "idle",
             diagnostics_text: "RustChan version: 1.1.6\nRecent warnings:\n  none",
         }
     }
@@ -2256,6 +2254,9 @@ mod tests {
         assert!(html.contains("open media panel"));
         assert!(html.contains("copy diagnostics"));
         assert!(html.contains("RustChan version: 1.1.6"));
+        assert!(html.contains(r#"data-admin-health-jobs-url="/admin/site-health/jobs""#));
+        assert!(html.contains(r#"data-admin-health-job="running_jobs""#));
+        assert!(!html.contains("Repair/VACUUM jobs"));
     }
 
     #[test]

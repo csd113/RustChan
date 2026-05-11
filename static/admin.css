@@ -942,6 +942,7 @@ html:not([data-theme]) .admin-panel h1 {
 .admin-site-health {
   display: grid;
   gap: 0.75rem;
+  padding-top: 0.75rem;
 }
 
 .admin-health-grid {
