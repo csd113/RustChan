@@ -290,7 +290,8 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // libvpx-vp9 + libopus encoders: needed for MP4→WebM transcoding and
     // WebM/AV1→VP9 re-encoding.  Checked independently so that a build missing
     // only these codecs still enables image conversion and thumbnail generation.
-    let ffmpeg_vp9_available = crate::detect::detect_webm_encoder(ffmpeg_available);
+    let ffmpeg_webm_status = crate::detect::detect_webm_encoder(ffmpeg_available);
+    let ffmpeg_vp9_available = ffmpeg_webm_status.is_available();
     let pdf_thumbnail_renderers = crate::detect::detect_pdf_thumbnail_renderers();
 
     // Derive bind_port from `bind_addr` (which already incorporates port_override).
@@ -344,6 +345,8 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         ffprobe_available,
         ffmpeg_webp_available,
         ffmpeg_vp9_available,
+        ffmpeg_vp9_encoder_available: ffmpeg_webm_status.vp9,
+        ffmpeg_opus_available: ffmpeg_webm_status.opus,
         pdf_thumbnail_renderer: pdf_thumbnail_renderers
             .first()
             .map(|renderer| renderer.binary_name()),

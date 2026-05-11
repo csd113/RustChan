@@ -56,8 +56,10 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use dashmap::DashMap;
 use serde::Deserialize;
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -572,8 +574,11 @@ struct AdminPanelSnapshot {
     ffprobe_available: bool,
     ffmpeg_webp_available: bool,
     ffmpeg_vp9_available: bool,
+    ffmpeg_vp9_encoder_available: bool,
+    ffmpeg_opus_available: bool,
     pdf_thumbnail_renderer: Option<String>,
     backup_summary: BackupSummary,
+    site_health: SiteHealthSnapshot,
 }
 
 #[derive(Clone)]
@@ -584,6 +589,27 @@ struct BackupSummary {
 
 struct OverviewDomainData {
     backup_summary: BackupSummary,
+}
+
+#[allow(clippy::struct_excessive_bools)]
+struct SiteHealthSnapshot {
+    server_status: String,
+    database_integrity_status: String,
+    last_successful_backup: String,
+    next_scheduled_backup: String,
+    data_dir_usage: String,
+    upload_dir_size: String,
+    tor_status: String,
+    tor_bootstrap_state: String,
+    running_jobs: i64,
+    queued_jobs: i64,
+    recent_completed_jobs: i64,
+    failed_jobs: i64,
+    backup_jobs: String,
+    restore_jobs: String,
+    thumbnail_transcode_jobs: i64,
+    repair_vacuum_jobs: String,
+    recent_warnings: String,
 }
 
 struct BoardsDomainData {
@@ -630,12 +656,230 @@ struct MaintenanceDomainData {
     ffprobe_available: bool,
     ffmpeg_webp_available: bool,
     ffmpeg_vp9_available: bool,
+    ffmpeg_vp9_encoder_available: bool,
+    ffmpeg_opus_available: bool,
     pdf_thumbnail_renderer: Option<String>,
 }
 
 fn load_overview_domain_data(full_backups: &[BackupInfo]) -> OverviewDomainData {
     OverviewDomainData {
         backup_summary: build_backup_summary(full_backups),
+    }
+}
+
+fn load_site_health_snapshot(
+    conn: &rusqlite::Connection,
+    state: &AppState,
+    full_backups: &[BackupInfo],
+    auto_full_backup_settings: &crate::middleware::AutoFullBackupSettingsSnapshot,
+    onion_address_val: Option<&str>,
+) -> SiteHealthSnapshot {
+    let server_status = conn
+        .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+        .ok()
+        .filter(|value| *value == 1)
+        .map_or_else(|| "degraded".to_string(), |_| "ready".to_string());
+    let database_integrity_status = db_integrity_status(&state.db_maintenance_jobs.snapshot());
+    let last_successful_backup = full_backups
+        .iter()
+        .find(|backup| backup.verified)
+        .map_or_else(|| "none saved".to_string(), format_backup_time);
+    let next_scheduled_backup =
+        next_scheduled_backup_label(full_backups, auto_full_backup_settings.interval_hours);
+    let data_dir_usage = safe_dir_size_label(&crate::config::data_dir());
+    let upload_dir_size = safe_dir_size_label(Path::new(&CONFIG.upload_dir));
+    let job_summary =
+        db::background_job_summary(conn).unwrap_or_else(|_| db::BackgroundJobSummary {
+            running: 0,
+            queued: state.job_queue.pending_count(),
+            recent_completed: 0,
+            failed: 0,
+            thumbnail_transcode: 0,
+        });
+    let backup_jobs = backup_jobs_label(state.backup_progress.as_ref());
+    let repair_vacuum_jobs = repair_vacuum_jobs_label(&state.db_maintenance_jobs.snapshot());
+    let recent_warnings = recent_warning_lines().unwrap_or_else(|| "not available".to_string());
+
+    SiteHealthSnapshot {
+        server_status,
+        database_integrity_status,
+        last_successful_backup,
+        next_scheduled_backup,
+        data_dir_usage,
+        upload_dir_size,
+        tor_status: if CONFIG.enable_tor_support {
+            "enabled".to_string()
+        } else {
+            "disabled".to_string()
+        },
+        tor_bootstrap_state: if !CONFIG.enable_tor_support {
+            "not configured".to_string()
+        } else if onion_address_val.is_some() {
+            "ready".to_string()
+        } else {
+            "bootstrapping or unknown".to_string()
+        },
+        running_jobs: job_summary.running,
+        queued_jobs: job_summary.queued,
+        recent_completed_jobs: job_summary.recent_completed,
+        failed_jobs: job_summary.failed,
+        backup_jobs,
+        restore_jobs: "not available".to_string(),
+        thumbnail_transcode_jobs: job_summary.thumbnail_transcode,
+        repair_vacuum_jobs,
+        recent_warnings,
+    }
+}
+
+fn format_backup_time(backup: &BackupInfo) -> String {
+    backup
+        .modified_epoch
+        .map_or_else(|| backup.filename.clone(), fmt_epoch)
+}
+
+fn next_scheduled_backup_label(full_backups: &[BackupInfo], interval_hours: u64) -> String {
+    if interval_hours == 0 {
+        return "not scheduled".to_string();
+    }
+    let Some(latest_verified) = full_backups.iter().find(|backup| backup.verified) else {
+        return "after first scheduler check".to_string();
+    };
+    let Some(modified_epoch) = latest_verified.modified_epoch else {
+        return "unknown".to_string();
+    };
+    let interval_secs = i64::try_from(interval_hours.saturating_mul(3600)).unwrap_or(i64::MAX);
+    fmt_epoch(modified_epoch.saturating_add(interval_secs))
+}
+
+fn fmt_epoch(timestamp: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0).map_or_else(
+        || "unknown".to_string(),
+        |datetime| datetime.format("%Y-%m-%d %H:%M UTC").to_string(),
+    )
+}
+
+fn db_integrity_status(status: &crate::middleware::DbMaintenanceJobStatus) -> String {
+    match status {
+        crate::middleware::DbMaintenanceJobStatus::Finished { report, .. } => {
+            if report.after.as_ref().unwrap_or(&report.before).ok() {
+                "passed at last check".to_string()
+            } else {
+                "failed at last check".to_string()
+            }
+        }
+        crate::middleware::DbMaintenanceJobStatus::Running { .. } => "check running".to_string(),
+        crate::middleware::DbMaintenanceJobStatus::Failed { .. } => "last check failed".to_string(),
+        crate::middleware::DbMaintenanceJobStatus::Idle => "not checked".to_string(),
+    }
+}
+
+fn backup_jobs_label(progress: &crate::middleware::BackupProgress) -> String {
+    use std::sync::atomic::Ordering;
+    match progress.phase.load(Ordering::Relaxed) {
+        crate::middleware::backup_phase::IDLE => "idle".to_string(),
+        crate::middleware::backup_phase::SNAPSHOT_DB => "snapshotting database".to_string(),
+        crate::middleware::backup_phase::COUNT_FILES => "counting files".to_string(),
+        crate::middleware::backup_phase::COMPRESS => {
+            let done = progress.files_done.load(Ordering::Relaxed);
+            let total = progress.files_total.load(Ordering::Relaxed);
+            if total == 0 {
+                "compressing".to_string()
+            } else {
+                format!("compressing ({done}/{total} files)")
+            }
+        }
+        crate::middleware::backup_phase::DONE => "last run complete".to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn repair_vacuum_jobs_label(status: &crate::middleware::DbMaintenanceJobStatus) -> String {
+    match status {
+        crate::middleware::DbMaintenanceJobStatus::Idle => "idle".to_string(),
+        crate::middleware::DbMaintenanceJobStatus::Running { phase, .. } => match phase {
+            crate::middleware::DbMaintenanceJobPhase::Starting => "starting".to_string(),
+            crate::middleware::DbMaintenanceJobPhase::Backup => "backup before repair".to_string(),
+            crate::middleware::DbMaintenanceJobPhase::Repair => "repair running".to_string(),
+        },
+        crate::middleware::DbMaintenanceJobStatus::Finished { .. } => {
+            "last repair finished".to_string()
+        }
+        crate::middleware::DbMaintenanceJobStatus::Failed { .. } => {
+            "last repair failed".to_string()
+        }
+    }
+}
+
+fn safe_dir_size_label(path: &Path) -> String {
+    safe_dir_size(path).map_or_else(
+        || "unknown".to_string(),
+        |bytes| {
+            let display_bytes = i64::try_from(bytes).unwrap_or(i64::MAX);
+            crate::utils::files::format_file_size(display_bytes)
+        },
+    )
+}
+
+fn safe_dir_size(root: &Path) -> Option<u64> {
+    let metadata = std::fs::symlink_metadata(root).ok()?;
+    if metadata.file_type().is_symlink() {
+        return None;
+    }
+    if metadata.is_file() {
+        return Some(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Some(0);
+    }
+
+    let mut total = 0_u64;
+    let mut pending = VecDeque::from([root.to_path_buf()]);
+    while let Some(dir) = pending.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&entry_path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push_back(entry_path);
+            } else if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    Some(total)
+}
+
+fn recent_warning_lines() -> Option<String> {
+    let log_path = latest_log_file(&crate::config::logs_dir())?;
+    let mut file = std::fs::File::open(log_path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let max_bytes = 65_536_u64;
+    let start = len.saturating_sub(max_bytes);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = String::new();
+    file.read_to_string(&mut buf).ok()?;
+    let warnings: Vec<&str> = buf
+        .lines()
+        .rev()
+        .filter(|line| {
+            line.contains("WARN")
+                || line.contains("ERROR")
+                || line.contains("warn")
+                || line.contains("error")
+        })
+        .take(5)
+        .collect();
+    if warnings.is_empty() {
+        Some("none in recent log tail".to_string())
+    } else {
+        Some(warnings.into_iter().rev().collect::<Vec<_>>().join("\n"))
     }
 }
 
@@ -713,6 +957,8 @@ fn load_maintenance_domain_data(
         ffprobe_available: state.ffprobe_available,
         ffmpeg_webp_available: state.ffmpeg_webp_available,
         ffmpeg_vp9_available: state.ffmpeg_vp9_available,
+        ffmpeg_vp9_encoder_available: state.ffmpeg_vp9_encoder_available,
+        ffmpeg_opus_available: state.ffmpeg_opus_available,
         pdf_thumbnail_renderer: state.pdf_thumbnail_renderer.map(str::to_string),
     }
 }
@@ -729,6 +975,13 @@ fn load_admin_panel_snapshot(
     let backups_domain = load_backups_domain_data();
     let overview_domain = load_overview_domain_data(&backups_domain.full_backups);
     let maintenance_domain = load_maintenance_domain_data(conn, state);
+    let site_health = load_site_health_snapshot(
+        conn,
+        state,
+        &backups_domain.full_backups,
+        &auto_full_backup_settings,
+        onion_address_val.as_deref(),
+    );
     Ok((
         AdminPanelSnapshot {
             boards: boards_domain.boards,
@@ -768,8 +1021,11 @@ fn load_admin_panel_snapshot(
             ffprobe_available: maintenance_domain.ffprobe_available,
             ffmpeg_webp_available: maintenance_domain.ffmpeg_webp_available,
             ffmpeg_vp9_available: maintenance_domain.ffmpeg_vp9_available,
+            ffmpeg_vp9_encoder_available: maintenance_domain.ffmpeg_vp9_encoder_available,
+            ffmpeg_opus_available: maintenance_domain.ffmpeg_opus_available,
             pdf_thumbnail_renderer: maintenance_domain.pdf_thumbnail_renderer,
             backup_summary: overview_domain.backup_summary,
+            site_health,
         },
         onion_address_val,
     ))
@@ -828,6 +1084,7 @@ fn render_admin_panel_from_snapshot(
     open_section: Option<&str>,
     current_theme: Option<&str>,
 ) -> String {
+    let diagnostics_text = build_diagnostics_text(&snapshot, tor_address.as_deref());
     let flash_ref = flash
         .as_ref()
         .map(|(is_error, message)| crate::templates::AdminPanelFlash {
@@ -858,6 +1115,7 @@ fn render_admin_panel_from_snapshot(
             home_banners: &snapshot.home_banners,
             board_banners: &snapshot.board_banners,
         },
+        site_health: build_site_health_view(&snapshot, tor_address.as_deref(), &diagnostics_text),
         backups: crate::templates::AdminPanelBackupsView {
             full_backups: &snapshot.full_backups,
             board_backups: &snapshot.board_backups,
@@ -902,7 +1160,7 @@ fn render_admin_panel_from_snapshot(
                 } else {
                     crate::templates::AdminDetectionStatus::Missing
                 },
-                pdf_thumbnail_renderer: snapshot.pdf_thumbnail_renderer,
+                pdf_thumbnail_renderer: snapshot.pdf_thumbnail_renderer.clone(),
             },
         },
         tor_address: tor_address.as_deref(),
@@ -910,6 +1168,95 @@ fn render_admin_panel_from_snapshot(
         open_section,
     };
     crate::templates::admin_panel_page(&view)
+}
+
+fn build_site_health_view<'a>(
+    snapshot: &'a AdminPanelSnapshot,
+    tor_address: Option<&'a str>,
+    diagnostics_text: &'a str,
+) -> crate::templates::AdminPanelSiteHealthView<'a> {
+    crate::templates::AdminPanelSiteHealthView {
+        server_status: &snapshot.site_health.server_status,
+        rustchan_version: env!("CARGO_PKG_VERSION"),
+        database_integrity_status: &snapshot.site_health.database_integrity_status,
+        last_successful_backup: &snapshot.site_health.last_successful_backup,
+        next_scheduled_backup: &snapshot.site_health.next_scheduled_backup,
+        data_dir_usage: &snapshot.site_health.data_dir_usage,
+        upload_dir_size: &snapshot.site_health.upload_dir_size,
+        tor_status: &snapshot.site_health.tor_status,
+        tor_onion_address: tor_address,
+        tor_bootstrap_state: &snapshot.site_health.tor_bootstrap_state,
+        dependency_summary: crate::templates::AdminSiteHealthDependencySummary {
+            ffmpeg: detection_status(snapshot.ffmpeg_available),
+            ffprobe: detection_status(snapshot.ffprobe_available),
+            webp: detection_status(snapshot.ffmpeg_webp_available),
+            vp9: detection_status(snapshot.ffmpeg_vp9_encoder_available),
+            opus: detection_status(snapshot.ffmpeg_opus_available),
+        },
+        running_jobs: snapshot.site_health.running_jobs,
+        queued_jobs: snapshot.site_health.queued_jobs,
+        recent_completed_jobs: snapshot.site_health.recent_completed_jobs,
+        failed_jobs: snapshot.site_health.failed_jobs,
+        backup_jobs: &snapshot.site_health.backup_jobs,
+        restore_jobs: &snapshot.site_health.restore_jobs,
+        thumbnail_transcode_jobs: snapshot.site_health.thumbnail_transcode_jobs,
+        repair_vacuum_jobs: &snapshot.site_health.repair_vacuum_jobs,
+        diagnostics_text,
+    }
+}
+
+const fn detection_status(detected: bool) -> crate::templates::AdminDetectionStatus {
+    if detected {
+        crate::templates::AdminDetectionStatus::Detected
+    } else {
+        crate::templates::AdminDetectionStatus::Missing
+    }
+}
+
+const fn detection_word(detected: bool) -> &'static str {
+    if detected {
+        "found"
+    } else {
+        "missing"
+    }
+}
+
+fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&str>) -> String {
+    let tor_enabled = if CONFIG.enable_tor_support {
+        "yes"
+    } else {
+        "no"
+    };
+    let tls_enabled = if CONFIG.tls.enabled { "yes" } else { "no" };
+    let reverse_proxy = if CONFIG.behind_proxy { "yes" } else { "no" };
+    let tor_detail = tor_address.unwrap_or("not available");
+    format!(
+        "RustChan version: {version}\n\
+         OS: {os}-{arch}\n\
+         SQLite: {sqlite}\n\
+         ffmpeg: {ffmpeg}\n\
+         ffprobe: {ffprobe}\n\
+         Tor enabled: {tor_enabled} ({tor_detail})\n\
+         TLS enabled: {tls_enabled}\n\
+         Reverse proxy: {reverse_proxy}\n\
+         Data path: {data_path}\n\
+         Recent warnings:\n{warnings}\n",
+        version = env!("CARGO_PKG_VERSION"),
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        sqlite = rusqlite::version(),
+        ffmpeg = detection_word(snapshot.ffmpeg_available),
+        ffprobe = detection_word(snapshot.ffprobe_available),
+        data_path = crate::config::data_dir().display(),
+        warnings = indent_diagnostics_block(&snapshot.site_health.recent_warnings),
+    )
+}
+
+fn indent_diagnostics_block(text: &str) -> String {
+    text.lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub async fn admin_panel(
@@ -1071,15 +1418,26 @@ pub async fn admin_live_log(
         .into_response())
 }
 
-fn latest_log_file(logs_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut files = std::fs::read_dir(logs_dir)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("log"))
-        .collect::<Vec<_>>();
-    files.sort();
-    files.pop()
+fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
+    let mut latest: Option<(SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(logs_dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&path).ok()?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
+        }
+        let modified = metadata.modified().ok()?;
+        if latest
+            .as_ref()
+            .is_none_or(|(current, _)| modified > *current)
+        {
+            latest = Some((modified, path));
+        }
+    }
+    latest.map(|(_, path)| path)
 }
 
 fn read_log_tail(path: &std::path::Path, max_bytes: usize) -> Result<(String, bool)> {

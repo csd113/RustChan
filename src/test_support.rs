@@ -13,6 +13,8 @@ pub fn app_state() -> crate::middleware::AppState {
         ffprobe_available: false,
         ffmpeg_webp_available: false,
         ffmpeg_vp9_available: false,
+        ffmpeg_vp9_encoder_available: false,
+        ffmpeg_opus_available: false,
         pdf_thumbnail_renderer: None,
         job_queue,
         backup_progress: std::sync::Arc::new(crate::middleware::BackupProgress::new()),

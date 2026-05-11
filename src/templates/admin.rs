@@ -77,6 +77,7 @@ mod boards;
 mod layout;
 mod maintenance;
 mod moderation;
+mod site_health;
 
 pub struct AdminPanelViewModel<'a> {
     pub csrf_token: &'a str,
@@ -84,6 +85,7 @@ pub struct AdminPanelViewModel<'a> {
     pub current_theme: Option<&'a str>,
     pub moderation: AdminPanelModerationView<'a>,
     pub appearance: AdminPanelAppearanceView<'a>,
+    pub site_health: AdminPanelSiteHealthView<'a>,
     pub backups: AdminPanelBackupsView<'a>,
     pub maintenance: AdminPanelMaintenanceView,
     pub tor_address: Option<&'a str>,
@@ -125,6 +127,38 @@ pub struct AdminPanelBackupsView<'a> {
     pub auto_full_backup_storage_mode: &'a str,
     pub auto_full_backup_split_zip_part_size_gib: u64,
     pub tor_hidden_service_key_backup_available: bool,
+}
+
+pub struct AdminPanelSiteHealthView<'a> {
+    pub server_status: &'a str,
+    pub rustchan_version: &'a str,
+    pub database_integrity_status: &'a str,
+    pub last_successful_backup: &'a str,
+    pub next_scheduled_backup: &'a str,
+    pub data_dir_usage: &'a str,
+    pub upload_dir_size: &'a str,
+    pub tor_status: &'a str,
+    pub tor_onion_address: Option<&'a str>,
+    pub tor_bootstrap_state: &'a str,
+    pub dependency_summary: AdminSiteHealthDependencySummary,
+    pub running_jobs: i64,
+    pub queued_jobs: i64,
+    pub recent_completed_jobs: i64,
+    pub failed_jobs: i64,
+    pub backup_jobs: &'a str,
+    pub restore_jobs: &'a str,
+    pub thumbnail_transcode_jobs: i64,
+    pub repair_vacuum_jobs: &'a str,
+    pub diagnostics_text: &'a str,
+}
+
+#[derive(Clone, Copy)]
+pub struct AdminSiteHealthDependencySummary {
+    pub ffmpeg: AdminDetectionStatus,
+    pub ffprobe: AdminDetectionStatus,
+    pub webp: AdminDetectionStatus,
+    pub vp9: AdminDetectionStatus,
+    pub opus: AdminDetectionStatus,
 }
 
 pub struct AdminPanelMaintenanceView {
@@ -1672,7 +1706,8 @@ mod tests {
         admin_db_health_result_page, admin_db_repair_idle_page, admin_login_page, admin_panel_page,
         render_board_appearance_card, render_board_settings_card, AdminDetectionStatus,
         AdminMediaDetectionView, AdminPanelAppearanceView, AdminPanelBackupsView,
-        AdminPanelMaintenanceView, AdminPanelModerationView, AdminPanelViewModel,
+        AdminPanelMaintenanceView, AdminPanelModerationView, AdminPanelSiteHealthView,
+        AdminPanelViewModel, AdminSiteHealthDependencySummary,
     };
     use crate::db::{DbCheckResult, DbHealthReport, DbHealthSnapshot};
     use crate::models::{
@@ -1861,6 +1896,37 @@ mod tests {
         }
     }
 
+    fn sample_site_health() -> AdminPanelSiteHealthView<'static> {
+        AdminPanelSiteHealthView {
+            server_status: "ready",
+            rustchan_version: "1.1.6",
+            database_integrity_status: "not checked",
+            last_successful_backup: "none saved",
+            next_scheduled_backup: "not scheduled",
+            data_dir_usage: "unknown",
+            upload_dir_size: "unknown",
+            tor_status: "disabled",
+            tor_onion_address: None,
+            tor_bootstrap_state: "not configured",
+            dependency_summary: AdminSiteHealthDependencySummary {
+                ffmpeg: AdminDetectionStatus::Detected,
+                ffprobe: AdminDetectionStatus::Detected,
+                webp: AdminDetectionStatus::Detected,
+                vp9: AdminDetectionStatus::Detected,
+                opus: AdminDetectionStatus::Detected,
+            },
+            running_jobs: 0,
+            queued_jobs: 0,
+            recent_completed_jobs: 0,
+            failed_jobs: 0,
+            backup_jobs: "idle",
+            restore_jobs: "not available",
+            thumbnail_transcode_jobs: 0,
+            repair_vacuum_jobs: "idle",
+            diagnostics_text: "RustChan version: 1.1.6\nRecent warnings:\n  none",
+        }
+    }
+
     fn render_admin_panel_for_test(
         boards: &[Board],
         reports: &[ReportWithContext],
@@ -1913,6 +1979,7 @@ mod tests {
                 home_banners: &[],
                 board_banners: &[],
             },
+            site_health: sample_site_health(),
             backups: AdminPanelBackupsView {
                 full_backups: &full_backups,
                 board_backups: &board_backups,
@@ -2168,6 +2235,46 @@ mod tests {
     }
 
     #[test]
+    fn admin_panel_site_health_renders_after_site_settings_closed_by_default() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+        let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
+
+        let site_settings = html
+            .find("// site settings")
+            .expect("site settings section");
+        let site_health = html.find("// site health").expect("site health section");
+        let boards = html.find("// boards").expect("boards section");
+
+        assert!(site_settings < site_health);
+        assert!(site_health < boards);
+        assert!(html.contains(r#"data-admin-dropdown-key="site-health""#));
+        assert!(!html.contains(
+            r#"<details class="admin-dropdown" data-admin-dropdown-key="site-health" open>"#
+        ));
+        assert!(html.contains("Database integrity status"));
+        assert!(html.contains("open media panel"));
+        assert!(html.contains("copy diagnostics"));
+        assert!(html.contains("RustChan version: 1.1.6"));
+    }
+
+    #[test]
+    fn admin_panel_site_health_honors_open_target() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+        let html = render_admin_panel_for_test(
+            std::slice::from_ref(&board),
+            &[],
+            &themes,
+            Some("site-health"),
+        );
+
+        assert!(html.contains(
+            r#"<details class="admin-dropdown" data-admin-dropdown-key="site-health" open>"#
+        ));
+    }
+
+    #[test]
     fn board_appearance_card_keeps_nsfw_tag() {
         let mut board = sample_board();
         board.nsfw = true;
@@ -2231,6 +2338,7 @@ mod tests {
         assert!(index < overview);
         for target in [
             "#site-settings",
+            "#site-health",
             "#boards",
             "#moderation",
             "#appearance",
@@ -2498,6 +2606,7 @@ mod tests {
                 home_banners: &[],
                 board_banners: &[],
             },
+            site_health: sample_site_health(),
             backups: AdminPanelBackupsView {
                 full_backups: &[],
                 board_backups: &[],
@@ -2586,6 +2695,7 @@ mod tests {
                 home_banners: &[],
                 board_banners: &[],
             },
+            site_health: sample_site_health(),
             backups: AdminPanelBackupsView {
                 full_backups: &[],
                 board_backups: &[],
@@ -2665,6 +2775,7 @@ mod tests {
                 home_banners: &[],
                 board_banners: &[],
             },
+            site_health: sample_site_health(),
             backups: AdminPanelBackupsView {
                 full_backups: &[],
                 board_backups: &[],

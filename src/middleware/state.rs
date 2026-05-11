@@ -278,6 +278,8 @@ pub struct AppState {
     pub ffprobe_available: bool,
     pub ffmpeg_webp_available: bool,
     pub ffmpeg_vp9_available: bool,
+    pub ffmpeg_vp9_encoder_available: bool,
+    pub ffmpeg_opus_available: bool,
     pub pdf_thumbnail_renderer: Option<&'static str>,
     pub job_queue: std::sync::Arc<crate::workers::JobQueue>,
     pub backup_progress: std::sync::Arc<crate::middleware::BackupProgress>,

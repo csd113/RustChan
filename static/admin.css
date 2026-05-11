@@ -939,6 +939,126 @@ html:not([data-theme]) .admin-panel h1 {
   box-sizing: border-box;
 }
 
+.admin-site-health {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.admin-health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 0.35rem 0.65rem;
+}
+
+.admin-health-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.65rem;
+  min-width: 0;
+  padding: 0.35rem 0.45rem;
+  border: 1px solid color-mix(in srgb, var(--border) 58%, transparent);
+  background: color-mix(in srgb, var(--bg-input) 36%, transparent);
+  font-size: 0.78rem;
+}
+
+.admin-health-row span {
+  color: var(--text-dim);
+  min-width: 0;
+}
+
+.admin-health-row strong {
+  color: var(--text);
+  font-weight: 600;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.admin-button-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2rem;
+  padding: 0.3rem 0.65rem;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--green-pale);
+  text-decoration: none;
+}
+
+.admin-button-link:hover,
+.admin-button-link:focus-visible {
+  border-color: var(--border-glow);
+  color: var(--green-bright);
+}
+
+.admin-diagnostics-details {
+  position: relative;
+}
+
+.admin-diagnostics-details > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.1rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--green-pale);
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.8rem;
+}
+
+.admin-diagnostics-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.admin-diagnostics-panel {
+  margin-top: 0.65rem;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  max-width: 100%;
+}
+
+html.js .admin-diagnostics-details[open] .admin-diagnostics-panel {
+  position: fixed;
+  inset: 8vh max(1rem, calc((100vw - 760px) / 2)) auto;
+  z-index: 1000;
+  max-height: 84vh;
+  box-shadow: 0 18px 80px rgba(0, 0, 0, 0.45);
+}
+
+.admin-diagnostics-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.admin-diagnostics-header h3 {
+  margin: 0;
+}
+
+.admin-diagnostics-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  justify-content: flex-end;
+}
+
+.admin-diagnostics-text {
+  margin: 0;
+  padding: 0.75rem;
+  max-height: 65vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.76rem;
+  background: var(--bg-input);
+}
+
 .backup-part-list {
   margin: 0.35rem 0 0;
   padding-left: 1.1rem;
@@ -2407,6 +2527,39 @@ html:not([data-theme]) .admin-login h1 {
 
   .admin-dropdown-counter-label {
     white-space: normal;
+  }
+
+  .admin-health-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-health-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .admin-health-row strong {
+    text-align: left;
+  }
+
+  html.js .admin-diagnostics-details[open] .admin-diagnostics-panel {
+    inset: 0.75rem;
+    max-height: calc(100vh - 1.5rem);
+  }
+
+  .admin-diagnostics-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .admin-diagnostics-actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .admin-diagnostics-actions button {
+    flex: 1 1 auto;
   }
 
   .theme-card-summary {

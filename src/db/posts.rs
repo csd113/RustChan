@@ -41,6 +41,15 @@ pub struct InterruptedJobRecovery {
     pub media_posts_reset: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackgroundJobSummary {
+    pub running: i64,
+    pub queued: i64,
+    pub recent_completed: i64,
+    pub failed: i64,
+    pub thumbnail_transcode: i64,
+}
+
 // ─── Row mapper ───────────────────────────────────────────────────────────────
 
 /// Map a full post row (25 columns, selected in the canonical order used
@@ -1218,6 +1227,46 @@ pub fn pending_job_count(conn: &rusqlite::Connection) -> Result<i64> {
         |r| r.get(0),
     )?;
     Ok(n)
+}
+
+/// Return a compact background job summary for admin status displays.
+///
+/// # Errors
+/// Returns an error if the database queries fail.
+pub fn background_job_summary(conn: &rusqlite::Connection) -> Result<BackgroundJobSummary> {
+    let (running, queued, recent_completed, failed) = conn.query_row(
+        "SELECT
+             SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END),
+             SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END),
+             SUM(CASE WHEN status = 'done' AND updated_at >= unixepoch() - 86400 THEN 1 ELSE 0 END),
+             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)
+         FROM background_jobs",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+            ))
+        },
+    )?;
+    let thumbnail_transcode = conn.query_row(
+        "SELECT COUNT(*)
+         FROM background_jobs
+         WHERE job_type IN ('video_transcode', 'audio_waveform')
+           AND status IN ('pending', 'running')",
+        [],
+        |row| row.get(0),
+    )?;
+
+    Ok(BackgroundJobSummary {
+        running,
+        queued,
+        recent_completed,
+        failed,
+        thumbnail_transcode,
+    })
 }
 
 /// Reset jobs that were interrupted after being claimed but before completion.

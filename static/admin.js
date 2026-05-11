@@ -88,6 +88,82 @@
 })();
 
 (function () {
+  function openAdminSection(sectionId) {
+    if (!sectionId) return;
+    var section = document.getElementById(sectionId);
+    if (!section) return;
+    var details = section.querySelector('details.admin-dropdown');
+    if (details) details.open = true;
+    if (typeof section.scrollIntoView === 'function') {
+      section.scrollIntoView({ block: 'start' });
+    }
+  }
+
+  function initAdminSectionLinks() {
+    document.querySelectorAll('[data-open-admin-section]').forEach(function (link) {
+      link.addEventListener('click', function () {
+        openAdminSection(link.getAttribute('data-open-admin-section'));
+      });
+    });
+  }
+
+  function initDiagnosticsDialog() {
+    document.querySelectorAll('[data-admin-diagnostics]').forEach(function (details) {
+      var summary = details.querySelector('summary');
+      var closeButton = details.querySelector('[data-admin-diagnostics-close]');
+      var copyButton = details.querySelector('[data-admin-diagnostics-copy]');
+      var text = details.querySelector('[data-admin-diagnostics-text]');
+
+      if (summary) {
+        summary.addEventListener('click', function (event) {
+          event.preventDefault();
+          details.open = true;
+          if (copyButton && typeof copyButton.focus === 'function') {
+            copyButton.focus();
+          }
+        });
+      }
+
+      if (closeButton) {
+        closeButton.addEventListener('click', function () {
+          details.open = false;
+          if (summary && typeof summary.focus === 'function') {
+            summary.focus();
+          }
+        });
+      }
+
+      if (copyButton && text) {
+        copyButton.addEventListener('click', function () {
+          var value = text.textContent || '';
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(value).then(function () {
+              copyButton.textContent = 'copied';
+              window.setTimeout(function () {
+                copyButton.textContent = 'copy';
+              }, 1500);
+            }).catch(function () {
+              copyButton.textContent = 'copy failed';
+            });
+          }
+        });
+      }
+
+      document.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape' && details.open) {
+          details.open = false;
+        }
+      });
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    initAdminSectionLinks();
+    initDiagnosticsDialog();
+  });
+})();
+
+(function () {
   var PRESET_CONFIGS = {
     forest: {
       background_color: '#141914',

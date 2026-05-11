@@ -13,6 +13,19 @@ pub enum ToolStatus {
     Missing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebmEncoderStatus {
+    pub vp9: bool,
+    pub opus: bool,
+}
+
+impl WebmEncoderStatus {
+    #[must_use]
+    pub const fn is_available(self) -> bool {
+        self.vp9 && self.opus
+    }
+}
+
 // ─── ffmpeg ───────────────────────────────────────────────────────────────────
 
 pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
@@ -204,16 +217,22 @@ fn status_with_timeout(
 }
 
 /// Probe whether the detected ffmpeg has `libvpx-vp9` + `libopus` compiled in.
-pub fn detect_webm_encoder(ffmpeg_ok: bool) -> bool {
+pub fn detect_webm_encoder(ffmpeg_ok: bool) -> WebmEncoderStatus {
     if !ffmpeg_ok {
-        return false;
+        return WebmEncoderStatus {
+            vp9: false,
+            opus: false,
+        };
     }
 
     let has_vp9 = crate::media::ffmpeg::check_vp9_encoder();
     let has_opus = crate::media::ffmpeg::check_opus_encoder();
-    let has_webm = has_vp9 && has_opus;
+    let status = WebmEncoderStatus {
+        vp9: has_vp9,
+        opus: has_opus,
+    };
 
-    if has_webm {
+    if status.is_available() {
         let profile = crate::media::ffmpeg::vp9_encoding_profile();
         tracing::info!(
             target: "rustchan::detect",
@@ -238,7 +257,7 @@ pub fn detect_webm_encoder(ffmpeg_ok: bool) -> bool {
         }
     }
 
-    has_webm
+    status
 }
 
 fn webm_install_hint(has_vp9: bool, has_opus: bool) -> String {
