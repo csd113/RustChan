@@ -4,6 +4,14 @@ use anyhow::Result;
 use std::path::Path;
 
 #[cfg(unix)]
+fn widen_to_u64<T>(value: T) -> u64
+where
+    T: Into<u64>,
+{
+    value.into()
+}
+
+#[cfg(unix)]
 pub(super) fn check_disk_space(dir: &Path, needed_bytes: usize) -> Result<()> {
     // SAFETY:
     // - `path_cstr` is a valid NUL-terminated string for the duration of the call.
@@ -14,9 +22,8 @@ pub(super) fn check_disk_space(dir: &Path, needed_bytes: usize) -> Result<()> {
         if let Ok(path_cstr) = std::ffi::CString::new(dir_bytes.as_bytes()) {
             let mut stat: libc::statvfs = std::mem::zeroed();
             if libc::statvfs(path_cstr.as_ptr(), &raw mut stat) == 0 {
-                // The platform-specific type conversion is intentional here and keeps the libc call straightforward.
-                // The platform-specific type conversion is intentional here and keeps the libc call straightforward.
-                let free_bytes = u64::from(stat.f_bavail).saturating_mul(stat.f_frsize);
+                let free_bytes =
+                    widen_to_u64(stat.f_bavail).saturating_mul(widen_to_u64(stat.f_frsize));
                 let needed = (needed_bytes as u64).saturating_mul(2);
                 if free_bytes < needed {
                     return Err(anyhow::anyhow!(
