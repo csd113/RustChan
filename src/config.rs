@@ -379,6 +379,7 @@ impl Default for TlsConfig {
     }
 }
 
+#[cfg_attr(not(feature = "tls-acme"), allow(dead_code))]
 #[derive(Debug, Clone, serde::Deserialize, Default)]
 pub struct AcmeConfig {
     #[serde(default)]
