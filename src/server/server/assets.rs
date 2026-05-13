@@ -68,17 +68,31 @@ mod tests {
     use super::{MAIN_JS, STYLE_CSS};
 
     #[test]
-    fn stylesheet_centers_mobile_user_preferences_panel_and_caps_viewport_usage() {
+    fn stylesheet_uses_mobile_sheet_for_user_preferences_panel() {
         assert!(STYLE_CSS.contains(".user-preferences-form {\n"));
         assert!(STYLE_CSS.contains("max-height: calc(100vh - 24px);"));
         assert!(STYLE_CSS.contains("overflow-y: auto;"));
-        assert!(STYLE_CSS.contains("@media (max-width: 700px) {\n  .user-preferences-panel[open] .user-preferences-form {\n    position: fixed;"));
-        assert!(STYLE_CSS.contains("top: max(12px, env(safe-area-inset-top));"));
-        assert!(STYLE_CSS.contains("bottom: max(12px, env(safe-area-inset-bottom));"));
-        assert!(STYLE_CSS.contains("margin: auto;"));
+        assert!(!STYLE_CSS.contains(".user-preferences-form button[type=\"submit\"]"));
+        assert!(STYLE_CSS.contains(".user-preferences-panel[open]::before"));
+        assert!(STYLE_CSS.contains("background: rgba(0,0,0,0.42);"));
+        assert!(
+            STYLE_CSS.contains(".user-preferences-panel[open] .user-preferences-summary::after")
+        );
+        assert!(STYLE_CSS.contains("content: \"\\00d7\";"));
+        assert!(STYLE_CSS.contains(
+            ".user-preferences-panel[open] .user-preferences-form {\n    position: fixed;"
+        ));
+        assert!(STYLE_CSS.contains("bottom: 0;"));
+        assert!(STYLE_CSS.contains("margin: 0 auto;"));
         assert!(STYLE_CSS.contains("transform: none;"));
-        assert!(STYLE_CSS.contains("max-width: calc(100vw - 24px);"));
-        assert!(STYLE_CSS.contains("max-height: calc(100dvh - 24px);"));
+        assert!(STYLE_CSS.contains("max-width: 30rem;"));
+        assert!(STYLE_CSS.contains(
+            "max-height: min(88dvh, calc(100dvh - max(18px, env(safe-area-inset-top))));"
+        ));
+        assert!(STYLE_CSS.contains("overflow-x: hidden;"));
+        assert!(STYLE_CSS.contains("border-radius: 18px 18px 0 0;"));
+        assert!(STYLE_CSS.contains(".user-preferences-form > label {\n    min-height: 52px;"));
+        assert!(STYLE_CSS.contains(".user-preferences-form input[type=\"checkbox\"],\n  .user-preferences-form input[type=\"radio\"] {\n    min-width: 24px;"));
     }
 
     #[test]
@@ -86,6 +100,9 @@ mod tests {
         assert!(MAIN_JS.contains("function initUserPreferencesForms()"));
         assert!(MAIN_JS.contains("x-rustchan-background"));
         assert!(MAIN_JS.contains("new URLSearchParams(new FormData(form))"));
+        assert!(MAIN_JS.contains(
+            "form.addEventListener('submit', function (event) {\n        event.preventDefault();"
+        ));
         assert!(MAIN_JS.contains("control.name === 'theme'"));
         assert!(MAIN_JS.contains("control.name === 'hide_nsfw_boards'"));
         assert!(MAIN_JS.contains("data-hide-nsfw-boards"));

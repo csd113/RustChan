@@ -784,7 +784,6 @@ pub fn base_layout_with_preferences(
         </fieldset>
         <input type="hidden" name="show_activity_badges_present" value="1">
         <label><input type="checkbox" name="show_activity_badges" value="1"{badges_checked}> Show new activity badges</label>
-        <button type="submit">Save preferences</button>
       </form>
     </details>
     <div id="theme-picker-panel">
@@ -1034,6 +1033,8 @@ mod tests {
         assert!(html.contains(r#"name="preferred_board_view" value="index" checked"#));
         assert!(html.contains(r#"name="show_activity_badges_present" value="1""#));
         assert!(!html.contains(r#"name="show_activity_badges" value="1" checked"#));
+        assert!(!html.contains("Save preferences"));
+        assert!(!html.contains(r#"type="submit">Save preferences"#));
     }
 
     #[test]

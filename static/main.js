@@ -2095,6 +2095,11 @@ function repositionOpenThreadMenus() {
     document.querySelectorAll('.user-preferences-panel').forEach(function (panel) {
       if (panel.dataset.touchReady === '1') return;
       panel.dataset.touchReady = '1';
+      panel.addEventListener('click', function (event) {
+        if (event.target === panel && panel.open) {
+          panel.open = false;
+        }
+      });
       var summary = panel.querySelector('.user-preferences-summary');
       if (!summary) return;
       if (!isTouchLikeDevice()) return;
@@ -2114,6 +2119,11 @@ function repositionOpenThreadMenus() {
       if (hideNsfw) applyHideNsfwPreference(hideNsfw.checked);
       var showBadges = form.querySelector('input[name="show_activity_badges"]');
       if (showBadges) applyActivityBadgePreference(showBadges.checked);
+
+      form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        persistUserPreferencesForm(form);
+      });
 
       form.addEventListener('change', function (event) {
         var control = event.target;
