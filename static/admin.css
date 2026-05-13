@@ -257,13 +257,13 @@ html:not([data-theme]) .admin-panel h1 {
 
 .admin-table-wrap .admin-table,
 .admin-table-wrap > table {
-  min-width: 40rem;
+  min-width: min(40rem, 100%);
   margin-bottom: 0;
 }
 
 .admin-table-wrap-compact .admin-table,
 .admin-table-wrap-compact > table {
-  min-width: 20rem;
+  min-width: min(20rem, 100%);
 }
 
 .admin-result-table {

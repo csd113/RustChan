@@ -1901,8 +1901,23 @@ function closeThreadMenus() {
     btn.setAttribute('aria-expanded', 'false');
   });
   document.querySelectorAll('.catalog-thread-menu').forEach(function (menu) {
+    delete menu.dataset.direction;
     menu.hidden = true;
   });
+}
+
+function positionThreadMenu(toggle, menu) {
+  if (!toggle || !menu) return;
+  delete menu.dataset.direction;
+
+  var toggleRect = toggle.getBoundingClientRect();
+  var menuRect = menu.getBoundingClientRect();
+  var gutter = 12;
+  var spaceBelow = window.innerHeight - toggleRect.bottom - gutter;
+  var spaceAbove = toggleRect.top - gutter;
+  if (spaceBelow < menuRect.height && spaceAbove > spaceBelow) {
+    menu.dataset.direction = 'up';
+  }
 }
 
 function toggleThreadMenu(toggle) {
@@ -1914,6 +1929,9 @@ function toggleThreadMenu(toggle) {
   closeThreadMenus();
   menu.hidden = !opening;
   toggle.setAttribute('aria-expanded', opening ? 'true' : 'false');
+  if (opening) {
+    positionThreadMenu(toggle, menu);
+  }
 }
 
 // ─── Theme picker ─────────────────────────────────────────────────────────────
@@ -1982,6 +2000,28 @@ function toggleThreadMenu(toggle) {
     document.body.classList.remove('theme-picker-open');
   }
 
+  function initUserPreferencesPanels() {
+    if (!isTouchLikeDevice()) return;
+    document.querySelectorAll('.user-preferences-panel').forEach(function (panel) {
+      if (panel.dataset.touchReady === '1') return;
+      panel.dataset.touchReady = '1';
+      var summary = panel.querySelector('.user-preferences-summary');
+      if (!summary) return;
+      summary.addEventListener('click', function (event) {
+        event.preventDefault();
+        panel.open = !panel.open;
+        if (panel.open) {
+          window.setTimeout(function () {
+            var firstControl = panel.querySelector('select, input, button');
+            if (firstControl && typeof firstControl.focus === 'function') {
+              firstControl.focus();
+            }
+          }, 0);
+        }
+      });
+    });
+  }
+
   document.addEventListener('click', function (e) {
     var btn = document.getElementById('theme-picker-btn');
     var panel = document.getElementById('theme-picker-panel');
@@ -2019,6 +2059,8 @@ function toggleThreadMenu(toggle) {
       try { localStorage.setItem('rustchan_theme', active); } catch (e) {}
     }
   }());
+
+  initUserPreferencesPanels();
 })();
 
 // ─── Collapse greentext blocks ────────────────────────────────────────────────

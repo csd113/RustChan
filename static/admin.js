@@ -305,7 +305,7 @@
       meta_text_color: '#c3a06f',
       success_color: '#d3a04a',
       danger_color: '#d97d5d',
-      border_radius_px: '4',
+      border_radius_px: '0',
       density: 'compact',
       font_family: 'system_mono',
       advanced_css: ''
@@ -421,7 +421,7 @@
       meta_text_color: '#6d7280',
       success_color: '#27a26b',
       danger_color: '#d05f79',
-      border_radius_px: '10',
+      border_radius_px: '0',
       density: 'cozy',
       font_family: 'system_sans',
       advanced_css: ''
