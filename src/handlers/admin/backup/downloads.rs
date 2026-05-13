@@ -52,9 +52,12 @@ pub(super) fn prune_stale_temp_board_downloads() {
         if !is_zip {
             continue;
         }
-        let Ok(meta) = entry.metadata() else {
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
             continue;
         };
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            continue;
+        }
         let Ok(modified) = meta.modified() else {
             continue;
         };
@@ -68,6 +71,18 @@ pub(super) fn prune_stale_temp_board_downloads() {
             }
         }
     }
+}
+
+fn safe_backup_file_path(root: &Path, filename: &str) -> Result<PathBuf> {
+    let path = root.join(filename);
+    if !path.exists() {
+        return Err(AppError::NotFound("Backup file not found.".into()));
+    }
+    let resolved = crate::utils::fs_security::canonical_child_of(root, &path)
+        .map_err(|error| AppError::BadRequest(format!("Backup file path is unsafe: {error}")))?;
+    crate::utils::fs_security::assert_regular_file_no_symlink(&resolved)
+        .map_err(|error| AppError::BadRequest(format!("Backup file path is unsafe: {error}")))?;
+    Ok(resolved)
 }
 
 struct TempFileStream {
@@ -235,7 +250,7 @@ pub async fn download_backup(
         _ => unreachable!("validated above"),
     };
 
-    let path = backup_dir.join(&safe_filename);
+    let path = safe_backup_file_path(&backup_dir, &safe_filename)?;
 
     let file_size = tokio::fs::metadata(&path)
         .await
@@ -338,6 +353,7 @@ pub async fn delete_backup(
                 invalidate_backup_list_cache(&backup_dir, backup_kind);
                 tracing::info!(target: "admin", backup_ref = %safe_filename, "Backup directory deleted");
             } else if legacy_path.exists() {
+                let legacy_path = safe_backup_file_path(&backup_dir, &safe_filename)?;
                 std::fs::remove_file(&legacy_path)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Delete backup: {e}")))?;
                 invalidate_backup_list_cache(&backup_dir, backup_kind);
@@ -350,4 +366,103 @@ pub async fn delete_backup(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok(Redirect::to("/admin/panel?backup_deleted=1").into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_backup_file_path;
+    use crate::error::AppError;
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_backup_file_path_rejects_symlink_escape() {
+        use std::os::unix::fs as unix_fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let backup_root = temp_dir.path().join("backups");
+        let outside = temp_dir.path().join("outside.zip");
+        std::fs::create_dir_all(&backup_root).expect("create backup root");
+        std::fs::write(&outside, b"outside").expect("write outside file");
+        unix_fs::symlink(&outside, backup_root.join("backup.zip")).expect("symlink backup");
+
+        assert!(safe_backup_file_path(&backup_root, "backup.zip").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_backup_file_path_rejects_symlinked_parent_dir() {
+        use std::os::unix::fs as unix_fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let backup_root = temp_dir.path().join("backups");
+        let outside_dir = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&backup_root).expect("create backup root");
+        std::fs::create_dir_all(&outside_dir).expect("create outside dir");
+        std::fs::write(outside_dir.join("backup.zip"), b"outside").expect("write outside file");
+        unix_fs::symlink(&outside_dir, backup_root.join("linked")).expect("symlink parent dir");
+
+        assert!(safe_backup_file_path(&backup_root, "linked/backup.zip").is_err());
+    }
+
+    #[test]
+    fn safe_backup_file_path_rejects_traversal() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let backup_root = temp_dir.path().join("backups");
+        let outside = temp_dir.path().join("outside.zip");
+        std::fs::create_dir_all(&backup_root).expect("create backup root");
+        std::fs::write(&outside, b"outside").expect("write outside file");
+
+        assert!(safe_backup_file_path(&backup_root, "../outside.zip").is_err());
+    }
+
+    #[test]
+    fn safe_backup_file_path_rejects_absolute_path() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let backup_root = temp_dir.path().join("backups");
+        let outside = temp_dir.path().join("outside.zip");
+        std::fs::create_dir_all(&backup_root).expect("create backup root");
+        std::fs::write(&outside, b"outside").expect("write outside file");
+
+        assert!(safe_backup_file_path(&backup_root, &outside.display().to_string()).is_err());
+    }
+
+    #[test]
+    fn safe_backup_file_path_rejects_directory() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let backup_root = temp_dir.path().join("backups");
+        std::fs::create_dir_all(backup_root.join("backup.zip")).expect("create backup dir");
+
+        assert!(safe_backup_file_path(&backup_root, "backup.zip").is_err());
+    }
+
+    #[test]
+    fn safe_backup_file_path_reports_missing_file() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let backup_root = temp_dir.path().join("backups");
+        std::fs::create_dir_all(&backup_root).expect("create backup root");
+
+        let error =
+            safe_backup_file_path(&backup_root, "missing.zip").expect_err("missing backup file");
+
+        assert!(matches!(error, AppError::NotFound(_)));
+    }
+
+    #[test]
+    fn safe_backup_file_path_accepts_regular_child_file() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let backup_root = temp_dir.path().join("backups");
+        std::fs::create_dir_all(&backup_root).expect("create backup root");
+        std::fs::write(backup_root.join("backup.zip"), b"zip").expect("write backup");
+
+        let resolved =
+            safe_backup_file_path(&backup_root, "backup.zip").expect("regular child backup");
+
+        assert_eq!(
+            resolved,
+            backup_root
+                .join("backup.zip")
+                .canonicalize()
+                .expect("canonical backup")
+        );
+    }
 }

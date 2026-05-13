@@ -308,6 +308,8 @@ fn reject_symlink_components(canonical_root: &Path, relative_path: &Path) -> Res
 fn delete_candidate_files(upload_root: &Path, paths: &[CandidatePath]) -> Result<()> {
     for candidate_path in paths {
         let relative_path = Path::new(&candidate_path.path);
+        // `safe_file_size` is the safety gate for this delete: it rejects
+        // traversal, symlink components, non-files, and root escapes.
         if safe_file_size(upload_root, relative_path)?.is_none() {
             continue;
         }

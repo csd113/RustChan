@@ -46,6 +46,33 @@ fn is_generated_svg_placeholder_thumb(media_path: &str) -> bool {
             .is_some_and(|part| part.as_os_str() == "thumbs")
 }
 
+fn safe_board_media_file(
+    base: &std::path::Path,
+    media_path: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    crate::utils::fs_security::existing_regular_file_child(base, media_path)
+}
+
+fn is_not_found_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .find_map(|source| source.downcast_ref::<std::io::Error>())
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn stale_webm_redirect_path(base: &std::path::Path, media_path: &str) -> Option<String> {
+    let path = std::path::Path::new(media_path);
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+    {
+        return None;
+    }
+    let webm_path = format!("{}.webm", &media_path[..media_path.len().saturating_sub(4)]);
+    safe_board_media_file(base, &webm_path).ok()?;
+    Some(format!("/boards/{webm_path}"))
+}
+
 // Replaces the former nest_service(ServeDir) so we can intercept stale .mp4
 
 // links (created before the background transcoder replaced them with .webm)
@@ -114,30 +141,20 @@ pub async fn serve_board_media(
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
 
-    // Verify the resolved path is still inside the upload directory.
-    // This catches any edge cases that slip past the string checks above
-    // (e.g. symlinks, exotic percent-encoding handled by the OS).
-    if !target.starts_with(&base) {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-
-    let target =
-        match crate::utils::fs_security::canonical_child_of(&base, &target).and_then(|path| {
-            crate::utils::fs_security::assert_regular_file_no_symlink(&path)?;
-            Ok(path)
-        }) {
-            Ok(path) => path,
-            Err(_)
-                if std::path::Path::new(&media_path)
+    let target = match safe_board_media_file(&base, &media_path) {
+        Ok(path) => Some(path),
+        Err(error)
+            if is_not_found_error(&error)
+                && std::path::Path::new(&media_path)
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4")) =>
-            {
-                target
-            }
-            Err(_) => return StatusCode::NOT_FOUND.into_response(),
-        };
+        {
+            None
+        }
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
 
-    if target.exists() {
+    if let Some(target) = target {
         // File present — forward the real request (with Range, ETag, etc.) to
         // ServeFile so it can respond with 206 Partial Content when needed.
         // iOS Safari requires Range request support to play video — dropping
@@ -192,18 +209,8 @@ pub async fn serve_board_media(
                 resp.into_response()
             },
         )
-    } else if std::path::Path::new(&media_path)
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
-    {
-        // MP4 was transcoded away — redirect permanently to the .webm sibling.
-        let webm_path_str = format!("{}.webm", &media_path[..media_path.len().saturating_sub(4)]);
-        let webm_abs = base.join(&webm_path_str);
-        if webm_abs.exists() {
-            Redirect::permanent(&format!("/boards/{webm_path_str}")).into_response()
-        } else {
-            StatusCode::NOT_FOUND.into_response()
-        }
+    } else if let Some(redirect_path) = stale_webm_redirect_path(&base, &media_path) {
+        Redirect::permanent(&redirect_path).into_response()
     } else {
         StatusCode::NOT_FOUND.into_response()
     }
@@ -221,6 +228,59 @@ const fn board_media_cache_control(
         crate::cache::CACHE_CONTROL_STATIC_SHORT
     } else {
         crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{safe_board_media_file, stale_webm_redirect_path};
+
+    #[test]
+    fn stale_mp4_redirect_path_accepts_valid_webm_sibling() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let upload_root = tempdir.path().join("uploads");
+        let board_dir = upload_root.join("test");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::write(board_dir.join("clip.webm"), b"webm").expect("write webm");
+
+        assert_eq!(
+            stale_webm_redirect_path(&upload_root, "test/clip.mp4").as_deref(),
+            Some("/boards/test/clip.webm")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_mp4_redirect_path_rejects_symlink_fallback_escape() {
+        use std::os::unix::fs as unix_fs;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let upload_root = tempdir.path().join("uploads");
+        let board_dir = upload_root.join("test");
+        let outside = tempdir.path().join("outside");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        std::fs::write(outside.join("clip.webm"), b"webm").expect("write outside webm");
+        unix_fs::symlink(&outside, board_dir.join("link")).expect("symlink");
+
+        assert!(stale_webm_redirect_path(&upload_root, "test/link/clip.mp4").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn board_media_file_rejects_symlink_original_escape() {
+        use std::os::unix::fs as unix_fs;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let upload_root = tempdir.path().join("uploads");
+        let board_dir = upload_root.join("test");
+        let outside = tempdir.path().join("outside");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        std::fs::write(outside.join("clip.mp4"), b"mp4").expect("write outside mp4");
+        unix_fs::symlink(&outside, board_dir.join("link")).expect("symlink");
+
+        assert!(safe_board_media_file(&upload_root, "test/link/clip.mp4").is_err());
     }
 }
 

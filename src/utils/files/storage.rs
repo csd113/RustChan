@@ -188,23 +188,30 @@ pub fn mime_to_ext_pub(mime: &str) -> &'static str {
 /// Returns an error if the path is suspicious or the underlying filesystem
 /// removal fails for a reason other than the file already being absent.
 pub fn delete_file_checked(boards_dir: &str, relative_path: &str) -> Result<()> {
-    let rel = std::path::Path::new(relative_path);
-    if rel.is_absolute()
-        || rel
-            .components()
-            .any(|component| component == std::path::Component::ParentDir)
-    {
-        anyhow::bail!(
-            "delete_file: rejected suspicious path (potential traversal): {relative_path:?}"
-        );
-    }
-
-    let path = PathBuf::from(boards_dir).join(rel);
+    let path = match crate::utils::fs_security::existing_regular_file_child(
+        Path::new(boards_dir),
+        relative_path,
+    ) {
+        Ok(path) => path,
+        Err(error) if is_not_found_error(&error) => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("delete_file: rejected unsafe runtime path {relative_path:?}")
+            });
+        }
+    };
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).with_context(|| format!("Failed to remove {}", path.display())),
     }
+}
+
+fn is_not_found_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .find_map(|source| source.downcast_ref::<std::io::Error>())
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
 #[must_use]
@@ -707,7 +714,10 @@ fn mime_to_ext(mime: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{save_audio_with_image_thumb_from_path, save_upload_from_path, SaveUploadOptions};
+    use super::{
+        delete_file_checked, save_audio_with_image_thumb_from_path, save_upload_from_path,
+        SaveUploadOptions,
+    };
 
     fn one_pixel_png() -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -764,6 +774,46 @@ trailer << /Root 1 0 R >>
 
     fn valid_webm_header() -> &'static [u8] {
         b"\x1a\x45\xdf\xa3\x00\x00\x00\x00\x00\x00\x42\x82\x84webm\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+    }
+
+    #[test]
+    fn delete_file_checked_removes_valid_in_tree_file() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let upload_root = tempdir.path().join("uploads");
+        let board_dir = upload_root.join("test");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::write(board_dir.join("file.txt"), b"ok").expect("write file");
+
+        delete_file_checked(
+            upload_root.to_str().expect("utf8 upload root"),
+            "test/file.txt",
+        )
+        .expect("delete file");
+
+        assert!(!board_dir.join("file.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_file_checked_rejects_symlink_parent_escape() {
+        use std::os::unix::fs as unix_fs;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let upload_root = tempdir.path().join("uploads");
+        let board_dir = upload_root.join("test");
+        let outside = tempdir.path().join("outside");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        let outside_file = outside.join("secret.txt");
+        std::fs::write(&outside_file, b"secret").expect("write outside file");
+        unix_fs::symlink(&outside, board_dir.join("link")).expect("symlink");
+
+        assert!(delete_file_checked(
+            upload_root.to_str().expect("utf8 upload root"),
+            "test/link/secret.txt",
+        )
+        .is_err());
+        assert!(outside_file.exists());
     }
 
     #[test]

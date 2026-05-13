@@ -851,6 +851,8 @@ pub fn finalize_upload_payload(
     validate_upload_finalize_payload(upload_root, payload)?;
 
     for relative_path in &payload.relative_paths {
+        // Payload validation above constrains every source to `.pending/`
+        // and every destination to a normalized relative path under upload_root.
         move_stage_file(stage_dir, upload_root, relative_path)?;
     }
 
@@ -1022,13 +1024,18 @@ fn cleanup_orphan_banner_files_in_dir(
     dir: &Path,
     referenced: &std::collections::HashSet<PathBuf>,
 ) -> Result<()> {
-    if !dir.exists() {
+    let Ok(dir_metadata) = std::fs::symlink_metadata(dir) else {
+        return Ok(());
+    };
+    if !dir_metadata.is_dir() || dir_metadata.file_type().is_symlink() {
         return Ok(());
     }
     for entry in std::fs::read_dir(dir).with_context(|| format!("Read {}", dir.display()))? {
         let entry = entry.with_context(|| format!("Read entry under {}", dir.display()))?;
         let path = entry.path();
-        if !path.is_file() {
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("Inspect banner cleanup path {}", path.display()))?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
             continue;
         }
         let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
@@ -1422,6 +1429,50 @@ mod tests {
         assert!(referenced.exists());
         assert!(!orphan.exists());
         assert!(unknown.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn banner_orphan_cleanup_skips_symlinked_banner_dir() {
+        use std::os::unix::fs as unix_fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let board_dir = temp_dir.path().join("board");
+        let outside = temp_dir.path().join("outside");
+        let storage_key = "0123456789abcdef0123456789abcdef";
+        let sentinel = outside.join(format!("{storage_key}.webp"));
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        std::fs::write(&sentinel, b"keep").expect("write sentinel");
+        unix_fs::symlink(&outside, board_dir.join("_banner")).expect("symlink banner dir");
+
+        cleanup_orphan_banner_files_in_dir(
+            &board_dir.join("_banner"),
+            &std::collections::HashSet::new(),
+        )
+        .expect("cleanup skips symlinked banner dir");
+
+        assert_eq!(std::fs::read(&sentinel).expect("read sentinel"), b"keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn banner_orphan_cleanup_skips_symlinked_banner_file() {
+        use std::os::unix::fs as unix_fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let banner_dir = temp_dir.path().join("banner");
+        let outside = temp_dir.path().join("outside.webp");
+        let storage_key = "0123456789abcdef0123456789abcdef";
+        std::fs::create_dir_all(&banner_dir).expect("create banner dir");
+        std::fs::write(&outside, b"keep").expect("write outside file");
+        unix_fs::symlink(&outside, banner_dir.join(format!("{storage_key}.webp")))
+            .expect("symlink banner file");
+
+        cleanup_orphan_banner_files_in_dir(&banner_dir, &std::collections::HashSet::new())
+            .expect("cleanup skips symlinked banner file");
+
+        assert_eq!(std::fs::read(&outside).expect("read outside"), b"keep");
     }
 
     #[test]

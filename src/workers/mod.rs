@@ -231,6 +231,12 @@ impl JobQueue {
             })
             .ok();
     }
+
+    fn mark_job_failure_state(&self, failure_state: crate::db::JobFailureState) {
+        if failure_state == crate::db::JobFailureState::Retrying {
+            self.pending_jobs.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 // ─── Worker pool startup ──────────────────────────────────────────────────────
@@ -317,14 +323,23 @@ async fn worker_loop(
                         error!("Worker {id}: cannot deserialize job #{job_id}: {error}");
                         let pool_done = queue.pool.clone();
                         let err_msg = format!("Cannot deserialize job payload: {error}");
-                        let db_result = tokio::task::spawn_blocking(move || -> Result<()> {
-                            let c = pool_done.get().map_err(anyhow::Error::from)?;
-                            let _ = crate::db::fail_job(&c, job_id, &err_msg)?;
-                            Ok(())
-                        })
+                        let db_result = tokio::task::spawn_blocking(
+                            move || -> Result<crate::db::JobFailureState> {
+                                let c = pool_done.get().map_err(anyhow::Error::from)?;
+                                crate::db::fail_job(&c, job_id, &err_msg)
+                            },
+                        )
                         .await;
-                        if let Ok(Err(db_error)) = db_result {
-                            error!("Worker {id}: failed to mark broken job #{job_id} as failed: {db_error}");
+                        match db_result {
+                            Ok(Ok(failure_state)) => {
+                                queue.mark_job_failure_state(failure_state);
+                            }
+                            Ok(Err(db_error)) => {
+                                error!("Worker {id}: failed to mark broken job #{job_id} as failed: {db_error}");
+                            }
+                            Err(join_error) => {
+                                error!("Worker {id}: failed to join broken job #{job_id} status update: {join_error}");
+                            }
                         }
                         continue;
                     }
@@ -348,51 +363,60 @@ async fn worker_loop(
                 // We now propagate the error into the back-off path so the
                 // worker retries acquiring a connection, and we log explicitly
                 // so operators can see pool exhaustion events.
-                let db_result = tokio::task::spawn_blocking(move || -> Result<()> {
-                    let c = pool_done.get().map_err(anyhow::Error::from)?;
-                    match result {
-                        Ok(()) => {
-                            crate::db::complete_job(&c, job_id)?;
-                            if let Some(post_id) = media_post_id {
-                                crate::db::set_post_media_processing_state(
-                                    &c, post_id, None, None,
-                                )?;
+                let db_result = tokio::task::spawn_blocking(
+                    move || -> Result<Option<crate::db::JobFailureState>> {
+                        let c = pool_done.get().map_err(anyhow::Error::from)?;
+                        match result {
+                            Ok(()) => {
+                                crate::db::complete_job(&c, job_id)?;
+                                if let Some(post_id) = media_post_id {
+                                    crate::db::set_post_media_processing_state(
+                                        &c, post_id, None, None,
+                                    )?;
+                                }
+                                Ok(None)
                             }
-                        }
-                        Err(e) if crate::db::is_stale_media_target_error(&e) => {
-                            warn!("Worker {id}: job #{job_id} target is stale — {e}");
-                            crate::db::complete_job(&c, job_id)?;
-                        }
-                        Err(e) => {
-                            warn!("Worker {id}: job #{job_id} failed — {e}");
-                            let failure_state = crate::db::fail_job(&c, job_id, &e.to_string())?;
-                            if let Some(post_id) = media_post_id {
-                                match failure_state {
-                                    crate::db::JobFailureState::Retrying => {
-                                        crate::db::set_post_media_processing_state(
-                                            &c,
-                                            post_id,
-                                            Some(crate::db::MEDIA_PROCESSING_PENDING),
-                                            None,
-                                        )?;
-                                    }
-                                    crate::db::JobFailureState::PermanentlyFailed => {
-                                        crate::db::set_post_media_processing_state(
-                                            &c,
-                                            post_id,
-                                            Some(crate::db::MEDIA_PROCESSING_FAILED),
-                                            Some(&e.to_string()),
-                                        )?;
+                            Err(e) if crate::db::is_stale_media_target_error(&e) => {
+                                warn!("Worker {id}: job #{job_id} target is stale — {e}");
+                                crate::db::complete_job(&c, job_id)?;
+                                Ok(None)
+                            }
+                            Err(e) => {
+                                warn!("Worker {id}: job #{job_id} failed — {e}");
+                                let failure_state =
+                                    crate::db::fail_job(&c, job_id, &e.to_string())?;
+                                if let Some(post_id) = media_post_id {
+                                    match failure_state {
+                                        crate::db::JobFailureState::Retrying => {
+                                            crate::db::set_post_media_processing_state(
+                                                &c,
+                                                post_id,
+                                                Some(crate::db::MEDIA_PROCESSING_PENDING),
+                                                None,
+                                            )?;
+                                        }
+                                        crate::db::JobFailureState::PermanentlyFailed => {
+                                            crate::db::set_post_media_processing_state(
+                                                &c,
+                                                post_id,
+                                                Some(crate::db::MEDIA_PROCESSING_FAILED),
+                                                Some(&e.to_string()),
+                                            )?;
+                                        }
                                     }
                                 }
+                                Ok(Some(failure_state))
                             }
                         }
-                    }
-                    Ok(())
-                })
+                    },
+                )
                 .await;
                 match db_result {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(failure_state)) => {
+                        if let Some(failure_state) = failure_state {
+                            queue.mark_job_failure_state(failure_state);
+                        }
+                    }
                     Ok(Err(e)) => {
                         error!("Worker {id}: failed to update completion status for job #{job_id}: {e}");
                         let delay = backoff_duration(consecutive_errors);
@@ -1299,12 +1323,24 @@ fn run_spam_check(post_id: i64, ip_hash: &str, body_len: usize) {
 pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
     // Collect (mtime_secs, path, size) for every file inside any thumbs/ dir.
     let mut files: Vec<(u64, std::path::PathBuf, u64)> = Vec::new();
+    let Ok(upload_root) = std::path::Path::new(upload_dir).canonicalize() else {
+        return;
+    };
     let Ok(boards_iter) = std::fs::read_dir(upload_dir) else {
         return;
     };
     for board_entry in boards_iter.flatten() {
+        let Ok(board_metadata) = board_entry.path().symlink_metadata() else {
+            continue;
+        };
+        if !board_metadata.is_dir() || board_metadata.file_type().is_symlink() {
+            continue;
+        }
         let thumbs_dir = board_entry.path().join("thumbs");
-        if !thumbs_dir.is_dir() {
+        let Ok(thumbs_metadata) = std::fs::symlink_metadata(&thumbs_dir) else {
+            continue;
+        };
+        if !thumbs_metadata.is_dir() || thumbs_metadata.file_type().is_symlink() {
             continue;
         }
         let Ok(thumbs_iter) = std::fs::read_dir(&thumbs_dir) else {
@@ -1312,16 +1348,24 @@ pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
         };
         for entry in thumbs_iter.flatten() {
             let path = entry.path();
-            if let Ok(meta) = entry.metadata() {
-                if meta.is_file() {
-                    let mtime = meta
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map_or(0, |d| d.as_secs());
-                    files.push((mtime, path, meta.len()));
-                }
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !meta.is_file() || meta.file_type().is_symlink() {
+                continue;
             }
+            let Ok(canonical_path) = path.canonicalize() else {
+                continue;
+            };
+            if !canonical_path.starts_with(&upload_root) {
+                continue;
+            }
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            files.push((mtime, canonical_path, meta.len()));
         }
     }
 
@@ -1366,6 +1410,7 @@ mod tests {
     use super::{
         persist_transcoded_webm, transcode_video_finalise, transcoded_webm_name,
         validated_board_media_file, video_reencode_timeout_warning, waveform_finalise,
+        EnqueueOutcome, Job, JobQueue,
     };
     use std::io::Write as _;
 
@@ -1376,6 +1421,85 @@ mod tests {
             |row| row.get(0),
         )
         .expect("file hash count")
+    }
+
+    fn enqueue_spam_job(queue: &JobQueue) -> i64 {
+        let job = Job::SpamCheck {
+            post_id: 42,
+            ip_hash: "hash".to_owned(),
+            body_len: 5,
+        };
+        match queue.enqueue(&job).expect("enqueue job") {
+            EnqueueOutcome::Enqueued(id) => id,
+            EnqueueOutcome::DroppedAtCapacity => panic!("test job should not be dropped"),
+        }
+    }
+
+    fn claim_job(queue: &JobQueue, conn: &rusqlite::Connection, expected_id: i64) -> (i64, String) {
+        let claimed = crate::db::claim_next_job(conn)
+            .expect("claim job")
+            .expect("job should be claimable");
+        assert_eq!(claimed.0, expected_id);
+        queue.mark_job_claimed();
+        claimed
+    }
+
+    #[test]
+    fn retryable_failure_restores_queue_pending_count() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let queue = JobQueue::new(pool.clone());
+        let job_id = enqueue_spam_job(&queue);
+        let conn = pool.get().expect("db connection");
+
+        claim_job(&queue, &conn, job_id);
+        assert_eq!(
+            crate::db::pending_job_count(&conn).expect("pending jobs"),
+            0
+        );
+        assert_eq!(queue.pending_count(), 0);
+
+        let failure_state =
+            crate::db::fail_job(&conn, job_id, "temporary failure").expect("fail job");
+        assert_eq!(failure_state, crate::db::JobFailureState::Retrying);
+        queue.mark_job_failure_state(failure_state);
+
+        assert_eq!(
+            crate::db::pending_job_count(&conn).expect("pending jobs"),
+            1
+        );
+        assert_eq!(queue.pending_count(), 1);
+    }
+
+    #[test]
+    fn permanent_failure_leaves_queue_pending_count_at_zero() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let queue = JobQueue::new(pool.clone());
+        let job_id = enqueue_spam_job(&queue);
+        let conn = pool.get().expect("db connection");
+        let mut saw_permanent_failure = false;
+
+        for _ in 0..8 {
+            claim_job(&queue, &conn, job_id);
+            let failure_state =
+                crate::db::fail_job(&conn, job_id, "persistent failure").expect("fail job");
+            queue.mark_job_failure_state(failure_state);
+            if failure_state == crate::db::JobFailureState::PermanentlyFailed {
+                saw_permanent_failure = true;
+                break;
+            }
+            assert_eq!(
+                crate::db::pending_job_count(&conn).expect("pending jobs"),
+                1
+            );
+            assert_eq!(queue.pending_count(), 1);
+        }
+
+        assert!(saw_permanent_failure);
+        assert_eq!(
+            crate::db::pending_job_count(&conn).expect("pending jobs"),
+            0
+        );
+        assert_eq!(queue.pending_count(), 0);
     }
 
     #[test]
@@ -1461,6 +1585,73 @@ mod tests {
         assert!(validated_board_media_file(&upload_root, "other/video.mp4", "b").is_err());
         assert!(validated_board_media_file(&upload_root, "b/thumbs/video.mp4", "b").is_err());
         assert!(validated_board_media_file(&upload_root, "b/video.mp4", "b").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn thumb_cache_eviction_skips_symlinked_thumbs_dir() {
+        use std::os::unix::fs as unix_fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_root = temp_dir.path().join("uploads");
+        let board_dir = upload_root.join("b");
+        let outside_dir = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::create_dir_all(&outside_dir).expect("create outside dir");
+        let outside_file = outside_dir.join("thumb.webp");
+        std::fs::write(&outside_file, b"outside").expect("write outside file");
+        unix_fs::symlink(&outside_dir, board_dir.join("thumbs")).expect("symlink thumbs dir");
+
+        super::evict_thumb_cache(upload_root.to_str().expect("utf8 upload root"), 0);
+
+        assert_eq!(
+            std::fs::read(&outside_file).expect("read outside"),
+            b"outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn thumb_cache_eviction_skips_symlinked_board_dir() {
+        use std::os::unix::fs as unix_fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_root = temp_dir.path().join("uploads");
+        let outside_board = temp_dir.path().join("outside_board");
+        let outside_thumbs = outside_board.join("thumbs");
+        std::fs::create_dir_all(&upload_root).expect("create upload root");
+        std::fs::create_dir_all(&outside_thumbs).expect("create outside thumbs");
+        let outside_file = outside_thumbs.join("thumb.webp");
+        std::fs::write(&outside_file, b"outside").expect("write outside file");
+        unix_fs::symlink(&outside_board, upload_root.join("b")).expect("symlink board dir");
+
+        super::evict_thumb_cache(upload_root.to_str().expect("utf8 upload root"), 0);
+
+        assert_eq!(
+            std::fs::read(&outside_file).expect("read outside"),
+            b"outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn thumb_cache_eviction_skips_symlinked_thumb_file() {
+        use std::os::unix::fs as unix_fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_root = temp_dir.path().join("uploads");
+        let thumbs_dir = upload_root.join("b").join("thumbs");
+        let outside_file = temp_dir.path().join("outside.webp");
+        std::fs::create_dir_all(&thumbs_dir).expect("create thumbs dir");
+        std::fs::write(&outside_file, b"outside").expect("write outside file");
+        unix_fs::symlink(&outside_file, thumbs_dir.join("thumb.webp")).expect("symlink thumb file");
+
+        super::evict_thumb_cache(upload_root.to_str().expect("utf8 upload root"), 0);
+
+        assert_eq!(
+            std::fs::read(&outside_file).expect("read outside"),
+            b"outside"
+        );
     }
 
     #[test]
