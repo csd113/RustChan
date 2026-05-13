@@ -231,59 +231,6 @@ const fn board_media_cache_control(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{safe_board_media_file, stale_webm_redirect_path};
-
-    #[test]
-    fn stale_mp4_redirect_path_accepts_valid_webm_sibling() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let upload_root = tempdir.path().join("uploads");
-        let board_dir = upload_root.join("test");
-        std::fs::create_dir_all(&board_dir).expect("create board dir");
-        std::fs::write(board_dir.join("clip.webm"), b"webm").expect("write webm");
-
-        assert_eq!(
-            stale_webm_redirect_path(&upload_root, "test/clip.mp4").as_deref(),
-            Some("/boards/test/clip.webm")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn stale_mp4_redirect_path_rejects_symlink_fallback_escape() {
-        use std::os::unix::fs as unix_fs;
-
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let upload_root = tempdir.path().join("uploads");
-        let board_dir = upload_root.join("test");
-        let outside = tempdir.path().join("outside");
-        std::fs::create_dir_all(&board_dir).expect("create board dir");
-        std::fs::create_dir_all(&outside).expect("create outside dir");
-        std::fs::write(outside.join("clip.webm"), b"webm").expect("write outside webm");
-        unix_fs::symlink(&outside, board_dir.join("link")).expect("symlink");
-
-        assert!(stale_webm_redirect_path(&upload_root, "test/link/clip.mp4").is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn board_media_file_rejects_symlink_original_escape() {
-        use std::os::unix::fs as unix_fs;
-
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let upload_root = tempdir.path().join("uploads");
-        let board_dir = upload_root.join("test");
-        let outside = tempdir.path().join("outside");
-        std::fs::create_dir_all(&board_dir).expect("create board dir");
-        std::fs::create_dir_all(&outside).expect("create outside dir");
-        std::fs::write(outside.join("clip.mp4"), b"mp4").expect("write outside mp4");
-        unix_fs::symlink(&outside, board_dir.join("link")).expect("symlink");
-
-        assert!(safe_board_media_file(&upload_root, "test/link/clip.mp4").is_err());
-    }
-}
-
 fn apply_pdf_embed_headers(headers: &mut axum::http::HeaderMap) {
     headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("SAMEORIGIN"));
     headers.insert(
@@ -459,3 +406,56 @@ pub async fn redirect_to_post(
 // ─── POST /appeal ─────────────────────────────────────────────────────────────
 // Banned users submit a brief appeal message here.
 // Appeals appear in the admin panel under // ban appeals.
+
+#[cfg(test)]
+mod tests {
+    use super::{safe_board_media_file, stale_webm_redirect_path};
+
+    #[test]
+    fn stale_mp4_redirect_path_accepts_valid_webm_sibling() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let upload_root = tempdir.path().join("uploads");
+        let board_dir = upload_root.join("test");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::write(board_dir.join("clip.webm"), b"webm").expect("write webm");
+
+        assert_eq!(
+            stale_webm_redirect_path(&upload_root, "test/clip.mp4").as_deref(),
+            Some("/boards/test/clip.webm")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_mp4_redirect_path_rejects_symlink_fallback_escape() {
+        use std::os::unix::fs as unix_fs;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let upload_root = tempdir.path().join("uploads");
+        let board_dir = upload_root.join("test");
+        let outside = tempdir.path().join("outside");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        std::fs::write(outside.join("clip.webm"), b"webm").expect("write outside webm");
+        unix_fs::symlink(&outside, board_dir.join("link")).expect("symlink");
+
+        assert!(stale_webm_redirect_path(&upload_root, "test/link/clip.mp4").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn board_media_file_rejects_symlink_original_escape() {
+        use std::os::unix::fs as unix_fs;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let upload_root = tempdir.path().join("uploads");
+        let board_dir = upload_root.join("test");
+        let outside = tempdir.path().join("outside");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        std::fs::write(outside.join("clip.mp4"), b"mp4").expect("write outside mp4");
+        unix_fs::symlink(&outside, board_dir.join("link")).expect("symlink");
+
+        assert!(safe_board_media_file(&upload_root, "test/link/clip.mp4").is_err());
+    }
+}
