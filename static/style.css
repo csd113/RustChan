@@ -2118,6 +2118,11 @@ html:not([data-theme]) .poster-id-btn {
   border-color: var(--border-glow);
   transform: translateY(-1px);
 }
+
+.catalog-item.catalog-menu-open {
+  z-index: 5;
+}
+
 .catalog-item.sticky { border-color: var(--amber); }
 .catalog-item.is-pinned {
   border-color: var(--amber);
@@ -2290,6 +2295,9 @@ html:not([data-theme]) .poster-id-btn {
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
   padding: 4px;
   text-align: left;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  z-index: 6;
 }
 
 .catalog-thread-menu[data-direction="up"] {

@@ -1902,21 +1902,53 @@ function closeThreadMenus() {
   });
   document.querySelectorAll('.catalog-thread-menu').forEach(function (menu) {
     delete menu.dataset.direction;
+    menu.style.maxHeight = '';
+    menu.style.overflowY = '';
     menu.hidden = true;
   });
+  document.querySelectorAll('.catalog-item.catalog-menu-open').forEach(function (card) {
+    card.classList.remove('catalog-menu-open');
+  });
+}
+
+function getThreadMenuBounds(gutter) {
+  var top = gutter;
+  var bottom = window.innerHeight - gutter;
+  var footer = document.querySelector('.site-footer');
+
+  if (footer) {
+    var footerRect = footer.getBoundingClientRect();
+    if (footerRect.top < bottom && footerRect.bottom > top) {
+      bottom = Math.max(top, footerRect.top - gutter);
+    }
+  }
+
+  return { top: top, bottom: bottom };
 }
 
 function positionThreadMenu(toggle, menu) {
   if (!toggle || !menu) return;
   delete menu.dataset.direction;
+  menu.style.maxHeight = '';
+  menu.style.overflowY = '';
 
   var toggleRect = toggle.getBoundingClientRect();
   var menuRect = menu.getBoundingClientRect();
   var gutter = 12;
-  var spaceBelow = window.innerHeight - toggleRect.bottom - gutter;
-  var spaceAbove = toggleRect.top - gutter;
-  if (spaceBelow < menuRect.height && spaceAbove > spaceBelow) {
+  var offset = 6;
+  var bounds = getThreadMenuBounds(gutter);
+  var spaceBelow = Math.max(0, bounds.bottom - toggleRect.bottom - offset);
+  var spaceAbove = Math.max(0, toggleRect.top - bounds.top - offset);
+  var openUp = spaceBelow < menuRect.height && spaceAbove >= spaceBelow;
+  var availableSpace = openUp ? spaceAbove : spaceBelow;
+
+  if (openUp) {
     menu.dataset.direction = 'up';
+  }
+
+  if (availableSpace > 0 && availableSpace < menuRect.height) {
+    menu.style.maxHeight = availableSpace + 'px';
+    menu.style.overflowY = 'auto';
   }
 }
 
@@ -1925,13 +1957,26 @@ function toggleThreadMenu(toggle) {
   var actions = toggle.closest('.catalog-card-actions');
   var menu = actions && actions.querySelector('.catalog-thread-menu');
   if (!menu) return;
+  var card = toggle.closest('.catalog-item');
   var opening = menu.hidden;
   closeThreadMenus();
   menu.hidden = !opening;
   toggle.setAttribute('aria-expanded', opening ? 'true' : 'false');
   if (opening) {
+    if (card) {
+      card.classList.add('catalog-menu-open');
+    }
     positionThreadMenu(toggle, menu);
   }
+}
+
+function repositionOpenThreadMenus() {
+  document.querySelectorAll('.catalog-thread-menu-toggle[aria-expanded="true"]').forEach(function (toggle) {
+    var actions = toggle.closest('.catalog-card-actions');
+    var menu = actions && actions.querySelector('.catalog-thread-menu');
+    if (!menu || menu.hidden) return;
+    positionThreadMenu(toggle, menu);
+  });
 }
 
 // ─── Theme picker ─────────────────────────────────────────────────────────────
@@ -3305,6 +3350,9 @@ document.addEventListener('keydown', function (e) {
     closeEditModal();
   }
 });
+
+window.addEventListener('resize', repositionOpenThreadMenus);
+window.addEventListener('scroll', repositionOpenThreadMenus, true);
 
 // YouTube / Streamable embed unfurling.
 // The Rust template emits board-specific values as data-* attributes on

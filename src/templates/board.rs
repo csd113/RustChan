@@ -1853,6 +1853,48 @@ mod tests {
     }
 
     #[test]
+    fn catalog_actions_render_toggle_and_menu_controls_together() {
+        let board = sample_board();
+        let thread = sample_thread();
+
+        let html = render_catalog_card(
+            &board,
+            &thread,
+            false,
+            None,
+            "csrf",
+            "pin",
+            "Pin thread",
+            "hide",
+            "Hide thread",
+            "/test/catalog",
+        );
+
+        let actions_start = html
+            .find(r#"<div class="catalog-card-actions">"#)
+            .expect("catalog actions wrapper should exist");
+        let menu_start = html[actions_start..]
+            .find(r#"class="catalog-thread-menu""#)
+            .map(|idx| actions_start + idx)
+            .expect("catalog thread menu should render inside actions wrapper");
+        let report_idx = html[menu_start..]
+            .find("Report thread")
+            .map(|idx| menu_start + idx)
+            .expect("report action should exist");
+        let pin_idx = html[menu_start..]
+            .find("Pin thread")
+            .map(|idx| menu_start + idx)
+            .expect("pin action should exist");
+        let hide_idx = html[menu_start..]
+            .find("Hide thread")
+            .map(|idx| menu_start + idx)
+            .expect("hide action should exist");
+
+        assert!(menu_start > actions_start);
+        assert!(report_idx < pin_idx && pin_idx < hide_idx);
+    }
+
+    #[test]
     fn catalog_reply_counter_renders_above_body_content() {
         let board = sample_board();
         let thread = sample_thread();
