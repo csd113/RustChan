@@ -1034,12 +1034,12 @@ pub fn render_post(
             } else if is_video {
                 let _ = write!(
                     html,
-                    r#"<div class="file-container">
+                    r#"<div class="file-container video-container">
 <div class="file-info">
   File: {file_link} ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
-<a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to play">
+<a class="media-preview video-preview" data-action="expand-media" href="/boards/{f}" title="click to play">
   {thumb_html}
   <div class="media-expand-overlay">&#9654;</div>
 </a>
@@ -1069,7 +1069,7 @@ pub fn render_post(
   File: {file_link} ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
-<a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
+<a class="media-preview pdf-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
   {thumb_html}
   <div class="media-expand-overlay">&#x2922;</div>
 </a>
@@ -1100,7 +1100,7 @@ pub fn render_post(
   File: {file_link} ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
-<a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
+<a class="media-preview image-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
   {thumb_html}
   <div class="media-expand-overlay">&#x2922;</div>
 </a>

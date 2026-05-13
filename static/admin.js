@@ -902,6 +902,8 @@
     window.setInterval(poll, 5000);
   }
 
+  document.addEventListener('DOMContentLoaded', initSiteHealthJobPolling);
+
   function requestHeaders(headers) {
     var pairs = [];
     Object.keys(headers || {}).forEach(function (key) {
@@ -1418,8 +1420,6 @@
   }
 
   document.addEventListener('DOMContentLoaded', function () {
-    initSiteHealthJobPolling();
-
     var fullForm = document.getElementById('full-backup-create-form');
     if (fullForm) {
       fullForm.addEventListener('submit', function (e) {

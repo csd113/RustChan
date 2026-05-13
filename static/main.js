@@ -1988,6 +1988,19 @@ function toggleThreadMenu(toggle) {
     if (btn && panel && !btn.contains(e.target) && !panel.contains(e.target)) {
       closeThemePicker();
     }
+
+    var preferences = document.querySelector('.user-preferences-panel[open]');
+    if (preferences && !preferences.contains(e.target)) {
+      preferences.open = false;
+    }
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    closeThemePicker();
+    document.querySelectorAll('.user-preferences-panel[open]').forEach(function (preferences) {
+      preferences.open = false;
+    });
   });
 
   // The cookie-backed server selection is authoritative on page load. The
