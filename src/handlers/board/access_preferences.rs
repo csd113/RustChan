@@ -556,6 +556,7 @@ fn public_preference_cookie(name: &'static str, value: String) -> Cookie<'static
 
 pub async fn set_user_preferences(
     jar: CookieJar,
+    headers: HeaderMap,
     Form(form): Form<UserPreferencesForm>,
 ) -> Result<Response> {
     check_csrf_jar(&jar, form.csrf.as_deref())?;
@@ -631,6 +632,14 @@ pub async fn set_user_preferences(
             USER_ACTIVITY_BADGES_COOKIE,
             show_badges.to_owned(),
         ));
+
+    if headers
+        .get("x-rustchan-background")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == "1")
+    {
+        return Ok((jar, axum::http::StatusCode::NO_CONTENT).into_response());
+    }
 
     let redirect_to = safe_return_to(form.return_to.as_deref(), "/");
     Ok((jar, Redirect::to(&redirect_to)).into_response())

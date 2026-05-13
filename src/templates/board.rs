@@ -168,8 +168,14 @@ fn render_board_card(
         )
     };
 
+    let nsfw_attr = if board.nsfw {
+        r#" data-board-nsfw="1""#
+    } else {
+        ""
+    };
+
     format!(
-        r#"<div class="board-card">
+        r#"<div class="board-card"{nsfw_attr}>
   {reorder_controls}
   <a class="board-card-link" href="{href}"{action_attr}{return_to_attr}>
     <div class="board-card-short"><span class="board-card-slug">/{sh}/</span><span class="board-card-badges">{nsfw}{access_badge}</span></div>
@@ -180,6 +186,7 @@ fn render_board_card(
   </a>
 </div>"#,
         reorder_controls = reorder_controls,
+        nsfw_attr = nsfw_attr,
         href = href,
         action_attr = action_attr,
         return_to_attr = return_to_attr,
@@ -638,7 +645,7 @@ pub fn index_page<S: std::hash::BuildHasher>(
         String::new()
     } else {
         format!(
-            "<div class=\"index-section\"><h2 class=\"index-section-title\">// Adult Boards <span class=\"nsfw-badge\">NSFW</span></h2><div class=\"board-cards\">{}</div></div>",
+            "<div class=\"index-section\" data-board-nsfw=\"1\"><h2 class=\"index-section-title\">// Adult Boards <span class=\"nsfw-badge\">NSFW</span></h2><div class=\"board-cards\">{}</div></div>",
             board_cards(&nsfw, board_badges, board_reply_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin, user_preferences)
         )
     };
@@ -1700,6 +1707,29 @@ mod tests {
 
         assert!(html.contains(r#"class="board-card-link" href="/test""#));
         assert!(!html.contains(r#"href="/test/catalog""#));
+    }
+
+    #[test]
+    fn board_cards_mark_nsfw_cards_for_client_preference_toggling() {
+        let mut board = sample_board();
+        board.nsfw = true;
+        let stats = BoardStats {
+            board,
+            thread_count: 4,
+        };
+
+        let html = board_cards(
+            &[&stats],
+            &HashMap::new(),
+            &HashMap::new(),
+            true,
+            "csrf",
+            None,
+            false,
+            crate::templates::UserPreferences::default(),
+        );
+
+        assert!(html.contains(r#"<div class="board-card" data-board-nsfw="1">"#));
     }
 
     #[test]

@@ -273,10 +273,19 @@ fn board_href(short_name: &str, preferences: UserPreferences) -> String {
     }
 }
 
-fn board_nav_group_html(boards: &[&Board], preferences: UserPreferences) -> Option<String> {
+fn board_nav_group_html(
+    boards: &[&Board],
+    preferences: UserPreferences,
+    is_nsfw: bool,
+) -> Option<String> {
     if boards.is_empty() {
         return None;
     }
+    let nsfw_attr = if is_nsfw {
+        r#" data-board-nsfw="1""#
+    } else {
+        ""
+    };
     let inner = boards
         .iter()
         .map(|board| {
@@ -289,14 +298,24 @@ fn board_nav_group_html(boards: &[&Board], preferences: UserPreferences) -> Opti
         .collect::<Vec<_>>()
         .join(" / ");
     Some(format!(
-        r#"<span class="board-list-group">[ {inner} ]</span>"#
+        r#"<span class="board-list-group"{nsfw_attr}>[ {inner} ]</span>"#
     ))
 }
 
-fn mobile_board_group_html(title: &str, boards: &[&Board], preferences: UserPreferences) -> String {
+fn mobile_board_group_html(
+    title: &str,
+    boards: &[&Board],
+    preferences: UserPreferences,
+    is_nsfw: bool,
+) -> String {
     if boards.is_empty() {
         return String::new();
     }
+    let nsfw_attr = if is_nsfw {
+        r#" data-board-nsfw="1""#
+    } else {
+        ""
+    };
     let mut items = String::new();
     for board in boards {
         let short = escape_html(&board.short_name);
@@ -307,7 +326,7 @@ fn mobile_board_group_html(title: &str, boards: &[&Board], preferences: UserPref
         );
     }
     format!(
-        r#"<div class="mobile-board-group"><div class="mobile-board-group-title">{title}</div>{items}</div>"#
+        r#"<div class="mobile-board-group"{nsfw_attr}><div class="mobile-board-group-title">{title}</div>{items}</div>"#
     )
 }
 
@@ -332,8 +351,8 @@ pub fn board_nav_html_for_preferences(boards: &[Board], preferences: UserPrefere
         nsfw_boards_all
     };
     [
-        board_nav_group_html(&sfw_boards, preferences),
-        board_nav_group_html(&nsfw_boards, preferences),
+        board_nav_group_html(&sfw_boards, preferences, false),
+        board_nav_group_html(&nsfw_boards, preferences, true),
     ]
     .into_iter()
     .flatten()
@@ -562,8 +581,8 @@ pub fn base_layout_with_preferences(
     } else {
         let items = format!(
             "{}{}",
-            mobile_board_group_html("Boards", &sfw_boards, preferences),
-            mobile_board_group_html("NSFW", &nsfw_boards, preferences)
+            mobile_board_group_html("Boards", &sfw_boards, preferences, false),
+            mobile_board_group_html("NSFW", &nsfw_boards, preferences, true)
         );
         format!(
             r#"<details class="mobile-board-menu">
@@ -1052,6 +1071,37 @@ mod tests {
         assert!(html.contains(r#"<a href="/tech">tech</a>"#));
         assert!(!html.contains(r#"<a href="/tech/catalog">tech</a>"#));
         assert!(!html.contains(r">x</a>"));
+    }
+
+    #[test]
+    fn base_layout_marks_nsfw_nav_groups_for_client_preference_toggling() {
+        let sfw = Board {
+            short_name: "tech".into(),
+            nsfw: false,
+            ..crate::test_fixtures::sample_board()
+        };
+        let nsfw = Board {
+            id: 2,
+            short_name: "x".into(),
+            nsfw: true,
+            ..crate::test_fixtures::sample_board()
+        };
+
+        let html = base_layout_with_preferences(
+            "Home",
+            None,
+            "<p>body</p>",
+            "csrf",
+            &[sfw, nsfw],
+            Some("forest"),
+            None,
+            false,
+            "/",
+            UserPreferences::default(),
+        );
+
+        assert!(html.contains(r#"<span class="board-list-group" data-board-nsfw="1">[ <a href="/x/catalog">x</a> ]</span>"#));
+        assert!(html.contains(r#"<div class="mobile-board-group" data-board-nsfw="1"><div class="mobile-board-group-title">NSFW</div><a class="mobile-board-link" href="/x/catalog">/x/</a></div>"#));
     }
 
     #[test]

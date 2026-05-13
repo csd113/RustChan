@@ -4889,6 +4889,11 @@ html.no-js #theme-picker-panel {
   overscroll-behavior: contain;
 }
 
+html[data-hide-nsfw-boards="1"] [data-board-nsfw="1"],
+html[data-show-activity-badges="0"] .new-activity-badge {
+  display: none !important;
+}
+
 .user-preferences-form label,
 .user-preferences-form fieldset {
   display: flex;
@@ -4969,13 +4974,16 @@ html.js .theme-picker-fallback {
 @media (max-width: 700px) {
   .user-preferences-panel[open] .user-preferences-form {
     position: fixed;
-    top: 50%;
-    right: auto;
-    bottom: auto;
-    left: 50%;
-    transform: translate(-50%, -50%);
+    top: max(12px, env(safe-area-inset-top));
+    right: 12px;
+    bottom: max(12px, env(safe-area-inset-bottom));
+    left: 12px;
+    margin: auto;
+    transform: none;
+    height: max-content;
     width: min(22rem, calc(100vw - 24px));
     max-width: calc(100vw - 24px);
+    max-height: calc(100dvh - 24px);
   }
 }
 

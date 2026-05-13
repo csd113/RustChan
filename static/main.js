@@ -2024,6 +2024,52 @@ function repositionOpenThreadMenus() {
     });
   }
 
+  function applyHideNsfwPreference(hide) {
+    if (hide) {
+      document.documentElement.setAttribute('data-hide-nsfw-boards', '1');
+    } else {
+      document.documentElement.removeAttribute('data-hide-nsfw-boards');
+    }
+  }
+
+  function applyActivityBadgePreference(show) {
+    if (show) {
+      document.documentElement.removeAttribute('data-show-activity-badges');
+    } else {
+      document.documentElement.setAttribute('data-show-activity-badges', '0');
+    }
+  }
+
+  function applyVideoAudioPreference(value) {
+    var muted = value === 'mute';
+    document.querySelectorAll('video, audio').forEach(function (media) {
+      media.muted = muted;
+      if (muted) {
+        media.setAttribute('muted', '');
+      } else {
+        media.removeAttribute('muted');
+      }
+    });
+  }
+
+  function persistUserPreferencesForm(form) {
+    if (!form) return Promise.resolve();
+    if (!window.fetch || !window.FormData || !window.URLSearchParams) {
+      form.submit();
+      return { then: function () {} };
+    }
+    return fetch(form.getAttribute('action') || '/preferences', {
+      method: (form.getAttribute('method') || 'POST').toUpperCase(),
+      credentials: 'same-origin',
+      headers: { 'x-rustchan-background': '1' },
+      body: new URLSearchParams(new FormData(form))
+    }).then(function (response) {
+      return response.ok;
+    }).catch(function () {
+      return false;
+    });
+  }
+
   window.setTheme = function (t, href) {
     try { localStorage.setItem('rustchan_theme', t); } catch (e) {}
     applyTheme(t);
@@ -2046,23 +2092,54 @@ function repositionOpenThreadMenus() {
   }
 
   function initUserPreferencesPanels() {
-    if (!isTouchLikeDevice()) return;
     document.querySelectorAll('.user-preferences-panel').forEach(function (panel) {
       if (panel.dataset.touchReady === '1') return;
       panel.dataset.touchReady = '1';
       var summary = panel.querySelector('.user-preferences-summary');
       if (!summary) return;
+      if (!isTouchLikeDevice()) return;
       summary.addEventListener('click', function (event) {
         event.preventDefault();
         panel.open = !panel.open;
-        if (panel.open) {
-          window.setTimeout(function () {
-            var firstControl = panel.querySelector('select, input, button');
-            if (firstControl && typeof firstControl.focus === 'function') {
-              firstControl.focus();
-            }
-          }, 0);
+      });
+    });
+  }
+
+  function initUserPreferencesForms() {
+    document.querySelectorAll('.user-preferences-form').forEach(function (form) {
+      if (form.dataset.preferenceReady === '1') return;
+      form.dataset.preferenceReady = '1';
+
+      var hideNsfw = form.querySelector('input[name="hide_nsfw_boards"]');
+      if (hideNsfw) applyHideNsfwPreference(hideNsfw.checked);
+      var showBadges = form.querySelector('input[name="show_activity_badges"]');
+      if (showBadges) applyActivityBadgePreference(showBadges.checked);
+
+      form.addEventListener('change', function (event) {
+        var control = event.target;
+        if (!control || !control.name) return;
+
+        var hadNsfwNodes = Boolean(document.querySelector('[data-board-nsfw="1"]'));
+        if (control.name === 'theme') {
+          try { localStorage.setItem('rustchan_theme', control.value); } catch (e) {}
+          applyTheme(control.value);
+        } else if (control.name === 'hide_nsfw_boards') {
+          applyHideNsfwPreference(control.checked);
+        } else if (control.name === 'show_activity_badges') {
+          applyActivityBadgePreference(control.checked);
+        } else if (control.name === 'video_audio') {
+          applyVideoAudioPreference(control.value);
         }
+
+        persistUserPreferencesForm(form).then(function (saved) {
+          if (!saved) return;
+          if (
+            control.name === 'preferred_board_view' ||
+            (control.name === 'hide_nsfw_boards' && !control.checked && !hadNsfwNodes)
+          ) {
+            window.location.reload();
+          }
+        });
       });
     });
   }
@@ -2106,6 +2183,7 @@ function repositionOpenThreadMenus() {
   }());
 
   initUserPreferencesPanels();
+  initUserPreferencesForms();
 })();
 
 // ─── Collapse greentext blocks ────────────────────────────────────────────────

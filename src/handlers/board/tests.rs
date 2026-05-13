@@ -2299,6 +2299,36 @@ async fn set_user_preferences_requires_csrf_and_sets_bounded_cookies() {
 }
 
 #[tokio::test]
+async fn set_user_preferences_supports_background_cookie_updates() {
+    install_preference_test_themes();
+    let router = Router::new().route("/preferences", post(super::set_user_preferences));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/preferences")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .header("x-rustchan-background", "1")
+                .body(Body::from(
+                    "_csrf=csrf123&return_to=%2Ftech&preferences_form=1&theme=blue-sky&hide_nsfw_boards=1&video_audio=mute&preferred_board_view=index&show_activity_badges=1",
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let set_cookies = set_cookie_pairs(&response);
+    assert!(set_cookies.contains("rustchan_theme=blue-sky"));
+    assert!(set_cookies.contains("rustchan_hide_nsfw=1"));
+    assert!(set_cookies.contains("rustchan_video_audio=mute"));
+    assert!(set_cookies.contains("rustchan_preferred_view=index"));
+    assert!(set_cookies.contains("rustchan_activity_badges=1"));
+}
+
+#[tokio::test]
 async fn set_user_preferences_accepts_admin_scoped_csrf_from_admin_panel() {
     install_preference_test_themes();
     let router = Router::new().route("/preferences", post(super::set_user_preferences));

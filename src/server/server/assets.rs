@@ -65,7 +65,7 @@ pub(super) async fn serve_theme_init_js(req: axum::extract::Request) -> impl Int
 
 #[cfg(test)]
 mod tests {
-    use super::STYLE_CSS;
+    use super::{MAIN_JS, STYLE_CSS};
 
     #[test]
     fn stylesheet_centers_mobile_user_preferences_panel_and_caps_viewport_usage() {
@@ -73,8 +73,24 @@ mod tests {
         assert!(STYLE_CSS.contains("max-height: calc(100vh - 24px);"));
         assert!(STYLE_CSS.contains("overflow-y: auto;"));
         assert!(STYLE_CSS.contains("@media (max-width: 700px) {\n  .user-preferences-panel[open] .user-preferences-form {\n    position: fixed;"));
-        assert!(STYLE_CSS.contains("left: 50%;"));
-        assert!(STYLE_CSS.contains("transform: translate(-50%, -50%);"));
+        assert!(STYLE_CSS.contains("top: max(12px, env(safe-area-inset-top));"));
+        assert!(STYLE_CSS.contains("bottom: max(12px, env(safe-area-inset-bottom));"));
+        assert!(STYLE_CSS.contains("margin: auto;"));
+        assert!(STYLE_CSS.contains("transform: none;"));
         assert!(STYLE_CSS.contains("max-width: calc(100vw - 24px);"));
+        assert!(STYLE_CSS.contains("max-height: calc(100dvh - 24px);"));
+    }
+
+    #[test]
+    fn main_js_progressively_persists_user_preference_changes() {
+        assert!(MAIN_JS.contains("function initUserPreferencesForms()"));
+        assert!(MAIN_JS.contains("x-rustchan-background"));
+        assert!(MAIN_JS.contains("new URLSearchParams(new FormData(form))"));
+        assert!(MAIN_JS.contains("control.name === 'theme'"));
+        assert!(MAIN_JS.contains("control.name === 'hide_nsfw_boards'"));
+        assert!(MAIN_JS.contains("data-hide-nsfw-boards"));
+        assert!(
+            !MAIN_JS.contains("var firstControl = panel.querySelector('select, input, button');")
+        );
     }
 }
