@@ -32,7 +32,6 @@ use crate::config::CONFIG;
 use crate::db::DbPool;
 use anyhow::{Context as _, Result};
 use dashmap::DashMap;
-use rand_core::{OsRng, RngCore as _};
 use serde::{Deserialize, Serialize};
 use std::num::NonZero;
 use std::path::PathBuf;
@@ -455,8 +454,9 @@ fn backoff_duration(consecutive_errors: u32) -> Duration {
 
     let exp = consecutive_errors.min(7); // 2^7 = 128 → 64 s before cap
     let base = BASE_MS.saturating_mul(1u64 << exp).min(MAX_MS);
-    // Use OsRng (already a dependency) for jitter — no new deps required.
-    let jitter = u64::from(OsRng.next_u32()) % JITTER_MAX_MS;
+    let jitter = u64::from(crate::utils::crypto::os_random_u32_or_exit(
+        "computing worker retry jitter",
+    )) % JITTER_MAX_MS;
     Duration::from_millis(base + jitter)
 }
 

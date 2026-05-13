@@ -1,5 +1,3 @@
-use rand_core::{OsRng, RngCore as _};
-
 /// Try to extract a (`embed_type`, `video_id`) pair from a URL.
 ///
 /// Supports `YouTube` (youtube.com and youtu.be), any Invidious instance
@@ -98,7 +96,7 @@ fn roll_dice(count: u32, sides: u32) -> (Vec<u32>, u32) {
     let mut rolls = Vec::with_capacity(count as usize);
     let mut sum = 0u32;
     for _ in 0..count {
-        let roll = (OsRng.next_u32() % sides) + 1;
+        let roll = (crate::utils::crypto::os_random_u32_or_exit("rolling dice markup") % sides) + 1;
         rolls.push(roll);
         sum = sum.saturating_add(roll);
     }

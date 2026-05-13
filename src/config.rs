@@ -1,5 +1,4 @@
 // Runtime configuration and settings-file loading.
-use rand_core::{OsRng, RngCore as _};
 use serde::Deserialize;
 use std::env;
 use std::io::Write as _;
@@ -330,7 +329,10 @@ pub fn generate_settings_file_if_missing() {
     }
     // Generate a random 64-hex-char secret (32 bytes of entropy).
     let mut secret_bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut secret_bytes);
+    crate::utils::crypto::fill_os_random_or_exit(
+        &mut secret_bytes,
+        "generating the initial cookie secret",
+    );
     let secret = hex::encode(secret_bytes);
     let content = template::settings_template(&secret);
     match std::fs::write(&path, content) {
@@ -702,7 +704,10 @@ impl Config {
             // Random in-memory secret so each restart invalidates hashes
             // (better than a known empty string, worse than a persisted one).
             let mut b = [0u8; 32];
-            OsRng.fill_bytes(&mut b);
+            crate::utils::crypto::fill_os_random_or_exit(
+                &mut b,
+                "generating a fallback in-memory cookie secret",
+            );
             hex::encode(b)
         };
         // ── ChanNet fields ───────────────────────────────────────────────────

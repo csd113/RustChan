@@ -53,8 +53,11 @@ pub fn init_pool() -> Result<DbPool> {
 /// # Errors
 /// Returns an error if the temporary pool cannot be created or initialised.
 pub fn init_test_pool() -> Result<DbPool> {
-    let manager =
-        SqliteConnectionManager::memory().with_init(|conn| conn.execute_batch(CONNECTION_PRAGMAS));
+    let test_db_dir = std::env::temp_dir().join("rustchan-test-dbs");
+    std::fs::create_dir_all(&test_db_dir).context("Failed to create test DB directory")?;
+    let test_db_path = test_db_dir.join(format!("{}.sqlite3", uuid::Uuid::new_v4().simple()));
+    let manager = SqliteConnectionManager::file(test_db_path)
+        .with_init(|conn| conn.execute_batch(CONNECTION_PRAGMAS));
 
     let pool = Pool::builder()
         .max_size(4)

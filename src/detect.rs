@@ -313,7 +313,6 @@ fn webm_install_hint(has_vp9: bool, has_opus: bool) -> String {
 use arti_client::{config::TorClientConfigBuilder, TorClient};
 use dashmap::DashMap;
 use futures::StreamExt as _;
-use rand_core::{OsRng, RngCore as _};
 use std::sync::LazyLock;
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
@@ -649,7 +648,10 @@ async fn proxy_tor_stream(
     let local_port = local.local_addr().map_or(0, |a| a.port());
     let token: Arc<str> = {
         let mut bytes = [0u8; 16];
-        OsRng.fill_bytes(&mut bytes);
+        crate::utils::crypto::fill_os_random_or_exit(
+            &mut bytes,
+            "generating a Tor stream isolation token",
+        );
         Arc::from(format!("tor:{}", hex::encode(bytes)).as_str())
     };
     // _guard removes the map entry when this task ends (connection closed or error).

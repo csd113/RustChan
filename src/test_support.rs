@@ -1,6 +1,11 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 pub fn app_state() -> crate::middleware::AppState {
+    std::fs::create_dir_all(&crate::config::CONFIG.upload_dir).expect("create test upload dir");
+    std::fs::create_dir_all(crate::config::full_backups_dir())
+        .expect("create test full backup dir");
+    std::fs::create_dir_all(crate::config::board_backups_dir())
+        .expect("create test board backup dir");
     let pool = crate::db::init_test_pool().expect("test pool");
     if let Ok(conn) = pool.get() {
         let _ = crate::db::sync_live_theme_state(&conn);
