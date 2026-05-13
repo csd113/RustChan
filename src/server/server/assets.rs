@@ -62,3 +62,19 @@ pub(super) async fn serve_admin_js(req: axum::extract::Request) -> impl IntoResp
 pub(super) async fn serve_theme_init_js(req: axum::extract::Request) -> impl IntoResponse {
     static_asset_response(&req, THEME_INIT_JS, "application/javascript; charset=utf-8")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::STYLE_CSS;
+
+    #[test]
+    fn stylesheet_centers_mobile_user_preferences_panel_and_caps_viewport_usage() {
+        assert!(STYLE_CSS.contains(".user-preferences-form {\n"));
+        assert!(STYLE_CSS.contains("max-height: calc(100vh - 24px);"));
+        assert!(STYLE_CSS.contains("overflow-y: auto;"));
+        assert!(STYLE_CSS.contains("@media (max-width: 700px) {\n  .user-preferences-panel[open] .user-preferences-form {\n    position: fixed;"));
+        assert!(STYLE_CSS.contains("left: 50%;"));
+        assert!(STYLE_CSS.contains("transform: translate(-50%, -50%);"));
+        assert!(STYLE_CSS.contains("max-width: calc(100vw - 24px);"));
+    }
+}

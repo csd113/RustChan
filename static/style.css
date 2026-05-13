@@ -4445,6 +4445,10 @@ html.no-js #theme-picker-panel {
   box-shadow: 0 4px 24px rgba(0,0,0,0.55);
   border-radius: var(--theme-picker-panel-radius, var(--theme-picker-radius, 0));
   text-align: left;
+  box-sizing: border-box;
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .user-preferences-form label,
@@ -4502,6 +4506,19 @@ html.js .theme-picker-fallback {
 
 .theme-picker-fallback a:hover {
   color: var(--green-bright);
+}
+
+@media (max-width: 700px) {
+  .user-preferences-panel[open] .user-preferences-form {
+    position: fixed;
+    top: 50%;
+    right: auto;
+    bottom: auto;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: min(22rem, calc(100vw - 24px));
+    max-width: calc(100vw - 24px);
+  }
 }
 
 #theme-picker-panel .tp-title {
