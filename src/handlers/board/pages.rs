@@ -381,7 +381,12 @@ pub async fn board_index(
         .get("if-none-match")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if client_etag == etag && !banner_selection.disable_not_modified_short_circuit {
+    let activity_markers_enabled =
+        thread_badges_enabled || homepage_thread_badges_enabled || homepage_reply_badges_enabled;
+    if client_etag == etag
+        && !banner_selection.disable_not_modified_short_circuit
+        && !activity_markers_enabled
+    {
         // StatusCode::NOT_MODIFIED and Body::empty() are always valid constants;
         // this builder call is infallible.
         let mut resp = axum::http::Response::builder()

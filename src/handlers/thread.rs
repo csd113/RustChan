@@ -206,7 +206,9 @@ pub async fn view_thread(
         .get("if-none-match")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if client_etag == etag {
+    let activity_markers_enabled =
+        thread_badges_enabled || homepage_thread_badges_enabled || homepage_reply_badges_enabled;
+    if client_etag == etag && !activity_markers_enabled {
         // StatusCode::NOT_MODIFIED and Body::empty() are always valid; this
         // builder call is infallible in practice.
         let mut resp = axum::http::Response::builder()

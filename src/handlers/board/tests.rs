@@ -1475,6 +1475,112 @@ async fn thread_visit_clears_homepage_new_thread_badge() {
 }
 
 #[tokio::test]
+async fn conditional_thread_visit_that_marks_activity_read_returns_full_response() {
+    let state = crate::test_support::app_state();
+    set_new_activity_settings(&state, true, true, true);
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    let router = activity_router(state.clone());
+    let mut cookies = HashMap::new();
+
+    let baseline = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/tech/thread/{thread_id}"))
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let baseline_etag = baseline
+        .headers()
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .expect("thread etag");
+    update_cookie_store(&mut cookies, baseline.headers());
+
+    create_thread_on_board(&state, board_id, "new thread");
+
+    let clear_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/tech/thread/{thread_id}"))
+                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::IF_NONE_MATCH, baseline_etag)
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(clear_response.status(), StatusCode::OK);
+    update_cookie_store(&mut cookies, clear_response.headers());
+
+    let home_response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let body = response_body_string(home_response).await;
+    assert!(!body.contains("board-card-activity-badge"));
+}
+
+#[tokio::test]
+async fn conditional_board_activity_pages_return_full_response_when_tracking_enabled() {
+    let state = crate::test_support::app_state();
+    set_new_activity_settings(&state, true, true, true);
+    seed_board_with_thread(&state, "tech", "op");
+    let router = activity_router(state);
+
+    for uri in ["/tech", "/tech/catalog"] {
+        let baseline = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let etag = baseline
+            .headers()
+            .get(header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .expect("etag");
+
+        let conditional = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header(header::IF_NONE_MATCH, etag)
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("conditional response");
+        assert_eq!(conditional.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
 async fn new_reply_after_thread_baseline_shows_thread_badge_until_thread_visit() {
     let state = crate::test_support::app_state();
     set_new_activity_settings(&state, true, true, true);
