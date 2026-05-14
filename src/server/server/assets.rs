@@ -75,23 +75,23 @@ mod tests {
         assert!(!STYLE_CSS.contains(".user-preferences-form button[type=\"submit\"]"));
         assert!(STYLE_CSS.contains(".user-preferences-panel[open]::before"));
         assert!(STYLE_CSS.contains("background: rgba(0,0,0,0.42);"));
-        assert!(
-            STYLE_CSS.contains(".user-preferences-panel[open] .user-preferences-summary::after")
-        );
-        assert!(STYLE_CSS.contains("content: \"\\00d7\";"));
+        assert!(STYLE_CSS.contains(".user-preferences-mobile-close {\n  display: none;"));
+        assert!(STYLE_CSS.contains("visibility: hidden;"));
         assert!(STYLE_CSS.contains(
             ".user-preferences-panel[open] .user-preferences-form {\n    position: fixed;"
         ));
         assert!(STYLE_CSS.contains("bottom: 0;"));
+        assert!(STYLE_CSS.contains("inset-block-end: 0;"));
         assert!(STYLE_CSS.contains("margin: 0 auto;"));
-        assert!(STYLE_CSS.contains("transform: none;"));
+        assert!(STYLE_CSS.contains("transform: translate3d(0, 0, 0);"));
         assert!(STYLE_CSS.contains("max-width: 30rem;"));
         assert!(STYLE_CSS.contains(
-            "max-height: min(88dvh, calc(100dvh - max(18px, env(safe-area-inset-top))));"
+            "max-height: min(68svh, calc(100svh - max(20px, env(safe-area-inset-top))));"
         ));
         assert!(STYLE_CSS.contains("overflow-x: hidden;"));
         assert!(STYLE_CSS.contains("border-radius: 18px 18px 0 0;"));
-        assert!(STYLE_CSS.contains(".user-preferences-form > label {\n    min-height: 52px;"));
+        assert!(STYLE_CSS.contains("position: sticky;"));
+        assert!(STYLE_CSS.contains(".user-preferences-form > label {\n    min-height: 46px;"));
         assert!(STYLE_CSS.contains(".user-preferences-form input[type=\"checkbox\"],\n  .user-preferences-form input[type=\"radio\"] {\n    min-width: 24px;"));
     }
 
@@ -106,6 +106,9 @@ mod tests {
         assert!(MAIN_JS.contains("control.name === 'theme'"));
         assert!(MAIN_JS.contains("control.name === 'hide_nsfw_boards'"));
         assert!(MAIN_JS.contains("data-hide-nsfw-boards"));
+        assert!(MAIN_JS
+            .contains("var mobileClose = panel.querySelector('.user-preferences-mobile-close');"));
+        assert!(MAIN_JS.contains("panel.open = false;"));
         assert!(
             !MAIN_JS.contains("var firstControl = panel.querySelector('select, input, button');")
         );

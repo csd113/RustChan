@@ -4867,6 +4867,10 @@ html.no-js #theme-picker-panel {
   color: var(--green-bright);
 }
 
+.user-preferences-mobile-close {
+  display: none;
+}
+
 .user-preferences-form {
   position: absolute;
   right: 0;
@@ -4976,27 +4980,7 @@ html.js .theme-picker-fallback {
   }
 
   .user-preferences-panel[open] .user-preferences-summary {
-    position: fixed;
-    top: max(14px, env(safe-area-inset-top));
-    right: max(14px, env(safe-area-inset-right));
-    z-index: 46;
-    display: grid;
-    place-items: center;
-    width: 44px;
-    min-width: 44px;
-    height: 44px;
-    min-height: 44px;
-    padding: 0;
-    overflow: hidden;
-    border-radius: 50%;
-    font-size: 0;
-    line-height: 1;
-  }
-
-  .user-preferences-panel[open] .user-preferences-summary::after {
-    content: "\00d7";
-    font-size: 1.7rem;
-    font-weight: bold;
+    visibility: hidden;
   }
 
   .user-preferences-panel[open] .user-preferences-form {
@@ -5005,12 +4989,13 @@ html.js .theme-picker-fallback {
     right: 0;
     bottom: 0;
     left: 0;
+    inset-block-end: 0;
     margin: 0 auto;
-    transform: none;
+    transform: translate3d(0, 0, 0);
     width: 100%;
     max-width: 30rem;
-    max-height: min(88dvh, calc(100dvh - max(18px, env(safe-area-inset-top))));
-    padding: 58px 18px calc(18px + env(safe-area-inset-bottom));
+    max-height: min(68vh, calc(100vh - max(20px, env(safe-area-inset-top))));
+    padding: 10px 16px calc(14px + env(safe-area-inset-bottom));
     gap: 0;
     overflow-x: hidden;
     border-right: 0;
@@ -5020,16 +5005,44 @@ html.js .theme-picker-fallback {
     box-shadow: 0 -10px 34px rgba(0,0,0,0.58);
   }
 
+  @supports (height: 100svh) {
+    .user-preferences-panel[open] .user-preferences-form {
+      max-height: min(68svh, calc(100svh - max(20px, env(safe-area-inset-top))));
+    }
+  }
+
+  .user-preferences-mobile-close {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: grid;
+    place-items: center;
+    align-self: center;
+    width: 40px;
+    min-width: 40px;
+    height: 30px;
+    min-height: 30px;
+    margin: 0 auto 4px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-panel);
+    color: var(--text);
+    font: inherit;
+    font-size: 1.15rem;
+    line-height: 1;
+  }
+
   .user-preferences-form label,
   .user-preferences-form fieldset {
     width: 100%;
     box-sizing: border-box;
-    font-size: 0.96rem;
+    font-size: 0.92rem;
   }
 
   .user-preferences-form > label {
-    min-height: 52px;
-    padding: 13px 0;
+    min-height: 46px;
+    padding: 9px 0;
     border-bottom: 1px solid var(--border);
   }
 
@@ -5037,14 +5050,15 @@ html.js .theme-picker-fallback {
     display: grid;
     grid-template-columns: 1fr;
     align-items: stretch;
-    gap: 8px;
+    gap: 7px;
+    padding-top: 7px;
   }
 
   .user-preferences-form fieldset {
     display: grid;
     grid-template-columns: 1fr;
     gap: 0;
-    padding: 12px 0;
+    padding: 10px 0;
     border: 0;
     border-bottom: 1px solid var(--border);
     border-radius: 0;
@@ -5053,23 +5067,23 @@ html.js .theme-picker-fallback {
   .user-preferences-form legend {
     float: left;
     width: 100%;
-    padding: 0 0 7px;
+    padding: 0 0 6px;
     color: var(--text);
     font-size: 0.82rem;
     font-weight: bold;
   }
 
   .user-preferences-form fieldset label {
-    min-height: 48px;
-    padding: 8px 0;
+    min-height: 44px;
+    padding: 7px 0;
   }
 
   .user-preferences-form select {
     width: 100%;
     min-width: 0;
-    min-height: 46px;
+    min-height: 42px;
     margin-left: 0;
-    font-size: 1rem;
+    font-size: 0.96rem;
   }
 
   .user-preferences-form input[type="checkbox"],

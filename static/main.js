@@ -2100,6 +2100,13 @@ function repositionOpenThreadMenus() {
           panel.open = false;
         }
       });
+      var mobileClose = panel.querySelector('.user-preferences-mobile-close');
+      if (mobileClose) {
+        mobileClose.addEventListener('click', function (event) {
+          event.preventDefault();
+          panel.open = false;
+        });
+      }
       var summary = panel.querySelector('.user-preferences-summary');
       if (!summary) return;
       if (!isTouchLikeDevice()) return;

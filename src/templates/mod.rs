@@ -764,6 +764,7 @@ pub fn base_layout_with_preferences(
     <details class="user-preferences-panel">
       <summary id="theme-picker-btn" class="user-preferences-summary">&#9881; User Preferences</summary>
       <form class="user-preferences-form" method="POST" action="/preferences">
+        <button type="button" class="user-preferences-mobile-close" aria-label="Close preferences">&times;</button>
         <input type="hidden" name="preferences_form" value="1">
         <input type="hidden" name="_csrf" value="{csrf_token}">
         <input type="hidden" name="return_to" value="{current_path}">
@@ -1025,6 +1026,8 @@ mod tests {
         assert!(html.contains(r#"data-active-theme="blue-sky""#));
         assert!(html.contains(r#"name="_csrf" value="csrf""#));
         assert!(html.contains(r#"name="preferences_form" value="1""#));
+        assert!(html.contains(r#"class="user-preferences-mobile-close""#));
+        assert!(html.contains(r#"aria-label="Close preferences""#));
         assert!(html.contains("User Preferences"));
         assert!(html.contains(r#"<option value="blue-sky" selected>Blue Sky</option>"#));
         assert!(html.contains(r#"name="hide_nsfw_boards_present" value="1""#));
