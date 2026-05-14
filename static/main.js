@@ -2061,6 +2061,7 @@ function repositionOpenThreadMenus() {
     return fetch(form.getAttribute('action') || '/preferences', {
       method: (form.getAttribute('method') || 'POST').toUpperCase(),
       credentials: 'same-origin',
+      keepalive: true,
       headers: { 'x-rustchan-background': '1' },
       body: new URLSearchParams(new FormData(form))
     }).then(function (response) {

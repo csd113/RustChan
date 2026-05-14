@@ -100,6 +100,7 @@ mod tests {
     fn main_js_progressively_persists_user_preference_changes() {
         assert!(MAIN_JS.contains("function initUserPreferencesForms()"));
         assert!(MAIN_JS.contains("x-rustchan-background"));
+        assert!(MAIN_JS.contains("keepalive: true"));
         assert!(MAIN_JS.contains("new URLSearchParams(new FormData(form))"));
         assert!(MAIN_JS.contains(
             "form.addEventListener('submit', function (event) {\n        event.preventDefault();"
