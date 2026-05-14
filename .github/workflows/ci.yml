@@ -105,6 +105,7 @@ jobs:
         with:
           shared-key: platform-smoke
           key: ${{ matrix.target }}
+          cache-bin: false
 
       - name: Build
         run: cargo build --locked --all-features --target ${{ matrix.target }} --verbose
