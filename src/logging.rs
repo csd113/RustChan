@@ -13,12 +13,19 @@
 //      All writes go through `CONSOLE_MUTEX` so `console.rs` interactive
 //      output never interleaves with log events.
 //
-//   2. Log file (logs/rustchan.YYYY-MM-DD.log, human-readable text, daily rotation)
+//   2. Main log file (logs/rustchan.YYYY-MM-DD.log, human-readable text, daily rotation)
 //      Same fixed-column format as the non-TTY terminal output, with two extras:
 //        • Millisecond precision on every timestamp.
 //        • WARN and ERROR lines append  (src/file.rs:line)  at the end so you
 //          can jump straight to the source without grepping the codebase.
 //      One event per line — easy to tail, grep, and read in any text editor.
+//
+//   3. Dependency log file (logs/dep_log.log)
+//      Third-party dependency events are hidden from the terminal and main log
+//      by default, but are still written here with the same human-readable file
+//      formatter. FFMPEG-related logs are intentionally treated as app/runtime
+//      logs and remain in the main log.
+//
 //      If you need machine-parseable output for a log shipper (Loki, Datadog,
 //      etc.) swap the FileFormatter layer for .json() — see the comment in
 //      init_logging().
@@ -41,7 +48,7 @@
 
 use std::fmt;
 use std::io::{self, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, OnceLock};
 use std::time::{Duration, Instant};
@@ -51,7 +58,12 @@ use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::fmt::{FmtContext, MakeWriter};
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter};
+use tracing_subscriber::{
+    filter::filter_fn,
+    layer::{Layer as _, SubscriberExt as _},
+    util::SubscriberInitExt as _,
+    EnvFilter,
+};
 
 // ─── Shared console write lock ────────────────────────────────────────────────
 
@@ -74,7 +86,12 @@ static CONSOLE_MUTEX: LazyLock<parking_lot::Mutex<()>> =
 // Using a module-level OnceLock means the guard is stored here without
 // requiring callers to thread it through their own state, and without changing
 // the public `init_logging(&Path)` signature.
-static FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+static MAIN_FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+static DEPENDENCY_FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> =
+    OnceLock::new();
+
+pub const MAIN_LOG_FALLBACK_FILE_NAME: &str = "rustchan.log";
+pub const DEPENDENCY_LOG_FILE_NAME: &str = "dep_log.log";
 
 // ─── TTY detection ────────────────────────────────────────────────────────────
 
@@ -134,6 +151,69 @@ pub fn is_tui_active() -> bool {
 }
 
 // ─── Component name extraction ────────────────────────────────────────────────
+
+const APP_LOG_TARGETS: &[&str] = &[
+    "admin",
+    "board",
+    "chan",
+    "chan_net",
+    "config",
+    "console",
+    "db",
+    "polls",
+    "rustchan",
+    "rustchan_cli",
+    "server",
+    "sessions",
+    "startup",
+    "tls",
+    "workers",
+];
+
+const APP_LOG_EXACT_TARGETS: &[&str] = &["convert", "media_prune"];
+
+#[must_use]
+pub fn dependency_log_path(log_dir: &Path) -> PathBuf {
+    log_dir.join(DEPENDENCY_LOG_FILE_NAME)
+}
+
+#[must_use]
+pub fn is_main_log_file(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    file_name == MAIN_LOG_FALLBACK_FILE_NAME
+        || (file_name.starts_with("rustchan.")
+            && path.extension().and_then(|ext| ext.to_str()) == Some("log"))
+}
+
+fn is_app_log_target(target: &str) -> bool {
+    APP_LOG_EXACT_TARGETS.contains(&target)
+        || APP_LOG_TARGETS.iter().any(|app_target| {
+            target == *app_target
+                || target
+                    .strip_prefix(*app_target)
+                    .is_some_and(|suffix| suffix.starts_with("::"))
+        })
+}
+
+fn is_ffmpeg_log_target(target: &str) -> bool {
+    target == "ffmpeg"
+        || target.starts_with("ffmpeg::")
+        || target == "ffmpeg_next"
+        || target.starts_with("ffmpeg_next::")
+        || target.ends_with("::ffmpeg")
+        || target.contains("::ffmpeg::")
+}
+
+fn is_main_log_target(target: &str) -> bool {
+    is_app_log_target(target) || is_ffmpeg_log_target(target)
+}
+
+fn is_dependency_log_target(target: &str) -> bool {
+    !is_main_log_target(target)
+}
 
 /// Extract the useful short name from a tracing target (module path).
 ///
@@ -819,6 +899,34 @@ fn write_event_fields(writer: &mut Writer<'_>, fields: &LogEventFields) -> fmt::
     Ok(())
 }
 
+fn default_env_filter() -> EnvFilter {
+    EnvFilter::new(
+        // Default to INFO for all enabled targets so third-party dependency
+        // events are not silently dropped; route filters below keep them out
+        // of the terminal and main RustChan log.
+        "info,\
+         rustchan=info,\
+         rustchan_cli=info,\
+         chan=info,\
+         admin=info,\
+         board=info,\
+         workers=info,\
+         server=info,\
+         db=info,\
+         startup=info,\
+         sessions=info,\
+         polls=info,\
+         chan_net=info,\
+         console=info,\
+         tls=info,\
+         config=info",
+    )
+}
+
+fn env_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| default_env_filter())
+}
+
 // ─── Terminal formatter ───────────────────────────────────────────────────────
 
 /// Writes one compact line per log event to the terminal.
@@ -992,15 +1100,22 @@ impl<'a> MakeWriter<'a> for ConsoleLock {
 /// before any `tracing::info!` or `tracing::warn!` calls are made.
 ///
 /// Detects whether stdout is an interactive terminal and stores the result
-/// in `IS_TTY` for the process lifetime. Installs two layers:
+/// in `IS_TTY` for the process lifetime. Installs three layers:
 ///
 /// 1. **Terminal layer** — `TerminalFormatter` writes via `ConsoleLock`
 ///    (`CONSOLE_MUTEX`). Human-readable, coloured when TTY, plain otherwise.
-///    Serialised with `console.rs` output via the shared mutex.
+///    Serialised with `console.rs` output via the shared mutex. `RustChan` and
+///    `FFMPEG` targets only.
 ///
-/// 2. **File layer** — `FileFormatter`, daily rotation, `debug`+.
+/// 2. **Main file layer** — `FileFormatter`, daily rotation, filtered by
+///    `RUST_LOG` or the default INFO-level filter.
 ///    Written to `{log_dir}/rustchan.YYYY-MM-DD.log`.
 ///    One human-readable line per event; WARN/ERROR include source location.
+///    `RustChan` and `FFMPEG` targets only.
+///
+/// 3. **Dependency file layer** — `FileFormatter`, written to
+///    `{log_dir}/dep_log.log`. Receives third-party dependency targets that
+///    are hidden from the terminal/main log.
 ///    Independent of the console lock; uses `tracing-appender`'s own lock.
 ///
 /// To switch the file layer to JSON for a log aggregator (Loki, Datadog, …):
@@ -1013,40 +1128,11 @@ pub fn init_logging(log_dir: &Path) {
     IS_TTY.store(tty, Ordering::Relaxed);
     ANSI_ENABLED.store(detect_ansi_enabled(tty), Ordering::Relaxed);
 
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(
-            // F-08: Explicitly suppress Arti's internal crates in the default
-            // filter. Without this they emit at DEBUG/TRACE (circuit negotiation,
-            // guard selection, consensus downloads) — hundreds of lines/minute.
-            // Operators who need Arti internals can set RUST_LOG=tor_proto=debug.
-            "rustchan=info,\
-             admin=info,\
-             board=info,\
-             workers=info,\
-             server=info,\
-             db=info,\
-             startup=info,\
-             sessions=info,\
-             polls=info,\
-             chan_net=info,\
-             console=info,\
-             tls=info,\
-             config=info,\
-             tower_http=warn,\
-             arti_client=warn,\
-             tor_proto=warn,\
-             tor_circmgr=warn,\
-             tor_dirmgr=warn,\
-             tor_guardmgr=warn,\
-             tor_chanmgr=warn,\
-             tor_hsservice=warn,\
-             tor_keymgr=warn",
-        )
-    });
-
     let terminal_layer = tracing_subscriber::fmt::layer()
         .event_format(TerminalFormatter)
-        .with_writer(ConsoleLock);
+        .with_writer(ConsoleLock)
+        .with_filter(filter_fn(|meta| is_main_log_target(meta.target())))
+        .with_filter(env_filter());
 
     // Build the rolling file appender.
     // FIX (filename): tracing_appender::rolling::daily(dir, "rustchan.log")
@@ -1072,19 +1158,31 @@ pub fn init_logging(log_dir: &Path) {
     // you never hit 8 KB between restarts, so the file stays empty.
     // non_blocking() moves writes to a background thread that flushes after
     // every batch, guaranteeing data reaches disk promptly.
-    // The WorkerGuard is stored in FILE_GUARD so it lives for the entire
+    // The WorkerGuard is stored in MAIN_FILE_GUARD so it lives for the entire
     // process — see the comment on that static for why this matters.
-    let (non_blocking_writer, guard) = tracing_appender::non_blocking(rolling);
-    let _ = FILE_GUARD.set(guard);
+    let (main_file_writer, main_guard) = tracing_appender::non_blocking(rolling);
+    let _ = MAIN_FILE_GUARD.set(main_guard);
 
     let file_layer = tracing_subscriber::fmt::layer()
         .event_format(FileFormatter)
-        .with_writer(non_blocking_writer);
+        .with_writer(main_file_writer)
+        .with_filter(filter_fn(|meta| is_main_log_target(meta.target())))
+        .with_filter(env_filter());
+
+    let dependency_log = tracing_appender::rolling::never(log_dir, DEPENDENCY_LOG_FILE_NAME);
+    let (dependency_file_writer, dependency_guard) = tracing_appender::non_blocking(dependency_log);
+    let _ = DEPENDENCY_FILE_GUARD.set(dependency_guard);
+
+    let dependency_file_layer = tracing_subscriber::fmt::layer()
+        .event_format(FileFormatter)
+        .with_writer(dependency_file_writer)
+        .with_filter(filter_fn(|meta| is_dependency_log_target(meta.target())))
+        .with_filter(env_filter());
 
     tracing_subscriber::registry()
-        .with(env_filter)
         .with(terminal_layer)
         .with(file_layer)
+        .with(dependency_file_layer)
         .init();
 }
 
@@ -1124,12 +1222,58 @@ pub fn console_prompt(msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_component, extract_component, humanize_field_name, is_external_source,
-        is_tor_descriptor_upload_timeout_event, normalize_duration, normalize_field_value,
-        normalize_message_text, parse_formatted_duration, rewrite_message, LogEventFields,
-        TorDescriptorTimeoutDecision, TorDescriptorTimeoutLimiter,
+        dependency_log_path, display_component, extract_component, humanize_field_name,
+        is_dependency_log_target, is_external_source, is_ffmpeg_log_target, is_main_log_file,
+        is_main_log_target, is_tor_descriptor_upload_timeout_event, normalize_duration,
+        normalize_field_value, normalize_message_text, parse_formatted_duration, rewrite_message,
+        FileFormatter, LogEventFields, TorDescriptorTimeoutDecision, TorDescriptorTimeoutLimiter,
+        DEPENDENCY_LOG_FILE_NAME,
     };
+    use std::io;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+    use tracing_subscriber::fmt::MakeWriter;
+    use tracing_subscriber::{filter::filter_fn, layer::Layer as _, layer::SubscriberExt as _};
+
+    #[derive(Clone, Default)]
+    struct SharedBuffer {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedBuffer {
+        fn content(&self) -> String {
+            let bytes = self.inner.lock().expect("buffer lock").clone();
+            String::from_utf8(bytes).expect("utf-8 log output")
+        }
+    }
+
+    struct SharedBufferWriter {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl io::Write for SharedBufferWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.inner
+                .lock()
+                .map_err(|_| io::Error::other("buffer lock poisoned"))?
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedBuffer {
+        type Writer = SharedBufferWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedBufferWriter {
+                inner: Arc::clone(&self.inner),
+            }
+        }
+    }
 
     fn rewrite_for_test(target: &str, message: &str, fields: &[(&str, &str)]) -> LogEventFields {
         let mut event_fields = LogEventFields {
@@ -1203,6 +1347,124 @@ mod tests {
         assert_eq!(display_component("tor_dirmgr::bootstrap"), "tor-dir");
         assert_eq!(display_component("tor_guardmgr::guard"), "tor-net");
         assert_eq!(display_component("tor_circmgr::hspool"), "onion");
+    }
+
+    #[test]
+    fn classifies_dependency_and_app_log_targets() {
+        assert!(is_main_log_target("rustchan::server::server"));
+        assert!(is_main_log_target("chan::media::ffmpeg"));
+        assert!(is_main_log_target("convert"));
+        assert!(is_main_log_target("media_prune"));
+        assert!(is_main_log_target("workers"));
+        assert!(is_dependency_log_target("tokio::runtime"));
+        assert!(is_dependency_log_target("hyper::proto"));
+        assert!(is_dependency_log_target("axum::routing"));
+        assert!(is_dependency_log_target("tower::buffer"));
+        assert!(is_dependency_log_target("tower_http::trace"));
+        assert!(is_dependency_log_target("rustls::server"));
+        assert!(is_dependency_log_target("arti_client::builder"));
+        assert!(is_dependency_log_target("tracing::span"));
+        assert!(is_dependency_log_target("reqwest::connect"));
+        assert!(is_dependency_log_target("rusqlite::inner"));
+        assert!(is_dependency_log_target("r2d2::pool"));
+        assert!(!is_dependency_log_target("admin"));
+        assert!(!is_dependency_log_target("convert"));
+        assert!(!is_dependency_log_target("media_prune"));
+        assert!(!is_main_log_target("rustchannel::server"));
+        assert!(!is_main_log_target("convert::third_party"));
+    }
+
+    #[test]
+    fn keeps_ffmpeg_targets_in_main_log_route() {
+        for target in [
+            "ffmpeg",
+            "ffmpeg::codec",
+            "ffmpeg_next",
+            "ffmpeg_next::codec",
+            "rustchan::media::ffmpeg",
+        ] {
+            assert!(is_ffmpeg_log_target(target));
+            assert!(is_main_log_target(target));
+            assert!(!is_dependency_log_target(target));
+        }
+    }
+
+    #[test]
+    fn recognizes_main_and_dependency_log_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            dependency_log_path(dir.path())
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some(DEPENDENCY_LOG_FILE_NAME)
+        );
+        assert!(is_main_log_file(
+            &dir.path().join("rustchan.2026-04-02.log")
+        ));
+        assert!(is_main_log_file(&dir.path().join("rustchan.log")));
+        assert!(!is_main_log_file(
+            &dir.path().join(DEPENDENCY_LOG_FILE_NAME)
+        ));
+        assert!(!is_main_log_file(&dir.path().join("tower_http.log")));
+    }
+
+    #[test]
+    fn route_filters_write_dependency_events_only_to_dependency_output() {
+        let main_log = SharedBuffer::default();
+        let dependency_log = SharedBuffer::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(FileFormatter)
+                    .with_writer(main_log.clone())
+                    .with_filter(filter_fn(|meta| is_main_log_target(meta.target()))),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(FileFormatter)
+                    .with_writer(dependency_log.clone())
+                    .with_filter(filter_fn(|meta| is_dependency_log_target(meta.target()))),
+            );
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "tokio::runtime", "dependency event");
+        });
+
+        assert!(!main_log.content().contains("Dependency event"));
+        assert!(dependency_log.content().contains("Dependency event"));
+    }
+
+    #[test]
+    fn route_filters_keep_app_and_ffmpeg_events_in_main_output() {
+        let main_log = SharedBuffer::default();
+        let dependency_log = SharedBuffer::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(FileFormatter)
+                    .with_writer(main_log.clone())
+                    .with_filter(filter_fn(|meta| is_main_log_target(meta.target()))),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(FileFormatter)
+                    .with_writer(dependency_log.clone())
+                    .with_filter(filter_fn(|meta| is_dependency_log_target(meta.target()))),
+            );
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "startup", "app event");
+            tracing::info!(target: "media_prune", "alias event");
+            tracing::warn!(target: "ffmpeg::stderr", "ffmpeg event");
+        });
+
+        let main_content = main_log.content();
+        assert!(main_content.contains("App event"));
+        assert!(main_content.contains("Alias event"));
+        assert!(main_content.contains("Ffmpeg event"));
+        assert!(!dependency_log.content().contains("App event"));
+        assert!(!dependency_log.content().contains("Alias event"));
+        assert!(!dependency_log.content().contains("Ffmpeg event"));
     }
 
     #[test]

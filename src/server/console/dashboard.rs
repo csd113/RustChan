@@ -391,7 +391,7 @@ fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
         .ok()?
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("log"))
+        .filter(|path| crate::logging::is_main_log_file(path))
         .collect::<Vec<_>>();
     files.sort();
     files.pop()
@@ -526,7 +526,7 @@ pub fn render_confirm_quit() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::render_dashboard;
+    use super::{latest_log_file, render_dashboard};
     use crate::server::console::ChanStats;
 
     #[test]
@@ -541,5 +541,23 @@ mod tests {
         assert!(rendered.contains("FFmpeg"));
         assert!(rendered.contains("videos processing"));
         assert!(rendered.contains("3"));
+    }
+
+    #[test]
+    fn log_view_selects_main_log_not_dependency_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("rustchan.2026-04-01.log"), "main").expect("main log");
+        std::fs::write(
+            dir.path().join(crate::logging::DEPENDENCY_LOG_FILE_NAME),
+            "deps",
+        )
+        .expect("dependency log");
+
+        let latest = latest_log_file(dir.path()).expect("latest log");
+
+        assert_eq!(
+            latest.file_name().and_then(|name| name.to_str()),
+            Some("rustchan.2026-04-01.log")
+        );
     }
 }

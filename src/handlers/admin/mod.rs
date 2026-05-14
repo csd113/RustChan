@@ -1246,6 +1246,8 @@ fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&st
          TLS enabled: {tls_enabled}\n\
          Reverse proxy: {reverse_proxy}\n\
          Data path: {data_path}\n\
+         Main log directory: {main_log_dir}\n\
+         Dependency log: {dependency_log}\n\
          Recent warnings:\n{warnings}\n",
         version = env!("CARGO_PKG_VERSION"),
         os = std::env::consts::OS,
@@ -1254,6 +1256,8 @@ fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&st
         ffmpeg = detection_word(snapshot.ffmpeg_available),
         ffprobe = detection_word(snapshot.ffprobe_available),
         data_path = crate::config::data_dir().display(),
+        main_log_dir = crate::config::logs_dir().display(),
+        dependency_log = crate::logging::dependency_log_path(&crate::config::logs_dir()).display(),
         warnings = indent_diagnostics_block(&snapshot.site_health.recent_warnings),
     )
 }
@@ -1467,7 +1471,7 @@ fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
     let mut latest: Option<(SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(logs_dir).ok()?.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
+        if !crate::logging::is_main_log_file(&path) {
             continue;
         }
         let metadata = std::fs::symlink_metadata(&path).ok()?;
@@ -1859,6 +1863,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("rustchan.2026-04-01.log"), "old").expect("old");
         std::fs::write(dir.path().join("rustchan.2026-04-02.log"), "new").expect("new");
+        std::fs::write(
+            dir.path().join(crate::logging::DEPENDENCY_LOG_FILE_NAME),
+            "deps",
+        )
+        .expect("deps");
         let latest = latest_log_file(dir.path()).expect("latest");
         assert_eq!(
             latest.file_name().and_then(|name| name.to_str()),

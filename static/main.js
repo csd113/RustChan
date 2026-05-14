@@ -216,6 +216,22 @@ document.addEventListener('DOMContentLoaded', function () {
 
 window.addEventListener('resize', syncMobileHeaderOffset);
 
+// Mobile Safari/Chrome can restore board/catalog/home pages from bfcache after
+// a thread visit, leaving server-rendered activity badges stale until reload.
+(function () {
+  var reloadedActivityRestore = false;
+
+  function pageHasActivityBadges() {
+    return Boolean(document.querySelector('.new-activity-badge'));
+  }
+
+  window.addEventListener('pageshow', function (event) {
+    if (!event.persisted || reloadedActivityRestore || !pageHasActivityBadges()) return;
+    reloadedActivityRestore = true;
+    window.location.reload();
+  });
+}());
+
 // Hook into new-post insertions (thread auto-update, quote popups, etc.)
 (function () {
   var _origLocalize = window._onNewPostsInserted;

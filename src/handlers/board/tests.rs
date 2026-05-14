@@ -1547,6 +1547,86 @@ async fn new_reply_after_thread_baseline_shows_thread_badge_until_thread_visit()
 }
 
 #[tokio::test]
+async fn thread_visit_invalidates_stale_catalog_activity_etag() {
+    let state = crate::test_support::app_state();
+    set_new_activity_settings(&state, true, true, true);
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    let router = activity_router(state.clone());
+    let mut cookies = HashMap::new();
+
+    let baseline = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/tech/catalog")
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    update_cookie_store(&mut cookies, baseline.headers());
+
+    create_reply_on_thread(&state, board_id, thread_id, "reply");
+
+    let badge_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/tech/catalog")
+                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let stale_badge_etag = badge_response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .expect("badge catalog etag")
+        .to_owned();
+    let badge_body = response_body_string(badge_response).await;
+    assert!(badge_body.contains("catalog-activity-badge"));
+
+    let thread_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/tech/thread/{thread_id}"))
+                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    update_cookie_store(&mut cookies, thread_response.headers());
+
+    let restored_catalog_response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/tech/catalog")
+                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::IF_NONE_MATCH, stale_badge_etag)
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(restored_catalog_response.status(), StatusCode::OK);
+    let restored_body = response_body_string(restored_catalog_response).await;
+    assert!(!restored_body.contains("catalog-activity-badge"));
+}
+
+#[tokio::test]
 async fn password_protected_board_does_not_leak_homepage_new_activity_badge() {
     let state = crate::test_support::app_state();
     set_new_activity_settings(&state, true, true, true);

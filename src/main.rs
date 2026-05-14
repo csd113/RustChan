@@ -152,6 +152,7 @@ fn main() -> anyhow::Result<()> {
         target: "startup",
         version = env!("CARGO_PKG_VERSION"),
         log_dir = %log_dir.display(),
+        dependency_log = %crate::logging::dependency_log_path(&log_dir).display(),
         "rustchan starting",
     );
 
