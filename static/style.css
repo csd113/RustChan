@@ -1493,6 +1493,16 @@ html:not([data-theme]) .poster-id-btn {
 .quotelink-popup .post { margin: 0; border: none; padding: 0; }
 .quotelink-popup .reply { margin: 0; border: none; }
 
+@media (max-width: 700px) {
+  .quotelink-popup {
+    max-width: calc(100vw - 16px);
+    min-width: 0;
+    max-height: min(70vh, 26rem);
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
 /* ── Missing-post inline notice (shown when a >>pid target was deleted) ───── */
 .missing-post-notice {
   display: flex;
@@ -5808,6 +5818,50 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
 }
 
 @media (max-width: 700px) {
+  .edit-modal,
+  .compress-modal {
+    align-items: flex-start;
+    padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom));
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .edit-modal-box,
+  .compress-modal-box {
+    width: min(100%, 460px);
+    max-height: calc(100vh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    overflow-y: auto;
+  }
+
+  @supports (height: 100svh) {
+    .edit-modal-box,
+    .compress-modal-box {
+      max-height: calc(100svh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    }
+  }
+
+  .edit-modal-box {
+    padding: 0.85rem;
+  }
+
+  .edit-modal-box textarea {
+    min-height: 8rem;
+    max-height: 45vh;
+  }
+
+  .edit-modal-box .post-form td:last-child {
+    display: grid;
+    gap: 0.55rem;
+  }
+
+  .edit-modal-box .edit-btn[data-action="close-edit-modal"] {
+    margin-left: 0 !important;
+    justify-self: stretch;
+    min-height: 40px;
+    padding: 8px 12px;
+    text-align: center;
+  }
+
   .nsfw-disclaimer-box {
     width: min(92vw, 460px);
     max-height: 74vh;

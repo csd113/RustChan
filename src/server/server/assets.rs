@@ -122,4 +122,40 @@ mod tests {
             !MAIN_JS.contains("var firstControl = panel.querySelector('select, input, button');")
         );
     }
+
+    #[test]
+    fn stylesheet_keeps_mobile_dialogs_and_popups_inside_viewport() {
+        assert!(STYLE_CSS.contains("@media (max-width: 700px) {\n  .quotelink-popup {"));
+        assert!(STYLE_CSS.contains("max-width: calc(100vw - 16px);"));
+        assert!(STYLE_CSS.contains("max-height: min(70vh, 26rem);"));
+        assert!(STYLE_CSS.contains(".edit-modal,\n  .compress-modal {"));
+        assert!(STYLE_CSS.contains("align-items: flex-start;"));
+        assert!(STYLE_CSS.contains(
+            "padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom));"
+        ));
+        assert!(STYLE_CSS.contains(".edit-modal-box,\n  .compress-modal-box {"));
+        assert!(STYLE_CSS.contains(
+            "max-height: calc(100svh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));"
+        ));
+        assert!(STYLE_CSS.contains(".edit-modal-box .post-form td:last-child {"));
+        assert!(STYLE_CSS.contains(".edit-modal-box .edit-btn[data-action=\"close-edit-modal\"]"));
+    }
+
+    #[test]
+    fn main_js_positions_mobile_menus_and_popups_against_visual_viewport() {
+        assert!(MAIN_JS.contains("function getThreadMenuBounds(gutter)"));
+        assert!(MAIN_JS.contains("window.visualViewport && window.visualViewport.height"));
+        assert!(MAIN_JS.contains("function clampPopupToViewport(anchor, popup)"));
+        assert!(MAIN_JS.contains("visualViewport.offsetLeft"));
+        assert!(MAIN_JS.contains("visualViewport.offsetTop"));
+        assert!(MAIN_JS.contains("var minTop = viewportTop + gutter;"));
+        assert!(MAIN_JS.contains("var maxTop = viewportTop + Math.max(gutter, vh - ph - gutter);"));
+        assert!(MAIN_JS.contains("var position = clampPopupToViewport(anchor, popup);"));
+        assert!(MAIN_JS.contains(
+            "window.visualViewport.addEventListener('resize', repositionOpenThreadMenus);"
+        ));
+        assert!(MAIN_JS.contains(
+            "window.visualViewport.addEventListener('scroll', repositionOpenThreadMenus);"
+        ));
+    }
 }

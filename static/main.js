@@ -1929,7 +1929,10 @@ function closeThreadMenus() {
 
 function getThreadMenuBounds(gutter) {
   var top = gutter;
-  var bottom = window.innerHeight - gutter;
+  var viewportHeight = window.visualViewport && window.visualViewport.height
+    ? window.visualViewport.height
+    : window.innerHeight;
+  var bottom = viewportHeight - gutter;
   var footer = document.querySelector('.site-footer');
 
   if (footer) {
@@ -1993,6 +1996,40 @@ function repositionOpenThreadMenus() {
     if (!menu || menu.hidden) return;
     positionThreadMenu(toggle, menu);
   });
+}
+
+function clampPopupToViewport(anchor, popup) {
+  var rect = anchor.getBoundingClientRect();
+  var pw = popup.offsetWidth || 420;
+  var ph = popup.offsetHeight || 200;
+  var visualViewport = window.visualViewport || null;
+  var vw = visualViewport && visualViewport.width ? visualViewport.width : window.innerWidth;
+  var vh = visualViewport && visualViewport.height ? visualViewport.height : window.innerHeight;
+  var scrollX = window.pageXOffset || 0;
+  var scrollY = window.pageYOffset || 0;
+  var viewportLeft = scrollX + (visualViewport && visualViewport.offsetLeft ? visualViewport.offsetLeft : 0);
+  var viewportTop = scrollY + (visualViewport && visualViewport.offsetTop ? visualViewport.offsetTop : 0);
+  var gutter = 8;
+  var left = rect.left + scrollX;
+  var minLeft = viewportLeft + gutter;
+  var maxLeft = viewportLeft + Math.max(gutter, vw - pw - gutter);
+  var top;
+
+  if (left > maxLeft) left = maxLeft;
+  if (left < minLeft) left = minLeft;
+
+  if (rect.bottom + ph + gutter < vh) {
+    top = rect.bottom + scrollY + gutter;
+  } else {
+    top = rect.top + scrollY - ph - gutter;
+  }
+
+  var minTop = viewportTop + gutter;
+  var maxTop = viewportTop + Math.max(gutter, vh - ph - gutter);
+  if (top > maxTop) top = maxTop;
+  if (top < minTop) top = minTop;
+
+  return { left: left, top: top };
 }
 
 // ─── Theme picker ─────────────────────────────────────────────────────────────
@@ -2828,22 +2865,9 @@ function repositionOpenThreadMenus() {
   }
 
   function positionPopup(anchor) {
-    var rect = anchor.getBoundingClientRect();
-    var pw = popup.offsetWidth || 420;
-    var ph = popup.offsetHeight || 200;
-    var vw = window.innerWidth;
-    var vh = window.innerHeight;
-    var scrollY = window.pageYOffset;
-    var left = rect.left + window.pageXOffset;
-    if (left + pw > vw - 10) left = Math.max(4, vw - pw - 10);
-    var top;
-    if (rect.bottom + ph + 8 < vh) {
-      top = rect.bottom + scrollY + 8;
-    } else {
-      top = rect.top + scrollY - ph - 8;
-    }
-    popup.style.left = left + 'px';
-    popup.style.top = top + 'px';
+    var position = clampPopupToViewport(anchor, popup);
+    popup.style.left = position.left + 'px';
+    popup.style.top = position.top + 'px';
   }
 
   function hidePopup() {
@@ -3016,22 +3040,9 @@ function repositionOpenThreadMenus() {
   }
 
   function positionCbPopup(anchor, popup) {
-    var rect = anchor.getBoundingClientRect();
-    var pw = popup.offsetWidth || 420;
-    var ph = popup.offsetHeight || 200;
-    var vw = window.innerWidth;
-    var vh = window.innerHeight;
-    var scrollY = window.pageYOffset;
-    var left = rect.left + window.pageXOffset;
-    if (left + pw > vw - 10) left = Math.max(4, vw - pw - 10);
-    var top;
-    if (rect.bottom + ph + 8 < vh) {
-      top = rect.bottom + scrollY + 8;
-    } else {
-      top = rect.top + scrollY - ph - 8;
-    }
-    popup.style.left = left + 'px';
-    popup.style.top = top + 'px';
+    var position = clampPopupToViewport(anchor, popup);
+    popup.style.left = position.left + 'px';
+    popup.style.top = position.top + 'px';
   }
 
   function wireCrossLinks(root) {
@@ -3577,6 +3588,10 @@ document.addEventListener('keydown', function (e) {
 
 window.addEventListener('resize', repositionOpenThreadMenus);
 window.addEventListener('scroll', repositionOpenThreadMenus, true);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', repositionOpenThreadMenus);
+  window.visualViewport.addEventListener('scroll', repositionOpenThreadMenus);
+}
 
 // YouTube / Streamable embed unfurling.
 // The Rust template emits board-specific values as data-* attributes on
