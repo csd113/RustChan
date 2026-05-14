@@ -231,12 +231,8 @@ window.addEventListener('resize', syncMobileHeaderOffset);
     return Boolean(document.querySelector('.new-activity-badge'));
   }
 
-  function pageMarksActivityRead() {
-    return Boolean(
-      document.getElementById('thread-posts') ||
-      document.getElementById('catalog-grid') ||
-      document.querySelector('.board-index-header')
-    );
+  function pageHasActivityLifecycle() {
+    return Boolean(document.querySelector('[data-activity-page]'));
   }
 
   function navigationType() {
@@ -246,7 +242,7 @@ window.addEventListener('resize', syncMobileHeaderOffset);
   }
 
   function shouldReloadActivityRestore(event) {
-    if (!pageHasActivityBadges() && !pageMarksActivityRead()) return false;
+    if (!pageHasActivityBadges() && !pageHasActivityLifecycle()) return false;
     if (event.persisted || navigationType() === 'back_forward') return true;
     try {
       return window.sessionStorage.getItem(currentRestoreKey()) === '1';
@@ -263,7 +259,7 @@ window.addEventListener('resize', syncMobileHeaderOffset);
 
   window.addEventListener('pagehide', function () {
     try {
-      if (pageHasActivityBadges() || pageMarksActivityRead()) {
+      if (pageHasActivityBadges() || pageHasActivityLifecycle()) {
         window.sessionStorage.setItem(currentRestoreKey(), '1');
       }
     } catch (e) {}

@@ -409,7 +409,7 @@ pub fn thread_page(
     let last_post_id = posts.iter().map(|p| p.id).max().unwrap_or(0);
     let _ = write!(
         body,
-        r#"<div id="thread-posts" data-thread-id="{tid}" data-board="{board}" data-last-id="{last}">"#,
+        r#"<div id="thread-posts" data-activity-page="thread" data-thread-id="{tid}" data-board="{board}" data-last-id="{last}">"#,
         tid = thread.id,
         board = escape_html(&board.short_name),
         last = last_post_id
@@ -1510,6 +1510,7 @@ mod tests {
         assert!(html.contains(r#"href="/test/catalog">[ Catalog ]</a>"#));
         assert!(html.contains(r##"href="#bottom">[ Bottom ]</a>"##));
         assert!(html.contains(r##"href="#top">[ Top ]</a>"##));
+        assert!(html.contains(r#"data-activity-page="thread""#));
         assert!(html.contains(r#"data-action="toggle-post-form""#));
     }
 

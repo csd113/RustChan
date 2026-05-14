@@ -762,7 +762,7 @@ pub fn index_page<S: std::hash::BuildHasher>(
     };
 
     let body = format!(
-        r#"<div class="index-hero">
+        r#"<div class="index-hero" data-activity-page="home">
 <h1 class="index-title">[ {name} ]</h1>
 <p class="index-subtitle">{subtitle}</p>
 </div>
@@ -857,7 +857,7 @@ pub fn board_page<S: std::hash::BuildHasher>(
         };
         let _ = write!(
             body,
-            r#"<div class="board-header board-index-header"><h1>/{short}/  — {name}{access_badge}</h1><p class="board-desc">{desc}</p></div>
+            r#"<div class="board-header board-index-header" data-activity-page="board-index"><h1>/{short}/  — {name}{access_badge}</h1><p class="board-desc">{desc}</p></div>
 {board_banner_html}
 <div class="board-nav"><a class="board-nav-link active" href="/{short}">[Index]</a><a class="board-nav-link" href="/{short}/catalog">[Catalog]</a>{nav_archive}</div>"#
         );
@@ -1229,7 +1229,7 @@ pub fn catalog_page<S: std::hash::BuildHasher>(
 
     let _ = write!(
         body,
-        r#"<div class="board-header board-catalog-header">
+        r#"<div class="board-header board-catalog-header" data-activity-page="catalog">
   <div class="catalog-header-left board-catalog-header">
     <h1>/{bs}/  — {bn}{access_badge}{title_suffix}</h1>
     <p class="board-desc">{desc}</p>
@@ -1754,6 +1754,7 @@ mod tests {
         );
 
         assert!(html.contains("site statistics are temporarily unavailable."));
+        assert!(html.contains(r#"data-activity-page="home""#));
         assert!(!html.contains("0.00 GB"));
         assert!(!html.contains("audio files uploaded</span></div>"));
     }
@@ -1819,6 +1820,7 @@ mod tests {
         );
 
         assert!(html.contains("catalog-card-link"));
+        assert!(html.contains(r#"data-activity-page="catalog""#));
         assert!(html.contains("catalog-card-media"));
         assert!(html.contains(r#"data-media-thumb="1""#));
         assert!(html.contains(r#"loading="lazy" decoding="async""#));
@@ -2122,6 +2124,7 @@ mod tests {
         );
 
         assert!(html.contains(r#"class="post-form-wrap is-open""#));
+        assert!(html.contains(r#"data-activity-page="board-index""#));
         assert!(html.contains(r#"style="display:block""#));
         assert!(html.contains(">retry</textarea>"));
     }

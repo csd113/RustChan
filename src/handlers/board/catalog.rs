@@ -185,7 +185,7 @@ pub async fn catalog(
             .iter()
             .take(THREAD_ACTIVITY_MARKER_LIMIT)
             .map(|thread| (thread.id, thread.reply_count));
-        remember_thread_activity_defaults(jar, defaults)
+        remember_visible_thread_activity(jar, defaults)
     } else {
         jar
     };

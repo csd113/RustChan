@@ -426,29 +426,26 @@ pub fn remember_thread_activity(
     }
 }
 
-pub fn remember_thread_activity_defaults<I>(jar: CookieJar, defaults: I) -> CookieJar
+pub fn remember_visible_thread_activity<I>(jar: CookieJar, visible_threads: I) -> CookieJar
 where
     I: IntoIterator<Item = (i64, i64)>,
 {
-    let mut markers = thread_activity_markers_from_jar(&jar)
-        .into_values()
-        .collect::<Vec<_>>();
-    let mut known_threads = markers
-        .iter()
-        .map(|marker| marker.thread_id)
-        .collect::<HashSet<_>>();
     let now = now_ts();
-    for (thread_id, seen_reply_count) in defaults {
-        if thread_id <= 0 || known_threads.contains(&thread_id) {
+    let mut markers = thread_activity_markers_from_jar(&jar);
+    for (thread_id, seen_reply_count) in visible_threads {
+        if thread_id <= 0 {
             continue;
         }
-        markers.push(ThreadActivityMarker {
+        markers.insert(
             thread_id,
-            seen_reply_count: seen_reply_count.max(0),
-            updated_at: now,
-        });
-        known_threads.insert(thread_id);
+            ThreadActivityMarker {
+                thread_id,
+                seen_reply_count: seen_reply_count.max(0),
+                updated_at: now,
+            },
+        );
     }
+    let markers = markers.into_values().collect::<Vec<_>>();
     if let Some(cookie) = thread_activity_cookie(&markers) {
         jar.add(cookie)
     } else {

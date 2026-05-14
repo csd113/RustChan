@@ -367,7 +367,7 @@ pub async fn board_index(
             .summaries
             .iter()
             .map(|summary| (summary.thread.id, summary.thread.reply_count));
-        remember_thread_activity_defaults(jar, defaults)
+        remember_visible_thread_activity(jar, defaults)
     } else {
         jar
     };
