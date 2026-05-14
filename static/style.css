@@ -4971,6 +4971,10 @@ html.js .theme-picker-fallback {
 }
 
 @media (max-width: 700px) {
+  body.user-preferences-mobile-open {
+    overflow: hidden;
+  }
+
   .user-preferences-panel[open]::before {
     content: "";
     position: fixed;

@@ -74,6 +74,7 @@ mod tests {
         assert!(STYLE_CSS.contains("overflow-y: auto;"));
         assert!(!STYLE_CSS.contains(".user-preferences-form button[type=\"submit\"]"));
         assert!(STYLE_CSS.contains(".user-preferences-panel[open]::before"));
+        assert!(STYLE_CSS.contains("body.user-preferences-mobile-open {\n    overflow: hidden;"));
         assert!(STYLE_CSS.contains("background: rgba(0,0,0,0.42);"));
         assert!(STYLE_CSS.contains(".user-preferences-mobile-close {\n  display: none;"));
         assert!(STYLE_CSS.contains("visibility: hidden;"));
@@ -108,6 +109,9 @@ mod tests {
         assert!(MAIN_JS.contains("data-hide-nsfw-boards"));
         assert!(MAIN_JS
             .contains("var mobileClose = panel.querySelector('.user-preferences-mobile-close');"));
+        assert!(MAIN_JS.contains("function syncUserPreferencesBackgroundScrollLock()"));
+        assert!(MAIN_JS.contains("document.body.style.position = 'fixed';"));
+        assert!(MAIN_JS.contains("window.scrollTo(0, scrollY);"));
         assert!(MAIN_JS.contains("panel.open = false;"));
         assert!(
             !MAIN_JS.contains("var firstControl = panel.querySelector('select, input, button');")

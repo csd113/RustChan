@@ -2091,10 +2091,81 @@ function repositionOpenThreadMenus() {
     document.body.classList.remove('theme-picker-open');
   }
 
+  var userPreferencesScrollLock = {
+    active: false,
+    scrollY: 0,
+    bodyPosition: '',
+    bodyTop: '',
+    bodyLeft: '',
+    bodyRight: '',
+    bodyWidth: '',
+    bodyOverflow: ''
+  };
+  var userPreferencesMobileQuery = window.matchMedia ?
+    window.matchMedia('(max-width: 700px)') :
+    null;
+
+  function isMobileUserPreferencesViewport() {
+    return userPreferencesMobileQuery && userPreferencesMobileQuery.matches;
+  }
+
+  function lockUserPreferencesBackgroundScroll() {
+    if (userPreferencesScrollLock.active) return;
+    userPreferencesScrollLock.active = true;
+    userPreferencesScrollLock.scrollY = window.scrollY || window.pageYOffset || 0;
+    userPreferencesScrollLock.bodyPosition = document.body.style.position;
+    userPreferencesScrollLock.bodyTop = document.body.style.top;
+    userPreferencesScrollLock.bodyLeft = document.body.style.left;
+    userPreferencesScrollLock.bodyRight = document.body.style.right;
+    userPreferencesScrollLock.bodyWidth = document.body.style.width;
+    userPreferencesScrollLock.bodyOverflow = document.body.style.overflow;
+    document.body.classList.add('user-preferences-mobile-open');
+    document.body.style.position = 'fixed';
+    document.body.style.top = '-' + userPreferencesScrollLock.scrollY + 'px';
+    document.body.style.left = '0';
+    document.body.style.right = '0';
+    document.body.style.width = '100%';
+    document.body.style.overflow = 'hidden';
+  }
+
+  function unlockUserPreferencesBackgroundScroll() {
+    if (!userPreferencesScrollLock.active) return;
+    var scrollY = userPreferencesScrollLock.scrollY;
+    document.body.classList.remove('user-preferences-mobile-open');
+    document.body.style.position = userPreferencesScrollLock.bodyPosition;
+    document.body.style.top = userPreferencesScrollLock.bodyTop;
+    document.body.style.left = userPreferencesScrollLock.bodyLeft;
+    document.body.style.right = userPreferencesScrollLock.bodyRight;
+    document.body.style.width = userPreferencesScrollLock.bodyWidth;
+    document.body.style.overflow = userPreferencesScrollLock.bodyOverflow;
+    userPreferencesScrollLock.active = false;
+    window.scrollTo(0, scrollY);
+  }
+
+  function syncUserPreferencesBackgroundScrollLock() {
+    if (
+      isMobileUserPreferencesViewport() &&
+      document.querySelector('.user-preferences-panel[open]')
+    ) {
+      lockUserPreferencesBackgroundScroll();
+    } else {
+      unlockUserPreferencesBackgroundScroll();
+    }
+  }
+
+  if (userPreferencesMobileQuery) {
+    if (userPreferencesMobileQuery.addEventListener) {
+      userPreferencesMobileQuery.addEventListener('change', syncUserPreferencesBackgroundScrollLock);
+    } else if (userPreferencesMobileQuery.addListener) {
+      userPreferencesMobileQuery.addListener(syncUserPreferencesBackgroundScrollLock);
+    }
+  }
+
   function initUserPreferencesPanels() {
     document.querySelectorAll('.user-preferences-panel').forEach(function (panel) {
       if (panel.dataset.touchReady === '1') return;
       panel.dataset.touchReady = '1';
+      panel.addEventListener('toggle', syncUserPreferencesBackgroundScrollLock);
       panel.addEventListener('click', function (event) {
         if (event.target === panel && panel.open) {
           panel.open = false;
@@ -2113,6 +2184,7 @@ function repositionOpenThreadMenus() {
       summary.addEventListener('click', function (event) {
         event.preventDefault();
         panel.open = !panel.open;
+        syncUserPreferencesBackgroundScrollLock();
       });
     });
   }
