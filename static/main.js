@@ -216,18 +216,65 @@ document.addEventListener('DOMContentLoaded', function () {
 
 window.addEventListener('resize', syncMobileHeaderOffset);
 
-// Mobile Safari/Chrome can restore board/catalog/home pages from bfcache after
-// a thread visit, leaving server-rendered activity badges stale until reload.
+// Mobile Safari/Chrome can restore activity pages from history cache without a
+// server request. These pages either show activity badges or advance the
+// HttpOnly activity cookies when loaded, so restore them through a fresh GET.
 (function () {
+  var RESTORE_KEY_PREFIX = 'rustchanActivityRestore:';
   var reloadedActivityRestore = false;
+
+  function currentRestoreKey() {
+    return RESTORE_KEY_PREFIX + window.location.pathname + window.location.search;
+  }
 
   function pageHasActivityBadges() {
     return Boolean(document.querySelector('.new-activity-badge'));
   }
 
+  function pageMarksActivityRead() {
+    return Boolean(
+      document.getElementById('thread-posts') ||
+      document.getElementById('catalog-grid') ||
+      document.querySelector('.board-index-header')
+    );
+  }
+
+  function navigationType() {
+    if (!window.performance || !performance.getEntriesByType) return '';
+    var entries = performance.getEntriesByType('navigation');
+    return entries && entries[0] ? entries[0].type : '';
+  }
+
+  function shouldReloadActivityRestore(event) {
+    if (!pageHasActivityBadges() && !pageMarksActivityRead()) return false;
+    if (event.persisted || navigationType() === 'back_forward') return true;
+    try {
+      return window.sessionStorage.getItem(currentRestoreKey()) === '1';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    try {
+      window.sessionStorage.removeItem(currentRestoreKey());
+    } catch (e) {}
+  });
+
+  window.addEventListener('pagehide', function () {
+    try {
+      if (pageHasActivityBadges() || pageMarksActivityRead()) {
+        window.sessionStorage.setItem(currentRestoreKey(), '1');
+      }
+    } catch (e) {}
+  });
+
   window.addEventListener('pageshow', function (event) {
-    if (!event.persisted || reloadedActivityRestore || !pageHasActivityBadges()) return;
+    if (reloadedActivityRestore || !shouldReloadActivityRestore(event)) return;
     reloadedActivityRestore = true;
+    try {
+      window.sessionStorage.removeItem(currentRestoreKey());
+    } catch (e) {}
     window.location.reload();
   });
 }());

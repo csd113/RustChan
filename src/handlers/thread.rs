@@ -1194,16 +1194,25 @@ struct ThreadUpdatesPayload {
     nav_html: String,
 }
 
-type ThreadUpdatesRender = (
-    String,
-    i64,
-    usize,
-    Vec<RefreshedPostPayload>,
-    i64,
-    i64,
-    bool,
-    bool,
-);
+struct ActivityBadgeSettings {
+    thread_badges_enabled: bool,
+    homepage_thread_badges_enabled: bool,
+    homepage_reply_badges_enabled: bool,
+}
+
+struct ThreadUpdatesRender {
+    html: String,
+    last_id: i64,
+    count: usize,
+    refreshed_posts: Vec<RefreshedPostPayload>,
+    reply_count: i64,
+    bump_time: i64,
+    locked: bool,
+    sticky: bool,
+    board_id: i64,
+    activity_badges: ActivityBadgeSettings,
+    latest_thread_marker: Option<(i64, i64)>,
+}
 
 fn parse_refresh_post_ids(raw: Option<&str>) -> Vec<i64> {
     let mut ids = raw
@@ -1259,98 +1268,128 @@ pub async fn thread_updates(
             .into_response());
     }
 
-    let (html, last_id, count, refreshed_posts, reply_count, bump_time, locked, sticky) =
-        tokio::task::spawn_blocking({
-            let pool = state.db.clone();
-            let refresh_post_ids = refresh_post_ids.clone();
-            move || -> crate::error::Result<ThreadUpdatesRender> {
-                let conn = pool.get()?;
+    let updates = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let refresh_post_ids = refresh_post_ids.clone();
+        move || -> crate::error::Result<ThreadUpdatesRender> {
+            let conn = pool.get()?;
 
-                // Validate board + thread exist (returns 404 for bad URLs).
-                let board = db::get_board_by_short(&conn, &board_short)?
-                    .ok_or_else(|| crate::error::AppError::NotFound("Board not found.".into()))?;
-                let thread = db::get_thread(&conn, thread_id)?
-                    .ok_or_else(|| crate::error::AppError::NotFound("Thread not found.".into()))?;
+            // Validate board + thread exist (returns 404 for bad URLs).
+            let board = db::get_board_by_short(&conn, &board_short)?
+                .ok_or_else(|| crate::error::AppError::NotFound("Board not found.".into()))?;
+            let thread = db::get_thread(&conn, thread_id)?
+                .ok_or_else(|| crate::error::AppError::NotFound("Thread not found.".into()))?;
+            let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
+            let homepage_thread_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
+            let homepage_reply_badges_enabled = db::get_homepage_new_reply_badges_enabled(&conn);
+            let activity_badges = ActivityBadgeSettings {
+                thread_badges_enabled,
+                homepage_thread_badges_enabled,
+                homepage_reply_badges_enabled,
+            };
+            let latest_thread_marker = if homepage_thread_badges_enabled {
+                db::get_latest_visible_thread_marker(&conn, board.id)?
+            } else {
+                None
+            };
 
-                // Fetch posts newer than `since`, ordered oldest-first so they
-                // render in the correct chronological order when appended.
-                let posts = db::get_new_posts_since(&conn, thread_id, since, 100)?;
-                let last_id = posts.iter().map(|p| p.id).max().unwrap_or(since);
-                let count = posts.len();
+            // Fetch posts newer than `since`, ordered oldest-first so they
+            // render in the correct chronological order when appended.
+            let posts = db::get_new_posts_since(&conn, thread_id, since, 100)?;
+            let last_id = posts.iter().map(|p| p.id).max().unwrap_or(since);
+            let count = posts.len();
 
-                let mut html = String::new();
-                for post in &posts {
-                    // show_delete=false, is_admin=false — no user controls in
-                    // auto-appended HTML; a full reload restores them.
-                    html.push_str(&crate::templates::render_post(
-                        post,
-                        &board_short,
-                        "",
-                        crate::templates::thread::RenderPostOpts {
-                            show_delete: false,
-                            is_admin: false,
-                            admin_csrf_token: None,
-                            show_media: true,
-                            allow_editing: false, // no edit link in auto-appended HTML; reload restores it
-                            allow_self_delete: false,
-                            owned_post_controls: None,
-                            show_poster_ids: thread.board_id == board.id && board.show_poster_ids,
-                            collapse_greentext: board.collapse_greentext,
-                            thread_state: None,
-                            thread_op_id: thread.op_id,
-                            video_audio_muted: user_preferences.video_audio_muted,
-                        },
-                        0,
-                    ));
-                }
-
-                let refreshed_posts =
-                    db::get_posts_by_ids_in_thread(&conn, thread_id, &refresh_post_ids)?
-                        .into_iter()
-                        .map(|post| RefreshedPostPayload {
-                            id: post.id,
-                            html: crate::templates::render_post(
-                                &post,
-                                &board_short,
-                                "",
-                                crate::templates::thread::RenderPostOpts {
-                                    show_delete: false,
-                                    is_admin: false,
-                                    admin_csrf_token: None,
-                                    show_media: true,
-                                    allow_editing: false,
-                                    allow_self_delete: false,
-                                    owned_post_controls: None,
-                                    show_poster_ids: thread.board_id == board.id
-                                        && board.show_poster_ids,
-                                    collapse_greentext: board.collapse_greentext,
-                                    thread_state: Some((
-                                        thread.sticky,
-                                        thread.locked,
-                                        thread.archived,
-                                    )),
-                                    thread_op_id: thread.op_id,
-                                    video_audio_muted: user_preferences.video_audio_muted,
-                                },
-                                0,
-                            ),
-                        })
-                        .collect::<Vec<_>>();
-
-                Ok((
-                    html,
-                    last_id,
-                    count,
-                    refreshed_posts,
-                    thread.reply_count,
-                    thread.bumped_at,
-                    thread.locked,
-                    thread.sticky,
-                ))
+            let mut html = String::new();
+            for post in &posts {
+                // show_delete=false, is_admin=false — no user controls in
+                // auto-appended HTML; a full reload restores them.
+                html.push_str(&crate::templates::render_post(
+                    post,
+                    &board_short,
+                    "",
+                    crate::templates::thread::RenderPostOpts {
+                        show_delete: false,
+                        is_admin: false,
+                        admin_csrf_token: None,
+                        show_media: true,
+                        allow_editing: false, // no edit link in auto-appended HTML; reload restores it
+                        allow_self_delete: false,
+                        owned_post_controls: None,
+                        show_poster_ids: thread.board_id == board.id && board.show_poster_ids,
+                        collapse_greentext: board.collapse_greentext,
+                        thread_state: None,
+                        thread_op_id: thread.op_id,
+                        video_audio_muted: user_preferences.video_audio_muted,
+                    },
+                    0,
+                ));
             }
-        })
-        .await
-        .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!(e)))??;
+
+            let refreshed_posts =
+                db::get_posts_by_ids_in_thread(&conn, thread_id, &refresh_post_ids)?
+                    .into_iter()
+                    .map(|post| RefreshedPostPayload {
+                        id: post.id,
+                        html: crate::templates::render_post(
+                            &post,
+                            &board_short,
+                            "",
+                            crate::templates::thread::RenderPostOpts {
+                                show_delete: false,
+                                is_admin: false,
+                                admin_csrf_token: None,
+                                show_media: true,
+                                allow_editing: false,
+                                allow_self_delete: false,
+                                owned_post_controls: None,
+                                show_poster_ids: thread.board_id == board.id
+                                    && board.show_poster_ids,
+                                collapse_greentext: board.collapse_greentext,
+                                thread_state: Some((thread.sticky, thread.locked, thread.archived)),
+                                thread_op_id: thread.op_id,
+                                video_audio_muted: user_preferences.video_audio_muted,
+                            },
+                            0,
+                        ),
+                    })
+                    .collect::<Vec<_>>();
+
+            Ok(ThreadUpdatesRender {
+                html,
+                last_id,
+                count,
+                refreshed_posts,
+                reply_count: thread.reply_count,
+                bump_time: thread.bumped_at,
+                locked: thread.locked,
+                sticky: thread.sticky,
+                board_id: board.id,
+                activity_badges,
+                latest_thread_marker,
+            })
+        }
+    })
+    .await
+    .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!(e)))??;
+    let jar = if updates.activity_badges.thread_badges_enabled
+        || updates.activity_badges.homepage_reply_badges_enabled
+    {
+        crate::handlers::board::remember_thread_activity(jar, thread_id, updates.reply_count)
+    } else {
+        jar
+    };
+    let (latest_created_at, latest_thread_id) =
+        crate::handlers::board::latest_visible_thread_marker_tuple(updates.latest_thread_marker);
+    let jar = if updates.activity_badges.homepage_thread_badges_enabled {
+        crate::handlers::board::remember_board_activity(
+            jar,
+            updates.board_id,
+            latest_created_at,
+            latest_thread_id,
+        )
+    } else {
+        jar
+    };
 
     // Current board-list version + rendered nav links — lets the JS refresh
     // the nav bar when boards are added or deleted while a thread is open,
@@ -1360,14 +1399,14 @@ pub async fn thread_updates(
     let nav_html =
         crate::templates::board_nav_html_for_preferences(boards.as_slice(), user_preferences);
     let payload = ThreadUpdatesPayload {
-        html,
-        last_id,
-        count,
-        refreshed_posts,
-        reply_count,
-        bump_time,
-        locked,
-        sticky,
+        html: updates.html,
+        last_id: updates.last_id,
+        count: updates.count,
+        refreshed_posts: updates.refreshed_posts,
+        reply_count: updates.reply_count,
+        bump_time: updates.bump_time,
+        locked: updates.locked,
+        sticky: updates.sticky,
         boards_version,
         nav_html,
     };
@@ -1379,7 +1418,7 @@ pub async fn thread_updates(
     )
         .into_response();
     crate::cache::insert_vary_cookie(response.headers_mut());
-    Ok(response)
+    Ok((jar, response).into_response())
 }
 
 #[cfg(test)]
