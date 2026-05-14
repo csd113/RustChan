@@ -1653,6 +1653,107 @@ async fn new_reply_after_thread_baseline_shows_thread_badge_until_thread_visit()
 }
 
 #[tokio::test]
+async fn thread_visit_clears_homepage_and_board_reply_badges() {
+    let state = crate::test_support::app_state();
+    set_new_activity_settings(&state, true, true, true);
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    let router = activity_router(state.clone());
+    let mut cookies = HashMap::new();
+
+    let baseline = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/tech")
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    update_cookie_store(&mut cookies, baseline.headers());
+
+    create_reply_on_thread(&state, board_id, thread_id, "reply");
+
+    let badge_home = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let badge_home_body = response_body_string(badge_home).await;
+    assert!(badge_home_body.contains("board-card-new-reply-badge"));
+
+    let badge_board = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/tech")
+                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let badge_board_body = response_body_string(badge_board).await;
+    assert!(badge_board_body.contains("thread-summary-activity-badge"));
+
+    let thread_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/tech/thread/{thread_id}"))
+                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    update_cookie_store(&mut cookies, thread_response.headers());
+
+    let cleared_home = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let cleared_home_body = response_body_string(cleared_home).await;
+    assert!(!cleared_home_body.contains("board-card-new-reply-badge"));
+
+    let cleared_board = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/tech")
+                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let cleared_board_body = response_body_string(cleared_board).await;
+    assert!(!cleared_board_body.contains("thread-summary-activity-badge"));
+}
+
+#[tokio::test]
 async fn thread_visit_invalidates_stale_catalog_activity_etag() {
     let state = crate::test_support::app_state();
     set_new_activity_settings(&state, true, true, true);
@@ -1915,10 +2016,11 @@ async fn new_activity_pages_keep_private_cache_headers() {
             .headers()
             .get(header::CACHE_CONTROL)
             .and_then(|value| value.to_str().ok()),
-        Some(super::HTML_CACHE_CONTROL)
+        Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE)
     );
 
     let catalog_response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -1934,8 +2036,79 @@ async fn new_activity_pages_keep_private_cache_headers() {
             .headers()
             .get(header::CACHE_CONTROL)
             .and_then(|value| value.to_str().ok()),
-        Some(super::HTML_CACHE_CONTROL)
+        Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE)
     );
+
+    let board_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/tech")
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        board_response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE)
+    );
+
+    let thread_response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/tech/thread/{_thread_id}"))
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        thread_response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE)
+    );
+}
+
+#[tokio::test]
+async fn activity_pages_keep_existing_cache_policy_when_tracking_disabled() {
+    let state = crate::test_support::app_state();
+    set_new_activity_settings(&state, false, false, false);
+    let (_board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    let router = activity_router(state);
+    let thread_uri = format!("/tech/thread/{thread_id}");
+
+    for uri in ["/", "/tech", "/tech/catalog", thread_uri.as_str()] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(super::HTML_CACHE_CONTROL),
+            "{uri} should keep no-cache when activity tracking is disabled"
+        );
+    }
 }
 
 #[tokio::test]

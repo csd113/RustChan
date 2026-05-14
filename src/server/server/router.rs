@@ -344,7 +344,7 @@ mod tests {
         let response = router
             .oneshot(
                 Request::builder()
-                    .uri("/")
+                    .uri("/banned")
                     .body(Body::empty())
                     .expect("request"),
             )

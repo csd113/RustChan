@@ -125,6 +125,14 @@ pub(crate) fn latest_visible_thread_marker_tuple(marker: Option<(i64, i64)>) -> 
     marker.unwrap_or((0, 0))
 }
 
+pub(crate) const fn activity_html_cache_control(activity_markers_enabled: bool) -> &'static str {
+    if activity_markers_enabled {
+        crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE
+    } else {
+        HTML_CACHE_CONTROL
+    }
+}
+
 pub(crate) fn thread_unread_counts(
     threads: &[crate::models::Thread],
     markers: &HashMap<i64, crate::handlers::board::ThreadActivityMarker>,

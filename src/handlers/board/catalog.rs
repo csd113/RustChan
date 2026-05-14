@@ -218,7 +218,7 @@ pub async fn catalog(
         );
         resp.headers_mut().insert(
             header::CACHE_CONTROL,
-            HeaderValue::from_static(HTML_CACHE_CONTROL),
+            HeaderValue::from_static(activity_html_cache_control(activity_markers_enabled)),
         );
         crate::cache::insert_vary_cookie(resp.headers_mut());
         return Ok((jar, resp).into_response());
@@ -254,7 +254,7 @@ pub async fn catalog(
     }
     resp.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static(HTML_CACHE_CONTROL),
+        HeaderValue::from_static(activity_html_cache_control(activity_markers_enabled)),
     );
     crate::cache::insert_vary_cookie(resp.headers_mut());
     Ok((jar, resp).into_response())

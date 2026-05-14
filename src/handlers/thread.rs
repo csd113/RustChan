@@ -222,7 +222,9 @@ pub async fn view_thread(
         );
         resp.headers_mut().insert(
             axum::http::header::CACHE_CONTROL,
-            axum::http::HeaderValue::from_static(crate::cache::CACHE_CONTROL_DYNAMIC_PUBLIC),
+            axum::http::HeaderValue::from_static(
+                crate::handlers::board::activity_html_cache_control(activity_markers_enabled),
+            ),
         );
         crate::cache::insert_vary_cookie(resp.headers_mut());
         return Ok((jar, resp).into_response());
@@ -251,7 +253,9 @@ pub async fn view_thread(
     }
     resp.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static(crate::cache::CACHE_CONTROL_DYNAMIC_PUBLIC),
+        axum::http::HeaderValue::from_static(crate::handlers::board::activity_html_cache_control(
+            activity_markers_enabled,
+        )),
     );
     crate::cache::insert_vary_cookie(resp.headers_mut());
     Ok((jar, resp).into_response())

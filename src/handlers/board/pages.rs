@@ -195,9 +195,10 @@ pub async fn index(
         user_preferences,
     ))
     .into_response();
+    let activity_markers_enabled = homepage_thread_badges_enabled || homepage_reply_badges_enabled;
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static(HTML_CACHE_CONTROL),
+        HeaderValue::from_static(activity_html_cache_control(activity_markers_enabled)),
     );
     crate::cache::insert_vary_cookie(response.headers_mut());
     Ok((jar, response).into_response())
@@ -400,7 +401,7 @@ pub async fn board_index(
         );
         resp.headers_mut().insert(
             header::CACHE_CONTROL,
-            HeaderValue::from_static(HTML_CACHE_CONTROL),
+            HeaderValue::from_static(activity_html_cache_control(activity_markers_enabled)),
         );
         crate::cache::insert_vary_cookie(resp.headers_mut());
         return Ok((jar, resp).into_response());
@@ -430,7 +431,7 @@ pub async fn board_index(
     }
     resp.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static(HTML_CACHE_CONTROL),
+        HeaderValue::from_static(activity_html_cache_control(activity_markers_enabled)),
     );
     crate::cache::insert_vary_cookie(resp.headers_mut());
     Ok((jar, resp).into_response())
