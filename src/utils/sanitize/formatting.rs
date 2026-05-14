@@ -46,6 +46,17 @@ fn extract_yt_id(url: &str) -> Option<String> {
             return Some(id);
         }
     }
+    if let Some(pos) = url.find("/embed/") {
+        let rest = &url[pos + 7..];
+        let id: String = rest.chars().take(11).collect();
+        if id.len() == 11
+            && id
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            return Some(id);
+        }
+    }
     extract_yt_id_from_watch_param(url)
 }
 
@@ -205,5 +216,24 @@ mod tests {
             extract_video_embed("https://youtu.be/dQw4w9WgXcQ?t=43"),
             Some(("youtube", "dQw4w9WgXcQ".to_owned()))
         );
+    }
+
+    #[test]
+    fn extracts_youtube_embed_from_supported_routes_with_extra_query_params() {
+        for url in [
+            "https://www.youtube.com/watch?v=zN9Cb-rNF9U",
+            "https://www.youtube.com/watch?v=zN9Cb-rNF9U&amp;list=RDzN9Cb-rNF9U&amp;start_radio=1",
+            "https://youtube.com/watch?v=zN9Cb-rNF9U&amp;list=RDzN9Cb-rNF9U",
+            "https://www.youtube.com/watch?v=zN9Cb-rNF9U&amp;t=30s",
+            "https://youtu.be/zN9Cb-rNF9U?si=abc123",
+            "https://www.youtube.com/shorts/zN9Cb-rNF9U?feature=share",
+            "https://www.youtube.com/embed/zN9Cb-rNF9U?start=30",
+        ] {
+            assert_eq!(
+                extract_video_embed(url),
+                Some(("youtube", "zN9Cb-rNF9U".to_owned())),
+                "{url}"
+            );
+        }
     }
 }

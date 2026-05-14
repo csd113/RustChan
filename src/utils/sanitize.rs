@@ -31,8 +31,9 @@ static RE_CROSSLINK: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/(\d+)?").expect("RE_CROSSLINK is valid")
 });
 
-static RE_URL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(https?://[^\s&<>]{3,300})").expect("RE_URL is valid"));
+static RE_URL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(https?://(?:[^\s&<>"']|&amp;){3,300})"#).expect("RE_URL is valid")
+});
 
 static RE_BOLD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\*\*([^*]+)\*\*").expect("RE_BOLD is valid"));
@@ -252,24 +253,29 @@ fn render_inline(text: &str) -> String {
             let url = &caps[1];
             let clean_url = url.trim_end_matches(['.', ',', ')', ';', '\'']);
             let trailing = &url[clean_url.len()..];
-            // Escape clean_url in both href and display text.
-            // RE_URL excludes & < > so escaping is safe today, but applying
-            // escape_html() consistently guards against future call-site changes.
-            let escaped_url = escape_html(clean_url);
+            // render_post_body receives already-escaped text. RE_URL only admits
+            // raw URL characters plus escaped ampersand separators, so clean_url
+            // is safe to place directly in href/text without double-escaping
+            // query strings from `&amp;` to `&amp;amp;`.
             let link = format!(
-                r#"<a href="{escaped_url}" rel="nofollow noopener" target="_blank">{escaped_url}</a>{trailing}"#
+                r#"<a href="{clean_url}" rel="nofollow noopener" target="_blank">{clean_url}</a>{trailing}"#
             );
             // Check for supported video embed URLs. Emit only the embed span —
             // the URL becomes a data attribute and the span text, not a hyperlink.
             // The client-side buildEmbed() function replaces the span with a
             // thumbnail+iframe widget positioned before the post body (like a webm).
             if let Some((embed_type, embed_id)) = extract_video_embed(clean_url) {
+                let display_url = if embed_type == "youtube" {
+                    format!("https://www.youtube.com/watch?v={embed_id}")
+                } else {
+                    clean_url.to_owned()
+                };
                 format!(
                     r#"<span class="video-unfurl" data-embed-type="{etype}" data-embed-id="{eid}" data-url="{url}">{display}{trail}</span>"#,
                     etype   = embed_type,
                     eid     = embed_id,
-                    url     = escape_html(clean_url),
-                    display = escape_html(clean_url),
+                    url     = display_url.as_str(),
+                    display = display_url.as_str(),
                     trail   = trailing,
                 )
             } else {
@@ -581,6 +587,40 @@ mod tests {
         let html = render_post_body(&escaped, false);
         assert!(!html.contains("href=\"https://example.com/foo.\""));
         assert!(!html.contains("href=\"https://example.com/bar,\""));
+    }
+
+    #[test]
+    fn test_youtube_watch_embed_consumes_extra_query_params() {
+        let escaped = escape_html(
+            "watch https://www.youtube.com/watch?v=zN9Cb-rNF9U&list=RDzN9Cb-rNF9U&start_radio=1 now",
+        );
+        let html = render_post_body(&escaped, false);
+
+        assert!(html.contains(r#"data-embed-type="youtube""#));
+        assert!(html.contains(r#"data-embed-id="zN9Cb-rNF9U""#));
+        assert!(html.contains(r#"data-url="https://www.youtube.com/watch?v=zN9Cb-rNF9U""#));
+        assert!(!html.contains("list=RDzN9Cb-rNF9U"));
+        assert!(!html.contains("start_radio=1"));
+    }
+
+    #[test]
+    fn test_youtube_short_url_embed_scrubs_tracking_query() {
+        let escaped = escape_html("watch https://youtu.be/zN9Cb-rNF9U?si=abc123");
+        let html = render_post_body(&escaped, false);
+
+        assert!(html.contains(r#"data-embed-id="zN9Cb-rNF9U""#));
+        assert!(html.contains(r"https://www.youtube.com/watch?v=zN9Cb-rNF9U"));
+        assert!(!html.contains("si=abc123"));
+    }
+
+    #[test]
+    fn test_youtube_shorts_embed_scrubs_tracking_query() {
+        let escaped = escape_html("watch https://www.youtube.com/shorts/zN9Cb-rNF9U?feature=share");
+        let html = render_post_body(&escaped, false);
+
+        assert!(html.contains(r#"data-embed-id="zN9Cb-rNF9U""#));
+        assert!(html.contains(r"https://www.youtube.com/watch?v=zN9Cb-rNF9U"));
+        assert!(!html.contains("feature=share"));
     }
 
     // ─── XSS vector tests ────────────────────────────────────────────────────
