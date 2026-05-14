@@ -99,6 +99,10 @@ mod tests {
     #[test]
     fn main_js_progressively_persists_user_preference_changes() {
         assert!(MAIN_JS.contains("function initUserPreferencesForms()"));
+        assert!(MAIN_JS.contains("function mirrorUserPreferencesToCookies(form)"));
+        assert!(MAIN_JS.contains("setPublicPreferenceCookie('rustchan_theme', theme.value);"));
+        assert!(MAIN_JS
+            .contains("setPublicPreferenceCookie('rustchan_preferred_view', boardView.value);"));
         assert!(MAIN_JS.contains("x-rustchan-background"));
         assert!(MAIN_JS.contains("keepalive: true"));
         assert!(MAIN_JS.contains("new URLSearchParams(new FormData(form))"));

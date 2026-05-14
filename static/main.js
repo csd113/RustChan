@@ -2052,6 +2052,44 @@ function repositionOpenThreadMenus() {
     });
   }
 
+  function setPublicPreferenceCookie(name, value) {
+    var cookie = encodeURIComponent(name) + '=' + encodeURIComponent(value) +
+      '; Max-Age=31536000; Path=/; SameSite=Lax';
+    if (window.location && window.location.protocol === 'https:') {
+      cookie += '; Secure';
+    }
+    document.cookie = cookie;
+  }
+
+  function mirrorUserPreferencesToCookies(form) {
+    if (!form) return;
+
+    var theme = form.querySelector('select[name="theme"]');
+    if (theme && THEMES.indexOf(theme.value) !== -1) {
+      setPublicPreferenceCookie('rustchan_theme', theme.value);
+    }
+
+    var hideNsfw = form.querySelector('input[name="hide_nsfw_boards"]');
+    if (hideNsfw) {
+      setPublicPreferenceCookie('rustchan_hide_nsfw', hideNsfw.checked ? '1' : '0');
+    }
+
+    var videoAudio = form.querySelector('input[name="video_audio"]:checked');
+    if (videoAudio && (videoAudio.value === 'on' || videoAudio.value === 'mute')) {
+      setPublicPreferenceCookie('rustchan_video_audio', videoAudio.value);
+    }
+
+    var boardView = form.querySelector('input[name="preferred_board_view"]:checked');
+    if (boardView && (boardView.value === 'catalog' || boardView.value === 'index')) {
+      setPublicPreferenceCookie('rustchan_preferred_view', boardView.value);
+    }
+
+    var showBadges = form.querySelector('input[name="show_activity_badges"]');
+    if (showBadges) {
+      setPublicPreferenceCookie('rustchan_activity_badges', showBadges.checked ? '1' : '0');
+    }
+  }
+
   function persistUserPreferencesForm(form) {
     if (!form) return Promise.resolve();
     if (!window.fetch || !window.FormData || !window.URLSearchParams) {
@@ -2202,6 +2240,7 @@ function repositionOpenThreadMenus() {
 
       form.addEventListener('submit', function (event) {
         event.preventDefault();
+        mirrorUserPreferencesToCookies(form);
         persistUserPreferencesForm(form);
       });
 
@@ -2221,6 +2260,7 @@ function repositionOpenThreadMenus() {
           applyVideoAudioPreference(control.value);
         }
 
+        mirrorUserPreferencesToCookies(form);
         persistUserPreferencesForm(form).then(function (saved) {
           if (!saved) return;
           if (
