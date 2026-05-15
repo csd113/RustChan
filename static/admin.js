@@ -877,20 +877,87 @@
       'recent_completed_jobs',
       'failed_jobs',
       'backup_jobs',
-      'restore_jobs',
-      'thumbnail_transcode_jobs'
+      'restore_jobs'
     ];
     var fields = {};
     fieldNames.forEach(function (name) {
       fields[name] = container.querySelector('[data-admin-health-job="' + name + '"]');
     });
+    var details = container.querySelector('[data-admin-health-job-details]');
+    var panels = {
+      failed: container.querySelector('[data-admin-health-job-panel="failed"]'),
+      completed: container.querySelector('[data-admin-health-job-panel="completed"]')
+    };
+    var lists = {
+      failed: container.querySelector('[data-admin-health-job-list="failed"]'),
+      completed: container.querySelector('[data-admin-health-job-list="completed"]')
+    };
+
+    function appendJobMeta(row, label, value) {
+      var item = document.createElement('span');
+      item.appendChild(document.createTextNode(label + ': '));
+      var strong = document.createElement('strong');
+      strong.textContent = value == null || value === '' ? 'n/a' : String(value);
+      item.appendChild(strong);
+      row.appendChild(item);
+    }
+
+    function renderJobList(name, jobs) {
+      var list = lists[name];
+      if (!list) return;
+      list.textContent = '';
+      if (!Array.isArray(jobs) || jobs.length === 0) {
+        var empty = document.createElement('p');
+        empty.className = 'admin-copy';
+        empty.textContent = 'No recent jobs recorded.';
+        list.appendChild(empty);
+        return;
+      }
+      jobs.forEach(function (job) {
+        var card = document.createElement('article');
+        card.className = 'admin-health-job-card';
+        var title = document.createElement('h4');
+        title.textContent = job.name || job.type || 'Background job';
+        card.appendChild(title);
+        var meta = document.createElement('div');
+        meta.className = 'admin-health-job-meta';
+        appendJobMeta(meta, 'id', job.id);
+        appendJobMeta(meta, 'type', job.type);
+        appendJobMeta(meta, 'status', job.status);
+        appendJobMeta(meta, 'attempts', job.attempts);
+        appendJobMeta(meta, 'updated', job.updated_at);
+        card.appendChild(meta);
+        if (job.error) {
+          var error = document.createElement('p');
+          error.className = 'admin-health-job-error';
+          error.textContent = job.error;
+          card.appendChild(error);
+        }
+        list.appendChild(card);
+      });
+    }
 
     function applyJobs(data) {
       fieldNames.forEach(function (name) {
         if (!fields[name] || data[name] === undefined || data[name] === null) return;
         fields[name].textContent = String(data[name]);
       });
+      renderJobList('failed', data.recent_failed_job_details);
+      renderJobList('completed', data.recent_completed_job_details);
     }
+
+    container.querySelectorAll('[data-admin-health-toggle]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var target = button.getAttribute('data-admin-health-toggle');
+        if (!details || !panels[target]) return;
+        var isOpen = !panels[target].hidden;
+        Object.keys(panels).forEach(function (name) {
+          if (panels[name]) panels[name].hidden = true;
+        });
+        panels[target].hidden = isOpen;
+        details.hidden = isOpen;
+      });
+    });
 
     function poll() {
       fetchJsonWithTimeout(url, 8000).then(applyJobs, function () {

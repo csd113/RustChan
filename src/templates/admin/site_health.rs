@@ -10,6 +10,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let health = &view.site_health;
     let rows = render_health_rows(view);
     let dependency_rows = render_dependency_summary(view);
+    let recent_jobs = render_recent_jobs_panel();
     let diagnostics = escape_html(health.diagnostics_text);
     format!(
         r##"<!-- ═══════════════════════════════════════════════════════════════════════════
@@ -20,6 +21,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
 <summary><span>// site health</span></summary>
 <div class="admin-dropdown-content admin-site-health" data-admin-health-jobs-url="/admin/site-health/jobs">
   <div class="admin-health-grid">{rows}</div>
+  {recent_jobs}
   <div class="admin-subsection admin-subsection-tight admin-health-dependencies">
     <div class="admin-card-header">
       <h3>// optional dependency summary</h3>
@@ -68,7 +70,6 @@ fn render_health_rows(view: &AdminPanelViewModel<'_>) -> String {
             "Tor onion address",
             health.tor_onion_address.unwrap_or("not available"),
         ),
-        ("Tor bootstrap state", health.tor_bootstrap_state),
     ] {
         append_health_row(&mut rows, label, value);
     }
@@ -104,12 +105,6 @@ fn append_job_rows(rows: &mut String, view: &AdminPanelViewModel<'_>) {
     );
     append_health_job_row(rows, "Backup jobs", health.backup_jobs, "backup_jobs");
     append_health_job_row(rows, "Restore jobs", health.restore_jobs, "restore_jobs");
-    append_health_job_row(
-        rows,
-        "Thumbnail/transcode jobs",
-        &health.thumbnail_transcode_jobs.to_string(),
-        "thumbnail_transcode_jobs",
-    );
 }
 
 fn append_health_row(out: &mut String, label: &str, value: &str) {
@@ -122,6 +117,22 @@ fn append_health_row(out: &mut String, label: &str, value: &str) {
 }
 
 fn append_health_job_row(out: &mut String, label: &str, value: &str, key: &str) {
+    if matches!(key, "failed_jobs" | "recent_completed_jobs") {
+        let target = if key == "failed_jobs" {
+            "failed"
+        } else {
+            "completed"
+        };
+        let _ = write!(
+            out,
+            r#"<div class="admin-health-row"><span>{label}</span><button type="button" class="admin-health-inspect-button" data-admin-health-toggle="{target}"><strong data-admin-health-job="{key}">{value}</strong></button></div>"#,
+            label = escape_html(label),
+            key = escape_html(key),
+            target = escape_html(target),
+            value = escape_html(value),
+        );
+        return;
+    }
     let _ = write!(
         out,
         r#"<div class="admin-health-row"><span>{label}</span><strong data-admin-health-job="{key}">{value}</strong></div>"#,
@@ -129,6 +140,20 @@ fn append_health_job_row(out: &mut String, label: &str, value: &str, key: &str) 
         key = escape_html(key),
         value = escape_html(value),
     );
+}
+
+fn render_recent_jobs_panel() -> String {
+    r#"<div class="admin-health-job-details" data-admin-health-job-details hidden>
+  <section data-admin-health-job-panel="failed" hidden>
+    <h3>// recent failed jobs</h3>
+    <div class="admin-health-job-list" data-admin-health-job-list="failed"></div>
+  </section>
+  <section data-admin-health-job-panel="completed" hidden>
+    <h3>// recently completed jobs</h3>
+    <div class="admin-health-job-list" data-admin-health-job-list="completed"></div>
+  </section>
+</div>"#
+        .to_owned()
 }
 
 fn render_dependency_summary(view: &AdminPanelViewModel<'_>) -> String {

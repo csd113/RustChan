@@ -47,7 +47,16 @@ pub struct BackgroundJobSummary {
     pub queued: i64,
     pub recent_completed: i64,
     pub failed: i64,
-    pub thumbnail_transcode: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentBackgroundJob {
+    pub id: i64,
+    pub job_type: String,
+    pub status: String,
+    pub attempts: i64,
+    pub last_error: Option<String>,
+    pub updated_at: i64,
 }
 
 // ─── Row mapper ───────────────────────────────────────────────────────────────
@@ -1251,22 +1260,47 @@ pub fn background_job_summary(conn: &rusqlite::Connection) -> Result<BackgroundJ
             ))
         },
     )?;
-    let thumbnail_transcode = conn.query_row(
-        "SELECT COUNT(*)
-         FROM background_jobs
-         WHERE job_type IN ('video_transcode', 'audio_waveform')
-           AND status IN ('pending', 'running')",
-        [],
-        |row| row.get(0),
-    )?;
-
     Ok(BackgroundJobSummary {
         running,
         queued,
         recent_completed,
         failed,
-        thumbnail_transcode,
     })
+}
+
+/// Return recent terminal background jobs for bounded admin diagnostics.
+///
+/// # Errors
+/// Returns an error if the database query fails.
+pub fn recent_background_jobs(
+    conn: &rusqlite::Connection,
+    status: &str,
+    limit: u32,
+) -> Result<Vec<RecentBackgroundJob>> {
+    anyhow::ensure!(
+        matches!(status, "done" | "failed"),
+        "unsupported job status"
+    );
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, job_type, status, attempts, last_error, updated_at
+         FROM background_jobs
+         WHERE status = ?1
+         ORDER BY updated_at DESC, id DESC
+         LIMIT ?2",
+    )?;
+    let jobs = stmt
+        .query_map(params![status, limit.min(25)], |row| {
+            Ok(RecentBackgroundJob {
+                id: row.get(0)?,
+                job_type: row.get(1)?,
+                status: row.get(2)?,
+                attempts: row.get(3)?,
+                last_error: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(jobs)
 }
 
 /// Reset jobs that were interrupted after being claimed but before completion.
@@ -1539,10 +1573,10 @@ mod tests {
     use super::{
         claim_next_job, count_posts_by_media_processing_state, count_search_results, get_post,
         get_post_submission, get_posts_for_thread, is_stale_media_target_error,
-        record_post_submission, recover_interrupted_background_jobs, replace_transcoded_media,
-        search_posts, search_terms, self_delete_post, set_post_media_processing_state,
-        to_fts_query, update_post_thumb_path, SelfDeleteOutcome, MEDIA_PROCESSING_FAILED,
-        MEDIA_PROCESSING_PENDING,
+        recent_background_jobs, record_post_submission, recover_interrupted_background_jobs,
+        replace_transcoded_media, search_posts, search_terms, self_delete_post,
+        set_post_media_processing_state, to_fts_query, update_post_thumb_path, SelfDeleteOutcome,
+        MEDIA_PROCESSING_FAILED, MEDIA_PROCESSING_PENDING,
     };
     use crate::db::{
         create_board, create_reply_with_thread_update, create_thread_with_optional_poll,
@@ -1650,6 +1684,27 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .expect("load background job")
+    }
+
+    #[test]
+    fn recent_background_jobs_are_bounded_and_terminal_only() {
+        let conn = test_conn();
+        let payload = r#"{"t":"SpamCheck","d":{"post_id":1,"ip_hash":"hash","body_len":5}}"#;
+        let older = insert_background_job(&conn, "spam_check", payload, "failed", 3, Some("older"));
+        let newer =
+            insert_background_job(&conn, "thread_prune", payload, "failed", 2, Some("newer"));
+        insert_background_job(&conn, "spam_check", payload, "pending", 0, None);
+
+        let jobs = recent_background_jobs(&conn, "failed", 1).expect("recent jobs");
+
+        assert_eq!(jobs.len(), 1);
+        let job = jobs.first().expect("one recent job");
+        assert_eq!(job.id, newer);
+        assert_eq!(job.job_type, "thread_prune");
+        assert_eq!(job.status, "failed");
+        assert_eq!(job.attempts, 2);
+        assert_eq!(job.last_error.as_deref(), Some("newer"));
+        assert!(older < newer);
     }
 
     #[test]

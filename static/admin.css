@@ -981,6 +981,72 @@ html:not([data-theme]) .admin-panel h1 {
   text-align: right;
 }
 
+.admin-health-inspect-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: right;
+}
+
+.admin-health-inspect-button strong {
+  color: var(--green-pale);
+  text-decoration: underline;
+  text-underline-offset: 0.12em;
+}
+
+.admin-health-inspect-button:hover strong,
+.admin-health-inspect-button:focus-visible strong {
+  color: var(--green-bright);
+}
+
+.admin-health-job-details {
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: color-mix(in srgb, var(--bg-input) 28%, transparent);
+  padding: 0.7rem;
+  border-radius: var(--radius-sm, 3px);
+}
+
+.admin-health-job-details h3 {
+  margin: 0 0 0.55rem;
+  font-size: 0.82rem;
+}
+
+.admin-health-job-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.admin-health-job-card {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid color-mix(in srgb, var(--border) 58%, transparent);
+  background: var(--bg-panel);
+}
+
+.admin-health-job-card h4 {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.admin-health-job-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.75rem;
+  color: var(--text-dim);
+  font-size: 0.74rem;
+}
+
+.admin-health-job-error {
+  margin: 0;
+  color: var(--red);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
 .admin-button-link {
   display: inline-flex;
   align-items: center;
@@ -2613,6 +2679,10 @@ html:not([data-theme]) .admin-login h1 {
   }
 
   .admin-health-row strong {
+    text-align: left;
+  }
+
+  .admin-health-inspect-button {
     text-align: left;
   }
 

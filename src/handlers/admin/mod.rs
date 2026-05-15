@@ -599,14 +599,12 @@ struct SiteHealthSnapshot {
     data_dir_usage: String,
     upload_dir_size: String,
     tor_status: String,
-    tor_bootstrap_state: String,
     running_jobs: i64,
     queued_jobs: i64,
     recent_completed_jobs: i64,
     failed_jobs: i64,
     backup_jobs: String,
     restore_jobs: String,
-    thumbnail_transcode_jobs: i64,
     recent_warnings: String,
 }
 
@@ -624,8 +622,22 @@ struct SiteHealthJobsSnapshot {
     backup: String,
     #[serde(rename = "restore_jobs")]
     restore: String,
-    #[serde(rename = "thumbnail_transcode_jobs")]
-    thumbnail_transcode: i64,
+    #[serde(rename = "recent_failed_job_details")]
+    recent_failed: Vec<SiteHealthJobDetail>,
+    #[serde(rename = "recent_completed_job_details")]
+    recent_completed_details: Vec<SiteHealthJobDetail>,
+}
+
+#[derive(Clone, Serialize)]
+struct SiteHealthJobDetail {
+    id: i64,
+    #[serde(rename = "type")]
+    job_type: String,
+    name: String,
+    status: String,
+    attempts: i64,
+    error: Option<String>,
+    updated_at: String,
 }
 
 struct BoardsDomainData {
@@ -688,7 +700,7 @@ fn load_site_health_snapshot(
     state: &AppState,
     full_backups: &[BackupInfo],
     auto_full_backup_settings: &crate::middleware::AutoFullBackupSettingsSnapshot,
-    onion_address_val: Option<&str>,
+    _onion_address_val: Option<&str>,
 ) -> SiteHealthSnapshot {
     let server_status = conn
         .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
@@ -719,20 +731,12 @@ fn load_site_health_snapshot(
         } else {
             "disabled".to_owned()
         },
-        tor_bootstrap_state: if !CONFIG.enable_tor_support {
-            "not configured".to_owned()
-        } else if onion_address_val.is_some() {
-            "ready".to_owned()
-        } else {
-            "bootstrapping or unknown".to_owned()
-        },
         running_jobs: jobs.running,
         queued_jobs: jobs.queued,
         recent_completed_jobs: jobs.recent_completed,
         failed_jobs: jobs.failed,
         backup_jobs: jobs.backup,
         restore_jobs: jobs.restore,
-        thumbnail_transcode_jobs: jobs.thumbnail_transcode,
         recent_warnings,
     }
 }
@@ -747,8 +751,9 @@ fn load_site_health_jobs_snapshot(
             queued: state.job_queue.pending_count(),
             recent_completed: 0,
             failed: 0,
-            thumbnail_transcode: 0,
         });
+    let recent_failed = load_site_health_job_details(conn, "failed");
+    let recent_completed_details = load_site_health_job_details(conn, "done");
     SiteHealthJobsSnapshot {
         running: job_summary.running,
         queued: job_summary.queued,
@@ -756,7 +761,83 @@ fn load_site_health_jobs_snapshot(
         failed: job_summary.failed,
         backup: backup_jobs_label(state.backup_progress.as_ref()),
         restore: "not available".to_owned(),
-        thumbnail_transcode: job_summary.thumbnail_transcode,
+        recent_failed,
+        recent_completed_details,
+    }
+}
+
+fn load_site_health_job_details(
+    conn: &rusqlite::Connection,
+    status: &str,
+) -> Vec<SiteHealthJobDetail> {
+    // background_jobs has no stable log-entry foreign key, so Site Health shows
+    // bounded inline job details instead of guessing at admin log links.
+    db::recent_background_jobs(conn, status, 10)
+        .unwrap_or_default()
+        .into_iter()
+        .map(site_health_job_detail)
+        .collect()
+}
+
+fn site_health_job_detail(job: db::RecentBackgroundJob) -> SiteHealthJobDetail {
+    SiteHealthJobDetail {
+        id: job.id,
+        name: background_job_display_name(&job.job_type).to_owned(),
+        job_type: job.job_type,
+        status: job.status,
+        attempts: job.attempts,
+        error: job
+            .last_error
+            .as_deref()
+            .and_then(sanitized_job_error_snippet),
+        updated_at: fmt_epoch(job.updated_at),
+    }
+}
+
+fn background_job_display_name(job_type: &str) -> &str {
+    match job_type {
+        "video_transcode" => "Video transcode",
+        "audio_waveform" => "Audio waveform",
+        "thread_prune" => "Thread prune",
+        "spam_check" => "Spam check",
+        _ => "Background job",
+    }
+}
+
+fn sanitized_job_error_snippet(error: &str) -> Option<String> {
+    let mut redacted = String::new();
+    for token in error.split_whitespace() {
+        let lower = token.to_ascii_lowercase();
+        let safe_token = if token.starts_with('/')
+            || token.starts_with("~/")
+            || lower.contains("/users/")
+            || lower.contains("token=")
+            || lower.contains("secret=")
+            || lower.contains("password=")
+            || lower.contains("cookie=")
+            || lower.contains("authorization:")
+        {
+            "[redacted]"
+        } else {
+            token
+        };
+        if !redacted.is_empty() {
+            redacted.push(' ');
+        }
+        redacted.push_str(safe_token);
+        if redacted.chars().count() >= 180 {
+            break;
+        }
+    }
+
+    let snippet: String = redacted.chars().take(180).collect();
+    let snippet = snippet.trim();
+    if snippet.is_empty() {
+        None
+    } else if redacted.chars().count() > 180 || error.chars().count() > snippet.chars().count() {
+        Some(format!("{snippet}..."))
+    } else {
+        Some(snippet.to_owned())
     }
 }
 
@@ -1192,7 +1273,6 @@ fn build_site_health_view<'a>(
         upload_dir_size: &snapshot.site_health.upload_dir_size,
         tor_status: &snapshot.site_health.tor_status,
         tor_onion_address: tor_address,
-        tor_bootstrap_state: &snapshot.site_health.tor_bootstrap_state,
         dependency_summary: crate::templates::AdminSiteHealthDependencySummary {
             ffmpeg: detection_status(snapshot.ffmpeg_available),
             ffprobe: detection_status(snapshot.ffprobe_available),
@@ -1206,7 +1286,6 @@ fn build_site_health_view<'a>(
         failed_jobs: snapshot.site_health.failed_jobs,
         backup_jobs: &snapshot.site_health.backup_jobs,
         restore_jobs: &snapshot.site_health.restore_jobs,
-        thumbnail_transcode_jobs: snapshot.site_health.thumbnail_transcode_jobs,
         diagnostics_text,
     }
 }
@@ -1933,6 +2012,20 @@ mod tests {
     async fn site_health_jobs_returns_no_store_json_body() {
         let state = crate::test_support::app_state();
         install_admin_session(&state);
+        {
+            let conn = state.db.get().expect("db connection");
+            conn.execute(
+                "INSERT INTO background_jobs
+                 (job_type, payload, status, attempts, last_error, updated_at)
+                 VALUES
+                 ('spam_check', '{}', 'failed', 3, ?1, unixepoch()),
+                 ('thread_prune', '{}', 'done', 1, NULL, unixepoch())",
+                rusqlite::params![
+                    "failed reading /Users/example/private.txt with token=abc123 ".repeat(8)
+                ],
+            )
+            .expect("insert background jobs");
+        }
         let response = admin_site_health_jobs(
             State(state),
             CookieJar::new().add(Cookie::new(SESSION_COOKIE, "session123")),
@@ -1967,8 +2060,23 @@ mod tests {
             Some("idle")
         );
         assert!(payload.get("running_jobs").is_some());
-        assert!(payload.get("thumbnail_transcode_jobs").is_some());
+        assert!(payload.get("queued_jobs").is_some());
+        assert!(payload.get("recent_failed_job_details").is_some());
+        assert!(payload.get("recent_completed_job_details").is_some());
+        assert!(payload.get("thumbnail_transcode_jobs").is_none());
         assert!(payload.get("repair_vacuum_jobs").is_none());
+        let failed_job = payload
+            .get("recent_failed_job_details")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|jobs| jobs.first())
+            .expect("failed job detail");
+        assert_eq!(failed_job["name"], "Spam check");
+        assert_eq!(failed_job["attempts"], 3);
+        let error = failed_job["error"].as_str().expect("error snippet");
+        assert!(error.contains("[redacted]"));
+        assert!(!error.contains("/Users/example"));
+        assert!(!error.contains("abc123"));
+        assert!(error.chars().count() <= 183);
     }
 
     #[tokio::test]

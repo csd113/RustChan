@@ -139,7 +139,6 @@ pub struct AdminPanelSiteHealthView<'a> {
     pub upload_dir_size: &'a str,
     pub tor_status: &'a str,
     pub tor_onion_address: Option<&'a str>,
-    pub tor_bootstrap_state: &'a str,
     pub dependency_summary: AdminSiteHealthDependencySummary,
     pub running_jobs: i64,
     pub queued_jobs: i64,
@@ -147,7 +146,6 @@ pub struct AdminPanelSiteHealthView<'a> {
     pub failed_jobs: i64,
     pub backup_jobs: &'a str,
     pub restore_jobs: &'a str,
-    pub thumbnail_transcode_jobs: i64,
     pub diagnostics_text: &'a str,
 }
 
@@ -1903,7 +1901,6 @@ mod tests {
             upload_dir_size: "unknown",
             tor_status: "disabled",
             tor_onion_address: None,
-            tor_bootstrap_state: "not configured",
             dependency_summary: AdminSiteHealthDependencySummary {
                 ffmpeg: AdminDetectionStatus::Detected,
                 ffprobe: AdminDetectionStatus::Detected,
@@ -1917,7 +1914,6 @@ mod tests {
             failed_jobs: 0,
             backup_jobs: "idle",
             restore_jobs: "not available",
-            thumbnail_transcode_jobs: 0,
             diagnostics_text: "RustChan version: 1.1.6\nRecent warnings:\n  none",
         }
     }
@@ -2253,6 +2249,11 @@ mod tests {
         assert!(html.contains("RustChan version: 1.1.6"));
         assert!(html.contains(r#"data-admin-health-jobs-url="/admin/site-health/jobs""#));
         assert!(html.contains(r#"data-admin-health-job="running_jobs""#));
+        assert!(html.contains(r#"data-admin-health-job="queued_jobs""#));
+        assert!(html.contains(r#"data-admin-health-toggle="failed""#));
+        assert!(html.contains(r#"data-admin-health-job-list="failed""#));
+        assert!(!html.contains("Tor bootstrap state"));
+        assert!(!html.contains("Thumbnail/transcode jobs"));
         assert!(!html.contains("Repair/VACUUM jobs"));
     }
 
