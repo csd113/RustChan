@@ -62,7 +62,10 @@ pub enum AdminAction {
         /// Disable video uploads on this board (default: video allowed)
         #[arg(long = "no-videos")]
         no_videos: bool,
-        /// Disable audio uploads on this board (default: audio disabled)
+        /// Enable audio uploads on this board (default: audio disabled)
+        #[arg(long = "audio", conflicts_with = "no_audio")]
+        audio: bool,
+        /// Compatibility flag; audio uploads are already disabled by default
         #[arg(long = "no-audio")]
         no_audio: bool,
     },
@@ -151,6 +154,7 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
             nsfw,
             no_images,
             no_videos,
+            audio,
             no_audio,
         } => {
             let short = short.to_lowercase();
@@ -162,7 +166,7 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
             }
             let allow_images = !no_images;
             let allow_video = !no_videos;
-            let allow_audio = !no_audio;
+            let allow_audio = audio && !no_audio;
             let id = db::create_board_with_media_flags(
                 &conn,
                 &short,
@@ -292,4 +296,71 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AdminAction, Cli, Command};
+    use clap::Parser as _;
+
+    #[test]
+    fn create_board_audio_is_opt_in() {
+        let cli = Cli::parse_from([
+            "rustchan-cli",
+            "admin",
+            "create-board",
+            "tech",
+            "Technology",
+        ]);
+
+        let Some(Command::Admin {
+            action: AdminAction::CreateBoard {
+                audio, no_audio, ..
+            },
+        }) = cli.command
+        else {
+            panic!("expected create-board command");
+        };
+
+        assert!(!audio);
+        assert!(!no_audio);
+    }
+
+    #[test]
+    fn create_board_audio_flag_enables_audio() {
+        let cli = Cli::parse_from([
+            "rustchan-cli",
+            "admin",
+            "create-board",
+            "tech",
+            "Technology",
+            "--audio",
+        ]);
+
+        let Some(Command::Admin {
+            action: AdminAction::CreateBoard { audio, .. },
+        }) = cli.command
+        else {
+            panic!("expected create-board command");
+        };
+
+        assert!(audio);
+    }
+
+    #[test]
+    fn create_board_audio_flags_conflict() {
+        let Err(err) = Cli::try_parse_from([
+            "rustchan-cli",
+            "admin",
+            "create-board",
+            "tech",
+            "Technology",
+            "--audio",
+            "--no-audio",
+        ]) else {
+            panic!("audio flags should conflict");
+        };
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
 }

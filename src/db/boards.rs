@@ -540,7 +540,7 @@ pub fn create_board(
 }
 
 /// Create a board with explicit per-media-type toggles.
-/// Used by the CLI `--no-images / --no-videos / --no-audio` flags.
+/// Used by the CLI and console board bootstrap paths.
 ///
 /// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
 ///

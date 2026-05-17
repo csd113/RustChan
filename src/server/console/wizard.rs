@@ -257,15 +257,15 @@ pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
         reader,
     )
     .unwrap_or_default();
-    let no_aud = prompt(
-        &format!("  {}Disable audio?  [y/N]:{} ", c(CYN), c(RST)),
+    let audio_raw = prompt(
+        &format!("  {}Enable audio?   [y/N]:{} ", c(CYN), c(RST)),
         reader,
     )
     .unwrap_or_default();
 
     let allow_images = !matches!(no_img.to_lowercase().as_str(), "y" | "yes");
     let allow_video = !matches!(no_vid.to_lowercase().as_str(), "y" | "yes");
-    let allow_audio = !matches!(no_aud.to_lowercase().as_str(), "y" | "yes");
+    let allow_audio = matches!(audio_raw.to_lowercase().as_str(), "y" | "yes");
 
     let Ok(conn) = pool.get() else {
         crate::logging::console_println(&format!(

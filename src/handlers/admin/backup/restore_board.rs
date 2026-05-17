@@ -377,12 +377,12 @@ where
             conn.execute(
                 "UPDATE boards SET name=?1, description=?2, nsfw=?3,
                  max_threads=?4, max_archived_threads=?5, bump_limit=?6,
-                 allow_images=?7, allow_video=?8, allow_audio=?9, allow_any_files=?10,
-                allow_tripcodes=?11, edit_window_secs=?12, allow_editing=?13, allow_self_delete=?14,
-                 allow_archive=?15, allow_video_embeds=?16, allow_captcha=?17,
-                 show_poster_ids=?18, collapse_greentext=?19, post_cooldown_secs=?20,
-                 banner_mode=?21, access_mode=?22, access_password_hash=?23
-                 WHERE id=?24",
+                 allow_images=?7, allow_video=?8, allow_audio=?9, allow_pdf=?10, allow_any_files=?11,
+                 allow_tripcodes=?12, edit_window_secs=?13, allow_editing=?14, allow_self_delete=?15,
+                 allow_archive=?16, allow_video_embeds=?17, allow_captcha=?18,
+                 show_poster_ids=?19, collapse_greentext=?20, post_cooldown_secs=?21,
+                 banner_mode=?22, access_mode=?23, access_password_hash=?24
+                 WHERE id=?25",
                 params![
                     manifest.board.name,
                     manifest.board.description,
@@ -393,6 +393,7 @@ where
                     i64::from(manifest.board.allow_images),
                     i64::from(manifest.board.allow_video),
                     i64::from(manifest.board.allow_audio),
+                    i64::from(manifest.board.allow_pdf),
                     i64::from(manifest.board.allow_any_files),
                     i64::from(manifest.board.allow_tripcodes),
                     manifest.board.edit_window_secs,
@@ -421,11 +422,11 @@ where
             insert_returning_id(
                 conn,
                 "INSERT INTO boards (short_name, name, description, nsfw, max_threads,
-                 max_archived_threads, bump_limit, allow_images, allow_video, allow_audio, allow_any_files,
+                 max_archived_threads, bump_limit, allow_images, allow_video, allow_audio, allow_pdf, allow_any_files,
                  allow_tripcodes, edit_window_secs, allow_editing, allow_self_delete, allow_archive,
                  allow_video_embeds, allow_captcha, show_poster_ids, collapse_greentext,
                  post_cooldown_secs, banner_mode, access_mode, access_password_hash, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)
                  RETURNING id",
                 params![
                     manifest.board.short_name,
@@ -438,6 +439,7 @@ where
                     i64::from(manifest.board.allow_images),
                     i64::from(manifest.board.allow_video),
                     i64::from(manifest.board.allow_audio),
+                    i64::from(manifest.board.allow_pdf),
                     i64::from(manifest.board.allow_any_files),
                     i64::from(manifest.board.allow_tripcodes),
                     manifest.board.edit_window_secs,
@@ -1300,6 +1302,7 @@ mod tests {
                 allow_images: true,
                 allow_video: true,
                 allow_audio: true,
+                allow_pdf: false,
                 allow_any_files: false,
                 allow_tripcodes: true,
                 edit_window_secs: 300,

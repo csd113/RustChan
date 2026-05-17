@@ -23,6 +23,8 @@ pub(super) mod board_backup_types {
         #[serde(default)]
         pub allow_audio: bool,
         #[serde(default)]
+        pub allow_pdf: bool,
+        #[serde(default)]
         pub allow_any_files: bool,
         #[serde(default = "default_true")]
         pub allow_tripcodes: bool,

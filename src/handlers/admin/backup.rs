@@ -1258,6 +1258,104 @@ mod tests {
     }
 
     #[test]
+    fn board_backup_manifest_preserves_pdf_upload_setting() {
+        let source_pool = crate::db::init_test_pool().expect("source pool");
+        let source_conn = source_pool.get().expect("source conn");
+        let board_id = crate::db::create_board(&source_conn, "tech", "Technology", "", false)
+            .expect("create source board");
+        source_conn
+            .execute(
+                "UPDATE boards SET allow_pdf = 1 WHERE id = ?1",
+                params![board_id],
+            )
+            .expect("enable pdf uploads");
+
+        let manifest = build_board_backup_manifest(&source_conn, "tech").expect("manifest");
+
+        assert!(manifest.board.allow_pdf);
+    }
+
+    #[test]
+    fn board_restore_preserves_pdf_upload_setting() {
+        let source_pool = crate::db::init_test_pool().expect("source pool");
+        let source_conn = source_pool.get().expect("source conn");
+        let board_id = crate::db::create_board(&source_conn, "tech", "Technology", "", false)
+            .expect("create source board");
+        source_conn
+            .execute(
+                "UPDATE boards SET allow_pdf = 1 WHERE id = ?1",
+                params![board_id],
+            )
+            .expect("enable pdf uploads");
+        let manifest = build_board_backup_manifest(&source_conn, "tech").expect("manifest");
+
+        let target_pool = crate::db::init_test_pool().expect("target pool");
+        let mut target_conn = target_pool.get().expect("target conn");
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        execute_board_restore(
+            &mut target_conn,
+            upload_dir.path().to_str().expect("upload dir path"),
+            manifest,
+            |_| Ok(()),
+            "Test PDF setting restore",
+            "Test PDF setting restore completed",
+        )
+        .expect("restore board");
+
+        let restored = crate::db::get_board_by_short(&target_conn, "tech")
+            .expect("load restored board")
+            .expect("restored board");
+        assert!(restored.allow_pdf);
+    }
+
+    #[test]
+    fn older_board_restore_manifests_default_pdf_uploads_off() {
+        let json = serde_json::json!({
+            "version": 1,
+            "board": {
+                "id": 1,
+                "short_name": "tech",
+                "name": "Technology",
+                "description": "",
+                "nsfw": false,
+                "max_threads": 100,
+                "max_archived_threads": 150,
+                "bump_limit": 300,
+                "allow_images": true,
+                "allow_video": true,
+                "allow_audio": true,
+                "allow_any_files": false,
+                "allow_tripcodes": true,
+                "edit_window_secs": 300,
+                "allow_editing": true,
+                "allow_self_delete": true,
+                "allow_archive": true,
+                "allow_video_embeds": true,
+                "allow_captcha": false,
+                "show_poster_ids": false,
+                "collapse_greentext": false,
+                "post_cooldown_secs": 0,
+                "banner_mode": "inherit",
+                "access_mode": "public",
+                "access_password_hash": "",
+                "created_at": 1_700_000_000
+            },
+            "threads": [],
+            "posts": [],
+            "polls": [],
+            "poll_options": [],
+            "poll_votes": [],
+            "file_hashes": [],
+            "banners": []
+        });
+
+        let manifest: super::types::board_backup_types::BoardBackupManifest =
+            serde_json::from_value(json).expect("legacy manifest");
+
+        assert!(!manifest.board.allow_pdf);
+    }
+
+    #[test]
     fn full_restore_layout_accepts_full_backup_archive() {
         let archive = zip_with_entries(&[("chan.db", b"SQLite format 3\0stub")]);
         assert!(validate_full_restore_archive_layout(&archive).is_ok());

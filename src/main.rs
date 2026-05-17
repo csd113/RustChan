@@ -6,7 +6,7 @@
 //   rustchan-cli admin create-admin  <u> <p>   → create an admin user
 //   rustchan-cli admin reset-password <u> <p>  → reset admin password
 //   rustchan-cli admin list-admins             → list admins
-//   rustchan-cli admin create-board  <s> <n> [desc] [--nsfw]
+//   rustchan-cli admin create-board  <s> <n> [desc] [--nsfw] [--audio]
 //   rustchan-cli admin delete-board  <short>
 //   rustchan-cli admin list-boards
 //   rustchan-cli admin ban    <ip_hash> <reason> [hours]
