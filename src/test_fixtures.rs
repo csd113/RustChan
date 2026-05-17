@@ -14,8 +14,8 @@ pub fn sample_board() -> crate::models::Board {
     crate::models::Board {
         id: 1,
         display_order: 1,
-        short_name: "test".to_string(),
-        name: "Test".to_string(),
+        short_name: "test".to_owned(),
+        name: "Test".to_owned(),
         description: String::new(),
         nsfw: false,
         max_threads: 100,

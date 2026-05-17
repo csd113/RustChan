@@ -67,7 +67,7 @@ pub enum AppError {
 // everything else to Internal (500).
 impl From<rusqlite::Error> for AppError {
     fn from(e: rusqlite::Error) -> Self {
-        if let rusqlite::Error::SqliteFailure(ref fe, _) = e {
+        if let rusqlite::Error::SqliteFailure(fe, _) = &e {
             if fe.code == rusqlite::ErrorCode::DatabaseBusy
                 || fe.code == rusqlite::ErrorCode::DatabaseLocked
             {
@@ -119,20 +119,20 @@ impl IntoResponse for AppError {
             Self::InvalidMediaType(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg.clone()),
             Self::DbBusy => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "The server is temporarily busy. Please try again in a moment.".to_string(),
+                "The server is temporarily busy. Please try again in a moment.".to_owned(),
             ),
             Self::Internal(e) => {
                 error!("Internal error: {:?}", e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "An internal error occurred.".to_string(),
+                    "An internal error occurred.".to_owned(),
                 )
             }
             Self::Tls(msg) => {
                 error!("TLS error: {msg}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "A TLS configuration error occurred.".to_string(),
+                    "A TLS configuration error occurred.".to_owned(),
                 )
             }
         };
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn tls_errors_hide_internal_messages_from_users() {
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        let response = AppError::Tls("secret cert path".to_string()).into_response();
+        let response = AppError::Tls("secret cert path".to_owned()).into_response();
         let body = runtime
             .block_on(to_bytes(response.into_body(), usize::MAX))
             .expect("body bytes");

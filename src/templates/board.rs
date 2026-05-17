@@ -13,12 +13,12 @@
 use crate::models::{Board, Pagination, Post, Thread, ThreadSummary, SEARCH_QUERY_MAX_CHARS};
 use crate::utils::sanitize::escape_html;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write;
+use std::fmt::Write as _;
 
 use super::{
-    base_layout, compress_modal_script, embed_thumb_from_body, fmt_ts, fmt_ts_short,
-    live_site_name, live_site_subtitle, render_pagination, report_modal_script, urlencoding_simple,
-    TOGGLE_SCRIPT,
+    base_layout, base_layout_with_preferences, compress_modal_script, embed_thumb_from_body,
+    fmt_ts, fmt_ts_short, live_site_name, live_site_subtitle, render_pagination,
+    report_modal_script, urlencoding_simple,
 };
 
 // ─── Site index (board list) ──────────────────────────────────────────────────
@@ -59,28 +59,32 @@ fn board_reorder_controls(
     )
 }
 
-fn render_new_activity_badge(count: i64, class_name: &str) -> String {
+fn render_new_activity_badge(count: i64, class_name: &str, label: &str) -> String {
     if count <= 0 {
         return String::new();
     }
     format!(
-        r#"<span class="{class_name}"><span class="new-activity-dot" aria-hidden="true"></span>{count} New</span>"#,
+        r#"<span class="{class_name}"><span class="new-activity-dot" aria-hidden="true"></span>{count} {label}</span>"#,
         class_name = escape_html(class_name),
-        count = count
+        count = count,
+        label = escape_html(label),
     )
 }
 
 // These flags map directly to render or DB inputs, so bundling them would make the call sites less clear.
-#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
+#[expect(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
+#[expect(clippy::too_many_lines)]
 fn render_board_card(
     stats: &crate::models::BoardStats,
     unread_thread_count: Option<i64>,
+    unread_reply_count: Option<i64>,
     nsfw_consent: bool,
     csrf_token: &str,
     admin_csrf_token: Option<&str>,
     show_reorder_controls: bool,
     is_first: bool,
     is_last: bool,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let board = &stats.board;
     let description_preview = preview_text(&board.description, 88);
@@ -91,8 +95,10 @@ fn render_board_card(
     };
     let board_href = if board.access_mode.requires_view_password() {
         format!("/{}/unlock", escape_html(&board.short_name))
-    } else {
+    } else if user_preferences.preferred_board_view.is_catalog() {
         format!("/{}/catalog", escape_html(&board.short_name))
+    } else {
+        format!("/{}", escape_html(&board.short_name))
     };
     let href = if board.nsfw && !nsfw_consent {
         format!("/?nsfw={}", urlencoding_simple(&board.short_name))
@@ -109,8 +115,10 @@ fn render_board_card(
             r#" data-return-to="/{}" data-board-label="/{}/""#,
             if board.access_mode.requires_view_password() {
                 format!("{}/unlock", escape_html(&board.short_name))
-            } else {
+            } else if user_preferences.preferred_board_view.is_catalog() {
                 format!("{}/catalog", escape_html(&board.short_name))
+            } else {
+                escape_html(&board.short_name)
             },
             escape_html(&board.short_name)
         )
@@ -134,24 +142,51 @@ fn render_board_card(
         String::new()
     };
     let access_badge = board_access_badge(board);
-    let activity_badge = unread_thread_count
+    let thread_activity_badge = unread_thread_count
         .map(|count| {
-            render_new_activity_badge(count, "new-activity-badge board-card-activity-badge")
+            render_new_activity_badge(
+                count,
+                "new-activity-badge board-card-activity-badge board-card-new-thread-badge",
+                "New Threads",
+            )
         })
         .unwrap_or_default();
+    let reply_activity_badge = unread_reply_count
+        .map(|count| {
+            render_new_activity_badge(
+                count,
+                "new-activity-badge board-card-activity-badge board-card-new-reply-badge",
+                "New Replies",
+            )
+        })
+        .unwrap_or_default();
+    let activity_badges = if thread_activity_badge.is_empty() && reply_activity_badge.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<div class="board-card-activity-row">{thread_activity_badge}{reply_activity_badge}</div>"#
+        )
+    };
+
+    let nsfw_attr = if board.nsfw {
+        r#" data-board-nsfw="1""#
+    } else {
+        ""
+    };
 
     format!(
-        r#"<div class="board-card">
+        r#"<div class="board-card"{nsfw_attr}>
   {reorder_controls}
   <a class="board-card-link" href="{href}"{action_attr}{return_to_attr}>
     <div class="board-card-short"><span class="board-card-slug">/{sh}/</span><span class="board-card-badges">{nsfw}{access_badge}</span></div>
     <div class="board-card-name">{name}</div>
     <div class="board-card-desc">{description}</div>
     <div class="board-card-stats">{thread_count} {thread_word}</div>
-    {activity_badge}
+    {activity_badges}
   </a>
 </div>"#,
         reorder_controls = reorder_controls,
+        nsfw_attr = nsfw_attr,
         href = href,
         action_attr = action_attr,
         return_to_attr = return_to_attr,
@@ -162,7 +197,7 @@ fn render_board_card(
         description = escape_html(&description_preview),
         thread_count = stats.thread_count,
         thread_word = thread_word,
-        activity_badge = activity_badge,
+        activity_badges = activity_badges,
     )
 }
 
@@ -170,10 +205,10 @@ pub(crate) fn board_access_badge(board: &Board) -> String {
     match board.access_mode {
         crate::models::BoardAccessMode::Public => String::new(),
         crate::models::BoardAccessMode::ViewPassword => {
-            r#" <span class="tag locked">PASSWORD</span>"#.to_string()
+            r#" <span class="tag locked">PASSWORD</span>"#.to_owned()
         }
         crate::models::BoardAccessMode::PostPassword => {
-            r#" <span class="tag sticky">POST PASSWORD</span>"#.to_string()
+            r#" <span class="tag sticky">POST PASSWORD</span>"#.to_owned()
         }
     }
 }
@@ -317,12 +352,12 @@ fn render_catalog_media_thumb(
     fallback_text: &str,
 ) -> String {
     let img_src = if src.starts_with("http://") || src.starts_with("https://") {
-        src.to_string()
+        src.to_owned()
     } else {
         format!("/boards/{src}")
     };
     format!(
-        r#"<img class="{class_name}" src="{src}" loading="lazy" alt="{alt}" data-media-thumb="1">
+        r#"<img class="{class_name}" src="{src}" loading="lazy" decoding="async" alt="{alt}" data-media-thumb="1">
 <div class="catalog-thumb-fallback media-thumb-fallback" hidden>{fallback_text}</div>"#,
         class_name = escape_html(class_name),
         src = escape_html(&img_src),
@@ -340,7 +375,7 @@ fn render_catalog_thumb(thread: &Thread) -> String {
                 .as_deref()
                 .and_then(embed_thumb_from_body)
                 .map_or_else(
-                    || r#"<div class="catalog-no-image">no img</div>"#.to_string(),
+                    || r#"<div class="catalog-no-image">no img</div>"#.to_owned(),
                     |embed_thumb| {
                         render_catalog_media_thumb(
                             "catalog-thumb embed-catalog-thumb",
@@ -358,7 +393,7 @@ fn render_catalog_thumb(thread: &Thread) -> String {
 }
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_catalog_actions(
     board_short: &str,
     thread: &Thread,
@@ -405,7 +440,7 @@ fn render_catalog_actions(
 }
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_catalog_card(
     board: &Board,
     thread: &Thread,
@@ -453,7 +488,9 @@ fn render_catalog_card(
         return_to,
     );
     let activity_badge = unread_reply_count
-        .map(|count| render_new_activity_badge(count, "new-activity-badge catalog-activity-badge"))
+        .map(|count| {
+            render_new_activity_badge(count, "new-activity-badge catalog-activity-badge", "New")
+        })
         .unwrap_or_default();
     let activity_row = if activity_badge.is_empty() {
         String::new()
@@ -512,7 +549,7 @@ fn render_archive_row(board_short: &str, thread: &Thread) -> String {
     });
     let thumb_html = thread.op_thumb.as_ref().map_or_else(String::new, |thumb| {
         format!(
-            r#"<div class="archive-row-media"><img src="/boards/{}" class="archive-thumb" alt="thumb" loading="lazy"></div>"#,
+            r#"<div class="archive-row-media"><img src="/boards/{}" class="archive-thumb" alt="thumb" loading="lazy" decoding="async"></div>"#,
             escape_html(thumb),
         )
     });
@@ -539,25 +576,30 @@ fn render_archive_row(board_short: &str, thread: &Thread) -> String {
     )
 }
 
-fn board_cards(
+#[expect(clippy::too_many_arguments)]
+fn board_cards<S: std::hash::BuildHasher>(
     list: &[&crate::models::BoardStats],
-    board_badges: &HashMap<i64, i64>,
+    board_new_thread_badges: &HashMap<i64, i64, S>,
+    board_new_reply_badges: &HashMap<i64, i64, S>,
     nsfw_consent: bool,
     csrf_token: &str,
     admin_csrf_token: Option<&str>,
     show_reorder_controls: bool,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let mut out = String::new();
     for (index, s) in list.iter().enumerate() {
         out.push_str(&render_board_card(
             s,
-            board_badges.get(&s.board.id).copied(),
+            board_new_thread_badges.get(&s.board.id).copied(),
+            board_new_reply_badges.get(&s.board.id).copied(),
             nsfw_consent,
             csrf_token,
             admin_csrf_token,
             show_reorder_controls,
             index == 0,
             index + 1 == list.len(),
+            user_preferences,
         ));
     }
     out
@@ -565,21 +607,23 @@ fn board_cards(
 
 #[must_use]
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines, clippy::implicit_hasher)]
+#[expect(clippy::too_many_lines)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
-pub fn index_page(
+#[expect(clippy::too_many_arguments)]
+pub fn index_page<S: std::hash::BuildHasher>(
     board_stats: &[crate::models::BoardStats],
     site_stats: Option<&crate::models::SiteStats>,
     csrf_token: &str,
     admin_csrf_token: Option<&str>,
     onion_address: Option<&str>,
     home_banner_html: &str,
-    board_badges: &HashMap<i64, i64>,
+    board_badges: &HashMap<i64, i64, S>,
+    board_reply_badges: &HashMap<i64, i64, S>,
     current_theme: Option<&str>,
     nsfw_prompt_board: Option<&Board>,
     nsfw_consent: bool,
     is_admin: bool,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let all_boards: Vec<Board> = board_stats.iter().map(|s| s.board.clone()).collect();
 
@@ -593,16 +637,16 @@ pub fn index_page(
     } else {
         format!(
             "<div class=\"index-section\"><h2 class=\"index-section-title\">// Boards</h2><div class=\"board-cards\">{}</div></div>",
-            board_cards(&sfw, board_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin)
+            board_cards(&sfw, board_badges, board_reply_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin, user_preferences)
         )
     };
 
-    let nsfw_sec = if nsfw.is_empty() {
+    let nsfw_sec = if user_preferences.hide_nsfw_boards || nsfw.is_empty() {
         String::new()
     } else {
         format!(
-            "<div class=\"index-section\"><h2 class=\"index-section-title\">// Adult Boards <span class=\"nsfw-badge\">NSFW</span></h2><div class=\"board-cards\">{}</div></div>",
-            board_cards(&nsfw, board_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin)
+            "<div class=\"index-section\" data-board-nsfw=\"1\"><h2 class=\"index-section-title\">// Adult Boards <span class=\"nsfw-badge\">NSFW</span></h2><div class=\"board-cards\">{}</div></div>",
+            board_cards(&nsfw, board_badges, board_reply_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin, user_preferences)
         )
     };
 
@@ -617,12 +661,11 @@ pub fn index_page(
             r#"<div class="index-section index-stats-section">
 <h2 class="index-section-title">// Stats</h2>
 <p class="index-stats-unavailable">site statistics are temporarily unavailable.</p>
-</div>"#
-                .to_string()
+</div>"#.to_owned()
         },
         |site_stats| {
 // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
-            #[allow(clippy::cast_precision_loss)]
+            #[expect(clippy::cast_precision_loss)]
             let active_gb = site_stats.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
             format!(
                 r#"<div class="index-section index-stats-section">
@@ -719,7 +762,7 @@ pub fn index_page(
     };
 
     let body = format!(
-        r#"<div class="index-hero">
+        r#"<div class="index-hero" data-activity-page="home">
 <h1 class="index-title">[ {name} ]</h1>
 <p class="index-subtitle">{subtitle}</p>
 </div>
@@ -736,7 +779,7 @@ pub fn index_page(
         nsfw_overlay = nsfw_overlay,
     );
 
-    base_layout(
+    base_layout_with_preferences(
         &live_site_name(),
         None,
         &body,
@@ -746,6 +789,7 @@ pub fn index_page(
         None,
         false,
         "/",
+        user_preferences,
     )
 }
 
@@ -753,14 +797,10 @@ pub fn index_page(
 
 #[must_use]
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(
-    clippy::too_many_lines,
-    clippy::fn_params_excessive_bools,
-    clippy::implicit_hasher
-)]
+#[expect(clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
-pub fn board_page(
+#[expect(clippy::too_many_arguments)]
+pub fn board_page<S: std::hash::BuildHasher>(
     board: &Board,
     summaries: &[ThreadSummary],
     pagination: &Pagination,
@@ -770,12 +810,13 @@ pub fn board_page(
     admin_csrf_token: Option<&str>,
     error: Option<&str>,
     new_thread_prefill: Option<&super::forms::PostFormState>,
-    thread_badges: &HashMap<i64, i64>,
+    thread_badges: &HashMap<i64, i64, S>,
     new_activity_enabled: bool,
     board_banner_html: &str,
     current_theme: Option<&str>,
     collapse_greentext: bool,
     can_post: bool,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let mut body = String::new();
     let admin_form_csrf = admin_csrf_token.unwrap_or(csrf_token);
@@ -816,7 +857,7 @@ pub fn board_page(
         };
         let _ = write!(
             body,
-            r#"<div class="board-header board-index-header"><h1>/{short}/  — {name}{access_badge}</h1><p class="board-desc">{desc}</p></div>
+            r#"<div class="board-header board-index-header" data-activity-page="board-index"><h1>/{short}/  — {name}{access_badge}</h1><p class="board-desc">{desc}</p></div>
 {board_banner_html}
 <div class="board-nav"><a class="board-nav-link active" href="/{short}">[Index]</a><a class="board-nav-link" href="/{short}/catalog">[Catalog]</a>{nav_archive}</div>"#
         );
@@ -867,6 +908,7 @@ pub fn board_page(
             } else {
                 None
             },
+            user_preferences,
         ));
     }
 
@@ -876,13 +918,12 @@ pub fn board_page(
         &format!("/{}", escape_html(&board.short_name)),
     ));
 
-    body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
         board.max_image_size_bytes(),
         board.max_video_size_bytes(),
     ));
 
-    base_layout(
+    base_layout_with_preferences(
         &format!("/{}/ — {} - Index", board.short_name, board.name),
         Some(&board.short_name),
         &body,
@@ -892,12 +933,13 @@ pub fn board_page(
         Some(&board.default_theme),
         collapse_greentext,
         &format!("/{}", board.short_name),
+        user_preferences,
     )
 }
 
 // ─── Thread summary (used by board_page) ─────────────────────────────────────
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
 fn render_thread_summary(
     summary: &ThreadSummary,
     board_short: &str,
@@ -907,6 +949,7 @@ fn render_thread_summary(
     show_poster_ids: bool,
     collapse_greentext: bool,
     unread_reply_count: Option<i64>,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let t = &summary.thread;
     let mut html = String::new();
@@ -936,7 +979,7 @@ fn render_thread_summary(
     if let (Some(_file), Some(thumb)) = (&t.op_file, &t.op_thumb) {
         let _ = write!(
             html,
-            r#"<div class="file-container thread-summary-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" alt="image"></a>{badges}</div>"#,
+            r#"<div class="file-container thread-summary-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" decoding="async" alt="image"></a>{badges}</div>"#,
             board = escape_html(board_short),
             tid = t.id,
             th = escape_html(thumb),
@@ -945,7 +988,7 @@ fn render_thread_summary(
     } else if let Some(embed_thumb) = t.op_body.as_deref().and_then(embed_thumb_from_body) {
         let _ = write!(
             html,
-            r#"<div class="file-container thread-summary-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb embed-index-thumb" src="{src}" loading="lazy" alt="video thumbnail"></a>{badges}</div>"#,
+            r#"<div class="file-container thread-summary-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb embed-index-thumb" src="{src}" loading="lazy" decoding="async" alt="video thumbnail"></a>{badges}</div>"#,
             board = escape_html(board_short),
             tid = t.id,
             src = escape_html(&embed_thumb),
@@ -1003,7 +1046,11 @@ fn render_thread_summary(
 
     let activity_badge = unread_reply_count
         .map(|count| {
-            render_new_activity_badge(count, "new-activity-badge thread-summary-activity-badge")
+            render_new_activity_badge(
+                count,
+                "new-activity-badge thread-summary-activity-badge",
+                "New",
+            )
         })
         .unwrap_or_default();
     if !activity_badge.is_empty() {
@@ -1093,7 +1140,7 @@ fn render_thread_summary(
             super::thread::RenderPostOpts {
                 show_delete: false,
                 is_admin,
-                admin_csrf_token: admin_csrf_token.map(str::to_string),
+                admin_csrf_token: admin_csrf_token.map(str::to_owned),
                 show_media: true,
                 allow_editing: false, // no edit link on board index previews
                 allow_self_delete: false,
@@ -1102,6 +1149,7 @@ fn render_thread_summary(
                 collapse_greentext,
                 thread_state: None,
                 thread_op_id: summary.thread.op_id,
+                video_audio_muted: user_preferences.video_audio_muted,
             },
             0,
         ));
@@ -1115,29 +1163,26 @@ fn render_thread_summary(
 
 #[must_use]
 // These flags map directly to render or DB inputs, so bundling them would make the call sites less clear.
-#[allow(
-    clippy::fn_params_excessive_bools,
-    clippy::too_many_lines,
-    clippy::implicit_hasher
-)]
+#[expect(clippy::fn_params_excessive_bools, clippy::too_many_lines)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
-pub fn catalog_page(
+#[expect(clippy::too_many_arguments)]
+pub fn catalog_page<S: std::hash::BuildHasher>(
     board: &Board,
     threads: &[Thread],
-    pinned_ids: &HashSet<i64>,
+    pinned_ids: &HashSet<i64, S>,
     hidden_count: usize,
     hidden_view: bool,
     csrf_token: &str,
     boards: &[Board],
     is_admin: bool,
     admin_csrf_token: Option<&str>,
-    thread_badges: &HashMap<i64, i64>,
+    thread_badges: &HashMap<i64, i64, S>,
     new_activity_enabled: bool,
     board_banner_html: &str,
     current_theme: Option<&str>,
     collapse_greentext: bool,
     can_post: bool,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let bs = escape_html(&board.short_name);
     let bn = escape_html(&board.name);
@@ -1184,7 +1229,7 @@ pub fn catalog_page(
 
     let _ = write!(
         body,
-        r#"<div class="board-header board-catalog-header">
+        r#"<div class="board-header board-catalog-header" data-activity-page="catalog">
   <div class="catalog-header-left board-catalog-header">
     <h1>/{bs}/  — {bn}{access_badge}{title_suffix}</h1>
     <p class="board-desc">{desc}</p>
@@ -1294,13 +1339,11 @@ pub fn catalog_page(
 
     body.push_str("</div>");
     body.push_str(report_modal_script());
-    // sortCatalog moved to /static/main.js
-    body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
         board.max_image_size_bytes(),
         board.max_video_size_bytes(),
     ));
-    base_layout(
+    base_layout_with_preferences(
         &format!(
             "/{}/ — {} - {}",
             board.short_name,
@@ -1323,6 +1366,7 @@ pub fn catalog_page(
         } else {
             format!("/{}/catalog", board.short_name)
         },
+        user_preferences,
     )
 }
 
@@ -1330,7 +1374,7 @@ pub fn catalog_page(
 
 #[must_use]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn search_page(
     board: &Board,
     query: &str,
@@ -1340,9 +1384,10 @@ pub fn search_page(
     boards: &[Board],
     current_theme: Option<&str>,
     collapse_greentext: bool,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let result_label = if pagination.total == 1 {
-        "1 result".to_string()
+        "1 result".to_owned()
     } else {
         format!("{} results", pagination.total)
     };
@@ -1391,6 +1436,7 @@ pub fn search_page(
                     collapse_greentext: board.collapse_greentext,
                     thread_state: None,
                     thread_op_id: None,
+                    video_audio_muted: user_preferences.video_audio_muted,
                 },
                 0,
             ));
@@ -1406,7 +1452,7 @@ pub fn search_page(
     }
 
     body.push_str("</div>");
-    base_layout(
+    base_layout_with_preferences(
         &format!("search — /{}/", board.short_name),
         Some(&board.short_name),
         &body,
@@ -1420,6 +1466,7 @@ pub fn search_page(
             board.short_name,
             urlencoding_simple(query)
         ),
+        user_preferences,
     )
 }
 
@@ -1489,7 +1536,7 @@ mod tests {
         archive_page, board_cards, board_page, catalog_page, index_page, render_catalog_card,
         render_thread_summary,
     };
-    use crate::models::{Board, BoardStats, SiteStats, Thread, ThreadSummary};
+    use crate::models::{Board, BoardStats, MediaType, Post, SiteStats, Thread, ThreadSummary};
     use crate::templates::forms::PostFormState;
     use std::collections::{HashMap, HashSet};
 
@@ -1534,6 +1581,36 @@ mod tests {
         }
     }
 
+    fn sample_video_reply() -> Post {
+        Post {
+            id: 99,
+            thread_id: 87,
+            board_id: 1,
+            name: "anon".into(),
+            tripcode: None,
+            subject: None,
+            body: "video reply".into(),
+            body_html: "video reply".into(),
+            ip_hash: None,
+            file_path: Some("test/video.webm".into()),
+            file_name: Some("video.webm".into()),
+            file_size: Some(1024),
+            thumb_path: Some("test/thumbs/video.webp".into()),
+            mime_type: Some("video/webm".into()),
+            media_type: Some(MediaType::Video),
+            media_processing_state: None,
+            media_processing_error: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            created_at: 1_700_000_020,
+            deletion_token: "token".into(),
+            is_op: false,
+            edited_at: None,
+        }
+    }
+
     #[test]
     fn board_cards_render_reorder_controls_only_when_enabled() {
         let board = sample_board();
@@ -1542,18 +1619,28 @@ mod tests {
             thread_count: 4,
         };
 
-        let html_without_controls =
-            board_cards(&[&stats], &HashMap::new(), true, "csrf", None, false);
+        let html_without_controls = board_cards(
+            &[&stats],
+            &HashMap::new(),
+            &HashMap::new(),
+            true,
+            "csrf",
+            None,
+            false,
+            crate::templates::UserPreferences::default(),
+        );
         assert!(html_without_controls.contains("board-card-link"));
         assert!(!html_without_controls.contains("board-reorder-menu"));
 
         let html_with_controls = board_cards(
             &[&stats],
             &HashMap::new(),
+            &HashMap::new(),
             true,
             "csrf",
             Some("admin-csrf"),
             true,
+            crate::templates::UserPreferences::default(),
         );
         assert!(html_with_controls.contains("board-reorder-menu"));
         assert!(html_with_controls.contains(r#"name="_csrf" value="admin-csrf""#));
@@ -1569,7 +1656,16 @@ mod tests {
         let mut badges = HashMap::new();
         badges.insert(stats.board.id, 2);
 
-        let html = board_cards(&[&stats], &badges, true, "csrf", None, false);
+        let html = board_cards(
+            &[&stats],
+            &badges,
+            &HashMap::new(),
+            true,
+            "csrf",
+            None,
+            false,
+            crate::templates::UserPreferences::default(),
+        );
 
         let stats_idx = html
             .find("board-card-stats")
@@ -1583,7 +1679,57 @@ mod tests {
 
         assert!(stats_idx < badge_idx && badge_idx < link_close_idx);
         assert!(html.contains(r#"<span class="board-card-slug">/test/</span>"#));
-        assert!(html.contains("2 New"));
+        assert!(html.contains("2 New Threads"));
+    }
+
+    #[test]
+    fn board_card_links_follow_index_preference_for_public_boards() {
+        let board = sample_board();
+        let stats = BoardStats {
+            board,
+            thread_count: 4,
+        };
+        let preferences = crate::templates::UserPreferences {
+            preferred_board_view: crate::templates::PreferredBoardView::Index,
+            ..crate::templates::UserPreferences::default()
+        };
+
+        let html = board_cards(
+            &[&stats],
+            &HashMap::new(),
+            &HashMap::new(),
+            true,
+            "csrf",
+            None,
+            false,
+            preferences,
+        );
+
+        assert!(html.contains(r#"class="board-card-link" href="/test""#));
+        assert!(!html.contains(r#"href="/test/catalog""#));
+    }
+
+    #[test]
+    fn board_cards_mark_nsfw_cards_for_client_preference_toggling() {
+        let mut board = sample_board();
+        board.nsfw = true;
+        let stats = BoardStats {
+            board,
+            thread_count: 4,
+        };
+
+        let html = board_cards(
+            &[&stats],
+            &HashMap::new(),
+            &HashMap::new(),
+            true,
+            "csrf",
+            None,
+            false,
+            crate::templates::UserPreferences::default(),
+        );
+
+        assert!(html.contains(r#"<div class="board-card" data-board-nsfw="1">"#));
     }
 
     #[test]
@@ -1599,13 +1745,16 @@ mod tests {
             None,
             "",
             &HashMap::new(),
+            &HashMap::new(),
             None,
             None,
             true,
             false,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains("site statistics are temporarily unavailable."));
+        assert!(html.contains(r#"data-activity-page="home""#));
         assert!(!html.contains("0.00 GB"));
         assert!(!html.contains("audio files uploaded</span></div>"));
     }
@@ -1631,10 +1780,12 @@ mod tests {
             None,
             "",
             &HashMap::new(),
+            &HashMap::new(),
             None,
             None,
             true,
             false,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains("audio files uploaded"));
@@ -1665,11 +1816,14 @@ mod tests {
             None,
             false,
             true,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains("catalog-card-link"));
+        assert!(html.contains(r#"data-activity-page="catalog""#));
         assert!(html.contains("catalog-card-media"));
         assert!(html.contains(r#"data-media-thumb="1""#));
+        assert!(html.contains(r#"loading="lazy" decoding="async""#));
         assert!(html.contains("catalog-thumb-fallback"));
         assert!(html.contains("thread-state-badge-pin"));
         assert!(html.contains("thread-state-badge-lock"));
@@ -1728,6 +1882,48 @@ mod tests {
             actions_idx > link_close_idx,
             "interactive actions should render after the card link"
         );
+    }
+
+    #[test]
+    fn catalog_actions_render_toggle_and_menu_controls_together() {
+        let board = sample_board();
+        let thread = sample_thread();
+
+        let html = render_catalog_card(
+            &board,
+            &thread,
+            false,
+            None,
+            "csrf",
+            "pin",
+            "Pin thread",
+            "hide",
+            "Hide thread",
+            "/test/catalog",
+        );
+
+        let actions_start = html
+            .find(r#"<div class="catalog-card-actions">"#)
+            .expect("catalog actions wrapper should exist");
+        let menu_start = html[actions_start..]
+            .find(r#"class="catalog-thread-menu""#)
+            .map(|idx| actions_start + idx)
+            .expect("catalog thread menu should render inside actions wrapper");
+        let report_idx = html[menu_start..]
+            .find("Report thread")
+            .map(|idx| menu_start + idx)
+            .expect("report action should exist");
+        let pin_idx = html[menu_start..]
+            .find("Pin thread")
+            .map(|idx| menu_start + idx)
+            .expect("pin action should exist");
+        let hide_idx = html[menu_start..]
+            .find("Hide thread")
+            .map(|idx| menu_start + idx)
+            .expect("hide action should exist");
+
+        assert!(menu_start > actions_start);
+        assert!(report_idx < pin_idx && pin_idx < hide_idx);
     }
 
     #[test]
@@ -1802,8 +1998,17 @@ mod tests {
     fn thread_summary_activity_badge_renders_between_title_area_and_footer() {
         let summary = sample_thread_summary();
 
-        let html =
-            render_thread_summary(&summary, "test", "csrf", None, false, true, false, Some(2));
+        let html = render_thread_summary(
+            &summary,
+            "test",
+            "csrf",
+            None,
+            false,
+            true,
+            false,
+            Some(2),
+            crate::templates::UserPreferences::default(),
+        );
 
         let subject_idx = html
             .find("class=\"subject\"")
@@ -1825,6 +2030,30 @@ mod tests {
     }
 
     #[test]
+    fn thread_summary_preview_videos_follow_audio_preference() {
+        let mut summary = sample_thread_summary();
+        summary.preview_posts = vec![sample_video_reply()];
+
+        let html = render_thread_summary(
+            &summary,
+            "test",
+            "csrf",
+            None,
+            false,
+            true,
+            false,
+            None,
+            crate::templates::UserPreferences {
+                video_audio_muted: true,
+                ..crate::templates::UserPreferences::default()
+            },
+        );
+
+        assert!(html.contains("media-expanded-video"));
+        assert!(html.contains("controls preload=\"none\" playsinline webkit-playsinline muted"));
+    }
+
+    #[test]
     fn thread_summary_admin_forms_use_admin_csrf_token() {
         let summary = sample_thread_summary();
 
@@ -1837,6 +2066,7 @@ mod tests {
             true,
             false,
             None,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains(r#"action="/admin/thread/delete""#));
@@ -1890,9 +2120,11 @@ mod tests {
             None,
             false,
             true,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains(r#"class="post-form-wrap is-open""#));
+        assert!(html.contains(r#"data-activity-page="board-index""#));
         assert!(html.contains(r#"style="display:block""#));
         assert!(html.contains(">retry</textarea>"));
     }

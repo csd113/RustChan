@@ -3,7 +3,7 @@
 use crate::config::CONFIG;
 use axum::{
     http::{self, header},
-    response::IntoResponse,
+    response::IntoResponse as _,
 };
 use std::net::{IpAddr, SocketAddr};
 
@@ -50,7 +50,8 @@ pub(super) async fn safe_timeout_middleware(
     let path = req.uri().path();
     let is_post_upload_route =
         matches!(*req.method(), http::Method::POST) && is_post_upload_path(path);
-    let bypass_timeout = path.starts_with("/admin/backup/download/")
+    let bypass_timeout = is_post_upload_route
+        || path.starts_with("/admin/backup/download/")
         || matches!(
             path,
             "/admin/backup"
@@ -68,13 +69,9 @@ pub(super) async fn safe_timeout_middleware(
         return next.run(req).await;
     }
 
-    let timeout = if is_post_upload_route {
-        std::time::Duration::from_secs(900)
-    } else {
-        match *req.method() {
-            http::Method::GET | http::Method::HEAD => std::time::Duration::from_secs(30),
-            _ => std::time::Duration::from_secs(300),
-        }
+    let timeout = match *req.method() {
+        http::Method::GET | http::Method::HEAD => std::time::Duration::from_secs(30),
+        _ => std::time::Duration::from_secs(300),
     };
 
     tokio::time::timeout(timeout, next.run(req))
@@ -82,6 +79,147 @@ pub(super) async fn safe_timeout_middleware(
         .unwrap_or_else(|_| {
             (http::StatusCode::REQUEST_TIMEOUT, "Request timed out").into_response()
         })
+}
+
+pub(super) async fn public_cache_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = req.uri().path().to_owned();
+    let mut resp = next.run(req).await;
+    if public_dynamic_html_path(&path) {
+        crate::cache::insert_cache_control_if_absent(
+            resp.headers_mut(),
+            crate::cache::CACHE_CONTROL_DYNAMIC_PUBLIC,
+        );
+    }
+    resp
+}
+
+pub(super) async fn admin_cache_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = req.uri().path().to_owned();
+    let mut resp = next.run(req).await;
+    let cache_control = if sensitive_admin_html_path(&path)
+        && response_content_type_starts_with(resp.headers(), "text/html")
+    {
+        crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE
+    } else {
+        crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE
+    };
+    crate::cache::insert_cache_control_if_absent(resp.headers_mut(), cache_control);
+    resp
+}
+
+pub(super) fn text_response_compression_predicate(
+    status: http::StatusCode,
+    _version: http::Version,
+    headers: &http::HeaderMap,
+    _extensions: &http::Extensions,
+) -> bool {
+    status == http::StatusCode::OK
+        && !headers.contains_key(header::CONTENT_ENCODING)
+        && !headers.contains_key(header::CONTENT_RANGE)
+        && !headers.contains_key(header::ACCEPT_RANGES)
+        && !has_attachment_disposition(headers)
+        && response_content_type_is_compressible(headers)
+}
+
+fn public_dynamic_html_path(path: &str) -> bool {
+    if path == "/" || path == "/banned" || path.starts_with("/banner/external/") {
+        return true;
+    }
+    let mut segments = path.trim_matches('/').split('/');
+    let (first, second, third, fourth) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    );
+    if matches!(
+        first,
+        Some("api" | "boards" | "static" | "theme-css" | "banner")
+    ) {
+        return false;
+    }
+    second.is_none()
+        || matches!(
+            (second, third, fourth),
+            (
+                Some("catalog" | "hidden" | "archive" | "search" | "unlock"),
+                None,
+                None
+            ) | (Some("thread"), Some(_), None)
+                | (Some("post"), Some(_), Some("edit" | "delete"))
+        )
+}
+
+fn sensitive_admin_html_path(path: &str) -> bool {
+    if matches!(
+        path,
+        "/admin"
+            | "/admin/panel"
+            | "/admin/mod-log"
+            | "/admin/backup"
+            | "/admin/backup/create"
+            | "/admin/backup/delete"
+            | "/admin/backup/extract-board"
+            | "/admin/backup/restore-saved"
+            | "/admin/backup/settings"
+            | "/admin/board/backup/create"
+            | "/admin/board/backup/restore-saved"
+            | "/admin/board/restore"
+            | "/admin/db/check"
+            | "/admin/db/repair"
+            | "/admin/db/repair/status"
+            | "/admin/restore"
+            | "/admin/vacuum"
+    ) {
+        return true;
+    }
+
+    path.strip_prefix("/admin/ip/")
+        .is_some_and(|tail| !tail.is_empty())
+}
+
+fn response_content_type_starts_with(headers: &http::HeaderMap, prefix: &str) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim_start().starts_with(prefix))
+}
+
+fn has_attachment_disposition(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("attachment"))
+}
+
+fn response_content_type_is_compressible(headers: &http::HeaderMap) -> bool {
+    let Some(content_type) = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+    else {
+        return false;
+    };
+
+    matches!(
+        content_type.as_str(),
+        "text/html"
+            | "text/css"
+            | "text/javascript"
+            | "application/javascript"
+            | "application/json"
+            | "application/xml"
+            | "text/xml"
+            | "image/svg+xml"
+    )
 }
 
 fn is_post_upload_path(path: &str) -> bool {
@@ -136,7 +274,7 @@ fn request_host_parts(headers: &http::HeaderMap) -> Option<(String, Option<u16>)
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<http::uri::Authority>().ok())
-        .map(|authority| (authority.host().to_string(), authority.port_u16()))
+        .map(|authority| (authority.host().to_owned(), authority.port_u16()))
 }
 
 fn host_is_configured_public_host(host: &str) -> bool {
@@ -157,9 +295,16 @@ fn is_loopback_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{hsts_middleware_with_mode, should_emit_hsts, CONTENT_SECURITY_POLICY};
+    use super::{
+        hsts_middleware_with_mode, public_dynamic_html_path, sensitive_admin_html_path,
+        should_emit_hsts, CONTENT_SECURITY_POLICY,
+    };
     use axum::{
-        body::Body, http::Request, middleware::from_fn, response::IntoResponse, routing::get,
+        body::Body,
+        http::{header, Request},
+        middleware::from_fn,
+        response::IntoResponse as _,
+        routing::get,
         Router,
     };
     use std::{
@@ -167,7 +312,7 @@ mod tests {
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::{Path, PathBuf},
     };
-    use tower::ServiceExt;
+    use tower::ServiceExt as _;
 
     #[test]
     fn csp_allows_core_end_user_media_features() {
@@ -188,6 +333,135 @@ mod tests {
         assert!(!CONTENT_SECURITY_POLICY.contains("script-src 'unsafe-inline'"));
         assert!(CONTENT_SECURITY_POLICY.contains("object-src 'none'"));
         assert!(CONTENT_SECURITY_POLICY.contains("frame-ancestors 'none'"));
+    }
+
+    #[test]
+    fn public_dynamic_html_cache_middleware_scope_is_narrow() {
+        assert!(public_dynamic_html_path("/"));
+        assert!(public_dynamic_html_path("/b/catalog"));
+        assert!(public_dynamic_html_path("/b/thread/1"));
+        assert!(public_dynamic_html_path("/b/post/1/edit"));
+        assert!(!public_dynamic_html_path("/static/style.css"));
+        assert!(!public_dynamic_html_path("/boards/b/file.webp"));
+        assert!(!public_dynamic_html_path("/api/post/b/1"));
+        assert!(!public_dynamic_html_path("/banner/assets/1"));
+    }
+
+    #[test]
+    fn sensitive_admin_html_paths_get_no_store_policy() {
+        for path in [
+            "/admin",
+            "/admin/panel",
+            "/admin/mod-log",
+            "/admin/backup",
+            "/admin/backup/create",
+            "/admin/backup/delete",
+            "/admin/backup/extract-board",
+            "/admin/backup/restore-saved",
+            "/admin/backup/settings",
+            "/admin/board/backup/create",
+            "/admin/board/backup/restore-saved",
+            "/admin/board/restore",
+            "/admin/db/check",
+            "/admin/db/repair",
+            "/admin/db/repair/status",
+            "/admin/restore",
+            "/admin/vacuum",
+            "/admin/ip/abcdef123456",
+        ] {
+            assert!(sensitive_admin_html_path(path), "{path} should be no-store");
+        }
+
+        assert!(!sensitive_admin_html_path("/admin/backup/progress"));
+        assert!(!sensitive_admin_html_path(
+            "/admin/backup/download/full/site.zip"
+        ));
+        assert!(!sensitive_admin_html_path("/admin/ip/"));
+    }
+
+    #[tokio::test]
+    async fn admin_cache_middleware_no_store_for_sensitive_html_only() {
+        let app = Router::new()
+            .route(
+                "/admin/backup",
+                get(|| async { ([("content-type", "text/html; charset=utf-8")], "ok") }),
+            )
+            .route(
+                "/admin/backup/progress",
+                get(|| async { ([("content-type", "application/json")], "{}") }),
+            )
+            .layer(from_fn(super::admin_cache_middleware));
+
+        let html_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/backup")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            html_response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE)
+        );
+
+        let json_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/backup/progress")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            json_response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE)
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_middleware_does_not_overwrite_route_cache_control() {
+        let app = Router::new()
+            .route(
+                "/",
+                get(|| async {
+                    (
+                        [(
+                            header::CACHE_CONTROL,
+                            crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA,
+                        )],
+                        "ok",
+                    )
+                }),
+            )
+            .layer(from_fn(super::public_cache_middleware));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA)
+        );
     }
 
     #[test]

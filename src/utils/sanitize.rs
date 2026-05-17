@@ -31,8 +31,9 @@ static RE_CROSSLINK: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/(\d+)?").expect("RE_CROSSLINK is valid")
 });
 
-static RE_URL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(https?://[^\s&<>]{3,300})").expect("RE_URL is valid"));
+static RE_URL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(https?://(?:[^\s&<>"']|&amp;){3,300})"#).expect("RE_URL is valid")
+});
 
 static RE_BOLD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\*\*([^*]+)\*\*").expect("RE_BOLD is valid"));
@@ -72,7 +73,7 @@ pub fn escape_html(s: &str) -> String {
 /// Apply word filters to raw (unescaped) text.
 #[must_use]
 pub fn apply_word_filters(text: &str, filters: &[(String, String)]) -> String {
-    let mut result = text.to_string();
+    let mut result = text.to_owned();
     for (pattern, replacement) in filters {
         if !pattern.is_empty() {
             result = result.replace(pattern.as_str(), replacement.as_str());
@@ -116,7 +117,7 @@ pub fn render_post_body(escaped: &str, collapse_greentext: bool) -> String {
     let mut i = 0;
 
     // Indexing is guarded by a surrounding invariant, so direct indexing is intentional here.
-    #[allow(clippy::indexing_slicing)] // i < lines.len() and j < lines.len() are invariants
+    #[expect(clippy::indexing_slicing)] // i < lines.len() and j < lines.len() are invariants
     while i < lines.len() {
         let line = lines[i];
 
@@ -185,7 +186,7 @@ pub fn normalize_greentext_blocks(body_html: &str, collapse_greentext: bool) -> 
     const CLOSE_TAG: &str = "</details>";
 
     if collapse_greentext {
-        return body_html.to_string();
+        return body_html.to_owned();
     }
 
     let mut out = String::with_capacity(body_html.len());
@@ -216,7 +217,7 @@ pub fn normalize_greentext_blocks(body_html: &str, collapse_greentext: bool) -> 
 
 /// Apply all inline markup transformations to a single line of HTML-escaped text.
 fn render_inline(text: &str) -> String {
-    let mut result = text.to_string();
+    let mut result = text.to_owned();
 
     // >>>/board/POST_ID → crosspost link (post redirect + hover preview data attrs)
     // >>>/board/        → board index link
@@ -252,24 +253,29 @@ fn render_inline(text: &str) -> String {
             let url = &caps[1];
             let clean_url = url.trim_end_matches(['.', ',', ')', ';', '\'']);
             let trailing = &url[clean_url.len()..];
-            // Escape clean_url in both href and display text.
-            // RE_URL excludes & < > so escaping is safe today, but applying
-            // escape_html() consistently guards against future call-site changes.
-            let escaped_url = escape_html(clean_url);
+            // render_post_body receives already-escaped text. RE_URL only admits
+            // raw URL characters plus escaped ampersand separators, so clean_url
+            // is safe to place directly in href/text without double-escaping
+            // query strings from `&amp;` to `&amp;amp;`.
             let link = format!(
-                r#"<a href="{escaped_url}" rel="nofollow noopener" target="_blank">{escaped_url}</a>{trailing}"#
+                r#"<a href="{clean_url}" rel="nofollow noopener" target="_blank">{clean_url}</a>{trailing}"#
             );
             // Check for supported video embed URLs. Emit only the embed span —
             // the URL becomes a data attribute and the span text, not a hyperlink.
             // The client-side buildEmbed() function replaces the span with a
             // thumbnail+iframe widget positioned before the post body (like a webm).
             if let Some((embed_type, embed_id)) = extract_video_embed(clean_url) {
+                let display_url = if embed_type == "youtube" {
+                    format!("https://www.youtube.com/watch?v={embed_id}")
+                } else {
+                    clean_url.to_owned()
+                };
                 format!(
                     r#"<span class="video-unfurl" data-embed-type="{etype}" data-embed-id="{eid}" data-url="{url}">{display}{trail}</span>"#,
                     etype   = embed_type,
                     eid     = embed_id,
-                    url     = escape_html(clean_url),
-                    display = escape_html(clean_url),
+                    url     = display_url.as_str(),
+                    display = display_url.as_str(),
                     trail   = trailing,
                 )
             } else {
@@ -347,7 +353,7 @@ pub fn validate_body_with_file(body: &str, has_file: bool) -> Result<String, Str
     if trimmed.is_empty() && !has_file {
         return Err("Post must include either text or an attached file.".into());
     }
-    Ok(trimmed.to_string())
+    Ok(trimmed.to_owned())
 }
 
 /// Validate and truncate a name field.
@@ -355,7 +361,7 @@ pub fn validate_body_with_file(body: &str, has_file: bool) -> Result<String, Str
 pub fn validate_name(name: &str) -> String {
     let trimmed = name.trim();
     if trimmed.is_empty() {
-        "Anonymous".to_string()
+        "Anonymous".to_owned()
     } else {
         trimmed.chars().take(64).collect()
     }
@@ -559,7 +565,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_filename_multibyte() {
-        let cjk: String = "日".repeat(50);
+        let cjk = "日".repeat(50);
         let long_name = format!("{cjk}.jpg");
         let result = sanitize_filename(&long_name);
         assert!(result.chars().count() <= 100);
@@ -568,7 +574,7 @@ mod tests {
     #[test]
     fn test_word_filter_before_escape() {
         let raw = "this is bad&word";
-        let filters = vec![("bad&word".to_string(), "filtered".to_string())];
+        let filters = vec![("bad&word".to_owned(), "filtered".to_owned())];
         let filtered = apply_word_filters(raw, &filters);
         assert_eq!(filtered, "this is filtered");
         let escaped = escape_html(&filtered);
@@ -581,6 +587,40 @@ mod tests {
         let html = render_post_body(&escaped, false);
         assert!(!html.contains("href=\"https://example.com/foo.\""));
         assert!(!html.contains("href=\"https://example.com/bar,\""));
+    }
+
+    #[test]
+    fn test_youtube_watch_embed_consumes_extra_query_params() {
+        let escaped = escape_html(
+            "watch https://www.youtube.com/watch?v=zN9Cb-rNF9U&list=RDzN9Cb-rNF9U&start_radio=1 now",
+        );
+        let html = render_post_body(&escaped, false);
+
+        assert!(html.contains(r#"data-embed-type="youtube""#));
+        assert!(html.contains(r#"data-embed-id="zN9Cb-rNF9U""#));
+        assert!(html.contains(r#"data-url="https://www.youtube.com/watch?v=zN9Cb-rNF9U""#));
+        assert!(!html.contains("list=RDzN9Cb-rNF9U"));
+        assert!(!html.contains("start_radio=1"));
+    }
+
+    #[test]
+    fn test_youtube_short_url_embed_scrubs_tracking_query() {
+        let escaped = escape_html("watch https://youtu.be/zN9Cb-rNF9U?si=abc123");
+        let html = render_post_body(&escaped, false);
+
+        assert!(html.contains(r#"data-embed-id="zN9Cb-rNF9U""#));
+        assert!(html.contains(r"https://www.youtube.com/watch?v=zN9Cb-rNF9U"));
+        assert!(!html.contains("si=abc123"));
+    }
+
+    #[test]
+    fn test_youtube_shorts_embed_scrubs_tracking_query() {
+        let escaped = escape_html("watch https://www.youtube.com/shorts/zN9Cb-rNF9U?feature=share");
+        let html = render_post_body(&escaped, false);
+
+        assert!(html.contains(r#"data-embed-id="zN9Cb-rNF9U""#));
+        assert!(html.contains(r"https://www.youtube.com/watch?v=zN9Cb-rNF9U"));
+        assert!(!html.contains("feature=share"));
     }
 
     // ─── XSS vector tests ────────────────────────────────────────────────────
@@ -673,7 +713,11 @@ mod tests {
     fn test_deeply_nested_spoilers() {
         // Deeply nested spoilers should not panic or produce runaway output
         let depth = 50;
-        let input = "[spoiler]".repeat(depth) + "x" + &"[/spoiler]".repeat(depth);
+        let input = format!(
+            "{}x{}",
+            "[spoiler]".repeat(depth),
+            "[/spoiler]".repeat(depth)
+        );
         let result = render_post_body(&input, false);
         // Must complete without panic; output length should be bounded
         assert!(
@@ -709,7 +753,7 @@ mod tests {
     #[test]
     fn test_only_gt_chars_does_not_panic() {
         // Input consisting entirely of > characters should not panic or loop
-        let input: String = ">".repeat(1000);
+        let input = ">".repeat(1000);
         let escaped = escape_html(&input);
         let _html = render_post_body(&escaped, false); // must not panic
     }

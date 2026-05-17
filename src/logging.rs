@@ -13,12 +13,19 @@
 //      All writes go through `CONSOLE_MUTEX` so `console.rs` interactive
 //      output never interleaves with log events.
 //
-//   2. Log file (logs/rustchan.YYYY-MM-DD.log, human-readable text, daily rotation)
+//   2. Main log file (logs/rustchan.YYYY-MM-DD.log, human-readable text, daily rotation)
 //      Same fixed-column format as the non-TTY terminal output, with two extras:
 //        • Millisecond precision on every timestamp.
 //        • WARN and ERROR lines append  (src/file.rs:line)  at the end so you
 //          can jump straight to the source without grepping the codebase.
 //      One event per line — easy to tail, grep, and read in any text editor.
+//
+//   3. Dependency log file (logs/dep_log.log)
+//      Third-party dependency events are hidden from the terminal and main log
+//      by default, but are still written here with the same human-readable file
+//      formatter. FFMPEG-related logs are intentionally treated as app/runtime
+//      logs and remain in the main log.
+//
 //      If you need machine-parseable output for a log shipper (Loki, Datadog,
 //      etc.) swap the FileFormatter layer for .json() — see the comment in
 //      init_logging().
@@ -40,8 +47,8 @@
 // Respects the RUST_LOG environment variable if set.
 
 use std::fmt;
-use std::io::{self, Write};
-use std::path::Path;
+use std::io::{self, Write as _};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, OnceLock};
 use std::time::{Duration, Instant};
@@ -51,7 +58,12 @@ use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::fmt::{FmtContext, MakeWriter};
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{
+    filter::filter_fn,
+    layer::{Layer as _, SubscriberExt as _},
+    util::SubscriberInitExt as _,
+    EnvFilter,
+};
 
 // ─── Shared console write lock ────────────────────────────────────────────────
 
@@ -74,11 +86,17 @@ static CONSOLE_MUTEX: LazyLock<parking_lot::Mutex<()>> =
 // Using a module-level OnceLock means the guard is stored here without
 // requiring callers to thread it through their own state, and without changing
 // the public `init_logging(&Path)` signature.
-static FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+static MAIN_FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+static DEPENDENCY_FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> =
+    OnceLock::new();
+
+pub const MAIN_LOG_FALLBACK_FILE_NAME: &str = "rustchan.log";
+pub const DEPENDENCY_LOG_FILE_NAME: &str = "dep_log.log";
 
 // ─── TTY detection ────────────────────────────────────────────────────────────
 
 static IS_TTY: AtomicBool = AtomicBool::new(false);
+static ANSI_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Returns `true` when stdout was a real interactive terminal at startup.
 ///
@@ -87,6 +105,27 @@ static IS_TTY: AtomicBool = AtomicBool::new(false);
 /// by a process supervisor like systemd.
 pub fn is_tty() -> bool {
     IS_TTY.load(Ordering::Relaxed)
+}
+
+/// Returns `true` when stdout is an interactive terminal that can consume ANSI
+/// escape sequences. On Windows this also probes/enables virtual terminal
+/// processing so raw colour sequences are not printed literally.
+pub fn ansi_enabled() -> bool {
+    ANSI_ENABLED.load(Ordering::Relaxed)
+}
+
+#[cfg(windows)]
+fn detect_ansi_enabled(tty: bool) -> bool {
+    if !tty {
+        return false;
+    }
+
+    crossterm::ansi_support::supports_ansi()
+}
+
+#[cfg(not(windows))]
+const fn detect_ansi_enabled(tty: bool) -> bool {
+    tty
 }
 
 /// Set to `true` once the full-screen TUI alternate screen is active.
@@ -113,6 +152,69 @@ pub fn is_tui_active() -> bool {
 
 // ─── Component name extraction ────────────────────────────────────────────────
 
+const APP_LOG_TARGETS: &[&str] = &[
+    "admin",
+    "board",
+    "chan",
+    "chan_net",
+    "config",
+    "console",
+    "db",
+    "polls",
+    "rustchan",
+    "rustchan_cli",
+    "server",
+    "sessions",
+    "startup",
+    "tls",
+    "workers",
+];
+
+const APP_LOG_EXACT_TARGETS: &[&str] = &["convert", "media_prune"];
+
+#[must_use]
+pub fn dependency_log_path(log_dir: &Path) -> PathBuf {
+    log_dir.join(DEPENDENCY_LOG_FILE_NAME)
+}
+
+#[must_use]
+pub fn is_main_log_file(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    file_name == MAIN_LOG_FALLBACK_FILE_NAME
+        || (file_name.starts_with("rustchan.")
+            && path.extension().and_then(|ext| ext.to_str()) == Some("log"))
+}
+
+fn is_app_log_target(target: &str) -> bool {
+    APP_LOG_EXACT_TARGETS.contains(&target)
+        || APP_LOG_TARGETS.iter().any(|app_target| {
+            target == *app_target
+                || target
+                    .strip_prefix(*app_target)
+                    .is_some_and(|suffix| suffix.starts_with("::"))
+        })
+}
+
+fn is_ffmpeg_log_target(target: &str) -> bool {
+    target == "ffmpeg"
+        || target.starts_with("ffmpeg::")
+        || target == "ffmpeg_next"
+        || target.starts_with("ffmpeg_next::")
+        || target.ends_with("::ffmpeg")
+        || target.contains("::ffmpeg::")
+}
+
+fn is_main_log_target(target: &str) -> bool {
+    is_app_log_target(target) || is_ffmpeg_log_target(target)
+}
+
+fn is_dependency_log_target(target: &str) -> bool {
+    !is_main_log_target(target)
+}
+
 /// Extract the useful short name from a tracing target (module path).
 ///
 /// `rustchan::server::server` → `server`
@@ -132,16 +234,16 @@ fn extract_component(target: &str) -> &str {
 fn display_component(target: &str) -> String {
     if is_tor_target(target) {
         match extract_component(target) {
-            "bootstrap" | "dirmgr" | "state" | "sqlite" => "tor-dir".to_string(),
-            "guard" | "guardmgr" => "tor-net".to_string(),
-            "chanmgr" => "tor-chan".to_string(),
-            "circmgr" | "mgr" | "reactor" => "tor-circ".to_string(),
-            "hspool" | "publish" | "descriptor" => "onion".to_string(),
-            "config" => "tor-cfg".to_string(),
-            other => other.to_string(),
+            "bootstrap" | "dirmgr" | "state" | "sqlite" => "tor-dir".to_owned(),
+            "guard" | "guardmgr" => "tor-net".to_owned(),
+            "chanmgr" => "tor-chan".to_owned(),
+            "circmgr" | "mgr" | "reactor" => "tor-circ".to_owned(),
+            "hspool" | "publish" | "descriptor" => "onion".to_owned(),
+            "config" => "tor-cfg".to_owned(),
+            other => other.to_owned(),
         }
     } else {
-        extract_component(target).to_string()
+        extract_component(target).to_owned()
     }
 }
 
@@ -207,30 +309,30 @@ fn strip_ansi(input: &str) -> String {
 
 fn humanize_field_name(name: &str) -> String {
     match name {
-        "addr" => "address".to_string(),
-        "admin_id" => "admin ID".to_string(),
-        "archived_cap" => "archive limit".to_string(),
-        "board_id" => "board ID".to_string(),
-        "bytes" => "size".to_string(),
-        "error" => "error".to_string(),
-        "failure_rate" => "failure rate".to_string(),
-        "files_removed" => "files removed".to_string(),
-        "freed_kib" => "freed KiB".to_string(),
-        "has_csrf_cookie" => "CSRF cookie".to_string(),
-        "has_session_cookie" => "session cookie".to_string(),
-        "attempts" => "attempts".to_string(),
-        "reason" => "reason".to_string(),
-        "uri" => "URI".to_string(),
-        "id" => "ID".to_string(),
-        "latency_ms" => "latency".to_string(),
-        "mime" => "MIME type".to_string(),
-        "post_id" => "post ID".to_string(),
-        "remaining_kib" => "remaining KiB".to_string(),
-        "retry_in" => "retry in".to_string(),
-        "saved_as" => "saved as".to_string(),
-        "thread_id" => "thread ID".to_string(),
-        "thumb" => "thumbnail".to_string(),
-        "url" => "URL".to_string(),
+        "addr" => "address".to_owned(),
+        "admin_id" => "admin ID".to_owned(),
+        "archived_cap" => "archive limit".to_owned(),
+        "board_id" => "board ID".to_owned(),
+        "bytes" => "size".to_owned(),
+        "error" => "error".to_owned(),
+        "failure_rate" => "failure rate".to_owned(),
+        "files_removed" => "files removed".to_owned(),
+        "freed_kib" => "freed KiB".to_owned(),
+        "has_csrf_cookie" => "CSRF cookie".to_owned(),
+        "has_session_cookie" => "session cookie".to_owned(),
+        "attempts" => "attempts".to_owned(),
+        "reason" => "reason".to_owned(),
+        "uri" => "URI".to_owned(),
+        "id" => "ID".to_owned(),
+        "latency_ms" => "latency".to_owned(),
+        "mime" => "MIME type".to_owned(),
+        "post_id" => "post ID".to_owned(),
+        "remaining_kib" => "remaining KiB".to_owned(),
+        "retry_in" => "retry in".to_owned(),
+        "saved_as" => "saved as".to_owned(),
+        "thread_id" => "thread ID".to_owned(),
+        "thumb" => "thumbnail".to_owned(),
+        "url" => "URL".to_owned(),
         other => other.replace('_', " "),
     }
 }
@@ -273,7 +375,7 @@ fn title_case_message(message: &str) -> String {
         Some(first) if first.is_ascii_lowercase() => {
             format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
         }
-        _ => message.to_string(),
+        _ => message.to_owned(),
     }
 }
 
@@ -306,7 +408,7 @@ fn parse_formatted_duration(value: &str) -> Option<String> {
 fn format_duration_parts(total_nanos: u128) -> String {
     let total_millis = (total_nanos.saturating_add(500_000)) / 1_000_000;
     if total_millis == 0 {
-        return "0s".to_string();
+        return "0s".to_owned();
     }
 
     let total_secs = (total_millis.saturating_add(500)) / 1000;
@@ -364,7 +466,7 @@ fn normalize_duration(value: &str) -> Option<String> {
 }
 
 fn scrub_tor_value(value: &str) -> String {
-    let mut out = value.to_string();
+    let mut out = value.to_owned();
 
     while let Some(start) = out.find("GuardId(") {
         let Some(end) = out[start..].find(')') else {
@@ -390,7 +492,7 @@ fn normalize_field_value(name: &str, value: &str) -> String {
     }
 
     if name == "guard" && value.starts_with("GuardId(") {
-        return "[scrubbed]".to_string();
+        return "[scrubbed]".to_owned();
     }
 
     if name == "latency_ms" {
@@ -424,7 +526,7 @@ impl LogEventFields {
         if should_hide_field(field.name(), &clean) {
             return;
         }
-        self.fields.push((field.name().to_string(), clean));
+        self.fields.push((field.name().to_owned(), clean));
     }
 }
 
@@ -470,7 +572,7 @@ fn upsert_field(fields: &mut Vec<(String, String)>, name: &str, value: String) {
     if let Some((_, existing)) = fields.iter_mut().find(|(field_name, _)| field_name == name) {
         *existing = value;
     } else {
-        fields.push((name.to_string(), value));
+        fields.push((name.to_owned(), value));
     }
 }
 
@@ -500,13 +602,13 @@ fn extract_attempt_count(message: &str) -> Option<String> {
 fn short_tor_error(error: &str) -> String {
     let lower = error.to_ascii_lowercase();
     if lower.contains("invalid document from directory server") {
-        "directory server sent invalid data".to_string()
+        "directory server sent invalid data".to_owned()
     } else if lower.contains("timed out") || lower.contains("timeout") {
-        "network timeout".to_string()
+        "network timeout".to_owned()
     } else if lower.contains("unusable guard") || lower.contains("could not connect to guard") {
-        "could not connect to a Tor guard".to_string()
+        "could not connect to a Tor guard".to_owned()
     } else if lower.contains("consensus") && lower.contains("expired") {
-        "network directory consensus expired".to_string()
+        "network directory consensus expired".to_owned()
     } else {
         scrub_tor_value(error)
     }
@@ -628,7 +730,7 @@ fn normalize_message_text(message: &str) -> String {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields) {
     let Some(message) = fields.message.clone() else {
         return;
@@ -641,19 +743,19 @@ fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields
         "guard" => {
             if let Some((_, retry)) = message.split_once("Retrying in ") {
                 let retry = retry.trim_end_matches('.');
-                let retry = normalize_duration(retry).unwrap_or_else(|| retry.to_string());
-                fields.message = Some("Tor guard connection failed".to_string());
+                let retry = normalize_duration(retry).unwrap_or_else(|| retry.to_owned());
+                fields.message = Some("Tor guard connection failed".to_owned());
                 upsert_field(&mut fields.fields, "retry_in", retry);
             } else if message.contains("Next retry time unknown") {
-                fields.message = Some("Tor guard connection failed".to_string());
-                upsert_field(&mut fields.fields, "retry_in", "unknown".to_string());
+                fields.message = Some("Tor guard connection failed".to_owned());
+                upsert_field(&mut fields.fields, "retry_in", "unknown".to_owned());
             } else if message.starts_with("Questionable guard:") {
-                fields.message = Some("Tor marked a guard as unstable".to_string());
+                fields.message = Some("Tor marked a guard as unstable".to_owned());
                 if let Some(rate) = extract_percent(&message) {
                     upsert_field(&mut fields.fields, "failure_rate", rate);
                 }
             } else if message.starts_with("Disabling guard:") {
-                fields.message = Some("Tor disabled an unstable guard".to_string());
+                fields.message = Some("Tor disabled an unstable guard".to_owned());
                 if let Some(rate) = extract_percent(&message) {
                     upsert_field(&mut fields.fields, "failure_rate", rate);
                 }
@@ -662,15 +764,15 @@ fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields
         "hspool" => {
             if message == "Too many preemptive onion service circuits failed; waiting a while." {
                 fields.message = Some(
-                    "Tor onion-service circuits are failing; waiting before retrying".to_string(),
+                    "Tor onion-service circuits are failing; waiting before retrying".to_owned(),
                 );
             } else if message.starts_with("unknown vanguard mode") {
-                fields.message = Some("Tor onion-service vanguard mode is unknown".to_string());
+                fields.message = Some("Tor onion-service vanguard mode is unknown".to_owned());
             }
         }
         "reactor" => {
             if message.eq_ignore_ascii_case("removing circuit leg") {
-                fields.message = Some("Tor circuit closed".to_string());
+                fields.message = Some("Tor circuit closed".to_owned());
                 remove_field(&mut fields.fields, "tunnel_id");
             } else if message.contains("descriptor upload")
                 || message.contains("Unable to upload")
@@ -682,9 +784,9 @@ fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields
         }
         "bootstrap" => {
             if message == "Unable to advance downloading state" {
-                fields.message = Some("Tor directory bootstrap stalled".to_string());
+                fields.message = Some("Tor directory bootstrap stalled".to_owned());
             } else if message.starts_with("We failed ") && message.contains("times to bootstrap") {
-                fields.message = Some("Tor directory bootstrap failed".to_string());
+                fields.message = Some("Tor directory bootstrap failed".to_owned());
                 if let Some(attempts) = extract_attempt_count(&message) {
                     upsert_field(&mut fields.fields, "attempts", attempts);
                 }
@@ -693,44 +795,44 @@ fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields
         "lib" => {
             if message == "Bootstrapping task exited before finishing." {
                 fields.message =
-                    Some("Tor directory bootstrap stopped before finishing".to_string());
+                    Some("Tor directory bootstrap stopped before finishing".to_owned());
             } else if message == "Got a new NetDir, but it's older than the one we currently have!"
             {
                 fields.message = Some(
-                    "Tor received an older network directory; keeping current copy".to_string(),
+                    "Tor received an older network directory; keeping current copy".to_owned(),
                 );
             }
         }
         "state" => {
             if message.starts_with("Problem with certificate received from") {
-                fields.message = Some("Tor directory certificate was rejected".to_string());
+                fields.message = Some("Tor directory certificate was rejected".to_owned());
             } else if message.starts_with("Discarding certificates") {
                 fields.message =
-                    Some("Tor discarded unrequested directory certificates".to_string());
+                    Some("Tor discarded unrequested directory certificates".to_owned());
             } else if message.starts_with("Received microdescriptor") {
-                fields.message = Some("Tor discarded an unrequested relay descriptor".to_string());
+                fields.message = Some("Tor discarded an unrequested relay descriptor".to_owned());
             } else if message == "Found a mismatched microdescriptor in cache; ignoring" {
                 fields.message =
-                    Some("Tor ignored a mismatched cached relay descriptor".to_string());
+                    Some("Tor ignored a mismatched cached relay descriptor".to_owned());
             }
         }
         "sqlite" if message.starts_with("Removing unreferenced file") => {
-            fields.message = Some("Tor removed an unreferenced cache file".to_string());
+            fields.message = Some("Tor removed an unreferenced cache file".to_owned());
         }
         "mgr" => {
             if message == "All tunnel attempts failed due to timeout" {
-                fields.message = Some("Tor circuit build timed out".to_string());
+                fields.message = Some("Tor circuit build timed out".to_owned());
             } else if message == "Reached circuit build retry limit, exiting..." {
-                fields.message = Some("Tor circuit build retry limit reached".to_string());
+                fields.message = Some("Tor circuit build retry limit reached".to_owned());
             } else if message == "Request failed" {
-                fields.message = Some("Tor circuit request failed".to_string());
+                fields.message = Some("Tor circuit request failed".to_owned());
             }
         }
         _ => {}
     }
 
     if message.starts_with("Error while adding directory info") {
-        fields.message = Some("Tor directory update failed".to_string());
+        fields.message = Some("Tor directory update failed".to_owned());
         if let Some(error) = remove_field(&mut fields.fields, "error") {
             upsert_field(&mut fields.fields, "reason", short_tor_error(&error));
         }
@@ -797,6 +899,34 @@ fn write_event_fields(writer: &mut Writer<'_>, fields: &LogEventFields) -> fmt::
     Ok(())
 }
 
+fn default_env_filter() -> EnvFilter {
+    EnvFilter::new(
+        // Default to INFO for all enabled targets so third-party dependency
+        // events are not silently dropped; route filters below keep them out
+        // of the terminal and main RustChan log.
+        "info,\
+         rustchan=info,\
+         rustchan_cli=info,\
+         chan=info,\
+         admin=info,\
+         board=info,\
+         workers=info,\
+         server=info,\
+         db=info,\
+         startup=info,\
+         sessions=info,\
+         polls=info,\
+         chan_net=info,\
+         console=info,\
+         tls=info,\
+         config=info",
+    )
+}
+
+fn env_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| default_env_filter())
+}
+
 // ─── Terminal formatter ───────────────────────────────────────────────────────
 
 /// Writes one compact line per log event to the terminal.
@@ -823,24 +953,24 @@ where
         event: &Event<'_>,
     ) -> fmt::Result {
         let tty = IS_TTY.load(Ordering::Relaxed);
+        let ansi = ANSI_ENABLED.load(Ordering::Relaxed);
         let meta = event.metadata();
         let Some(fields) = prepare_event_fields(meta.target(), meta.file(), event) else {
             return Ok(());
         };
 
         // ── Timestamp (with milliseconds) ─────────────────────────────────────
+        let now = chrono::Local::now();
         if tty {
-            let now = chrono::Local::now();
             write!(writer, "{} ", now.format("%H:%M:%S%.3f"))?;
         } else {
-            let now = chrono::Utc::now();
             write!(writer, "{} ", now.format("%Y-%m-%d %H:%M:%S%.3f"))?;
         }
 
         // ── Level + component columns ─────────────────────────────────────────
         let level = *meta.level();
-        write_level_tag(&mut writer, level, tty)?;
-        write_component_tag(&mut writer, meta.target(), tty)?;
+        write_level_tag(&mut writer, level, ansi)?;
+        write_component_tag(&mut writer, meta.target(), ansi)?;
 
         // ── Message and structured fields ─────────────────────────────────────
         // tracing_subscriber writes the `message` field first, then all other
@@ -884,8 +1014,8 @@ where
             return Ok(());
         };
 
-        // ── Timestamp — UTC, full date, millisecond precision ─────────────────
-        let now = chrono::Utc::now();
+        // ── Timestamp — server-local, full date, millisecond precision ───────
+        let now = chrono::Local::now();
         write!(writer, "{} ", now.format("%Y-%m-%d %H:%M:%S%.3f"))?;
 
         // ── Level + component columns (no colour) ─────────────────────────────
@@ -970,60 +1100,39 @@ impl<'a> MakeWriter<'a> for ConsoleLock {
 /// before any `tracing::info!` or `tracing::warn!` calls are made.
 ///
 /// Detects whether stdout is an interactive terminal and stores the result
-/// in `IS_TTY` for the process lifetime. Installs two layers:
+/// in `IS_TTY` for the process lifetime. Installs three layers:
 ///
 /// 1. **Terminal layer** — `TerminalFormatter` writes via `ConsoleLock`
 ///    (`CONSOLE_MUTEX`). Human-readable, coloured when TTY, plain otherwise.
-///    Serialised with `console.rs` output via the shared mutex.
+///    Serialised with `console.rs` output via the shared mutex. `RustChan` and
+///    `FFMPEG` targets only.
 ///
-/// 2. **File layer** — `FileFormatter`, daily rotation, `debug`+.
+/// 2. **Main file layer** — `FileFormatter`, daily rotation, filtered by
+///    `RUST_LOG` or the default INFO-level filter.
 ///    Written to `{log_dir}/rustchan.YYYY-MM-DD.log`.
 ///    One human-readable line per event; WARN/ERROR include source location.
+///    `RustChan` and `FFMPEG` targets only.
+///
+/// 3. **Dependency file layer** — `FileFormatter`, written to
+///    `{log_dir}/dep_log.log`. Receives third-party dependency targets that
+///    are hidden from the terminal/main log.
 ///    Independent of the console lock; uses `tracing-appender`'s own lock.
 ///
 /// To switch the file layer to JSON for a log aggregator (Loki, Datadog, …):
 /// replace `FileFormatter` with `.json()` and add `.with_file(true)
 /// .with_line_number(true)` to the layer builder.
 pub fn init_logging(log_dir: &Path) {
-    use std::io::IsTerminal;
+    use std::io::IsTerminal as _;
 
     let tty = io::stdout().is_terminal();
     IS_TTY.store(tty, Ordering::Relaxed);
-
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(
-            // F-08: Explicitly suppress Arti's internal crates in the default
-            // filter. Without this they emit at DEBUG/TRACE (circuit negotiation,
-            // guard selection, consensus downloads) — hundreds of lines/minute.
-            // Operators who need Arti internals can set RUST_LOG=tor_proto=debug.
-            "rustchan=info,\
-             admin=info,\
-             board=info,\
-             workers=info,\
-             server=info,\
-             db=info,\
-             startup=info,\
-             sessions=info,\
-             polls=info,\
-             chan_net=info,\
-             console=info,\
-             tls=info,\
-             config=info,\
-             tower_http=warn,\
-             arti_client=warn,\
-             tor_proto=warn,\
-             tor_circmgr=warn,\
-             tor_dirmgr=warn,\
-             tor_guardmgr=warn,\
-             tor_chanmgr=warn,\
-             tor_hsservice=warn,\
-             tor_keymgr=warn",
-        )
-    });
+    ANSI_ENABLED.store(detect_ansi_enabled(tty), Ordering::Relaxed);
 
     let terminal_layer = tracing_subscriber::fmt::layer()
         .event_format(TerminalFormatter)
-        .with_writer(ConsoleLock);
+        .with_writer(ConsoleLock)
+        .with_filter(filter_fn(|meta| is_main_log_target(meta.target())))
+        .with_filter(env_filter());
 
     // Build the rolling file appender.
     // FIX (filename): tracing_appender::rolling::daily(dir, "rustchan.log")
@@ -1036,7 +1145,10 @@ pub fn init_logging(log_dir: &Path) {
         .filename_suffix("log")
         .build(log_dir)
         .unwrap_or_else(|e| {
-            eprintln!("Warning: could not create log file appender: {e}");
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "Warning: could not create log file appender: {e}"
+            );
             tracing_appender::rolling::never(log_dir, "rustchan.log")
         });
 
@@ -1046,19 +1158,31 @@ pub fn init_logging(log_dir: &Path) {
     // you never hit 8 KB between restarts, so the file stays empty.
     // non_blocking() moves writes to a background thread that flushes after
     // every batch, guaranteeing data reaches disk promptly.
-    // The WorkerGuard is stored in FILE_GUARD so it lives for the entire
+    // The WorkerGuard is stored in MAIN_FILE_GUARD so it lives for the entire
     // process — see the comment on that static for why this matters.
-    let (non_blocking_writer, guard) = tracing_appender::non_blocking(rolling);
-    let _ = FILE_GUARD.set(guard);
+    let (main_file_writer, main_guard) = tracing_appender::non_blocking(rolling);
+    let _ = MAIN_FILE_GUARD.set(main_guard);
 
     let file_layer = tracing_subscriber::fmt::layer()
         .event_format(FileFormatter)
-        .with_writer(non_blocking_writer);
+        .with_writer(main_file_writer)
+        .with_filter(filter_fn(|meta| is_main_log_target(meta.target())))
+        .with_filter(env_filter());
+
+    let dependency_log = tracing_appender::rolling::never(log_dir, DEPENDENCY_LOG_FILE_NAME);
+    let (dependency_file_writer, dependency_guard) = tracing_appender::non_blocking(dependency_log);
+    let _ = DEPENDENCY_FILE_GUARD.set(dependency_guard);
+
+    let dependency_file_layer = tracing_subscriber::fmt::layer()
+        .event_format(FileFormatter)
+        .with_writer(dependency_file_writer)
+        .with_filter(filter_fn(|meta| is_dependency_log_target(meta.target())))
+        .with_filter(env_filter());
 
     tracing_subscriber::registry()
-        .with(env_filter)
         .with(terminal_layer)
         .with(file_layer)
+        .with(dependency_file_layer)
         .init();
 }
 
@@ -1098,16 +1222,62 @@ pub fn console_prompt(msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_component, extract_component, humanize_field_name, is_external_source,
-        is_tor_descriptor_upload_timeout_event, normalize_duration, normalize_field_value,
-        normalize_message_text, parse_formatted_duration, rewrite_message, LogEventFields,
-        TorDescriptorTimeoutDecision, TorDescriptorTimeoutLimiter,
+        dependency_log_path, display_component, extract_component, humanize_field_name,
+        is_dependency_log_target, is_external_source, is_ffmpeg_log_target, is_main_log_file,
+        is_main_log_target, is_tor_descriptor_upload_timeout_event, normalize_duration,
+        normalize_field_value, normalize_message_text, parse_formatted_duration, rewrite_message,
+        FileFormatter, LogEventFields, TorDescriptorTimeoutDecision, TorDescriptorTimeoutLimiter,
+        DEPENDENCY_LOG_FILE_NAME,
     };
+    use std::io;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+    use tracing_subscriber::fmt::MakeWriter;
+    use tracing_subscriber::{filter::filter_fn, layer::Layer as _, layer::SubscriberExt as _};
+
+    #[derive(Clone, Default)]
+    struct SharedBuffer {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedBuffer {
+        fn content(&self) -> String {
+            let bytes = self.inner.lock().expect("buffer lock").clone();
+            String::from_utf8(bytes).expect("utf-8 log output")
+        }
+    }
+
+    struct SharedBufferWriter {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl io::Write for SharedBufferWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.inner
+                .lock()
+                .map_err(|_| io::Error::other("buffer lock poisoned"))?
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedBuffer {
+        type Writer = SharedBufferWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedBufferWriter {
+                inner: Arc::clone(&self.inner),
+            }
+        }
+    }
 
     fn rewrite_for_test(target: &str, message: &str, fields: &[(&str, &str)]) -> LogEventFields {
         let mut event_fields = LogEventFields {
-            message: Some(message.to_string()),
+            message: Some(message.to_owned()),
             fields: fields
                 .iter()
                 .filter_map(|(name, value)| {
@@ -1180,6 +1350,124 @@ mod tests {
     }
 
     #[test]
+    fn classifies_dependency_and_app_log_targets() {
+        assert!(is_main_log_target("rustchan::server::server"));
+        assert!(is_main_log_target("chan::media::ffmpeg"));
+        assert!(is_main_log_target("convert"));
+        assert!(is_main_log_target("media_prune"));
+        assert!(is_main_log_target("workers"));
+        assert!(is_dependency_log_target("tokio::runtime"));
+        assert!(is_dependency_log_target("hyper::proto"));
+        assert!(is_dependency_log_target("axum::routing"));
+        assert!(is_dependency_log_target("tower::buffer"));
+        assert!(is_dependency_log_target("tower_http::trace"));
+        assert!(is_dependency_log_target("rustls::server"));
+        assert!(is_dependency_log_target("arti_client::builder"));
+        assert!(is_dependency_log_target("tracing::span"));
+        assert!(is_dependency_log_target("reqwest::connect"));
+        assert!(is_dependency_log_target("rusqlite::inner"));
+        assert!(is_dependency_log_target("r2d2::pool"));
+        assert!(!is_dependency_log_target("admin"));
+        assert!(!is_dependency_log_target("convert"));
+        assert!(!is_dependency_log_target("media_prune"));
+        assert!(!is_main_log_target("rustchannel::server"));
+        assert!(!is_main_log_target("convert::third_party"));
+    }
+
+    #[test]
+    fn keeps_ffmpeg_targets_in_main_log_route() {
+        for target in [
+            "ffmpeg",
+            "ffmpeg::codec",
+            "ffmpeg_next",
+            "ffmpeg_next::codec",
+            "rustchan::media::ffmpeg",
+        ] {
+            assert!(is_ffmpeg_log_target(target));
+            assert!(is_main_log_target(target));
+            assert!(!is_dependency_log_target(target));
+        }
+    }
+
+    #[test]
+    fn recognizes_main_and_dependency_log_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            dependency_log_path(dir.path())
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some(DEPENDENCY_LOG_FILE_NAME)
+        );
+        assert!(is_main_log_file(
+            &dir.path().join("rustchan.2026-04-02.log")
+        ));
+        assert!(is_main_log_file(&dir.path().join("rustchan.log")));
+        assert!(!is_main_log_file(
+            &dir.path().join(DEPENDENCY_LOG_FILE_NAME)
+        ));
+        assert!(!is_main_log_file(&dir.path().join("tower_http.log")));
+    }
+
+    #[test]
+    fn route_filters_write_dependency_events_only_to_dependency_output() {
+        let main_log = SharedBuffer::default();
+        let dependency_log = SharedBuffer::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(FileFormatter)
+                    .with_writer(main_log.clone())
+                    .with_filter(filter_fn(|meta| is_main_log_target(meta.target()))),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(FileFormatter)
+                    .with_writer(dependency_log.clone())
+                    .with_filter(filter_fn(|meta| is_dependency_log_target(meta.target()))),
+            );
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "tokio::runtime", "dependency event");
+        });
+
+        assert!(!main_log.content().contains("Dependency event"));
+        assert!(dependency_log.content().contains("Dependency event"));
+    }
+
+    #[test]
+    fn route_filters_keep_app_and_ffmpeg_events_in_main_output() {
+        let main_log = SharedBuffer::default();
+        let dependency_log = SharedBuffer::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(FileFormatter)
+                    .with_writer(main_log.clone())
+                    .with_filter(filter_fn(|meta| is_main_log_target(meta.target()))),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(FileFormatter)
+                    .with_writer(dependency_log.clone())
+                    .with_filter(filter_fn(|meta| is_dependency_log_target(meta.target()))),
+            );
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "startup", "app event");
+            tracing::info!(target: "media_prune", "alias event");
+            tracing::warn!(target: "ffmpeg::stderr", "ffmpeg event");
+        });
+
+        let main_content = main_log.content();
+        assert!(main_content.contains("App event"));
+        assert!(main_content.contains("Alias event"));
+        assert!(main_content.contains("Ffmpeg event"));
+        assert!(!dependency_log.content().contains("App event"));
+        assert!(!dependency_log.content().contains("Alias event"));
+        assert!(!dependency_log.content().contains("Ffmpeg event"));
+    }
+
+    #[test]
     fn rewrites_common_tor_guard_messages() {
         let fields = rewrite_for_test(
             "tor_guardmgr::guard",
@@ -1193,7 +1481,7 @@ mod tests {
         );
         assert_eq!(
             fields.fields,
-            vec![("retry_in".to_string(), "30s".to_string())]
+            vec![("retry_in".to_owned(), "30s".to_owned())]
         );
 
         let fields = rewrite_for_test(
@@ -1207,7 +1495,7 @@ mod tests {
         );
         assert_eq!(
             fields.fields,
-            vec![("failure_rate".to_string(), "72.5%".to_string())]
+            vec![("failure_rate".to_owned(), "72.5%".to_owned())]
         );
     }
 
@@ -1228,8 +1516,8 @@ mod tests {
         assert_eq!(
             fields.fields,
             vec![(
-                "reason".to_string(),
-                "directory server sent invalid data".to_string()
+                "reason".to_owned(),
+                "directory server sent invalid data".to_owned()
             )]
         );
 
@@ -1242,10 +1530,7 @@ mod tests {
             fields.message.as_deref(),
             Some("Tor directory bootstrap failed")
         );
-        assert_eq!(
-            fields.fields,
-            vec![("attempts".to_string(), "3".to_string())]
-        );
+        assert_eq!(fields.fields, vec![("attempts".to_owned(), "3".to_owned())]);
     }
 
     #[test]
@@ -1268,7 +1553,7 @@ mod tests {
         assert_eq!(fields.message.as_deref(), Some("Tor circuit closed"));
         assert_eq!(
             fields.fields,
-            vec![("reason".to_string(), "closed".to_string())]
+            vec![("reason".to_owned(), "closed".to_owned())]
         );
     }
 
@@ -1276,7 +1561,7 @@ mod tests {
     fn suppresses_repetitive_onion_retry_warning() {
         let mut fields = LogEventFields {
             message: Some(
-                "Too many preemptive onion service circuits failed; waiting a while.".to_string(),
+                "Too many preemptive onion service circuits failed; waiting a while.".to_owned(),
             ),
             fields: Vec::new(),
         };

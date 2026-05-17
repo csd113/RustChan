@@ -1,6 +1,11 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 pub fn app_state() -> crate::middleware::AppState {
+    std::fs::create_dir_all(&crate::config::CONFIG.upload_dir).expect("create test upload dir");
+    std::fs::create_dir_all(crate::config::full_backups_dir())
+        .expect("create test full backup dir");
+    std::fs::create_dir_all(crate::config::board_backups_dir())
+        .expect("create test board backup dir");
     let pool = crate::db::init_test_pool().expect("test pool");
     if let Ok(conn) = pool.get() {
         let _ = crate::db::sync_live_theme_state(&conn);
@@ -13,10 +18,18 @@ pub fn app_state() -> crate::middleware::AppState {
         ffprobe_available: false,
         ffmpeg_webp_available: false,
         ffmpeg_vp9_available: false,
+        ffmpeg_vp9_encoder_available: false,
+        ffmpeg_opus_available: false,
         pdf_thumbnail_renderer: None,
         job_queue,
         backup_progress: std::sync::Arc::new(crate::middleware::BackupProgress::new()),
-        auto_full_backup_settings: crate::middleware::AutoFullBackupSettings::new(24, 1, false),
+        auto_full_backup_settings: crate::middleware::AutoFullBackupSettings::new(
+            24,
+            1,
+            false,
+            "directory",
+            4 * 1024 * 1024 * 1024,
+        ),
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
         db_maintenance_jobs: crate::middleware::DbMaintenanceJobs::new(),
         chan_ledger: None,
@@ -32,7 +45,7 @@ pub fn multipart_body(
     fields: &[(&str, &str)],
     file: Option<(&str, &str, &[u8], &str)>,
 ) -> (String, Vec<u8>) {
-    let boundary = "rustchan-test-boundary".to_string();
+    let boundary = "rustchan-test-boundary".to_owned();
     let mut body = Vec::new();
 
     for (name, value) in fields {

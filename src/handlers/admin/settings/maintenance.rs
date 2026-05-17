@@ -24,6 +24,9 @@ pub struct MediaSettingsForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub ffmpeg_timeout_secs: Option<String>,
+    pub media_auto_prune_enabled: Option<String>,
+    pub media_max_active_content_size: Option<String>,
+    pub media_max_active_content_size_unit: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -34,7 +37,7 @@ pub struct DbRepairStatusQuery {
 fn create_pre_repair_backup(
     pool: &crate::db::DbPool,
     progress: &std::sync::Arc<crate::middleware::BackupProgress>,
-    copies_to_keep: u64,
+    job_id: u64,
 ) -> Result<String> {
     #[cfg(test)]
     {
@@ -47,17 +50,13 @@ fn create_pre_repair_backup(
         }
     }
 
-    crate::handlers::admin::create_full_backup_to_server(
+    crate::handlers::admin::create_pre_maintenance_backup_to_server(
         pool,
-        None,
         progress,
-        copies_to_keep,
-        pre_repair_backup_include_tor_hidden_service_keys(),
+        "db_repair",
+        job_id,
+        "Automatic DB + config safety backup before database repair.",
     )
-}
-
-fn pre_repair_backup_include_tor_hidden_service_keys() -> bool {
-    crate::config::configured_tor_hidden_service_keys_dir().is_some_and(|path| path.is_dir())
 }
 
 fn parse_ffmpeg_timeout_secs_input(input: Option<&str>) -> Result<u64> {
@@ -65,11 +64,58 @@ fn parse_ffmpeg_timeout_secs_input(input: Option<&str>) -> Result<u64> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AppError::BadRequest("Video re-encoding timeout is required.".into()))?;
-    let timeout_secs = raw.parse::<u64>().map_err(|_| {
+    let timeout_secs = raw.parse::<u64>().map_err(|_error| {
         AppError::BadRequest("Video re-encoding timeout must be a whole number of seconds.".into())
     })?;
     crate::config::validate_ffmpeg_timeout_secs(timeout_secs)
         .map_err(|error| AppError::BadRequest(error.to_string()))
+}
+
+fn parse_media_prune_size_input(
+    enabled: bool,
+    value: Option<&str>,
+    unit: Option<&str>,
+) -> Result<u64> {
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    const MIN_ENABLED_BYTES: u64 = MIB;
+
+    let raw = value.map(str::trim).unwrap_or("");
+    if raw.is_empty() {
+        if enabled {
+            return Err(AppError::BadRequest(
+                "Maximum active content size is required when pruning is enabled.".into(),
+            ));
+        }
+        return Ok(0);
+    }
+    if raw.starts_with('-') {
+        return Err(AppError::BadRequest(
+            "Maximum active content size cannot be negative.".into(),
+        ));
+    }
+    let amount = raw.parse::<u64>().map_err(|_error| {
+        AppError::BadRequest("Maximum active content size must be a whole number.".into())
+    })?;
+    let multiplier = match unit.unwrap_or("mib") {
+        "bytes" => 1,
+        "mib" => MIB,
+        "gib" => GIB,
+        _ => {
+            return Err(AppError::BadRequest(
+                "Maximum active content size unit is invalid.".into(),
+            ));
+        }
+    };
+    let bytes = amount
+        .checked_mul(multiplier)
+        .ok_or_else(|| AppError::BadRequest("Maximum active content size is too large.".into()))?;
+    if enabled && bytes < MIN_ENABLED_BYTES {
+        return Err(AppError::BadRequest(
+            "Maximum active content size must be at least 1 MiB when pruning is enabled.".into(),
+        ));
+    }
+    Ok(bytes)
 }
 
 pub async fn update_media_settings(
@@ -79,13 +125,25 @@ pub async fn update_media_settings(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<MediaSettingsForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let timeout_secs = match parse_ffmpeg_timeout_secs_input(form.ffmpeg_timeout_secs.as_deref()) {
         Ok(timeout_secs) => timeout_secs,
+        Err(AppError::BadRequest(message)) => {
+            return Ok(
+                super::admin_panel_error_redirect_anchor(&message, "maintenance").into_response(),
+            );
+        }
+        Err(error) => return Err(error),
+    };
+    let prune_enabled = checkbox_is_on(form.media_auto_prune_enabled.as_deref());
+    let prune_max_bytes = match parse_media_prune_size_input(
+        prune_enabled,
+        form.media_max_active_content_size.as_deref(),
+        form.media_max_active_content_size_unit.as_deref(),
+    ) {
+        Ok(bytes) => bytes,
         Err(AppError::BadRequest(message)) => {
             return Ok(
                 super::admin_panel_error_redirect_anchor(&message, "maintenance").into_response(),
@@ -100,10 +158,19 @@ pub async fn update_media_settings(
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
             crate::config::set_live_ffmpeg_timeout_secs(timeout_secs)?;
+            db::set_media_prune_settings(&conn, prune_enabled, prune_max_bytes)?;
             crate::config::update_settings_file_ffmpeg_timeout(timeout_secs);
+            crate::config::update_settings_file_media_pruning(prune_enabled, prune_max_bytes);
+            let prune_report = crate::media::prune::run_configured_prune(
+                &conn,
+                &crate::config::CONFIG.upload_dir,
+            )?;
             tracing::info!(
                 target: "admin",
                 ffmpeg_timeout_secs = timeout_secs,
+                media_auto_prune_enabled = prune_enabled,
+                media_max_active_content_size_bytes = prune_max_bytes,
+                pruned_files = prune_report.removed_files,
                 "FFmpeg media timeout updated"
             );
             Ok(())
@@ -125,9 +192,8 @@ pub async fn admin_vacuum(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<VacuumForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
@@ -160,6 +226,7 @@ pub async fn admin_vacuum(
                 size_before,
                 size_after,
                 &csrf_clone,
+                current_theme.as_deref(),
             ))
         }
     })
@@ -176,9 +243,8 @@ pub async fn admin_db_check(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<DbMaintenanceForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
@@ -203,6 +269,7 @@ pub async fn admin_db_check(
                 false,
                 &csrf_clone,
                 None,
+                current_theme.as_deref(),
             ))
         }
     })
@@ -219,9 +286,7 @@ pub async fn admin_db_repair(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<DbMaintenanceForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
@@ -240,8 +305,7 @@ pub async fn admin_db_repair(
         .maintenance_gate
         .try_begin("Database maintenance rebuild")?;
     let job_id = state.db_maintenance_jobs.mark_running();
-    let progress = state.backup_progress.clone();
-    let copies_to_keep = state.auto_full_backup_settings.snapshot().copies_to_keep;
+    let progress = std::sync::Arc::clone(&state.backup_progress);
     let pool = state.db.clone();
     let db_maintenance_jobs = state.db_maintenance_jobs.clone();
 
@@ -251,7 +315,7 @@ pub async fn admin_db_repair(
             let _maintenance_guard = maintenance_guard;
             let _ = db_maintenance_jobs
                 .mark_phase(job_id, crate::middleware::DbMaintenanceJobPhase::Backup);
-            let backup_result = create_pre_repair_backup(&pool, &progress, copies_to_keep);
+            let backup_result = create_pre_repair_backup(&pool, &progress, job_id);
 
             let conn = match pool.get() {
                 Ok(conn) => conn,
@@ -269,7 +333,18 @@ pub async fn admin_db_repair(
             let _ = db_maintenance_jobs
                 .mark_phase(job_id, crate::middleware::DbMaintenanceJobPhase::Repair);
             let report = match backup_result {
-                Ok(filename) => db::attempt_db_repair(&conn, Some(db::DbRepairBackup { filename })),
+                Ok(backup_id) => db::attempt_db_repair(
+                    &conn,
+                    Some(db::DbRepairBackup {
+                        backup_id: backup_id.clone(),
+                        backup_type: "DB + config".to_owned(),
+                        backup_path: crate::config::backups_dir()
+                            .join(&backup_id)
+                            .display()
+                            .to_string(),
+                        verified: true,
+                    }),
+                ),
                 Err(error) => {
                     let backup_error = error.to_string();
                     db::db_repair_aborted_for_backup_failure(&conn, &backup_error)
@@ -280,7 +355,10 @@ pub async fn admin_db_repair(
                 before_ok = report.before.ok(),
                 after_ok = report.after.as_ref().map(db::DbHealthSnapshot::ok),
                 steps = report.repair_steps.len(),
-                backup = report.repair_backup.as_ref().map(|backup| backup.filename.as_str()),
+                backup = report
+                    .repair_backup
+                    .as_ref()
+                    .map(|backup| backup.backup_id.as_str()),
                 backup_error = report.repair_backup_error.as_deref(),
                 "Admin ran database repair attempt"
             );
@@ -305,9 +383,7 @@ pub async fn admin_db_repair_progress_json(
     jar: CookieJar,
     Query(query): Query<DbRepairStatusQuery>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -326,7 +402,7 @@ pub async fn admin_db_repair_progress_json(
         query.job_id,
     );
     Ok((
-        [(header::CONTENT_TYPE, "application/json".to_string())],
+        [(header::CONTENT_TYPE, "application/json".to_owned())],
         payload.to_string(),
     )
         .into_response())
@@ -427,12 +503,12 @@ fn db_repair_progress_payload(
 
 fn backup_percent(phase: u64, files_done: u64, files_total: u64) -> u64 {
     match phase {
-        crate::middleware::backup_phase::SNAPSHOT_DB => 15,
-        crate::middleware::backup_phase::COUNT_FILES => 30,
+        crate::middleware::backup_phase::SNAPSHOT_DB => 35,
+        crate::middleware::backup_phase::COUNT_FILES => 45,
         crate::middleware::backup_phase::COMPRESS => files_done
             .saturating_mul(30)
             .checked_div(files_total)
-            .map_or(45, |percent| 45 + percent),
+            .map_or(55, |percent| 55 + percent),
         crate::middleware::backup_phase::DONE => 78,
         _ => 10,
     }
@@ -441,20 +517,24 @@ fn backup_percent(phase: u64, files_done: u64, files_total: u64) -> u64 {
 fn backup_progress_label(phase: u64, files_done: u64, files_total: u64) -> String {
     match phase {
         crate::middleware::backup_phase::SNAPSHOT_DB => {
-            "Creating pre-repair database snapshot...".to_string()
+            "Creating Backup v4 DB snapshot...".to_owned()
         }
         crate::middleware::backup_phase::COUNT_FILES => {
-            "Counting files for the pre-repair backup...".to_string()
+            "Writing Backup v4 maintenance metadata...".to_owned()
         }
         crate::middleware::backup_phase::COMPRESS => {
             if files_total == 0 {
-                "Compressing pre-repair backup...".to_string()
+                "Copying files into the Backup v4 folder...".to_owned()
             } else {
-                format!("Compressing pre-repair backup... {files_done}/{files_total} files")
+                format!(
+                    "Copying files into the Backup v4 folder... {files_done}/{files_total} files"
+                )
             }
         }
-        crate::middleware::backup_phase::DONE => "Pre-repair backup complete...".to_string(),
-        _ => "Preparing pre-repair backup...".to_string(),
+        crate::middleware::backup_phase::DONE => {
+            "Backup v4 pre-maintenance backup complete...".to_owned()
+        }
+        _ => "Preparing Backup v4 pre-maintenance backup...".to_owned(),
     }
 }
 
@@ -463,9 +543,7 @@ pub async fn admin_db_repair_status(
     jar: CookieJar,
     Query(query): Query<DbRepairStatusQuery>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
 
     let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
     tokio::task::spawn_blocking({
@@ -490,7 +568,7 @@ pub async fn admin_db_repair_status(
 fn db_repair_status_url(job_id: Option<u64>) -> String {
     match job_id {
         Some(job_id) => format!("/admin/db/repair/status?job_id={job_id}"),
-        None => "/admin/db/repair".to_string(),
+        None => "/admin/db/repair".to_owned(),
     }
 }
 
@@ -500,11 +578,15 @@ fn render_db_repair_running_response(
     job_id: u64,
     started_at: i64,
 ) -> Response {
+    let current_theme = crate::handlers::board::current_theme_from_jar(jar);
     let refresh = format!("10; url={}", db_repair_status_url(Some(job_id)));
     let mut response = (
         jar.clone(),
         Html(crate::templates::admin_db_repair_running_page(
-            csrf, job_id, started_at,
+            csrf,
+            job_id,
+            started_at,
+            current_theme.as_deref(),
         )),
     )
         .into_response();
@@ -520,6 +602,7 @@ fn render_db_repair_entry_response(
     csrf: &str,
     status: crate::middleware::DbMaintenanceJobStatus,
 ) -> Response {
+    let current_theme = crate::handlers::board::current_theme_from_jar(jar);
     match status {
         crate::middleware::DbMaintenanceJobStatus::Running {
             job_id, started_at, ..
@@ -528,7 +611,10 @@ fn render_db_repair_entry_response(
         | crate::middleware::DbMaintenanceJobStatus::Finished { .. }
         | crate::middleware::DbMaintenanceJobStatus::Failed { .. } => (
             jar.clone(),
-            Html(crate::templates::admin_db_repair_idle_page(csrf)),
+            Html(crate::templates::admin_db_repair_idle_page(
+                csrf,
+                current_theme.as_deref(),
+            )),
         )
             .into_response(),
     }
@@ -540,6 +626,7 @@ fn render_db_repair_status_response(
     status: crate::middleware::DbMaintenanceJobStatus,
     requested_job_id: Option<u64>,
 ) -> Response {
+    let current_theme = crate::handlers::board::current_theme_from_jar(jar);
     if requested_job_id.is_some_and(|job_id| Some(job_id) != status.job_id()) {
         return (
             jar.clone(),
@@ -547,6 +634,7 @@ fn render_db_repair_status_response(
                 csrf,
                 requested_job_id.expect("requested job id for stale page"),
                 status.job_id(),
+                current_theme.as_deref(),
             )),
         )
             .into_response();
@@ -555,7 +643,10 @@ fn render_db_repair_status_response(
     match status {
         crate::middleware::DbMaintenanceJobStatus::Idle => (
             jar.clone(),
-            Html(crate::templates::admin_db_repair_idle_page(csrf)),
+            Html(crate::templates::admin_db_repair_idle_page(
+                csrf,
+                current_theme.as_deref(),
+            )),
         )
             .into_response(),
         crate::middleware::DbMaintenanceJobStatus::Running {
@@ -568,6 +659,7 @@ fn render_db_repair_status_response(
                 true,
                 csrf,
                 Some(job_id),
+                current_theme.as_deref(),
             )),
         )
             .into_response(),
@@ -582,6 +674,7 @@ fn render_db_repair_status_response(
                 &message,
                 finished_at,
                 job_id,
+                current_theme.as_deref(),
             )),
         )
             .into_response(),
@@ -592,7 +685,7 @@ fn render_db_repair_status_response(
 mod tests {
     use super::{
         admin_db_repair, admin_db_repair_status, admin_vacuum, parse_ffmpeg_timeout_secs_input,
-        update_media_settings, PRE_REPAIR_BACKUP_FAILURE,
+        parse_media_prune_size_input, update_media_settings, PRE_REPAIR_BACKUP_FAILURE,
     };
     use axum::{
         body::{to_bytes, Body},
@@ -646,11 +739,11 @@ mod tests {
         let post = crate::db::NewPost {
             thread_id: 0,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
-            subject: Some("repair thread".to_string()),
-            body: "repair test body".to_string(),
-            body_html: "repair test body".to_string(),
+            subject: Some("repair thread".to_owned()),
+            body: "repair test body".to_owned(),
+            body_html: "repair test body".to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -662,7 +755,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "repair-token".to_string(),
+            deletion_token: "repair-token".to_owned(),
             is_op: true,
         };
         crate::db::create_thread_with_optional_poll(
@@ -762,6 +855,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_media_prune_size_rejects_invalid_or_negative_values() {
+        assert!(parse_media_prune_size_input(true, Some("-1"), Some("mib")).is_err());
+        assert!(parse_media_prune_size_input(true, Some("abc"), Some("mib")).is_err());
+        assert!(parse_media_prune_size_input(true, Some("0"), Some("mib")).is_err());
+        assert!(parse_media_prune_size_input(true, Some("1024"), Some("bytes")).is_err());
+        assert_eq!(
+            parse_media_prune_size_input(true, Some("2"), Some("gib")).expect("valid size"),
+            2 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            parse_media_prune_size_input(false, Some("0"), Some("mib")).expect("disabled zero"),
+            0
+        );
+    }
+
     #[tokio::test]
     async fn media_settings_save_updates_live_timeout_and_settings_file() {
         let _guard = MEDIA_SETTINGS_TEST_LOCK.lock().await;
@@ -775,11 +884,13 @@ mod tests {
         std::fs::create_dir_all(parent).expect("create settings parent");
         std::fs::write(
             &settings_path,
-            format!("forum_name = \"RustChan\"\nffmpeg_timeout_secs = {previous_timeout}\n"),
+            format!(
+                "forum_name = \"RustChan\"\nffmpeg_timeout_secs = {previous_timeout}\nmedia_auto_prune_enabled = false\nmedia_max_active_content_size_bytes = 0\n"
+            ),
         )
         .expect("write settings fixture");
 
-        let router = media_settings_router(state);
+        let router = media_settings_router(state.clone());
         let response = router
             .oneshot(
                 Request::builder()
@@ -794,7 +905,7 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(format!(
-                        "_csrf={}&ffmpeg_timeout_secs=1800",
+                        "_csrf={}&ffmpeg_timeout_secs=1800&media_auto_prune_enabled=1&media_max_active_content_size=2&media_max_active_content_size_unit=mib",
                         admin_signed_csrf()
                     )))
                     .expect("request"),
@@ -816,8 +927,21 @@ mod tests {
         assert_eq!(crate::config::ffmpeg_timeout_secs(), 1_800);
         let updated_settings = std::fs::read_to_string(&settings_path).expect("read settings");
         assert!(updated_settings.contains("ffmpeg_timeout_secs = 1800\n"));
+        assert!(updated_settings.contains("media_auto_prune_enabled = true\n"));
+        assert!(updated_settings.contains("media_max_active_content_size_bytes = 2097152\n"));
+        let conn = state.db.get().expect("db connection for settings");
+        assert!(crate::db::get_media_auto_prune_enabled(&conn));
+        assert_eq!(
+            crate::db::get_media_max_active_content_size_bytes(&conn),
+            2_097_152
+        );
         let reloaded = crate::config::Config::from_env();
         assert_eq!(reloaded.ffmpeg_timeout_secs, 1_800);
+        assert!(reloaded.initial_media_auto_prune_enabled);
+        assert_eq!(
+            reloaded.initial_media_max_active_content_size_bytes,
+            2_097_152
+        );
 
         crate::config::set_live_ffmpeg_timeout_secs(previous_timeout).expect("restore timeout");
         match previous_settings {
@@ -846,7 +970,7 @@ mod tests {
             let mut failure = PRE_REPAIR_BACKUP_FAILURE
                 .lock()
                 .expect("backup failure mutex");
-            *failure = Some("simulated pre-repair backup failure".to_string());
+            *failure = Some("simulated pre-repair backup failure".to_owned());
         }
 
         let router = repair_router(state.clone());
@@ -1000,12 +1124,13 @@ mod tests {
 
         assert!(repair_body.contains("[ database repair ]"));
         assert!(
-            repair_body.contains("Created pre-repair full backup:"),
+            repair_body.contains("Created pre-repair DB + config backup:"),
             "{repair_body}"
         );
         assert!(repair_body.contains("<strong>Repair run:</strong> Yes"));
         assert!(repair_body.contains("Repair finished, but the database still reports a problem."));
         assert!(repair_body.contains("<strong>Pre-repair backup:</strong> <code>"));
+        assert!(repair_body.contains("<strong>Pre-repair backup type:</strong> DB + config"));
         assert!(!repair_body
             .contains("Maintenance completed. Database health checks passed afterward."));
         assert!(!repair_body.contains(

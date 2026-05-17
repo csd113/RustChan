@@ -11,7 +11,7 @@ pub fn read_exif_orientation(data: &[u8]) -> u32 {
     };
     exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
         .and_then(|f| {
-            if let exif::Value::Short(ref v) = f.value {
+            if let exif::Value::Short(v) = &f.value {
                 v.first().copied().map(u32::from)
             } else {
                 None

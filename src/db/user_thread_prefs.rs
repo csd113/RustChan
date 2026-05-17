@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension as _};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, Default)]

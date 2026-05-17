@@ -1,4 +1,6 @@
-use super::{appearance, backups, base_layout, boards, escape_html, maintenance, moderation};
+use super::{
+    appearance, backups, base_layout, boards, escape_html, maintenance, moderation, site_health,
+};
 use super::{AdminPanelFlash, AdminPanelViewModel};
 
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
@@ -6,6 +8,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let section_index = render_admin_section_index();
     let overview_section = render_admin_overview_section();
     let site_settings_section = appearance::render_site_settings(view);
+    let site_health_section = site_health::render(view);
     let boards_section = boards::render(view);
     let moderation_section = moderation::render(view);
     let appearance_section = appearance::render(view);
@@ -29,6 +32,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
 {section_index}
 {overview_section}
 {site_settings_section}
+{site_health_section}
 {boards_section}
 {moderation_section}
 {appearance_section}
@@ -59,8 +63,8 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
         &body,
         view.csrf_token,
         view.boards,
-        None,
-        None,
+        view.current_theme,
+        Some(view.appearance.default_theme),
         false,
         "/admin/panel",
     )
@@ -85,6 +89,7 @@ const fn render_admin_section_index() -> &'static str {
     r##"<nav class="admin-section-index" aria-label="Admin panel sections">
   <span>jump to</span>
   <a href="#site-settings">site settings</a>
+  <a href="#site-health">site health</a>
   <a href="#boards">boards</a>
   <a href="#moderation">moderation</a>
   <a href="#appearance">appearance</a>
@@ -105,6 +110,7 @@ fn render_admin_overview_section() -> String {
 <p class="admin-copy">
   Watching <span id="admin-live-log-file">current log</span>. Updates every 2 seconds.
 </p>
+<p id="admin-live-log-status" class="admin-meta-note">Connecting to live log…</p>
 <div class="admin-inline-actions admin-inline-actions-spaced">
   <button type="button" id="admin-live-log-refresh">refresh now</button>
   <button type="button" id="admin-live-log-clear">clear</button>
@@ -117,5 +123,5 @@ fn render_admin_overview_section() -> String {
 </details>
 </section>
 </div>"#
-        .to_string()
+        .to_owned()
 }

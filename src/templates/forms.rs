@@ -66,8 +66,8 @@ fn render_captcha_row(board_short: &str, reply_suffix: &str) -> String {
     format!(
         r#"    <tr id="captcha-row-{board}{suffix}"><td>captcha</td>
         <td>
-          <span id="captcha-status-{board}{suffix}" class="form-field-help">waiting for the JavaScript proof-of-work solver…</span>
-          <noscript><div class="form-field-help">This board&apos;s CAPTCHA is solved in JavaScript. Enable JavaScript and wait for the checkmark before posting.</div></noscript>
+          <span id="captcha-status-{board}{suffix}" class="form-field-help">waiting for the JavaScript proof-of-work solver… posting on this board requires JavaScript.</span>
+          <noscript><div class="form-field-help">Posting on this board requires JavaScript because its CAPTCHA uses proof-of-work. Enable JavaScript, wait for the checkmark, then submit.</div></noscript>
           <input type="hidden" name="pow_nonce" id="pow-nonce-{board}{suffix}" value=""
                  data-pow-board="{board}" data-pow-difficulty="{difficulty}">
         </td></tr>"#,
@@ -161,7 +161,7 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
         "upload"
     };
     let primary_accept = if audio_image_dual_mode {
-        AUDIO_ACCEPT.to_string()
+        AUDIO_ACCEPT.to_owned()
     } else {
         file_accept
     };
@@ -181,7 +181,6 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
 }
 
 /// New-thread submission form. Embedded on board index and catalog pages.
-#[allow(clippy::too_many_lines)]
 pub(super) fn new_thread_form(
     board_short: &str,
     csrf_token: &str,
@@ -199,7 +198,7 @@ pub(super) fn new_thread_form(
     let uploads_disabled_row = if upload_policy.uploads_enabled {
         String::new()
     } else {
-        render_uploads_disabled_row().to_string()
+        render_uploads_disabled_row().to_owned()
     };
 
     // PoW CAPTCHA block — only rendered when the board has it enabled.
@@ -274,7 +273,6 @@ pub(super) fn new_thread_form(
 </form>
 </div>
 "#,
-        // poll scripts moved to /static/main.js
         board = escape_html(board_short),
         csrf = escape_html(csrf_token),
         submission_token = escape_html(&submission_token),
@@ -310,7 +308,7 @@ pub(super) fn reply_form(
     let uploads_disabled_row = if upload_policy.uploads_enabled {
         String::new()
     } else {
-        render_uploads_disabled_row().to_string()
+        render_uploads_disabled_row().to_owned()
     };
 
     // PoW CAPTCHA block — only rendered when the board has it enabled.
@@ -512,7 +510,7 @@ mod tests {
             None,
         );
 
-        assert!(html.contains("waiting for the JavaScript proof-of-work solver"));
-        assert!(html.contains("Enable JavaScript and wait for the checkmark before posting"));
+        assert!(html.contains("posting on this board requires JavaScript"));
+        assert!(html.contains("CAPTCHA uses proof-of-work"));
     }
 }

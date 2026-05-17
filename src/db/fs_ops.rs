@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 
 #[derive(Debug, Clone)]
 pub struct PendingFsOpRow {

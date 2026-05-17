@@ -20,7 +20,7 @@
 // On failure, all functions log a warning and the caller falls back to
 // storing the original bytes.
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 

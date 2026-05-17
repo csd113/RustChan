@@ -2,13 +2,15 @@
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
+use chrono::TimeZone as _;
+use std::collections::HashSet;
 
 const BACKUP_LIST_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 struct BackupListCacheEntry {
     generated_at: Instant,
-    dir_modified: Option<SystemTime>,
+    source_modified: Option<SystemTime>,
     files: Vec<BackupInfo>,
 }
 
@@ -16,11 +18,14 @@ static BACKUP_LIST_CACHE: LazyLock<parking_lot::Mutex<HashMap<String, BackupList
     LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
 pub(super) fn latest_saved_board_backup_filename(board_short: &str) -> Option<String> {
-    let prefix = format!("rustchan-board-{board_short}-");
-    let mut matches = list_backup_files(&board_backup_dir(), BackupListKind::Board)
+    list_backup_files(&board_backup_dir(), BackupListKind::Board)
         .into_iter()
-        .filter(|info| info.filename.starts_with(&prefix));
-    matches.next().map(|info| info.filename)
+        .find(|info| {
+            info.boards
+                .first()
+                .is_some_and(|board| board.short_name == board_short)
+        })
+        .map(|info| info.backup_ref)
 }
 
 #[derive(Clone, Copy)]
@@ -29,36 +34,323 @@ pub enum BackupListKind {
     Board,
 }
 
-fn backup_cache_key(dir: &Path, kind: BackupListKind) -> String {
-    let kind = match kind {
-        BackupListKind::Full => "full",
-        BackupListKind::Board => "board",
-    };
-    format!("{kind}:{}", dir.display())
+fn backup_cache_key(kind: BackupListKind) -> String {
+    match kind {
+        BackupListKind::Full => "full".to_owned(),
+        BackupListKind::Board => "board".to_owned(),
+    }
 }
 
 fn current_dir_modified(dir: &Path) -> Option<SystemTime> {
     std::fs::metadata(dir).ok()?.modified().ok()
 }
 
-pub fn invalidate_backup_list_cache(dir: &Path, kind: BackupListKind) {
-    BACKUP_LIST_CACHE
-        .lock()
-        .remove(&backup_cache_key(dir, kind));
+fn current_source_modified(dir: &Path) -> Option<SystemTime> {
+    let mut modified = current_dir_modified(dir);
+    let root_modified = current_dir_modified(&v4::backups_root_dir());
+    if root_modified > modified {
+        modified = root_modified;
+    }
+    modified
 }
 
-/// List `.zip` files in `dir`, newest-filename-first.
-pub fn list_backup_files(dir: &std::path::Path, kind: BackupListKind) -> Vec<BackupInfo> {
-    let cache_key = backup_cache_key(dir, kind);
-    let dir_modified = current_dir_modified(dir);
-    if let Some(entry) = BACKUP_LIST_CACHE.lock().get(&cache_key).cloned() {
-        if entry.generated_at.elapsed() <= BACKUP_LIST_CACHE_TTL
-            && entry.dir_modified == dir_modified
-        {
-            return entry.files;
+pub fn invalidate_backup_list_cache(_dir: &Path, kind: BackupListKind) {
+    BACKUP_LIST_CACHE.lock().remove(&backup_cache_key(kind));
+}
+
+fn modified_string_from_epoch(epoch: Option<i64>) -> String {
+    epoch
+        .and_then(|secs| {
+            Local
+                .timestamp_opt(secs, 0)
+                .single()
+                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+        })
+        .unwrap_or_default()
+}
+
+const fn metadata_scope_matches(kind: BackupListKind, scope: v4::BackupScope) -> bool {
+    match kind {
+        BackupListKind::Full => matches!(
+            scope,
+            v4::BackupScope::FullSite
+                | v4::BackupScope::SelectedBoards
+                | v4::BackupScope::PreMaintenance
+        ),
+        BackupListKind::Board => matches!(scope, v4::BackupScope::Board),
+    }
+}
+
+fn scope_label(scope: v4::BackupScope) -> String {
+    match scope {
+        v4::BackupScope::FullSite => "Full site".to_owned(),
+        v4::BackupScope::Board => "Board".to_owned(),
+        v4::BackupScope::SelectedBoards => "Selected boards".to_owned(),
+        v4::BackupScope::PreMaintenance => "Pre-maintenance".to_owned(),
+    }
+}
+
+fn validate_v4_listing_metadata(
+    layout: &v4::SavedBackupLayout,
+    metadata: &v4::BackupMetadata,
+    manifest: &v4::BackupManifest,
+) -> Result<()> {
+    if metadata.backup_id != manifest.backup_id {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} has mismatched backup_id metadata.",
+            layout.backup_ref
+        )));
+    }
+    if metadata.backup_id != layout.backup_ref {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup root '{}' does not match backup_id '{}'.",
+            layout.backup_ref, metadata.backup_id
+        )));
+    }
+    if metadata.scope != manifest.scope {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} has mismatched scope metadata.",
+            layout.backup_ref
+        )));
+    }
+    if metadata.storage_mode != manifest.storage_mode {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} has mismatched storage mode metadata.",
+            layout.backup_ref
+        )));
+    }
+    if !matches!(
+        metadata.storage_mode,
+        v4::BackupStorageMode::Directory | v4::BackupStorageMode::SplitZip
+    ) {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} uses unsupported saved-v4 storage mode '{}'.",
+            layout.backup_ref,
+            metadata.storage_mode.display_name()
+        )));
+    }
+    if metadata.part_count != u32::try_from(manifest.parts.len()).unwrap_or(u32::MAX) {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} has mismatched part count metadata.",
+            layout.backup_ref
+        )));
+    }
+    if metadata.includes_tor_keys != manifest.includes.tor_keys {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} has mismatched Tor key metadata.",
+            layout.backup_ref
+        )));
+    }
+    if metadata.included_boards != manifest.included_boards {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} has mismatched included board metadata.",
+            layout.backup_ref
+        )));
+    }
+    let completed_at = metadata
+        .completed_at
+        .zip(manifest.completed_at)
+        .ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "Saved backup {} is missing completed_at metadata.",
+                layout.backup_ref
+            ))
+        })?;
+    if !metadata.verified || completed_at.0 != completed_at.1 {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} is not marked complete.",
+            layout.backup_ref
+        )));
+    }
+    if completed_at.0 < metadata.created_at || completed_at.1 < manifest.created_at {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} has invalid completion timestamps.",
+            layout.backup_ref
+        )));
+    }
+
+    match metadata.storage_mode {
+        v4::BackupStorageMode::Directory if !manifest.parts.is_empty() => {
+            Err(AppError::BadRequest(format!(
+                "Saved backup {} is directory mode but contains split ZIP metadata.",
+                layout.backup_ref
+            )))
+        }
+        v4::BackupStorageMode::SplitZip => validate_split_zip_listing_metadata(layout, manifest),
+        v4::BackupStorageMode::Directory => Ok(()),
+        v4::BackupStorageMode::SingleZip | v4::BackupStorageMode::LegacyZip => {
+            Err(AppError::BadRequest(format!(
+                "Saved backup {} uses unsupported saved-v4 storage mode '{}'.",
+                layout.backup_ref,
+                metadata.storage_mode.display_name()
+            )))
+        }
+    }
+}
+
+fn validate_split_zip_listing_metadata(
+    layout: &v4::SavedBackupLayout,
+    manifest: &v4::BackupManifest,
+) -> Result<()> {
+    if manifest.parts.is_empty() {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} is split ZIP mode but contains no parts.",
+            layout.backup_ref
+        )));
+    }
+
+    let expected_total = u32::try_from(manifest.parts.len()).unwrap_or(u32::MAX);
+    let mut part_filenames = HashSet::new();
+    let mut part_indexes = HashSet::new();
+    for part in &manifest.parts {
+        if !part_filenames.insert(part.filename.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "Saved backup {} contains duplicate split ZIP part filename '{}'.",
+                layout.backup_ref, part.filename
+            )));
+        }
+        if !part_indexes.insert(part.part_index) {
+            return Err(AppError::BadRequest(format!(
+                "Saved backup {} contains duplicate split ZIP part index {}.",
+                layout.backup_ref, part.part_index
+            )));
+        }
+        if part.part_index == 0 || part.part_index > expected_total {
+            return Err(AppError::BadRequest(format!(
+                "Saved backup {} has split ZIP part index {} outside 1..={expected_total}.",
+                layout.backup_ref, part.part_index
+            )));
+        }
+        if part.total_parts != expected_total {
+            return Err(AppError::BadRequest(format!(
+                "Saved backup {} has inconsistent split ZIP total_parts metadata.",
+                layout.backup_ref
+            )));
+        }
+        let expected_filename = format!("parts/part-{:04}.zip", part.part_index);
+        if part.filename != expected_filename {
+            return Err(AppError::BadRequest(format!(
+                "Saved backup {} split ZIP filename '{}' does not match part index {}.",
+                layout.backup_ref, part.filename, part.part_index
+            )));
+        }
+        let part_path = layout.root_dir.join(&part.filename);
+        let metadata = std::fs::metadata(&part_path).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Inspect split ZIP part {}: {error}",
+                part_path.display()
+            ))
+        })?;
+        if metadata.len() != part.size {
+            return Err(AppError::BadRequest(format!(
+                "Backup v4 split part '{}' size mismatch.",
+                part.filename
+            )));
+        }
+    }
+    for expected_index in 1..=expected_total {
+        if !part_indexes.contains(&expected_index) {
+            return Err(AppError::BadRequest(format!(
+                "Saved backup {} is missing split ZIP part index {expected_index}.",
+                layout.backup_ref
+            )));
         }
     }
 
+    let mut declared_logical_paths = HashSet::new();
+    for entry in &manifest.files {
+        if !declared_logical_paths.insert(entry.logical_path.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "Saved backup {} contains duplicate logical path '{}'.",
+                layout.backup_ref, entry.logical_path
+            )));
+        }
+        v4::sanitize_logical_path(&entry.logical_path)?;
+        let Some(part_filename) = entry.zip_part.as_deref() else {
+            continue;
+        };
+        if !part_filenames.contains(part_filename) {
+            return Err(AppError::BadRequest(format!(
+                "Backup v4 file '{}' references unknown split ZIP part '{}'.",
+                entry.logical_path, part_filename
+            )));
+        }
+        let entry_path = entry
+            .zip_entry_path
+            .as_deref()
+            .unwrap_or(&entry.logical_path);
+        v4::sanitize_logical_path(entry_path)?;
+    }
+    Ok(())
+}
+
+fn list_v4_backups(kind: BackupListKind) -> Vec<BackupInfo> {
+    let mut backups = Vec::new();
+    for layout in v4::iter_saved_backup_layouts() {
+        let Ok(metadata) = v4::load_metadata(&layout.metadata_path) else {
+            continue;
+        };
+        let Ok(manifest) = v4::load_manifest(&layout.manifest_path) else {
+            continue;
+        };
+        let listing_validation = validate_v4_listing_metadata(&layout, &metadata, &manifest);
+        let (modified_epoch, verified, verified_note) = match listing_validation {
+            Ok(()) => (
+                metadata.completed_at,
+                true,
+                format!(
+                    "indexed Backup v4 {} (full content verification runs during restore)",
+                    metadata.storage_mode.display_name().to_lowercase()
+                ),
+            ),
+            Err(error) => (
+                metadata
+                    .completed_at
+                    .filter(|completed_at| *completed_at >= metadata.created_at),
+                false,
+                error.to_string(),
+            ),
+        };
+
+        if !metadata_scope_matches(kind, metadata.scope) {
+            continue;
+        }
+
+        backups.push(BackupInfo {
+            backup_ref: layout.backup_ref.clone(),
+            backup_id: metadata.backup_id.clone(),
+            filename: metadata.backup_id.clone(),
+            size_bytes: metadata.total_size_bytes,
+            modified: modified_string_from_epoch(modified_epoch),
+            modified_epoch,
+            verified,
+            verification_note: verified_note,
+            scope: scope_label(metadata.scope),
+            mode: metadata.storage_mode.display_name().to_owned(),
+            part_count: metadata.part_count,
+            part_filenames: manifest
+                .parts
+                .iter()
+                .map(|part| {
+                    part.filename
+                        .strip_prefix("parts/")
+                        .unwrap_or(&part.filename)
+                        .to_owned()
+                })
+                .collect(),
+            contains_tor_hidden_service_keys: metadata.includes_tor_keys,
+            boards: metadata.included_boards.clone(),
+            server_path: layout.root_dir.display().to_string(),
+            manifest_path: layout.manifest_path.display().to_string(),
+            downloadable_archive: metadata.storage_mode == v4::BackupStorageMode::SingleZip,
+        });
+
+        let _ = manifest;
+    }
+    backups
+}
+
+fn list_legacy_zip_backups(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> {
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -67,9 +359,7 @@ pub fn list_backup_files(dir: &std::path::Path, kind: BackupListKind) -> Vec<Bac
                 continue;
             }
             if let (Some(name), Ok(meta)) = (
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(ToString::to_string),
+                path.file_name().and_then(|n| n.to_str()).map(str::to_owned),
                 std::fs::metadata(&path),
             ) {
                 let modified_epoch = meta
@@ -77,68 +367,141 @@ pub fn list_backup_files(dir: &std::path::Path, kind: BackupListKind) -> Vec<Bac
                     .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs().cast_signed());
-                let modified = modified_epoch
-                    .and_then(|secs| {
-                        // chrono's deprecated constructor is still the
-                        // smallest/clearest way to format this optional file
-                        // timestamp in this verification-only path.
-                        #[allow(deprecated)]
-                        chrono::DateTime::<Utc>::from_timestamp(secs, 0)
-                            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
-                    })
-                    .unwrap_or_default();
-                let (verification, boards, contains_tor_hidden_service_keys) = match kind {
-                    BackupListKind::Full => match common::verify_full_backup_zip(&path) {
-                        Ok(manifest) => (
-                            Ok(format!("verified v{} backup", manifest.version)),
-                            manifest.boards,
-                            manifest.tor_hidden_service_keys_included,
-                        ),
-                        Err(error) => (Err(error), Vec::new(), false),
-                    },
-                    BackupListKind::Board => match common::verify_board_backup_zip(&path) {
-                        Ok(manifest) => (
-                            Ok(format!(
-                                "verified board /{}/ backup",
-                                manifest.board.short_name
-                            )),
-                            vec![crate::models::BackupBoardSummary {
-                                short_name: manifest.board.short_name,
-                                name: manifest.board.name,
-                            }],
-                            false,
-                        ),
-                        Err(error) => (Err(error), Vec::new(), false),
-                    },
-                };
+                let modified = modified_string_from_epoch(modified_epoch);
+                let (verification, boards, contains_tor_hidden_service_keys, scope, mode) =
+                    match kind {
+                        BackupListKind::Full => match common::verify_full_backup_zip(&path) {
+                            Ok(manifest) => (
+                                Ok(format!("verified legacy v{} backup", manifest.version)),
+                                manifest.boards,
+                                manifest.tor_hidden_service_keys_included,
+                                "Full site".to_owned(),
+                                "Legacy ZIP".to_owned(),
+                            ),
+                            Err(error) => (
+                                Err(error),
+                                Vec::new(),
+                                false,
+                                "Full site".to_owned(),
+                                "Legacy ZIP".to_owned(),
+                            ),
+                        },
+                        BackupListKind::Board => match common::verify_board_backup_zip(&path) {
+                            Ok(manifest) => (
+                                Ok(format!(
+                                    "verified legacy board /{}/ backup",
+                                    manifest.board.short_name
+                                )),
+                                vec![crate::models::BackupBoardSummary {
+                                    short_name: manifest.board.short_name,
+                                    name: manifest.board.name,
+                                }],
+                                false,
+                                "Board".to_owned(),
+                                "Legacy ZIP".to_owned(),
+                            ),
+                            Err(error) => (
+                                Err(error),
+                                Vec::new(),
+                                false,
+                                "Board".to_owned(),
+                                "Legacy ZIP".to_owned(),
+                            ),
+                        },
+                    };
                 files.push(BackupInfo {
+                    backup_ref: name.clone(),
+                    backup_id: name.clone(),
                     filename: name,
                     size_bytes: meta.len(),
                     modified,
                     modified_epoch,
                     verified: verification.is_ok(),
                     verification_note: verification.unwrap_or_else(|error| error.to_string()),
+                    scope,
+                    mode,
+                    part_count: 1,
+                    part_filenames: Vec::new(),
                     contains_tor_hidden_service_keys,
                     boards,
+                    server_path: path.display().to_string(),
+                    manifest_path: String::new(),
+                    downloadable_archive: true,
                 });
             }
         }
     }
-    files.sort_by(|a, b| b.filename.cmp(&a.filename));
+    files
+}
+
+/// List saved backups for the requested kind, newest-first.
+pub fn list_backup_files(dir: &std::path::Path, kind: BackupListKind) -> Vec<BackupInfo> {
+    let cache_key = backup_cache_key(kind);
+    let source_modified = current_source_modified(dir);
+    if let Some(entry) = BACKUP_LIST_CACHE.lock().get(&cache_key).cloned() {
+        if entry.generated_at.elapsed() <= BACKUP_LIST_CACHE_TTL
+            && entry.source_modified == source_modified
+        {
+            return entry.files;
+        }
+    }
+
+    let mut files = list_v4_backups(kind);
+    files.extend(list_legacy_zip_backups(dir, kind));
+    files.sort_by(|left, right| {
+        right
+            .modified_epoch
+            .cmp(&left.modified_epoch)
+            .then_with(|| right.backup_ref.cmp(&left.backup_ref))
+    });
+
     BACKUP_LIST_CACHE.lock().insert(
         cache_key,
         BackupListCacheEntry {
             generated_at: Instant::now(),
-            dir_modified,
+            source_modified,
             files: files.clone(),
         },
     );
     files
 }
 
+pub(super) fn safe_saved_backup_dir_for_delete(path: &Path) -> Result<()> {
+    let backup_root = v4::backups_root_dir();
+    crate::utils::fs_security::assert_dir_no_symlink(path).map_err(|error| {
+        AppError::BadRequest(format!(
+            "Saved backup directory {} is unsafe to delete: {error}",
+            path.display()
+        ))
+    })?;
+    let canonical_root = backup_root.canonicalize().map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Canonicalize backup root {}: {error}",
+            backup_root.display()
+        ))
+    })?;
+    let canonical_path = crate::utils::fs_security::canonical_child_of(&backup_root, path)
+        .map_err(|error| {
+            AppError::BadRequest(format!(
+                "Saved backup directory {} is outside the backup root: {error}",
+                path.display()
+            ))
+        })?;
+    if canonical_path.parent() != Some(canonical_root.as_path()) {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup directory {} is not a direct child of the backup root.",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 pub(super) fn prune_full_backup_dir_to_limit(dir: &Path, keep_limit: usize) -> Result<Vec<String>> {
     let keep_limit = keep_limit.max(1);
-    let mut backups = list_backup_files(dir, BackupListKind::Full);
+    let mut backups = list_backup_files(dir, BackupListKind::Full)
+        .into_iter()
+        .filter(|backup| backup.scope == "Full site" || backup.scope == "Selected boards")
+        .collect::<Vec<_>>();
     if backups.len() <= keep_limit {
         return Ok(Vec::new());
     }
@@ -146,17 +509,27 @@ pub(super) fn prune_full_backup_dir_to_limit(dir: &Path, keep_limit: usize) -> R
     let to_remove = backups.split_off(keep_limit);
     let mut removed = Vec::with_capacity(to_remove.len());
     for backup in to_remove {
-        let path = dir.join(&backup.filename);
+        let path = PathBuf::from(&backup.server_path);
         if !path.exists() {
             continue;
         }
-        std::fs::remove_file(&path).map_err(|error| {
-            AppError::Internal(anyhow::anyhow!(
-                "Delete retained full backup '{}': {error}",
-                backup.filename
-            ))
-        })?;
-        removed.push(backup.filename);
+        if path.is_dir() {
+            safe_saved_backup_dir_for_delete(&path)?;
+            std::fs::remove_dir_all(&path).map_err(|error| {
+                AppError::Internal(anyhow::anyhow!(
+                    "Delete retained saved backup '{}': {error}",
+                    backup.backup_ref
+                ))
+            })?;
+        } else {
+            std::fs::remove_file(&path).map_err(|error| {
+                AppError::Internal(anyhow::anyhow!(
+                    "Delete retained full backup '{}': {error}",
+                    backup.backup_ref
+                ))
+            })?;
+        }
+        removed.push(backup.backup_ref);
     }
 
     if !removed.is_empty() {
@@ -171,30 +544,45 @@ pub(crate) fn enforce_full_backup_retention(copies_to_keep: u64) -> Result<Vec<S
 }
 
 pub(super) fn latest_verified_full_backup_modified_time_in_dir(dir: &Path) -> Option<SystemTime> {
-    let mut candidates = Vec::new();
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("zip") {
+    let mut latest = None;
+    let backups = if dir == full_backup_dir().as_path() {
+        list_backup_files(dir, BackupListKind::Full)
+    } else {
+        list_legacy_zip_backups(dir, BackupListKind::Full)
+    };
+    for backup in backups {
+        if !backup.verified {
             continue;
         }
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        let Ok(modified) = metadata.modified() else {
-            continue;
-        };
-        candidates.push((modified, path));
-    }
-    candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
-    for (modified, path) in candidates {
-        if common::verify_full_backup_zip(&path).is_ok() {
-            return Some(modified);
+        let candidate = backup.modified_epoch.and_then(|epoch| {
+            std::time::UNIX_EPOCH.checked_add(Duration::from_secs(epoch.cast_unsigned()))
+        })?;
+        if latest.is_none_or(|current| candidate > current) {
+            latest = Some(candidate);
         }
     }
-    None
+    latest
 }
 
 pub(crate) fn latest_verified_full_backup_modified_time() -> Option<SystemTime> {
     latest_verified_full_backup_modified_time_in_dir(&full_backup_dir())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_saved_backup_dir_for_delete_rejects_paths_outside_backup_root() {
+        let backup_root = v4::backups_root_dir();
+        std::fs::create_dir_all(&backup_root).expect("backup root");
+        let data_dir = backup_root.parent().expect("backup root has parent");
+        let outside = tempfile::Builder::new()
+            .prefix("outside-backup-root-")
+            .tempdir_in(data_dir)
+            .expect("outside tempdir");
+        let error = safe_saved_backup_dir_for_delete(outside.path())
+            .expect_err("outside path should be rejected");
+        assert!(error.to_string().contains("outside the backup root"));
+    }
 }

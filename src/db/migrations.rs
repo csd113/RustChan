@@ -1,6 +1,6 @@
 // src/db/migrations.rs
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 
 /// Post-squash schema version for the canonical baseline.
 ///

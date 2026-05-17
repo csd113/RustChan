@@ -13,6 +13,8 @@ pub struct SiteSettingsForm {
     pub site_subtitle: Option<String>,
     /// Toggle homepage board-card new-thread badges.
     pub homepage_new_thread_badges_enabled: Option<String>,
+    /// Toggle homepage board-card new-reply badges.
+    pub homepage_new_reply_badges_enabled: Option<String>,
     /// Toggle board/catalog thread-card new-reply badges.
     pub thread_new_reply_badges_enabled: Option<String>,
     /// Default theme served to first-time visitors.
@@ -45,13 +47,12 @@ pub async fn update_site_settings(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<SiteSettingsForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let is_banner_settings_only = form.site_name.is_none()
         && form.site_subtitle.is_none()
         && form.homepage_new_thread_badges_enabled.is_none()
+        && form.homepage_new_reply_badges_enabled.is_none()
         && form.thread_new_reply_badges_enabled.is_none()
         && form.default_theme.is_none()
         && (form.banner_rotation_interval_minutes.is_some()
@@ -81,6 +82,11 @@ pub async fn update_site_settings(
                 db::get_thread_new_reply_badges_enabled(&conn),
                 preserve_missing_badge_settings,
             );
+            let homepage_new_reply_badges_enabled = resolved_checkbox_setting(
+                form.homepage_new_reply_badges_enabled.as_deref(),
+                db::get_homepage_new_reply_badges_enabled(&conn),
+                preserve_missing_badge_settings,
+            );
 
             // Save the custom site name (trimmed, max 64 chars).
             let new_name = form.site_name.as_deref().map_or_else(
@@ -105,11 +111,11 @@ pub async fn update_site_settings(
             let new_theme = if let Some(value) = form.default_theme.as_deref() {
                 let candidate = db::sanitize_theme_slug(value);
                 if candidate.is_empty() {
-                    crate::theme::HARD_DEFAULT_THEME.to_string()
+                    crate::theme::HARD_DEFAULT_THEME.to_owned()
                 } else if db::get_theme(&conn, &candidate)?.is_some_and(|theme| theme.enabled) {
                     candidate
                 } else {
-                    crate::theme::HARD_DEFAULT_THEME.to_string()
+                    crate::theme::HARD_DEFAULT_THEME.to_owned()
                 }
             } else {
                 db::get_default_user_theme(&conn)
@@ -122,6 +128,15 @@ pub async fn update_site_settings(
                 &conn,
                 "homepage_new_thread_badges_enabled",
                 if homepage_new_thread_badges_enabled {
+                    "1"
+                } else {
+                    "0"
+                },
+            )?;
+            db::set_site_setting(
+                &conn,
+                "homepage_new_reply_badges_enabled",
+                if homepage_new_reply_badges_enabled {
                     "1"
                 } else {
                     "0"
@@ -144,6 +159,7 @@ pub async fn update_site_settings(
                 &new_name,
                 &new_subtitle,
                 homepage_new_thread_badges_enabled,
+                homepage_new_reply_badges_enabled,
                 thread_new_reply_badges_enabled,
                 &new_theme,
             );

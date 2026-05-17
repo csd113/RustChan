@@ -88,6 +88,82 @@
 })();
 
 (function () {
+  function openAdminSection(sectionId) {
+    if (!sectionId) return;
+    var section = document.getElementById(sectionId);
+    if (!section) return;
+    var details = section.querySelector('details.admin-dropdown');
+    if (details) details.open = true;
+    if (typeof section.scrollIntoView === 'function') {
+      section.scrollIntoView({ block: 'start' });
+    }
+  }
+
+  function initAdminSectionLinks() {
+    document.querySelectorAll('[data-open-admin-section]').forEach(function (link) {
+      link.addEventListener('click', function () {
+        openAdminSection(link.getAttribute('data-open-admin-section'));
+      });
+    });
+  }
+
+  function initDiagnosticsDialog() {
+    document.querySelectorAll('[data-admin-diagnostics]').forEach(function (details) {
+      var summary = details.querySelector('summary');
+      var closeButton = details.querySelector('[data-admin-diagnostics-close]');
+      var copyButton = details.querySelector('[data-admin-diagnostics-copy]');
+      var text = details.querySelector('[data-admin-diagnostics-text]');
+
+      if (summary) {
+        summary.addEventListener('click', function (event) {
+          event.preventDefault();
+          details.open = true;
+          if (copyButton && typeof copyButton.focus === 'function') {
+            copyButton.focus();
+          }
+        });
+      }
+
+      if (closeButton) {
+        closeButton.addEventListener('click', function () {
+          details.open = false;
+          if (summary && typeof summary.focus === 'function') {
+            summary.focus();
+          }
+        });
+      }
+
+      if (copyButton && text) {
+        copyButton.addEventListener('click', function () {
+          var value = text.textContent || '';
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(value).then(function () {
+              copyButton.textContent = 'copied';
+              window.setTimeout(function () {
+                copyButton.textContent = 'copy';
+              }, 1500);
+            }).catch(function () {
+              copyButton.textContent = 'copy failed';
+            });
+          }
+        });
+      }
+
+      document.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape' && details.open) {
+          details.open = false;
+        }
+      });
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    initAdminSectionLinks();
+    initDiagnosticsDialog();
+  });
+})();
+
+(function () {
   var PRESET_CONFIGS = {
     forest: {
       background_color: '#141914',
@@ -229,7 +305,7 @@
       meta_text_color: '#c3a06f',
       success_color: '#d3a04a',
       danger_color: '#d97d5d',
-      border_radius_px: '4',
+      border_radius_px: '0',
       density: 'compact',
       font_family: 'system_mono',
       advanced_css: ''
@@ -345,7 +421,7 @@
       meta_text_color: '#6d7280',
       success_color: '#27a26b',
       danger_color: '#d05f79',
-      border_radius_px: '10',
+      border_radius_px: '0',
       density: 'cozy',
       font_family: 'system_sans',
       advanced_css: ''
@@ -588,6 +664,7 @@
 (function () {
   function initAdminLiveLog() {
     var output = document.getElementById('admin-live-log-output');
+    var status = document.getElementById('admin-live-log-status');
     var fileLabel = document.getElementById('admin-live-log-file');
     var refreshBtn = document.getElementById('admin-live-log-refresh');
     var clearBtn = document.getElementById('admin-live-log-clear');
@@ -598,6 +675,16 @@
     var lastText = '';
     var clearedBaseline = '';
     var clearedFile = '';
+    var requestInFlight = false;
+    var requestSerial = 0;
+    var consecutiveFailures = 0;
+    var pollIntervalMs = 2000;
+    var requestTimeoutMs = 8000;
+    var maxPollIntervalMs = 15000;
+
+    function setStatus(message) {
+      if (status) status.textContent = message;
+    }
 
     function visibleText(fullText, fileName) {
       if (!clearedBaseline || clearedFile !== fileName) {
@@ -612,10 +699,48 @@
       return fullText;
     }
 
-    function fetchLog() {
-      fetch('/admin/log/live?bytes=65536', { credentials: 'same-origin' })
+    function scheduleNextPoll(delayMs) {
+      if (timer) clearTimeout(timer);
+      timer = window.setTimeout(fetchLog, delayMs);
+    }
+
+    function retryDelayMs() {
+      if (consecutiveFailures <= 0) {
+        return pollIntervalMs;
+      }
+      return Math.min(
+        pollIntervalMs * Math.pow(2, Math.min(consecutiveFailures - 1, 3)),
+        maxPollIntervalMs
+      );
+    }
+
+    function fetchLog(force) {
+      if (requestInFlight && !force) return;
+      requestInFlight = true;
+      requestSerial += 1;
+      var serial = requestSerial;
+      var controller = typeof AbortController === 'function' ? new AbortController() : null;
+      var timeoutHandle = window.setTimeout(function () {
+        if (controller) {
+          controller.abort();
+        }
+      }, requestTimeoutMs);
+
+      if (!lastText) {
+        setStatus('Connecting to live log…');
+      }
+
+      fetch('/admin/log/live?bytes=65536', {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        signal: controller ? controller.signal : undefined
+      })
         .then(function (resp) { return resp.json(); })
         .then(function (data) {
+          if (serial !== requestSerial) return;
+          window.clearTimeout(timeoutHandle);
+          requestInFlight = false;
+          consecutiveFailures = 0;
           var fileName = data.filename || 'current log';
           var fullText = data.content || '';
           if (data.truncated) {
@@ -626,27 +751,43 @@
             clearedBaseline = '';
             clearedFile = fileName;
           }
-          if (fullText === lastText) return;
-          lastText = fullText;
-          var text = visibleText(fullText, fileName);
-          output.textContent = text || 'Waiting for new log lines\u2026';
+          setStatus('Live log connected. Retrying automatically if this connection stalls.');
+          if (fullText !== lastText) {
+            lastText = fullText;
+            var text = visibleText(fullText, fileName);
+            output.textContent = text || 'Waiting for new log lines\u2026';
+          }
           if (!autoscroll || autoscroll.checked) {
             output.scrollTop = output.scrollHeight;
           }
+          scheduleNextPoll(pollIntervalMs);
         })
-        .catch(function () {
-          output.textContent = 'Unable to load live log.';
+        .catch(function (error) {
+          if (serial !== requestSerial) return;
+          window.clearTimeout(timeoutHandle);
+          requestInFlight = false;
+          consecutiveFailures += 1;
+          var delayMs = retryDelayMs();
+          var timedOut = !!(error && error.name === 'AbortError');
+          if (!lastText) {
+            output.textContent = timedOut
+              ? 'Live log request timed out. Retrying\u2026'
+              : 'Unable to load live log. Retrying\u2026';
+          }
+          setStatus(
+            timedOut
+              ? 'Live log request timed out over this connection. Retrying in ' + Math.round(delayMs / 1000) + 's.'
+              : 'Live log unavailable right now. Retrying in ' + Math.round(delayMs / 1000) + 's.'
+          );
+          scheduleNextPoll(delayMs);
         });
-    }
-
-    function startPolling() {
-      if (timer) clearInterval(timer);
-      timer = setInterval(fetchLog, 2000);
     }
 
     if (refreshBtn) {
       refreshBtn.addEventListener('click', function () {
-        fetchLog();
+        consecutiveFailures = 0;
+        if (timer) clearTimeout(timer);
+        fetchLog(true);
       });
     }
 
@@ -658,11 +799,355 @@
       });
     }
 
-    fetchLog();
-    startPolling();
+    fetchLog(false);
   }
 
   document.addEventListener('DOMContentLoaded', initAdminLiveLog);
+})();
+
+(function () {
+  function fetchJsonWithTimeout(url, timeoutMs) {
+    if (!window.AbortController && window.XMLHttpRequest) {
+      return new Promise(function (resolve, reject) {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', url, true);
+        xhr.withCredentials = true;
+        xhr.timeout = timeoutMs;
+        xhr.setRequestHeader('Accept', 'application/json');
+        xhr.addEventListener('load', function () {
+          if (xhr.status < 200 || xhr.status >= 300) {
+            reject(new Error('poll request failed'));
+            return;
+          }
+          try {
+            resolve(JSON.parse(xhr.responseText || '{}'));
+          } catch (error) {
+            reject(error);
+          }
+        });
+        xhr.addEventListener('timeout', function () {
+          var error = new Error('poll request timed out');
+          error.name = 'AbortError';
+          reject(error);
+        });
+        xhr.addEventListener('error', function () {
+          reject(new Error('poll request failed'));
+        });
+        xhr.send();
+      });
+    }
+
+    var controller = null;
+    var timer = null;
+    var options = {
+      credentials: 'same-origin',
+      headers: { 'Accept': 'application/json' },
+      cache: 'no-store'
+    };
+
+    if (window.AbortController) {
+      controller = new AbortController();
+      options.signal = controller.signal;
+      timer = window.setTimeout(function () {
+        controller.abort();
+      }, timeoutMs);
+    }
+
+    return fetch(url, options)
+      .then(function (resp) {
+        if (timer) window.clearTimeout(timer);
+        if (!resp.ok) throw new Error('poll request failed');
+        return resp.json();
+      }, function (error) {
+        if (timer) window.clearTimeout(timer);
+        throw error;
+      });
+  }
+
+  function initSiteHealthJobPolling() {
+    var container = document.querySelector('[data-admin-health-jobs-url]');
+    if (!container) return;
+
+    var url = container.getAttribute('data-admin-health-jobs-url');
+    if (!url) return;
+
+    var fieldNames = [
+      'running_jobs',
+      'queued_jobs',
+      'recent_completed_jobs',
+      'failed_jobs',
+      'backup_jobs',
+      'restore_jobs'
+    ];
+    var fields = {};
+    fieldNames.forEach(function (name) {
+      fields[name] = container.querySelector('[data-admin-health-job="' + name + '"]');
+    });
+    var details = container.querySelector('[data-admin-health-job-details]');
+    var panels = {
+      failed: container.querySelector('[data-admin-health-job-panel="failed"]'),
+      completed: container.querySelector('[data-admin-health-job-panel="completed"]')
+    };
+    var lists = {
+      failed: container.querySelector('[data-admin-health-job-list="failed"]'),
+      completed: container.querySelector('[data-admin-health-job-list="completed"]')
+    };
+
+    function appendJobMeta(row, label, value) {
+      var item = document.createElement('span');
+      item.appendChild(document.createTextNode(label + ': '));
+      var strong = document.createElement('strong');
+      strong.textContent = value == null || value === '' ? 'n/a' : String(value);
+      item.appendChild(strong);
+      row.appendChild(item);
+    }
+
+    function appendJobLinkMeta(row, label, value, href) {
+      var item = document.createElement('span');
+      item.appendChild(document.createTextNode(label + ': '));
+      var link = document.createElement('a');
+      link.href = href;
+      link.textContent = String(value);
+      item.appendChild(link);
+      row.appendChild(item);
+    }
+
+    function renderJobList(name, jobs) {
+      var list = lists[name];
+      if (!list) return;
+      list.textContent = '';
+      if (!Array.isArray(jobs) || jobs.length === 0) {
+        var empty = document.createElement('p');
+        empty.className = 'admin-copy';
+        empty.textContent = 'No recent jobs recorded.';
+        list.appendChild(empty);
+        return;
+      }
+      jobs.forEach(function (job) {
+        var card = document.createElement('article');
+        card.className = 'admin-health-job-card';
+        var title = document.createElement('h4');
+        title.textContent = job.name || job.type || 'Background job';
+        card.appendChild(title);
+        var meta = document.createElement('div');
+        meta.className = 'admin-health-job-meta';
+        appendJobMeta(meta, 'id', job.id);
+        appendJobMeta(meta, 'type', job.type);
+        if (job.post_id && job.post_url) {
+          appendJobLinkMeta(meta, 'post', job.post_id, job.post_url);
+        } else if (job.post_id) {
+          appendJobMeta(meta, 'post', job.post_id);
+        }
+        appendJobMeta(meta, 'status', job.status);
+        appendJobMeta(meta, 'attempts', job.attempts);
+        appendJobMeta(meta, 'updated', job.updated_at);
+        card.appendChild(meta);
+        if (job.error) {
+          var error = document.createElement('p');
+          error.className = 'admin-health-job-error';
+          error.textContent = job.error;
+          card.appendChild(error);
+        }
+        list.appendChild(card);
+      });
+    }
+
+    function applyJobs(data) {
+      fieldNames.forEach(function (name) {
+        if (!fields[name] || data[name] === undefined || data[name] === null) return;
+        fields[name].textContent = String(data[name]);
+      });
+      renderJobList('failed', data.recent_failed_job_details);
+      renderJobList('completed', data.recent_completed_job_details);
+    }
+
+    container.querySelectorAll('[data-admin-health-toggle]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var target = button.getAttribute('data-admin-health-toggle');
+        if (!details || !panels[target]) return;
+        var isOpen = !panels[target].hidden;
+        Object.keys(panels).forEach(function (name) {
+          if (panels[name]) panels[name].hidden = true;
+        });
+        panels[target].hidden = isOpen;
+        details.hidden = isOpen;
+      });
+    });
+
+    container.querySelectorAll('[data-admin-health-close]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        Object.keys(panels).forEach(function (name) {
+          if (panels[name]) panels[name].hidden = true;
+        });
+        if (details) details.hidden = true;
+      });
+    });
+
+    function poll() {
+      fetchJsonWithTimeout(url, 8000).then(applyJobs, function () {
+        // Keep the last known values visible; the next poll will retry.
+      });
+    }
+
+    poll();
+    window.setInterval(poll, 5000);
+  }
+
+  document.addEventListener('DOMContentLoaded', initSiteHealthJobPolling);
+
+  function requestHeaders(headers) {
+    var pairs = [];
+    Object.keys(headers || {}).forEach(function (key) {
+      pairs.push([key, headers[key]]);
+    });
+    return pairs;
+  }
+
+  function xhrResponse(xhr) {
+    return {
+      ok: xhr.status >= 200 && xhr.status < 300,
+      status: xhr.status,
+      redirected: false,
+      headers: {
+        get: function (name) {
+          return xhr.getResponseHeader(name);
+        }
+      },
+      json: function () {
+        try {
+          return Promise.resolve(JSON.parse(xhr.responseText || '{}'));
+        } catch (error) {
+          return Promise.reject(error);
+        }
+      }
+    };
+  }
+
+  function xhrRequestWithTimeout(url, options, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      var body = options.body || null;
+      xhr.open(options.method || 'GET', url, true);
+      xhr.withCredentials = options.credentials !== 'omit';
+      xhr.timeout = timeoutMs;
+      requestHeaders(options.headers).forEach(function (pair) {
+        xhr.setRequestHeader(pair[0], pair[1]);
+      });
+      if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
+        xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded;charset=UTF-8');
+        body = body.toString();
+      }
+      xhr.addEventListener('load', function () {
+        resolve(xhrResponse(xhr));
+      });
+      xhr.addEventListener('timeout', function () {
+        var error = new Error('request timed out');
+        error.name = 'AbortError';
+        reject(error);
+      });
+      xhr.addEventListener('error', function () {
+        reject(new Error('request failed'));
+      });
+      xhr.send(body);
+    });
+  }
+
+  function requestWithTimeout(url, options, timeoutMs) {
+    options = options || {};
+    timeoutMs = timeoutMs || 600000;
+    if (!window.AbortController && window.XMLHttpRequest) {
+      return xhrRequestWithTimeout(url, options, timeoutMs);
+    }
+    if (!window.fetch) return Promise.reject(new Error('request unsupported'));
+
+    var timer = null;
+    var controller = null;
+    if (window.AbortController) {
+      controller = new AbortController();
+      options.signal = controller.signal;
+      timer = window.setTimeout(function () {
+        controller.abort();
+      }, timeoutMs);
+    }
+
+    return fetch(url, options).then(function (response) {
+      if (timer) window.clearTimeout(timer);
+      return response;
+    }, function (error) {
+      if (timer) window.clearTimeout(timer);
+      throw error;
+    });
+  }
+
+  function createAdminJsonPoller(options) {
+    options = options || {};
+    var stopped = false;
+    var inFlight = false;
+    var timer = null;
+    var failures = 0;
+    var baseDelay = options.baseDelayMs || 750;
+    var timeoutMs = options.timeoutMs || 20000;
+    var maxDelay = options.maxDelayMs || 12000;
+
+    function nextDelay(failed) {
+      if (!failed) return baseDelay;
+      return Math.min(maxDelay, baseDelay * Math.pow(2, Math.min(failures - 1, 4)));
+    }
+
+    function schedule(delayMs) {
+      if (stopped) return;
+      timer = window.setTimeout(poll, delayMs);
+    }
+
+    function poll() {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      fetchJsonWithTimeout(options.url, timeoutMs)
+        .then(function (data) {
+          failures = 0;
+          if (options.onData && options.onData(data) === false) {
+            stopped = true;
+            return;
+          }
+          schedule(nextDelay(false));
+        })
+        .catch(function (error) {
+          failures += 1;
+          var delay = nextDelay(true);
+          if (options.onStatus) {
+            options.onStatus(
+              error && error.name === 'AbortError'
+                ? 'Progress request timed out. Retrying in ' + Math.round(delay / 1000) + 's...'
+                : 'Progress unavailable. Retrying in ' + Math.round(delay / 1000) + 's...'
+            );
+          }
+          schedule(delay);
+        })
+        .then(function () {
+          inFlight = false;
+        }, function () {
+          inFlight = false;
+        });
+    }
+
+    return {
+      start: function () {
+        stopped = false;
+        if (timer) window.clearTimeout(timer);
+        poll();
+      },
+      stop: function () {
+        stopped = true;
+        if (timer) {
+          window.clearTimeout(timer);
+          timer = null;
+        }
+      }
+    };
+  }
+
+  window.createAdminJsonPoller = createAdminJsonPoller;
+  window.adminRequestWithTimeout = requestWithTimeout;
 })();
 
 (function () {
@@ -673,8 +1158,8 @@
     var bar = wrap.querySelector('[data-db-repair-progress-bar]');
     var text = wrap.querySelector('[data-db-repair-progress-text]');
     var progressUrl = wrap.getAttribute('data-db-repair-progress-url') || '/admin/db/repair/progress';
-    var timer = null;
     var redirected = false;
+    var poller = null;
 
     function setProgress(percent, message) {
       percent = Math.min(100, Math.max(0, Number(percent) || 0));
@@ -683,10 +1168,7 @@
     }
 
     function finish(data) {
-      if (timer) {
-        clearInterval(timer);
-        timer = null;
-      }
+      if (poller) poller.stop();
       if (redirected) return;
       redirected = true;
       setProgress(data && data.percent, data && data.label);
@@ -695,26 +1177,23 @@
       }, 700);
     }
 
-    function poll() {
-      fetch(progressUrl, {
-        credentials: 'same-origin',
-        headers: { 'Accept': 'application/json' }
-      })
-        .then(function (resp) {
-          if (!resp.ok) throw new Error('progress request failed');
-          return resp.json();
-        })
-        .then(function (data) {
-          setProgress(data.percent, data.label);
-          if (data.done) finish(data);
-        })
-        .catch(function () {
-          setProgress(5, 'Still working. Waiting for progress update...');
-        });
-    }
-
-    poll();
-    timer = window.setInterval(poll, 750);
+    poller = window.createAdminJsonPoller({
+      url: progressUrl,
+      baseDelayMs: 750,
+      timeoutMs: 20000,
+      onData: function (data) {
+        setProgress(data.percent, data.label);
+        if (data.done) {
+          finish(data);
+          return false;
+        }
+        return true;
+      },
+      onStatus: function (message) {
+        setProgress(5, 'Still working. ' + message);
+      }
+    });
+    poller.start();
   }
 
   document.addEventListener('DOMContentLoaded', initDbRepairProgress);
@@ -723,7 +1202,7 @@
 // Backup progress modal for both POST-based saves and GET downloads.
 // Handlers stay CSP-safe and reuse the same phase codes as middleware::backup_phase.
 (function () {
-  var _pollTimer = null;
+  var _poller = null;
   var _downloadMode = false;
 
   var PHASE_LABELS = [
@@ -764,41 +1243,52 @@
   }
 
   function _startPolling(onDone) {
-    if (_pollTimer) return;
-    _pollTimer = setInterval(function () {
-      fetch('/admin/backup/progress', { credentials: 'same-origin' })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-          var phase = data.phase || 0;
-          var label = PHASE_LABELS[phase] || 'Working\u2026';
-          var pct = 0;
-          if (data.files_total > 0) {
-            pct = Math.min(98, Math.round((data.files_done / data.files_total) * 100));
-          } else if (phase === 1) {
-            pct = 5;
-          } else if (phase === 2) {
-            pct = 10;
-          }
-          var detail = data.files_total > 0
-            ? ' (' + data.files_done + '/' + data.files_total + ' files)'
-            : '';
-          _setBkProgress(pct, label + detail);
+    if (_poller) return;
+    _poller = window.createAdminJsonPoller({
+      url: '/admin/backup/progress',
+      baseDelayMs: 700,
+      timeoutMs: 20000,
+      onData: function (data) {
+        var phase = data.phase || 0;
+        var label = PHASE_LABELS[phase] || 'Working\u2026';
+        var pct = 0;
+        if (data.files_total > 0) {
+          pct = Math.min(98, Math.round((data.files_done / data.files_total) * 100));
+        } else if (phase === 1) {
+          pct = 5;
+        } else if (phase === 2) {
+          pct = 10;
+        }
+        var detail = data.files_total > 0
+          ? ' (' + data.files_done + '/' + data.files_total + ' files)'
+          : '';
+        _setBkProgress(pct, label + detail);
 
-          if (_downloadMode && phase === 5) {
-            _stopPolling();
-            _setBkProgress(100, '\u2713 Download ready!');
-            setTimeout(hideBackupModal, 1500);
-            if (onDone) onDone();
-          }
-        })
-        .catch(function () {});
-    }, 500);
+        if (_downloadMode && phase === 5) {
+          _stopPolling();
+          _setBkProgress(100, '\u2713 Download ready!');
+          setTimeout(hideBackupModal, 1500);
+          if (onDone) onDone();
+          return false;
+        }
+        if (phase === 5) {
+          _stopPolling();
+          _setBkProgress(100, 'Backup completed. Waiting for final response\u2026');
+          return false;
+        }
+        return true;
+      },
+      onStatus: function (message) {
+        _setBkProgress(5, 'Still working. ' + message);
+      }
+    });
+    _poller.start();
   }
 
   function _stopPolling() {
-    if (_pollTimer) {
-      clearInterval(_pollTimer);
-      _pollTimer = null;
+    if (_poller) {
+      _poller.stop();
+      _poller = null;
     }
   }
 
@@ -862,6 +1352,7 @@
     xhr = new XMLHttpRequest();
     xhr.open((form.method || 'POST').toUpperCase(), form.action, true);
     xhr.withCredentials = true;
+    xhr.timeout = 600000;
     xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
 
     xhr.upload.addEventListener('progress', function (event) {
@@ -908,7 +1399,13 @@
 
     xhr.addEventListener('error', function () {
       submitHelper.setBusy(false);
-      submitHelper.setProgress(0, title + ' failed. Please try again.');
+      submitHelper.setProgress(0, title + ' failed. Request may still have succeeded. Refresh before retrying.');
+      showDoneButton();
+    });
+
+    xhr.addEventListener('timeout', function () {
+      submitHelper.setBusy(false);
+      submitHelper.setProgress(0, title + ' timed out. Request may still have succeeded. Refresh before retrying.');
       showDoneButton();
     });
 
@@ -939,12 +1436,12 @@
       headers['X-Rustchan-Download-After-Create'] = '1';
     }
 
-    fetch(form.action, {
+    window.adminRequestWithTimeout(form.action, {
       method: 'POST',
       body: params,
       credentials: 'same-origin',
       headers: headers
-    })
+    }, 600000)
       .then(function (resp) {
         _stopPolling();
         if (!resp.ok && !resp.redirected) {
@@ -988,7 +1485,11 @@
       .catch(function (err) {
         _stopPolling();
         submitHelper.setBusy(false);
-        submitHelper.setProgress(0, title + ': ' + (err.message || 'request failed'));
+        submitHelper.setProgress(
+          0,
+          title + ': ' + (err.message || 'request failed') +
+          '. The request may still have succeeded. Refresh before retrying.'
+        );
         showDoneButton();
       });
   }

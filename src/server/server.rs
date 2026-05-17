@@ -15,7 +15,7 @@
 
 use axum::{
     http::header,
-    response::{IntoResponse, Redirect},
+    response::{IntoResponse as _, Redirect},
 };
 use dashmap::DashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -107,7 +107,7 @@ impl Drop for ScopedDecrement<'_> {
 
 // ─── Server mode ─────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::Result<()> {
     // rustls 0.23 requires an explicit process-wide crypto provider.
     // install_default() is idempotent — a second call (e.g. in tests) returns
@@ -181,7 +181,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             let subtitle = subtitle_in_db.unwrap_or_else(|| {
                 // Nothing in DB — seed from CONFIG (settings.toml).
                 let seed = if CONFIG.initial_site_subtitle.is_empty() {
-                    "select board to proceed".to_string()
+                    "select board to proceed".to_owned()
                 } else {
                     CONFIG.initial_site_subtitle.clone()
                 };
@@ -209,6 +209,21 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 let _ =
                     crate::db::set_site_setting(&conn, "homepage_new_thread_badges_enabled", value);
             }
+            if crate::db::get_site_setting(&conn, "homepage_new_reply_badges_enabled")
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                let value = legacy_new_activity.as_deref().unwrap_or(
+                    if CONFIG.initial_homepage_new_reply_badges_enabled {
+                        "1"
+                    } else {
+                        "0"
+                    },
+                );
+                let _ =
+                    crate::db::set_site_setting(&conn, "homepage_new_reply_badges_enabled", value);
+            }
             if crate::db::get_site_setting(&conn, "thread_new_reply_badges_enabled")
                 .ok()
                 .flatten()
@@ -226,6 +241,33 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             }
 
             seed_initial_default_theme(&conn, &CONFIG.initial_default_theme);
+            if crate::db::get_site_setting(&conn, crate::db::MEDIA_AUTO_PRUNE_ENABLED_KEY)
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                let _ = crate::db::set_site_setting(
+                    &conn,
+                    crate::db::MEDIA_AUTO_PRUNE_ENABLED_KEY,
+                    &CONFIG.initial_media_auto_prune_enabled.to_string(),
+                );
+            }
+            if crate::db::get_site_setting(
+                &conn,
+                crate::db::MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY,
+            )
+            .ok()
+            .flatten()
+            .is_none()
+            {
+                let _ = crate::db::set_site_setting(
+                    &conn,
+                    crate::db::MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY,
+                    &CONFIG
+                        .initial_media_max_active_content_size_bytes
+                        .to_string(),
+                );
+            }
             let _ = crate::db::sync_live_theme_state(&conn);
 
             // Seed the live board list used by error pages and ban pages.
@@ -238,6 +280,12 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // ffmpeg: required for video thumbnails (optional — graceful degradation).
     let ffmpeg_status = crate::detect::detect_ffmpeg(CONFIG.require_ffmpeg);
     let ffmpeg_available = ffmpeg_status == crate::detect::ToolStatus::Available;
+    if CONFIG.require_ffmpeg && !ffmpeg_available {
+        anyhow::bail!(
+            "ffmpeg is required but was not detected at '{}'",
+            CONFIG.ffmpeg_path
+        );
+    }
     // ffprobe is used lazily for WebM codec inspection, so probe it at startup
     // to make explicit configured paths authoritative and catch bogus paths early.
     let ffprobe_available = crate::detect::detect_ffprobe();
@@ -248,7 +296,8 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // libvpx-vp9 + libopus encoders: needed for MP4→WebM transcoding and
     // WebM/AV1→VP9 re-encoding.  Checked independently so that a build missing
     // only these codecs still enables image conversion and thumbnail generation.
-    let ffmpeg_vp9_available = crate::detect::detect_webm_encoder(ffmpeg_available);
+    let ffmpeg_webm_status = crate::detect::detect_webm_encoder(ffmpeg_available);
+    let ffmpeg_vp9_available = ffmpeg_webm_status.is_available();
     let pdf_thumbnail_renderers = crate::detect::detect_pdf_thumbnail_renderers();
 
     // Derive bind_port from `bind_addr` (which already incorporates port_override).
@@ -270,9 +319,25 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // sequence can await each worker instead of blindly sleeping for 10 s.
     // Previously the return value was silently discarded, making it impossible
     // to know whether in-flight jobs had finished before the process exited.
+    {
+        let conn = pool.get()?;
+        let recovery = crate::db::recover_interrupted_background_jobs(&conn)?;
+        if recovery.jobs_reset > 0 {
+            tracing::warn!(
+                target: "workers",
+                jobs_reset = recovery.jobs_reset,
+                media_posts_reset = recovery.media_posts_reset,
+                "Recovered interrupted background jobs from previous shutdown"
+            );
+        }
+    }
     let worker_queue = std::sync::Arc::new(crate::workers::JobQueue::new(pool.clone()));
-    let worker_handles =
-        crate::workers::start_worker_pool(&worker_queue, ffmpeg_available, ffmpeg_vp9_available);
+    let worker_handles = crate::workers::start_worker_pool(
+        &worker_queue,
+        ffmpeg_available,
+        ffprobe_available,
+        ffmpeg_vp9_available,
+    );
 
     let chan_ledger = if chan_net {
         let conn = pool.get()?;
@@ -290,6 +355,8 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         ffprobe_available,
         ffmpeg_webp_available,
         ffmpeg_vp9_available,
+        ffmpeg_vp9_encoder_available: ffmpeg_webm_status.vp9,
+        ffmpeg_opus_available: ffmpeg_webm_status.opus,
         pdf_thumbnail_renderer: pdf_thumbnail_renderers
             .first()
             .map(|renderer| renderer.binary_name()),
@@ -299,6 +366,8 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             CONFIG.auto_full_backup_interval_hours,
             CONFIG.auto_full_backup_copies_to_keep,
             CONFIG.auto_full_backup_include_tor_hidden_service_keys,
+            CONFIG.auto_full_backup_storage_mode.clone(),
+            CONFIG.auto_full_backup_split_zip_part_size_bytes,
         ),
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
         db_maintenance_jobs: crate::middleware::DbMaintenanceJobs::new(),
@@ -555,14 +624,19 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                         };
 
                         let bg2 = bg.clone();
-                        let progress = maintenance_state.backup_progress.clone();
+                        let progress = std::sync::Arc::clone(&maintenance_state.backup_progress);
                         let attempt_result = tokio::task::spawn_blocking(move || {
+                            let storage_mode = crate::handlers::admin::backup::parse_backup_storage_mode_value(
+                                Some(&settings.storage_mode),
+                            )?;
                             crate::handlers::admin::create_full_backup_to_server(
                                 &bg2,
                                 None,
                                 &progress,
                                 settings.copies_to_keep,
                                 settings.include_tor_hidden_service_keys,
+                                storage_mode,
+                                settings.split_zip_part_size,
                             )
                         })
                         .await;
@@ -732,11 +806,11 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     let force_reload_notify = std::sync::Arc::new(tokio::sync::Notify::new());
     {
         let pool_stats = pool.clone();
-        let worker_queue_stats = state.job_queue.clone();
-        let stats_w = shared_stats.clone();
+        let worker_queue_stats = std::sync::Arc::clone(&state.job_queue);
+        let stats_w = std::sync::Arc::clone(&shared_stats);
         let cancel_stats = worker_cancel.clone();
-        let onion_addr = state.onion_address.clone();
-        let force_reload = force_reload_notify.clone();
+        let onion_addr = std::sync::Arc::clone(&state.onion_address);
+        let force_reload = std::sync::Arc::clone(&force_reload_notify);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(3));
             let mut prev_req = REQUEST_COUNT.load(std::sync::atomic::Ordering::Relaxed);
@@ -783,17 +857,17 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         CONFIG.enable_tor_support,
         bind_port,
         &data_dir,
-        state.onion_address.clone(),
+        std::sync::Arc::clone(&state.onion_address),
         worker_cancel.clone(),
     );
 
     // Event dispatch — translate KeyEvents into mode changes and wizard launches.
     {
-        let mode_d = shared_mode.clone();
+        let mode_d = std::sync::Arc::clone(&shared_mode);
         let pool_d = pool.clone();
         let cancel_d = worker_cancel.clone();
         let shutdown_tx = worker_cancel.clone();
-        let force_reload = force_reload_notify.clone();
+        let force_reload = std::sync::Arc::clone(&force_reload_notify);
         tokio::spawn(async move {
             while let Some(key) = key_rx.recv().await {
                 use super::console::input::KeyEvent;
@@ -852,7 +926,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     KeyEvent::CreateBoard => {
                         *mode_d.write().await = ConsoleMode::Wizard(WizardKind::CreateBoard);
                         let pool_w = pool_d.clone();
-                        let mode_w = mode_d.clone();
+                        let mode_w = std::sync::Arc::clone(&mode_d);
                         tokio::task::spawn_blocking(move || {
                             super::console::wizard::run_wizard(
                                 &WizardKind::CreateBoard,
@@ -864,7 +938,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     KeyEvent::CreateAdmin => {
                         *mode_d.write().await = ConsoleMode::Wizard(WizardKind::CreateAdmin);
                         let pool_w = pool_d.clone();
-                        let mode_w = mode_d.clone();
+                        let mode_w = std::sync::Arc::clone(&mode_d);
                         tokio::task::spawn_blocking(move || {
                             super::console::wizard::run_wizard(
                                 &WizardKind::CreateAdmin,
@@ -876,7 +950,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     KeyEvent::DeleteThread => {
                         *mode_d.write().await = ConsoleMode::Wizard(WizardKind::DeleteThread);
                         let pool_w = pool_d.clone();
-                        let mode_w = mode_d.clone();
+                        let mode_w = std::sync::Arc::clone(&mode_d);
                         tokio::task::spawn_blocking(move || {
                             super::console::wizard::run_wizard(
                                 &WizardKind::DeleteThread,
@@ -995,7 +1069,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             None => { /* tls.enabled = false — unreachable here but exhaustive */ }
 
             // Suppress unreachable-pattern warning when tls-acme feature is off.
-            #[allow(unreachable_patterns)]
+            #[expect(unreachable_patterns)]
             Some(_) => {
                 return Err(anyhow::anyhow!(
                     "ACME acceptor built but tls-acme feature is not enabled — \
@@ -1208,12 +1282,12 @@ pub async fn run_https_acme(
                     }
                 };
 
-                let acme_acceptor = acme_acceptor.clone();
-                let server_cfg    = server_cfg.clone();
+                let acme_acceptor = std::sync::Arc::clone(&acme_acceptor);
+                let server_cfg = std::sync::Arc::clone(&server_cfg);
                 let svc           = app.clone();
 
                 tokio::spawn(async move {
-                    use tokio_util::compat::{TokioAsyncReadCompatExt, FuturesAsyncReadCompatExt};
+                    use tokio_util::compat::{TokioAsyncReadCompatExt as _, FuturesAsyncReadCompatExt as _};
                     // rustls-acme requires futures::{AsyncRead, AsyncWrite}; wrap
                     // the tokio TcpStream with the tokio-util compat shim.
                     let tcp = tcp.compat();
@@ -1279,7 +1353,7 @@ pub async fn run_http_redirect(
     https_port: u16,
     cancel: tokio_util::sync::CancellationToken,
 ) {
-    use axum::{extract::Request, http::StatusCode, response::IntoResponse, routing::any};
+    use axum::{extract::Request, http::StatusCode, response::IntoResponse as _, routing::any};
 
     let redirect_app = axum::Router::new().route(
         "/{*path}",
@@ -1331,11 +1405,11 @@ fn redirect_host(req: &axum::extract::Request) -> Option<String> {
             .iter()
             .any(|trusted| trusted.eq_ignore_ascii_case(host))
         {
-            return Some(host.to_string());
+            return Some(host.to_owned());
         }
 
         if trusted_hosts.is_empty() && is_local_redirect_host(host) {
-            return Some(host.to_string());
+            return Some(host.to_owned());
         }
     }
 
@@ -1387,17 +1461,17 @@ fn redirect_trusted_hosts_with(
 fn parse_bind_host(bind_addr: &str) -> Option<String> {
     if let Some(rest) = bind_addr.strip_prefix('[') {
         let (host, _) = rest.split_once("]:")?;
-        return Some(host.to_string());
+        return Some(host.to_owned());
     }
 
     bind_addr
         .rsplit_once(':')
-        .map(|(host, _port)| host.to_string())
+        .map(|(host, _port)| host.to_owned())
 }
 
 fn parse_authority_host(value: &str) -> Option<String> {
     let authority = value.parse::<axum::http::uri::Authority>().ok()?;
-    Some(authority.host().to_string())
+    Some(authority.host().to_owned())
 }
 
 fn format_redirect_authority(host: &str, https_port: u16) -> String {
@@ -1571,7 +1645,7 @@ mod tests {
     #[test]
     fn redirect_trusted_hosts_include_configured_public_hosts_for_manual_cert_setups() {
         let hosts = redirect_trusted_hosts_with(
-            &["example.com".to_string(), "www.example.com".to_string()],
+            &["example.com".to_owned(), "www.example.com".to_owned()],
             false,
             &[],
             "0.0.0.0:8080",

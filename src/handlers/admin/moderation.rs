@@ -10,7 +10,7 @@ use crate::{
 };
 use axum::{
     extract::{Form, Path, Query, State},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
@@ -34,9 +34,7 @@ pub async fn add_ban(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<AddBanForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let expires_at = form
@@ -99,9 +97,7 @@ pub async fn remove_ban(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<BanIdForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     tokio::task::spawn_blocking({
@@ -138,7 +134,7 @@ pub struct BanDeleteForm {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub async fn admin_ban_and_delete(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -146,17 +142,15 @@ pub async fn admin_ban_and_delete(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<BanDeleteForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let reason = form
         .reason
         .as_deref()
-        .map(|r| r.trim().to_string())
+        .map(|r| r.trim().to_owned())
         .filter(|r| !r.is_empty())
-        .unwrap_or_else(|| "Rule violation".to_string());
+        .unwrap_or_else(|| "Rule violation".to_owned());
 
     let expires_at = form
         .duration_hours
@@ -323,9 +317,7 @@ pub async fn dismiss_appeal(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<AppealActionForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     tokio::task::spawn_blocking({
@@ -355,9 +347,7 @@ pub async fn accept_appeal(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<AppealActionForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     tokio::task::spawn_blocking({
@@ -417,9 +407,7 @@ pub async fn add_filter(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<AddFilterForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     if form.pattern.trim().is_empty() {
@@ -465,9 +453,7 @@ pub async fn remove_filter(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<FilterIdForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     tokio::task::spawn_blocking({
@@ -507,9 +493,8 @@ pub async fn admin_ip_history(
     Query(params): Query<IpHistoryQuery>,
     jar: CookieJar,
 ) -> Result<(CookieJar, Html<String>)> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     let (jar, csrf) = super::ensure_admin_csrf(jar)?;
     let csrf_clone = csrf.clone();
 
@@ -523,7 +508,7 @@ pub async fn admin_ip_history(
     let page = params.page.max(1);
     let return_to =
         crate::utils::redirect::strict_safe_internal_path_or(params.return_to.as_deref(), "")
-            .to_string();
+            .to_owned();
 
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -550,6 +535,7 @@ pub async fn admin_ip_history(
                 } else {
                     Some(return_to.as_str())
                 },
+                current_theme.as_deref(),
             ))
         }
     })
@@ -575,9 +561,7 @@ pub async fn resolve_report(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<ResolveReportForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     tokio::task::spawn_blocking({
@@ -640,9 +624,7 @@ pub async fn admin_ip_report(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<IpReportForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let reason = form.reason.trim().chars().take(512).collect::<String>();
@@ -742,7 +724,6 @@ mod tests {
     use super::super::{admin_panel_redirect_anchor_open, SESSION_COOKIE};
     use super::*;
     use axum::extract::State;
-    use axum::response::IntoResponse;
     use axum_extra::extract::cookie::{Cookie, CookieJar};
 
     fn admin_signed_csrf() -> String {
@@ -781,20 +762,20 @@ mod tests {
         crate::db::NewPost {
             thread_id,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
             subject: None,
             body: if is_op {
-                "op body".to_string()
+                "op body".to_owned()
             } else {
-                "reply body".to_string()
+                "reply body".to_owned()
             },
             body_html: if is_op {
-                "<p>op body</p>".to_string()
+                "<p>op body</p>".to_owned()
             } else {
-                "<p>reply body</p>".to_string()
+                "<p>reply body</p>".to_owned()
             },
-            ip_hash: ip_hash.map(str::to_string),
+            ip_hash: ip_hash.map(str::to_owned),
             file_path: None,
             file_name: None,
             file_size: None,
@@ -806,9 +787,9 @@ mod tests {
             audio_file_size: None,
             audio_mime_type: None,
             deletion_token: if is_op {
-                "token-op".to_string()
+                "token-op".to_owned()
             } else {
-                "token-reply".to_string()
+                "token-reply".to_owned()
             },
             is_op,
         }
@@ -832,7 +813,7 @@ mod tests {
     async fn admin_ip_report_records_admin_as_reporter() {
         let state = crate::test_support::app_state();
         let target_ip =
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string();
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned();
         let conn = state.db.get().expect("db connection");
         let password_hash = crate::utils::crypto::hash_password("hunter2").expect("hash password");
         let admin_id =
@@ -866,9 +847,9 @@ mod tests {
             Form(IpReportForm {
                 post_id: reply_id,
                 thread_id,
-                board: "test".to_string(),
+                board: "test".to_owned(),
                 ip_hash: target_ip.clone(),
-                reason: "Needs review".to_string(),
+                reason: "Needs review".to_owned(),
                 csrf: Some(admin_signed_csrf()),
             }),
         )
@@ -915,9 +896,8 @@ pub async fn mod_log_page(
     jar: CookieJar,
     Query(params): Query<ModLogQuery>,
 ) -> Result<(CookieJar, Html<String>)> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     let (jar, csrf) = super::ensure_admin_csrf(jar)?;
     let csrf_clone = csrf.clone();
     let page = params.page.max(1);
@@ -938,6 +918,7 @@ pub async fn mod_log_page(
                 &pagination,
                 &csrf_clone,
                 &boards,
+                current_theme.as_deref(),
             ))
         }
     })

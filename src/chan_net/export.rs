@@ -1,7 +1,5 @@
 // chan_net/export.rs — Federation export handler.
 //
-// Step 2.4
-//
 // POST /chan/export builds a full snapshot of all boards and active
 // (non-archived) threads via snapshot::build_snapshot and returns the ZIP
 // bytes with Content-Type: application/zip.

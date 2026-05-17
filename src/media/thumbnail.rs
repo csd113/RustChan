@@ -1,7 +1,7 @@
 // Thumbnail generation for uploaded media.
 
-use anyhow::{Context, Result};
-use image::{imageops::FilterType, GenericImageView, ImageFormat};
+use anyhow::{Context as _, Result};
+use image::{imageops::FilterType, GenericImageView as _, ImageFormat};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -228,13 +228,11 @@ pub fn generate_thumbnail(
                             "ffmpeg image thumbnail failed ({}); falling back to image crate",
                             e
                         );
-                        image_crate_thumbnail(input_path, mime, output_path, max_dim)
-                            .map(|()| output_path.to_path_buf())
+                        image_crate_thumbnail_or_placeholder(input_path, mime, output_path, max_dim)
                     }
                 }
             } else {
-                image_crate_thumbnail(input_path, mime, output_path, max_dim)
-                    .map(|()| output_path.to_path_buf())
+                image_crate_thumbnail_or_placeholder(input_path, mime, output_path, max_dim)
             }
         }
 
@@ -318,7 +316,7 @@ fn image_crate_thumbnail(
 
     let (w, h) = img.dimensions();
     // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
-    #[allow(
+    #[expect(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
@@ -342,7 +340,29 @@ fn image_crate_thumbnail(
         .with_context(|| format!("failed to save WebP thumbnail to {}", output_path.display()))
 }
 
-#[allow(clippy::too_many_lines)]
+fn image_crate_thumbnail_or_placeholder(
+    input_path: &Path,
+    mime: &str,
+    output_path: &Path,
+    max_dim: u32,
+) -> Result<PathBuf> {
+    match image_crate_thumbnail(input_path, mime, output_path, max_dim) {
+        Ok(()) => Ok(output_path.to_path_buf()),
+        Err(error) => {
+            tracing::warn!(
+                mime,
+                input = %input_path.display(),
+                error = %error,
+                "image thumbnail generation failed; using generic placeholder"
+            );
+            let svg_path = output_path.with_extension("svg");
+            let _ = std::fs::remove_file(output_path);
+            write_placeholder(&svg_path, PlaceholderKind::Video).map(|()| svg_path)
+        }
+    }
+}
+
+#[expect(clippy::too_many_lines)]
 fn pdf_first_page_thumbnail(
     input_path: &Path,
     output_path: &Path,
@@ -610,12 +630,34 @@ fn probe_renderer(renderer: PdfRenderer) -> bool {
         return false;
     }
 
-    Command::new(renderer.binary_name())
+    probe_renderer_with_timeout(renderer.binary_name())
+}
+
+fn probe_renderer_with_timeout(program: &str) -> bool {
+    let timeout = Duration::from_secs(10);
+    let Ok(mut child) = Command::new(program)
         .arg("-h")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .is_ok()
+        .spawn()
+    else {
+        return false;
+    };
+    let started = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => return true,
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[cfg(test)]
@@ -749,6 +791,21 @@ mod tests {
         let svg = std::fs::read_to_string(&output).expect("read placeholder");
         assert!(svg.contains("PDF"));
         assert!(svg.contains("<svg"));
+    }
+
+    #[test]
+    fn unsupported_image_thumbnail_falls_back_to_svg_placeholder_without_ffmpeg() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let input = tempdir.path().join("input.heic");
+        let output = tempdir.path().join("thumb.webp");
+        std::fs::write(&input, b"not decoded by image crate").expect("write input");
+
+        let actual = generate_thumbnail(&input, "image/heic", &output, 64, false, false)
+            .expect("fallback thumbnail");
+
+        assert_eq!(actual.extension().and_then(|ext| ext.to_str()), Some("svg"));
+        assert!(actual.exists());
+        assert!(!output.exists());
     }
 
     #[test]

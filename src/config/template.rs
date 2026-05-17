@@ -1,5 +1,5 @@
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub(super) fn settings_template(secret: &str) -> String {
     format!(
         r#"# RustChan settings.toml
@@ -17,6 +17,10 @@ site_subtitle = "select board to proceed"
 # Enable per-browser homepage board-card badges for newly created threads.
 # This seeds the DB on first run; after that Admin -> Site Settings owns the live value.
 homepage_new_thread_badges_enabled = true
+
+# Enable per-browser homepage board-card badges for new replies on existing threads.
+# This seeds the DB on first run; after that Admin -> Site Settings owns the live value.
+homepage_new_reply_badges_enabled = true
 
 # Enable per-browser board/catalog thread-card badges for new replies.
 # This seeds the DB on first run; after that Admin -> Site Settings owns the live value.
@@ -43,29 +47,6 @@ trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
 # Public hostnames accepted by the HTTP -> HTTPS redirect listener.
 # Usually only needed when binding to 0.0.0.0/:: with a manual certificate.
 # public_hosts = ["example.com", "www.example.com"]
-
-# Built-in HTTPS listener. On first run a self-signed localhost certificate is
-# generated automatically in rustchan-data/runtime/tls/dev/.
-# For production, configure [tls.acme] (Let's Encrypt) or [tls.manual_cert].
-[tls]
-enabled = false
-port = 8443
-redirect_http = false
-http_port = 8080
-
-# Let's Encrypt via ACME (requires the tls-acme Cargo feature):
-# [tls.acme]
-# enabled = true
-# staging = true
-# domains = ["example.com"]
-# email = "admin@example.com"
-# cache_dir = "runtime/tls/acme"
-
-# Manual certificate files:
-# [tls.manual_cert]
-# cert_path = "runtime/tls/fullchain.pem"
-# key_path = "runtime/tls/privkey.pem"
-
 
 # ── Upload limits ─────────────────────────────────────────────────────────────
 # Maximum size for image uploads in MiB (jpg, png, gif, webp, heic).
@@ -132,6 +113,13 @@ ffmpeg_timeout_secs = 600
 # Optional explicit ffprobe binary path. Leave unset to use PATH lookup.
 # ffprobe_path = "/usr/local/bin/ffprobe"
 
+# Automatically prune oldest full-size post media when active stored post media
+# exceeds the configured byte cap. Thumbnails are kept when possible so old
+# posts remain browsable. 0 means unset/no pruning.
+# After first startup, Admin -> Media Settings owns the live values.
+media_auto_prune_enabled = false
+media_max_active_content_size_bytes = 0
+
 
 # ── Maintenance / performance ────────────────────────────────────────────────
 # How often (in seconds) to run PRAGMA wal_checkpoint(TRUNCATE) to keep
@@ -155,6 +143,12 @@ auto_full_backup_copies_to_keep = 1
 # Whether automatic full-site backups include Tor hidden service identity keys.
 # Anyone with these keys can impersonate the onion service. Default: true.
 auto_full_backup_include_tor_hidden_service_keys = true
+
+# Automatic full-site backup output mode: "directory" or "split_zip".
+auto_full_backup_storage_mode = "directory"
+
+# Split ZIP part size in GiB when automatic backups use split_zip output.
+auto_full_backup_split_zip_part_size_gib = 4
 
 # How often (in hours) to purge vote records for polls that have expired.
 # The poll question and options are kept for display; only per-IP vote rows
@@ -202,6 +196,30 @@ db_pool_size = 8
 # Pre-shared API key for /chan/refresh and /chan/poll.
 # Must be at least 32 characters. Leave unset to disable those endpoints.
 # chan_net_api_key = "replace-with-a-long-random-secret"
+
+
+# ── TLS / HTTPS ───────────────────────────────────────────────────────────────
+# Built-in HTTPS listener. On first run a self-signed localhost certificate is
+# generated automatically in rustchan-data/runtime/tls/dev/.
+# For production, configure [tls.acme] (Let's Encrypt) or [tls.manual_cert].
+[tls]
+enabled = false
+port = 8443
+redirect_http = false
+http_port = 8080
+
+# Let's Encrypt via ACME (requires the tls-acme Cargo feature):
+# [tls.acme]
+# enabled = true
+# staging = true
+# domains = ["example.com"]
+# email = "admin@example.com"
+# cache_dir = "runtime/tls/acme"
+
+# Manual certificate files:
+# [tls.manual_cert]
+# cert_path = "runtime/tls/fullchain.pem"
+# key_path = "runtime/tls/privkey.pem"
 "#
     )
 }

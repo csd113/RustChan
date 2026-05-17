@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Result of probing for a tool at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,6 +11,19 @@ pub enum ToolStatus {
     /// Tool is ready for use immediately (e.g. ffmpeg).
     Available,
     Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebmEncoderStatus {
+    pub vp9: bool,
+    pub opus: bool,
+}
+
+impl WebmEncoderStatus {
+    #[must_use]
+    pub const fn is_available(self) -> bool {
+        self.vp9 && self.opus
+    }
 }
 
 // ─── ffmpeg ───────────────────────────────────────────────────────────────────
@@ -30,7 +44,7 @@ pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
         crate::logging::console_print_raw(
             "  Install ffmpeg from: https://ffmpeg.org/download.html\n\n",
         );
-        std::process::exit(1);
+        ToolStatus::Missing
     } else {
         tracing::warn!(
             target: "rustchan::detect",
@@ -169,25 +183,56 @@ fn webp_install_hint() -> String {
 }
 
 fn probe_tool(program: &str) -> bool {
-    Command::new(program)
-        .arg("-version")
+    probe_tool_with_args(program, &["-version"])
+}
+
+fn probe_tool_with_args(program: &str, args: &[&str]) -> bool {
+    let mut command = Command::new(program);
+    command
+        .args(args)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+        .stderr(Stdio::null());
+    status_with_timeout(&mut command, Duration::from_secs(10))
+        .is_some_and(|status| status.success())
+}
+
+fn status_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Option<std::process::ExitStatus> {
+    let mut child = command.spawn().ok()?;
+    let started = Instant::now();
+
+    loop {
+        if let Some(status) = child.try_wait().ok()? {
+            return Some(status);
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Probe whether the detected ffmpeg has `libvpx-vp9` + `libopus` compiled in.
-pub fn detect_webm_encoder(ffmpeg_ok: bool) -> bool {
+pub fn detect_webm_encoder(ffmpeg_ok: bool) -> WebmEncoderStatus {
     if !ffmpeg_ok {
-        return false;
+        return WebmEncoderStatus {
+            vp9: false,
+            opus: false,
+        };
     }
 
     let has_vp9 = crate::media::ffmpeg::check_vp9_encoder();
     let has_opus = crate::media::ffmpeg::check_opus_encoder();
-    let has_webm = has_vp9 && has_opus;
+    let status = WebmEncoderStatus {
+        vp9: has_vp9,
+        opus: has_opus,
+    };
 
-    if has_webm {
+    if status.is_available() {
         let profile = crate::media::ffmpeg::vp9_encoding_profile();
         tracing::info!(
             target: "rustchan::detect",
@@ -212,7 +257,7 @@ pub fn detect_webm_encoder(ffmpeg_ok: bool) -> bool {
         }
     }
 
-    has_webm
+    status
 }
 
 fn webm_install_hint(has_vp9: bool, has_opus: bool) -> String {
@@ -267,8 +312,7 @@ fn webm_install_hint(has_vp9: bool, has_opus: bool) -> String {
 
 use arti_client::{config::TorClientConfigBuilder, TorClient};
 use dashmap::DashMap;
-use futures::StreamExt;
-use rand_core::{OsRng, RngCore};
+use futures::StreamExt as _;
 use std::sync::LazyLock;
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
@@ -350,7 +394,7 @@ pub fn detect_tor(
             );
             let run_start = std::time::Instant::now();
             let result = tokio::select! {
-                r = run_arti(data_dir.clone(), bind_port, onion_address.clone()) => r,
+                r = run_arti(data_dir.clone(), bind_port, Arc::clone(&onion_address)) => r,
                 () = cancel.cancelled() => {
                     tracing::info!(target: "rustchan::detect", "Tor: shutdown signal — exiting");
                     *onion_address.write().await = None;
@@ -431,7 +475,7 @@ async fn run_arti(
     let tor_client =
         tokio::time::timeout(bootstrap_timeout, TorClient::create_bootstrapped(config))
             .await
-            .map_err(|_| {
+            .map_err(|_error| {
                 format!(
                     "Tor bootstrap timed out after {} s — check network connectivity \
              (increase tor_bootstrap_timeout_secs in settings.toml for censored networks)",
@@ -557,7 +601,7 @@ async fn publish_onion_address(onion_name: &str, onion_address: &RwLock<Option<S
     tracing::debug!(target: "rustchan::detect", "Tor: hidden service active");
     tracing::info!(target: "rustchan::detect", "Tor: hidden service active");
 
-    *onion_address.write().await = Some(onion_name.to_string());
+    *onion_address.write().await = Some(onion_name.to_owned());
 
     // When the full-screen TUI is active the dashboard shows the onion address
     // on its next render tick.  Printing the banner box here would corrupt the
@@ -596,7 +640,7 @@ async fn proxy_tor_stream(
         TcpStream::connect(local_addr),
     )
     .await
-    .map_err(|_| "timed out connecting to local HTTP server")?
+    .map_err(|_error| "timed out connecting to local HTTP server")?
     .map_err(|e| format!("local TCP connect failed: {e}"))?;
     // local port. axum's ConnectInfo sees this port as the peer port on the
     // incoming socket, so ClientIp / extract_ip can retrieve the token without
@@ -604,7 +648,10 @@ async fn proxy_tor_stream(
     let local_port = local.local_addr().map_or(0, |a| a.port());
     let token: Arc<str> = {
         let mut bytes = [0u8; 16];
-        OsRng.fill_bytes(&mut bytes);
+        crate::utils::crypto::fill_os_random_or_exit(
+            &mut bytes,
+            "generating a Tor stream isolation token",
+        );
         Arc::from(format!("tor:{}", hex::encode(bytes)).as_str())
     };
     // _guard removes the map entry when this task ends (connection closed or error).
@@ -628,7 +675,7 @@ async fn proxy_tor_stream(
 ///
 /// Format: `base32( pubkey || sha3_256(".onion checksum" || pubkey || version)[..2] || version )`
 fn hsid_to_onion_address(hsid: HsId) -> String {
-    use sha3::{Digest, Sha3_256};
+    use sha3::{Digest as _, Sha3_256};
 
     let pubkey: &[u8; 32] = hsid.as_ref();
     let version: u8 = 3;

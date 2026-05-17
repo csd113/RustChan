@@ -40,7 +40,7 @@ pub async fn file_report(
         .collect::<String>();
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_raw);
 
     let board_raw_closure = board_raw.clone();

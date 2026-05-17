@@ -38,25 +38,36 @@ pub struct BoardSettingsForm {
     csrf: Option<String>,
 }
 
-fn parse_board_upload_limit_bytes(
-    raw_value: Option<&str>,
-    fallback_bytes: i64,
-    global_max_bytes: usize,
-) -> Result<i64> {
+fn parse_board_upload_limit_bytes(raw_value: Option<&str>, fallback_bytes: i64) -> Result<i64> {
     const MIB: i64 = 1024 * 1024;
+    // Deliberate site maximum for each per-board media cap. Aggregate public
+    // multipart limits still bound a whole request separately.
+    const SITE_MAX_BOARD_UPLOAD_CAP_MB: i64 = 512;
 
     let fallback_mb = (fallback_bytes / MIB).max(1);
-    let parsed_mb = raw_value
-        .and_then(|value| value.trim().parse::<i64>().ok())
-        .unwrap_or(fallback_mb);
-    let global_max_mb = i64::try_from(global_max_bytes / (1024 * 1024)).map_err(|_| {
-        AppError::Internal(anyhow::anyhow!("Global upload limit does not fit in i64"))
-    })?;
-    let clamped_mb = parsed_mb.clamp(1, global_max_mb.max(1));
+    let parsed_mb = match raw_value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => value.parse::<i64>().map_err(|_error| {
+            AppError::BadRequest(
+                "Board upload size limits must be positive whole MiB values.".into(),
+            )
+        })?,
+        None => fallback_mb,
+    };
+    if parsed_mb <= 0 {
+        return Err(AppError::BadRequest(
+            "Board upload size limits must be at least 1 MiB.".into(),
+        ));
+    }
 
-    clamped_mb
+    if parsed_mb > SITE_MAX_BOARD_UPLOAD_CAP_MB {
+        return Err(AppError::BadRequest(format!(
+            "Board upload size limits must be {SITE_MAX_BOARD_UPLOAD_CAP_MB} MiB or less."
+        )));
+    }
+
+    parsed_mb
         .checked_mul(MIB)
-        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Board upload limit overflowed i64")))
+        .ok_or_else(|| AppError::BadRequest("Board upload size limit is too large.".into()))
 }
 
 fn resolve_board_access_password_hash(
@@ -81,7 +92,7 @@ fn resolve_board_access_password_hash(
         hash_password(submitted_password)?
     };
 
-    if access_mode.is_password_protected() && access_password_hash.is_empty() {
+    if access_mode.requires_post_password() && access_password_hash.is_empty() {
         return Err(AppError::BadRequest(
             "Password-protected boards require a saved password. Enter a new board password or switch access mode to Public before removing it.".into(),
         ));
@@ -97,9 +108,7 @@ pub async fn update_board_settings(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<BoardSettingsForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let bump_limit = form
@@ -176,17 +185,14 @@ pub async fn update_board_settings(
             let max_image_size = parse_board_upload_limit_bytes(
                 form.max_image_size_mb.as_deref(),
                 current_board.max_image_size,
-                CONFIG.max_image_size,
             )?;
             let max_video_size = parse_board_upload_limit_bytes(
                 form.max_video_size_mb.as_deref(),
                 current_board.max_video_size,
-                CONFIG.max_video_size,
             )?;
             let max_audio_size = parse_board_upload_limit_bytes(
                 form.max_audio_size_mb.as_deref(),
                 current_board.max_audio_size,
-                CONFIG.max_audio_size,
             )?;
             db::update_board_settings(
                 &mut conn,

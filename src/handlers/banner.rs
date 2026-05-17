@@ -8,15 +8,15 @@ use crate::{
 use axum::{
     extract::{Path, Query, Request, State},
     http::{header, HeaderValue, StatusCode},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
-use tower::ServiceExt;
+use tower::ServiceExt as _;
 use tower_http::services::ServeFile;
 
-const VERSIONED_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
-const UNVERSIONED_CACHE_CONTROL: &str = "no-cache, must-revalidate";
+const VERSIONED_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA;
+const UNVERSIONED_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_STATIC_SHORT;
 
 #[derive(Deserialize, Default)]
 pub struct ExternalBannerQuery {
@@ -28,7 +28,7 @@ fn load_accessible_banner_asset(
     banner_id: i64,
     jar: &CookieJar,
     admin_session_id: Option<&str>,
-) -> Result<crate::models::BannerAsset> {
+) -> Result<(crate::models::BannerAsset, bool)> {
     let asset = db::get_banner_asset(conn, banner_id)?
         .ok_or_else(|| AppError::NotFound("Banner not found.".into()))?;
     if asset.scope == crate::models::BannerScope::Board {
@@ -46,8 +46,12 @@ fn load_accessible_banner_asset(
         if !access_context.can_view {
             return Err(AppError::Forbidden("Banner is not available.".into()));
         }
+        return Ok((
+            asset,
+            access_context.board.access_mode.requires_view_password(),
+        ));
     }
-    Ok(asset)
+    Ok((asset, false))
 }
 
 pub async fn serve_banner_asset(
@@ -62,19 +66,19 @@ pub async fn serve_banner_asset(
         .is_some_and(|query| query.split('&').any(|part| part.starts_with("v=")));
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
 
     let asset = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let jar = jar.clone();
-        move || -> Result<crate::models::BannerAsset> {
+        move || -> Result<(crate::models::BannerAsset, bool)> {
             let conn = pool.get()?;
             load_accessible_banner_asset(&conn, banner_id, &jar, admin_session_id.as_deref())
         }
     })
     .await;
 
-    let asset = match asset {
+    let (asset, is_protected_board_asset) = match asset {
         Ok(Ok(asset)) => asset,
         Ok(Err(AppError::NotFound(_))) => return StatusCode::NOT_FOUND.into_response(),
         Ok(Err(AppError::Forbidden(_))) => return StatusCode::FORBIDDEN.into_response(),
@@ -84,9 +88,22 @@ pub async fn serve_banner_asset(
     let Ok(path) = banner::banner_asset_path(&asset) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if !path.exists() || !path.is_file() {
+    let root = match asset.scope {
+        crate::models::BannerScope::Global => banner::global_banner_dir(),
+        crate::models::BannerScope::Home => banner::home_banner_dir(),
+        crate::models::BannerScope::Board => {
+            let Some(board_short) = asset.board_short.as_deref() else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            banner::board_banner_dir(board_short)
+        }
+    };
+    let Ok(path) = crate::utils::fs_security::canonical_child_of(&root, &path).and_then(|path| {
+        crate::utils::fs_security::assert_regular_file_no_symlink(&path)?;
+        Ok(path)
+    }) else {
         return StatusCode::NOT_FOUND.into_response();
-    }
+    };
     let content_type = banner::banner_asset_content_type(&path);
 
     let req = req.map(|_| axum::body::Body::empty());
@@ -96,13 +113,15 @@ pub async fn serve_banner_asset(
             let mut resp = resp.map(axum::body::Body::new);
             resp.headers_mut()
                 .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-            resp.headers_mut().insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static(if has_version {
+            crate::cache::set_cache_control(
+                resp.headers_mut(),
+                if is_protected_board_asset {
+                    crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE
+                } else if has_version {
                     VERSIONED_CACHE_CONTROL
                 } else {
                     UNVERSIONED_CACHE_CONTROL
-                }),
+                },
             );
             resp.into_response()
         },
@@ -117,7 +136,7 @@ pub async fn external_banner_warning_page(
 ) -> Result<Response> {
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
     let return_to = banner::safe_return_to(query.return_to.as_deref().unwrap_or("/"));
@@ -132,7 +151,7 @@ pub async fn external_banner_warning_page(
                     "External banner links are disabled.".into(),
                 ));
             }
-            let asset =
+            let (asset, _) =
                 load_accessible_banner_asset(&conn, banner_id, &jar, admin_session_id.as_deref())?;
             if asset.target_type != crate::models::BannerTargetType::ExternalUrl
                 || banner::normalize_external_url(&asset.target_value).is_none()
@@ -174,7 +193,12 @@ pub async fn external_banner_warning_page(
         false,
         "/banner/external",
     );
-    Ok((jar, Html(html)).into_response())
+    let mut response = Html(html).into_response();
+    crate::cache::set_cache_control(
+        response.headers_mut(),
+        crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE,
+    );
+    Ok((jar, response).into_response())
 }
 
 pub async fn external_banner_continue(
@@ -185,7 +209,7 @@ pub async fn external_banner_continue(
 ) -> Result<Response> {
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let target = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let jar = jar.clone();
@@ -197,7 +221,7 @@ pub async fn external_banner_continue(
                     "External banner links are disabled.".into(),
                 ));
             }
-            let asset =
+            let (asset, _) =
                 load_accessible_banner_asset(&conn, banner_id, &jar, admin_session_id.as_deref())?;
             if asset.target_type != crate::models::BannerTargetType::ExternalUrl {
                 return Err(AppError::BadRequest("Banner is not external.".into()));
@@ -305,6 +329,60 @@ mod tests {
         (banner_id, path)
     }
 
+    fn insert_existing_protected_board_banner(
+        state: &crate::middleware::AppState,
+    ) -> (i64, std::path::PathBuf, String) {
+        let conn = state.db.get().expect("db connection");
+        let board_id =
+            crate::db::create_board(&conn, "securebanner", "Secret", "", false).expect("board");
+        let password_hash =
+            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+        conn.execute(
+            "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE id = ?3",
+            rusqlite::params!["view_password", password_hash, board_id],
+        )
+        .expect("protect board");
+        let admin_hash = crate::utils::crypto::hash_password("hunter2").expect("hash admin");
+        let admin_id = crate::db::create_admin(&conn, "admin", &admin_hash).expect("admin");
+        crate::db::create_session(&conn, "banner-session", admin_id, i64::MAX).expect("session");
+
+        let storage_key = uuid::Uuid::new_v4().simple().to_string();
+        let path = crate::banner::banner_storage_path(
+            crate::models::BannerScope::Board,
+            Some("securebanner"),
+            &storage_key,
+        )
+        .expect("banner path");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create banner dir");
+        }
+        std::fs::write(&path, b"banner bytes").expect("write banner file");
+        let banner_id = crate::db::insert_banner_asset(
+            &conn,
+            crate::models::BannerScope::Board,
+            Some(board_id),
+            &storage_key,
+            468,
+            60,
+            12,
+            true,
+            1,
+            crate::models::BannerTargetType::None,
+            "",
+            true,
+            true,
+        )
+        .expect("insert banner asset");
+        (
+            banner_id,
+            path,
+            format!(
+                "{}=banner-session",
+                crate::handlers::board::ADMIN_SESSION_COOKIE
+            ),
+        )
+    }
+
     #[tokio::test]
     async fn serve_banner_asset_returns_not_found_for_missing_banner_id() {
         let router = Router::new()
@@ -389,6 +467,37 @@ mod tests {
                 .get(header::CACHE_CONTROL)
                 .and_then(|value| value.to_str().ok()),
             Some(super::VERSIONED_CACHE_CONTROL)
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn protected_board_banner_asset_is_not_public_cacheable() {
+        let state = crate::test_support::app_state();
+        let (banner_id, path, cookie) = insert_existing_protected_board_banner(&state);
+        let router = Router::new()
+            .route("/banner/assets/{id}", get(super::serve_banner_asset))
+            .with_state(state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/banner/assets/{banner_id}?v=123"))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE)
         );
 
         let _ = std::fs::remove_file(path);

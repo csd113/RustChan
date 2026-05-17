@@ -8,22 +8,24 @@ use super::*;
 
 // ─── POST /:board/ — create new thread ───────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub async fn create_thread(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
     multipart: Multipart,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
+    let user_preferences = user_preferences_from_jar(&jar);
     let xhr_request = is_xml_http_request(&req_headers);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
-    match board_access_preflight(
+    let access_context = match board_access_preflight(
         &state,
         &board_short,
         admin_session_id.clone(),
@@ -33,15 +35,26 @@ pub async fn create_thread(
     )
     .await?
     {
-        BoardAccessDecision::Allowed(_) => {}
+        BoardAccessDecision::Allowed(context) => context,
         BoardAccessDecision::Denied(denial) => {
             let redirect_to = unlock_redirect_url(&board_short, &denial.return_to);
             return Ok(Redirect::to(&redirect_to).into_response());
         }
-    }
+    };
 
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    let form = parse_post_multipart(multipart, csrf_cookie.as_deref()).await?;
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_owned());
+    let form = tokio::time::timeout(
+        crate::handlers::PUBLIC_UPLOAD_TIMEOUT,
+        parse_post_multipart(
+            multipart,
+            csrf_cookie.as_deref(),
+            access_context.board.max_image_size_bytes(),
+            access_context.board.max_video_size_bytes(),
+            access_context.board.max_audio_size_bytes(),
+        ),
+    )
+    .await
+    .map_err(|_error| AppError::BadRequest("Upload timed out. Please try again.".into()))??;
 
     if !form.csrf_verified {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
@@ -65,8 +78,9 @@ pub async fn create_thread(
     let identity_key = identity_key(&client_ip, &jar);
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let job_queue = state.job_queue.clone();
+        let job_queue = std::sync::Arc::clone(&state.job_queue);
         let ffmpeg_available = state.ffmpeg_available;
+        let ffprobe_available = state.ffprobe_available;
         let ffmpeg_webp_available = state.ffmpeg_webp_available;
         move || -> Result<posting::SubmitPostResult> {
             let conn = pool.get()?;
@@ -95,10 +109,8 @@ pub async fn create_thread(
                     audio_file_data: form.audio_file,
                     upload_dir: CONFIG.upload_dir.clone(),
                     thumb_size: CONFIG.thumb_size,
-                    max_image_size: CONFIG.max_image_size,
-                    max_video_size: CONFIG.max_video_size,
-                    max_audio_size: CONFIG.max_audio_size,
                     ffmpeg_available,
+                    ffprobe_available,
                     ffmpeg_webp_available,
                 },
             )
@@ -161,6 +173,7 @@ pub async fn create_thread(
                     &banner_html,
                     current_theme.as_deref(),
                     true,
+                    user_preferences,
                 ))
             })
             .await
@@ -178,13 +191,14 @@ pub async fn create_thread(
         }
     };
 
-    let jar = remember_owned_post_until(
+    let jar = remember_owned_post_until_with_secure(
         jar,
         &submit_result.board_short,
         submit_result.thread_id,
         submit_result.post_id,
         &submit_result.deletion_token,
         submit_result.created_at + SELF_DELETE_WINDOW_SECS,
+        should_set_public_secure_cookie(&req_headers, Some(peer)),
     );
 
     if xhr_request {

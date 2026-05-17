@@ -2,7 +2,7 @@
 
 Current setup and deployment guide for Linux, macOS, and Windows.
 
-Current development version: `1.1.6-development`.
+Current development version: `1.2.0`.
 
 This guide reflects the current RustChan architecture:
 
@@ -265,7 +265,7 @@ rustchan-data/
 
 ## Banner Artwork Requirements
 
-RustChan `1.1.6-development` adds board banners plus a separate home-page announcement banner.
+RustChan `1.2.0` includes board banners plus a separate home-page announcement banner.
 
 Banner upload requirements:
 

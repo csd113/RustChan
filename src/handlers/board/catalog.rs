@@ -8,6 +8,7 @@ type CatalogLoadResult = (
     crate::banner::BannerSelection,
     bool,
     bool,
+    bool,
     Option<(i64, i64)>,
 );
 
@@ -19,11 +20,12 @@ pub async fn catalog(
     req_headers: HeaderMap,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
+    let user_preferences = user_preferences_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
     let viewer_key = viewer_preference_key(&client_ip, &jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
     let access_context = match board_access_preflight(
         &state,
@@ -95,7 +97,8 @@ pub async fn catalog(
                 &format!("/{board_short}/catalog"),
             )?;
             let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
-            let homepage_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
+            let homepage_thread_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
+            let homepage_reply_badges_enabled = db::get_homepage_new_reply_badges_enabled(&conn);
             Ok((
                 (
                     board.clone(),
@@ -106,8 +109,9 @@ pub async fn catalog(
                 ),
                 banner_selection,
                 thread_badges_enabled,
-                homepage_badges_enabled,
-                if homepage_badges_enabled {
+                homepage_thread_badges_enabled,
+                homepage_reply_badges_enabled,
+                if homepage_thread_badges_enabled {
                     db::get_latest_visible_thread_marker(&conn, board.id)?
                 } else {
                     None
@@ -123,10 +127,11 @@ pub async fn catalog(
         (board, threads, pinned_ids, hidden_count, etag_signature),
         banner_selection,
         thread_badges_enabled,
-        homepage_badges_enabled,
+        homepage_thread_badges_enabled,
+        homepage_reply_badges_enabled,
         latest_thread_marker,
     ) = catalog_data;
-    let thread_badges = if thread_badges_enabled {
+    let thread_badges = if thread_badges_enabled && user_preferences.show_activity_badges {
         thread_unread_counts(&threads, &thread_activity_markers)
     } else {
         HashMap::new()
@@ -148,6 +153,10 @@ pub async fn catalog(
     } else {
         "-cg0"
     };
+    let theme_tag = crate::templates::page_theme_etag_fragment(
+        current_theme.as_deref(),
+        Some(&board.default_theme),
+    );
     let activity_tag = if thread_badges_enabled {
         let mut badge_parts = thread_badges
             .iter()
@@ -159,15 +168,16 @@ pub async fn catalog(
             crate::utils::crypto::sha256_hex(badge_parts.join("|").as_bytes())
         )
     } else {
-        "-na0".to_string()
+        "-na0".to_owned()
     };
     let etag = format!(
-        "\"{etag_signature}-catalog{admin_tag}{post_tag}{greentext_tag}-b{}{activity_tag}\"",
-        banner_selection.etag_fragment
+        "\"{etag_signature}-catalog{admin_tag}{post_tag}{greentext_tag}-t{theme_tag}-b{}{activity_tag}-{}\"",
+        banner_selection.etag_fragment,
+        user_preferences.etag_fragment()
     );
     let (latest_created_at, latest_thread_id) =
         latest_visible_thread_marker_tuple(latest_thread_marker);
-    let jar = if thread_badges_enabled {
+    let jar = if thread_badges_enabled || homepage_reply_badges_enabled {
         // Seed only the highest-priority catalog cards we can actually retain in
         // the activity cookie, so the persisted baseline matches the visible
         // ordering instead of being truncated later by cookie serialization.
@@ -175,11 +185,11 @@ pub async fn catalog(
             .iter()
             .take(THREAD_ACTIVITY_MARKER_LIMIT)
             .map(|thread| (thread.id, thread.reply_count));
-        remember_thread_activity_defaults(jar, defaults)
+        remember_visible_thread_activity(jar, defaults)
     } else {
         jar
     };
-    let jar = if homepage_badges_enabled {
+    let jar = if homepage_thread_badges_enabled {
         remember_board_activity(jar, board.id, latest_created_at, latest_thread_id)
     } else {
         jar
@@ -189,7 +199,12 @@ pub async fn catalog(
         .get("if-none-match")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if client_etag == etag && !banner_selection.disable_not_modified_short_circuit {
+    let activity_markers_enabled =
+        thread_badges_enabled || homepage_thread_badges_enabled || homepage_reply_badges_enabled;
+    if client_etag == etag
+        && !banner_selection.disable_not_modified_short_circuit
+        && !activity_markers_enabled
+    {
         // StatusCode::NOT_MODIFIED and Body::empty() are always valid constants;
         // this builder call is infallible.
         let mut resp = axum::http::Response::builder()
@@ -203,8 +218,9 @@ pub async fn catalog(
         );
         resp.headers_mut().insert(
             header::CACHE_CONTROL,
-            HeaderValue::from_static(HTML_CACHE_CONTROL),
+            HeaderValue::from_static(activity_html_cache_control(activity_markers_enabled)),
         );
+        crate::cache::insert_vary_cookie(resp.headers_mut());
         return Ok((jar, resp).into_response());
     }
 
@@ -225,11 +241,12 @@ pub async fn catalog(
         access_context.is_admin,
         admin_csrf.as_deref(),
         &thread_badges,
-        thread_badges_enabled,
+        thread_badges_enabled && user_preferences.show_activity_badges,
         &banner_html,
         current_theme.as_deref(),
         board.collapse_greentext,
         can_post,
+        user_preferences,
     );
     let mut resp = Html(html).into_response();
     if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
@@ -237,8 +254,9 @@ pub async fn catalog(
     }
     resp.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static(HTML_CACHE_CONTROL),
+        HeaderValue::from_static(activity_html_cache_control(activity_markers_enabled)),
     );
+    crate::cache::insert_vary_cookie(resp.headers_mut());
     Ok((jar, resp).into_response())
 }
 
@@ -249,11 +267,12 @@ pub async fn hidden_threads(
     jar: CookieJar,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
+    let user_preferences = user_preferences_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
     let viewer_key = viewer_preference_key(&client_ip, &jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
     let access_context = match board_access_preflight(
         &state,
@@ -307,6 +326,7 @@ pub async fn hidden_threads(
                 current_theme.as_deref(),
                 board.collapse_greentext,
                 access_context.can_post,
+                user_preferences,
             ))
         }
     })
@@ -329,7 +349,7 @@ pub async fn board_archive(
     let (jar, csrf) = ensure_csrf(jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
 
     let page: i64 = params
@@ -411,10 +431,11 @@ pub async fn search(
 ) -> Result<Response> {
     const SEARCH_PER_PAGE: i64 = 20;
     let current_theme = current_theme_from_jar(&jar);
+    let user_preferences = user_preferences_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
 
     // Cap query length to prevent excessively large LIKE pattern scans.
@@ -473,11 +494,14 @@ pub async fn search(
                 all_boards.as_slice(),
                 current_theme.as_deref(),
                 board.collapse_greentext,
+                user_preferences,
             ))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(html)).into_response())
+    let mut response = Html(html).into_response();
+    crate::cache::insert_vary_cookie(response.headers_mut());
+    Ok((jar, response).into_response())
 }

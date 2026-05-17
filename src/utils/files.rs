@@ -7,7 +7,7 @@ mod storage;
 
 pub use mime::fallback_download_mime_type;
 pub use storage::{
-    classify_upload_mime, delete_file, delete_file_checked, format_file_size, mime_to_ext_pub,
+    classify_upload_mime, delete_file_checked, format_file_size, mime_to_ext_pub,
     save_audio_with_image_thumb_from_path, save_upload_from_path, validate_upload_from_path,
     SaveUploadOptions, UploadedFile,
 };

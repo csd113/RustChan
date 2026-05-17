@@ -6,7 +6,7 @@ use rustls_acme::AcmeAcceptor;
 use std::{fmt::Debug, net::IpAddr, path::Path, sync::Arc};
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::PermissionsExt as _;
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -106,7 +106,7 @@ pub fn build_acme_acceptor(
     // The `acceptor()` method is marked deprecated in favor of framework
     // helpers (e.g. `axum_acceptor`) or the high-level API, but it remains
     // the supported path for per-acceptor / manual rustls setups.
-    #[allow(deprecated)]
+    #[expect(deprecated)]
     let acme_acceptor = Arc::new(state.acceptor());
 
     // Spawn the event loop. This task must stay alive for the lifetime of

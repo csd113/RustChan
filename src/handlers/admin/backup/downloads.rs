@@ -52,9 +52,12 @@ pub(super) fn prune_stale_temp_board_downloads() {
         if !is_zip {
             continue;
         }
-        let Ok(meta) = entry.metadata() else {
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
             continue;
         };
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            continue;
+        }
         let Ok(modified) = meta.modified() else {
             continue;
         };
@@ -68,6 +71,18 @@ pub(super) fn prune_stale_temp_board_downloads() {
             }
         }
     }
+}
+
+fn safe_backup_file_path(root: &Path, filename: &str) -> Result<PathBuf> {
+    let path = root.join(filename);
+    if !path.exists() {
+        return Err(AppError::NotFound("Backup file not found.".into()));
+    }
+    let resolved = crate::utils::fs_security::canonical_child_of(root, &path)
+        .map_err(|error| AppError::BadRequest(format!("Backup file path is unsafe: {error}")))?;
+    crate::utils::fs_security::assert_regular_file_no_symlink(&resolved)
+        .map_err(|error| AppError::BadRequest(format!("Backup file path is unsafe: {error}")))?;
+    Ok(resolved)
 }
 
 struct TempFileStream {
@@ -107,6 +122,7 @@ impl Drop for TempFileStream {
 pub struct DownloadBackupQuery {
     cleanup: Option<String>,
     token: Option<String>,
+    part: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -123,11 +139,13 @@ pub async fn download_backup(
     Query(query): Query<DownloadBackupQuery>,
     axum::extract::Path((kind, filename)): axum::extract::Path<(String, String)>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
 
-    let safe_filename = sanitize_backup_zip_filename(&filename)?;
+    let safe_filename = if query.part.is_some() && matches!(kind.as_str(), "full" | "board") {
+        sanitize_saved_backup_ref(&filename)?
+    } else {
+        sanitize_backup_zip_filename(&filename)?
+    };
 
     match kind.as_str() {
         "temp-board" => {
@@ -166,6 +184,65 @@ pub async fn download_backup(
         _ => return Err(AppError::BadRequest("Unknown backup kind.".into())),
     }
 
+    if let Some(part_name) = query.part.as_deref() {
+        if !matches!(kind.as_str(), "full" | "board") {
+            return Err(AppError::BadRequest(
+                "Backup parts are not available for this download kind.".into(),
+            ));
+        }
+        let safe_part = sanitize_backup_zip_filename(part_name)?;
+        let backup_root = crate::config::backups_dir().join(&safe_filename);
+        let expected_scopes: &[v4::BackupScope] = match kind.as_str() {
+            "full" => &[v4::BackupScope::FullSite],
+            "board" => &[v4::BackupScope::Board],
+            _ => unreachable!("validated above"),
+        };
+        let verified = v4::verify_saved_v4_root(&backup_root, expected_scopes)?;
+        let part_filename = format!("parts/{safe_part}");
+        let part = verified
+            .manifest
+            .parts
+            .iter()
+            .find(|part| part.filename == part_filename)
+            .ok_or_else(|| AppError::NotFound("Backup part not found.".into()))?;
+        let path = backup_root.join(&part.filename);
+        let resolved = crate::utils::fs_security::canonical_child_of(&backup_root, &path).map_err(
+            |error| AppError::BadRequest(format!("Backup part path is unsafe: {error}")),
+        )?;
+        crate::utils::fs_security::assert_regular_file_no_symlink(&resolved).map_err(|error| {
+            AppError::BadRequest(format!("Backup part path is unsafe: {error}"))
+        })?;
+        let file_size = tokio::fs::metadata(&resolved)
+            .await
+            .map_err(|_error| AppError::NotFound("Backup part not found.".into()))?
+            .len();
+        if file_size != part.size {
+            return Err(AppError::BadRequest(
+                "Backup part size changed since verification.".into(),
+            ));
+        }
+        let file_sha256 = v4::sha256_hex_for_file(&resolved)?;
+        if file_sha256 != part.sha256 {
+            return Err(AppError::BadRequest(
+                "Backup part checksum changed since verification.".into(),
+            ));
+        }
+        let file = tokio::fs::File::open(&resolved)
+            .await
+            .map_err(|_error| AppError::NotFound("Backup part not found.".into()))?;
+        let body = axum::body::Body::from_stream(ReaderStream::new(file));
+        let disposition = format!("attachment; filename=\"{safe_part}\"");
+        return Ok((
+            [
+                (header::CONTENT_TYPE, "application/zip".to_owned()),
+                (header::CONTENT_DISPOSITION, disposition),
+                (header::CONTENT_LENGTH, file_size.to_string()),
+            ],
+            body,
+        )
+            .into_response());
+    }
+
     let backup_dir = match kind.as_str() {
         "full" => full_backup_dir(),
         "board" => board_backup_dir(),
@@ -173,16 +250,16 @@ pub async fn download_backup(
         _ => unreachable!("validated above"),
     };
 
-    let path = backup_dir.join(&safe_filename);
+    let path = safe_backup_file_path(&backup_dir, &safe_filename)?;
 
     let file_size = tokio::fs::metadata(&path)
         .await
-        .map_err(|_| AppError::NotFound("Backup file not found.".into()))?
+        .map_err(|_error| AppError::NotFound("Backup file not found.".into()))?
         .len();
 
     let file = tokio::fs::File::open(&path)
         .await
-        .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
+        .map_err(|_error| AppError::NotFound("Backup file not found.".into()))?;
     let cleanup_temp = kind == "temp-board" && query.cleanup.as_deref() == Some("1");
     let stream: Pin<
         Box<dyn Stream<Item = std::result::Result<axum::body::Bytes, std::io::Error>> + Send>,
@@ -196,7 +273,7 @@ pub async fn download_backup(
     let disposition = format!("attachment; filename=\"{safe_filename}\"");
     Ok((
         [
-            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (header::CONTENT_TYPE, "application/zip".to_owned()),
             (header::CONTENT_DISPOSITION, disposition),
             (header::CONTENT_LENGTH, file_size.to_string()),
         ],
@@ -209,9 +286,7 @@ pub async fn backup_progress_json(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
@@ -234,7 +309,7 @@ pub async fn backup_progress_json(
     );
 
     Ok((
-        [(header::CONTENT_TYPE, "application/json".to_string())],
+        [(header::CONTENT_TYPE, "application/json".to_owned())],
         json,
     )
         .into_response())
@@ -247,12 +322,10 @@ pub async fn delete_backup(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<DeleteBackupForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    let safe_filename = sanitize_backup_zip_filename(&form.filename)?;
+    let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
 
     let backup_dir = match form.kind.as_str() {
         "full" => full_backup_dir(),
@@ -271,9 +344,17 @@ pub async fn delete_backup(
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
 
-            let path = backup_dir.join(&safe_filename);
-            if path.exists() {
-                std::fs::remove_file(&path)
+            let v4_root = crate::config::backups_dir().join(&safe_filename);
+            let legacy_path = backup_dir.join(&safe_filename);
+            if v4_root.is_dir() {
+                super::listing::safe_saved_backup_dir_for_delete(&v4_root)?;
+                std::fs::remove_dir_all(&v4_root)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Delete backup: {e}")))?;
+                invalidate_backup_list_cache(&backup_dir, backup_kind);
+                tracing::info!(target: "admin", backup_ref = %safe_filename, "Backup directory deleted");
+            } else if legacy_path.exists() {
+                let legacy_path = safe_backup_file_path(&backup_dir, &safe_filename)?;
+                std::fs::remove_file(&legacy_path)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Delete backup: {e}")))?;
                 invalidate_backup_list_cache(&backup_dir, backup_kind);
                 tracing::info!(target: "admin", filename = %safe_filename, "Backup file deleted");
@@ -285,4 +366,103 @@ pub async fn delete_backup(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok(Redirect::to("/admin/panel?backup_deleted=1").into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_backup_file_path;
+    use crate::error::AppError;
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_backup_file_path_rejects_symlink_escape() {
+        use std::os::unix::fs as unix_fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let backup_root = temp_dir.path().join("backups");
+        let outside = temp_dir.path().join("outside.zip");
+        std::fs::create_dir_all(&backup_root).expect("create backup root");
+        std::fs::write(&outside, b"outside").expect("write outside file");
+        unix_fs::symlink(&outside, backup_root.join("backup.zip")).expect("symlink backup");
+
+        assert!(safe_backup_file_path(&backup_root, "backup.zip").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_backup_file_path_rejects_symlinked_parent_dir() {
+        use std::os::unix::fs as unix_fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let backup_root = temp_dir.path().join("backups");
+        let outside_dir = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&backup_root).expect("create backup root");
+        std::fs::create_dir_all(&outside_dir).expect("create outside dir");
+        std::fs::write(outside_dir.join("backup.zip"), b"outside").expect("write outside file");
+        unix_fs::symlink(&outside_dir, backup_root.join("linked")).expect("symlink parent dir");
+
+        assert!(safe_backup_file_path(&backup_root, "linked/backup.zip").is_err());
+    }
+
+    #[test]
+    fn safe_backup_file_path_rejects_traversal() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let backup_root = temp_dir.path().join("backups");
+        let outside = temp_dir.path().join("outside.zip");
+        std::fs::create_dir_all(&backup_root).expect("create backup root");
+        std::fs::write(&outside, b"outside").expect("write outside file");
+
+        assert!(safe_backup_file_path(&backup_root, "../outside.zip").is_err());
+    }
+
+    #[test]
+    fn safe_backup_file_path_rejects_absolute_path() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let backup_root = temp_dir.path().join("backups");
+        let outside = temp_dir.path().join("outside.zip");
+        std::fs::create_dir_all(&backup_root).expect("create backup root");
+        std::fs::write(&outside, b"outside").expect("write outside file");
+
+        assert!(safe_backup_file_path(&backup_root, &outside.display().to_string()).is_err());
+    }
+
+    #[test]
+    fn safe_backup_file_path_rejects_directory() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let backup_root = temp_dir.path().join("backups");
+        std::fs::create_dir_all(backup_root.join("backup.zip")).expect("create backup dir");
+
+        assert!(safe_backup_file_path(&backup_root, "backup.zip").is_err());
+    }
+
+    #[test]
+    fn safe_backup_file_path_reports_missing_file() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let backup_root = temp_dir.path().join("backups");
+        std::fs::create_dir_all(&backup_root).expect("create backup root");
+
+        let error =
+            safe_backup_file_path(&backup_root, "missing.zip").expect_err("missing backup file");
+
+        assert!(matches!(error, AppError::NotFound(_)));
+    }
+
+    #[test]
+    fn safe_backup_file_path_accepts_regular_child_file() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let backup_root = temp_dir.path().join("backups");
+        std::fs::create_dir_all(&backup_root).expect("create backup root");
+        std::fs::write(backup_root.join("backup.zip"), b"zip").expect("write backup");
+
+        let resolved =
+            safe_backup_file_path(&backup_root, "backup.zip").expect("regular child backup");
+
+        assert_eq!(
+            resolved,
+            backup_root
+                .join("backup.zip")
+                .canonicalize()
+                .expect("canonical backup")
+        );
+    }
 }

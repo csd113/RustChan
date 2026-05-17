@@ -1,5 +1,4 @@
 // chan_net/poll.rs — Federation incoming handler.
-// Fully implemented in Phase 5 (Step 5.1).
 //
 // POST /chan/poll drains RustWave's broadcast queue by fetching and importing
 // up to MAX_POLL_ITERATIONS (50) snapshots per call. Skips AppError::Conflict
@@ -11,9 +10,6 @@
 // Implementation note: the response body is always consumed via .bytes()
 // before any JSON inspection. Calling .json() and then .bytes() on the same
 // reqwest::Response would fail — the body stream is single-pass.
-//
-// Phase 8 fix: two AppError::Internal calls passed String values (via format!())
-// instead of anyhow::Error. Fixed by using anyhow::anyhow!() in both cases.
 
 use super::import::do_import;
 use super::refresh::HTTP_CLIENT;
@@ -63,7 +59,7 @@ pub async fn chan_poll(
             .get(axum::http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
-            .to_string();
+            .to_owned();
 
         // ── Consume body exactly once ─────────────────────────────────────
         // IMPORTANT: reqwest::Response body is a single-pass stream. We read

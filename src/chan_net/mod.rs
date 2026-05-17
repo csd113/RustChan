@@ -4,13 +4,11 @@
 // main forum port. Activated with the --chan-net CLI flag.
 //
 // Two independent layers:
-//   Layer 1 — Federation sync  (Phases 1–6): node-to-node ZIP exchange
-//   Layer 2 — RustWave gateway (Phase 7):    JSON command in, ZIP package out
+//   Layer 1 — Federation sync: node-to-node ZIP exchange
+//   Layer 2 — RustWave gateway: JSON command in, ZIP package out
 //
 // Rate-limit middleware is intentionally excluded — all traffic on this
 // listener is machine-to-machine.
-//
-// Step 1.4
 
 pub mod command;
 pub mod export;
@@ -85,13 +83,13 @@ impl IntoResponse for ChanError {
             AppError::InvalidMediaType(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg),
             AppError::DbBusy => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "Database busy — retry shortly.".to_string(),
+                "Database busy — retry shortly.".to_owned(),
             ),
             AppError::Internal(e) => {
                 tracing::error!("ChanNet internal error: {:?}", e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "An internal error occurred.".to_string(),
+                    "An internal error occurred.".to_owned(),
                 )
             }
             AppError::Tls(msg) => {

@@ -1,5 +1,5 @@
 use super::{escape_html, format_file_size, AdminPanelViewModel};
-use std::fmt::Write;
+use std::fmt::Write as _;
 
 struct MaintenanceSectionView<'a> {
     csrf_token: &'a str,
@@ -8,6 +8,9 @@ struct MaintenanceSectionView<'a> {
     tor_section: &'a str,
     ffmpeg_timeout_secs: u64,
     ffmpeg_timeout_help: &'a str,
+    media_auto_prune_enabled: bool,
+    media_max_active_content_size_value: u64,
+    media_max_active_content_size_unit: &'a str,
     media_detection_cards: &'a str,
     media_settings_open_attr: &'a str,
     database_maintenance_open_attr: &'a str,
@@ -53,6 +56,8 @@ old boards to prevent query performance degradation.
     let db_size_str = format_file_size(view.maintenance.db_size_bytes);
     let ffmpeg_timeout_help =
         crate::config::describe_timeout_secs(view.maintenance.ffmpeg_timeout_secs);
+    let (media_max_value, media_max_unit) =
+        media_size_input_parts(view.maintenance.media_max_active_content_size_bytes);
     let media_detection_cards = render_media_detection_cards(view);
     let section_view = MaintenanceSectionView {
         csrf_token: view.csrf_token,
@@ -61,11 +66,24 @@ old boards to prevent query performance degradation.
         tor_section: &tor_section,
         ffmpeg_timeout_secs: view.maintenance.ffmpeg_timeout_secs,
         ffmpeg_timeout_help: &ffmpeg_timeout_help,
+        media_auto_prune_enabled: view.maintenance.media_auto_prune_enabled,
+        media_max_active_content_size_value: media_max_value,
+        media_max_active_content_size_unit: media_max_unit,
         media_detection_cards: &media_detection_cards,
         media_settings_open_attr,
         database_maintenance_open_attr,
     };
     render_admin_maintenance_section(&section_view)
+}
+
+const fn media_size_input_parts(bytes: u64) -> (u64, &'static str) {
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    if bytes > 0 && bytes.is_multiple_of(GIB) {
+        (bytes / GIB, "gib")
+    } else {
+        (bytes / MIB, "mib")
+    }
 }
 
 fn render_media_detection_cards(view: &AdminPanelViewModel<'_>) -> String {
@@ -83,7 +101,7 @@ fn render_media_detection_cards(view: &AdminPanelViewModel<'_>) -> String {
     {
         format!("selected renderer: {pdf_renderer}")
     } else {
-        "using built-in generic PDF placeholder thumbnail".to_string()
+        "using built-in generic PDF placeholder thumbnail".to_owned()
     };
 
     let mut cards = String::new();
@@ -139,6 +157,7 @@ fn render_media_detection_cards(view: &AdminPanelViewModel<'_>) -> String {
     cards
 }
 
+#[expect(clippy::too_many_lines)]
 fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String {
     format!(
         r#"<div class="admin-panel-maintenance" id="maintenance">
@@ -156,6 +175,8 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
   </div>
   <div class="admin-detection-grid">{media_detection_cards}</div>
 </div>
+<form method="POST" action="/admin/media/settings" class="admin-site-settings-form">
+  <input type="hidden" name="_csrf" value="{csrf}">
 <div class="admin-subsection admin-subsection-tight">
   <div class="admin-card-header">
     <h3>// ffmpeg timeout</h3>
@@ -165,8 +186,6 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
   RustChan currently allows ffmpeg to run for <strong>{ffmpeg_timeout_help}</strong> before a long-running media job is killed.
   This primarily affects uploaded video re-encoding, especially slow MP4 to WebM/VP9 conversion.
 </p>
-<form method="POST" action="/admin/media/settings" class="admin-site-settings-form">
-  <input type="hidden" name="_csrf" value="{csrf}">
   <div class="board-settings-grid admin-settings-grid">
     <label title="Slow systems may need a higher value for ffmpeg video conversion jobs.">
       Video re-encoding timeout (seconds)
@@ -179,11 +198,36 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
     MP4 to WebM/VP9 encoding can be especially slow without hardware acceleration.
     If videos fail to convert because of timeouts, increase this value.
   </p>
-  <div class="board-settings-actions">
-    <button type="submit">save media settings</button>
-  </div>
-</form>
 </div>
+<div class="admin-subsection admin-subsection-tight">
+  <div class="admin-card-header">
+    <h3>// media pruning</h3>
+    <p>Delete oldest full-size post media when active stored media exceeds the configured cap. Thumbnails are kept where practical.</p>
+  </div>
+  <div class="board-settings-grid admin-settings-grid">
+    <label title="Set to 0 to leave the active media cap unset. When pruning is enabled, use at least 1 MiB.">
+      Maximum active content database/media size
+      <span class="admin-inline-control">
+        <input type="number" name="media_max_active_content_size" value="{media_max_active_content_size}" min="0" step="1" inputmode="numeric" class="admin-input-compact">
+        <select name="media_max_active_content_size_unit">
+          <option value="mib"{media_max_unit_mib_selected}>MiB</option>
+          <option value="gib"{media_max_unit_gib_selected}>GiB</option>
+          <option value="bytes"{media_max_unit_bytes_selected}>bytes</option>
+        </select>
+      </span>
+    </label>
+  </div>
+  <div class="board-settings-checks">
+    <label class="admin-inline-checkbox" title="Delete oldest full-size post media when active stored media exceeds the configured cap. Thumbnails are kept where practical.">
+      <input type="checkbox" name="media_auto_prune_enabled" value="1"{media_auto_prune_checked}>
+      Enable automatic active content pruning
+    </label>
+  </div>
+</div>
+<div class="board-settings-actions">
+  <button type="submit">save media settings</button>
+</div>
+</form>
 </div>
 </details>
 </section>
@@ -229,6 +273,27 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
         db_warn_banner = view.db_warn_banner,
         db_size_str = view.db_size_str,
         ffmpeg_timeout_secs = view.ffmpeg_timeout_secs,
+        media_auto_prune_checked = if view.media_auto_prune_enabled {
+            " checked"
+        } else {
+            ""
+        },
+        media_max_active_content_size = view.media_max_active_content_size_value,
+        media_max_unit_mib_selected = if view.media_max_active_content_size_unit == "mib" {
+            " selected"
+        } else {
+            ""
+        },
+        media_max_unit_gib_selected = if view.media_max_active_content_size_unit == "gib" {
+            " selected"
+        } else {
+            ""
+        },
+        media_max_unit_bytes_selected = if view.media_max_active_content_size_unit == "bytes" {
+            " selected"
+        } else {
+            ""
+        },
         ffmpeg_timeout_help = escape_html(view.ffmpeg_timeout_help),
         media_detection_cards = view.media_detection_cards,
         ffmpeg_timeout_min = crate::config::MIN_FFMPEG_TIMEOUT_SECS,

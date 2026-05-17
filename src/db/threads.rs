@@ -9,8 +9,8 @@
 //   prune_old_threads      → super::paths_safe_to_delete       (file safety)
 //
 use crate::models::Thread;
-use anyhow::{Context, Result};
-use rusqlite::{params, OptionalExtension};
+use anyhow::{Context as _, Result};
+use rusqlite::{params, OptionalExtension as _};
 
 pub struct PollInsert<'a> {
     pub question: &'a str,
@@ -794,11 +794,11 @@ mod tests {
         let post = NewPost {
             thread_id: 0,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
-            subject: Some(title.to_string()),
-            body: title.to_string(),
-            body_html: title.to_string(),
+            subject: Some(title.to_owned()),
+            body: title.to_owned(),
+            body_html: title.to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -810,7 +810,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "token".to_string(),
+            deletion_token: "token".to_owned(),
             is_op: true,
         };
         let (thread_id, _, _) =
@@ -884,23 +884,23 @@ mod tests {
         let reply = NewPost {
             thread_id,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
             subject: None,
-            body: "reply".to_string(),
-            body_html: "reply".to_string(),
+            body: "reply".to_owned(),
+            body_html: "reply".to_owned(),
             ip_hash: None,
-            file_path: Some("media/reply.webp".to_string()),
-            file_name: Some("reply.webp".to_string()),
+            file_path: Some("media/reply.webp".to_owned()),
+            file_name: Some("reply.webp".to_owned()),
             file_size: Some(5),
-            thumb_path: Some("media/thumbs/reply.webp".to_string()),
-            mime_type: Some("image/webp".to_string()),
-            media_type: Some(MediaType::Image.as_str().to_string()),
+            thumb_path: Some("media/thumbs/reply.webp".to_owned()),
+            mime_type: Some("image/webp".to_owned()),
+            media_type: Some(MediaType::Image.as_str().to_owned()),
             audio_file_path: None,
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "token".to_string(),
+            deletion_token: "token".to_owned(),
             is_op: false,
         };
         create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
@@ -952,11 +952,11 @@ mod tests {
         let reply = NewPost {
             thread_id,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
             subject: None,
-            body: "reply".to_string(),
-            body_html: "reply".to_string(),
+            body: "reply".to_owned(),
+            body_html: "reply".to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -968,7 +968,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "token".to_string(),
+            deletion_token: "token".to_owned(),
             is_op: false,
         };
         create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");

@@ -13,7 +13,7 @@
 //   • If ffmpeg exits non-zero, the error includes the trimmed stderr so
 //     operators can diagnose codec or format issues without reading raw logs.
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use std::borrow::Cow;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -45,13 +45,7 @@ pub struct Vp9EncodingProfile {
 }
 
 static ENCODER_LIST: LazyLock<Option<String>> = LazyLock::new(|| {
-    ffmpeg_command()
-        .args(["-encoders"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+    output_stdout_with_timeout(&crate::config::CONFIG.ffmpeg_path, &["-encoders"])
 });
 
 /// Probe whether the `ffmpeg` binary is reachable on the current PATH.
@@ -329,7 +323,7 @@ pub fn build_vp9_transcode_args(input: &str, output: &str) -> Vec<String> {
             "-cpu-used",
         ]
         .into_iter()
-        .map(str::to_string),
+        .map(str::to_owned),
     );
     args.push(cpu_used);
     args.extend(
@@ -339,7 +333,7 @@ pub fn build_vp9_transcode_args(input: &str, output: &str) -> Vec<String> {
             "-tile-columns",
         ]
         .into_iter()
-        .map(str::to_string),
+        .map(str::to_owned),
     );
     args.push(tile_columns);
     args.extend(
@@ -362,7 +356,7 @@ pub fn build_vp9_transcode_args(input: &str, output: &str) -> Vec<String> {
             output,
         ]
         .into_iter()
-        .map(str::to_string),
+        .map(str::to_owned),
     );
     args
 }
@@ -488,6 +482,35 @@ fn run_command_with_timeout(
                 "{label} timed out after {}s",
                 timeout.as_secs()
             ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn output_stdout_with_timeout(program: &str, args: &[&str]) -> Option<String> {
+    let timeout = Duration::from_secs(10);
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = Instant::now();
+
+    loop {
+        if let Some(status) = child.try_wait().ok()? {
+            if status.success() {
+                return child
+                    .wait_with_output()
+                    .ok()
+                    .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+            }
+            return None;
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
         }
         thread::sleep(Duration::from_millis(50));
     }

@@ -1,17 +1,7 @@
 // chan_net/snapshot.rs — Federation snapshot builders.
 //
-// Step 2.1 — Structs: SnapshotBoard, SnapshotPost, SnapshotMetadata are now
-//   defined in src/models.rs and re-exported here so all existing call-sites
-//   (snapshot::SnapshotPost, etc.) continue to compile without change.
-//   Moving the types to models.rs resolves the layering inversion: db/chan_net.rs
-//   previously imported from `crate::chan_net::snapshot`, which is only reachable
-//   in the binary crate (chan_net is declared in main.rs, not lib.rs). models.rs
-//   is re-exported by lib.rs and is accessible from anywhere in the crate.
-//
-// Step 2.2 — build_snapshot: full ZIP of all boards + active (non-archived) posts
-// Step 2.3 — unpack_snapshot: strict-whitelist ZIP parser
-//
-// Column fix (Phase 8): boards table display-name column is `name`, not `title`.
+// Build a full ZIP of all boards and active posts, and unpack snapshots with
+// a strict filename whitelist.
 
 // Re-export so that all call-sites using `super::snapshot::SnapshotPost` etc.
 // continue to compile without any changes.
@@ -21,7 +11,7 @@ pub use crate::models::{SnapshotBoard, SnapshotMetadata, SnapshotPost};
 
 use anyhow::Result;
 use rusqlite::Connection;
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Write as _};
 use uuid::Uuid;
 use zip::{write::SimpleFileOptions, ZipWriter};
 
@@ -61,7 +51,7 @@ pub fn build_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
                 board: row.get(1)?,
                 author: row
                     .get::<_, Option<String>>(2)?
-                    .unwrap_or_else(|| "anon".to_string()),
+                    .unwrap_or_else(|| "anon".to_owned()),
                 content: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
                 timestamp: row.get::<_, i64>(4)?.cast_unsigned(),
             })
@@ -77,7 +67,7 @@ pub fn build_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
 
     let metadata = SnapshotMetadata {
         generated_at: now,
-        rustchan_version: env!("CARGO_PKG_VERSION").to_string(),
+        rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
         post_count: posts.len() as u64,
         tx_id,
         signature: None,
@@ -113,14 +103,14 @@ pub fn build_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
 pub fn unpack_snapshot(
     bytes: &[u8],
 ) -> anyhow::Result<(Vec<SnapshotBoard>, Vec<SnapshotPost>, SnapshotMetadata)> {
-    use std::io::Read;
+    use std::io::Read as _;
 
     let cursor = Cursor::new(bytes);
     let mut zip = zip::ZipArchive::new(cursor)?;
 
     // Path traversal guard — whitelist only.
     for i in 0..zip.len() {
-        let name = zip.by_index(i)?.name().to_string();
+        let name = zip.by_index(i)?.name().to_owned();
         if !matches!(
             name.as_str(),
             "boards.json" | "posts.json" | "metadata.json"

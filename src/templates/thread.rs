@@ -9,13 +9,13 @@ use crate::models::{Board, Post, Thread};
 use crate::utils::{
     files::format_file_size, redirect::encode_query_component, sanitize::escape_html,
 };
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
-use std::fmt::Write;
+use std::fmt::Write as _;
 
 use super::{
-    base_layout, compress_modal_script, fmt_ts, fmt_ts_short, report_modal_script,
-    thread_autoupdate_script, TOGGLE_SCRIPT,
+    base_layout, base_layout_with_preferences, compress_modal_script, fmt_ts, fmt_ts_short,
+    report_modal_script, thread_autoupdate_script,
 };
 
 const SELF_ACTION_WINDOW_SECS: i64 = 60;
@@ -61,6 +61,7 @@ fn render_post_preview(
             collapse_greentext: true,
             thread_state: None,
             thread_op_id,
+            video_audio_muted: false,
         },
         SELF_ACTION_WINDOW_SECS,
     )
@@ -266,9 +267,9 @@ pub fn render_archive_state_badges(sticky: bool) -> String {
 
 #[must_use]
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn thread_page(
     board: &Board,
     thread: &Thread,
@@ -286,6 +287,7 @@ pub fn thread_page(
     current_theme: Option<&str>,
     collapse_greentext: bool,
     can_post: bool,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let mut body = String::new();
     let admin_form_csrf = admin_csrf_token.unwrap_or(csrf_token);
@@ -407,7 +409,7 @@ pub fn thread_page(
     let last_post_id = posts.iter().map(|p| p.id).max().unwrap_or(0);
     let _ = write!(
         body,
-        r#"<div id="thread-posts" data-thread-id="{tid}" data-board="{board}" data-last-id="{last}">"#,
+        r#"<div id="thread-posts" data-activity-page="thread" data-thread-id="{tid}" data-board="{board}" data-last-id="{last}">"#,
         tid = thread.id,
         board = escape_html(&board.short_name),
         last = last_post_id
@@ -420,7 +422,7 @@ pub fn thread_page(
             RenderPostOpts {
                 show_delete: true,
                 is_admin,
-                admin_csrf_token: admin_csrf_token.map(str::to_string),
+                admin_csrf_token: admin_csrf_token.map(str::to_owned),
                 show_media: true,
                 allow_editing: board.allow_editing,
                 allow_self_delete: board.allow_self_delete,
@@ -429,6 +431,7 @@ pub fn thread_page(
                 collapse_greentext: board.collapse_greentext,
                 thread_state: Some((thread.sticky, thread.locked, thread.archived)),
                 thread_op_id: thread.op_id,
+                video_audio_muted: user_preferences.video_audio_muted,
             },
             SELF_ACTION_WINDOW_SECS,
         ));
@@ -484,7 +487,6 @@ pub fn thread_page(
     body.push_str("<div id=\"bottom\"></div>\n");
     body.push_str(&render_thread_nav(board, thread.reply_count, true));
 
-    body.push_str(TOGGLE_SCRIPT);
     body.push_str(&compress_modal_script(
         board.max_image_size_bytes(),
         board.max_video_size_bytes(),
@@ -516,7 +518,7 @@ pub fn thread_page(
         draft_key = escape_html(&draft_key)
     );
 
-    base_layout(
+    base_layout_with_preferences(
         &format!(
             "/{}/ - {}",
             board.short_name,
@@ -530,6 +532,7 @@ pub fn thread_page(
         Some(&board.default_theme),
         collapse_greentext,
         &format!("/{}/thread/{}", board.short_name, thread.id),
+        user_preferences,
     )
 }
 
@@ -544,7 +547,7 @@ fn render_poll(
     let now = chrono::Utc::now().timestamp();
     let time_left = pd.poll.expires_at.saturating_sub(now);
     let expires_str = if pd.is_expired {
-        "closed".to_string()
+        "closed".to_owned()
     } else if time_left < 3600 {
         format!("closes in {}m", time_left / 60)
     } else if time_left < 86400 {
@@ -583,7 +586,7 @@ fn render_poll(
         html.push_str(r#"<div class="poll-results">"#);
         for opt in &pd.options {
             // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+            #[expect(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
             let pct = (opt.vote_count as f64 / total as f64 * 100.0).round() as i64;
             let is_voted = pd.user_voted_option == Some(opt.id);
             let _ = write!(
@@ -642,7 +645,7 @@ fn render_poll(
 // ─── Single post renderer ─────────────────────────────────────────────────────
 
 /// Options that control which controls are rendered for a post.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 #[derive(Clone, Default)]
 pub struct RenderPostOpts {
     pub show_delete: bool,
@@ -656,6 +659,7 @@ pub struct RenderPostOpts {
     pub collapse_greentext: bool,
     pub thread_state: Option<(bool, bool, bool)>,
     pub thread_op_id: Option<i64>,
+    pub video_audio_muted: bool,
 }
 
 const POSTER_ID_ALPHABET: &[u8; 64] =
@@ -729,7 +733,7 @@ fn poster_id_chip_style(poster_id: &str) -> String {
 
 fn annotate_op_quotelinks(body_html: &str, thread_op_id: Option<i64>) -> String {
     let Some(op_id) = thread_op_id else {
-        return body_html.to_string();
+        return body_html.to_owned();
     };
     let target = format!(
         r##"<a href="#p{op_id}" class="quotelink" data-pid="{op_id}">&gt;&gt;{op_id}</a>"##
@@ -752,7 +756,7 @@ fn render_media_thumb(
     fallback_text: &str,
 ) -> String {
     format!(
-        r#"<img class="{img_class}" src="/boards/{src}" loading="{loading}" alt="{alt}" data-media-thumb="1">
+        r#"<img class="{img_class}" src="/boards/{src}" loading="{loading}" decoding="async" alt="{alt}" data-media-thumb="1">
 <div class="{fallback_class} media-thumb-fallback" hidden>{fallback_text}</div>"#,
         img_class = escape_html(img_class),
         fallback_class = escape_html(fallback_class),
@@ -765,7 +769,7 @@ fn render_media_thumb(
 
 fn truncate_file_name_stem(input: &str) -> String {
     if input.chars().count() <= FILE_NAME_STEM_PREFIX_DISPLAY_CHARS {
-        return input.to_string();
+        return input.to_owned();
     }
 
     let prefix: String = input
@@ -782,7 +786,7 @@ fn display_file_name(name: &str) -> String {
             if stem.chars().count() > FILE_NAME_STEM_PREFIX_DISPLAY_CHARS {
                 format!("{}{}", truncate_file_name_stem(stem), ext)
             } else {
-                name.to_string()
+                name.to_owned()
             }
         }
         _ => truncate_file_name_stem(name),
@@ -822,7 +826,7 @@ fn effective_media_type(post: &Post) -> crate::models::MediaType {
 /// user-supplied string in this function must continue to pass through
 /// `escape_html()`. Do not change the `body_html` insertion without ensuring
 /// the upstream sanitiser is still in place.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub fn render_post(
     post: &Post,
     board_short: &str,
@@ -842,6 +846,7 @@ pub fn render_post(
         collapse_greentext,
         thread_state,
         thread_op_id,
+        video_audio_muted,
     } = opts;
     let poster_id = render_poster_id(post, show_poster_ids);
     let poster_id_html = poster_id.as_ref().map_or_else(String::new, |poster_id| {
@@ -881,20 +886,22 @@ pub fn render_post(
     };
     let media_processing_badge = match post.media_processing_state.as_deref() {
         Some("pending") => {
-            r#" <span class="post-edited" title="Background media processing is still running.">(processing media)</span>"#
-                .to_string()
+            r#" <span class="post-edited" title="Background media processing is still running.">(processing media)</span>"#.to_owned()
         }
         Some("failed") => {
             let title = post
                 .media_processing_error
                 .as_deref()
                 .map_or_else(
-                    || "Background media processing failed.".to_string(),
+                    || "Background media processing failed.".to_owned(),
                     escape_html,
                 );
             format!(
                 r#" <span class="post-edited" title="{title}">(media processing failed)</span>"#
             )
+        }
+        Some("pruned") => {
+            r#" <span class="post-edited" title="Original file removed by active media pruning.">(original file removed)</span>"#.to_owned()
         }
         _ => String::new(),
     };
@@ -928,10 +935,46 @@ pub fn render_post(
     );
 
     let primary_media_type = effective_media_type(post);
+    let thumb_loading = if post.is_op { "eager" } else { "lazy" };
+    let original_pruned =
+        post.media_processing_state.as_deref() == Some(crate::db::MEDIA_ORIGINAL_PRUNED);
 
     // Image / Video / Audio
     if show_media {
-        if let (Some(file), Some(thumb)) = (&post.file_path, &post.thumb_path) {
+        if original_pruned {
+            let name_str = post.file_name.as_deref().unwrap_or("file");
+            let size_str = post.file_size.map(format_file_size).unwrap_or_default();
+            let thumb_html = post
+                .thumb_path
+                .as_deref()
+                .map_or_else(String::new, |thumb| {
+                    format!(
+                        r#"<div class="media-preview media-preview-pruned">{}</div>"#,
+                        render_media_thumb(
+                            "thumb",
+                            "thumb",
+                            thumb,
+                            "pruned media preview",
+                            thumb_loading,
+                            "original removed",
+                        )
+                    )
+                });
+            let _ = write!(
+                html,
+                r#"<div class="file-container media-pruned">
+<div class="file-info">
+  File: <span title="{orig}">{name}</span> ({sz})
+  <span class="post-edited" title="Original full-size file was removed by active media pruning.">original file removed</span>
+</div>
+{thumb_html}
+</div>"#,
+                orig = escape_html(name_str),
+                name = escape_html(&display_file_name(name_str)),
+                sz = escape_html(&size_str),
+                thumb_html = thumb_html,
+            );
+        } else if let (Some(file), Some(thumb)) = (&post.file_path, &post.thumb_path) {
             let size_str = post.file_size.map(format_file_size).unwrap_or_default();
             let name_str = post.file_name.as_deref().unwrap_or("file");
             let file_link = render_file_link(file, name_str);
@@ -981,7 +1024,7 @@ pub fn render_post(
                         "thumb",
                         thumb,
                         "audio",
-                        "eager",
+                        thumb_loading,
                         "preview unavailable",
                     ),
                     orig = escape_html(name_str),
@@ -991,16 +1034,16 @@ pub fn render_post(
             } else if is_video {
                 let _ = write!(
                     html,
-                    r#"<div class="file-container">
+                    r#"<div class="file-container video-container">
 <div class="file-info">
   File: {file_link} ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
-<a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to play">
+<a class="media-preview video-preview" data-action="expand-media" href="/boards/{f}" title="click to play">
   {thumb_html}
   <div class="media-expand-overlay">&#9654;</div>
 </a>
-<video class="media-expanded media-expanded-video" controls preload="none" playsinline webkit-playsinline style="display:none">
+<video class="media-expanded media-expanded-video" controls preload="none" playsinline webkit-playsinline{muted_attr} style="display:none">
   <source src="/boards/{f}" type="{mime}">
 </video>
 </div>"#,
@@ -1011,11 +1054,12 @@ pub fn render_post(
                         "thumb",
                         thumb,
                         "video thumbnail",
-                        "eager",
+                        thumb_loading,
                         "preview unavailable",
                     ),
                     sz = escape_html(&size_str),
-                    mime = escape_html(mime)
+                    mime = escape_html(mime),
+                    muted_attr = if video_audio_muted { " muted" } else { "" },
                 );
             } else if is_pdf {
                 let _ = write!(
@@ -1025,7 +1069,7 @@ pub fn render_post(
   File: {file_link} ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
-<a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
+<a class="media-preview pdf-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
   {thumb_html}
   <div class="media-expand-overlay">&#x2922;</div>
 </a>
@@ -1038,7 +1082,7 @@ pub fn render_post(
                         "thumb",
                         thumb,
                         "pdf preview",
-                        "eager",
+                        thumb_loading,
                         "Open PDF",
                     ),
                     sz = escape_html(&size_str),
@@ -1056,7 +1100,7 @@ pub fn render_post(
   File: {file_link} ({sz})
   <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
 </div>
-<a class="media-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
+<a class="media-preview image-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
   {thumb_html}
   <div class="media-expand-overlay">&#x2922;</div>
 </a>
@@ -1076,7 +1120,7 @@ pub fn render_post(
                         "thumb",
                         thumb,
                         "image",
-                        "eager",
+                        thumb_loading,
                         "preview unavailable",
                     ),
                     sz = escape_html(&size_str),
@@ -1129,7 +1173,10 @@ pub fn render_post(
         }
     }
 
-    if show_media && matches!(&post.media_type, Some(crate::models::MediaType::Other)) {
+    if show_media
+        && !original_pruned
+        && matches!(&post.media_type, Some(crate::models::MediaType::Other))
+    {
         if let Some(file) = &post.file_path {
             let size_str = post.file_size.map(format_file_size).unwrap_or_default();
             let name_str = post.file_name.as_deref().unwrap_or("download");
@@ -1148,7 +1195,10 @@ pub fn render_post(
     }
 
     // Secondary audio fallback for legacy rows that store a separate audio attachment.
-    if show_media && !matches!(primary_media_type, crate::models::MediaType::Image) {
+    if show_media
+        && !original_pruned
+        && !matches!(primary_media_type, crate::models::MediaType::Image)
+    {
         if let (Some(aud_file), Some(aud_mime)) = (&post.audio_file_path, &post.audio_mime_type) {
             let aud_name = post.audio_file_name.as_deref().unwrap_or("audio");
             let aud_size = post
@@ -1453,12 +1503,14 @@ mod tests {
             None,
             false,
             true,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains(r#"href="/test">[ Return ]</a>"#));
         assert!(html.contains(r#"href="/test/catalog">[ Catalog ]</a>"#));
         assert!(html.contains(r##"href="#bottom">[ Bottom ]</a>"##));
         assert!(html.contains(r##"href="#top">[ Top ]</a>"##));
+        assert!(html.contains(r#"data-activity-page="thread""#));
         assert!(html.contains(r#"data-action="toggle-post-form""#));
     }
 
@@ -1492,6 +1544,7 @@ mod tests {
             None,
             false,
             false,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains(r#"href="/test">[ Return ]</a>"#));
@@ -1529,6 +1582,7 @@ mod tests {
             None,
             false,
             true,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains(r#"action="/admin/thread/delete""#));
@@ -1562,6 +1616,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: None,
                 thread_op_id: Some(1),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1601,6 +1656,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: None,
                 thread_op_id: Some(1),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1646,6 +1702,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: None,
                 thread_op_id: Some(1),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1675,6 +1732,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: Some((true, true, true)),
                 thread_op_id: Some(post.id),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1707,6 +1765,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: None,
                 thread_op_id: Some(1),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1714,6 +1773,75 @@ mod tests {
         assert!(html.contains("media processing failed"));
         assert!(html.contains("Preview generation failed; original file is still available."));
         assert!(html.contains(r#"href="/boards/test/image.webp""#));
+    }
+
+    #[test]
+    fn pruned_original_renders_thumbnail_without_original_link() {
+        let mut post = sample_post();
+        post.media_processing_state = Some(crate::db::MEDIA_ORIGINAL_PRUNED.into());
+        post.media_processing_error = Some("original file removed".into());
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                admin_csrf_token: None,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+                video_audio_muted: false,
+            },
+            0,
+        );
+
+        assert!(html.contains("original file removed"));
+        assert!(html.contains("/boards/test/thumbs/image.webp"));
+        assert!(!html.contains(r#"href="/boards/test/image.webp""#));
+        assert!(!html.contains(r#"data-src="/boards/test/image.webp""#));
+    }
+
+    #[test]
+    fn pruned_generic_download_does_not_render_stale_download_link() {
+        let mut post = sample_post();
+        post.file_path = Some("test/archive.zip".into());
+        post.file_name = Some("archive.zip".into());
+        post.thumb_path = None;
+        post.mime_type = Some("application/zip".into());
+        post.media_type = Some(MediaType::Other);
+        post.media_processing_state = Some(crate::db::MEDIA_ORIGINAL_PRUNED.into());
+        post.media_processing_error = Some("original file removed".into());
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                admin_csrf_token: None,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+                video_audio_muted: false,
+            },
+            0,
+        );
+
+        assert!(html.contains("original file removed"));
+        assert!(!html.contains(r#"href="/boards/test/archive.zip""#));
     }
 
     #[test]
@@ -1736,12 +1864,63 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: None,
                 thread_op_id: Some(1),
+                video_audio_muted: false,
             },
             0,
         );
 
         assert!(html.contains(r#"data-media-thumb="1""#));
+        assert!(html.contains(r#"loading="lazy" decoding="async""#));
         assert!(html.contains("media-thumb-fallback"));
+    }
+
+    #[test]
+    fn op_media_stays_eager_while_reply_media_is_lazy() {
+        let mut op = sample_post();
+        op.is_op = true;
+        let op_html = render_post(
+            &op,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                admin_csrf_token: None,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+                video_audio_muted: false,
+            },
+            0,
+        );
+        assert!(op_html.contains(r#"loading="eager" decoding="async""#));
+
+        let reply_html = render_post(
+            &sample_post(),
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                admin_csrf_token: None,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+                video_audio_muted: false,
+            },
+            0,
+        );
+        assert!(reply_html.contains(r#"loading="lazy" decoding="async""#));
     }
 
     #[test]
@@ -1769,6 +1948,7 @@ mod tests {
                 collapse_greentext: true,
                 thread_state: None,
                 thread_op_id: Some(1),
+                video_audio_muted: false,
             },
             0,
         );
@@ -1815,6 +1995,7 @@ mod tests {
             None,
             false,
             true,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains(r#"class="post-form-wrap is-open""#));
@@ -1855,6 +2036,7 @@ mod tests {
             None,
             false,
             true,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains(r#"id="edit-modal""#));
@@ -1893,6 +2075,7 @@ mod tests {
             None,
             false,
             true,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains(r#"href="/test/post/1/edit""#));
@@ -1995,6 +2178,7 @@ mod tests {
             None,
             false,
             true,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(!html.contains("(edited"));

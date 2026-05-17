@@ -11,14 +11,19 @@ use crate::models::{
 };
 use crate::utils::{files::format_file_size, sanitize::escape_html};
 use std::collections::BTreeSet;
-use std::fmt::Write;
+use std::fmt::Write as _;
 
 use super::{base_layout, fmt_ts, fmt_ts_short, render_pagination, urlencoding_simple};
 
 // ─── Admin login ──────────────────────────────────────────────────────────────
 
 #[must_use]
-pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board]) -> String {
+pub fn admin_login_page(
+    error: Option<&str>,
+    csrf_token: &str,
+    boards: &[Board],
+    current_theme: Option<&str>,
+) -> String {
     let err_html = error
         .map(|e| {
             format!(
@@ -57,7 +62,7 @@ pub fn admin_login_page(error: Option<&str>, csrf_token: &str, boards: &[Board])
         &body,
         csrf_token,
         boards,
-        None,
+        current_theme,
         None,
         false,
         "/admin",
@@ -72,12 +77,15 @@ mod boards;
 mod layout;
 mod maintenance;
 mod moderation;
+mod site_health;
 
 pub struct AdminPanelViewModel<'a> {
     pub csrf_token: &'a str,
     pub boards: &'a [Board],
+    pub current_theme: Option<&'a str>,
     pub moderation: AdminPanelModerationView<'a>,
     pub appearance: AdminPanelAppearanceView<'a>,
+    pub site_health: AdminPanelSiteHealthView<'a>,
     pub backups: AdminPanelBackupsView<'a>,
     pub maintenance: AdminPanelMaintenanceView,
     pub tor_address: Option<&'a str>,
@@ -92,10 +100,12 @@ pub struct AdminPanelModerationView<'a> {
     pub appeals: &'a [crate::models::BanAppeal],
 }
 
+#[expect(clippy::struct_excessive_bools)]
 pub struct AdminPanelAppearanceView<'a> {
     pub site_name: &'a str,
     pub site_subtitle: &'a str,
     pub homepage_new_thread_badges_enabled: bool,
+    pub homepage_new_reply_badges_enabled: bool,
     pub thread_new_reply_badges_enabled: bool,
     pub default_theme: &'a str,
     pub banner_rotation_interval_minutes: i64,
@@ -114,13 +124,46 @@ pub struct AdminPanelBackupsView<'a> {
     pub auto_full_backup_interval_hours: u64,
     pub auto_full_backup_copies_to_keep: u64,
     pub auto_full_backup_include_tor_hidden_service_keys: bool,
+    pub auto_full_backup_storage_mode: &'a str,
+    pub auto_full_backup_split_zip_part_size_gib: u64,
     pub tor_hidden_service_key_backup_available: bool,
+}
+
+pub struct AdminPanelSiteHealthView<'a> {
+    pub server_status: &'a str,
+    pub rustchan_version: &'a str,
+    pub database_integrity_status: &'a str,
+    pub last_successful_backup: &'a str,
+    pub next_scheduled_backup: &'a str,
+    pub data_dir_usage: &'a str,
+    pub upload_dir_size: &'a str,
+    pub tor_status: &'a str,
+    pub tor_onion_address: Option<&'a str>,
+    pub dependency_summary: AdminSiteHealthDependencySummary,
+    pub running_jobs: i64,
+    pub queued_jobs: i64,
+    pub recent_completed_jobs: i64,
+    pub failed_jobs: i64,
+    pub backup_jobs: &'a str,
+    pub restore_jobs: &'a str,
+    pub diagnostics_text: &'a str,
+}
+
+#[derive(Clone, Copy)]
+pub struct AdminSiteHealthDependencySummary {
+    pub ffmpeg: AdminDetectionStatus,
+    pub ffprobe: AdminDetectionStatus,
+    pub webp: AdminDetectionStatus,
+    pub vp9: AdminDetectionStatus,
+    pub opus: AdminDetectionStatus,
 }
 
 pub struct AdminPanelMaintenanceView {
     pub db_size_bytes: i64,
     pub db_size_warning: bool,
     pub ffmpeg_timeout_secs: u64,
+    pub media_auto_prune_enabled: bool,
+    pub media_max_active_content_size_bytes: u64,
     pub media_detection: AdminMediaDetectionView,
 }
 
@@ -260,13 +303,11 @@ fn render_banner_upload_form(
   <label class="admin-inline-checkbox"><input type="checkbox" name="enabled" value="1" checked> Enabled</label>
   <label class="admin-inline-checkbox"><input type="checkbox" name="show_on_index" value="1" checked> Show on board index</label>
   <label class="admin-inline-checkbox"><input type="checkbox" name="show_on_catalog" value="1" checked> Show on catalog</label>
-</div>"#
-            .to_string()
+</div>"#.to_owned()
     } else {
         r#"<div class="admin-banner-toggle-group">
   <label class="admin-inline-checkbox"><input type="checkbox" name="enabled" value="1" checked> Enabled</label>
-</div>"#
-        .to_string()
+</div>"#.to_owned()
     };
     format!(
         r#"<form method="POST" action="{action}" enctype="multipart/form-data" class="admin-banner-upload-form admin-banner-editor" data-banner-editor="1">
@@ -505,7 +546,7 @@ fn render_board_backup_actions(board: &Board, csrf_token: &str) -> String {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 fn render_board_settings_card(
     board: &Board,
     index: usize,
@@ -609,7 +650,9 @@ fn render_board_settings_card(
   </div>
   <div class="board-settings-checks">
     <label><input type="checkbox" name="clear_access_password" value="1"> Remove saved password</label>
-    <label><input type="checkbox" name="allow_captcha" value="1"{captcha_checked}> PoW CAPTCHA on threads and replies (hashcash, JS-solved)</label>
+    <label><input type="checkbox" name="allow_captcha" value="1"{captcha_checked}> PoW CAPTCHA on threads and replies (hashcash, JS-solved)
+      <span class="admin-quick-help">Enabling this makes posting require JavaScript on this board.</span>
+    </label>
   </div>
 </div>
 <div class="admin-subsection">
@@ -618,14 +661,14 @@ fn render_board_settings_card(
     <p>Control accepted media types, per-board upload caps, poster identity tools, embeds, and editing behavior.</p>
   </div>
   <div class="board-settings-grid">
-    <label title="Per-board image upload size cap. Cannot exceed the site-wide image limit.">
-      Image size limit (MiB)<input type="number" name="max_image_size_mb" value="{max_image_size_mb}" min="1" max="{global_max_image_size_mb}">
+    <label title="Per-board image upload size cap in MiB.">
+      Image size limit (MiB)<input type="number" name="max_image_size_mb" value="{max_image_size_mb}" min="1">
     </label>
-    <label title="Per-board video upload size cap. Cannot exceed the site-wide video limit.">
-      Video size limit (MiB)<input type="number" name="max_video_size_mb" value="{max_video_size_mb}" min="1" max="{global_max_video_size_mb}">
+    <label title="Per-board video upload size cap in MiB.">
+      Video size limit (MiB)<input type="number" name="max_video_size_mb" value="{max_video_size_mb}" min="1">
     </label>
-    <label title="Per-board audio upload size cap. Cannot exceed the site-wide audio limit.">
-      Audio size limit (MiB)<input type="number" name="max_audio_size_mb" value="{max_audio_size_mb}" min="1" max="{global_max_audio_size_mb}">
+    <label title="Per-board audio upload size cap in MiB.">
+      Audio size limit (MiB)<input type="number" name="max_audio_size_mb" value="{max_audio_size_mb}" min="1">
     </label>
   </div>
   <p class="admin-meta-note">PDF and any-file uploads still use the largest enabled cap for this board.</p>
@@ -749,9 +792,6 @@ fn render_board_settings_card(
             bytes_to_mib(board.max_video_size, crate::config::CONFIG.max_video_size),
         max_audio_size_mb =
             bytes_to_mib(board.max_audio_size, crate::config::CONFIG.max_audio_size),
-        global_max_image_size_mb = crate::config::CONFIG.max_image_size / 1024 / 1024,
-        global_max_video_size_mb = crate::config::CONFIG.max_video_size / 1024 / 1024,
-        global_max_audio_size_mb = crate::config::CONFIG.max_audio_size / 1024 / 1024,
         pdf_checked = checked(board.allow_pdf),
         tripcodes_checked = checked(board.allow_tripcodes),
         video_embeds_checked = checked(board.allow_video_embeds),
@@ -897,6 +937,7 @@ pub fn mod_log_page(
     pagination: &crate::models::Pagination,
     csrf_token: &str,
     boards: &[Board],
+    current_theme: Option<&str>,
 ) -> String {
     let mut rows = String::new();
     if entries.is_empty() {
@@ -962,7 +1003,7 @@ pub fn mod_log_page(
         &body,
         csrf_token,
         boards,
-        None,
+        current_theme,
         None,
         false,
         "/admin/log",
@@ -972,10 +1013,15 @@ pub fn mod_log_page(
 // ─── VACUUM result ────────────────────────────────────────────────────────────
 
 #[must_use]
-pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &str) -> String {
+pub fn admin_vacuum_result_page(
+    size_before: i64,
+    size_after: i64,
+    csrf_token: &str,
+    current_theme: Option<&str>,
+) -> String {
     let saved = size_before.saturating_sub(size_after);
     // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::cast_precision_loss
@@ -1017,7 +1063,7 @@ pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &
         &body,
         csrf_token,
         &[],
-        None,
+        current_theme,
         None,
         false,
         "/admin",
@@ -1025,13 +1071,14 @@ pub fn admin_vacuum_result_page(size_before: i64, size_after: i64, csrf_token: &
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 #[must_use]
 pub fn admin_db_health_result_page(
     report: &DbHealthReport,
     attempted_repair: bool,
     csrf_token: &str,
     repair_job_id: Option<u64>,
+    current_theme: Option<&str>,
 ) -> String {
     let title = if attempted_repair {
         "[ database repair ]"
@@ -1065,12 +1112,12 @@ pub fn admin_db_health_result_page(
         let (label, confirm) = if report.before.ok() {
             (
                 "&#x1F6E0; run maintenance rebuild",
-                "Run maintenance rebuild? This will create a full backup, then run REINDEX, rebuild the search index, recreate its triggers, and optimize SQLite statistics. Continue?",
+                "Run maintenance rebuild? This will create a Backup v4 DB + config pre-maintenance backup, then run REINDEX, rebuild the search index, recreate its triggers, and optimize SQLite statistics. Continue?",
             )
         } else {
             (
                 "&#x1F6E0; attempt repair",
-                "Attempt database repair? This will create a full backup, then run integrity checks, REINDEX, and rebuild the search index. It may not fix true file corruption. Continue?",
+                "Attempt database repair? This will create a Backup v4 DB + config pre-maintenance backup, then run integrity checks, REINDEX, and rebuild the search index. It may not fix true file corruption. Continue?",
             )
         };
         format!(
@@ -1116,7 +1163,7 @@ pub fn admin_db_health_result_page(
     let backup_html = report.repair_backup.as_ref().map_or_else(
         || {
             report.repair_backup_error.as_ref().map_or_else(
-                || r"<p><strong>Pre-repair backup:</strong> Not run</p>".to_string(),
+                || r"<p><strong>Pre-repair backup:</strong> Not run</p>".to_owned(),
                 |error| {
                     format!(
                         r#"<p><strong>Pre-repair backup:</strong> <span class="admin-status-error">Failed</span> <code>{}</code></p>"#,
@@ -1127,14 +1174,20 @@ pub fn admin_db_health_result_page(
         },
         |backup| {
             format!(
-                r"<p><strong>Pre-repair backup:</strong> <code>{}</code></p>",
-                escape_html(&backup.filename)
+                r"<p><strong>Pre-repair backup:</strong> <code>{}</code></p>
+<p><strong>Pre-repair backup type:</strong> {}</p>
+<p><strong>Verification status:</strong> {}</p>
+<p><strong>Backup path:</strong> <code>{}</code></p>",
+                escape_html(&backup.backup_id),
+                escape_html(&backup.backup_type),
+                if backup.verified { "Verified" } else { "Unverified" },
+                escape_html(&backup.backup_path)
             )
         },
     );
     let before_checks_html = render_db_health_snapshot(&report.before);
     let after_checks_html = report.after.as_ref().map_or_else(
-        || r"<p><strong>After:</strong> Not run</p>".to_string(),
+        || r"<p><strong>After:</strong> Not run</p>".to_owned(),
         render_db_health_snapshot,
     );
 
@@ -1163,8 +1216,8 @@ pub fn admin_db_health_result_page(
 </ul>
 {repair_action}
 <p class="admin-result-note">
-  Run checks after restores or large deletes. Take a backup before repair; this repair flow creates one automatically before making changes.
-  This tool can repair index and search-index issues, but true SQLite file corruption may still require restoring a known-good full backup.
+  Run checks after restores or large deletes. Take a backup before repair; this repair flow now creates a Backup v4 DB + config pre-maintenance snapshot before making changes.
+  This tool can repair index and search-index issues, but true SQLite file corruption may still require restoring a known-good backup.
 </p>
 <p class="admin-result-actions">
   <a href="/admin/panel">&#8592; back to admin panel</a>
@@ -1201,7 +1254,7 @@ pub fn admin_db_health_result_page(
         &body,
         csrf_token,
         &[],
-        None,
+        current_theme,
         None,
         false,
         "/admin",
@@ -1209,7 +1262,7 @@ pub fn admin_db_health_result_page(
 }
 
 #[must_use]
-pub fn admin_db_repair_idle_page(csrf_token: &str) -> String {
+pub fn admin_db_repair_idle_page(csrf_token: &str, current_theme: Option<&str>) -> String {
     let body = r#"<div class="admin-panel">
 <h1>[ database repair ]</h1>
 <section class="admin-section">
@@ -1222,8 +1275,7 @@ pub fn admin_db_repair_idle_page(csrf_token: &str) -> String {
   <a href="/admin/panel">&#8592; back to admin panel</a>
 </p>
 </section>
-</div>"#
-        .to_string();
+</div>"#.to_owned();
 
     base_layout(
         "Database repair",
@@ -1231,7 +1283,7 @@ pub fn admin_db_repair_idle_page(csrf_token: &str) -> String {
         &body,
         csrf_token,
         &[],
-        None,
+        current_theme,
         None,
         false,
         "/admin",
@@ -1239,7 +1291,12 @@ pub fn admin_db_repair_idle_page(csrf_token: &str) -> String {
 }
 
 #[must_use]
-pub fn admin_db_repair_running_page(csrf_token: &str, job_id: u64, started_at: i64) -> String {
+pub fn admin_db_repair_running_page(
+    csrf_token: &str,
+    job_id: u64,
+    started_at: i64,
+    current_theme: Option<&str>,
+) -> String {
     let progress_url = format!("/admin/db/repair/progress?job_id={job_id}");
     let status_url = format!("/admin/db/repair/status?job_id={job_id}");
     let body = format!(
@@ -1268,7 +1325,7 @@ pub fn admin_db_repair_running_page(csrf_token: &str, job_id: u64, started_at: i
         &body,
         csrf_token,
         &[],
-        None,
+        current_theme,
         None,
         false,
         "/admin",
@@ -1280,6 +1337,7 @@ pub fn admin_db_repair_stale_page(
     csrf_token: &str,
     requested_job_id: u64,
     current_job_id: Option<u64>,
+    current_theme: Option<&str>,
 ) -> String {
     let body = format!(
         r#"<div class="admin-panel">
@@ -1296,7 +1354,7 @@ pub fn admin_db_repair_stale_page(
 </section>
 </div>"#,
         current_job_html = current_job_id.map_or_else(
-            || "<p>No maintenance rebuild is currently active.</p>".to_string(),
+            || "<p>No maintenance rebuild is currently active.</p>".to_owned(),
             |job_id| {
                 format!(
                     r#"<p>The current maintenance rebuild is <code>{job_id}</code>. <a href="/admin/db/repair/status?job_id={job_id}">Open that status page.</a></p>"#
@@ -1311,7 +1369,7 @@ pub fn admin_db_repair_stale_page(
         &body,
         csrf_token,
         &[],
-        None,
+        current_theme,
         None,
         false,
         "/admin",
@@ -1324,6 +1382,7 @@ pub fn admin_db_repair_failed_page(
     message: &str,
     finished_at: i64,
     job_id: u64,
+    current_theme: Option<&str>,
 ) -> String {
     let body = format!(
         r#"<div class="admin-panel">
@@ -1351,7 +1410,7 @@ pub fn admin_db_repair_failed_page(
         &body,
         csrf_token,
         &[],
-        None,
+        current_theme,
         None,
         false,
         "/admin",
@@ -1397,7 +1456,7 @@ fn render_db_check_result(label: &str, result: &crate::db::DbCheckResult) -> Str
 
 // ─── IP history ───────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 #[must_use]
 pub fn admin_ip_history_page(
     ip_hash: &str,
@@ -1406,6 +1465,7 @@ pub fn admin_ip_history_page(
     all_boards: &[Board],
     csrf_token: &str,
     return_to: Option<&str>,
+    current_theme: Option<&str>,
 ) -> String {
     use crate::models::MediaType;
 
@@ -1416,7 +1476,7 @@ pub fn admin_ip_history_page(
     for (post, _) in posts_with_boards {
         let name = post.name.trim();
         if !name.is_empty() && name != "Anonymous" {
-            seen_names.insert(name.to_string());
+            seen_names.insert(name.to_owned());
         }
 
         if let Some(tripcode) = post
@@ -1425,7 +1485,7 @@ pub fn admin_ip_history_page(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            seen_tripcodes.insert(tripcode.to_string());
+            seen_tripcodes.insert(tripcode.to_owned());
         }
     }
 
@@ -1627,7 +1687,7 @@ pub fn admin_ip_history_page(
         &body,
         csrf_token,
         all_boards,
-        None,
+        current_theme,
         None,
         false,
         &pag_base,
@@ -1640,7 +1700,8 @@ mod tests {
         admin_db_health_result_page, admin_db_repair_idle_page, admin_login_page, admin_panel_page,
         render_board_appearance_card, render_board_settings_card, AdminDetectionStatus,
         AdminMediaDetectionView, AdminPanelAppearanceView, AdminPanelBackupsView,
-        AdminPanelMaintenanceView, AdminPanelModerationView, AdminPanelViewModel,
+        AdminPanelMaintenanceView, AdminPanelModerationView, AdminPanelSiteHealthView,
+        AdminPanelViewModel, AdminSiteHealthDependencySummary,
     };
     use crate::db::{DbCheckResult, DbHealthReport, DbHealthSnapshot};
     use crate::models::{
@@ -1728,30 +1789,50 @@ mod tests {
 
     fn sample_full_backup() -> BackupInfo {
         BackupInfo {
+            backup_ref: "2026-04-07_1015_full-site_ab12cd".into(),
+            backup_id: "2026-04-07_1015_full-site_ab12cd".into(),
             filename: "full-2026-04-07.zip".into(),
             size_bytes: 2048,
             modified: "2026-04-07 10:15 UTC".into(),
             modified_epoch: Some(1_775_555_700),
             verified: true,
             verification_note: "verified".into(),
+            scope: "Full site".into(),
+            mode: "Single ZIP".into(),
+            part_count: 1,
+            part_filenames: Vec::new(),
             contains_tor_hidden_service_keys: true,
             boards: vec![BackupBoardSummary {
                 short_name: "tech".into(),
                 name: "Technology".into(),
             }],
+            server_path: "/tmp/rustchan-data/backups/2026-04-07_1015_full-site_ab12cd".into(),
+            manifest_path:
+                "/tmp/rustchan-data/backups/2026-04-07_1015_full-site_ab12cd/manifest.json".into(),
+            downloadable_archive: true,
         }
     }
 
     fn sample_board_backup() -> BackupInfo {
         BackupInfo {
+            backup_ref: "2026-04-07_1100_board-tech_ef34gh".into(),
+            backup_id: "2026-04-07_1100_board-tech_ef34gh".into(),
             filename: "tech-2026-04-07.zip".into(),
             size_bytes: 1024,
             modified: "2026-04-07 11:00 UTC".into(),
             modified_epoch: Some(1_775_558_400),
             verified: true,
             verification_note: "verified".into(),
+            scope: "Board".into(),
+            mode: "Single ZIP".into(),
+            part_count: 1,
+            part_filenames: Vec::new(),
             contains_tor_hidden_service_keys: false,
             boards: Vec::new(),
+            server_path: "/tmp/rustchan-data/backups/2026-04-07_1100_board-tech_ef34gh".into(),
+            manifest_path:
+                "/tmp/rustchan-data/backups/2026-04-07_1100_board-tech_ef34gh/manifest.json".into(),
+            downloadable_archive: true,
         }
     }
 
@@ -1809,6 +1890,34 @@ mod tests {
         }
     }
 
+    fn sample_site_health() -> AdminPanelSiteHealthView<'static> {
+        AdminPanelSiteHealthView {
+            server_status: "ready",
+            rustchan_version: "1.2.0",
+            database_integrity_status: "not checked",
+            last_successful_backup: "none saved",
+            next_scheduled_backup: "not scheduled",
+            data_dir_usage: "unknown",
+            upload_dir_size: "unknown",
+            tor_status: "disabled",
+            tor_onion_address: None,
+            dependency_summary: AdminSiteHealthDependencySummary {
+                ffmpeg: AdminDetectionStatus::Detected,
+                ffprobe: AdminDetectionStatus::Detected,
+                webp: AdminDetectionStatus::Detected,
+                vp9: AdminDetectionStatus::Detected,
+                opus: AdminDetectionStatus::Detected,
+            },
+            running_jobs: 0,
+            queued_jobs: 0,
+            recent_completed_jobs: 0,
+            failed_jobs: 0,
+            backup_jobs: "idle",
+            restore_jobs: "not available",
+            diagnostics_text: "RustChan version: 1.2.0\nRecent warnings:\n  none",
+        }
+    }
+
     fn render_admin_panel_for_test(
         boards: &[Board],
         reports: &[ReportWithContext],
@@ -1840,6 +1949,7 @@ mod tests {
         let view = AdminPanelViewModel {
             csrf_token: "csrf",
             boards,
+            current_theme: None,
             moderation: AdminPanelModerationView {
                 bans: &[],
                 filters: &[],
@@ -1850,6 +1960,7 @@ mod tests {
                 site_name: "RustChan",
                 site_subtitle: "select board to proceed",
                 homepage_new_thread_badges_enabled: true,
+                homepage_new_reply_badges_enabled: true,
                 thread_new_reply_badges_enabled: true,
                 default_theme: "terminal",
                 banner_rotation_interval_minutes: 0,
@@ -1859,6 +1970,7 @@ mod tests {
                 home_banners: &[],
                 board_banners: &[],
             },
+            site_health: sample_site_health(),
             backups: AdminPanelBackupsView {
                 full_backups: &full_backups,
                 board_backups: &board_backups,
@@ -1867,18 +1979,22 @@ mod tests {
                 auto_full_backup_interval_hours: 24,
                 auto_full_backup_copies_to_keep: 7,
                 auto_full_backup_include_tor_hidden_service_keys: false,
+                auto_full_backup_storage_mode: "directory",
+                auto_full_backup_split_zip_part_size_gib: 4,
                 tor_hidden_service_key_backup_available: tor_backup_available,
             },
             maintenance: AdminPanelMaintenanceView {
                 db_size_bytes: 4096,
                 db_size_warning: false,
                 ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
+                media_auto_prune_enabled: false,
+                media_max_active_content_size_bytes: 0,
                 media_detection: AdminMediaDetectionView {
                     ffmpeg: AdminDetectionStatus::Detected,
                     ffprobe: AdminDetectionStatus::Detected,
                     webp_encoder: AdminDetectionStatus::Detected,
                     vp9_pipeline: AdminDetectionStatus::Detected,
-                    pdf_thumbnail_renderer: Some("pdftoppm".to_string()),
+                    pdf_thumbnail_renderer: Some("pdftoppm".to_owned()),
                 },
             },
             tor_address: None,
@@ -2009,7 +2125,12 @@ mod tests {
 
     #[test]
     fn board_settings_card_renders_per_board_upload_limits() {
-        let board = sample_board();
+        let board = Board {
+            max_image_size: 25 * 1024 * 1024,
+            max_video_size: 500 * 1024 * 1024,
+            max_audio_size: 300 * 1024 * 1024,
+            ..sample_board()
+        };
         let html = render_board_settings_card(
             &board,
             0,
@@ -2023,9 +2144,13 @@ mod tests {
         assert!(html.contains(r#"name="max_image_size_mb""#));
         assert!(html.contains(r#"name="max_video_size_mb""#));
         assert!(html.contains(r#"name="max_audio_size_mb""#));
-        assert!(html.contains(r#"value="8""#));
-        assert!(html.contains(r#"value="50""#));
-        assert!(html.contains(r#"value="150""#));
+        assert!(html.contains(r#"value="25""#));
+        assert!(html.contains(r#"value="500""#));
+        assert!(html.contains(r#"value="300""#));
+        assert!(!html.contains("Cannot exceed the site-wide"));
+        assert!(!html.contains(r#"max="8""#));
+        assert!(!html.contains(r#"max="50""#));
+        assert!(!html.contains(r#"max="150""#));
         assert!(html.contains("PDF and any-file uploads still use the largest enabled cap"));
     }
 
@@ -2041,10 +2166,12 @@ mod tests {
         assert!(html.contains(r#"<div class="board-settings-checks">"#));
         assert!(html.contains(r#"name="homepage_new_thread_badges_enabled" value="1" checked"#));
         assert!(html.contains("Homepage board-card new-thread badges"));
+        assert!(html.contains(r#"name="homepage_new_reply_badges_enabled" value="1" checked"#));
+        assert!(html.contains("Show new reply badges on homepage"));
         assert!(html.contains(r#"name="thread_new_reply_badges_enabled" value="1" checked"#));
         assert!(html.contains("Board/catalog thread-card new-reply badges"));
         assert!(html.contains(
-            "Track newly created threads on the home page and new replies inside board index/catalog cards independently."
+            "Track newly created threads on the home page, new replies on the home page, and new replies inside board index/catalog cards independently."
         ));
 
         let theme_idx = html.find("Default theme").expect("theme control present");
@@ -2054,9 +2181,97 @@ mod tests {
         let thread_idx = html
             .find("Board/catalog thread-card new-reply badges")
             .expect("thread control present");
+        let homepage_reply_idx = html
+            .find("Show new reply badges on homepage")
+            .expect("homepage reply control present");
 
         assert!(theme_idx < homepage_idx);
-        assert!(homepage_idx < thread_idx);
+        assert!(homepage_idx < homepage_reply_idx);
+        assert!(homepage_reply_idx < thread_idx);
+    }
+
+    #[test]
+    fn admin_panel_media_prune_toggle_uses_checkbox_row_layout() {
+        let html = render_admin_panel_for_test(
+            &[sample_board()],
+            &[sample_report()],
+            &[sample_theme()],
+            Some("media-settings"),
+        );
+
+        assert!(html.contains(
+            r#"<div class="board-settings-checks">
+    <label class="admin-inline-checkbox" title="Delete oldest full-size post media when active stored media exceeds the configured cap. Thumbnails are kept where practical.">
+      <input type="checkbox" name="media_auto_prune_enabled" value="1">
+      Enable automatic active content pruning
+    </label>
+  </div>"#
+        ));
+        assert!(!html.contains(
+            r#"<span>
+        <input type="checkbox" name="media_auto_prune_enabled""#
+        ));
+
+        let timeout_section_idx = html
+            .find("// ffmpeg timeout")
+            .expect("timeout section present");
+        let pruning_section_idx = html
+            .find("// media pruning")
+            .expect("pruning section present");
+        let prune_toggle_idx = html
+            .find("Enable automatic active content pruning")
+            .expect("prune toggle present");
+        assert!(timeout_section_idx < pruning_section_idx);
+        assert!(pruning_section_idx < prune_toggle_idx);
+    }
+
+    #[test]
+    fn admin_panel_site_health_renders_after_site_settings_closed_by_default() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+        let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
+
+        let site_settings = html
+            .find("// site settings")
+            .expect("site settings section");
+        let site_health = html.find("// site health").expect("site health section");
+        let boards = html.find("// boards").expect("boards section");
+
+        assert!(site_settings < site_health);
+        assert!(site_health < boards);
+        assert!(html.contains(r#"data-admin-dropdown-key="site-health""#));
+        assert!(!html.contains(
+            r#"<details class="admin-dropdown" data-admin-dropdown-key="site-health" open>"#
+        ));
+        assert!(html.contains("Database integrity status"));
+        assert!(html.contains("open media panel"));
+        assert!(html.contains("copy diagnostics"));
+        assert!(html.contains("RustChan version: 1.2.0"));
+        assert!(html.contains(r#"data-admin-health-jobs-url="/admin/site-health/jobs""#));
+        assert!(html.contains(r#"data-admin-health-job="running_jobs""#));
+        assert!(html.contains(r#"data-admin-health-job="queued_jobs""#));
+        assert!(html.contains(r#"data-admin-health-toggle="failed""#));
+        assert!(html.contains(r#"data-admin-health-job-list="failed""#));
+        assert!(html.contains(r"data-admin-health-close"));
+        assert!(!html.contains("Tor bootstrap state"));
+        assert!(!html.contains("Thumbnail/transcode jobs"));
+        assert!(!html.contains("Repair/VACUUM jobs"));
+    }
+
+    #[test]
+    fn admin_panel_site_health_honors_open_target() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+        let html = render_admin_panel_for_test(
+            std::slice::from_ref(&board),
+            &[],
+            &themes,
+            Some("site-health"),
+        );
+
+        assert!(html.contains(
+            r#"<details class="admin-dropdown" data-admin-dropdown-key="site-health" open>"#
+        ));
     }
 
     #[test]
@@ -2080,7 +2295,12 @@ mod tests {
     #[test]
     fn admin_login_page_uses_semantic_form_layout() {
         let board = sample_board();
-        let html = admin_login_page(Some("bad login"), "csrf", std::slice::from_ref(&board));
+        let html = admin_login_page(
+            Some("bad login"),
+            "csrf",
+            std::slice::from_ref(&board),
+            Some("blue-sky"),
+        );
 
         assert!(
             html.contains(r#"<form method="POST" action="/admin/login" class="admin-login-form">"#)
@@ -2118,6 +2338,7 @@ mod tests {
         assert!(index < overview);
         for target in [
             "#site-settings",
+            "#site-health",
             "#boards",
             "#moderation",
             "#appearance",
@@ -2148,8 +2369,8 @@ mod tests {
             repair_steps: Vec::new(),
             after: None,
         };
-        let html = admin_db_health_result_page(&report, false, "csrf", None);
-        let idle_html = admin_db_repair_idle_page("csrf");
+        let html = admin_db_health_result_page(&report, false, "csrf", None, Some("blue-sky"));
+        let idle_html = admin_db_repair_idle_page("csrf", Some("blue-sky"));
 
         assert!(html.contains(r#"class="admin-result-card""#));
         assert!(html.contains(r#"class="admin-result-details""#));
@@ -2202,6 +2423,7 @@ mod tests {
         assert!(html.contains("// create board"));
         assert!(html.contains(r#"name="allow_audio" value="1"> Enable audio uploads"#));
         assert!(html.contains(r#"name="allow_pdf" value="1"> Allow PDF uploads"#));
+        assert!(html.contains("Enabling this makes posting require JavaScript on this board."));
         assert!(html.contains(r#"data-admin-dropdown-key="boards""#));
         assert!(html.contains("// board appearance overrides"));
         assert!(html.contains("id=\"board-appearance-tech\""));
@@ -2209,21 +2431,60 @@ mod tests {
         assert!(html.contains("id=\"board-backup-tech\""));
         assert!(html.contains("// create board backups"));
         assert!(html.contains("// automated full backups"));
-        assert!(html.contains("// run or restore now"));
+        assert!(html.contains(r#"name="auto_full_backup_storage_mode" value="directory" checked"#));
+        assert!(html.contains(r#"name="auto_full_backup_storage_mode" value="split_zip""#));
+        assert!(html.contains(r#"name="auto_full_backup_split_zip_part_size_gib""#));
+        assert!(html.contains("<summary>Manual backup</summary>"));
+        assert!(html.contains(r#"class="backup-output-fieldset""#));
+        assert!(html.contains(r#"type="radio" name="storage_mode" value="directory" checked"#));
+        assert!(html.contains(r#"type="radio" name="storage_mode" value="split_zip""#));
+        assert!(html.contains(r#"name="split_zip_part_size_gib""#));
         assert!(html.contains("// saved full backups"));
         assert!(html.contains("data-admin-dropdown-key=\"full-backup-restore\""));
         assert!(html.contains("single-board tools"));
         assert!(html.contains("// restore from local file"));
         assert!(html.contains("// saved board backups"));
-        assert!(html.contains("data-admin-dropdown-key=\"board-backup-restore\""));
-        assert!(html.contains("single-board snapshot"));
+        assert!(html.contains("advanced: board backup and restore"));
+        assert!(!html.contains("<section class=\"admin-section admin-section-collapsible\" id=\"board-backup-restore\">"));
+        assert!(html.contains("Single ZIP"));
         assert!(html.contains(r#"data-admin-dropdown-key="media-settings""#));
         assert!(html.contains(r#"data-admin-dropdown-key="database-maintenance""#));
+        assert!(html.contains(
+            r#"<section class="admin-section admin-section-collapsible" id="media-settings">
+<details class="admin-dropdown" data-admin-dropdown-key="media-settings""#
+        ));
+        assert!(html.contains(
+            r#"<section class="admin-section admin-section-collapsible" id="database-maintenance">
+<details class="admin-dropdown" data-admin-dropdown-key="database-maintenance""#
+        ));
         assert!(html.contains("// media settings"));
         assert!(html.contains("// media pipeline detection"));
         assert!(html.contains("video thumbnails, waveform jobs, and transcoding entrypoint"));
         assert!(html.contains("selected renderer: pdftoppm"));
+        assert!(html.contains("Enable automatic active content pruning"));
+        assert!(html.contains("name=\"media_max_active_content_size\""));
+        assert!(html.contains("Maximum active content database/media size"));
         assert!(html.contains("save media settings"));
+
+        let full_backup_start = html
+            .find(r#"<section class="admin-section admin-section-collapsible" id="full-backup-restore">"#)
+            .expect("full backup section");
+        let full_backup_end = html[full_backup_start..]
+            .find(r"</section>")
+            .map(|offset| full_backup_start + offset)
+            .expect("full backup section closes");
+        let full_backup_html = &html[full_backup_start..full_backup_end];
+        assert!(full_backup_html.contains(
+            r#"<details class="admin-dropdown" data-admin-dropdown-key="full-backup-restore""#
+        ));
+        assert!(full_backup_html.contains(r#"class="backup-extract-details""#));
+        assert!(full_backup_html.contains("advanced: board backup and restore"));
+        assert!(full_backup_html.contains(r#"class="backup-manual-details""#));
+        assert!(full_backup_html.contains(r#"name="split_zip_part_size_gib""#));
+        assert!(full_backup_html.contains(r#"type="radio" name="storage_mode" value="split_zip""#));
+
+        let maintenance_html = &html[maintenance..];
+        assert!(!maintenance_html.contains("advanced: board backup and restore"));
     }
 
     #[test]
@@ -2324,6 +2585,7 @@ mod tests {
         let html = admin_panel_page(&AdminPanelViewModel {
             csrf_token: "csrf",
             boards: std::slice::from_ref(&board),
+            current_theme: Some("blue-sky"),
             moderation: AdminPanelModerationView {
                 bans: &[],
                 filters: &[],
@@ -2334,6 +2596,7 @@ mod tests {
                 site_name: "RustChan",
                 site_subtitle: "select board to proceed",
                 homepage_new_thread_badges_enabled: true,
+                homepage_new_reply_badges_enabled: true,
                 thread_new_reply_badges_enabled: true,
                 default_theme: "terminal",
                 banner_rotation_interval_minutes: 0,
@@ -2343,6 +2606,7 @@ mod tests {
                 home_banners: &[],
                 board_banners: &[],
             },
+            site_health: sample_site_health(),
             backups: AdminPanelBackupsView {
                 full_backups: &[],
                 board_backups: &[],
@@ -2351,12 +2615,16 @@ mod tests {
                 auto_full_backup_interval_hours: 24,
                 auto_full_backup_copies_to_keep: 7,
                 auto_full_backup_include_tor_hidden_service_keys: false,
+                auto_full_backup_storage_mode: "directory",
+                auto_full_backup_split_zip_part_size_gib: 4,
                 tor_hidden_service_key_backup_available: false,
             },
             maintenance: AdminPanelMaintenanceView {
                 db_size_bytes: 4096,
                 db_size_warning: false,
                 ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
+                media_auto_prune_enabled: false,
+                media_max_active_content_size_bytes: 0,
                 media_detection: AdminMediaDetectionView {
                     ffmpeg: AdminDetectionStatus::Missing,
                     ffprobe: AdminDetectionStatus::Missing,
@@ -2372,6 +2640,176 @@ mod tests {
 
         assert!(html.contains("using built-in generic PDF placeholder thumbnail"));
         assert!(html.contains(r#"admin-detection-pill admin-detection-pill-missing">missing"#));
+    }
+
+    #[test]
+    fn admin_panel_live_log_renders_connection_status_surface() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+        let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
+
+        assert!(html.contains(r#"id="admin-live-log-status""#));
+        assert!(html.contains("Connecting to live log"));
+    }
+
+    #[test]
+    fn admin_panel_prefers_selected_theme_over_default_theme() {
+        let board = sample_board();
+        let themes = vec![
+            sample_theme(),
+            Theme {
+                slug: "blue-sky".into(),
+                display_name: "Blue Sky".into(),
+                description: "Bright override".into(),
+                swatch_hex: "#66aaff".into(),
+                enabled: true,
+                sort_order: 2,
+                is_builtin: true,
+                custom_css: String::new(),
+            },
+        ];
+        crate::templates::set_live_default_theme("terminal");
+        crate::templates::set_live_themes(themes.clone());
+
+        let html = admin_panel_page(&AdminPanelViewModel {
+            csrf_token: "csrf",
+            boards: std::slice::from_ref(&board),
+            current_theme: Some("blue-sky"),
+            moderation: AdminPanelModerationView {
+                bans: &[],
+                filters: &[],
+                reports: &[],
+                appeals: &[],
+            },
+            appearance: AdminPanelAppearanceView {
+                site_name: "RustChan",
+                site_subtitle: "select board to proceed",
+                homepage_new_thread_badges_enabled: true,
+                homepage_new_reply_badges_enabled: true,
+                thread_new_reply_badges_enabled: true,
+                default_theme: "terminal",
+                banner_rotation_interval_minutes: 0,
+                banner_external_links_enabled: false,
+                themes: &themes,
+                global_banners: &[],
+                home_banners: &[],
+                board_banners: &[],
+            },
+            site_health: sample_site_health(),
+            backups: AdminPanelBackupsView {
+                full_backups: &[],
+                board_backups: &[],
+                backup_status_line: "",
+                backup_warning: None,
+                auto_full_backup_interval_hours: 24,
+                auto_full_backup_copies_to_keep: 1,
+                auto_full_backup_include_tor_hidden_service_keys: false,
+                auto_full_backup_storage_mode: "directory",
+                auto_full_backup_split_zip_part_size_gib: 4,
+                tor_hidden_service_key_backup_available: false,
+            },
+            maintenance: AdminPanelMaintenanceView {
+                db_size_bytes: 0,
+                db_size_warning: false,
+                ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
+                media_auto_prune_enabled: false,
+                media_max_active_content_size_bytes: 0,
+                media_detection: AdminMediaDetectionView {
+                    ffmpeg: AdminDetectionStatus::Detected,
+                    ffprobe: AdminDetectionStatus::Detected,
+                    webp_encoder: AdminDetectionStatus::Detected,
+                    vp9_pipeline: AdminDetectionStatus::Detected,
+                    pdf_thumbnail_renderer: None,
+                },
+            },
+            tor_address: None,
+            flash: None,
+            open_section: None,
+        });
+
+        assert!(html.contains(r#"data-default-theme="terminal""#));
+        assert!(html.contains(r#"data-active-theme="blue-sky""#));
+        assert!(html.contains(r#"data-theme="blue-sky""#));
+    }
+
+    #[test]
+    fn admin_panel_falls_back_when_selected_theme_is_disabled() {
+        let board = sample_board();
+        let themes = vec![
+            sample_theme(),
+            Theme {
+                slug: "blue-sky".into(),
+                display_name: "Blue Sky".into(),
+                description: "Disabled".into(),
+                swatch_hex: "#66aaff".into(),
+                enabled: false,
+                sort_order: 2,
+                is_builtin: true,
+                custom_css: String::new(),
+            },
+        ];
+        crate::templates::set_live_default_theme("terminal");
+        crate::templates::set_live_themes(themes.clone());
+
+        let html = admin_panel_page(&AdminPanelViewModel {
+            csrf_token: "csrf",
+            boards: std::slice::from_ref(&board),
+            current_theme: Some("blue-sky"),
+            moderation: AdminPanelModerationView {
+                bans: &[],
+                filters: &[],
+                reports: &[],
+                appeals: &[],
+            },
+            appearance: AdminPanelAppearanceView {
+                site_name: "RustChan",
+                site_subtitle: "select board to proceed",
+                homepage_new_thread_badges_enabled: true,
+                homepage_new_reply_badges_enabled: true,
+                thread_new_reply_badges_enabled: true,
+                default_theme: "terminal",
+                banner_rotation_interval_minutes: 0,
+                banner_external_links_enabled: false,
+                themes: &themes,
+                global_banners: &[],
+                home_banners: &[],
+                board_banners: &[],
+            },
+            site_health: sample_site_health(),
+            backups: AdminPanelBackupsView {
+                full_backups: &[],
+                board_backups: &[],
+                backup_status_line: "",
+                backup_warning: None,
+                auto_full_backup_interval_hours: 24,
+                auto_full_backup_copies_to_keep: 1,
+                auto_full_backup_include_tor_hidden_service_keys: false,
+                auto_full_backup_storage_mode: "directory",
+                auto_full_backup_split_zip_part_size_gib: 4,
+                tor_hidden_service_key_backup_available: false,
+            },
+            maintenance: AdminPanelMaintenanceView {
+                db_size_bytes: 0,
+                db_size_warning: false,
+                ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
+                media_auto_prune_enabled: false,
+                media_max_active_content_size_bytes: 0,
+                media_detection: AdminMediaDetectionView {
+                    ffmpeg: AdminDetectionStatus::Detected,
+                    ffprobe: AdminDetectionStatus::Detected,
+                    webp_encoder: AdminDetectionStatus::Detected,
+                    vp9_pipeline: AdminDetectionStatus::Detected,
+                    pdf_thumbnail_renderer: None,
+                },
+            },
+            tor_address: None,
+            flash: None,
+            open_section: None,
+        });
+
+        assert!(html.contains(r#"data-default-theme="terminal""#));
+        assert!(html.contains(r#"data-active-theme="terminal""#));
+        assert!(!html.contains(r#"data-theme="blue-sky""#));
     }
 
     #[test]
@@ -2445,6 +2883,7 @@ mod tests {
             std::slice::from_ref(&board),
             "csrf123",
             Some("/tech/thread/9"),
+            Some("blue-sky"),
         );
 
         assert!(html.contains(r#"id="report-modal""#));

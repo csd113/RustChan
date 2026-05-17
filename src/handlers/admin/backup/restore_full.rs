@@ -170,7 +170,7 @@ fn scrub_full_restore_runtime_state(conn: &rusqlite::Connection) -> Result<()> {
 }
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     live_conn: &mut rusqlite::Connection,
     admin_id: i64,
@@ -230,6 +230,32 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
             ))
         },
     );
+    let previous_global_favicon_dir = live_global_favicon_dir.parent().map_or_else(
+        || PathBuf::from(format!("{}.restore-old", live_global_favicon_dir.display())),
+        |parent| {
+            parent.join(format!(
+                ".{}.restore-old.{}",
+                live_global_favicon_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("favicon"),
+                uuid::Uuid::new_v4().simple()
+            ))
+        },
+    );
+    let previous_global_banner_dir = live_global_banner_dir.parent().map_or_else(
+        || PathBuf::from(format!("{}.restore-old", live_global_banner_dir.display())),
+        |parent| {
+            parent.join(format!(
+                ".{}.restore-old.{}",
+                live_global_banner_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("banner"),
+                uuid::Uuid::new_v4().simple()
+            ))
+        },
+    );
     let previous_tor_hidden_service_keys_dir =
         live_tor_hidden_service_keys_dir.as_ref().map(|live_path| {
             live_path.parent().map_or_else(
@@ -253,7 +279,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         let mut entry = archive
             .by_index(index)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip[{index}]: {error}")))?;
-        let name = entry.name().to_string();
+        let name = entry.name().to_owned();
         validate_restore_safe_entry_name(&name)?;
 
         if name == "chan.db" {
@@ -271,7 +297,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
 
             let mut header = [0u8; 16];
             {
-                use std::io::Read;
+                use std::io::Read as _;
                 let mut file = std::fs::File::open(&temp_db).map_err(|error| {
                     AppError::Internal(anyhow::anyhow!("Magic check open: {error}"))
                 })?;
@@ -460,11 +486,25 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     }
 
     let pending_restore_id = uuid::Uuid::new_v4().to_string();
-    let pending_restore_payload = crate::pending_fs::FullRestoreSwapPayload {
-        staged: staged_upload_root.display().to_string(),
-        live: upload_root.display().to_string(),
-        previous: previous_upload_root.display().to_string(),
-        additional_swaps: live_tor_hidden_service_keys_dir
+    let mut additional_swaps = Vec::new();
+    if favicon_extracted {
+        additional_swaps.push(crate::pending_fs::RestorePathSwapPayload {
+            staged: staged_global_favicon_dir.display().to_string(),
+            live: live_global_favicon_dir.display().to_string(),
+            previous: previous_global_favicon_dir.display().to_string(),
+            restrict_private_permissions: false,
+        });
+    }
+    if banner_extracted {
+        additional_swaps.push(crate::pending_fs::RestorePathSwapPayload {
+            staged: staged_global_banner_dir.display().to_string(),
+            live: live_global_banner_dir.display().to_string(),
+            previous: previous_global_banner_dir.display().to_string(),
+            restrict_private_permissions: false,
+        });
+    }
+    additional_swaps.extend(
+        live_tor_hidden_service_keys_dir
             .as_ref()
             .zip(staged_tor_hidden_service_keys_dir.as_ref())
             .zip(previous_tor_hidden_service_keys_dir.as_ref())
@@ -480,9 +520,14 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
                         restrict_private_permissions: true,
                     }
                 },
-            )
-            .into_iter()
-            .collect(),
+            ),
+    );
+
+    let pending_restore_payload = crate::pending_fs::FullRestoreSwapPayload {
+        staged: staged_upload_root.display().to_string(),
+        live: upload_root.display().to_string(),
+        previous: previous_upload_root.display().to_string(),
+        additional_swaps,
     };
     let pending_restore_op = crate::pending_fs::PendingFsOpInsert {
         id: pending_restore_id.clone(),
@@ -545,24 +590,10 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     }
     db::delete_pending_fs_op(live_conn, &pending_restore_id)?;
 
-    if favicon_extracted {
-        remove_path_if_exists(&live_global_favicon_dir)?;
-        std::fs::rename(&staged_global_favicon_dir, &live_global_favicon_dir).map_err(|error| {
-            AppError::Internal(anyhow::anyhow!(
-                "{restore_label} global favicon swap failed: {error}"
-            ))
-        })?;
-    } else {
+    if !favicon_extracted {
         let _ = remove_path_if_exists(&staged_global_favicon_dir);
     }
-    if banner_extracted {
-        remove_path_if_exists(&live_global_banner_dir)?;
-        std::fs::rename(&staged_global_banner_dir, &live_global_banner_dir).map_err(|error| {
-            AppError::Internal(anyhow::anyhow!(
-                "{restore_label} global banner swap failed: {error}"
-            ))
-        })?;
-    } else {
+    if !banner_extracted {
         let _ = remove_path_if_exists(&staged_global_banner_dir);
     }
     let _ = std::fs::remove_file(&temp_db);
@@ -592,7 +623,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
 fn restrict_private_key_material_permissions(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::PermissionsExt as _;
 
         let metadata = std::fs::metadata(path).map_err(|error| {
             AppError::Internal(anyhow::anyhow!("Inspect {}: {error}", path.display()))
@@ -653,7 +684,6 @@ fn full_restore_success_response(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
 pub async fn admin_restore(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -768,7 +798,6 @@ pub async fn admin_restore(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
 pub async fn restore_saved_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -776,14 +805,10 @@ pub async fn restore_saved_full_backup(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    let safe_filename = sanitize_backup_zip_filename(&form.filename)?;
-
-    let path = full_backup_dir().join(&safe_filename);
+    let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
     let upload_dir = CONFIG.upload_dir.clone();
     let restore_tor_hidden_service_keys = form.restore_tor_hidden_service_keys;
     let live_tor_hidden_service_keys_dir = crate::config::configured_tor_hidden_service_keys_dir();
@@ -793,12 +818,23 @@ pub async fn restore_saved_full_backup(
         move || -> Result<String> {
             let mut live_conn = pool.get()?;
             let admin_id = super::require_admin_session_sid(&live_conn, session_id.as_deref())?;
+            let root_dir = crate::config::backups_dir().join(&safe_filename);
+            let legacy_zip_path = full_backup_dir().join(&safe_filename);
+            let temp_v4_zip = if root_dir.is_dir() {
+                Some(create_temp_legacy_full_backup_from_v4_path(&root_dir)?)
+            } else {
+                None
+            };
+            let _temp_v4_zip_guard = temp_v4_zip
+                .as_ref()
+                .map(|path| super::archive::TempZipCleanupGuard::new(path.clone()));
+            let archive_path = temp_v4_zip.as_deref().unwrap_or(&legacy_zip_path);
 
-            let zip_file = std::fs::File::open(&path)
-                .map_err(|_| AppError::NotFound("Backup file not found.".into()))?;
+            let zip_file = std::fs::File::open(archive_path)
+                .map_err(|_error| AppError::NotFound("Backup file not found.".into()))?;
             let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
                 .map_err(|e| AppError::BadRequest(format!("Invalid zip: {e}")))?;
-            execute_full_restore(
+            let restore_result = execute_full_restore(
                 &mut live_conn,
                 admin_id,
                 &upload_dir,
@@ -809,7 +845,8 @@ pub async fn restore_saved_full_backup(
                 "Restore-saved completed",
                 "Restore-saved",
                 "Restore-saved",
-            )
+            );
+            restore_result
         }
     })
     .await
@@ -1021,7 +1058,7 @@ mod tests {
             CookieJar::new(),
             &headers,
             std::net::SocketAddr::from(([127, 0, 0, 1], 41000)),
-            "fresh-session".to_string(),
+            "fresh-session".to_owned(),
             false,
         );
 
@@ -1089,14 +1126,8 @@ mod tests {
         assert_eq!(
             live_tree,
             BTreeMap::from([
-                (
-                    "hs_ed25519_public_key".to_string(),
-                    "live-public".to_string()
-                ),
-                (
-                    "hs_ed25519_secret_key".to_string(),
-                    "live-secret".to_string()
-                ),
+                ("hs_ed25519_public_key".to_owned(), "live-public".to_owned()),
+                ("hs_ed25519_secret_key".to_owned(), "live-secret".to_owned()),
             ])
         );
     }
@@ -1463,12 +1494,12 @@ mod tests {
             read_tree(&tor_keys_dir),
             BTreeMap::from([
                 (
-                    "hs_ed25519_public_key".to_string(),
-                    "backup-public".to_string()
+                    "hs_ed25519_public_key".to_owned(),
+                    "backup-public".to_owned()
                 ),
                 (
-                    "hs_ed25519_secret_key".to_string(),
-                    "backup-secret".to_string()
+                    "hs_ed25519_secret_key".to_owned(),
+                    "backup-secret".to_owned()
                 ),
             ])
         );
@@ -1524,12 +1555,12 @@ mod tests {
             live_tree,
             BTreeMap::from([
                 (
-                    "hs_ed25519_public_key".to_string(),
-                    "backup-public".to_string()
+                    "hs_ed25519_public_key".to_owned(),
+                    "backup-public".to_owned()
                 ),
                 (
-                    "hs_ed25519_secret_key".to_string(),
-                    "backup-secret".to_string()
+                    "hs_ed25519_secret_key".to_owned(),
+                    "backup-secret".to_owned()
                 ),
             ])
         );
@@ -1565,7 +1596,7 @@ mod tests {
         std::fs::create_dir_all(&upload_dir).expect("create uploads");
 
         crate::pending_fs::set_private_permission_failure_for_test(Some(
-            "simulated Tor key permission failure".to_string(),
+            "simulated Tor key permission failure".to_owned(),
         ));
         let _private_permission_failure_reset = PrivatePermissionFailureReset;
         let error = execute_full_restore(
@@ -1617,12 +1648,12 @@ mod tests {
             read_tree(&tor_keys_dir),
             BTreeMap::from([
                 (
-                    "hs_ed25519_public_key".to_string(),
-                    "backup-public".to_string()
+                    "hs_ed25519_public_key".to_owned(),
+                    "backup-public".to_owned()
                 ),
                 (
-                    "hs_ed25519_secret_key".to_string(),
-                    "backup-secret".to_string()
+                    "hs_ed25519_secret_key".to_owned(),
+                    "backup-secret".to_owned()
                 ),
             ])
         );
@@ -1698,10 +1729,7 @@ mod tests {
 
         assert_eq!(
             read_tree(&tor_keys_dir),
-            BTreeMap::from([(
-                "hs_ed25519_secret_key".to_string(),
-                "live-secret".to_string()
-            )])
+            BTreeMap::from([("hs_ed25519_secret_key".to_owned(), "live-secret".to_owned())])
         );
     }
 }

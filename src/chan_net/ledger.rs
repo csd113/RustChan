@@ -2,8 +2,6 @@
 //
 // TxLedger tracks UUID transaction IDs from imported snapshots so that the
 // same snapshot is never applied twice within a server session.
-//
-// Step 1.3
 
 use std::collections::HashSet;
 use uuid::Uuid;

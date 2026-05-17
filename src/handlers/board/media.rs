@@ -35,6 +35,44 @@ fn media_content_type(path: &std::path::Path) -> Option<&'static str> {
     }
 }
 
+fn is_generated_svg_placeholder_thumb(media_path: &str) -> bool {
+    let path = std::path::Path::new(media_path);
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+        && path
+            .components()
+            .nth(1)
+            .is_some_and(|part| part.as_os_str() == "thumbs")
+}
+
+fn safe_board_media_file(
+    base: &std::path::Path,
+    media_path: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    crate::utils::fs_security::existing_regular_file_child(base, media_path)
+}
+
+fn is_not_found_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .find_map(|source| source.downcast_ref::<std::io::Error>())
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn stale_webm_redirect_path(base: &std::path::Path, media_path: &str) -> Option<String> {
+    let path = std::path::Path::new(media_path);
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+    {
+        return None;
+    }
+    let webm_path = format!("{}.webm", &media_path[..media_path.len().saturating_sub(4)]);
+    safe_board_media_file(base, &webm_path).ok()?;
+    Some(format!("/boards/{webm_path}"))
+}
+
 // Replaces the former nest_service(ServeDir) so we can intercept stale .mp4
 
 // links (created before the background transcoder replaced them with .webm)
@@ -46,10 +84,9 @@ pub async fn serve_board_media(
     jar: CookieJar,
     req: axum::extract::Request,
 ) -> Response {
-    use axum::http::header::CACHE_CONTROL;
     use axum::http::StatusCode;
     use std::path::PathBuf;
-    use tower::ServiceExt;
+    use tower::ServiceExt as _;
     use tower_http::services::ServeFile;
 
     // Reject path-traversal attempts and absolute-path escapes.
@@ -63,11 +100,11 @@ pub async fn serve_board_media(
 
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, board_short);
     let access_context = match tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let board_short = board_short.to_string();
+        let board_short = board_short.to_owned();
         move || -> Result<BoardAccessContext> {
             let conn = pool.get()?;
             load_board_access_context(
@@ -104,14 +141,20 @@ pub async fn serve_board_media(
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
 
-    // Verify the resolved path is still inside the upload directory.
-    // This catches any edge cases that slip past the string checks above
-    // (e.g. symlinks, exotic percent-encoding handled by the OS).
-    if !target.starts_with(&base) {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
+    let target = match safe_board_media_file(&base, &media_path) {
+        Ok(path) => Some(path),
+        Err(error)
+            if is_not_found_error(&error)
+                && std::path::Path::new(&media_path)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4")) =>
+        {
+            None
+        }
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
 
-    if target.exists() {
+    if let Some(target) = target {
         // File present — forward the real request (with Range, ETag, etc.) to
         // ServeFile so it can respond with 206 Partial Content when needed.
         // iOS Safari requires Range request support to play video — dropping
@@ -122,13 +165,24 @@ pub async fn serve_board_media(
             |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             |resp| {
                 let mut resp = resp.map(axum::body::Body::new);
-                if is_board_favicon {
+                crate::cache::set_cache_control(
+                    resp.headers_mut(),
+                    board_media_cache_control(
+                        access_context.board.access_mode.requires_view_password(),
+                        is_board_favicon,
+                        has_version,
+                    ),
+                );
+                if is_generated_svg_placeholder_thumb(&media_path) {
+                    resp.headers_mut()
+                        .insert(CONTENT_TYPE, HeaderValue::from_static("image/svg+xml"));
+                    resp.headers_mut()
+                        .insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
                     resp.headers_mut().insert(
-                        CACHE_CONTROL,
-                        HeaderValue::from_static(board_media_cache_control(has_version)),
+                        CONTENT_SECURITY_POLICY,
+                        HeaderValue::from_static("default-src 'none'; script-src 'none'"),
                     );
-                }
-                if let Some(ct) = media_content_type(&target) {
+                } else if let Some(ct) = media_content_type(&target) {
                     resp.headers_mut()
                         .insert(CONTENT_TYPE, HeaderValue::from_static(ct));
                 } else {
@@ -155,28 +209,25 @@ pub async fn serve_board_media(
                 resp.into_response()
             },
         )
-    } else if std::path::Path::new(&media_path)
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
-    {
-        // MP4 was transcoded away — redirect permanently to the .webm sibling.
-        let webm_path_str = format!("{}.webm", &media_path[..media_path.len().saturating_sub(4)]);
-        let webm_abs = base.join(&webm_path_str);
-        if webm_abs.exists() {
-            Redirect::permanent(&format!("/boards/{webm_path_str}")).into_response()
-        } else {
-            StatusCode::NOT_FOUND.into_response()
-        }
+    } else if let Some(redirect_path) = stale_webm_redirect_path(&base, &media_path) {
+        Redirect::permanent(&redirect_path).into_response()
     } else {
         StatusCode::NOT_FOUND.into_response()
     }
 }
 
-const fn board_media_cache_control(has_version: bool) -> &'static str {
-    if has_version {
-        "public, max-age=31536000, immutable"
+const fn board_media_cache_control(
+    is_protected_board: bool,
+    is_replaceable_asset: bool,
+    has_version: bool,
+) -> &'static str {
+    if is_protected_board {
+        return crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE;
+    }
+    if is_replaceable_asset && !has_version {
+        crate::cache::CACHE_CONTROL_STATIC_SHORT
     } else {
-        "no-cache, must-revalidate"
+        crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA
     }
 }
 
@@ -211,9 +262,10 @@ pub async fn api_post_preview(
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
 ) -> impl axum::response::IntoResponse {
+    let user_preferences = user_preferences_from_jar(&jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -253,6 +305,7 @@ pub async fn api_post_preview(
                             collapse_greentext: board.collapse_greentext,
                             thread_state: None,
                             thread_op_id: None,
+                            video_audio_muted: user_preferences.video_audio_muted,
                         },
                         0, // no edit window
                     );
@@ -269,15 +322,15 @@ pub async fn api_post_preview(
         Ok(Ok(Some((html, thread_id)))) => {
             let body =
                 serde_json::to_string(&serde_json::json!({ "html": html, "thread_id": thread_id }))
-                    .unwrap_or_else(|_| r#"{"html":"","thread_id":0}"#.to_string());
+                    .unwrap_or_else(|_| r#"{"html":"","thread_id":0}"#.to_owned());
             (axum::http::StatusCode::OK, json_ct, body).into_response()
         }
         Ok(Ok(None)) => {
-            let body = r#"{"error":"not found"}"#.to_string();
+            let body = r#"{"error":"not found"}"#.to_owned();
             (axum::http::StatusCode::NOT_FOUND, json_ct, body).into_response()
         }
         _ => {
-            let body = r#"{"error":"internal error"}"#.to_string();
+            let body = r#"{"error":"internal error"}"#.to_owned();
             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, json_ct, body).into_response()
         }
     }
@@ -302,7 +355,7 @@ pub async fn redirect_to_post(
     let board_short_for_url = board_short.clone();
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -353,3 +406,56 @@ pub async fn redirect_to_post(
 // ─── POST /appeal ─────────────────────────────────────────────────────────────
 // Banned users submit a brief appeal message here.
 // Appeals appear in the admin panel under // ban appeals.
+
+#[cfg(test)]
+mod tests {
+    use super::{safe_board_media_file, stale_webm_redirect_path};
+
+    #[test]
+    fn stale_mp4_redirect_path_accepts_valid_webm_sibling() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let upload_root = tempdir.path().join("uploads");
+        let board_dir = upload_root.join("test");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::write(board_dir.join("clip.webm"), b"webm").expect("write webm");
+
+        assert_eq!(
+            stale_webm_redirect_path(&upload_root, "test/clip.mp4").as_deref(),
+            Some("/boards/test/clip.webm")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_mp4_redirect_path_rejects_symlink_fallback_escape() {
+        use std::os::unix::fs as unix_fs;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let upload_root = tempdir.path().join("uploads");
+        let board_dir = upload_root.join("test");
+        let outside = tempdir.path().join("outside");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        std::fs::write(outside.join("clip.webm"), b"webm").expect("write outside webm");
+        unix_fs::symlink(&outside, board_dir.join("link")).expect("symlink");
+
+        assert!(stale_webm_redirect_path(&upload_root, "test/link/clip.mp4").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn board_media_file_rejects_symlink_original_escape() {
+        use std::os::unix::fs as unix_fs;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let upload_root = tempdir.path().join("uploads");
+        let board_dir = upload_root.join("test");
+        let outside = tempdir.path().join("outside");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        std::fs::write(outside.join("clip.mp4"), b"mp4").expect("write outside mp4");
+        unix_fs::symlink(&outside, board_dir.join("link")).expect("symlink");
+
+        assert!(safe_board_media_file(&upload_root, "test/link/clip.mp4").is_err());
+    }
+}

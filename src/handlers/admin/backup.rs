@@ -22,15 +22,15 @@ use crate::{
     utils::crypto::{new_session_id, verify_password},
 };
 use axum::{
-    extract::{Form, FromRequest, Multipart, Query, Request, State},
+    extract::{Form, FromRequest as _, Multipart, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar};
-use chrono::Utc;
+use chrono::{Local, Utc};
 use futures::stream::Stream;
-use rusqlite::{backup::Backup, params, OptionalExtension};
+use rusqlite::{backup::Backup, params, OptionalExtension as _};
 use serde::Deserialize;
 use serde_json;
 use std::collections::HashMap;
@@ -61,6 +61,8 @@ mod listing;
 mod restore_board;
 mod restore_full;
 mod types;
+mod v4;
+pub(crate) use v4::BackupStorageMode;
 
 use common::{
     copy_limited, create_staging_dir, extract_uploads_to_dir, log_backup_phase,
@@ -110,6 +112,8 @@ fn form_checkbox_value_is_on(value: Option<&str>) -> bool {
 
 use archive::{
     canonicalize_restored_banner_dir, create_temp_board_backup_from_full_backup_path,
+    create_temp_legacy_board_backup_from_saved_full_v4_path,
+    create_temp_legacy_board_backup_from_v4_path, create_temp_legacy_full_backup_from_v4_path,
     parse_board_backup_manifest_from_zip, validate_full_restore_archive_layout,
 };
 use downloads::prune_stale_temp_board_downloads;
@@ -121,8 +125,8 @@ use http::{
     is_xml_http_request, log_restore_upload_started, redirect_page_response,
     restore_auth_preflight, restore_error_redirect_target, restore_failure_response,
     restore_start_response, restore_success_redirect_target, restore_upload_parse_response,
-    sanitize_backup_zip_filename, sanitize_board_short_value, stream_restore_upload_to_tempfile,
-    validate_streamed_restore_upload, RestoreKind,
+    sanitize_backup_zip_filename, sanitize_board_short_value, sanitize_saved_backup_ref,
+    stream_restore_upload_to_tempfile, validate_streamed_restore_upload, RestoreKind,
 };
 use listing::latest_saved_board_backup_filename as latest_board_backup_filename;
 pub(crate) use listing::{
@@ -137,16 +141,14 @@ use restore_full::refresh_live_site_state_from_db;
 use restore_full::restore_db_from_snapshot;
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
     let _maintenance_guard = state.maintenance_gate.try_begin("Full backup download")?;
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     let upload_dir = CONFIG.upload_dir.clone();
     let global_favicon_dir = crate::favicon::global_backup_source_dir();
     let global_banner_dir = crate::banner::backup_source_dir();
-    let progress = state.backup_progress.clone();
+    let progress = std::sync::Arc::clone(&state.backup_progress);
 
     let (tmp_path, filename, file_size) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -294,7 +296,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
                 .keep()
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Persist temp zip: {e}")))?;
 
-            let ts = Utc::now().format("%Y%m%d_%H%M%S");
+            let ts = local_backup_timestamp_label();
             let fname = format!("rustchan-backup-{ts}.zip");
             tracing::info!(target: "admin", bytes = file_size, "Full backup downloaded");
             progress
@@ -324,7 +326,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
     let disposition = format!("attachment; filename=\"{filename}\"");
     Ok((
         [
-            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (header::CONTENT_TYPE, "application/zip".to_owned()),
             (header::CONTENT_DISPOSITION, disposition),
             (header::CONTENT_LENGTH, file_size.to_string()),
         ],
@@ -336,7 +338,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
 /// Count regular files (not directories) under `dir` recursively.
 /// Used to initialise the progress bar's `files_total` before compression starts.
 fn count_files_in_dir(dir: &std::path::Path) -> u64 {
-    if !dir.is_dir() {
+    if crate::utils::fs_security::assert_dir_no_symlink(dir).is_err() {
         return 0;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -344,9 +346,16 @@ fn count_files_in_dir(dir: &std::path::Path) -> u64 {
     };
     entries.flatten().fold(0u64, |acc, entry| {
         let p = entry.path();
-        if p.is_dir() {
+        let Ok(metadata) = std::fs::symlink_metadata(&p) else {
+            return acc;
+        };
+        if metadata.file_type().is_symlink() {
+            acc
+        } else if metadata.file_type().is_dir() {
             acc + count_files_in_dir(&p)
-        } else if p.is_file() {
+        } else if metadata.file_type().is_file()
+            && crate::utils::fs_security::assert_regular_file_no_symlink(&p).is_ok()
+        {
             acc + 1
         } else {
             acc
@@ -386,6 +395,13 @@ pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
     for entry in entries {
         let entry = entry.map_err(|e| AppError::Internal(anyhow::anyhow!("dir entry: {e}")))?;
         let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("inspect {}: {error}", path.display()))
+        })?;
+        if metadata.file_type().is_symlink() {
+            tracing::warn!(path = %path.display(), "skipping symlink during backup traversal");
+            continue;
+        }
 
         let relative = path
             .strip_prefix(base)
@@ -393,11 +409,15 @@ pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
         let rel_str = relative.to_string_lossy().replace('\\', "/");
         let zip_path = format!("{prefix}/{rel_str}");
 
-        if path.is_dir() {
+        if metadata.file_type().is_dir() {
             zip.add_directory(&zip_path, opts)
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("zip dir: {e}")))?;
             add_dir_to_zip_with_prefix(zip, base, &path, prefix, opts, progress)?;
-        } else if path.is_file() {
+        } else if metadata.file_type().is_file() {
+            if crate::utils::fs_security::assert_regular_file_no_symlink(&path).is_err() {
+                tracing::warn!(path = %path.display(), "skipping unsafe runtime file during backup");
+                continue;
+            }
             // MEM-FIX: open file, stream through io::copy — no Vec<u8> allocation.
             let mut src = std::fs::File::open(&path).map_err(|e| {
                 AppError::Internal(anyhow::anyhow!("open {}: {}", path.display(), e))
@@ -473,10 +493,14 @@ pub fn board_backup_dir() -> PathBuf {
     crate::config::board_backups_dir()
 }
 
+pub(super) fn local_backup_timestamp_label() -> String {
+    Local::now().format("%Y%m%d_%H%M%S").to_string()
+}
+
 pub fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
     let candidate = dir.join(base_name);
     if !candidate.exists() {
-        return base_name.to_string();
+        return base_name.to_owned();
     }
 
     let stem = Path::new(base_name)
@@ -508,15 +532,12 @@ pub fn temp_board_download_dir() -> PathBuf {
 ///
 /// MEM-FIX: Same approach as `admin_backup` — build zip into a `NamedTempFile` on
 /// disk, then stream the result in 64 KiB chunks.
-#[allow(clippy::too_many_lines)]
 pub async fn board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     axum::extract::Path(board_short): axum::extract::Path<String>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     let safe_board = board_short
         .chars()
         .filter(char::is_ascii_alphanumeric)
@@ -537,7 +558,7 @@ pub async fn board_backup(
                 params![safe_board],
                 |_| Ok(()),
             )
-            .map_err(|_| AppError::NotFound(format!("Board '{safe_board}' not found")))?;
+            .map_err(|_error| AppError::NotFound(format!("Board '{safe_board}' not found")))?;
 
             latest_board_backup_filename(&safe_board).ok_or_else(|| {
                 AppError::NotFound(format!(
@@ -549,6 +570,34 @@ pub async fn board_backup(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
+    let v4_root = crate::config::backups_dir().join(&filename);
+    if v4_root.is_dir() {
+        let (temp_zip, temp_name) =
+            create_temp_legacy_board_backup_from_v4_path(&v4_root, Some(&safe_board))?;
+        let mut temp_zip_guard = archive::TempZipCleanupGuard::new(temp_zip.clone());
+        let download_token = new_session_id();
+        write_temp_board_download_token(&temp_name, &download_token)?;
+        let download_dir = temp_board_download_dir();
+        std::fs::create_dir_all(&download_dir).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Create temp board download dir {}: {error}",
+                download_dir.display()
+            ))
+        })?;
+        let final_path = download_dir.join(&temp_name);
+        std::fs::rename(&temp_zip, &final_path).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Move temp board backup {}: {error}",
+                final_path.display()
+            ))
+        })?;
+        temp_zip_guard.disarm();
+        return Ok(Redirect::to(&format!(
+            "/admin/backup/download/temp-board/{temp_name}?cleanup=1&token={download_token}"
+        ))
+        .into_response());
+    }
+
     Ok(Redirect::to(&format!("/admin/backup/download/board/{filename}")).into_response())
 }
 
@@ -557,10 +606,11 @@ mod tests {
     use super::{
         build_board_backup_manifest, consume_temp_board_download_token,
         create_temp_board_backup_from_full_backup_path, execute_board_restore, full_backup_dir,
+        invalidate_backup_list_cache, latest_verified_full_backup_modified_time,
         latest_verified_full_backup_modified_time_in_dir, refresh_live_site_state_from_db,
         render_restored_body_html, should_store_without_recompress, temp_board_download_dir,
         temp_board_download_token_path, validate_full_restore_archive_layout,
-        write_temp_board_download_token, RestoreKind,
+        write_temp_board_download_token, BackupListKind, RestoreKind,
     };
     use crate::error::AppError;
     use crate::models::BackupBoardSummary;
@@ -574,7 +624,7 @@ mod tests {
     use axum_extra::extract::cookie::{Cookie, CookieJar};
     use rusqlite::params;
     use std::io::{Cursor, Write as _};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tower::ServiceExt as _;
 
     fn zip_with_entries(entries: &[(&str, &[u8])]) -> zip::ZipArchive<Cursor<Vec<u8>>> {
@@ -590,6 +640,18 @@ mod tests {
         }
         cursor.set_position(0);
         zip::ZipArchive::new(cursor).expect("zip archive")
+    }
+
+    #[test]
+    fn local_backup_timestamp_label_is_filename_safe_and_sortable() {
+        let label = super::local_backup_timestamp_label();
+
+        assert_eq!(label.len(), "YYYYMMDD_HHMMSS".len());
+        assert_eq!(label.as_bytes().get(8), Some(&b'_'));
+        assert!(label
+            .chars()
+            .enumerate()
+            .all(|(idx, ch)| idx == 8 && ch == '_' || ch.is_ascii_digit()));
     }
 
     async fn echo_restore_saved_form(Form(form): Form<super::RestoreSavedForm>) -> String {
@@ -696,37 +758,11 @@ mod tests {
         format!("{prefix}-{}.zip", uuid::Uuid::new_v4().simple())
     }
 
-    fn latest_zip_name(dir: &Path, prefix: &str) -> Option<String> {
-        let mut entries = std::fs::read_dir(dir)
-            .ok()?
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                let is_zip = path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
-                let matches_prefix = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(prefix));
-                (is_zip && matches_prefix).then_some(path)
-            })
-            .collect::<Vec<_>>();
-        entries.sort();
-        entries.pop().and_then(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_string)
-        })
-    }
-
     fn extract_location_query_param(location: &str, key: &str) -> Option<String> {
-        location.split_once('?').and_then(|(_, query)| {
-            query.split('&').find_map(|pair| {
-                let (name, value) = pair.split_once('=')?;
-                (name == key).then(|| value.to_string())
-            })
+        let (_, query) = location.split_once('?')?;
+        query.split('&').find_map(|pair| {
+            let (name, value) = pair.split_once('=')?;
+            (name == key).then(|| value.to_owned())
         })
     }
 
@@ -919,12 +955,9 @@ mod tests {
         assert!(create_location.contains("open=board-backup-restore"));
         assert!(create_location.contains(&format!("#board-backup-{board_short}")));
 
-        let filename = latest_zip_name(
-            super::board_backup_dir().as_path(),
-            &format!("rustchan-board-{board_short}-"),
-        )
-        .expect("created backup filename");
-        let backup_path = super::board_backup_dir().join(&filename);
+        let filename =
+            super::latest_board_backup_filename(&board_short).expect("created backup filename");
+        let backup_path = crate::config::backups_dir().join(&filename);
         let _backup_cleanup = PathCleanup(backup_path.clone());
         assert!(backup_path.exists());
 
@@ -1170,7 +1203,7 @@ mod tests {
         crate::db::create_board(&source_conn, "tech", "Technology", "", false)
             .expect("create source board");
         let mut manifest = build_board_backup_manifest(&source_conn, "tech").expect("manifest");
-        manifest.board.access_mode = "definitely_not_valid".to_string();
+        manifest.board.access_mode = "definitely_not_valid".to_owned();
 
         let target_pool = crate::db::init_test_pool().expect("target pool");
         let mut target_conn = target_pool.get().expect("target conn");
@@ -1200,7 +1233,7 @@ mod tests {
         crate::db::create_board(&source_conn, "tech", "Technology", "", false)
             .expect("create source board");
         let mut manifest = build_board_backup_manifest(&source_conn, "tech").expect("manifest");
-        manifest.board.access_mode = "view_password".to_string();
+        manifest.board.access_mode = "view_password".to_owned();
         manifest.board.access_password_hash.clear();
 
         let target_pool = crate::db::init_test_pool().expect("target pool");
@@ -1222,6 +1255,104 @@ mod tests {
             }
             other => panic!("expected BadRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn board_backup_manifest_preserves_pdf_upload_setting() {
+        let source_pool = crate::db::init_test_pool().expect("source pool");
+        let source_conn = source_pool.get().expect("source conn");
+        let board_id = crate::db::create_board(&source_conn, "tech", "Technology", "", false)
+            .expect("create source board");
+        source_conn
+            .execute(
+                "UPDATE boards SET allow_pdf = 1 WHERE id = ?1",
+                params![board_id],
+            )
+            .expect("enable pdf uploads");
+
+        let manifest = build_board_backup_manifest(&source_conn, "tech").expect("manifest");
+
+        assert!(manifest.board.allow_pdf);
+    }
+
+    #[test]
+    fn board_restore_preserves_pdf_upload_setting() {
+        let source_pool = crate::db::init_test_pool().expect("source pool");
+        let source_conn = source_pool.get().expect("source conn");
+        let board_id = crate::db::create_board(&source_conn, "tech", "Technology", "", false)
+            .expect("create source board");
+        source_conn
+            .execute(
+                "UPDATE boards SET allow_pdf = 1 WHERE id = ?1",
+                params![board_id],
+            )
+            .expect("enable pdf uploads");
+        let manifest = build_board_backup_manifest(&source_conn, "tech").expect("manifest");
+
+        let target_pool = crate::db::init_test_pool().expect("target pool");
+        let mut target_conn = target_pool.get().expect("target conn");
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        execute_board_restore(
+            &mut target_conn,
+            upload_dir.path().to_str().expect("upload dir path"),
+            manifest,
+            |_| Ok(()),
+            "Test PDF setting restore",
+            "Test PDF setting restore completed",
+        )
+        .expect("restore board");
+
+        let restored = crate::db::get_board_by_short(&target_conn, "tech")
+            .expect("load restored board")
+            .expect("restored board");
+        assert!(restored.allow_pdf);
+    }
+
+    #[test]
+    fn older_board_restore_manifests_default_pdf_uploads_off() {
+        let json = serde_json::json!({
+            "version": 1,
+            "board": {
+                "id": 1,
+                "short_name": "tech",
+                "name": "Technology",
+                "description": "",
+                "nsfw": false,
+                "max_threads": 100,
+                "max_archived_threads": 150,
+                "bump_limit": 300,
+                "allow_images": true,
+                "allow_video": true,
+                "allow_audio": true,
+                "allow_any_files": false,
+                "allow_tripcodes": true,
+                "edit_window_secs": 300,
+                "allow_editing": true,
+                "allow_self_delete": true,
+                "allow_archive": true,
+                "allow_video_embeds": true,
+                "allow_captcha": false,
+                "show_poster_ids": false,
+                "collapse_greentext": false,
+                "post_cooldown_secs": 0,
+                "banner_mode": "inherit",
+                "access_mode": "public",
+                "access_password_hash": "",
+                "created_at": 1_700_000_000
+            },
+            "threads": [],
+            "posts": [],
+            "polls": [],
+            "poll_options": [],
+            "poll_votes": [],
+            "file_hashes": [],
+            "banners": []
+        });
+
+        let manifest: super::types::board_backup_types::BoardBackupManifest =
+            serde_json::from_value(json).expect("legacy manifest");
+
+        assert!(!manifest.board.allow_pdf);
     }
 
     #[test]
@@ -1401,7 +1532,7 @@ mod tests {
 
         assert_eq!(
             removed,
-            vec!["rustchan-backup-20260101_000000.zip".to_string()]
+            vec!["rustchan-backup-20260101_000000.zip".to_owned()]
         );
         assert!(!oldest.exists());
         assert!(middle.exists());
@@ -1428,8 +1559,63 @@ mod tests {
             .expect("valid metadata")
             .modified()
             .expect("valid mtime");
+        let modified_epoch = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("modified epoch")
+            .as_secs();
+        let valid_modified_epoch = valid_modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("valid modified epoch")
+            .as_secs();
 
-        assert_eq!(modified, valid_modified);
+        assert_eq!(modified_epoch, valid_modified_epoch);
+    }
+
+    #[test]
+    fn latest_verified_full_backup_modified_time_prefers_verified_v4_completed_at_over_dir_mtime() {
+        struct CleanupGuard(Vec<PathBuf>);
+        impl Drop for CleanupGuard {
+            fn drop(&mut self) {
+                for path in self.0.drain(..) {
+                    let _ = std::fs::remove_dir_all(path);
+                }
+            }
+        }
+
+        let backup_root = crate::handlers::admin::backup::v4::backups_root_dir();
+        std::fs::create_dir_all(&backup_root).expect("backup root");
+        let older_completed_dir = backup_root.join("2099-01-01_000001_full-site-newer-mtime-test");
+        let newer_dir_mtime_dir =
+            backup_root.join("2099-01-01_000002_full-site-older-completed-test");
+        let _cleanup = CleanupGuard(vec![
+            older_completed_dir.clone(),
+            newer_dir_mtime_dir.clone(),
+        ]);
+        crate::handlers::admin::backup::v4::write_saved_v4_fixture_for_test(
+            &older_completed_dir,
+            crate::handlers::admin::backup::v4::BackupScope::FullSite,
+            crate::handlers::admin::backup::v4::board_fixture_files_for_test(),
+            Some(b"sqlite".to_vec()),
+            4_102_444_800,
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        crate::handlers::admin::backup::v4::write_saved_v4_fixture_for_test(
+            &newer_dir_mtime_dir,
+            crate::handlers::admin::backup::v4::BackupScope::FullSite,
+            crate::handlers::admin::backup::v4::board_fixture_files_for_test(),
+            Some(b"sqlite".to_vec()),
+            4_102_444_700,
+        );
+        invalidate_backup_list_cache(&full_backup_dir(), BackupListKind::Full);
+
+        let modified =
+            latest_verified_full_backup_modified_time().expect("verified v4 backup time");
+        let modified_epoch = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("modified epoch")
+            .as_secs();
+
+        assert_eq!(modified_epoch, 4_102_444_800);
     }
 
     #[test]

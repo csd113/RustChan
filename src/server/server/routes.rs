@@ -10,19 +10,8 @@ use axum::{
     Router,
 };
 
-use crate::config::CONFIG;
 use crate::middleware::AppState;
 use crate::server::server::observability;
-
-const POST_MULTIPART_HEADROOM_BYTES: usize = 1024 * 1024;
-
-fn post_upload_body_limit() -> usize {
-    CONFIG
-        .max_video_size
-        .max(CONFIG.max_audio_size)
-        .max(CONFIG.max_image_size)
-        .saturating_add(POST_MULTIPART_HEADROOM_BYTES)
-}
 
 pub(super) fn public_routes() -> Router<AppState> {
     Router::new()
@@ -55,6 +44,10 @@ pub(super) fn public_routes() -> Router<AppState> {
         )
         .route("/nsfw/accept", post(crate::handlers::board::accept_nsfw))
         .route("/theme/{theme}", get(crate::handlers::board::set_theme))
+        .route(
+            "/preferences",
+            post(crate::handlers::board::set_user_preferences),
+        )
         .route("/banned", get(crate::handlers::board::banned_page))
         .route(
             "/theme-css/{theme}",
@@ -76,8 +69,7 @@ pub(super) fn public_routes() -> Router<AppState> {
         .route("/{board}", get(crate::handlers::board::board_index))
         .route(
             "/{board}",
-            post(crate::handlers::board::create_thread)
-                .layer(DefaultBodyLimit::max(post_upload_body_limit())),
+            post(crate::handlers::board::create_thread).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/{board}/unlock",
@@ -105,8 +97,7 @@ pub(super) fn public_routes() -> Router<AppState> {
         )
         .route(
             "/{board}/thread/{id}",
-            post(crate::handlers::thread::post_reply)
-                .layer(DefaultBodyLimit::max(post_upload_body_limit())),
+            post(crate::handlers::thread::post_reply).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/{board}/post/{id}/edit",
@@ -171,6 +162,10 @@ fn admin_auth_routes() -> Router<AppState> {
         )
         .route("/admin/logout", post(crate::handlers::admin::admin_logout))
         .route("/admin/panel", get(crate::handlers::admin::admin_panel))
+        .route(
+            "/admin/site-health/jobs",
+            get(crate::handlers::admin::admin_site_health_jobs),
+        )
         .route(
             "/admin/log/live",
             get(crate::handlers::admin::admin_live_log),
@@ -396,7 +391,7 @@ fn admin_backup_routes() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use super::{admin_routes, post_upload_body_limit, POST_MULTIPART_HEADROOM_BYTES};
+    use super::admin_routes;
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
@@ -418,20 +413,6 @@ mod tests {
             writer.finish().expect("finish zip");
         }
         cursor.into_inner()
-    }
-
-    #[test]
-    fn post_upload_body_limit_allows_largest_media_class() {
-        let largest_media_limit = crate::config::CONFIG
-            .max_image_size
-            .max(crate::config::CONFIG.max_video_size)
-            .max(crate::config::CONFIG.max_audio_size);
-
-        assert!(post_upload_body_limit() >= largest_media_limit);
-        assert_eq!(
-            post_upload_body_limit(),
-            largest_media_limit.saturating_add(POST_MULTIPART_HEADROOM_BYTES)
-        );
     }
 
     fn install_admin_session(state: &crate::middleware::AppState) {
@@ -476,6 +457,18 @@ mod tests {
         body
     }
 
+    fn board_settings_upload_form_body(
+        board_id: i64,
+        image_mib: &str,
+        video_mib: &str,
+        audio_mib: &str,
+    ) -> String {
+        format!(
+            "board_id={board_id}&name=Test&description=&access_mode=public&max_image_size_mb={image_mib}&max_video_size_mb={video_mib}&max_audio_size_mb={audio_mib}&_csrf={}",
+            admin_signed_csrf()
+        )
+    }
+
     async fn post_board_settings(
         state: crate::middleware::AppState,
         body: String,
@@ -511,6 +504,64 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("board access row")
+    }
+
+    fn board_upload_limits_row(
+        state: &crate::middleware::AppState,
+        board_id: i64,
+    ) -> (i64, i64, i64) {
+        let conn = state.db.get().expect("db connection");
+        conn.query_row(
+            "SELECT max_image_size, max_video_size, max_audio_size FROM boards WHERE id = ?1",
+            rusqlite::params![board_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("board upload limits row")
+    }
+
+    #[tokio::test]
+    async fn board_settings_accepts_upload_limits_above_defaults() {
+        let state = crate::test_support::app_state();
+        let board_id = create_admin_settings_board(&state);
+
+        let response = post_board_settings(
+            state.clone(),
+            board_settings_upload_form_body(board_id, "25", "500", "300"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            board_upload_limits_row(&state, board_id),
+            (25 * 1024 * 1024, 500 * 1024 * 1024, 300 * 1024 * 1024)
+        );
+    }
+
+    #[tokio::test]
+    async fn board_settings_rejects_invalid_upload_limits() {
+        for invalid in ["0", "-1", "nope", "9223372036854775808"] {
+            let state = crate::test_support::app_state();
+            let board_id = create_admin_settings_board(&state);
+
+            let response = post_board_settings(
+                state.clone(),
+                board_settings_upload_form_body(board_id, invalid, "50", "150"),
+            )
+            .await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                board_upload_limits_row(&state, board_id),
+                (
+                    i64::try_from(crate::config::CONFIG.max_image_size)
+                        .expect("image default fits in i64"),
+                    i64::try_from(crate::config::CONFIG.max_video_size)
+                        .expect("video default fits in i64"),
+                    i64::try_from(crate::config::CONFIG.max_audio_size)
+                        .expect("audio default fits in i64")
+                )
+            );
+        }
     }
 
     #[tokio::test]

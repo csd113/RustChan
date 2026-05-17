@@ -130,7 +130,7 @@ fn sanitize_builder_advanced_css(raw_value: Option<&str>) -> Result<String> {
         }
     }
 
-    Ok(trimmed.to_string())
+    Ok(trimmed.to_owned())
 }
 
 fn resolve_builder_swatch(raw_value: Option<&str>, fallback: &str) -> String {
@@ -196,7 +196,7 @@ fn resolve_builder_config(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| {
             existing_config.as_ref().map_or_else(
-                || DEFAULT_THEME_WORKSHOP_PRESET.to_string(),
+                || DEFAULT_THEME_WORKSHOP_PRESET.to_owned(),
                 |config| config.base_preset.clone(),
             )
         });
@@ -378,9 +378,7 @@ pub async fn create_theme(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<CreateThemeForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -434,9 +432,7 @@ pub async fn update_theme(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<UpdateThemeForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -462,8 +458,8 @@ pub async fn update_theme(
                 let builtin = crate::theme::builtin_theme(&existing_slug)
                     .ok_or_else(|| AppError::BadRequest("Theme not found.".into()))?;
                 (
-                    builtin.display_name.to_string(),
-                    builtin.description.to_string(),
+                    builtin.display_name.to_owned(),
+                    builtin.description.to_owned(),
                 )
             } else {
                 (
@@ -516,9 +512,7 @@ pub async fn delete_theme(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<DeleteThemeForm>,
 ) -> Result<Response> {
-    let session_id = jar
-        .get(super::SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     tokio::task::spawn_blocking({
         let pool = state.db.clone();

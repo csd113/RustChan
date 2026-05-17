@@ -216,8 +216,8 @@ pub fn start(
         tracing::error!(target: "console", error = %e, "Failed to spawn console-input thread");
     }
 
-    let stats_r = stats.clone();
-    let mode_r = mode.clone();
+    let stats_r = std::sync::Arc::clone(stats);
+    let mode_r = std::sync::Arc::clone(mode);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         let mut last_rendered = String::new();
@@ -237,9 +237,9 @@ pub fn start(
 /// Mutates the delta-tracking locals in place so req/s and other deltas
 /// are accurate across calls. Runs on the calling thread — use
 /// `tokio::task::block_in_place` at the call site when inside an async context.
-#[allow(clippy::cast_precision_loss)]
+#[expect(clippy::cast_precision_loss)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn collect_stats(
     pool: &crate::db::DbPool,
     job_queue: &crate::workers::JobQueue,
@@ -385,9 +385,41 @@ fn process_rss_kb() -> u64 {
 // the `clippy::items_after_statements` lint is satisfied — inner `fn` items
 // defined after the first statement in a function body trigger that lint.
 
+fn first_admin_c(code: &'static str) -> &'static str {
+    if crate::logging::ansi_enabled() {
+        code
+    } else {
+        ""
+    }
+}
+
+#[cfg(windows)]
+const fn first_admin_ok() -> &'static str {
+    "OK"
+}
+
+#[cfg(not(windows))]
+const fn first_admin_ok() -> &'static str {
+    "\u{2713}"
+}
+
+#[cfg(windows)]
+const fn first_admin_err() -> &'static str {
+    "x"
+}
+
+#[cfg(not(windows))]
+const fn first_admin_err() -> &'static str {
+    "\u{2717}"
+}
+
 fn first_admin_prompt_u(reader: &mut dyn std::io::BufRead) -> Option<String> {
     loop {
-        crate::logging::console_prompt("  \x1b[36mUsername:\x1b[0m ");
+        crate::logging::console_prompt(&format!(
+            "  {}Username:{} ",
+            first_admin_c("\x1b[36m"),
+            first_admin_c("\x1b[0m")
+        ));
         let mut s = String::new();
         match reader.read_line(&mut s) {
             Ok(0) | Err(_) => {
@@ -398,7 +430,7 @@ fn first_admin_prompt_u(reader: &mut dyn std::io::BufRead) -> Option<String> {
             }
             Ok(_) => {}
         }
-        let u = s.trim().to_string();
+        let u = s.trim().to_owned();
         if u.is_empty() {
             crate::logging::console_println("  Username cannot be empty.");
             continue;
@@ -422,7 +454,11 @@ fn first_admin_prompt_u(reader: &mut dyn std::io::BufRead) -> Option<String> {
 
 fn first_admin_prompt_p(reader: &mut dyn std::io::BufRead) -> Option<String> {
     loop {
-        crate::logging::console_prompt("  \x1b[36mPassword (min 8 chars):\x1b[0m ");
+        crate::logging::console_prompt(&format!(
+            "  {}Password (min 8 chars):{} ",
+            first_admin_c("\x1b[36m"),
+            first_admin_c("\x1b[0m")
+        ));
         let mut p1 = String::new();
         match reader.read_line(&mut p1) {
             Ok(0) | Err(_) => {
@@ -431,22 +467,34 @@ fn first_admin_prompt_p(reader: &mut dyn std::io::BufRead) -> Option<String> {
             }
             Ok(_) => {}
         }
-        let p1 = p1.trim().to_string();
+        let p1 = p1.trim().to_owned();
         if let Err(e) = crate::utils::crypto::validate_password(&p1) {
-            crate::logging::console_println(&format!("  \x1b[31m✗\x1b[0m {e}"));
+            crate::logging::console_println(&format!(
+                "  {}{}{} {e}",
+                first_admin_c("\x1b[31m"),
+                first_admin_err(),
+                first_admin_c("\x1b[0m")
+            ));
             continue;
         }
-        crate::logging::console_prompt("  \x1b[36mConfirm password:\x1b[0m   ");
+        crate::logging::console_prompt(&format!(
+            "  {}Confirm password:{}   ",
+            first_admin_c("\x1b[36m"),
+            first_admin_c("\x1b[0m")
+        ));
         let mut p2 = String::new();
         if reader.read_line(&mut p2).is_err() {
             crate::logging::console_println("\n  Skipped.");
             return None;
         }
-        let p2 = p2.trim().to_string();
+        let p2 = p2.trim().to_owned();
         if p1 != p2 {
-            crate::logging::console_println(
-                "  \x1b[31m✗\x1b[0m Passwords do not match. Try again.",
-            );
+            crate::logging::console_println(&format!(
+                "  {}{}{} Passwords do not match. Try again.",
+                first_admin_c("\x1b[31m"),
+                first_admin_err(),
+                first_admin_c("\x1b[0m")
+            ));
             continue;
         }
         return Some(p1);
@@ -457,23 +505,26 @@ fn first_admin_prompt_p(reader: &mut dyn std::io::BufRead) -> Option<String> {
 
 /// First-run wizard. Called before the TUI starts, so stdout is in normal
 /// terminal mode — no raw mode toggling needed here.
-#[allow(clippy::too_many_lines)]
 pub fn prompt_create_first_admin(pool: &crate::db::DbPool, reader: &mut dyn std::io::BufRead) {
-    crate::logging::console_print_raw(
+    crate::logging::console_print_raw(&format!(
         "\n\
-        \x1b[36m╔══════════════════════════════════════════════════════╗\n\
-        ║         FIRST RUN — CREATE ADMIN ACCOUNT             ║\n\
-        ╠══════════════════════════════════════════════════════╣\n\
-        ║  No admin accounts found.                            ║\n\
-        ║  Create one now to access the admin panel at /admin  ║\n\
-        ║  after the server starts. (Ctrl+C to skip for now.)  ║\n\
-        ╚══════════════════════════════════════════════════════╝\x1b[0m\n\n",
-    );
+        {}------------------------------------------------------\n\
+        |         FIRST RUN - CREATE ADMIN ACCOUNT             |\n\
+        |------------------------------------------------------|\n\
+        |  No admin accounts found.                            |\n\
+        |  Create one now to access the admin panel at /admin  |\n\
+        |  after the server starts. (Ctrl+C to skip for now.)  |\n\
+        ------------------------------------------------------{}\n\n",
+        first_admin_c("\x1b[36m"),
+        first_admin_c("\x1b[0m")
+    ));
 
     if crate::logging::is_tty() {
-        crate::logging::console_println(
-            "  \x1b[33mNote: password input is visible — this is a one-time setup.\x1b[0m",
-        );
+        crate::logging::console_println(&format!(
+            "  {}Note: password input is visible - this is a one-time setup.{}",
+            first_admin_c("\x1b[33m"),
+            first_admin_c("\x1b[0m")
+        ));
     }
 
     let Some(username) = first_admin_prompt_u(reader) else {
@@ -484,11 +535,19 @@ pub fn prompt_create_first_admin(pool: &crate::db::DbPool, reader: &mut dyn std:
     };
 
     let Ok(hash) = crate::utils::crypto::hash_password(&password) else {
-        crate::logging::console_println("  \x1b[31m[err]\x1b[0m Failed to hash password.");
+        crate::logging::console_println(&format!(
+            "  {}[err]{} Failed to hash password.",
+            first_admin_c("\x1b[31m"),
+            first_admin_c("\x1b[0m")
+        ));
         return;
     };
     let Ok(conn) = pool.get() else {
-        crate::logging::console_println("  \x1b[31m[err]\x1b[0m DB connection failed.");
+        crate::logging::console_println(&format!(
+            "  {}[err]{} DB connection failed.",
+            first_admin_c("\x1b[31m"),
+            first_admin_c("\x1b[0m")
+        ));
         return;
     };
 
@@ -501,19 +560,32 @@ pub fn prompt_create_first_admin(pool: &crate::db::DbPool, reader: &mut dyn std:
                 "First admin account created via setup wizard"
             );
             crate::logging::console_print_raw(&format!(
-                "\n  \x1b[32m✓\x1b[0m Admin '\x1b[1m{username}\x1b[0m' created (id={id}).\n\
-                   \x1b[36m→\x1b[0m Log in at /admin once the server is running.\n\n",
+                "\n  {}{}{} Admin '{}{username}{}' created (id={id}).\n\
+                   {}->{} Log in at /admin once the server is running.\n\n",
+                first_admin_c("\x1b[32m"),
+                first_admin_ok(),
+                first_admin_c("\x1b[0m"),
+                first_admin_c("\x1b[1m"),
+                first_admin_c("\x1b[0m"),
+                first_admin_c("\x1b[36m"),
+                first_admin_c("\x1b[0m")
             ));
         }
         Err(e) => {
             crate::logging::console_println(&format!(
-                "  \x1b[31m[err]\x1b[0m Failed to create admin: {e}"
+                "  {}[err]{} Failed to create admin: {e}",
+                first_admin_c("\x1b[31m"),
+                first_admin_c("\x1b[0m")
             ));
             return;
         }
     }
 
-    crate::logging::console_prompt("  \x1b[36mCreate a board now?\x1b[0m [y/N]: ");
+    crate::logging::console_prompt(&format!(
+        "  {}Create a board now?{} [y/N]: ",
+        first_admin_c("\x1b[36m"),
+        first_admin_c("\x1b[0m")
+    ));
     let mut ans = String::new();
     if reader.read_line(&mut ans).is_ok()
         && matches!(ans.trim().to_lowercase().as_str(), "y" | "yes")

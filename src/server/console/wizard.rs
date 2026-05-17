@@ -49,7 +49,10 @@ pub fn run_wizard(kind: &WizardKind, pool: &DbPool, mode: &SharedConsoleMode) {
         // 3. Hold so the operator can read the result.
         {
             use std::io::Write as _;
-            print!("\n  Press Enter to return to the dashboard\u{2026}");
+            let _ = write!(
+                stdout(),
+                "\n  Press Enter to return to the dashboard\u{2026}"
+            );
             let _ = stdout().flush();
         }
         let mut buf = String::new();
@@ -76,7 +79,7 @@ pub fn run_wizard(kind: &WizardKind, pool: &DbPool, mode: &SharedConsoleMode) {
 // ─── ANSI / prompt helpers ────────────────────────────────────────────────────
 
 fn c(code: &'static str) -> &'static str {
-    if crate::logging::is_tty() {
+    if crate::logging::ansi_enabled() {
         code
     } else {
         ""
@@ -89,6 +92,36 @@ const GRN: &str = "\x1b[32m";
 const YLW: &str = "\x1b[33m";
 const CYN: &str = "\x1b[36m";
 const BLD: &str = "\x1b[1m";
+
+#[cfg(windows)]
+const fn ok_mark() -> &'static str {
+    "OK"
+}
+
+#[cfg(not(windows))]
+const fn ok_mark() -> &'static str {
+    "\u{2713}"
+}
+
+#[cfg(windows)]
+const fn err_mark() -> &'static str {
+    "x"
+}
+
+#[cfg(not(windows))]
+const fn err_mark() -> &'static str {
+    "\u{2717}"
+}
+
+#[cfg(windows)]
+const fn section_rule() -> &'static str {
+    "-- Create Admin Account --------------------------------"
+}
+
+#[cfg(not(windows))]
+const fn section_rule() -> &'static str {
+    "\u{2500}\u{2500} Create Admin Account \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}"
+}
 
 fn prompt_username(reader: &mut dyn BufRead) -> Option<String> {
     loop {
@@ -103,7 +136,7 @@ fn prompt_username(reader: &mut dyn BufRead) -> Option<String> {
             }
             Ok(_) => {}
         }
-        let u = s.trim().to_string();
+        let u = s.trim().to_owned();
         if u.is_empty() {
             crate::logging::console_println("  Username cannot be empty.");
             continue;
@@ -136,9 +169,9 @@ fn prompt_password(reader: &mut dyn BufRead) -> Option<String> {
             }
             Ok(_) => {}
         }
-        let p1 = p1.trim().to_string();
+        let p1 = p1.trim().to_owned();
         if let Err(e) = crate::utils::crypto::validate_password(&p1) {
-            crate::logging::console_println(&format!("  {}✗{} {e}", c(RED), c(RST)));
+            crate::logging::console_println(&format!("  {}{}{} {e}", c(RED), err_mark(), c(RST)));
             continue;
         }
         crate::logging::console_prompt(&format!("  {}Confirm password:{}   ", c(CYN), c(RST)));
@@ -147,11 +180,12 @@ fn prompt_password(reader: &mut dyn BufRead) -> Option<String> {
             crate::logging::console_println("\n  Skipped.");
             return None;
         }
-        let p2 = p2.trim().to_string();
+        let p2 = p2.trim().to_owned();
         if p1 != p2 {
             crate::logging::console_println(&format!(
-                "  {}✗{} Passwords do not match. Try again.",
+                "  {}{}{} Passwords do not match. Try again.",
                 c(RED),
+                err_mark(),
                 c(RST),
             ));
             continue;
@@ -162,14 +196,13 @@ fn prompt_password(reader: &mut dyn BufRead) -> Option<String> {
 
 // ─── kb_create_board ─────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
 pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
     let prompt = |msg: &str, reader: &mut dyn BufRead| -> Option<String> {
         crate::logging::console_prompt(msg);
         let mut s = String::new();
         match reader.read_line(&mut s) {
             Ok(0) | Err(_) => None,
-            Ok(_) => Some(s.trim().to_string()),
+            Ok(_) => Some(s.trim().to_owned()),
         }
     };
 
@@ -224,15 +257,15 @@ pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
         reader,
     )
     .unwrap_or_default();
-    let no_aud = prompt(
-        &format!("  {}Disable audio?  [y/N]:{} ", c(CYN), c(RST)),
+    let audio_raw = prompt(
+        &format!("  {}Enable audio?   [y/N]:{} ", c(CYN), c(RST)),
         reader,
     )
     .unwrap_or_default();
 
     let allow_images = !matches!(no_img.to_lowercase().as_str(), "y" | "yes");
     let allow_video = !matches!(no_vid.to_lowercase().as_str(), "y" | "yes");
-    let allow_audio = !matches!(no_aud.to_lowercase().as_str(), "y" | "yes");
+    let allow_audio = matches!(audio_raw.to_lowercase().as_str(), "y" | "yes");
 
     let Ok(conn) = pool.get() else {
         crate::logging::console_println(&format!(
@@ -260,8 +293,9 @@ pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
                 "Board created via console",
             );
             crate::logging::console_println(&format!(
-                "  {}✓{} Board /{short_lc}/  — {name}{}  created (id={id}).",
+                "  {}{}{} Board /{short_lc}/ - {name}{} created (id={id}).",
                 c(GRN),
+                ok_mark(),
                 c(RST),
                 if nsfw { " [NSFW]" } else { "" },
             ));
@@ -273,13 +307,8 @@ pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
 
 // ─── kb_create_admin ─────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
 pub fn kb_create_admin(pool: &DbPool, reader: &mut dyn BufRead) {
-    crate::logging::console_print_raw(&format!(
-        "\n  {}── Create Admin Account ─────────────────────────────────{}\n\n",
-        c(CYN),
-        c(RST),
-    ));
+    crate::logging::console_print_raw(&format!("\n  {}{}{}\n\n", c(CYN), section_rule(), c(RST)));
 
     if crate::logging::is_tty() {
         crate::logging::console_println(&format!(
@@ -320,8 +349,9 @@ pub fn kb_create_admin(pool: &DbPool, reader: &mut dyn BufRead) {
                 "Admin account created via console",
             );
             crate::logging::console_println(&format!(
-                "  {}✓{} Admin '{}{username}{}' created (id={id}).",
+                "  {}{}{} Admin '{}{username}{}' created (id={id}).",
                 c(GRN),
+                ok_mark(),
                 c(RST),
                 c(BLD),
                 c(RST),
@@ -411,8 +441,9 @@ pub fn kb_delete_thread(pool: &DbPool, reader: &mut dyn BufRead) {
                 "Thread deleted via console",
             );
             crate::logging::console_println(&format!(
-                "  {}✓{} Thread {thread_id} deleted ({n} file(s) removed).",
+                "  {}{}{} Thread {thread_id} deleted ({n} file(s) removed).",
                 c(GRN),
+                ok_mark(),
                 c(RST),
             ));
         }

@@ -1,6 +1,7 @@
 // lib.rs — shared library for modules used by both server and admin CLI
 
 pub mod banner;
+pub mod cache;
 pub mod config;
 pub mod db;
 pub mod error;

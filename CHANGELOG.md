@@ -2,7 +2,7 @@
 
 All notable changes to RustChan will be documented in this file.
 
-## [1.1.5]
+## [1.2.0]
 
 ### Added
 
@@ -12,10 +12,12 @@ All notable changes to RustChan will be documented in this file.
 - Boards can now enforce their own upload size limits for images, video, and audio, with caps that stay within the site-wide maxima.
 - Two new built-in themes, Blue Sky and Deep Orbit, are available across normal pages, admin views, theme seeding, defaults, and setup documentation.
 - Users can now self-delete their own posts within a 60-second grace window after posting, with server-side expiry checks and UI countdown hints.
+- Site-health background job details now include post IDs and direct post links when a queued, completed, or failed job can be traced back to a post.
 
 ### Improved
 
 - The admin panel has been split into clearer sections and subsections, making board setup, moderation, settings, backups, and banner management easier to scan and work through on both desktop and mobile.
+- Recent site-health job detail panels can now be closed directly after reviewing failed or completed background jobs.
 - Banner editing in the admin UI is smoother: target pickers behave more predictably, external-link warnings show up inline before save, and the banner forms are laid out more cleanly.
 - The board appearance editor now shows each board's NSFW tag state directly in the appearance card.
 - Admin login and banner-serving internals were tightened up, with cleaner helper paths for session handling, banner access checks, and post-query lookups.
@@ -29,7 +31,7 @@ All notable changes to RustChan will be documented in this file.
 - Tor bootstrap and runtime logs are humanized into clearer status messages so operators can understand connection progress without reading raw Arti output, and repeat onion-service retry spam is suppressed.
 - Site stats now account for archived thread media more accurately, so admin totals reflect active content instead of counting archived bytes.
 - Built-in self-signed TLS is now gated behind an explicit feature flag, keeping production builds slimmer unless the development certificate path is needed.
-- Rust dependencies, GitHub Actions release tooling, and lockfile contents were refreshed for the `1.1.5-indev` cycle.
+- Rust dependencies, GitHub Actions release tooling, and lockfile contents were refreshed for the `1.2.0` cycle.
 - Release artifacts now focus on current Apple Silicon macOS builds instead of publishing a separate macOS x86 archive.
 - Blue Sky and Deep Orbit theme palettes were refined for better contrast and fuller coverage across normal and admin surfaces.
 
@@ -46,7 +48,7 @@ All notable changes to RustChan will be documented in this file.
 
 ### Documentation
 
-- `README.md`, `SETUP.md`, and the release notes were cleaned up for the `1.1.5-indev` cycle, with plainer wording and less filler.
+- `README.md`, `SETUP.md`, and the release notes were cleaned up for the `1.2.0` cycle, with plainer wording and less filler.
 - The README was rewritten for clearer structure and refreshed with banner-maker screenshots and current feature wording.
 
 ### Internal

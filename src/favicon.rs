@@ -1,6 +1,6 @@
 use crate::config::CONFIG;
-use anyhow::{Context, Result};
-use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageFormat};
+use anyhow::{Context as _, Result};
+use image::{imageops::FilterType, DynamicImage, GenericImageView as _, ImageFormat};
 use std::path::{Path, PathBuf};
 
 const GLOBAL_FILENAMES: &[&str] = &[
@@ -308,7 +308,7 @@ fn version_for_scope(scope: FaviconScope<'_>) -> Option<String> {
     let path = scope_dir(scope).join("version.txt");
     std::fs::read_to_string(path)
         .ok()
-        .map(|value| value.trim().to_string())
+        .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
 }
 
@@ -377,7 +377,7 @@ mod tests {
         std::fs::create_dir_all(&parent).expect("create parent");
         *FAVICON_STAGE_WRITE_FAILURE
             .lock()
-            .expect("stage failure mutex") = Some("injected favicon write failure".to_string());
+            .expect("stage failure mutex") = Some("injected favicon write failure".to_owned());
 
         let error = write_favicon_set(FaviconScope::Board(&board_short), &favicon_png_bytes())
             .expect_err("injected failure");
@@ -406,7 +406,7 @@ mod tests {
         *FAVICON_OLD_CLEANUP_FAILURE
             .lock()
             .expect("old cleanup failure mutex") =
-            Some("injected old favicon cleanup failure".to_string());
+            Some("injected old favicon cleanup failure".to_owned());
         let error = write_favicon_set(FaviconScope::Board(&board_short), &favicon_png_bytes())
             .expect_err("cleanup failure should be visible");
         assert!(error

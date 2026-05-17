@@ -3,9 +3,9 @@
 use crate::config::CONFIG;
 use crate::models::{Board, Pagination, Theme, SEARCH_QUERY_MAX_CHARS};
 use crate::utils::sanitize::escape_html;
-use chrono::{TimeZone, Utc};
+use chrono::{Local, TimeZone as _};
 use parking_lot::RwLock;
-use std::fmt::Write;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -19,6 +19,55 @@ pub mod thread;
 pub use admin::*;
 pub use board::*;
 pub use thread::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreferredBoardView {
+    Catalog,
+    Index,
+}
+
+impl PreferredBoardView {
+    #[must_use]
+    pub const fn is_catalog(self) -> bool {
+        matches!(self, Self::Catalog)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserPreferences {
+    pub hide_nsfw_boards: bool,
+    pub video_audio_muted: bool,
+    pub preferred_board_view: PreferredBoardView,
+    pub show_activity_badges: bool,
+}
+
+impl Default for UserPreferences {
+    fn default() -> Self {
+        Self {
+            hide_nsfw_boards: false,
+            video_audio_muted: false,
+            preferred_board_view: PreferredBoardView::Catalog,
+            show_activity_badges: true,
+        }
+    }
+}
+
+impl UserPreferences {
+    #[must_use]
+    pub fn etag_fragment(self) -> String {
+        format!(
+            "u{}{}{}{}",
+            i32::from(self.hide_nsfw_boards),
+            i32::from(self.video_audio_muted),
+            if self.preferred_board_view.is_catalog() {
+                "c"
+            } else {
+                "i"
+            },
+            i32::from(self.show_activity_badges)
+        )
+    }
+}
 
 // ─── Live site name (DB-overridable, falls back to CONFIG.forum_name) ─────────
 //
@@ -95,7 +144,7 @@ fn compute_static_asset_version() -> String {
         .and_then(|metadata| metadata.modified().ok())
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
         .map_or_else(
-            || env!("CARGO_PKG_VERSION").to_string(),
+            || env!("CARGO_PKG_VERSION").to_owned(),
             |duration| duration.as_secs().to_string(),
         )
 }
@@ -105,9 +154,9 @@ pub fn static_asset_url(path: &str) -> String {
     format!("{path}?v={}", *STATIC_ASSET_VERSION)
 }
 
-pub fn live_board_nav() -> (u64, Arc<str>) {
-    let guard = LIVE_BOARD_NAV.read();
-    (guard.0, Arc::clone(&guard.1))
+#[must_use]
+pub fn static_asset_version_matches(version: &str) -> bool {
+    version == STATIC_ASSET_VERSION.as_str()
 }
 
 /// Call this at startup (after first DB read) and after admin saves a new name.
@@ -174,7 +223,7 @@ fn fallback_theme_slug() -> String {
                 .find(|theme| theme.enabled)
                 .map(|theme| theme.slug.clone())
         })
-        .unwrap_or_else(|| crate::theme::HARD_DEFAULT_THEME.to_string())
+        .unwrap_or_else(|| crate::theme::HARD_DEFAULT_THEME.to_owned())
 }
 
 fn resolve_page_default_theme(board_default_theme: Option<&str>) -> String {
@@ -182,6 +231,21 @@ fn resolve_page_default_theme(board_default_theme: Option<&str>) -> String {
         .and_then(normalize_theme_slug)
         .or_else(|| normalize_theme_slug(&live_default_theme()))
         .unwrap_or_else(fallback_theme_slug)
+}
+
+#[must_use]
+pub fn page_theme_etag_fragment(
+    current_theme: Option<&str>,
+    board_default_theme: Option<&str>,
+) -> String {
+    let default_theme = resolve_page_default_theme(board_default_theme);
+    let active_theme = current_theme
+        .and_then(normalize_theme_slug)
+        .unwrap_or(default_theme);
+    crate::utils::crypto::sha256_hex(active_theme.as_bytes())
+        .chars()
+        .take(12)
+        .collect()
 }
 
 fn theme_css_href(theme: &str) -> String {
@@ -201,50 +265,74 @@ fn board_nav_groups(boards: &[Board]) -> (Vec<&Board>, Vec<&Board>) {
     (sfw, nsfw)
 }
 
-fn board_nav_group_html(boards: &[&Board]) -> Option<String> {
+fn board_href(short_name: &str, preferences: UserPreferences) -> String {
+    if preferences.preferred_board_view.is_catalog() {
+        format!("/{}/catalog", escape_html(short_name))
+    } else {
+        format!("/{}", escape_html(short_name))
+    }
+}
+
+fn board_nav_group_html(
+    boards: &[&Board],
+    preferences: UserPreferences,
+    is_nsfw: bool,
+) -> Option<String> {
     if boards.is_empty() {
         return None;
     }
+    let nsfw_attr = if is_nsfw {
+        r#" data-board-nsfw="1""#
+    } else {
+        ""
+    };
     let inner = boards
         .iter()
         .map(|board| {
             format!(
-                r#"<a href="/{short}/catalog">{short}</a>"#,
-                short = escape_html(&board.short_name)
+                r#"<a href="{href}">{short}</a>"#,
+                href = board_href(&board.short_name, preferences),
+                short = escape_html(&board.short_name),
             )
         })
         .collect::<Vec<_>>()
         .join(" / ");
     Some(format!(
-        r#"<span class="board-list-group">[ {inner} ]</span>"#
+        r#"<span class="board-list-group"{nsfw_attr}>[ {inner} ]</span>"#
     ))
 }
 
-fn mobile_board_group_html(title: &str, boards: &[&Board]) -> String {
+fn mobile_board_group_html(
+    title: &str,
+    boards: &[&Board],
+    preferences: UserPreferences,
+    is_nsfw: bool,
+) -> String {
     if boards.is_empty() {
         return String::new();
     }
+    let nsfw_attr = if is_nsfw {
+        r#" data-board-nsfw="1""#
+    } else {
+        ""
+    };
     let mut items = String::new();
     for board in boards {
         let short = escape_html(&board.short_name);
+        let href = board_href(&board.short_name, preferences);
         let _ = write!(
             items,
-            r#"<a class="mobile-board-link" href="/{short}/catalog">/{short}/</a>"#
+            r#"<a class="mobile-board-link" href="{href}">/{short}/</a>"#,
         );
     }
     format!(
-        r#"<div class="mobile-board-group"><div class="mobile-board-group-title">{title}</div>{items}</div>"#
+        r#"<div class="mobile-board-group"{nsfw_attr}><div class="mobile-board-group-title">{title}</div>{items}</div>"#
     )
 }
 
 fn rebuild_live_board_nav() {
     let boards = live_boards_snapshot();
-    let (sfw, nsfw) = board_nav_groups(boards.as_slice());
-    let nav_html = [board_nav_group_html(&sfw), board_nav_group_html(&nsfw)]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let nav_html = board_nav_html_for_preferences(boards.as_slice(), UserPreferences::default());
     let nav_html: Arc<str> = if nav_html.is_empty() {
         Arc::from("")
     } else {
@@ -254,11 +342,23 @@ fn rebuild_live_board_nav() {
     *LIVE_BOARD_NAV.write() = (version, nav_html);
 }
 
-// ─── Shared JS injected once per page ────────────────────────────────────────
-
-// All JavaScript has been moved to /static/main.js.
-// Kept as an empty constant to avoid touching every call-site.
-pub const TOGGLE_SCRIPT: &str = "";
+#[must_use]
+pub fn board_nav_html_for_preferences(boards: &[Board], preferences: UserPreferences) -> String {
+    let (sfw_boards, nsfw_boards_all) = board_nav_groups(boards);
+    let nsfw_boards = if preferences.hide_nsfw_boards {
+        Vec::new()
+    } else {
+        nsfw_boards_all
+    };
+    [
+        board_nav_group_html(&sfw_boards, preferences, false),
+        board_nav_group_html(&nsfw_boards, preferences, true),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ")
+}
 
 // ─── Auto-compress modal ──────────────────────────────────────────────────────
 
@@ -349,17 +449,17 @@ pub const fn thread_autoupdate_script() -> &'static str {
 
 #[must_use]
 pub fn fmt_ts(ts: i64) -> String {
-    match Utc.timestamp_opt(ts, 0) {
-        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-        _ => "unknown".to_string(),
+    match Local.timestamp_opt(ts, 0) {
+        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+        _ => "unknown".to_owned(),
     }
 }
 
 #[must_use]
 pub fn fmt_ts_short(ts: i64) -> String {
-    match Utc.timestamp_opt(ts, 0) {
+    match Local.timestamp_opt(ts, 0) {
         chrono::LocalResult::Single(dt) => dt.format("%m/%d/%y(%a)%H:%M:%S").to_string(),
-        _ => "?".to_string(),
+        _ => "?".to_owned(),
     }
 }
 
@@ -427,9 +527,9 @@ pub fn urlencoding_simple(s: &str) -> String {
 
 // ─── Base layout ─────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
+#[must_use]
 pub fn base_layout(
     title: &str,
     board_short: Option<&str>,
@@ -441,22 +541,48 @@ pub fn base_layout(
     collapse_greentext: bool,
     current_path: &str,
 ) -> String {
-    let (sfw_boards, nsfw_boards) = board_nav_groups(boards);
-    let board_links = [
-        board_nav_group_html(&sfw_boards),
-        board_nav_group_html(&nsfw_boards),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(" ");
+    base_layout_with_preferences(
+        title,
+        board_short,
+        body,
+        csrf_token,
+        boards,
+        current_theme,
+        board_default_theme,
+        collapse_greentext,
+        current_path,
+        UserPreferences::default(),
+    )
+}
+
+#[must_use]
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn base_layout_with_preferences(
+    title: &str,
+    board_short: Option<&str>,
+    body: &str,
+    csrf_token: &str,
+    boards: &[Board],
+    current_theme: Option<&str>,
+    board_default_theme: Option<&str>,
+    collapse_greentext: bool,
+    current_path: &str,
+    preferences: UserPreferences,
+) -> String {
+    let (sfw_boards, nsfw_boards_all) = board_nav_groups(boards);
+    let nsfw_boards = if preferences.hide_nsfw_boards {
+        Vec::new()
+    } else {
+        nsfw_boards_all
+    };
+    let board_links = board_nav_html_for_preferences(boards, preferences);
     let board_menu = if boards.is_empty() {
         String::new()
     } else {
         let items = format!(
             "{}{}",
-            mobile_board_group_html("Boards", &sfw_boards),
-            mobile_board_group_html("NSFW", &nsfw_boards)
+            mobile_board_group_html("Boards", &sfw_boards, preferences, false),
+            mobile_board_group_html("NSFW", &nsfw_boards, preferences, true)
         );
         format!(
             r#"<details class="mobile-board-menu">
@@ -498,6 +624,7 @@ pub fn base_layout(
     } else {
         format!(r#" data-theme="{}""#, escape_html(&active_theme))
     };
+    let active_theme_value_attr = format!(r#" data-active-theme="{}""#, escape_html(&active_theme));
     let theme_href = |theme: &str| {
         format!(
             "/theme/{}?return_to={}",
@@ -535,8 +662,21 @@ pub fn base_layout(
     };
     let mut theme_picker_fallback = String::new();
     let mut theme_picker_panel = String::new();
+    let mut theme_select_options = String::new();
     for theme in enabled_themes.iter().filter(|theme| theme.enabled) {
         let href = theme_href(&theme.slug);
+        let selected_attr = if theme.slug == active_theme {
+            " selected"
+        } else {
+            ""
+        };
+        let _ = write!(
+            theme_select_options,
+            r#"<option value="{slug}"{selected}>{label}</option>"#,
+            slug = escape_html(&theme.slug),
+            selected = selected_attr,
+            label = escape_html(&theme.display_name),
+        );
         let _ = write!(
             theme_picker_fallback,
             r#" <a href="{href}">{label}</a>"#,
@@ -555,10 +695,40 @@ pub fn base_layout(
             label = escape_html(&theme.display_name)
         );
     }
+    let hide_nsfw_checked = if preferences.hide_nsfw_boards {
+        " checked"
+    } else {
+        ""
+    };
+    let audio_on_checked = if preferences.video_audio_muted {
+        ""
+    } else {
+        " checked"
+    };
+    let audio_muted_checked = if preferences.video_audio_muted {
+        " checked"
+    } else {
+        ""
+    };
+    let catalog_checked = if preferences.preferred_board_view.is_catalog() {
+        " checked"
+    } else {
+        ""
+    };
+    let index_checked = if preferences.preferred_board_view.is_catalog() {
+        ""
+    } else {
+        " checked"
+    };
+    let badges_checked = if preferences.show_activity_badges {
+        " checked"
+    } else {
+        ""
+    };
 
     format!(
         r#"<!DOCTYPE html>
-<html lang="en" class="no-js"{default_theme_attr}{theme_slugs_attr}{active_theme_attr}>
+<html lang="en" class="no-js"{default_theme_attr}{theme_slugs_attr}{active_theme_value_attr}{active_theme_attr}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -591,7 +761,32 @@ pub fn base_layout(
       <span class="theme-picker-fallback-title">Theme:</span>
       {theme_picker_fallback}
     </nav>
-    <button id="theme-picker-btn" data-action="toggle-theme-picker" title="Select Theme">&#127912; Theme</button>
+    <details class="user-preferences-panel">
+      <summary id="theme-picker-btn" class="user-preferences-summary">&#9881; User Preferences</summary>
+      <form class="user-preferences-form" method="POST" action="/preferences">
+        <button type="button" class="user-preferences-mobile-close" aria-label="Close preferences">&times;</button>
+        <input type="hidden" name="preferences_form" value="1">
+        <input type="hidden" name="_csrf" value="{csrf_token}">
+        <input type="hidden" name="return_to" value="{current_path}">
+        <label>Theme
+          <select name="theme">{theme_select_options}</select>
+        </label>
+        <input type="hidden" name="hide_nsfw_boards_present" value="1">
+        <label><input type="checkbox" name="hide_nsfw_boards" value="1"{hide_nsfw_checked}> Hide NSFW boards</label>
+        <fieldset>
+          <legend>Video audio by default</legend>
+          <label><input type="radio" name="video_audio" value="on"{audio_on_checked}> On</label>
+          <label><input type="radio" name="video_audio" value="mute"{audio_muted_checked}> Mute</label>
+        </fieldset>
+        <fieldset>
+          <legend>Board links</legend>
+          <label><input type="radio" name="preferred_board_view" value="catalog"{catalog_checked}> Prefer catalog</label>
+          <label><input type="radio" name="preferred_board_view" value="index"{index_checked}> Prefer index</label>
+        </fieldset>
+        <input type="hidden" name="show_activity_badges_present" value="1">
+        <label><input type="checkbox" name="show_activity_badges" value="1"{badges_checked}> Show new activity badges</label>
+      </form>
+    </details>
     <div id="theme-picker-panel">
       <div class="tp-title">// SELECT THEME</div>
       {theme_picker_panel}
@@ -622,9 +817,18 @@ pub fn base_layout(
         admin_script_tag = admin_script_tag,
         default_theme_attr = default_theme_attr,
         theme_slugs_attr = theme_slugs_attr,
+        active_theme_value_attr = active_theme_value_attr,
         active_theme_attr = active_theme_attr,
         theme_picker_fallback = theme_picker_fallback,
+        theme_select_options = theme_select_options,
         theme_picker_panel = theme_picker_panel,
+        current_path = escape_html(current_path),
+        hide_nsfw_checked = hide_nsfw_checked,
+        audio_on_checked = audio_on_checked,
+        audio_muted_checked = audio_muted_checked,
+        catalog_checked = catalog_checked,
+        index_checked = index_checked,
+        badges_checked = badges_checked,
         collapse_attr = if collapse_greentext {
             " data-collapse-greentext=\"1\""
         } else {
@@ -744,15 +948,18 @@ pub fn error_page(code: u16, message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{base_layout, set_live_default_theme, set_live_themes};
-    use crate::models::Theme;
+    use super::{
+        base_layout, base_layout_with_preferences, fmt_ts, fmt_ts_short, set_live_default_theme,
+        set_live_themes, PreferredBoardView, UserPreferences,
+    };
+    use crate::models::{Board, Theme};
 
     fn builtin_theme(slug: &str, display_name: &str, sort_order: i64) -> Theme {
         Theme {
-            slug: slug.to_string(),
-            display_name: display_name.to_string(),
+            slug: slug.to_owned(),
+            display_name: display_name.to_owned(),
             description: format!("{display_name} description"),
-            swatch_hex: "#123456".to_string(),
+            swatch_hex: "#123456".to_owned(),
             enabled: true,
             sort_order,
             is_builtin: true,
@@ -785,5 +992,136 @@ mod tests {
         assert!(blue_sky_idx < deep_orbit_idx);
         assert!(deep_orbit_idx < terminal_idx);
         assert!(terminal_idx < dorfic_idx);
+    }
+
+    #[test]
+    fn base_layout_preferences_are_plain_html_and_selected() {
+        set_live_default_theme("forest");
+        set_live_themes(vec![
+            builtin_theme("forest", "Forest", 10),
+            builtin_theme("blue-sky", "Blue Sky", 20),
+        ]);
+        let preferences = UserPreferences {
+            hide_nsfw_boards: true,
+            video_audio_muted: true,
+            preferred_board_view: PreferredBoardView::Index,
+            show_activity_badges: false,
+        };
+
+        let html = base_layout_with_preferences(
+            "Home",
+            None,
+            "<p>body</p>",
+            "csrf",
+            &[],
+            Some("blue-sky"),
+            None,
+            false,
+            "/",
+            preferences,
+        );
+
+        assert!(html.contains(r#"<details class="user-preferences-panel">"#));
+        assert!(html.contains(r#"method="POST" action="/preferences""#));
+        assert!(html.contains(r#"data-active-theme="blue-sky""#));
+        assert!(html.contains(r#"name="_csrf" value="csrf""#));
+        assert!(html.contains(r#"name="preferences_form" value="1""#));
+        assert!(html.contains(r#"class="user-preferences-mobile-close""#));
+        assert!(html.contains(r#"aria-label="Close preferences""#));
+        assert!(html.contains("User Preferences"));
+        assert!(html.contains(r#"<option value="blue-sky" selected>Blue Sky</option>"#));
+        assert!(html.contains(r#"name="hide_nsfw_boards_present" value="1""#));
+        assert!(html.contains(r#"name="hide_nsfw_boards" value="1" checked"#));
+        assert!(html.contains(r#"name="video_audio" value="mute" checked"#));
+        assert!(html.contains(r#"name="preferred_board_view" value="index" checked"#));
+        assert!(html.contains(r#"name="show_activity_badges_present" value="1""#));
+        assert!(!html.contains(r#"name="show_activity_badges" value="1" checked"#));
+        assert!(!html.contains("Save preferences"));
+        assert!(!html.contains(r#"type="submit">Save preferences"#));
+    }
+
+    #[test]
+    fn base_layout_hides_nsfw_nav_and_uses_index_links_when_requested() {
+        let sfw = Board {
+            short_name: "tech".into(),
+            nsfw: false,
+            ..crate::test_fixtures::sample_board()
+        };
+        let nsfw = Board {
+            id: 2,
+            short_name: "x".into(),
+            nsfw: true,
+            ..crate::test_fixtures::sample_board()
+        };
+        let preferences = UserPreferences {
+            hide_nsfw_boards: true,
+            preferred_board_view: PreferredBoardView::Index,
+            ..UserPreferences::default()
+        };
+
+        let html = base_layout_with_preferences(
+            "Home",
+            None,
+            "<p>body</p>",
+            "csrf",
+            &[sfw, nsfw],
+            None,
+            None,
+            false,
+            "/",
+            preferences,
+        );
+
+        assert!(html.contains(r#"<a href="/tech">tech</a>"#));
+        assert!(!html.contains(r#"<a href="/tech/catalog">tech</a>"#));
+        assert!(!html.contains(r">x</a>"));
+    }
+
+    #[test]
+    fn base_layout_marks_nsfw_nav_groups_for_client_preference_toggling() {
+        let sfw = Board {
+            short_name: "tech".into(),
+            nsfw: false,
+            ..crate::test_fixtures::sample_board()
+        };
+        let nsfw = Board {
+            id: 2,
+            short_name: "x".into(),
+            nsfw: true,
+            ..crate::test_fixtures::sample_board()
+        };
+
+        let html = base_layout_with_preferences(
+            "Home",
+            None,
+            "<p>body</p>",
+            "csrf",
+            &[sfw, nsfw],
+            Some("forest"),
+            None,
+            false,
+            "/",
+            UserPreferences::default(),
+        );
+
+        assert!(html.contains(r#"<span class="board-list-group" data-board-nsfw="1">[ <a href="/x/catalog">x</a> ]</span>"#));
+        assert!(html.contains(r#"<div class="mobile-board-group" data-board-nsfw="1"><div class="mobile-board-group-title">NSFW</div><a class="mobile-board-link" href="/x/catalog">/x/</a></div>"#));
+    }
+
+    #[test]
+    fn timestamp_helpers_do_not_force_utc_suffix() {
+        let full = fmt_ts(1_700_000_000);
+        let short = fmt_ts_short(1_700_000_000);
+
+        assert!(!full.contains("UTC"));
+        assert!(!short.contains("UTC"));
+        assert_ne!(full, "unknown");
+        assert_ne!(short, "?");
+    }
+
+    #[test]
+    fn timestamp_helpers_handle_out_of_range_epoch_values() {
+        assert_eq!(fmt_ts(i64::MAX), "unknown");
+        assert_eq!(fmt_ts_short(i64::MAX), "?");
     }
 }

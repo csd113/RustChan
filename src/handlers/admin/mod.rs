@@ -50,14 +50,16 @@ use crate::{
 use axum::{
     extract::{Query, State},
     http::{header, HeaderMap, Uri},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use dashmap::DashMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::io::{Read, Seek, SeekFrom};
+use std::collections::VecDeque;
+use std::io::{Seek as _, SeekFrom};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -66,6 +68,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const SESSION_COOKIE: &str = "chan_admin_session";
 const ADMIN_COOKIE_SAME_SITE: SameSite = SameSite::Lax;
 const ADMIN_BOOTSTRAP_TTL_SECS: u64 = 120;
+const MISSING_ORIGIN_REFERER: &str = "Missing Origin/Referer header.";
 
 static ADMIN_SESSION_BOOTSTRAPS: LazyLock<DashMap<String, (String, u64)>> =
     LazyLock::new(DashMap::new);
@@ -88,7 +91,7 @@ fn require_admin_session_with_name(
     session_id: Option<&str>,
 ) -> Result<(i64, String)> {
     let admin_id = require_admin_session_sid(conn, session_id)?;
-    let name = db::get_admin_name_by_id(conn, admin_id)?.unwrap_or_else(|| "unknown".to_string());
+    let name = db::get_admin_name_by_id(conn, admin_id)?.unwrap_or_else(|| "unknown".to_owned());
     Ok((admin_id, name))
 }
 
@@ -114,7 +117,7 @@ pub(super) fn require_same_origin_request(
     let request_scheme =
         if crate::middleware::forwarded_proto_is_https(headers, peer, CONFIG.behind_proxy)
             || (CONFIG.tls.enabled && host_header_uses_https_port(headers))
-            || request_referer_indicates_https_tunnel(headers)
+            || request_origin_uses_https(headers)
         {
             "https"
         } else {
@@ -134,7 +137,7 @@ pub(super) fn require_same_origin_request(
         if request_has_same_origin_fetch_metadata(headers) {
             return Ok(());
         }
-        return Err(AppError::Forbidden("Missing Origin/Referer header.".into()));
+        return Err(AppError::Forbidden(MISSING_ORIGIN_REFERER.into()));
     };
     if source.eq_ignore_ascii_case("null") {
         if is_loopback_alias(request_authority.host()) {
@@ -146,7 +149,7 @@ pub(super) fn require_same_origin_request(
     }
     let source_uri = source
         .parse::<Uri>()
-        .map_err(|_| AppError::Forbidden("Invalid Origin/Referer header.".into()))?;
+        .map_err(|_error| AppError::Forbidden("Invalid Origin/Referer header.".into()))?;
     let source_scheme = source_uri
         .scheme_str()
         .ok_or_else(|| AppError::Forbidden("Origin/Referer header has no scheme.".into()))?;
@@ -216,16 +219,38 @@ fn request_has_same_origin_fetch_metadata(headers: &HeaderMap) -> bool {
 }
 
 pub(super) fn check_admin_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
+    if admin_csrf_is_valid(jar, form_token) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden("CSRF token mismatch.".into()))
+    }
+}
+
+pub(super) fn admin_csrf_is_valid(jar: &CookieJar, form_token: Option<&str>) -> bool {
     let csrf_cookie = jar
         .get("csrf_token")
         .map(axum_extra::extract::cookie::Cookie::value);
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(axum_extra::extract::cookie::Cookie::value);
-    if validate_signed_csrf(csrf_cookie, session_id, form_token.unwrap_or("")) {
-        Ok(())
-    } else {
-        Err(AppError::Forbidden("CSRF token mismatch.".into()))
+    validate_signed_csrf(csrf_cookie, session_id, form_token.unwrap_or(""))
+}
+
+pub(super) fn require_same_origin_or_valid_csrf(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    csrf_valid: bool,
+) -> Result<()> {
+    match require_same_origin_request(headers, peer) {
+        Ok(()) => Ok(()),
+        Err(AppError::Forbidden(message)) if message == MISSING_ORIGIN_REFERER && csrf_valid => {
+            tracing::debug!(
+                target: "admin",
+                "Admin POST accepted without Origin/Referer because signed CSRF token was valid"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -235,8 +260,13 @@ pub(super) fn require_admin_post_origin_and_csrf(
     peer: Option<SocketAddr>,
     form_token: Option<&str>,
 ) -> Result<()> {
-    require_same_origin_request(headers, peer)?;
-    check_admin_csrf_jar(jar, form_token)
+    let csrf_valid = admin_csrf_is_valid(jar, form_token);
+    require_same_origin_or_valid_csrf(headers, peer, csrf_valid)?;
+    if csrf_valid {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden("CSRF token mismatch.".into()))
+    }
 }
 
 fn admin_csrf_cookie(raw_token: String) -> Cookie<'static> {
@@ -258,7 +288,7 @@ pub(super) fn ensure_admin_csrf(jar: CookieJar) -> Result<(CookieJar, String)> {
         .get("csrf_token")
         .map(axum_extra::extract::cookie::Cookie::value)
         .filter(|value| !value.is_empty())
-        .map(str::to_string);
+        .map(str::to_owned);
     let mut jar = jar;
     let raw = if let Some(raw) = raw {
         raw
@@ -271,7 +301,7 @@ pub(super) fn ensure_admin_csrf(jar: CookieJar) -> Result<(CookieJar, String)> {
         .get(SESSION_COOKIE)
         .map(axum_extra::extract::cookie::Cookie::value)
         .ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
-    let session_id = session_id.to_string();
+    let session_id = session_id.to_owned();
     Ok((
         jar,
         make_scoped_csrf_form_token(&raw, &CONFIG.cookie_secret, &session_id),
@@ -280,7 +310,10 @@ pub(super) fn ensure_admin_csrf(jar: CookieJar) -> Result<(CookieJar, String)> {
 
 pub(super) use crate::utils::redirect::encode_query_component;
 
-pub(super) fn should_set_secure_cookie(headers: &HeaderMap, peer: Option<SocketAddr>) -> bool {
+pub(in crate::handlers) fn should_set_secure_cookie(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+) -> bool {
     if !CONFIG.https_cookies {
         return false;
     }
@@ -319,7 +352,7 @@ fn request_origin_uses_https(headers: &HeaderMap) -> bool {
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
-        .map(|authority| authority.host().to_string());
+        .map(|authority| authority.host().to_owned());
 
     let Some(request_host) = request_host.as_deref() else {
         return false;
@@ -341,40 +374,6 @@ fn request_origin_uses_https(headers: &HeaderMap) -> bool {
     };
 
     hosts_match_for_same_origin(source_host, request_host)
-}
-
-fn request_referer_indicates_https_tunnel(headers: &HeaderMap) -> bool {
-    let origin = header_value_trimmed(headers, header::ORIGIN);
-    if origin.is_some_and(|value| !value.eq_ignore_ascii_case("null")) {
-        return false;
-    }
-
-    let request_host = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
-        .map(|authority| authority.host().to_string());
-    let Some(request_host) = request_host.as_deref() else {
-        return false;
-    };
-
-    let Some(referer) = header_value_trimmed(headers, header::REFERER) else {
-        return false;
-    };
-    let Ok(referer_uri) = referer.parse::<Uri>() else {
-        return false;
-    };
-    if referer_uri.scheme_str() != Some("https") {
-        return false;
-    }
-    let Some(referer_host) = referer_uri
-        .authority()
-        .map(axum::http::uri::Authority::host)
-    else {
-        return false;
-    };
-
-    hosts_match_for_same_origin(referer_host, request_host)
 }
 
 fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
@@ -540,7 +539,7 @@ pub struct LiveLogQuery {
     pub bytes: Option<usize>,
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 struct AdminPanelSnapshot {
     boards: Vec<crate::models::Board>,
     bans: Vec<crate::models::Ban>,
@@ -550,6 +549,7 @@ struct AdminPanelSnapshot {
     site_name: String,
     site_subtitle: String,
     homepage_new_thread_badges_enabled: bool,
+    homepage_new_reply_badges_enabled: bool,
     thread_new_reply_badges_enabled: bool,
     default_theme: String,
     banner_rotation_interval_minutes: i64,
@@ -557,6 +557,8 @@ struct AdminPanelSnapshot {
     auto_full_backup_interval_hours: u64,
     auto_full_backup_copies_to_keep: u64,
     auto_full_backup_include_tor_hidden_service_keys: bool,
+    auto_full_backup_storage_mode: String,
+    auto_full_backup_split_zip_part_size_bytes: u64,
     themes: Vec<crate::models::Theme>,
     global_banners: Vec<crate::models::BannerAsset>,
     home_banners: Vec<crate::models::BannerAsset>,
@@ -566,12 +568,17 @@ struct AdminPanelSnapshot {
     db_size_bytes: i64,
     db_size_warning: bool,
     ffmpeg_timeout_secs: u64,
+    media_auto_prune_enabled: bool,
+    media_max_active_content_size_bytes: u64,
     ffmpeg_available: bool,
     ffprobe_available: bool,
     ffmpeg_webp_available: bool,
     ffmpeg_vp9_available: bool,
+    ffmpeg_vp9_encoder_available: bool,
+    ffmpeg_opus_available: bool,
     pdf_thumbnail_renderer: Option<String>,
     backup_summary: BackupSummary,
+    site_health: SiteHealthSnapshot,
 }
 
 #[derive(Clone)]
@@ -582,6 +589,57 @@ struct BackupSummary {
 
 struct OverviewDomainData {
     backup_summary: BackupSummary,
+}
+
+struct SiteHealthSnapshot {
+    server_status: String,
+    database_integrity_status: String,
+    last_successful_backup: String,
+    next_scheduled_backup: String,
+    data_dir_usage: String,
+    upload_dir_size: String,
+    tor_status: String,
+    running_jobs: i64,
+    queued_jobs: i64,
+    recent_completed_jobs: i64,
+    failed_jobs: i64,
+    backup_jobs: String,
+    restore_jobs: String,
+    recent_warnings: String,
+}
+
+#[derive(Serialize)]
+struct SiteHealthJobsSnapshot {
+    #[serde(rename = "running_jobs")]
+    running: i64,
+    #[serde(rename = "queued_jobs")]
+    queued: i64,
+    #[serde(rename = "recent_completed_jobs")]
+    recent_completed: i64,
+    #[serde(rename = "failed_jobs")]
+    failed: i64,
+    #[serde(rename = "backup_jobs")]
+    backup: String,
+    #[serde(rename = "restore_jobs")]
+    restore: String,
+    #[serde(rename = "recent_failed_job_details")]
+    recent_failed: Vec<SiteHealthJobDetail>,
+    #[serde(rename = "recent_completed_job_details")]
+    recent_completed_details: Vec<SiteHealthJobDetail>,
+}
+
+#[derive(Clone, Serialize)]
+struct SiteHealthJobDetail {
+    id: i64,
+    #[serde(rename = "type")]
+    job_type: String,
+    name: String,
+    post_id: Option<i64>,
+    post_url: Option<String>,
+    status: String,
+    attempts: i64,
+    error: Option<String>,
+    updated_at: String,
 }
 
 struct BoardsDomainData {
@@ -595,10 +653,12 @@ struct ModerationDomainData {
     appeals: Vec<crate::models::BanAppeal>,
 }
 
+#[expect(clippy::struct_excessive_bools)]
 struct AppearanceDomainData {
     site_name: String,
     site_subtitle: String,
     homepage_new_thread_badges_enabled: bool,
+    homepage_new_reply_badges_enabled: bool,
     thread_new_reply_badges_enabled: bool,
     default_theme: String,
     banner_rotation_interval_minutes: i64,
@@ -614,22 +674,331 @@ struct BackupsDomainData {
     board_backups: Vec<BackupInfo>,
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 // This is a flat snapshot of independent maintenance capability flags read from app state.
 struct MaintenanceDomainData {
     db_size_bytes: i64,
     db_size_warning: bool,
     ffmpeg_timeout_secs: u64,
+    media_auto_prune_enabled: bool,
+    media_max_active_content_size_bytes: u64,
     ffmpeg_available: bool,
     ffprobe_available: bool,
     ffmpeg_webp_available: bool,
     ffmpeg_vp9_available: bool,
+    ffmpeg_vp9_encoder_available: bool,
+    ffmpeg_opus_available: bool,
     pdf_thumbnail_renderer: Option<String>,
 }
 
 fn load_overview_domain_data(full_backups: &[BackupInfo]) -> OverviewDomainData {
     OverviewDomainData {
         backup_summary: build_backup_summary(full_backups),
+    }
+}
+
+fn load_site_health_snapshot(
+    conn: &rusqlite::Connection,
+    state: &AppState,
+    full_backups: &[BackupInfo],
+    auto_full_backup_settings: &crate::middleware::AutoFullBackupSettingsSnapshot,
+    _onion_address_val: Option<&str>,
+) -> SiteHealthSnapshot {
+    let server_status = conn
+        .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+        .ok()
+        .filter(|value| *value == 1)
+        .map_or_else(|| "degraded".to_owned(), |_| "ready".to_owned());
+    let database_integrity_status = db_integrity_status(&state.db_maintenance_jobs.snapshot());
+    let last_successful_backup = full_backups
+        .iter()
+        .find(|backup| backup.verified)
+        .map_or_else(|| "none saved".to_owned(), format_backup_time);
+    let next_scheduled_backup =
+        next_scheduled_backup_label(full_backups, auto_full_backup_settings.interval_hours);
+    let data_dir_usage = safe_dir_size_label(&crate::config::data_dir());
+    let upload_dir_size = safe_dir_size_label(Path::new(&CONFIG.upload_dir));
+    let jobs = load_site_health_jobs_snapshot(conn, state);
+    let recent_warnings = recent_warning_lines().unwrap_or_else(|| "not available".to_owned());
+
+    SiteHealthSnapshot {
+        server_status,
+        database_integrity_status,
+        last_successful_backup,
+        next_scheduled_backup,
+        data_dir_usage,
+        upload_dir_size,
+        tor_status: if CONFIG.enable_tor_support {
+            "enabled".to_owned()
+        } else {
+            "disabled".to_owned()
+        },
+        running_jobs: jobs.running,
+        queued_jobs: jobs.queued,
+        recent_completed_jobs: jobs.recent_completed,
+        failed_jobs: jobs.failed,
+        backup_jobs: jobs.backup,
+        restore_jobs: jobs.restore,
+        recent_warnings,
+    }
+}
+
+fn load_site_health_jobs_snapshot(
+    conn: &rusqlite::Connection,
+    state: &AppState,
+) -> SiteHealthJobsSnapshot {
+    let job_summary =
+        db::background_job_summary(conn).unwrap_or_else(|_| db::BackgroundJobSummary {
+            running: 0,
+            queued: state.job_queue.pending_count(),
+            recent_completed: 0,
+            failed: 0,
+        });
+    let recent_failed = load_site_health_job_details(conn, "failed");
+    let recent_completed_details = load_site_health_job_details(conn, "done");
+    SiteHealthJobsSnapshot {
+        running: job_summary.running,
+        queued: job_summary.queued,
+        recent_completed: job_summary.recent_completed,
+        failed: job_summary.failed,
+        backup: backup_jobs_label(state.backup_progress.as_ref()),
+        restore: "not available".to_owned(),
+        recent_failed,
+        recent_completed_details,
+    }
+}
+
+fn load_site_health_job_details(
+    conn: &rusqlite::Connection,
+    status: &str,
+) -> Vec<SiteHealthJobDetail> {
+    // background_jobs has no stable log-entry foreign key, so Site Health shows
+    // bounded inline job details instead of guessing at admin log links.
+    db::recent_background_jobs(conn, status, 10)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|job| site_health_job_detail(conn, job))
+        .collect()
+}
+
+fn site_health_job_detail(
+    conn: &rusqlite::Connection,
+    job: db::RecentBackgroundJob,
+) -> SiteHealthJobDetail {
+    let post_id = job_post_id(&job.payload);
+    let post_url = post_id.and_then(|id| post_url_for_job(conn, id));
+    SiteHealthJobDetail {
+        id: job.id,
+        name: background_job_display_name(&job.job_type).to_owned(),
+        job_type: job.job_type,
+        post_id,
+        post_url,
+        status: job.status,
+        attempts: job.attempts,
+        error: job
+            .last_error
+            .as_deref()
+            .and_then(sanitized_job_error_snippet),
+        updated_at: fmt_epoch(job.updated_at),
+    }
+}
+
+fn job_post_id(payload: &str) -> Option<i64> {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|value| value.get("d").and_then(|data| data.get("post_id")).cloned())
+        .and_then(|post_id| post_id.as_i64())
+}
+
+fn post_url_for_job(conn: &rusqlite::Connection, post_id: i64) -> Option<String> {
+    conn.query_row(
+        "SELECT b.short_name, p.thread_id
+         FROM posts p
+         JOIN boards b ON b.id = p.board_id
+         WHERE p.id = ?1
+         LIMIT 1",
+        rusqlite::params![post_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+    )
+    .ok()
+    .map(|(board_short, thread_id)| format!("/{board_short}/thread/{thread_id}#p{post_id}"))
+}
+
+fn background_job_display_name(job_type: &str) -> &str {
+    match job_type {
+        "video_transcode" => "Video transcode",
+        "audio_waveform" => "Audio waveform",
+        "thread_prune" => "Thread prune",
+        "spam_check" => "Spam check",
+        _ => "Background job",
+    }
+}
+
+fn sanitized_job_error_snippet(error: &str) -> Option<String> {
+    let mut redacted = String::new();
+    for token in error.split_whitespace() {
+        let lower = token.to_ascii_lowercase();
+        let safe_token = if token.starts_with('/')
+            || token.starts_with("~/")
+            || lower.contains("/users/")
+            || lower.contains("token=")
+            || lower.contains("secret=")
+            || lower.contains("password=")
+            || lower.contains("cookie=")
+            || lower.contains("authorization:")
+        {
+            "[redacted]"
+        } else {
+            token
+        };
+        if !redacted.is_empty() {
+            redacted.push(' ');
+        }
+        redacted.push_str(safe_token);
+        if redacted.chars().count() >= 180 {
+            break;
+        }
+    }
+
+    let snippet: String = redacted.chars().take(180).collect();
+    let snippet = snippet.trim();
+    if snippet.is_empty() {
+        None
+    } else if redacted.chars().count() > 180 || error.chars().count() > snippet.chars().count() {
+        Some(format!("{snippet}..."))
+    } else {
+        Some(snippet.to_owned())
+    }
+}
+
+fn format_backup_time(backup: &BackupInfo) -> String {
+    backup
+        .modified_epoch
+        .map_or_else(|| backup.filename.clone(), fmt_epoch)
+}
+
+fn next_scheduled_backup_label(full_backups: &[BackupInfo], interval_hours: u64) -> String {
+    if interval_hours == 0 {
+        return "not scheduled".to_owned();
+    }
+    let Some(latest_verified) = full_backups.iter().find(|backup| backup.verified) else {
+        return "after first scheduler check".to_owned();
+    };
+    let Some(modified_epoch) = latest_verified.modified_epoch else {
+        return "unknown".to_owned();
+    };
+    let interval_secs = i64::try_from(interval_hours.saturating_mul(3600)).unwrap_or(i64::MAX);
+    fmt_epoch(modified_epoch.saturating_add(interval_secs))
+}
+
+fn fmt_epoch(timestamp: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0).map_or_else(
+        || "unknown".to_owned(),
+        |datetime| datetime.format("%Y-%m-%d %H:%M UTC").to_string(),
+    )
+}
+
+fn db_integrity_status(status: &crate::middleware::DbMaintenanceJobStatus) -> String {
+    match status {
+        crate::middleware::DbMaintenanceJobStatus::Finished { report, .. } => {
+            if report.after.as_ref().unwrap_or(&report.before).ok() {
+                "passed at last check".to_owned()
+            } else {
+                "failed at last check".to_owned()
+            }
+        }
+        crate::middleware::DbMaintenanceJobStatus::Running { .. } => "check running".to_owned(),
+        crate::middleware::DbMaintenanceJobStatus::Failed { .. } => "last check failed".to_owned(),
+        crate::middleware::DbMaintenanceJobStatus::Idle => "not checked".to_owned(),
+    }
+}
+
+fn backup_jobs_label(progress: &crate::middleware::BackupProgress) -> String {
+    use std::sync::atomic::Ordering;
+    match progress.phase.load(Ordering::Relaxed) {
+        crate::middleware::backup_phase::IDLE => "idle".to_owned(),
+        crate::middleware::backup_phase::SNAPSHOT_DB => "snapshotting database".to_owned(),
+        crate::middleware::backup_phase::COUNT_FILES => "counting files".to_owned(),
+        crate::middleware::backup_phase::COMPRESS => {
+            let done = progress.files_done.load(Ordering::Relaxed);
+            let total = progress.files_total.load(Ordering::Relaxed);
+            if total == 0 {
+                "compressing".to_owned()
+            } else {
+                format!("compressing ({done}/{total} files)")
+            }
+        }
+        crate::middleware::backup_phase::DONE => "last run complete".to_owned(),
+        _ => "unknown".to_owned(),
+    }
+}
+
+fn safe_dir_size_label(path: &Path) -> String {
+    safe_dir_size(path).map_or_else(
+        || "unknown".to_owned(),
+        |bytes| {
+            let display_bytes = i64::try_from(bytes).unwrap_or(i64::MAX);
+            crate::utils::files::format_file_size(display_bytes)
+        },
+    )
+}
+
+fn safe_dir_size(root: &Path) -> Option<u64> {
+    let metadata = std::fs::symlink_metadata(root).ok()?;
+    if metadata.file_type().is_symlink() {
+        return None;
+    }
+    if metadata.is_file() {
+        return Some(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Some(0);
+    }
+
+    let mut total = 0_u64;
+    let mut pending = VecDeque::from([root.to_path_buf()]);
+    while let Some(dir) = pending.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&entry_path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push_back(entry_path);
+            } else if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    Some(total)
+}
+
+fn recent_warning_lines() -> Option<String> {
+    let log_path = latest_log_file(&crate::config::logs_dir())?;
+    let buf = std::fs::read(log_path).ok()?;
+    let start = buf.len().saturating_sub(65_536);
+    let buf = String::from_utf8_lossy(buf.get(start..).unwrap_or_default()).into_owned();
+    let warnings: Vec<&str> = buf
+        .lines()
+        .rev()
+        .filter(|line| {
+            line.contains("WARN")
+                || line.contains("ERROR")
+                || line.contains("warn")
+                || line.contains("error")
+        })
+        .take(5)
+        .collect();
+    if warnings.is_empty() {
+        Some("none in recent log tail".to_owned())
+    } else {
+        Some(warnings.into_iter().rev().collect::<Vec<_>>().join("\n"))
     }
 }
 
@@ -665,6 +1034,7 @@ fn load_appearance_domain_data(
         site_name: db::get_site_name(conn),
         site_subtitle: db::get_site_subtitle(conn),
         homepage_new_thread_badges_enabled: db::get_homepage_new_thread_badges_enabled(conn),
+        homepage_new_reply_badges_enabled: db::get_homepage_new_reply_badges_enabled(conn),
         thread_new_reply_badges_enabled: db::get_thread_new_reply_badges_enabled(conn),
         default_theme: db::get_default_user_theme(conn),
         banner_rotation_interval_minutes: db::get_banner_rotation_interval_minutes(conn),
@@ -700,11 +1070,15 @@ fn load_maintenance_domain_data(
         db_size_bytes,
         db_size_warning,
         ffmpeg_timeout_secs: crate::config::ffmpeg_timeout_secs(),
+        media_auto_prune_enabled: db::get_media_auto_prune_enabled(conn),
+        media_max_active_content_size_bytes: db::get_media_max_active_content_size_bytes(conn),
         ffmpeg_available: state.ffmpeg_available,
         ffprobe_available: state.ffprobe_available,
         ffmpeg_webp_available: state.ffmpeg_webp_available,
         ffmpeg_vp9_available: state.ffmpeg_vp9_available,
-        pdf_thumbnail_renderer: state.pdf_thumbnail_renderer.map(str::to_string),
+        ffmpeg_vp9_encoder_available: state.ffmpeg_vp9_encoder_available,
+        ffmpeg_opus_available: state.ffmpeg_opus_available,
+        pdf_thumbnail_renderer: state.pdf_thumbnail_renderer.map(str::to_owned),
     }
 }
 
@@ -720,6 +1094,13 @@ fn load_admin_panel_snapshot(
     let backups_domain = load_backups_domain_data();
     let overview_domain = load_overview_domain_data(&backups_domain.full_backups);
     let maintenance_domain = load_maintenance_domain_data(conn, state);
+    let site_health = load_site_health_snapshot(
+        conn,
+        state,
+        &backups_domain.full_backups,
+        &auto_full_backup_settings,
+        onion_address_val.as_deref(),
+    );
     Ok((
         AdminPanelSnapshot {
             boards: boards_domain.boards,
@@ -731,6 +1112,7 @@ fn load_admin_panel_snapshot(
             site_subtitle: appearance_domain.site_subtitle,
             homepage_new_thread_badges_enabled: appearance_domain
                 .homepage_new_thread_badges_enabled,
+            homepage_new_reply_badges_enabled: appearance_domain.homepage_new_reply_badges_enabled,
             thread_new_reply_badges_enabled: appearance_domain.thread_new_reply_badges_enabled,
             default_theme: appearance_domain.default_theme,
             banner_rotation_interval_minutes: appearance_domain.banner_rotation_interval_minutes,
@@ -739,6 +1121,9 @@ fn load_admin_panel_snapshot(
             auto_full_backup_copies_to_keep: auto_full_backup_settings.copies_to_keep,
             auto_full_backup_include_tor_hidden_service_keys: auto_full_backup_settings
                 .include_tor_hidden_service_keys,
+            auto_full_backup_storage_mode: auto_full_backup_settings.storage_mode,
+            auto_full_backup_split_zip_part_size_bytes: auto_full_backup_settings
+                .split_zip_part_size,
             themes: appearance_domain.themes,
             global_banners: appearance_domain.global_banners,
             home_banners: appearance_domain.home_banners,
@@ -748,12 +1133,18 @@ fn load_admin_panel_snapshot(
             db_size_bytes: maintenance_domain.db_size_bytes,
             db_size_warning: maintenance_domain.db_size_warning,
             ffmpeg_timeout_secs: maintenance_domain.ffmpeg_timeout_secs,
+            media_auto_prune_enabled: maintenance_domain.media_auto_prune_enabled,
+            media_max_active_content_size_bytes: maintenance_domain
+                .media_max_active_content_size_bytes,
             ffmpeg_available: maintenance_domain.ffmpeg_available,
             ffprobe_available: maintenance_domain.ffprobe_available,
             ffmpeg_webp_available: maintenance_domain.ffmpeg_webp_available,
             ffmpeg_vp9_available: maintenance_domain.ffmpeg_vp9_available,
+            ffmpeg_vp9_encoder_available: maintenance_domain.ffmpeg_vp9_encoder_available,
+            ffmpeg_opus_available: maintenance_domain.ffmpeg_opus_available,
             pdf_thumbnail_renderer: maintenance_domain.pdf_thumbnail_renderer,
             backup_summary: overview_domain.backup_summary,
+            site_health,
         },
         onion_address_val,
     ))
@@ -765,10 +1156,9 @@ fn build_backup_summary(full_backups: &[BackupInfo]) -> BackupSummary {
     let Some(latest) = full_backups.first() else {
         return BackupSummary {
             warning: Some(
-                "No saved full backup found. Create and download a verified full backup before relying on this node."
-                    .to_string(),
+                "No saved full backup found. Create and download a verified full backup before relying on this node.".to_owned(),
             ),
-            status_line: "Latest full backup: none saved.".to_string(),
+            status_line: "Latest full backup: none saved.".to_owned(),
         };
     };
 
@@ -778,7 +1168,7 @@ fn build_backup_summary(full_backups: &[BackupInfo]) -> BackupSummary {
         .map(|ts| now.saturating_sub(ts).max(0) / 3600);
     let age_text = age_hours
         .map(|hours| format!("{hours}h ago"))
-        .unwrap_or_else(|| "unknown age".to_string());
+        .unwrap_or_else(|| "unknown age".to_owned());
     let status_line = format!(
         "Latest full backup: {} ({age_text}) — {}.",
         latest.filename, latest.verification_note
@@ -810,7 +1200,9 @@ fn render_admin_panel_from_snapshot(
     tor_address: Option<String>,
     flash: Option<(bool, String)>,
     open_section: Option<&str>,
+    current_theme: Option<&str>,
 ) -> String {
+    let diagnostics_text = build_diagnostics_text(&snapshot, tor_address.as_deref());
     let flash_ref = flash
         .as_ref()
         .map(|(is_error, message)| crate::templates::AdminPanelFlash {
@@ -820,6 +1212,7 @@ fn render_admin_panel_from_snapshot(
     let view = crate::templates::AdminPanelViewModel {
         csrf_token,
         boards: &snapshot.boards,
+        current_theme,
         moderation: crate::templates::AdminPanelModerationView {
             bans: &snapshot.bans,
             filters: &snapshot.filters,
@@ -830,6 +1223,7 @@ fn render_admin_panel_from_snapshot(
             site_name: &snapshot.site_name,
             site_subtitle: &snapshot.site_subtitle,
             homepage_new_thread_badges_enabled: snapshot.homepage_new_thread_badges_enabled,
+            homepage_new_reply_badges_enabled: snapshot.homepage_new_reply_badges_enabled,
             thread_new_reply_badges_enabled: snapshot.thread_new_reply_badges_enabled,
             default_theme: &snapshot.default_theme,
             banner_rotation_interval_minutes: snapshot.banner_rotation_interval_minutes,
@@ -839,6 +1233,7 @@ fn render_admin_panel_from_snapshot(
             home_banners: &snapshot.home_banners,
             board_banners: &snapshot.board_banners,
         },
+        site_health: build_site_health_view(&snapshot, tor_address.as_deref(), &diagnostics_text),
         backups: crate::templates::AdminPanelBackupsView {
             full_backups: &snapshot.full_backups,
             board_backups: &snapshot.board_backups,
@@ -848,6 +1243,11 @@ fn render_admin_panel_from_snapshot(
             auto_full_backup_copies_to_keep: snapshot.auto_full_backup_copies_to_keep,
             auto_full_backup_include_tor_hidden_service_keys: snapshot
                 .auto_full_backup_include_tor_hidden_service_keys,
+            auto_full_backup_storage_mode: &snapshot.auto_full_backup_storage_mode,
+            auto_full_backup_split_zip_part_size_gib:
+                crate::handlers::admin::backup::split_zip_part_size_gib(
+                    snapshot.auto_full_backup_split_zip_part_size_bytes,
+                ),
             tor_hidden_service_key_backup_available:
                 crate::config::configured_tor_hidden_service_keys_dir().is_some(),
         },
@@ -855,6 +1255,8 @@ fn render_admin_panel_from_snapshot(
             db_size_bytes: snapshot.db_size_bytes,
             db_size_warning: snapshot.db_size_warning,
             ffmpeg_timeout_secs: snapshot.ffmpeg_timeout_secs,
+            media_auto_prune_enabled: snapshot.media_auto_prune_enabled,
+            media_max_active_content_size_bytes: snapshot.media_max_active_content_size_bytes,
             media_detection: crate::templates::AdminMediaDetectionView {
                 ffmpeg: if snapshot.ffmpeg_available {
                     crate::templates::AdminDetectionStatus::Detected
@@ -876,7 +1278,7 @@ fn render_admin_panel_from_snapshot(
                 } else {
                     crate::templates::AdminDetectionStatus::Missing
                 },
-                pdf_thumbnail_renderer: snapshot.pdf_thumbnail_renderer,
+                pdf_thumbnail_renderer: snapshot.pdf_thumbnail_renderer.clone(),
             },
         },
         tor_address: tor_address.as_deref(),
@@ -884,6 +1286,96 @@ fn render_admin_panel_from_snapshot(
         open_section,
     };
     crate::templates::admin_panel_page(&view)
+}
+
+fn build_site_health_view<'a>(
+    snapshot: &'a AdminPanelSnapshot,
+    tor_address: Option<&'a str>,
+    diagnostics_text: &'a str,
+) -> crate::templates::AdminPanelSiteHealthView<'a> {
+    crate::templates::AdminPanelSiteHealthView {
+        server_status: &snapshot.site_health.server_status,
+        rustchan_version: env!("CARGO_PKG_VERSION"),
+        database_integrity_status: &snapshot.site_health.database_integrity_status,
+        last_successful_backup: &snapshot.site_health.last_successful_backup,
+        next_scheduled_backup: &snapshot.site_health.next_scheduled_backup,
+        data_dir_usage: &snapshot.site_health.data_dir_usage,
+        upload_dir_size: &snapshot.site_health.upload_dir_size,
+        tor_status: &snapshot.site_health.tor_status,
+        tor_onion_address: tor_address,
+        dependency_summary: crate::templates::AdminSiteHealthDependencySummary {
+            ffmpeg: detection_status(snapshot.ffmpeg_available),
+            ffprobe: detection_status(snapshot.ffprobe_available),
+            webp: detection_status(snapshot.ffmpeg_webp_available),
+            vp9: detection_status(snapshot.ffmpeg_vp9_encoder_available),
+            opus: detection_status(snapshot.ffmpeg_opus_available),
+        },
+        running_jobs: snapshot.site_health.running_jobs,
+        queued_jobs: snapshot.site_health.queued_jobs,
+        recent_completed_jobs: snapshot.site_health.recent_completed_jobs,
+        failed_jobs: snapshot.site_health.failed_jobs,
+        backup_jobs: &snapshot.site_health.backup_jobs,
+        restore_jobs: &snapshot.site_health.restore_jobs,
+        diagnostics_text,
+    }
+}
+
+const fn detection_status(detected: bool) -> crate::templates::AdminDetectionStatus {
+    if detected {
+        crate::templates::AdminDetectionStatus::Detected
+    } else {
+        crate::templates::AdminDetectionStatus::Missing
+    }
+}
+
+const fn detection_word(detected: bool) -> &'static str {
+    if detected {
+        "found"
+    } else {
+        "missing"
+    }
+}
+
+fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&str>) -> String {
+    let tor_enabled = if CONFIG.enable_tor_support {
+        "yes"
+    } else {
+        "no"
+    };
+    let tls_enabled = if CONFIG.tls.enabled { "yes" } else { "no" };
+    let reverse_proxy = if CONFIG.behind_proxy { "yes" } else { "no" };
+    let tor_detail = tor_address.unwrap_or("not available");
+    format!(
+        "RustChan version: {version}\n\
+         OS: {os}-{arch}\n\
+         SQLite: {sqlite}\n\
+         ffmpeg: {ffmpeg}\n\
+         ffprobe: {ffprobe}\n\
+         Tor enabled: {tor_enabled} ({tor_detail})\n\
+         TLS enabled: {tls_enabled}\n\
+         Reverse proxy: {reverse_proxy}\n\
+         Data path: {data_path}\n\
+         Main log directory: {main_log_dir}\n\
+         Dependency log: {dependency_log}\n\
+         Recent warnings:\n{warnings}\n",
+        version = env!("CARGO_PKG_VERSION"),
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        sqlite = rusqlite::version(),
+        ffmpeg = detection_word(snapshot.ffmpeg_available),
+        ffprobe = detection_word(snapshot.ffprobe_available),
+        data_path = crate::config::data_dir().display(),
+        main_log_dir = crate::config::logs_dir().display(),
+        dependency_log = crate::logging::dependency_log_path(&crate::config::logs_dir()).display(),
+        warnings = indent_diagnostics_block(&snapshot.site_health.recent_warnings),
+    )
+}
+
+fn indent_diagnostics_block(text: &str) -> String {
+    text.lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub async fn admin_panel(
@@ -894,8 +1386,9 @@ pub async fn admin_panel(
     Query(params): Query<AdminPanelQuery>,
 ) -> Result<(CookieJar, Html<String>)> {
     // Move auth check and all DB calls into spawn_blocking.
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let cookie_secure = should_set_secure_cookie(&headers, Some(peer));
-    let mut session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let mut session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     let mut jar = jar;
     if session_id.is_none() {
         if let Some(bootstrap_token) = params.bootstrap.as_deref() {
@@ -928,13 +1421,13 @@ pub async fn admin_panel(
     } else if let Some(board) = params.board_restored {
         Some((false, format!("Board /{board}/ restored successfully.")))
     } else if params.backup_created.is_some() {
-        Some((false, "Backup saved on the server.".to_string()))
+        Some((false, "Backup saved on the server.".to_owned()))
     } else if params.backup_deleted.is_some() {
-        Some((false, "Backup deleted.".to_string()))
+        Some((false, "Backup deleted.".to_owned()))
     } else if params.restored.is_some() {
-        Some((false, "Restore completed successfully.".to_string()))
+        Some((false, "Restore completed successfully.".to_owned()))
     } else if params.settings_saved.is_some() {
-        Some((false, "Site settings saved.".to_string()))
+        Some((false, "Site settings saved.".to_owned()))
     } else {
         None
     };
@@ -970,6 +1463,7 @@ pub async fn admin_panel(
                 tor_address,
                 flash,
                 open_section.as_deref(),
+                current_theme.as_deref(),
             ))
         }
     })
@@ -979,12 +1473,51 @@ pub async fn admin_panel(
     Ok((jar, Html(html)))
 }
 
+pub async fn admin_site_health_jobs(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Response> {
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+
+    let jobs = tokio::task::spawn_blocking({
+        let state = state.clone();
+        move || -> Result<SiteHealthJobsSnapshot> {
+            let conn = state.db.get()?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
+            Ok(load_site_health_jobs_snapshot(&conn, &state))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    let payload =
+        serde_json::to_string(&jobs).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/json; charset=utf-8".to_owned(),
+            ),
+            (
+                header::CACHE_CONTROL,
+                "private, no-cache, no-store, must-revalidate, no-transform".to_owned(),
+            ),
+            (header::PRAGMA, "no-cache".to_owned()),
+            (header::EXPIRES, "0".to_owned()),
+            (header::VARY, "Cookie".to_owned()),
+        ],
+        payload,
+    )
+        .into_response())
+}
+
 pub async fn admin_live_log(
     State(state): State<AppState>,
     jar: CookieJar,
     Query(params): Query<LiveLogQuery>,
 ) -> Result<Response> {
-    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     let max_bytes = params.bytes.unwrap_or(65_536).clamp(4_096, 262_144);
 
     let payload = tokio::task::spawn_blocking({
@@ -1021,21 +1554,48 @@ pub async fn admin_live_log(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok((
-        [(header::CONTENT_TYPE, "application/json".to_string())],
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/json; charset=utf-8".to_owned(),
+            ),
+            (
+                header::CACHE_CONTROL,
+                "private, no-cache, no-store, must-revalidate, no-transform".to_owned(),
+            ),
+            (header::PRAGMA, "no-cache".to_owned()),
+            (header::EXPIRES, "0".to_owned()),
+            (
+                header::HeaderName::from_static("x-accel-buffering"),
+                "no".to_owned(),
+            ),
+            (header::VARY, "Cookie".to_owned()),
+        ],
         payload,
     )
         .into_response())
 }
 
-fn latest_log_file(logs_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut files = std::fs::read_dir(logs_dir)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("log"))
-        .collect::<Vec<_>>();
-    files.sort();
-    files.pop()
+fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
+    let mut latest: Option<(SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(logs_dir).ok()?.flatten() {
+        let path = entry.path();
+        if !crate::logging::is_main_log_file(&path) {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&path).ok()?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
+        }
+        let modified = metadata.modified().ok()?;
+        if latest
+            .as_ref()
+            .is_none_or(|(current, _)| modified > *current)
+        {
+            latest = Some((modified, path));
+        }
+    }
+    latest.map(|(_, path)| path)
 }
 
 fn read_log_tail(path: &std::path::Path, max_bytes: usize) -> Result<(String, bool)> {
@@ -1049,11 +1609,10 @@ fn read_log_tail(path: &std::path::Path, max_bytes: usize) -> Result<(String, bo
     file.seek(SeekFrom::Start(start))
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Seek log: {e}")))?;
 
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Read log: {e}")))?;
-
-    let text = String::from_utf8_lossy(&buf).into_owned();
+    let buf =
+        std::fs::read(path).map_err(|e| AppError::Internal(anyhow::anyhow!("Read log: {e}")))?;
+    let start = usize::try_from(start).unwrap_or(usize::MAX);
+    let text = String::from_utf8_lossy(buf.get(start..).unwrap_or_default()).into_owned();
     let truncated = start > 0;
     let content = if truncated {
         match text.find('\n') {
@@ -1076,7 +1635,7 @@ fn admin_bootstrap_now_secs() -> u64 {
 pub(super) fn create_admin_session_bootstrap(session_id: &str) -> String {
     let token = crate::utils::crypto::new_session_id();
     let expires_at = admin_bootstrap_now_secs().saturating_add(ADMIN_BOOTSTRAP_TTL_SECS);
-    ADMIN_SESSION_BOOTSTRAPS.insert(token.clone(), (session_id.to_string(), expires_at));
+    ADMIN_SESSION_BOOTSTRAPS.insert(token.clone(), (session_id.to_owned(), expires_at));
     token
 }
 
@@ -1091,11 +1650,19 @@ pub(super) fn consume_admin_session_bootstrap(token: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        consume_admin_session_bootstrap, create_admin_session_bootstrap,
-        host_header_uses_https_port, hosts_match_for_same_origin, latest_log_file, read_log_tail,
-        request_origin_uses_https, require_same_origin_request,
+        admin_live_log, admin_site_health_jobs, consume_admin_session_bootstrap,
+        create_admin_session_bootstrap, host_header_uses_https_port, hosts_match_for_same_origin,
+        latest_log_file, read_log_tail, request_origin_uses_https,
+        require_same_origin_or_valid_csrf, require_same_origin_request, LiveLogQuery,
+        SESSION_COOKIE,
     };
-    use axum::http::{header, HeaderMap, HeaderValue};
+    use crate::error::AppError;
+    use axum::{
+        body::to_bytes,
+        extract::{Query, State},
+        http::{header, HeaderMap, HeaderValue, StatusCode},
+    };
+    use axum_extra::extract::cookie::{Cookie, CookieJar};
 
     fn same_origin_headers(host: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -1182,6 +1749,28 @@ mod tests {
     }
 
     #[test]
+    fn same_origin_or_valid_csrf_accepts_headerless_post_with_valid_csrf() {
+        let headers = same_origin_headers("demo.serveo.net");
+        assert!(require_same_origin_or_valid_csrf(&headers, None, true).is_ok());
+    }
+
+    #[test]
+    fn same_origin_or_valid_csrf_rejects_headerless_post_with_invalid_csrf() {
+        let headers = same_origin_headers("demo.serveo.net");
+        assert!(require_same_origin_or_valid_csrf(&headers, None, false).is_err());
+    }
+
+    #[test]
+    fn same_origin_or_valid_csrf_rejects_cross_origin_post_with_valid_csrf() {
+        let mut headers = same_origin_headers("demo.serveo.net");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.test"),
+        );
+        assert!(require_same_origin_or_valid_csrf(&headers, None, true).is_err());
+    }
+
+    #[test]
     fn same_origin_request_accepts_null_origin_with_same_origin_referer_on_https_tunnel() {
         let mut headers = same_origin_headers("demo.serveo.net");
         headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
@@ -1190,6 +1779,41 @@ mod tests {
             HeaderValue::from_static("https://demo.serveo.net/admin"),
         );
         assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_accepts_same_host_https_origin_on_https_tunnel() {
+        let mut headers = same_origin_headers("rustchan.serveousercontent.com");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://rustchan.serveousercontent.com"),
+        );
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn admin_post_csrf_accepts_scoped_token_on_https_tunnel_host() {
+        let mut headers = same_origin_headers("rustchan.serveousercontent.com");
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://rustchan.serveousercontent.com"),
+        );
+        let token = crate::utils::crypto::make_scoped_csrf_form_token(
+            "csrf123",
+            &crate::config::CONFIG.cookie_secret,
+            "session123",
+        );
+        let jar = CookieJar::new()
+            .add(Cookie::new("csrf_token", "csrf123"))
+            .add(Cookie::new(SESSION_COOKIE, "session123"));
+
+        assert!(
+            super::require_admin_post_origin_and_csrf(&jar, &headers, None, Some(&token)).is_ok()
+        );
+        assert!(
+            super::require_admin_post_origin_and_csrf(&jar, &headers, None, Some("bad")).is_err()
+        );
+        assert!(super::require_admin_post_origin_and_csrf(&jar, &headers, None, None).is_err());
     }
 
     #[test]
@@ -1204,8 +1828,8 @@ mod tests {
     }
 
     #[test]
-    fn same_origin_request_rejects_scheme_mismatch_for_non_loopback_host() {
-        let mut headers = same_origin_headers("example.test");
+    fn same_origin_request_rejects_default_https_origin_with_explicit_http_port() {
+        let mut headers = same_origin_headers("example.test:8080");
         headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("https://example.test"),
@@ -1348,6 +1972,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("rustchan.2026-04-01.log"), "old").expect("old");
         std::fs::write(dir.path().join("rustchan.2026-04-02.log"), "new").expect("new");
+        std::fs::write(
+            dir.path().join(crate::logging::DEPENDENCY_LOG_FILE_NAME),
+            "deps",
+        )
+        .expect("deps");
         let latest = latest_log_file(dir.path()).expect("latest");
         assert_eq!(
             latest.file_name().and_then(|name| name.to_str()),
@@ -1363,5 +1992,213 @@ mod tests {
         let (content, truncated) = read_log_tail(&path, 8).expect("tail");
         assert!(truncated);
         assert!(content.contains("line3"));
+    }
+
+    fn install_admin_session(state: &crate::middleware::AppState) {
+        let conn = state.db.get().expect("db connection");
+        let password_hash = crate::utils::crypto::hash_password("hunter2").expect("hash password");
+        let admin_id =
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+        crate::db::create_session(
+            &conn,
+            "session123",
+            admin_id,
+            chrono::Utc::now().timestamp() + 3600,
+        )
+        .expect("create session");
+    }
+
+    #[tokio::test]
+    async fn live_log_requires_admin_auth() {
+        let state = crate::test_support::app_state();
+        let error = admin_live_log(
+            State(state),
+            CookieJar::new(),
+            Query(LiveLogQuery { bytes: None }),
+        )
+        .await
+        .expect_err("missing session should fail");
+
+        match error {
+            AppError::Forbidden(message) => assert_eq!(message, "Not logged in."),
+            other => panic!("expected forbidden error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn site_health_jobs_requires_admin_auth() {
+        let state = crate::test_support::app_state();
+        let error = admin_site_health_jobs(State(state), CookieJar::new())
+            .await
+            .expect_err("missing session should fail");
+
+        match error {
+            AppError::Forbidden(message) => assert_eq!(message, "Not logged in."),
+            other => panic!("expected forbidden error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn site_health_jobs_returns_no_store_json_body() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let (expected_post_id, expected_post_url);
+        {
+            let conn = state.db.get().expect("db connection");
+            let board_id =
+                crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+            conn.execute(
+                "INSERT INTO threads (board_id, subject) VALUES (?1, 'job thread')",
+                rusqlite::params![board_id],
+            )
+            .expect("insert thread");
+            let thread_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO posts
+                 (thread_id, board_id, body, body_html, deletion_token, is_op)
+                 VALUES (?1, ?2, 'job body', 'job body', 'delete-token', 1)",
+                rusqlite::params![thread_id, board_id],
+            )
+            .expect("insert post");
+            let post_id = conn.last_insert_rowid();
+            expected_post_id = post_id;
+            expected_post_url = format!("/test/thread/{thread_id}#p{post_id}");
+            let failed_payload = serde_json::json!({
+                "t": "SpamCheck",
+                "d": {
+                    "post_id": post_id,
+                    "ip_hash": "hash",
+                    "body_len": 8
+                }
+            })
+            .to_string();
+            conn.execute(
+                "INSERT INTO background_jobs
+                 (job_type, payload, status, attempts, last_error, updated_at)
+                 VALUES
+                 ('spam_check', ?1, 'failed', 3, ?2, unixepoch()),
+                 ('thread_prune', '{}', 'done', 1, NULL, unixepoch())",
+                rusqlite::params![
+                    failed_payload,
+                    "failed reading /Users/example/private.txt with token=abc123 ".repeat(8)
+                ],
+            )
+            .expect("insert background jobs");
+        }
+        let response = admin_site_health_jobs(
+            State(state),
+            CookieJar::new().add(Cookie::new(SESSION_COOKIE, "session123")),
+        )
+        .await
+        .expect("handler response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("application/json; charset=utf-8"))
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static(
+                "private, no-cache, no-store, must-revalidate, no-transform"
+            ))
+        );
+        assert_eq!(
+            response.headers().get(header::VARY),
+            Some(&HeaderValue::from_static("Cookie"))
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json payload");
+        assert_eq!(
+            payload
+                .get("backup_jobs")
+                .and_then(serde_json::Value::as_str),
+            Some("idle")
+        );
+        assert!(payload.get("running_jobs").is_some());
+        assert!(payload.get("queued_jobs").is_some());
+        assert!(payload.get("recent_failed_job_details").is_some());
+        assert!(payload.get("recent_completed_job_details").is_some());
+        assert!(payload.get("thumbnail_transcode_jobs").is_none());
+        assert!(payload.get("repair_vacuum_jobs").is_none());
+        let failed_job = payload
+            .get("recent_failed_job_details")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|jobs| jobs.first())
+            .expect("failed job detail");
+        assert_eq!(failed_job["name"], "Spam check");
+        assert_eq!(failed_job["attempts"], 3);
+        assert_eq!(failed_job["post_id"], expected_post_id);
+        assert_eq!(failed_job["post_url"], expected_post_url);
+        let error = failed_job["error"].as_str().expect("error snippet");
+        assert!(error.contains("[redacted]"));
+        assert!(!error.contains("/Users/example"));
+        assert!(!error.contains("abc123"));
+        assert!(error.chars().count() <= 183);
+    }
+
+    #[tokio::test]
+    async fn live_log_returns_no_store_headers_and_json_body() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let response = admin_live_log(
+            State(state),
+            CookieJar::new().add(Cookie::new(SESSION_COOKIE, "session123")),
+            Query(LiveLogQuery { bytes: None }),
+        )
+        .await
+        .expect("handler response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("application/json; charset=utf-8"))
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static(
+                "private, no-cache, no-store, must-revalidate, no-transform"
+            ))
+        );
+        assert_eq!(
+            response.headers().get(header::PRAGMA),
+            Some(&HeaderValue::from_static("no-cache"))
+        );
+        assert_eq!(
+            response.headers().get(header::EXPIRES),
+            Some(&HeaderValue::from_static("0"))
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::HeaderName::from_static("x-accel-buffering")),
+            Some(&HeaderValue::from_static("no"))
+        );
+        assert_eq!(
+            response.headers().get(header::VARY),
+            Some(&HeaderValue::from_static("Cookie"))
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json payload");
+        assert_eq!(
+            payload.get("filename").and_then(serde_json::Value::as_str),
+            Some("no log file")
+        );
+        assert_eq!(
+            payload
+                .get("truncated")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            payload.get("content").and_then(serde_json::Value::as_str),
+            Some("No live log file found yet.")
+        );
     }
 }

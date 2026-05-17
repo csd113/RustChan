@@ -2,8 +2,8 @@ use crate::{
     banner,
     models::{BannerAsset, BannerScope, BannerTargetType},
 };
-use anyhow::{Context, Result};
-use rusqlite::{params, OptionalExtension};
+use anyhow::{Context as _, Result};
+use rusqlite::{params, OptionalExtension as _};
 
 const BANNER_SELECT_COLUMNS: &str = "ba.id, ba.scope_type, ba.board_id, b.short_name, \
     ba.storage_key, ba.width, ba.height, ba.file_size, ba.enabled, ba.sort_order, \
@@ -124,7 +124,7 @@ pub fn next_banner_sort_order(
 ///
 /// # Errors
 /// Returns an error if the storage key is invalid or the insert fails.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn insert_banner_asset(
     conn: &rusqlite::Connection,
     scope: BannerScope,

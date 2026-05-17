@@ -1,6 +1,6 @@
 [package]
 name = "rustchan"
-version = "1.1.6"
+version = "1.2.0"
 edition = "2021"
 # axum 0.8 requires Rust 1.75; arti-client 0.41 bumps the effective floor to
 # 1.90 — keep both fields in sync.
@@ -38,9 +38,9 @@ tower-http = { version = "0.6",  features = ["fs", "set-header", "compression-fu
 tokio      = { version = "1",    features = ["full"] }
 tokio-util = "0.7"
 
-rusqlite    = { version = "0.38", features = ["bundled", "backup"] }
+rusqlite    = { version = "0.39.0", features = ["bundled", "backup"] }
 r2d2        = "0.8"
-r2d2_sqlite = "0.32"
+r2d2_sqlite = "0.34.0"
 time        = "0.3"
 
 serde      = { version = "1", features = ["derive"] }
@@ -52,12 +52,12 @@ argon2  = "0.5"
 sha2    = "0.11"
 subtle  = "2"
 hex    = "0.4"
-# rand_core 0.6 replaces rand = "0.8" entirely.
-# We only need OsRng + RngCore, both of which live in rand_core.
-# rand_core 0.6 that argon2 0.5 / password-hash 0.5 depends on, causing
-# OsRng type mismatches at compile time. Using rand_core 0.6 directly
-# shares the exact same crate instance as argon2's transitive dep.
-rand_core = { version = "0.6", features = ["getrandom"] }
+# rand_core 0.10 updates RustChan's direct RNG trait dependency, but the
+# password-hash stack still carries rand_core 0.6 transitively for salt
+# generation. Keep direct OS entropy reads on getrandom::SysRng and only use
+# password-hash's re-exported rand_core where that older trait set is required.
+rand_core = "0.10.1"
+getrandom = { version = "0.4.2", features = ["sys_rng"] }
 
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "ico"] }
 
@@ -118,14 +118,14 @@ libc      = "0.2"
 # Post-change verification:
 #   cargo tree --edges features | grep -iE "openssl|native.tls"   # expect nothing
 #   cargo tree -i openssl-sys                                       # expect error: not found
-arti-client = { version = "0.41", default-features = false, features = ["tokio", "rustls", "onion-service-service"] }
+arti-client = { version = "0.42.0", default-features = false, features = ["tokio", "rustls", "onion-service-service"] }
 
 # tor-hsservice / tor-cell: also part of the arti workspace.  Their `full`
 # default feature bundle can activate the native-tls TLS backend through
 # tor-rtcompat.  Disable defaults; add back only what the build requires.
 # If compilation fails with "feature X not found", re-add that feature here.
-tor-hsservice = { version = "0.41", default-features = false }
-tor-cell      = { version = "0.41", default-features = false }
+tor-hsservice = { version = "0.42.0", default-features = false }
+tor-cell      = { version = "0.42.0", default-features = false }
 
 futures       = "0.3"
 sha3          = "0.11"
@@ -139,7 +139,7 @@ tokio-rustls   = "0.26"
 rustls         = { version = "0.23", features = ["ring"] }
 
 # Optional — gated by Cargo features
-rustls-acme    = { version = "0.15", features = ["tokio"], optional = true }
+rustls-acme    = { version = "0.15.1", features = ["tokio"], optional = true }
 rcgen          = { version = "0.14", optional = true }
 pem-rfc7468    = { version = "1.0",  optional = true, features = ["std"] }
 x509-cert      = { version = "0.2",  optional = true }
@@ -162,7 +162,7 @@ tls-acme        = ["dep:rustls-acme"]
 [target.'cfg(windows)'.dependencies]
 # AllocConsole — used by the double-click / no-TTY re-launch guard in main.rs
 # to attach a visible console window when the binary is started from Explorer.
-windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console"] }
 
 # ── Safety net ────────────────────────────────────────────────────────────────
 # If a future dependency version change re-introduces openssl-sys as a

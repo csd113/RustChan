@@ -5,11 +5,13 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct AutoFullBackupSettingsSnapshot {
     pub interval_hours: u64,
     pub copies_to_keep: u64,
     pub include_tor_hidden_service_keys: bool,
+    pub storage_mode: String,
+    pub split_zip_part_size: u64,
 }
 
 #[derive(Clone)]
@@ -17,6 +19,8 @@ pub struct AutoFullBackupSettings {
     interval_hours: std::sync::Arc<AtomicU64>,
     copies_to_keep: std::sync::Arc<AtomicU64>,
     include_tor_hidden_service_keys: std::sync::Arc<AtomicBool>,
+    storage_mode: std::sync::Arc<parking_lot::RwLock<String>>,
+    split_zip_part_size: std::sync::Arc<AtomicU64>,
 }
 
 impl AutoFullBackupSettings {
@@ -25,6 +29,8 @@ impl AutoFullBackupSettings {
         interval_hours: u64,
         copies_to_keep: u64,
         include_tor_hidden_service_keys: bool,
+        storage_mode: impl Into<String>,
+        split_zip_part_size: u64,
     ) -> Self {
         Self {
             interval_hours: std::sync::Arc::new(AtomicU64::new(interval_hours)),
@@ -32,6 +38,8 @@ impl AutoFullBackupSettings {
             include_tor_hidden_service_keys: std::sync::Arc::new(AtomicBool::new(
                 include_tor_hidden_service_keys,
             )),
+            storage_mode: std::sync::Arc::new(parking_lot::RwLock::new(storage_mode.into())),
+            split_zip_part_size: std::sync::Arc::new(AtomicU64::new(split_zip_part_size)),
         }
     }
 
@@ -43,6 +51,8 @@ impl AutoFullBackupSettings {
             include_tor_hidden_service_keys: self
                 .include_tor_hidden_service_keys
                 .load(Ordering::Relaxed),
+            storage_mode: self.storage_mode.read().clone(),
+            split_zip_part_size: self.split_zip_part_size.load(Ordering::Relaxed),
         }
     }
 
@@ -51,12 +61,17 @@ impl AutoFullBackupSettings {
         interval_hours: u64,
         copies_to_keep: u64,
         include_tor_hidden_service_keys: bool,
+        storage_mode: impl Into<String>,
+        split_zip_part_size: u64,
     ) {
         self.interval_hours.store(interval_hours, Ordering::Relaxed);
         self.copies_to_keep
             .store(copies_to_keep.max(1), Ordering::Relaxed);
         self.include_tor_hidden_service_keys
             .store(include_tor_hidden_service_keys, Ordering::Relaxed);
+        *self.storage_mode.write() = storage_mode.into();
+        self.split_zip_part_size
+            .store(split_zip_part_size, Ordering::Relaxed);
     }
 }
 
@@ -79,12 +94,12 @@ impl MaintenanceGate {
         &self,
         label: &str,
     ) -> std::result::Result<MaintenanceGuard, crate::error::AppError> {
-        match self.semaphore.clone().try_acquire_owned() {
+        match std::sync::Arc::clone(&self.semaphore).try_acquire_owned() {
             Ok(permit) => {
-                *self.active_label.write() = Some(label.to_string());
+                *self.active_label.write() = Some(label.to_owned());
                 Ok(MaintenanceGuard {
                     _permit: permit,
-                    active_label: self.active_label.clone(),
+                    active_label: std::sync::Arc::clone(&self.active_label),
                 })
             }
             Err(_) => {
@@ -92,7 +107,7 @@ impl MaintenanceGate {
                     .active_label
                     .read()
                     .clone()
-                    .unwrap_or_else(|| "another maintenance operation".to_string());
+                    .unwrap_or_else(|| "another maintenance operation".to_owned());
                 Err(crate::error::AppError::Conflict(format!(
                     "{current} is already running. Try again after it finishes."
                 )))
@@ -121,7 +136,7 @@ pub enum DbMaintenanceJobStatus {
     },
     Finished {
         job_id: u64,
-        report: crate::db::DbHealthReport,
+        report: Box<crate::db::DbHealthReport>,
     },
     Failed {
         job_id: u64,
@@ -191,7 +206,10 @@ impl DbMaintenanceJobs {
                 job_id: current_job_id,
                 ..
             } if *current_job_id == job_id => {
-                *status = DbMaintenanceJobStatus::Finished { job_id, report };
+                *status = DbMaintenanceJobStatus::Finished {
+                    job_id,
+                    report: Box::new(report),
+                };
                 true
             }
             DbMaintenanceJobStatus::Idle
@@ -252,7 +270,7 @@ impl Drop for MaintenanceGuard {
 }
 
 #[derive(Clone)]
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 // These booleans are independent runtime capability toggles shared across handlers.
 pub struct AppState {
     pub db: crate::db::DbPool,
@@ -260,6 +278,8 @@ pub struct AppState {
     pub ffprobe_available: bool,
     pub ffmpeg_webp_available: bool,
     pub ffmpeg_vp9_available: bool,
+    pub ffmpeg_vp9_encoder_available: bool,
+    pub ffmpeg_opus_available: bool,
     pub pdf_thumbnail_renderer: Option<&'static str>,
     pub job_queue: std::sync::Arc<crate::workers::JobQueue>,
     pub backup_progress: std::sync::Arc<crate::middleware::BackupProgress>,
@@ -278,14 +298,16 @@ mod tests {
 
     #[test]
     fn auto_full_backup_settings_clamps_copies_to_keep() {
-        let settings = AutoFullBackupSettings::new(24, 0, false);
+        let settings = AutoFullBackupSettings::new(24, 0, false, "directory", 4);
         assert_eq!(settings.snapshot().copies_to_keep, 1);
 
-        settings.update(12, 0, true);
+        settings.update(12, 0, true, "split_zip", 8);
         let snapshot = settings.snapshot();
         assert_eq!(snapshot.interval_hours, 12);
         assert_eq!(snapshot.copies_to_keep, 1);
         assert!(snapshot.include_tor_hidden_service_keys);
+        assert_eq!(snapshot.storage_mode, "split_zip");
+        assert_eq!(snapshot.split_zip_part_size, 8);
     }
 
     #[test]
@@ -323,7 +345,7 @@ mod tests {
 
         let second_job_id = jobs.mark_running();
         assert!(second_job_id > first_job_id);
-        assert!(jobs.mark_failed(second_job_id, "simulated failure".to_string()));
+        assert!(jobs.mark_failed(second_job_id, "simulated failure".to_owned()));
         match jobs.snapshot() {
             DbMaintenanceJobStatus::Failed { job_id, .. } => assert_eq!(job_id, second_job_id),
             DbMaintenanceJobStatus::Idle
@@ -395,7 +417,7 @@ mod tests {
         let first_job_id = jobs.mark_running();
         let second_job_id = jobs.mark_running();
 
-        assert!(!jobs.mark_failed(first_job_id, "stale failure".to_string()));
+        assert!(!jobs.mark_failed(first_job_id, "stale failure".to_owned()));
         match jobs.snapshot() {
             DbMaintenanceJobStatus::Running { job_id, .. } => assert_eq!(job_id, second_job_id),
             DbMaintenanceJobStatus::Idle
@@ -403,7 +425,7 @@ mod tests {
             | DbMaintenanceJobStatus::Failed { .. } => panic!("expected running status"),
         }
 
-        assert!(jobs.mark_failed(second_job_id, "current failure".to_string()));
+        assert!(jobs.mark_failed(second_job_id, "current failure".to_owned()));
         match jobs.snapshot() {
             DbMaintenanceJobStatus::Failed {
                 job_id, message, ..
@@ -423,7 +445,7 @@ mod tests {
         let first_job_id = jobs.mark_running();
         let second_job_id = jobs.mark_running();
 
-        assert!(!jobs.mark_failed(first_job_id, "join error".to_string()));
+        assert!(!jobs.mark_failed(first_job_id, "join error".to_owned()));
         match jobs.snapshot() {
             DbMaintenanceJobStatus::Running { job_id, phase, .. } => {
                 assert_eq!(job_id, second_job_id);

@@ -1,5 +1,5 @@
 use super::{escape_html, fmt_ts, AdminPanelViewModel};
-use std::fmt::Write;
+use std::fmt::Write as _;
 
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let report_count = view.moderation.reports.len();
@@ -40,7 +40,7 @@ fn render_ban_rows(view: &AdminPanelViewModel<'_>) -> String {
     for ban in view.moderation.bans {
         let expires = ban
             .expires_at
-            .map_or_else(|| "permanent".to_string(), fmt_ts);
+            .map_or_else(|| "permanent".to_owned(), fmt_ts);
         let _ = write!(
             ban_rows,
             r#"<tr>
@@ -183,9 +183,9 @@ fn render_appeal_rows(view: &AdminPanelViewModel<'_>) -> String {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_admin_moderation_section(
     csrf_token: &str,
     report_rows: &str,

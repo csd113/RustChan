@@ -18,17 +18,22 @@
 //
 // • Deletion tokens — 16-byte random value encoded as hex. Stored in DB.
 //
-// All random token generation uses OsRng directly (OS CSPRNG), making the
+// All random token generation uses the OS CSPRNG directly, making the
 // security property immediately visible to auditors.
 
 use anyhow::Result;
 use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{
+        rand_core::OsRng as PasswordOsRng, PasswordHash, PasswordHasher as _,
+        PasswordVerifier as _, SaltString,
+    },
     Algorithm, Argon2, Params, Version,
 };
 use dashmap::DashMap;
-use rand_core::RngCore;
-use sha2::{Digest, Sha256};
+use getrandom::SysRng;
+use rand_core::TryRng as _;
+use sha2::{Digest as _, Sha256};
+use std::io::Write as _;
 use std::sync::LazyLock;
 
 /// Maximum allowed nonce length in characters.
@@ -46,7 +51,7 @@ const MAX_BOARD_SHORT_LEN: usize = 32;
 /// # Errors
 /// Returns an error if Argon2 parameter construction or hashing fails.
 pub fn hash_password(password: &str) -> Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
+    let salt = SaltString::generate(&mut PasswordOsRng);
     let params =
         Params::new(65536, 2, 2, None).map_err(|e| anyhow::anyhow!("Argon2 params error: {e}"))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
@@ -73,12 +78,34 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
 
 /// Generate a cryptographically secure random hex string.
 ///
+fn fatal_randomness_error(context: &str, error: &impl std::fmt::Display) -> ! {
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "Fatal: OS randomness unavailable while {context}: {error}"
+    );
+    std::process::exit(1);
+}
+
+pub fn fill_os_random_or_exit(bytes: &mut [u8], context: &str) {
+    if let Err(error) = SysRng.try_fill_bytes(bytes) {
+        fatal_randomness_error(context, &error);
+    }
+}
+
+#[must_use]
+pub fn os_random_u32_or_exit(context: &str) -> u32 {
+    match SysRng.try_next_u32() {
+        Ok(value) => value,
+        Err(error) => fatal_randomness_error(context, &error),
+    }
+}
+
 /// `bytes` is the number of random bytes; the returned string is `2 * bytes`
-/// hex characters long. Uses [`OsRng`] directly for explicit CSPRNG provenance.
+/// hex characters long. Uses the OS CSPRNG directly for explicit provenance.
 #[must_use]
 pub fn random_hex(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
-    OsRng.fill_bytes(&mut buf);
+    fill_os_random_or_exit(&mut buf, "generating a random hex token");
     hex::encode(buf)
 }
 

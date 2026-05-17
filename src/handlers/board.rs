@@ -27,7 +27,7 @@ use crate::{
     db::{self},
     error::{AppError, Result},
     handlers::{parse_post_multipart, posting, render},
-    middleware::{validate_csrf, AppState},
+    middleware::{validate_csrf, validate_signed_csrf, AppState},
     models::{Board, Pagination, SearchQuery, SEARCH_QUERY_MAX_CHARS},
     templates,
     utils::crypto::{
@@ -35,14 +35,15 @@ use crate::{
     },
 };
 use axum::{
-    extract::{Form, Multipart, Path, Query, State},
+    extract::{ConnectInfo, Form, Multipart, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::{atomic::AtomicU64, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use time::Duration;
@@ -63,9 +64,20 @@ pub use media::*;
 pub use pages::*;
 pub use reports::*;
 
+pub(crate) fn should_set_public_secure_cookie(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+) -> bool {
+    crate::handlers::admin::should_set_secure_cookie(headers, peer)
+}
+
 const PREVIEW_REPLIES: i64 = 3;
 const THREADS_PER_PAGE: i64 = 10;
 pub const USER_THEME_COOKIE: &str = "rustchan_theme";
+pub const USER_HIDE_NSFW_COOKIE: &str = "rustchan_hide_nsfw";
+pub const USER_VIDEO_AUDIO_COOKIE: &str = "rustchan_video_audio";
+pub const USER_PREFERRED_VIEW_COOKIE: &str = "rustchan_preferred_view";
+pub const USER_ACTIVITY_BADGES_COOKIE: &str = "rustchan_activity_badges";
 pub const NSFW_CONSENT_COOKIE: &str = "rustchan_nsfw_ok";
 pub const VISITOR_ID_COOKIE: &str = "rustchan_visitor_id";
 pub(crate) const ADMIN_SESSION_COOKIE: &str = "chan_admin_session";
@@ -73,7 +85,7 @@ const BOARD_ACCESS_COOKIE_PREFIX: &str = "rustchan_board_access_";
 const BOARD_ACCESS_COOKIE_TTL_DAYS: i64 = 30;
 const BOARD_UNLOCK_FAIL_LIMIT: u32 = 5;
 const BOARD_UNLOCK_FAIL_WINDOW_SECS: u64 = 900;
-const HTML_CACHE_CONTROL: &str = "private, no-cache, must-revalidate";
+const HTML_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_DYNAMIC_PUBLIC;
 pub(crate) const X_RUSTCHAN_REDIRECT_HEADER: &str = "x-rustchan-redirect";
 
 static BOARD_UNLOCK_FAILS: LazyLock<DashMap<String, (u32, u64)>> = LazyLock::new(DashMap::new);
@@ -113,6 +125,14 @@ pub(crate) fn latest_visible_thread_marker_tuple(marker: Option<(i64, i64)>) -> 
     marker.unwrap_or((0, 0))
 }
 
+pub(crate) const fn activity_html_cache_control(activity_markers_enabled: bool) -> &'static str {
+    if activity_markers_enabled {
+        crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE
+    } else {
+        HTML_CACHE_CONTROL
+    }
+}
+
 pub(crate) fn thread_unread_counts(
     threads: &[crate::models::Thread],
     markers: &HashMap<i64, crate::handlers::board::ThreadActivityMarker>,
@@ -120,10 +140,9 @@ pub(crate) fn thread_unread_counts(
     threads
         .iter()
         .filter_map(|thread| {
-            markers.get(&thread.id).and_then(|marker| {
-                let unread = (thread.reply_count - marker.seen_reply_count).max(0);
-                (unread > 0).then_some((thread.id, unread))
-            })
+            let marker = markers.get(&thread.id)?;
+            let unread = (thread.reply_count - marker.seen_reply_count).max(0);
+            (unread > 0).then_some((thread.id, unread))
         })
         .collect()
 }
@@ -241,13 +260,41 @@ pub struct BannedPageQuery {
 }
 
 pub fn current_theme_from_jar(jar: &CookieJar) -> Option<String> {
-    jar.get(USER_THEME_COOKIE)
-        .and_then(|cookie| crate::templates::normalize_theme_slug(cookie.value()))
+    let cookie = jar.get(USER_THEME_COOKIE)?;
+    crate::templates::normalize_theme_slug(cookie.value())
+}
+
+pub fn user_preferences_from_jar(jar: &CookieJar) -> crate::templates::UserPreferences {
+    let default_preferences = crate::templates::UserPreferences::default();
+    crate::templates::UserPreferences {
+        hide_nsfw_boards: jar
+            .get(USER_HIDE_NSFW_COOKIE)
+            .is_some_and(|cookie| cookie.value() == "1"),
+        video_audio_muted: jar
+            .get(USER_VIDEO_AUDIO_COOKIE)
+            .is_some_and(|cookie| cookie.value() == "mute"),
+        preferred_board_view: match jar.get(USER_PREFERRED_VIEW_COOKIE).map(Cookie::value) {
+            Some("index") => crate::templates::PreferredBoardView::Index,
+            Some("catalog") => crate::templates::PreferredBoardView::Catalog,
+            _ => default_preferences.preferred_board_view,
+        },
+        show_activity_badges: jar
+            .get(USER_ACTIVITY_BADGES_COOKIE)
+            .map_or(default_preferences.show_activity_badges, |cookie| {
+                cookie.value() != "0"
+            }),
+    }
 }
 
 pub fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    if validate_csrf(csrf_cookie.as_deref(), form_token.unwrap_or("")) {
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_owned());
+    let admin_session = jar
+        .get("chan_admin_session")
+        .map(axum_extra::extract::cookie::Cookie::value);
+    let form_token = form_token.unwrap_or("");
+    if validate_csrf(csrf_cookie.as_deref(), form_token)
+        || validate_signed_csrf(csrf_cookie.as_deref(), admin_session, form_token)
+    {
         Ok(())
     } else {
         Err(AppError::Forbidden("CSRF token mismatch.".into()))
@@ -286,7 +333,7 @@ pub fn board_access_cookie_name(board_short: &str) -> String {
 pub fn board_access_cookie_from_jar(jar: &CookieJar, board_short: &str) -> Option<String> {
     let cookie_name = board_access_cookie_name(board_short);
     jar.get(cookie_name.as_str())
-        .map(|cookie| cookie.value().to_string())
+        .map(|cookie| cookie.value().to_owned())
 }
 
 fn expected_board_access_cookie_value(board_short: &str, password_hash: &str) -> Option<String> {
@@ -360,7 +407,7 @@ pub(crate) async fn board_access_preflight(
 ) -> Result<BoardAccessDecision> {
     let access_context = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let board_short = board_short.to_string();
+        let board_short = board_short.to_owned();
         move || -> Result<BoardAccessContext> {
             let conn = pool.get()?;
             load_board_access_context(
@@ -435,13 +482,13 @@ pub async fn banned_page(Query(query): Query<BannedPageQuery>, jar: CookieJar) -
     let (jar, csrf) = ensure_csrf(jar);
     let reason = query
         .reason
-        .unwrap_or_else(|| "No reason given".to_string())
+        .unwrap_or_else(|| "No reason given".to_owned())
         .trim()
         .chars()
         .take(512)
         .collect::<String>();
     let reason = if reason.is_empty() {
-        "No reason given".to_string()
+        "No reason given".to_owned()
     } else {
         reason
     };
@@ -500,7 +547,7 @@ fn record_board_unlock_failure(attempt_key: &str) {
     let now_secs = board_unlock_now_secs();
     prune_board_unlock_failures(now_secs);
     let mut entry = BOARD_UNLOCK_FAILS
-        .entry(attempt_key.to_string())
+        .entry(attempt_key.to_owned())
         .or_insert((0, now_secs));
     let (count, window_start) = entry.value_mut();
     if now_secs.saturating_sub(*window_start) > BOARD_UNLOCK_FAIL_WINDOW_SECS {
@@ -555,7 +602,7 @@ fn board_access_page_response(
     *resp.status_mut() = status;
     resp.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static(HTML_CACHE_CONTROL),
+        HeaderValue::from_static(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE),
     );
     if let Some(retry_after_secs) = retry_after_secs {
         if let Ok(retry_after) = HeaderValue::from_str(&retry_after_secs.to_string()) {
@@ -587,12 +634,12 @@ pub(crate) fn board_access_rate_limited_response(
 }
 
 fn safe_return_to(path: Option<&str>, fallback: &str) -> String {
-    crate::utils::redirect::strict_safe_internal_path_or(path, fallback).to_string()
+    crate::utils::redirect::strict_safe_internal_path_or(path, fallback).to_owned()
 }
 
 pub fn identity_key(client_ip: &str, jar: &CookieJar) -> String {
     if client_ip.starts_with("tor:") {
-        return client_ip.to_string();
+        return client_ip.to_owned();
     }
 
     if client_ip == "127.0.0.1" || client_ip == "::1" || client_ip == "unknown" {
@@ -603,7 +650,7 @@ pub fn identity_key(client_ip: &str, jar: &CookieJar) -> String {
         }
     }
 
-    client_ip.to_string()
+    client_ip.to_owned()
 }
 
 fn viewer_preference_key(client_ip: &str, jar: &CookieJar) -> String {

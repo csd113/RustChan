@@ -12,7 +12,7 @@ One binary. One data folder. SQLite only. The rest is features.
 
 RustChan is built in Rust, ships with bundled SQLite, and is designed to be understandable, movable, and fun to run.
 
-Current development version: `1.1.6`.
+Current development version: `1.2.0`.
 
 [What is RustChan?](#what-is-rustchan) ·
 [Why it exists](#why-it-exists) ·
@@ -239,7 +239,7 @@ For the technically curious, RustChan currently leans on:
 | Media | `image`, EXIF handling, and optional `ffmpeg` / `ffprobe` |
 | TLS | `rustls`, self-signed dev certs, optional ACME or manual certs |
 | Tor | Arti |
-| Logging | `tracing` with daily file rotation |
+| Logging | `tracing` with daily main log rotation and `dep_log.log` for dependency noise |
 | Background work | In-process worker queue |
 
 The architecture is intentionally compact. That is the point.

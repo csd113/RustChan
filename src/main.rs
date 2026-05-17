@@ -6,7 +6,7 @@
 //   rustchan-cli admin create-admin  <u> <p>   → create an admin user
 //   rustchan-cli admin reset-password <u> <p>  → reset admin password
 //   rustchan-cli admin list-admins             → list admins
-//   rustchan-cli admin create-board  <s> <n> [desc] [--nsfw]
+//   rustchan-cli admin create-board  <s> <n> [desc] [--nsfw] [--audio]
 //   rustchan-cli admin delete-board  <short>
 //   rustchan-cli admin list-boards
 //   rustchan-cli admin ban    <ip_hash> <reason> [hours]
@@ -21,9 +21,11 @@
 // Terminal console and startup banner live in server/console/.
 // ChanNet / RustWave gateway lives in chan_net/mod.rs (second listener, port 7070).
 
-use clap::Parser;
+use clap::Parser as _;
+use std::io::Write as _;
 
 mod banner;
+mod cache;
 mod chan_net;
 mod config;
 mod db;
@@ -66,7 +68,7 @@ fn main() -> anyhow::Result<()> {
     //
     // RUSTCHAN_SPAWNED prevents the child from looping back here.
     {
-        use std::io::IsTerminal;
+        use std::io::IsTerminal as _;
         if !std::io::stdout().is_terminal() && std::env::var("RUSTCHAN_SPAWNED").is_err() {
             #[cfg(target_os = "linux")]
             {
@@ -112,14 +114,23 @@ fn main() -> anyhow::Result<()> {
     // file appender can open the directory immediately on startup.
     let data_dir = crate::config::data_dir();
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
-        eprintln!("Warning: could not create rustchan-data directory: {e}");
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "Warning: could not create rustchan-data directory: {e}"
+        );
     }
     if let Err(e) = crate::config::migrate_runtime_layout_if_needed() {
-        eprintln!("Warning: could not migrate runtime layout: {e}");
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "Warning: could not migrate runtime layout: {e}"
+        );
     }
     let log_dir = crate::config::logs_dir();
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
-        eprintln!("Warning: could not create rustchan-data/logs directory: {e}");
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "Warning: could not create rustchan-data/logs directory: {e}"
+        );
     }
     generate_settings_file_if_missing();
 
@@ -141,6 +152,7 @@ fn main() -> anyhow::Result<()> {
         target: "startup",
         version = env!("CARGO_PKG_VERSION"),
         log_dir = %log_dir.display(),
+        dependency_log = %crate::logging::dependency_log_path(&log_dir).display(),
         "rustchan starting",
     );
 

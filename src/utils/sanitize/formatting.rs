@@ -1,5 +1,3 @@
-use rand_core::{OsRng, RngCore};
-
 /// Try to extract a (`embed_type`, `video_id`) pair from a URL.
 ///
 /// Supports `YouTube` (youtube.com and youtu.be), any Invidious instance
@@ -39,6 +37,17 @@ fn extract_yt_id(url: &str) -> Option<String> {
     }
     if let Some(pos) = url.find("/shorts/") {
         let rest = &url[pos + 8..];
+        let id: String = rest.chars().take(11).collect();
+        if id.len() == 11
+            && id
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            return Some(id);
+        }
+    }
+    if let Some(pos) = url.find("/embed/") {
+        let rest = &url[pos + 7..];
         let id: String = rest.chars().take(11).collect();
         if id.len() == 11
             && id
@@ -98,7 +107,7 @@ fn roll_dice(count: u32, sides: u32) -> (Vec<u32>, u32) {
     let mut rolls = Vec::with_capacity(count as usize);
     let mut sum = 0u32;
     for _ in 0..count {
-        let roll = (OsRng.next_u32() % sides) + 1;
+        let roll = (crate::utils::crypto::os_random_u32_or_exit("rolling dice markup") % sides) + 1;
         rolls.push(roll);
         sum = sum.saturating_add(roll);
     }
@@ -166,9 +175,9 @@ fn replace_emoji_shortcodes(text: &str) -> String {
         (":owo:", "👁️👄👁️"),
     ];
     if !text.contains(':') {
-        return text.to_string();
+        return text.to_owned();
     }
-    let mut out = text.to_string();
+    let mut out = text.to_owned();
     for (code, emoji) in CODES {
         if out.contains(code) {
             out = out.replace(code, emoji);
@@ -205,7 +214,26 @@ mod tests {
     fn extracts_youtube_embed() {
         assert_eq!(
             extract_video_embed("https://youtu.be/dQw4w9WgXcQ?t=43"),
-            Some(("youtube", "dQw4w9WgXcQ".to_string()))
+            Some(("youtube", "dQw4w9WgXcQ".to_owned()))
         );
+    }
+
+    #[test]
+    fn extracts_youtube_embed_from_supported_routes_with_extra_query_params() {
+        for url in [
+            "https://www.youtube.com/watch?v=zN9Cb-rNF9U",
+            "https://www.youtube.com/watch?v=zN9Cb-rNF9U&amp;list=RDzN9Cb-rNF9U&amp;start_radio=1",
+            "https://youtube.com/watch?v=zN9Cb-rNF9U&amp;list=RDzN9Cb-rNF9U",
+            "https://www.youtube.com/watch?v=zN9Cb-rNF9U&amp;t=30s",
+            "https://youtu.be/zN9Cb-rNF9U?si=abc123",
+            "https://www.youtube.com/shorts/zN9Cb-rNF9U?feature=share",
+            "https://www.youtube.com/embed/zN9Cb-rNF9U?start=30",
+        ] {
+            assert_eq!(
+                extract_video_embed(url),
+                Some(("youtube", "zN9Cb-rNF9U".to_owned())),
+                "{url}"
+            );
+        }
     }
 }

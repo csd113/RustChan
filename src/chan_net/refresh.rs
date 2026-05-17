@@ -1,14 +1,8 @@
 // chan_net/refresh.rs — Federation outgoing handler.
-// Fully implemented in Phase 4 (Step 4.1).
 //
 // POST /chan/refresh builds a full snapshot and pushes it to RustWave
 // /broadcast/transmit as multipart. Holds the shared HTTP_CLIENT static
 // (LazyLock<reqwest::Client>) reused by poll.rs.
-//
-// Phase 8 fix: all AppError::Internal calls in this file previously passed
-// String values (via .to_string() or format!()) to AppError::Internal, which
-// takes anyhow::Error. These have been corrected to use anyhow::anyhow!() or
-// direct ? propagation where a From impl exists.
 
 use crate::{config::CONFIG, error::AppError, middleware::AppState};
 use axum::{extract::State, response::IntoResponse, Json};
@@ -92,7 +86,7 @@ pub async fn chan_refresh(
         .get("tx_id")
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .to_string();
+        .to_owned();
 
     Ok(Json(json!({
         "status":          "ok",

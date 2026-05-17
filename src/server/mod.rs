@@ -15,7 +15,7 @@
 pub mod cli;
 pub mod console;
 // The nested module name matches the server layer layout and keeps the public path stable.
-#[allow(clippy::module_inception)]
+#[expect(clippy::module_inception)]
 pub mod server;
 
 use std::path::{Path, PathBuf};

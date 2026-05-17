@@ -134,7 +134,6 @@ impl BoardAccessMode {
     #[must_use]
     // This alias remains for API clarity and backward-compatible call sites,
     // even though the newer helper is preferred in most code paths.
-    #[allow(dead_code)]
     pub const fn requires_post_password(self) -> bool {
         self.requires_unlock_for_posting()
     }
@@ -264,7 +263,7 @@ pub enum BannerPlacement {
 /// A board, e.g. /tech/ — Technology
 #[derive(Debug, Clone, Serialize, Deserialize)]
 // This type mirrors serialized or render state, so the boolean count is an intentional tradeoff.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools)]
 pub struct Board {
     pub id: i64,
     pub display_order: i64,
@@ -647,7 +646,7 @@ pub struct ModLogEntry {
 }
 
 /// Represents a saved backup file on disk (shown in admin panel).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackupBoardSummary {
     pub short_name: String,
     pub name: String,
@@ -656,9 +655,13 @@ pub struct BackupBoardSummary {
 /// Represents a saved backup file on disk (shown in admin panel).
 #[derive(Debug, Clone, Serialize)]
 pub struct BackupInfo {
-    /// Filename only (no directory path).
+    /// Stable saved-backup reference used by admin actions.
+    pub backup_ref: String,
+    /// Human-readable backup identity shown in the UI.
+    pub backup_id: String,
+    /// Display name for legacy zip files or default download names.
     pub filename: String,
-    /// Size of the file in bytes.
+    /// Total backup size in bytes.
     pub size_bytes: u64,
     /// Human-readable last-modified timestamp (UTC).
     pub modified: String,
@@ -668,10 +671,24 @@ pub struct BackupInfo {
     pub verified: bool,
     /// Short note describing verification status or the detected problem.
     pub verification_note: String,
+    /// Saved backup scope label.
+    pub scope: String,
+    /// Storage mode label such as single ZIP, split ZIP, or directory.
+    pub mode: String,
+    /// Number of ZIP parts when split storage is used.
+    pub part_count: u32,
+    /// ZIP part filenames relative to the backup parts directory.
+    pub part_filenames: Vec<String>,
     /// Whether this full backup includes the Tor hidden service identity files.
     pub contains_tor_hidden_service_keys: bool,
     /// Boards indexed inside the backup when available.
     pub boards: Vec<BackupBoardSummary>,
+    /// Absolute server-local backup directory or legacy archive path.
+    pub server_path: String,
+    /// Manifest path when available.
+    pub manifest_path: String,
+    /// Whether the backup can be downloaded as a single archive directly.
+    pub downloadable_archive: bool,
 }
 
 /// A user-submitted ban appeal

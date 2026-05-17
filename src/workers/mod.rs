@@ -19,7 +19,7 @@
 //   VideoTranscode — MP4 → WebM (VP9 + Opus) via ffmpeg (off the hot path)
 //   AudioWaveform  — waveform PNG from audio via ffmpeg (off the hot path)
 //   ThreadPrune    — delete overflow threads from a board asynchronously
-//   SpamCheck      — hook for future spam / abuse analysis
+//   SpamCheck      — lightweight abuse signal logging
 //
 // Integration (handlers):
 //   1. save_upload() saves the raw file and returns processing_pending=true
@@ -30,9 +30,8 @@
 
 use crate::config::CONFIG;
 use crate::db::DbPool;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use dashmap::DashMap;
-use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::num::NonZero;
 use std::path::PathBuf;
@@ -81,7 +80,7 @@ pub enum Job {
         max_archived_threads: i64,
         allow_archive: bool,
     },
-    /// Spam / abuse analysis hook — currently logs; extend for auto-banning.
+    /// Lightweight spam / abuse signal logging.
     SpamCheck {
         post_id: i64,
         ip_hash: String,
@@ -232,6 +231,12 @@ impl JobQueue {
             })
             .ok();
     }
+
+    fn mark_job_failure_state(&self, failure_state: crate::db::JobFailureState) {
+        if failure_state == crate::db::JobFailureState::Retrying {
+            self.pending_jobs.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 // ─── Worker pool startup ──────────────────────────────────────────────────────
@@ -253,6 +258,7 @@ impl JobQueue {
 pub fn start_worker_pool(
     queue: &Arc<JobQueue>,
     ffmpeg_available: bool,
+    ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let n = std::thread::available_parallelism()
@@ -263,9 +269,16 @@ pub fn start_worker_pool(
 
     (0..n)
         .map(|idx| {
-            let q = queue.clone();
+            let q = std::sync::Arc::clone(queue);
             tokio::spawn(async move {
-                worker_loop(idx, q, ffmpeg_available, ffmpeg_vp9_available).await;
+                worker_loop(
+                    idx,
+                    q,
+                    ffmpeg_available,
+                    ffprobe_available,
+                    ffmpeg_vp9_available,
+                )
+                .await;
             })
         })
         .collect()
@@ -277,6 +290,7 @@ async fn worker_loop(
     id: usize,
     queue: Arc<JobQueue>,
     ffmpeg_available: bool,
+    ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
 ) {
     debug!("Worker {id} started");
@@ -293,10 +307,8 @@ async fn worker_loop(
         // Atomically claim the next pending job (UPDATE … RETURNING).
         let pool_claim = queue.pool.clone();
         let claim = tokio::task::spawn_blocking(move || {
-            pool_claim
-                .get()
-                .map_err(anyhow::Error::from)
-                .and_then(|c| crate::db::claim_next_job(&c))
+            let c = pool_claim.get().map_err(anyhow::Error::from)?;
+            crate::db::claim_next_job(&c)
         })
         .await;
 
@@ -311,14 +323,23 @@ async fn worker_loop(
                         error!("Worker {id}: cannot deserialize job #{job_id}: {error}");
                         let pool_done = queue.pool.clone();
                         let err_msg = format!("Cannot deserialize job payload: {error}");
-                        let db_result = tokio::task::spawn_blocking(move || -> Result<()> {
-                            let c = pool_done.get().map_err(anyhow::Error::from)?;
-                            let _ = crate::db::fail_job(&c, job_id, &err_msg)?;
-                            Ok(())
-                        })
+                        let db_result = tokio::task::spawn_blocking(
+                            move || -> Result<crate::db::JobFailureState> {
+                                let c = pool_done.get().map_err(anyhow::Error::from)?;
+                                crate::db::fail_job(&c, job_id, &err_msg)
+                            },
+                        )
                         .await;
-                        if let Ok(Err(db_error)) = db_result {
-                            error!("Worker {id}: failed to mark broken job #{job_id} as failed: {db_error}");
+                        match db_result {
+                            Ok(Ok(failure_state)) => {
+                                queue.mark_job_failure_state(failure_state);
+                            }
+                            Ok(Err(db_error)) => {
+                                error!("Worker {id}: failed to mark broken job #{job_id} as failed: {db_error}");
+                            }
+                            Err(join_error) => {
+                                error!("Worker {id}: failed to join broken job #{job_id} status update: {join_error}");
+                            }
                         }
                         continue;
                     }
@@ -328,10 +349,11 @@ async fn worker_loop(
                 let result = handle_job(
                     job,
                     ffmpeg_available,
+                    ffprobe_available,
                     ffmpeg_vp9_available,
                     queue.pool.clone(),
-                    queue.in_progress.clone(),
-                    queue.active_video_jobs.clone(),
+                    std::sync::Arc::clone(&queue.in_progress),
+                    std::sync::Arc::clone(&queue.active_video_jobs),
                 )
                 .await;
                 // Previously pool_done.get() failures were
@@ -341,51 +363,60 @@ async fn worker_loop(
                 // We now propagate the error into the back-off path so the
                 // worker retries acquiring a connection, and we log explicitly
                 // so operators can see pool exhaustion events.
-                let db_result = tokio::task::spawn_blocking(move || -> Result<()> {
-                    let c = pool_done.get().map_err(anyhow::Error::from)?;
-                    match result {
-                        Ok(()) => {
-                            crate::db::complete_job(&c, job_id)?;
-                            if let Some(post_id) = media_post_id {
-                                crate::db::set_post_media_processing_state(
-                                    &c, post_id, None, None,
-                                )?;
+                let db_result = tokio::task::spawn_blocking(
+                    move || -> Result<Option<crate::db::JobFailureState>> {
+                        let c = pool_done.get().map_err(anyhow::Error::from)?;
+                        match result {
+                            Ok(()) => {
+                                crate::db::complete_job(&c, job_id)?;
+                                if let Some(post_id) = media_post_id {
+                                    crate::db::set_post_media_processing_state(
+                                        &c, post_id, None, None,
+                                    )?;
+                                }
+                                Ok(None)
                             }
-                        }
-                        Err(ref e) if crate::db::is_stale_media_target_error(e) => {
-                            warn!("Worker {id}: job #{job_id} target is stale — {e}");
-                            crate::db::complete_job(&c, job_id)?;
-                        }
-                        Err(ref e) => {
-                            warn!("Worker {id}: job #{job_id} failed — {e}");
-                            let failure_state = crate::db::fail_job(&c, job_id, &e.to_string())?;
-                            if let Some(post_id) = media_post_id {
-                                match failure_state {
-                                    crate::db::JobFailureState::Retrying => {
-                                        crate::db::set_post_media_processing_state(
-                                            &c,
-                                            post_id,
-                                            Some(crate::db::MEDIA_PROCESSING_PENDING),
-                                            None,
-                                        )?;
-                                    }
-                                    crate::db::JobFailureState::PermanentlyFailed => {
-                                        crate::db::set_post_media_processing_state(
-                                            &c,
-                                            post_id,
-                                            Some(crate::db::MEDIA_PROCESSING_FAILED),
-                                            Some(&e.to_string()),
-                                        )?;
+                            Err(e) if crate::db::is_stale_media_target_error(&e) => {
+                                warn!("Worker {id}: job #{job_id} target is stale — {e}");
+                                crate::db::complete_job(&c, job_id)?;
+                                Ok(None)
+                            }
+                            Err(e) => {
+                                warn!("Worker {id}: job #{job_id} failed — {e}");
+                                let failure_state =
+                                    crate::db::fail_job(&c, job_id, &e.to_string())?;
+                                if let Some(post_id) = media_post_id {
+                                    match failure_state {
+                                        crate::db::JobFailureState::Retrying => {
+                                            crate::db::set_post_media_processing_state(
+                                                &c,
+                                                post_id,
+                                                Some(crate::db::MEDIA_PROCESSING_PENDING),
+                                                None,
+                                            )?;
+                                        }
+                                        crate::db::JobFailureState::PermanentlyFailed => {
+                                            crate::db::set_post_media_processing_state(
+                                                &c,
+                                                post_id,
+                                                Some(crate::db::MEDIA_PROCESSING_FAILED),
+                                                Some(&e.to_string()),
+                                            )?;
+                                        }
                                     }
                                 }
+                                Ok(Some(failure_state))
                             }
                         }
-                    }
-                    Ok(())
-                })
+                    },
+                )
                 .await;
                 match db_result {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(failure_state)) => {
+                        if let Some(failure_state) = failure_state {
+                            queue.mark_job_failure_state(failure_state);
+                        }
+                    }
                     Ok(Err(e)) => {
                         error!("Worker {id}: failed to update completion status for job #{job_id}: {e}");
                         let delay = backoff_duration(consecutive_errors);
@@ -447,17 +478,18 @@ fn backoff_duration(consecutive_errors: u32) -> Duration {
 
     let exp = consecutive_errors.min(7); // 2^7 = 128 → 64 s before cap
     let base = BASE_MS.saturating_mul(1u64 << exp).min(MAX_MS);
-    // Use OsRng (already a dependency) for jitter — no new deps required.
-    let jitter = u64::from(OsRng.next_u32()) % JITTER_MAX_MS;
+    let jitter = u64::from(crate::utils::crypto::os_random_u32_or_exit(
+        "computing worker retry jitter",
+    )) % JITTER_MAX_MS;
     Duration::from_millis(base + jitter)
 }
 
 // ─── Job dispatch ─────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
 async fn handle_job(
     job: Job,
     ffmpeg_available: bool,
+    ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
     pool: DbPool,
     in_progress: Arc<DashMap<String, bool>>,
@@ -486,6 +518,7 @@ async fn handle_job(
                 file_path.clone(),
                 board_short,
                 ffmpeg_available,
+                ffprobe_available,
                 ffmpeg_vp9_available,
                 pool,
             )
@@ -584,11 +617,20 @@ async fn transcode_video(
     file_path: String,
     board_short: String,
     ffmpeg_available: bool,
+    ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
     pool: DbPool,
 ) -> Result<()> {
     if !ffmpeg_available {
         debug!("VideoTranscode skipped for post {post_id}: ffmpeg not available");
+        return Ok(());
+    }
+
+    if !ffprobe_available {
+        warn!(
+            "VideoTranscode skipped for post {post_id}: ffprobe not available. \
+             Install ffprobe alongside ffmpeg to enable safe video transcoding."
+        );
         return Ok(());
     }
 
@@ -685,15 +727,9 @@ fn transcode_video_prepare(
     file_path: &str,
     board_short: &str,
 ) -> Result<Option<TranscodePrepareParts>> {
-    let upload_dir = &CONFIG.upload_dir;
-    let src = PathBuf::from(upload_dir).join(file_path);
-
-    if !src.exists() {
-        return Err(anyhow::anyhow!(
-            "Source file not found for transcode: {}",
-            src.display()
-        ));
-    }
+    let upload_root = PathBuf::from(&CONFIG.upload_dir);
+    let board_dir = validated_board_media_dir(&upload_root, board_short)?;
+    let src = validated_board_media_file(&upload_root, file_path, board_short)?;
 
     let ext = src
         .extension()
@@ -710,10 +746,10 @@ fn transcode_video_prepare(
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8: {}", src.display()))?;
         match crate::media::ffmpeg::probe_video_codec(src_str) {
-            Ok(ref codec) if codec == "av1" => {
+            Ok(codec) if codec == "av1" => {
                 tracing::info!(target: "workers", post_id = post_id, codec = "av1", "VideoTranscode: re-encoding WebM/AV1 to VP9");
             }
-            Ok(ref codec) => {
+            Ok(codec) => {
                 debug!(
                     "VideoTranscode: skipping WebM with codec '{}' for post {} (already VP8/VP9)",
                     codec, post_id
@@ -734,14 +770,15 @@ fn transcode_video_prepare(
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("Malformed filename: {}", src.display()))?
-        .to_string();
+        .to_owned();
 
     tracing::info!(target: "workers", post_id = post_id, file = %file_path, "VideoTranscode: starting");
 
-    let board_dir = PathBuf::from(upload_dir).join(board_short);
-    let webm_name = format!("{stem}.webm");
+    let webm_name = transcoded_webm_name(&stem, &ext);
     let webm_abs = board_dir.join(&webm_name);
     let webm_rel = format!("{board_short}/{webm_name}");
+    crate::utils::fs_security::canonical_parent_for_new_child(&upload_root, &webm_abs)
+        .context("Transcode destination failed safety validation")?;
 
     // temp file in the same directory for POSIX-atomic rename.
     let tmp = tempfile::Builder::new()
@@ -753,17 +790,94 @@ fn transcode_video_prepare(
         .path()
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Temp file path is non-UTF-8"))?
-        .to_string();
+        .to_owned();
     let src_path_str = src
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8"))?
-        .to_string();
+        .to_owned();
 
     // Build the ffmpeg argument list as owned strings so it can cross the
     // async boundary without lifetime issues.
     let args = crate::media::ffmpeg::build_vp9_transcode_args(&src_path_str, &tmp_path_str);
 
     Ok(Some((args, src, webm_abs, webm_rel, webm_name, tmp)))
+}
+
+fn validated_board_media_dir(upload_root: &std::path::Path, board_short: &str) -> Result<PathBuf> {
+    let board_component = single_normal_component(board_short)
+        .ok_or_else(|| anyhow::anyhow!("Transcode board name contains unsafe path components"))?;
+    let board_dir = upload_root.join(board_component);
+    crate::utils::fs_security::canonical_child_of(upload_root, &board_dir)
+        .context("Transcode board directory failed safety validation")?;
+    crate::utils::fs_security::assert_dir_no_symlink(&board_dir)
+        .context("Transcode board directory is not safe")?;
+    Ok(board_dir)
+}
+
+fn validated_board_media_file(
+    upload_root: &std::path::Path,
+    file_path: &str,
+    board_short: &str,
+) -> Result<PathBuf> {
+    let relative = std::path::Path::new(file_path);
+    if relative.is_absolute() {
+        anyhow::bail!("Transcode source path must be relative");
+    }
+
+    let mut components = relative.components();
+    let board_component = components
+        .next()
+        .and_then(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            std::path::Component::CurDir
+            | std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("Transcode source path is missing a board component"))?;
+    if board_component != board_short {
+        anyhow::bail!("Transcode source path does not belong to its board");
+    }
+    let filename = components
+        .next()
+        .and_then(|component| match component {
+            std::path::Component::Normal(value) => Some(value),
+            std::path::Component::CurDir
+            | std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("Transcode source path is missing a file name"))?;
+    if components.next().is_some() {
+        anyhow::bail!("Transcode source path must be an immediate board media file");
+    }
+
+    let src = upload_root.join(board_short).join(filename);
+    let src = crate::utils::fs_security::canonical_child_of(upload_root, &src)
+        .context("Transcode source failed safety validation")?;
+    crate::utils::fs_security::assert_regular_file_no_symlink(&src)
+        .context("Transcode source is not a safe regular file")?;
+    Ok(src)
+}
+
+fn single_normal_component(value: &str) -> Option<&std::ffi::OsStr> {
+    let mut components = std::path::Path::new(value).components();
+    let component = match components.next()? {
+        std::path::Component::Normal(component) => component,
+        std::path::Component::CurDir
+        | std::path::Component::ParentDir
+        | std::path::Component::RootDir
+        | std::path::Component::Prefix(_) => return None,
+    };
+    components.next().is_none().then_some(component)
+}
+
+fn transcoded_webm_name(stem: &str, source_ext: &str) -> String {
+    if source_ext.eq_ignore_ascii_case("webm") {
+        format!("{stem}.vp9.webm")
+    } else {
+        format!("{stem}.webm")
+    }
 }
 
 /// Finalise a completed video transcode: persist the temp file atomically,
@@ -773,40 +887,73 @@ fn transcode_video_prepare(
 fn transcode_video_finalise(
     post_id: i64,
     file_path: &str,
-    src: &PathBuf,
-    webm_abs: &PathBuf,
+    src: &std::path::Path,
+    webm_abs: &std::path::Path,
     webm_rel: &str,
     tmp: tempfile::NamedTempFile,
     pool: &DbPool,
 ) -> Result<()> {
-    use anyhow::Context as _;
-
     let ext = src
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
 
+    match validate_transcoded_webm_output(src, tmp.path()) {
+        Ok(TranscodeOutputDecision::Accept) => {}
+        Ok(TranscodeOutputDecision::Skip { reason }) => {
+            tracing::warn!(
+                target: "workers",
+                post_id,
+                reason,
+                "VideoTranscode: keeping original media"
+            );
+            return Ok(());
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "workers",
+                post_id,
+                error = %error,
+                "VideoTranscode: output validation failed; keeping original media"
+            );
+            return Ok(());
+        }
+    }
+
+    persist_transcoded_webm(post_id, file_path, src, webm_abs, webm_rel, tmp, pool)?;
+    if ext != "webm" {
+        let _ = std::fs::remove_file(src);
+    }
+    Ok(())
+}
+
+fn persist_transcoded_webm(
+    post_id: i64,
+    file_path: &str,
+    src: &std::path::Path,
+    webm_abs: &std::path::Path,
+    webm_rel: &str,
+    tmp: tempfile::NamedTempFile,
+    pool: &DbPool,
+) -> Result<()> {
     tmp.persist(webm_abs)
         .map_err(|e| anyhow::anyhow!("Failed to atomically rename WebM output: {e}"))?;
-
-    let webm_bytes =
-        std::fs::read(webm_abs).context("Failed to read transcoded WebM for dedup hash")?;
-
+    let webm_sha256 = sha256_file_hex(webm_abs)?;
+    let webm_bytes = std::fs::metadata(webm_abs)
+        .with_context(|| format!("Failed to stat transcoded WebM {}", webm_abs.display()))?
+        .len();
     let conn = pool.get()?;
 
     // clean up on DB failure.
-    let db_result = {
-        let webm_sha256 = crate::utils::crypto::sha256_hex(&webm_bytes);
-        crate::db::replace_transcoded_media(
-            &conn,
-            post_id,
-            file_path,
-            webm_rel,
-            "video/webm",
-            &webm_sha256,
-        )
-    };
+    let db_result = crate::db::replace_transcoded_media(
+        &conn,
+        post_id,
+        file_path,
+        webm_rel,
+        "video/webm",
+        &webm_sha256,
+    );
 
     if let Err(e) = db_result {
         if let Err(cleanup_error) = std::fs::remove_file(webm_abs) {
@@ -819,12 +966,54 @@ fn transcode_video_finalise(
         return Err(e);
     }
 
-    if ext != "webm" {
-        let _ = std::fs::remove_file(src);
+    tracing::info!(target: "workers", post_id = post_id, source = %src.display(), output = %webm_rel, bytes = webm_bytes, "VideoTranscode done");
+    Ok(())
+}
+
+enum TranscodeOutputDecision {
+    Accept,
+    Skip { reason: &'static str },
+}
+
+fn validate_transcoded_webm_output(
+    source_path: &std::path::Path,
+    output_path: &std::path::Path,
+) -> Result<TranscodeOutputDecision> {
+    let source_size = std::fs::metadata(source_path)
+        .with_context(|| format!("Failed to stat source video {}", source_path.display()))?
+        .len();
+    let output_size = std::fs::metadata(output_path)
+        .with_context(|| format!("Failed to stat transcoded WebM {}", output_path.display()))?
+        .len();
+    if output_size == 0 {
+        return Ok(TranscodeOutputDecision::Skip {
+            reason: "transcoded output is empty",
+        });
+    }
+    if output_size >= source_size {
+        return Ok(TranscodeOutputDecision::Skip {
+            reason: "transcoded output is not smaller than the original",
+        });
     }
 
-    tracing::info!(target: "workers", post_id = post_id, output = %webm_rel, bytes = webm_bytes.len(), "VideoTranscode done");
-    Ok(())
+    if crate::media::ffmpeg::probe_stream_kind(output_path)?
+        != crate::media::ffmpeg::StreamKind::Video
+    {
+        return Ok(TranscodeOutputDecision::Skip {
+            reason: "transcoded output has no video stream",
+        });
+    }
+    let output_str = output_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Transcoded output path is non-UTF-8"))?;
+    let codec = crate::media::ffmpeg::probe_video_codec(output_str)?;
+    if codec != "vp9" {
+        return Ok(TranscodeOutputDecision::Skip {
+            reason: "transcoded output is not VP9",
+        });
+    }
+
+    Ok(TranscodeOutputDecision::Accept)
 }
 
 // ─── AudioWaveform ────────────────────────────────────────────────────────────
@@ -940,7 +1129,7 @@ fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepar
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("Malformed audio filename: {}", src.display()))?
-        .to_string();
+        .to_owned();
     let thumb_size = CONFIG.thumb_size;
     let thumbs_dir = PathBuf::from(upload_dir).join(board_short).join("thumbs");
     std::fs::create_dir_all(&thumbs_dir)?;
@@ -955,12 +1144,12 @@ fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepar
     let src_str = src
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8"))?
-        .to_string();
+        .to_owned();
     let tmp_str = tmp_png
         .path()
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Temp path is non-UTF-8"))?
-        .to_string();
+        .to_owned();
     let filter = format!(
         "showwavespic=s={thumb_size}x{}:colors=0x888888",
         thumb_size / 2
@@ -978,9 +1167,9 @@ fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepar
         &tmp_str,
     ]
     .iter()
-    .map(|s| (*s).to_string())
+    .map(|s| (*s).to_owned())
     .collect();
-    Ok((args, png_abs, png_rel, src, file_path.to_string(), tmp_png))
+    Ok((args, png_abs, png_rel, src, file_path.to_owned(), tmp_png))
 }
 
 /// Blocking finalise phase for [`generate_waveform`]: atomically persist the
@@ -1134,12 +1323,24 @@ fn run_spam_check(post_id: i64, ip_hash: &str, body_len: usize) {
 pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
     // Collect (mtime_secs, path, size) for every file inside any thumbs/ dir.
     let mut files: Vec<(u64, std::path::PathBuf, u64)> = Vec::new();
+    let Ok(upload_root) = std::path::Path::new(upload_dir).canonicalize() else {
+        return;
+    };
     let Ok(boards_iter) = std::fs::read_dir(upload_dir) else {
         return;
     };
     for board_entry in boards_iter.flatten() {
+        let Ok(board_metadata) = board_entry.path().symlink_metadata() else {
+            continue;
+        };
+        if !board_metadata.is_dir() || board_metadata.file_type().is_symlink() {
+            continue;
+        }
         let thumbs_dir = board_entry.path().join("thumbs");
-        if !thumbs_dir.is_dir() {
+        let Ok(thumbs_metadata) = std::fs::symlink_metadata(&thumbs_dir) else {
+            continue;
+        };
+        if !thumbs_metadata.is_dir() || thumbs_metadata.file_type().is_symlink() {
             continue;
         }
         let Ok(thumbs_iter) = std::fs::read_dir(&thumbs_dir) else {
@@ -1147,16 +1348,24 @@ pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
         };
         for entry in thumbs_iter.flatten() {
             let path = entry.path();
-            if let Ok(meta) = entry.metadata() {
-                if meta.is_file() {
-                    let mtime = meta
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map_or(0, |d| d.as_secs());
-                    files.push((mtime, path, meta.len()));
-                }
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !meta.is_file() || meta.file_type().is_symlink() {
+                continue;
             }
+            let Ok(canonical_path) = path.canonicalize() else {
+                continue;
+            };
+            if !canonical_path.starts_with(&upload_root) {
+                continue;
+            }
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            files.push((mtime, canonical_path, meta.len()));
         }
     }
 
@@ -1198,8 +1407,12 @@ pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{transcode_video_finalise, video_reencode_timeout_warning, waveform_finalise};
-    use std::io::Write;
+    use super::{
+        persist_transcoded_webm, transcode_video_finalise, transcoded_webm_name,
+        validated_board_media_file, video_reencode_timeout_warning, waveform_finalise,
+        EnqueueOutcome, Job, JobQueue,
+    };
+    use std::io::Write as _;
 
     fn file_hash_count(conn: &rusqlite::Connection, file_path: &str) -> i64 {
         conn.query_row(
@@ -1210,8 +1423,87 @@ mod tests {
         .expect("file hash count")
     }
 
+    fn enqueue_spam_job(queue: &JobQueue) -> i64 {
+        let job = Job::SpamCheck {
+            post_id: 42,
+            ip_hash: "hash".to_owned(),
+            body_len: 5,
+        };
+        match queue.enqueue(&job).expect("enqueue job") {
+            EnqueueOutcome::Enqueued(id) => id,
+            EnqueueOutcome::DroppedAtCapacity => panic!("test job should not be dropped"),
+        }
+    }
+
+    fn claim_job(queue: &JobQueue, conn: &rusqlite::Connection, expected_id: i64) -> (i64, String) {
+        let claimed = crate::db::claim_next_job(conn)
+            .expect("claim job")
+            .expect("job should be claimable");
+        assert_eq!(claimed.0, expected_id);
+        queue.mark_job_claimed();
+        claimed
+    }
+
     #[test]
-    fn stale_transcode_finalise_removes_unattached_webm_and_writes_no_hash() {
+    fn retryable_failure_restores_queue_pending_count() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let queue = JobQueue::new(pool.clone());
+        let job_id = enqueue_spam_job(&queue);
+        let conn = pool.get().expect("db connection");
+
+        claim_job(&queue, &conn, job_id);
+        assert_eq!(
+            crate::db::pending_job_count(&conn).expect("pending jobs"),
+            0
+        );
+        assert_eq!(queue.pending_count(), 0);
+
+        let failure_state =
+            crate::db::fail_job(&conn, job_id, "temporary failure").expect("fail job");
+        assert_eq!(failure_state, crate::db::JobFailureState::Retrying);
+        queue.mark_job_failure_state(failure_state);
+
+        assert_eq!(
+            crate::db::pending_job_count(&conn).expect("pending jobs"),
+            1
+        );
+        assert_eq!(queue.pending_count(), 1);
+    }
+
+    #[test]
+    fn permanent_failure_leaves_queue_pending_count_at_zero() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let queue = JobQueue::new(pool.clone());
+        let job_id = enqueue_spam_job(&queue);
+        let conn = pool.get().expect("db connection");
+        let mut saw_permanent_failure = false;
+
+        for _ in 0..8 {
+            claim_job(&queue, &conn, job_id);
+            let failure_state =
+                crate::db::fail_job(&conn, job_id, "persistent failure").expect("fail job");
+            queue.mark_job_failure_state(failure_state);
+            if failure_state == crate::db::JobFailureState::PermanentlyFailed {
+                saw_permanent_failure = true;
+                break;
+            }
+            assert_eq!(
+                crate::db::pending_job_count(&conn).expect("pending jobs"),
+                1
+            );
+            assert_eq!(queue.pending_count(), 1);
+        }
+
+        assert!(saw_permanent_failure);
+        assert_eq!(
+            crate::db::pending_job_count(&conn).expect("pending jobs"),
+            0
+        );
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[test]
+    fn stale_transcode_persist_removes_unattached_webm_and_writes_no_hash() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let board_dir = temp_dir.path().join("b");
         std::fs::create_dir_all(&board_dir).expect("create board dir");
@@ -1225,7 +1517,7 @@ mod tests {
         tmp.write_all(b"webm").expect("write temp webm");
         let pool = crate::db::init_test_pool().expect("test pool");
 
-        let error = transcode_video_finalise(
+        let error = persist_transcoded_webm(
             999,
             "b/video.mp4",
             &src,
@@ -1240,6 +1532,126 @@ mod tests {
         assert!(!webm_abs.exists());
         let conn = pool.get().expect("db connection");
         assert_eq!(file_hash_count(&conn, "b/video.webm"), 0);
+    }
+
+    #[test]
+    fn transcode_finalise_skips_larger_output_and_cleans_temp_file() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let board_dir = temp_dir.path().join("b");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        let src = board_dir.join("video.mp4");
+        std::fs::write(&src, b"small").expect("write source");
+        let webm_abs = board_dir.join("video.webm");
+        let mut tmp = tempfile::Builder::new()
+            .suffix(".webm")
+            .tempfile_in(&board_dir)
+            .expect("temp webm");
+        tmp.write_all(b"larger than source")
+            .expect("write temp webm");
+        let tmp_path = tmp.path().to_path_buf();
+        let pool = crate::db::init_test_pool().expect("test pool");
+
+        transcode_video_finalise(
+            999,
+            "b/video.mp4",
+            &src,
+            &webm_abs,
+            "b/video.webm",
+            tmp,
+            &pool,
+        )
+        .expect("larger output should be skipped without failing the job");
+
+        assert!(src.exists());
+        assert!(!webm_abs.exists());
+        assert!(!tmp_path.exists());
+    }
+
+    #[test]
+    fn webm_reencode_uses_distinct_output_name() {
+        assert_eq!(transcoded_webm_name("clip", "mp4"), "clip.webm");
+        assert_eq!(transcoded_webm_name("clip", "webm"), "clip.vp9.webm");
+    }
+
+    #[test]
+    fn transcode_source_validation_rejects_escape_paths() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_root = temp_dir.path().join("uploads");
+        let board_dir = upload_root.join("b");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::write(board_dir.join("video.mp4"), b"source").expect("write source");
+
+        assert!(validated_board_media_file(&upload_root, "../video.mp4", "b").is_err());
+        assert!(validated_board_media_file(&upload_root, "other/video.mp4", "b").is_err());
+        assert!(validated_board_media_file(&upload_root, "b/thumbs/video.mp4", "b").is_err());
+        assert!(validated_board_media_file(&upload_root, "b/video.mp4", "b").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn thumb_cache_eviction_skips_symlinked_thumbs_dir() {
+        use std::os::unix::fs as unix_fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_root = temp_dir.path().join("uploads");
+        let board_dir = upload_root.join("b");
+        let outside_dir = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::create_dir_all(&outside_dir).expect("create outside dir");
+        let outside_file = outside_dir.join("thumb.webp");
+        std::fs::write(&outside_file, b"outside").expect("write outside file");
+        unix_fs::symlink(&outside_dir, board_dir.join("thumbs")).expect("symlink thumbs dir");
+
+        super::evict_thumb_cache(upload_root.to_str().expect("utf8 upload root"), 0);
+
+        assert_eq!(
+            std::fs::read(&outside_file).expect("read outside"),
+            b"outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn thumb_cache_eviction_skips_symlinked_board_dir() {
+        use std::os::unix::fs as unix_fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_root = temp_dir.path().join("uploads");
+        let outside_board = temp_dir.path().join("outside_board");
+        let outside_thumbs = outside_board.join("thumbs");
+        std::fs::create_dir_all(&upload_root).expect("create upload root");
+        std::fs::create_dir_all(&outside_thumbs).expect("create outside thumbs");
+        let outside_file = outside_thumbs.join("thumb.webp");
+        std::fs::write(&outside_file, b"outside").expect("write outside file");
+        unix_fs::symlink(&outside_board, upload_root.join("b")).expect("symlink board dir");
+
+        super::evict_thumb_cache(upload_root.to_str().expect("utf8 upload root"), 0);
+
+        assert_eq!(
+            std::fs::read(&outside_file).expect("read outside"),
+            b"outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn thumb_cache_eviction_skips_symlinked_thumb_file() {
+        use std::os::unix::fs as unix_fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_root = temp_dir.path().join("uploads");
+        let thumbs_dir = upload_root.join("b").join("thumbs");
+        let outside_file = temp_dir.path().join("outside.webp");
+        std::fs::create_dir_all(&thumbs_dir).expect("create thumbs dir");
+        std::fs::write(&outside_file, b"outside").expect("write outside file");
+        unix_fs::symlink(&outside_file, thumbs_dir.join("thumb.webp")).expect("symlink thumb file");
+
+        super::evict_thumb_cache(upload_root.to_str().expect("utf8 upload root"), 0);
+
+        assert_eq!(
+            std::fs::read(&outside_file).expect("read outside"),
+            b"outside"
+        );
     }
 
     #[test]

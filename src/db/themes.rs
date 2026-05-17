@@ -3,8 +3,8 @@ use crate::{
     models::Theme,
     theme::{builtin_theme, builtin_theme_rows},
 };
-use anyhow::{Context, Result};
-use rusqlite::{params, OptionalExtension};
+use anyhow::{Context as _, Result};
+use rusqlite::{params, OptionalExtension as _};
 use std::collections::BTreeSet;
 
 const LEGACY_DEFAULT_BUILTIN_THEMES: &[&str] = &[
@@ -34,7 +34,7 @@ fn configured_enabled_builtin_slugs() -> Vec<String> {
         .collect::<BTreeSet<_>>();
 
     if configured == legacy_default {
-        enabled_builtin_slugs.extend(["blue-sky".to_string(), "deep-orbit".to_string()]);
+        enabled_builtin_slugs.extend(["blue-sky".to_owned(), "deep-orbit".to_owned()]);
     }
 
     enabled_builtin_slugs
@@ -163,7 +163,7 @@ pub fn create_custom_theme(
 ///
 /// # Errors
 /// Returns an error if the theme is missing or the update fails.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn update_theme(
     conn: &mut rusqlite::Connection,
     existing_slug: &str,
@@ -179,7 +179,7 @@ pub fn update_theme(
     let css_to_save = if current.is_builtin {
         current.custom_css
     } else {
-        custom_css.unwrap_or(&current.custom_css).to_string()
+        custom_css.unwrap_or(&current.custom_css).to_owned()
     };
     let tx = conn.transaction()?;
     tx.execute(
@@ -257,7 +257,7 @@ pub fn sanitize_theme_slug(slug: &str) -> String {
 pub fn sanitize_theme_name(name: &str) -> String {
     let value = name.trim().chars().take(64).collect::<String>();
     if value.is_empty() {
-        "Untitled Theme".to_string()
+        "Untitled Theme".to_owned()
     } else {
         value
     }
@@ -282,7 +282,7 @@ pub fn sanitize_theme_swatch(swatch: &str) -> String {
     {
         trimmed.to_ascii_lowercase()
     } else {
-        "#888888".to_string()
+        "#888888".to_owned()
     }
 }
 

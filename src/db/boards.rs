@@ -4,8 +4,8 @@
 // guard via super::paths_safe_to_delete), and aggregate site statistics.
 //
 use crate::models::{Board, BoardAccessMode, BoardBannerMode};
-use anyhow::{Context, Result};
-use rusqlite::{params, OptionalExtension};
+use anyhow::{Context as _, Result};
+use rusqlite::{params, OptionalExtension as _};
 use std::collections::{HashMap, HashSet};
 
 const BOARD_ORDER_SQL: &str = "nsfw ASC, display_order ASC, id ASC";
@@ -179,6 +179,41 @@ pub fn set_site_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> 
     Ok(())
 }
 
+pub const MEDIA_AUTO_PRUNE_ENABLED_KEY: &str = "media_auto_prune_enabled";
+pub const MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY: &str = "media_max_active_content_size_bytes";
+
+pub fn get_media_auto_prune_enabled(conn: &rusqlite::Connection) -> bool {
+    parse_site_bool(
+        get_site_setting(conn, MEDIA_AUTO_PRUNE_ENABLED_KEY)
+            .ok()
+            .flatten(),
+    )
+    .unwrap_or(crate::config::CONFIG.initial_media_auto_prune_enabled)
+}
+
+pub fn get_media_max_active_content_size_bytes(conn: &rusqlite::Connection) -> u64 {
+    get_site_setting(conn, MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY)
+        .ok()
+        .flatten()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(crate::config::CONFIG.initial_media_max_active_content_size_bytes)
+}
+
+/// # Errors
+/// Returns an error if the database write fails.
+pub fn set_media_prune_settings(
+    conn: &rusqlite::Connection,
+    enabled: bool,
+    max_size_bytes: u64,
+) -> Result<()> {
+    set_site_setting(conn, MEDIA_AUTO_PRUNE_ENABLED_KEY, &enabled.to_string())?;
+    set_site_setting(
+        conn,
+        MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY,
+        &max_size_bytes.to_string(),
+    )
+}
+
 /// Returns the admin-configured site name, or falls back to `CONFIG.forum_name`.
 pub fn get_site_name(conn: &rusqlite::Connection) -> String {
     get_site_setting(conn, "site_name")
@@ -197,7 +232,7 @@ pub fn get_site_subtitle(conn: &rusqlite::Connection) -> String {
             None
         })
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "select board to proceed".to_string())
+        .unwrap_or_else(|| "select board to proceed".to_owned())
 }
 
 /// Convenience: read the admin-configured default UI theme.
@@ -211,14 +246,13 @@ pub fn get_default_user_theme(conn: &rusqlite::Connection) -> String {
 }
 
 fn parse_site_bool(value: Option<String>) -> Option<bool> {
-    value.and_then(|value| {
-        let trimmed = value.trim();
-        match trimmed {
-            "1" | "true" | "TRUE" | "True" => Some(true),
-            "0" | "false" | "FALSE" | "False" => Some(false),
-            _ => None,
-        }
-    })
+    let value = value?;
+    let trimmed = value.trim();
+    match trimmed {
+        "1" | "true" | "TRUE" | "True" => Some(true),
+        "0" | "false" | "FALSE" | "False" => Some(false),
+        _ => None,
+    }
 }
 
 fn get_site_bool_with_legacy_fallback(
@@ -251,6 +285,15 @@ pub fn get_homepage_new_thread_badges_enabled(conn: &rusqlite::Connection) -> bo
         "homepage_new_thread_badges_enabled",
         "new_activity_notifications_enabled",
         crate::config::CONFIG.initial_homepage_new_thread_badges_enabled,
+    )
+}
+
+pub fn get_homepage_new_reply_badges_enabled(conn: &rusqlite::Connection) -> bool {
+    get_site_bool_with_legacy_fallback(
+        conn,
+        "homepage_new_reply_badges_enabled",
+        "new_activity_notifications_enabled",
+        crate::config::CONFIG.initial_homepage_new_reply_badges_enabled,
     )
 }
 
@@ -380,6 +423,71 @@ pub fn count_new_threads_for_boards(
     Ok(counts)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoardReplyActivityCountInput {
+    pub thread_id: i64,
+    pub seen_reply_count: i64,
+}
+
+/// Count new replies on visible, existing threads and aggregate them by board.
+///
+/// Exact semantics: for each retained per-thread marker, count
+/// `thread.reply_count - seen_reply_count` when positive, excluding archived
+/// threads.
+///
+/// # Errors
+/// Returns an error if the database operation fails.
+pub fn count_new_replies_for_boards(
+    conn: &rusqlite::Connection,
+    markers: &[BoardReplyActivityCountInput],
+) -> Result<HashMap<i64, i64>> {
+    if markers.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let values_sql = markers
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let base = index * 2;
+            format!("(?{}, ?{})", base + 1, base + 2)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "WITH seen(thread_id, seen_reply_count) AS (
+             VALUES {values_sql}
+         )
+         SELECT t.board_id, SUM(MAX(t.reply_count - s.seen_reply_count, 0))
+         FROM threads t
+         JOIN seen s ON s.thread_id = t.id
+         WHERE t.archived = 0
+         GROUP BY t.board_id"
+    );
+
+    let mut params = Vec::with_capacity(markers.len() * 2);
+    for marker in markers {
+        params.push(rusqlite::types::Value::Integer(marker.thread_id));
+        params.push(rusqlite::types::Value::Integer(
+            marker.seen_reply_count.max(0),
+        ));
+    }
+
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+
+    let mut counts = HashMap::new();
+    for row in rows {
+        let (board_id, count) = row?;
+        if count > 0 {
+            counts.insert(board_id, count);
+        }
+    }
+    Ok(counts)
+}
+
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Option<Board>> {
@@ -432,15 +540,15 @@ pub fn create_board(
 }
 
 /// Create a board with explicit per-media-type toggles.
-/// Used by the CLI `--no-images / --no-videos / --no-audio` flags.
+/// Used by the CLI and console board bootstrap paths.
 ///
 /// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-#[allow(clippy::fn_params_excessive_bools)]
+#[expect(clippy::fn_params_excessive_bools)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn create_board_with_media_flags(
     conn: &rusqlite::Connection,
     short: &str,
@@ -549,11 +657,11 @@ pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Re
 ///
 /// # Errors
 /// Returns an error if the database operation fails or the board id is not found.
-#[allow(clippy::fn_params_excessive_bools)]
+#[expect(clippy::fn_params_excessive_bools)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 // Keeping the SQL branches inline makes the nsfw reorder/update behavior easier to verify in one place.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub fn update_board_settings(
     conn: &mut rusqlite::Connection,
     id: i64,
@@ -735,11 +843,19 @@ pub fn get_seconds_since_last_post(
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>> {
+pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<super::DeletePathsResult> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin delete_board transaction")?;
 
-    let result: anyhow::Result<Vec<String>> = (|| {
+    let result: anyhow::Result<super::DeletePathsResult> = (|| {
+        let board_short: String = conn
+            .query_row(
+                "SELECT short_name FROM boards WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .context("Failed to load board before delete")?;
+
         // Collect every file path that belongs to this board before the CASCADE.
         // The ON DELETE CASCADE on boards→threads→posts handles DB row removal, but
         // on-disk files must be cleaned up by the caller.
@@ -778,7 +894,17 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<Vec<String>>
         // post-delete state: any file exclusively used by this board's posts now
         // has zero remaining references and is safe to remove.
         let safe = super::paths_safe_to_delete(conn, candidates)?;
-        Ok(safe)
+        let pending_fs_op = super::build_delete_files_and_dirs_pending_op(
+            &safe,
+            std::slice::from_ref(&board_short),
+        )?;
+        if let Some(op) = pending_fs_op.as_ref() {
+            super::insert_pending_fs_op(conn, op)?;
+        }
+        Ok(super::DeletePathsResult {
+            paths: safe,
+            pending_fs_op_id: pending_fs_op.map(|op| op.id),
+        })
     })();
 
     match result {
@@ -869,7 +995,7 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
         total_audio_checks.push("mime_type LIKE 'audio/%'");
     }
     let total_audio_expr = if total_audio_checks.is_empty() {
-        "0".to_string()
+        "0".to_owned()
     } else {
         format!(
             "SUM(CASE WHEN {} THEN 1 ELSE 0 END)",
@@ -898,7 +1024,7 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
                   THEN audio_file_size ELSE 0 END)"
         )
     } else {
-        "0".to_string()
+        "0".to_owned()
     };
 
     let query = format!(
@@ -948,8 +1074,8 @@ fn post_table_columns(conn: &rusqlite::Connection) -> Result<HashSet<String>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_board, create_board_with_media_flags, get_all_boards_with_stats, get_board_by_short,
-        get_site_stats,
+        create_board, create_board_with_media_flags, delete_board, get_all_boards_with_stats,
+        get_board_by_short, get_site_stats,
     };
     use rusqlite::Connection;
 
@@ -1141,5 +1267,72 @@ mod tests {
             board.allow_self_delete,
             crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_SELF_DELETE
         );
+        assert_eq!(
+            board.max_image_size,
+            i64::try_from(crate::config::CONFIG.max_image_size).expect("image size fits in i64")
+        );
+        assert_eq!(
+            board.max_video_size,
+            i64::try_from(crate::config::CONFIG.max_video_size).expect("video size fits in i64")
+        );
+        assert_eq!(
+            board.max_audio_size,
+            i64::try_from(crate::config::CONFIG.max_audio_size).expect("audio size fits in i64")
+        );
+    }
+
+    #[test]
+    fn delete_board_records_durable_board_directory_cleanup() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_dir = temp_dir.path().join("uploads");
+        let board_dir = upload_dir.join("gone");
+        std::fs::create_dir_all(board_dir.join("thumbs")).expect("create board dirs");
+        std::fs::write(board_dir.join("file.webp"), b"file").expect("write file");
+        std::fs::write(board_dir.join("thumbs/file.webp"), b"thumb").expect("write thumb");
+        std::fs::write(board_dir.join("orphan.bin"), b"orphan").expect("write orphan");
+
+        let pool = crate::db::init_test_pool().expect("init test pool");
+        let conn = pool.get().expect("get test connection");
+        let board_id = create_board(&conn, "gone", "Gone", "", false).expect("create board");
+        conn.execute(
+            "INSERT INTO threads (id, board_id, subject) VALUES (1, ?1, 'delete me')",
+            rusqlite::params![board_id],
+        )
+        .expect("insert thread");
+        conn.execute(
+            "INSERT INTO posts (
+                 id, thread_id, board_id, body, body_html, deletion_token, is_op,
+                 file_path, file_name, file_size, thumb_path
+             ) VALUES
+             (1, 1, ?1, 'body', '<p>body</p>', 'tok', 1,
+              'gone/file.webp', 'file.webp', 4, 'gone/thumbs/file.webp')",
+            rusqlite::params![board_id],
+        )
+        .expect("insert post");
+
+        let deleted = delete_board(&conn, board_id).expect("delete board");
+        assert_eq!(deleted.paths.len(), 2);
+        assert!(deleted.pending_fs_op_id.is_some());
+        assert!(
+            board_dir.exists(),
+            "simulated crash window leaves directory for startup cleanup"
+        );
+
+        let pending = crate::db::list_pending_fs_ops(&conn).expect("list pending ops");
+        assert_eq!(pending.len(), 1);
+        let pending_op = pending.first().expect("pending op");
+        let payload: crate::pending_fs::DeleteFilesPayload =
+            serde_json::from_str(&pending_op.payload_json).expect("pending payload");
+        assert_eq!(payload.dirs, vec!["gone".to_owned()]);
+
+        crate::pending_fs::reconcile_pending_fs_ops(
+            &pool,
+            upload_dir.to_str().expect("utf8 upload dir"),
+        )
+        .expect("startup cleanup");
+        assert!(!board_dir.exists());
+        assert!(crate::db::list_pending_fs_ops(&conn)
+            .expect("list pending ops")
+            .is_empty());
     }
 }

@@ -22,7 +22,7 @@ use crate::{
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
@@ -30,6 +30,7 @@ use serde::Deserialize;
 type ThreadViewLoadResult = (
     String,
     render::ThreadPageData,
+    bool,
     bool,
     bool,
     bool,
@@ -45,7 +46,7 @@ fn is_xml_http_request(headers: &HeaderMap) -> bool {
 
 // ─── GET /:board/thread/:id ───────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub async fn view_thread(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
@@ -55,12 +56,13 @@ pub async fn view_thread(
     req_headers: HeaderMap,
 ) -> Result<Response> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
+    let user_preferences = crate::handlers::board::user_preferences_from_jar(&jar);
     let (jar, csrf) = ensure_csrf(jar);
     let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
     let owned_post_grants = crate::handlers::board::owned_post_grants_from_jar(&jar);
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
     let return_to = format!("/{board_short}/thread/{thread_id}");
     let access_context = match crate::handlers::board::board_access_preflight(
@@ -100,15 +102,17 @@ pub async fn view_thread(
             )?;
             let is_admin = page_data.is_admin;
             let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
-            let homepage_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
+            let homepage_thread_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
+            let homepage_reply_badges_enabled = db::get_homepage_new_reply_badges_enabled(&conn);
             let board_id = page_data.board.id;
             Ok((
                 render::thread_page_etag_signature(&page_data),
                 page_data,
                 is_admin,
                 thread_badges_enabled,
-                homepage_badges_enabled,
-                if homepage_badges_enabled {
+                homepage_thread_badges_enabled,
+                homepage_reply_badges_enabled,
+                if homepage_thread_badges_enabled {
                     db::get_latest_visible_thread_marker(&conn, board_id)?
                 } else {
                     None
@@ -125,7 +129,8 @@ pub async fn view_thread(
         mut page_data,
         _is_admin,
         thread_badges_enabled,
-        homepage_badges_enabled,
+        homepage_thread_badges_enabled,
+        homepage_reply_badges_enabled,
         latest_thread_marker,
     ) = page_data;
     page_data.owned_post_controls = owned_post_grants
@@ -157,6 +162,10 @@ pub async fn view_thread(
     } else {
         "-cg0"
     };
+    let theme_tag = crate::templates::page_theme_etag_fragment(
+        current_theme.as_deref(),
+        Some(&page_data.board.default_theme),
+    );
     let ownership_sig = {
         let mut owned = page_data
             .owned_post_controls
@@ -167,11 +176,12 @@ pub async fn view_thread(
         crate::utils::crypto::sha256_hex(owned.join("|").as_bytes())
     };
     let etag = format!(
-        "\"{thread_sig}-b{boards_ver}{admin_tag}{post_tag}{greentext_tag}-o{ownership_sig}\""
+        "\"{thread_sig}-b{boards_ver}{admin_tag}{post_tag}{greentext_tag}-t{theme_tag}-o{ownership_sig}-{}\"",
+        user_preferences.etag_fragment()
     );
     let (latest_created_at, latest_thread_id) =
         crate::handlers::board::latest_visible_thread_marker_tuple(latest_thread_marker);
-    let jar = if thread_badges_enabled {
+    let jar = if thread_badges_enabled || homepage_reply_badges_enabled {
         crate::handlers::board::remember_thread_activity(
             jar,
             page_data.thread.id,
@@ -180,7 +190,7 @@ pub async fn view_thread(
     } else {
         jar
     };
-    let jar = if homepage_badges_enabled {
+    let jar = if homepage_thread_badges_enabled {
         crate::handlers::board::remember_board_activity(
             jar,
             page_data.board.id,
@@ -196,7 +206,9 @@ pub async fn view_thread(
         .get("if-none-match")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if client_etag == etag {
+    let activity_markers_enabled =
+        thread_badges_enabled || homepage_thread_badges_enabled || homepage_reply_badges_enabled;
+    if client_etag == etag && !activity_markers_enabled {
         // StatusCode::NOT_MODIFIED and Body::empty() are always valid; this
         // builder call is infallible in practice.
         let mut resp = axum::http::Response::builder()
@@ -210,8 +222,11 @@ pub async fn view_thread(
         );
         resp.headers_mut().insert(
             axum::http::header::CACHE_CONTROL,
-            axum::http::HeaderValue::from_static("private, no-cache, must-revalidate"),
+            axum::http::HeaderValue::from_static(
+                crate::handlers::board::activity_html_cache_control(activity_markers_enabled),
+            ),
         );
+        crate::cache::insert_vary_cookie(resp.headers_mut());
         return Ok((jar, resp).into_response());
     }
 
@@ -230,6 +245,7 @@ pub async fn view_thread(
         None,
         current_theme.as_deref(),
         can_post,
+        user_preferences,
     );
     let mut resp = Html(html).into_response();
     if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
@@ -237,26 +253,31 @@ pub async fn view_thread(
     }
     resp.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("private, no-cache, must-revalidate"),
+        axum::http::HeaderValue::from_static(crate::handlers::board::activity_html_cache_control(
+            activity_markers_enabled,
+        )),
     );
+    crate::cache::insert_vary_cookie(resp.headers_mut());
     Ok((jar, resp).into_response())
 }
 
 // ─── POST /:board/thread/:id — post reply ────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub async fn post_reply(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
     multipart: Multipart,
 ) -> Result<Response> {
     let xhr_request = is_xml_http_request(&req_headers);
+    let user_preferences = crate::handlers::board::user_preferences_from_jar(&jar);
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
     let access_decision = crate::handlers::board::board_access_preflight(
         &state,
@@ -268,14 +289,28 @@ pub async fn post_reply(
     )
     .await?;
 
-    if let crate::handlers::board::BoardAccessDecision::Denied(denial) = access_decision {
-        let redirect_to =
-            crate::handlers::board::unlock_redirect_url(&board_short, &denial.return_to);
-        return Ok(Redirect::to(&redirect_to).into_response());
-    }
+    let access_context = match access_decision {
+        crate::handlers::board::BoardAccessDecision::Allowed(context) => context,
+        crate::handlers::board::BoardAccessDecision::Denied(denial) => {
+            let redirect_to =
+                crate::handlers::board::unlock_redirect_url(&board_short, &denial.return_to);
+            return Ok(Redirect::to(&redirect_to).into_response());
+        }
+    };
 
-    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_string());
-    let form = parse_post_multipart(multipart, csrf_cookie.as_deref()).await?;
+    let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_owned());
+    let form = tokio::time::timeout(
+        crate::handlers::PUBLIC_UPLOAD_TIMEOUT,
+        parse_post_multipart(
+            multipart,
+            csrf_cookie.as_deref(),
+            access_context.board.max_image_size_bytes(),
+            access_context.board.max_video_size_bytes(),
+            access_context.board.max_audio_size_bytes(),
+        ),
+    )
+    .await
+    .map_err(|_error| AppError::BadRequest("Upload timed out. Please try again.".into()))??;
 
     if !form.csrf_verified {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
@@ -299,8 +334,9 @@ pub async fn post_reply(
     let identity_key_err = identity_key.clone();
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let job_queue = state.job_queue.clone();
+        let job_queue = std::sync::Arc::clone(&state.job_queue);
         let ffmpeg_available = state.ffmpeg_available;
+        let ffprobe_available = state.ffprobe_available;
         let ffmpeg_webp_available = state.ffmpeg_webp_available;
         move || -> Result<posting::SubmitPostResult> {
             let conn = pool.get()?;
@@ -327,10 +363,8 @@ pub async fn post_reply(
                     audio_file_data: form.audio_file,
                     upload_dir: CONFIG.upload_dir.clone(),
                     thumb_size: CONFIG.thumb_size,
-                    max_image_size: CONFIG.max_image_size,
-                    max_video_size: CONFIG.max_video_size,
-                    max_audio_size: CONFIG.max_audio_size,
                     ffmpeg_available,
+                    ffprobe_available,
                     ffmpeg_webp_available,
                 },
             )
@@ -384,6 +418,7 @@ pub async fn post_reply(
                     None,
                     current_theme.as_deref(),
                     true,
+                    user_preferences,
                 ))
             })
             .await
@@ -401,13 +436,14 @@ pub async fn post_reply(
         }
     };
 
-    let jar = crate::handlers::board::remember_owned_post_until(
+    let jar = crate::handlers::board::remember_owned_post_until_with_secure(
         jar,
         &submit_result.board_short,
         submit_result.thread_id,
         submit_result.post_id,
         &submit_result.deletion_token,
         submit_result.created_at + crate::handlers::board::SELF_DELETE_WINDOW_SECS,
+        crate::handlers::board::should_set_public_secure_cookie(&req_headers, Some(peer)),
     );
 
     if xhr_request {
@@ -443,7 +479,7 @@ async fn load_self_action_post_context(
 ) -> Result<SelfActionPostContext> {
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let board_short = board_short.to_string();
+        let board_short = board_short.to_owned();
         move || -> Result<SelfActionPostContext> {
             let conn = pool.get()?;
             let board = db::get_board_by_short(&conn, &board_short)?
@@ -495,7 +531,7 @@ async fn render_edit_post_error_page(
         load_self_action_post_context(state, board_short, post_id, admin_session_id, access_cookie)
             .await?;
     let mut post = context.post.clone();
-    post.body = body.to_string();
+    body.clone_into(&mut post.body);
     let boards = crate::templates::live_boards();
     let html = crate::templates::thread::edit_post_page(
         &context.board,
@@ -511,7 +547,7 @@ async fn render_edit_post_error_page(
     *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-cache, must-revalidate"),
+        HeaderValue::from_static(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE),
     );
     Ok((jar, response).into_response())
 }
@@ -525,7 +561,7 @@ pub async fn edit_post_get(
     let (jar, csrf) = ensure_csrf(jar);
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
     let context = load_self_action_post_context(
         &state,
@@ -599,7 +635,7 @@ pub async fn edit_post_get(
     let mut response = Html(html).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-cache, must-revalidate"),
+        HeaderValue::from_static(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE),
     );
     Ok((jar, response).into_response())
 }
@@ -638,7 +674,7 @@ pub async fn edit_post_post(
         )?;
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
     let can_post = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -705,8 +741,7 @@ pub async fn edit_post_post(
             }
 
             let body_text = crate::utils::sanitize::validate_body(&raw_body)
-                .map_err(AppError::BadRequest)?
-                .to_string();
+                .map_err(AppError::BadRequest)?.to_owned();
 
             let filters: Vec<(String, String)> = db::get_word_filters(&conn)?
                 .into_iter()
@@ -794,7 +829,7 @@ pub async fn delete_post_get(
     let (jar, csrf) = ensure_csrf(jar);
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
     let context = load_self_action_post_context(
         &state,
@@ -869,7 +904,7 @@ pub async fn delete_post_get(
     let mut response = Html(html).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-cache, must-revalidate"),
+        HeaderValue::from_static(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE),
     );
     Ok((jar, response).into_response())
 }
@@ -892,7 +927,7 @@ pub async fn delete_own_post(
         )?;
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
     let can_post = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -1045,7 +1080,7 @@ pub async fn vote_handler(
     let (_poll_id, thread_id, board_short) = context;
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
     let can_post = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -1165,16 +1200,25 @@ struct ThreadUpdatesPayload {
     nav_html: String,
 }
 
-type ThreadUpdatesRender = (
-    String,
-    i64,
-    usize,
-    Vec<RefreshedPostPayload>,
-    i64,
-    i64,
-    bool,
-    bool,
-);
+struct ActivityBadgeSettings {
+    thread_badges_enabled: bool,
+    homepage_thread_badges_enabled: bool,
+    homepage_reply_badges_enabled: bool,
+}
+
+struct ThreadUpdatesRender {
+    html: String,
+    last_id: i64,
+    count: usize,
+    refreshed_posts: Vec<RefreshedPostPayload>,
+    reply_count: i64,
+    bump_time: i64,
+    locked: bool,
+    sticky: bool,
+    board_id: i64,
+    activity_badges: ActivityBadgeSettings,
+    latest_thread_marker: Option<(i64, i64)>,
+}
 
 fn parse_refresh_post_ids(raw: Option<&str>) -> Vec<i64> {
     let mut ids = raw
@@ -1196,10 +1240,11 @@ pub async fn thread_updates(
     jar: CookieJar,
 ) -> Result<Response> {
     let since = params.since;
+    let user_preferences = crate::handlers::board::user_preferences_from_jar(&jar);
     let refresh_post_ids = parse_refresh_post_ids(params.refresh.as_deref());
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_string());
+        .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
     let can_view = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -1224,125 +1269,162 @@ pub async fn thread_updates(
         return Ok((
             axum::http::StatusCode::FORBIDDEN,
             [(axum::http::header::CONTENT_TYPE, "application/json")],
-            r#"{"error":"forbidden"}"#.to_string(),
+            r#"{"error":"forbidden"}"#.to_owned(),
         )
             .into_response());
     }
 
-    let (html, last_id, count, refreshed_posts, reply_count, bump_time, locked, sticky) =
-        tokio::task::spawn_blocking({
-            let pool = state.db.clone();
-            let refresh_post_ids = refresh_post_ids.clone();
-            move || -> crate::error::Result<ThreadUpdatesRender> {
-                let conn = pool.get()?;
+    let updates = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        let refresh_post_ids = refresh_post_ids.clone();
+        move || -> crate::error::Result<ThreadUpdatesRender> {
+            let conn = pool.get()?;
 
-                // Validate board + thread exist (returns 404 for bad URLs).
-                let board = db::get_board_by_short(&conn, &board_short)?
-                    .ok_or_else(|| crate::error::AppError::NotFound("Board not found.".into()))?;
-                let thread = db::get_thread(&conn, thread_id)?
-                    .ok_or_else(|| crate::error::AppError::NotFound("Thread not found.".into()))?;
+            // Validate board + thread exist (returns 404 for bad URLs).
+            let board = db::get_board_by_short(&conn, &board_short)?
+                .ok_or_else(|| crate::error::AppError::NotFound("Board not found.".into()))?;
+            let thread = db::get_thread(&conn, thread_id)?
+                .ok_or_else(|| crate::error::AppError::NotFound("Thread not found.".into()))?;
+            let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
+            let homepage_thread_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
+            let homepage_reply_badges_enabled = db::get_homepage_new_reply_badges_enabled(&conn);
+            let activity_badges = ActivityBadgeSettings {
+                thread_badges_enabled,
+                homepage_thread_badges_enabled,
+                homepage_reply_badges_enabled,
+            };
+            let latest_thread_marker = if homepage_thread_badges_enabled {
+                db::get_latest_visible_thread_marker(&conn, board.id)?
+            } else {
+                None
+            };
 
-                // Fetch posts newer than `since`, ordered oldest-first so they
-                // render in the correct chronological order when appended.
-                let posts = db::get_new_posts_since(&conn, thread_id, since, 100)?;
-                let last_id = posts.iter().map(|p| p.id).max().unwrap_or(since);
-                let count = posts.len();
+            // Fetch posts newer than `since`, ordered oldest-first so they
+            // render in the correct chronological order when appended.
+            let posts = db::get_new_posts_since(&conn, thread_id, since, 100)?;
+            let last_id = posts.iter().map(|p| p.id).max().unwrap_or(since);
+            let count = posts.len();
 
-                let mut html = String::new();
-                for post in &posts {
-                    // show_delete=false, is_admin=false — no user controls in
-                    // auto-appended HTML; a full reload restores them.
-                    html.push_str(&crate::templates::render_post(
-                        post,
-                        &board_short,
-                        "",
-                        crate::templates::thread::RenderPostOpts {
-                            show_delete: false,
-                            is_admin: false,
-                            admin_csrf_token: None,
-                            show_media: true,
-                            allow_editing: false, // no edit link in auto-appended HTML; reload restores it
-                            allow_self_delete: false,
-                            owned_post_controls: None,
-                            show_poster_ids: thread.board_id == board.id && board.show_poster_ids,
-                            collapse_greentext: board.collapse_greentext,
-                            thread_state: None,
-                            thread_op_id: thread.op_id,
-                        },
-                        0,
-                    ));
-                }
-
-                let refreshed_posts =
-                    db::get_posts_by_ids_in_thread(&conn, thread_id, &refresh_post_ids)?
-                        .into_iter()
-                        .map(|post| RefreshedPostPayload {
-                            id: post.id,
-                            html: crate::templates::render_post(
-                                &post,
-                                &board_short,
-                                "",
-                                crate::templates::thread::RenderPostOpts {
-                                    show_delete: false,
-                                    is_admin: false,
-                                    admin_csrf_token: None,
-                                    show_media: true,
-                                    allow_editing: false,
-                                    allow_self_delete: false,
-                                    owned_post_controls: None,
-                                    show_poster_ids: thread.board_id == board.id
-                                        && board.show_poster_ids,
-                                    collapse_greentext: board.collapse_greentext,
-                                    thread_state: Some((
-                                        thread.sticky,
-                                        thread.locked,
-                                        thread.archived,
-                                    )),
-                                    thread_op_id: thread.op_id,
-                                },
-                                0,
-                            ),
-                        })
-                        .collect::<Vec<_>>();
-
-                Ok((
-                    html,
-                    last_id,
-                    count,
-                    refreshed_posts,
-                    thread.reply_count,
-                    thread.bumped_at,
-                    thread.locked,
-                    thread.sticky,
-                ))
+            let mut html = String::new();
+            for post in &posts {
+                // show_delete=false, is_admin=false — no user controls in
+                // auto-appended HTML; a full reload restores them.
+                html.push_str(&crate::templates::render_post(
+                    post,
+                    &board_short,
+                    "",
+                    crate::templates::thread::RenderPostOpts {
+                        show_delete: false,
+                        is_admin: false,
+                        admin_csrf_token: None,
+                        show_media: true,
+                        allow_editing: false, // no edit link in auto-appended HTML; reload restores it
+                        allow_self_delete: false,
+                        owned_post_controls: None,
+                        show_poster_ids: thread.board_id == board.id && board.show_poster_ids,
+                        collapse_greentext: board.collapse_greentext,
+                        thread_state: None,
+                        thread_op_id: thread.op_id,
+                        video_audio_muted: user_preferences.video_audio_muted,
+                    },
+                    0,
+                ));
             }
-        })
-        .await
-        .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!(e)))??;
+
+            let refreshed_posts =
+                db::get_posts_by_ids_in_thread(&conn, thread_id, &refresh_post_ids)?
+                    .into_iter()
+                    .map(|post| RefreshedPostPayload {
+                        id: post.id,
+                        html: crate::templates::render_post(
+                            &post,
+                            &board_short,
+                            "",
+                            crate::templates::thread::RenderPostOpts {
+                                show_delete: false,
+                                is_admin: false,
+                                admin_csrf_token: None,
+                                show_media: true,
+                                allow_editing: false,
+                                allow_self_delete: false,
+                                owned_post_controls: None,
+                                show_poster_ids: thread.board_id == board.id
+                                    && board.show_poster_ids,
+                                collapse_greentext: board.collapse_greentext,
+                                thread_state: Some((thread.sticky, thread.locked, thread.archived)),
+                                thread_op_id: thread.op_id,
+                                video_audio_muted: user_preferences.video_audio_muted,
+                            },
+                            0,
+                        ),
+                    })
+                    .collect::<Vec<_>>();
+
+            Ok(ThreadUpdatesRender {
+                html,
+                last_id,
+                count,
+                refreshed_posts,
+                reply_count: thread.reply_count,
+                bump_time: thread.bumped_at,
+                locked: thread.locked,
+                sticky: thread.sticky,
+                board_id: board.id,
+                activity_badges,
+                latest_thread_marker,
+            })
+        }
+    })
+    .await
+    .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!(e)))??;
+    let jar = if updates.activity_badges.thread_badges_enabled
+        || updates.activity_badges.homepage_reply_badges_enabled
+    {
+        crate::handlers::board::remember_thread_activity(jar, thread_id, updates.reply_count)
+    } else {
+        jar
+    };
+    let (latest_created_at, latest_thread_id) =
+        crate::handlers::board::latest_visible_thread_marker_tuple(updates.latest_thread_marker);
+    let jar = if updates.activity_badges.homepage_thread_badges_enabled {
+        crate::handlers::board::remember_board_activity(
+            jar,
+            updates.board_id,
+            latest_created_at,
+            latest_thread_id,
+        )
+    } else {
+        jar
+    };
 
     // Current board-list version + rendered nav links — lets the JS refresh
     // the nav bar when boards are added or deleted while a thread is open,
     // without requiring a full page reload.
-    let (boards_version, nav_html) = crate::templates::live_board_nav();
+    let boards_version = crate::templates::live_boards_version();
+    let boards = crate::templates::live_boards_snapshot();
+    let nav_html =
+        crate::templates::board_nav_html_for_preferences(boards.as_slice(), user_preferences);
     let payload = ThreadUpdatesPayload {
-        html,
-        last_id,
-        count,
-        refreshed_posts,
-        reply_count,
-        bump_time,
-        locked,
-        sticky,
+        html: updates.html,
+        last_id: updates.last_id,
+        count: updates.count,
+        refreshed_posts: updates.refreshed_posts,
+        reply_count: updates.reply_count,
+        bump_time: updates.bump_time,
+        locked: updates.locked,
+        sticky: updates.sticky,
         boards_version,
-        nav_html: nav_html.as_ref().to_string(),
+        nav_html,
     };
 
-    Ok((
+    let mut response = (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&payload)
             .map_err(|error| crate::error::AppError::Internal(anyhow::anyhow!(error)))?,
     )
-        .into_response())
+        .into_response();
+    crate::cache::insert_vary_cookie(response.headers_mut());
+    Ok((jar, response).into_response())
 }
 
 #[cfg(test)]
@@ -1354,6 +1436,126 @@ mod tests {
         Router,
     };
     use tower::ServiceExt as _;
+
+    fn flac_fixture(size: usize) -> Vec<u8> {
+        let mut bytes = vec![0_u8; size.max(4)];
+        if let Some(prefix) = bytes.get_mut(..4) {
+            prefix.copy_from_slice(b"fLaC");
+        }
+        bytes
+    }
+
+    fn seed_audio_board(state: &crate::middleware::AppState, max_audio_size: i64) {
+        let conn = state.db.get().expect("db connection");
+        let board_id =
+            crate::db::create_board(&conn, "music", "Music", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET allow_audio = 1, max_audio_size = ?1 WHERE id = ?2",
+            rusqlite::params![max_audio_size, board_id],
+        )
+        .expect("enable audio board");
+    }
+
+    #[tokio::test]
+    async fn create_thread_and_reply_accept_audio_within_board_limit() {
+        let state = crate::test_support::app_state();
+        seed_audio_board(&state, 5_000);
+
+        let router = Router::new()
+            .route("/{board}", post(crate::handlers::board::create_thread))
+            .route("/{board}/thread/{id}", post(super::post_reply))
+            .with_state(state.clone());
+
+        let create_audio = flac_fixture(4_500);
+        let (create_boundary, create_body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123"), ("body", "")],
+            Some(("audio_file", "track.flac", &create_audio, "audio/flac")),
+        );
+        let create_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/music")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={create_boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(create_body))
+                    .expect("create request"),
+            )
+            .await
+            .expect("create response");
+        assert_eq!(create_response.status(), StatusCode::SEE_OTHER);
+
+        let thread_id = {
+            let conn = state.db.get().expect("db connection");
+            conn.query_row("SELECT id FROM threads LIMIT 1", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("thread id")
+        };
+
+        let reply_audio = flac_fixture(4_500);
+        let (reply_boundary, reply_body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123"), ("body", "reply")],
+            Some(("audio_file", "reply.flac", &reply_audio, "audio/flac")),
+        );
+        let reply_response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/music/thread/{thread_id}"))
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={reply_boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(reply_body))
+                    .expect("reply request"),
+            )
+            .await
+            .expect("reply response");
+
+        assert_eq!(reply_response.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn create_thread_rejects_audio_over_board_limit_with_413() {
+        let state = crate::test_support::app_state();
+        seed_audio_board(&state, 5_000);
+
+        let router = Router::new()
+            .route("/{board}", post(crate::handlers::board::create_thread))
+            .with_state(state);
+
+        let audio = flac_fixture(5_001);
+        let (boundary, body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123"), ("body", "")],
+            Some(("audio_file", "too-large.flac", &audio, "audio/flac")),
+        );
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/music")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
 
     fn seed_owned_post(
         state: &crate::middleware::AppState,
@@ -1376,11 +1578,11 @@ mod tests {
         let post = crate::db::NewPost {
             thread_id: 0,
             board_id,
-            name: "anon".to_string(),
+            name: "anon".to_owned(),
             tripcode: None,
-            subject: Some("subject".to_string()),
-            body: "original body".to_string(),
-            body_html: "original body".to_string(),
+            subject: Some("subject".to_owned()),
+            body: "original body".to_owned(),
+            body_html: "original body".to_owned(),
             ip_hash: None,
             file_path: None,
             file_name: None,
@@ -1392,7 +1594,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            deletion_token: "edit-token".to_string(),
+            deletion_token: "edit-token".to_owned(),
             is_op: true,
         };
         let (thread_id, post_id, _) = crate::db::create_thread_with_optional_poll(
@@ -1420,7 +1622,7 @@ mod tests {
             .get("rustchan_owned_posts")
             .expect("owned posts cookie")
             .value()
-            .to_string();
+            .to_owned();
         (thread_id, post_id, cookie)
     }
 
@@ -1719,11 +1921,11 @@ mod tests {
             let post = crate::db::NewPost {
                 thread_id: 0,
                 board_id,
-                name: "anon".to_string(),
+                name: "anon".to_owned(),
                 tripcode: None,
-                subject: Some("subject".to_string()),
-                body: "op body".to_string(),
-                body_html: "op body".to_string(),
+                subject: Some("subject".to_owned()),
+                body: "op body".to_owned(),
+                body_html: "op body".to_owned(),
                 ip_hash: Some(ip_hash),
                 file_path: None,
                 file_name: None,
@@ -1735,7 +1937,7 @@ mod tests {
                 audio_file_name: None,
                 audio_file_size: None,
                 audio_mime_type: None,
-                deletion_token: "token".to_string(),
+                deletion_token: "token".to_owned(),
                 is_op: true,
             };
             let (thread_id, _, _) = crate::db::create_thread_with_optional_poll(
@@ -1879,7 +2081,7 @@ mod tests {
                 .headers()
                 .get(header::CACHE_CONTROL)
                 .and_then(|value| value.to_str().ok()),
-            Some("private, no-cache, must-revalidate")
+            Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE)
         );
         let body = String::from_utf8(
             to_bytes(response.into_body(), usize::MAX)
@@ -2231,7 +2433,7 @@ mod tests {
                 .headers()
                 .get(header::CACHE_CONTROL)
                 .and_then(|value| value.to_str().ok()),
-            Some("private, no-cache, must-revalidate")
+            Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE)
         );
         let body = String::from_utf8(
             to_bytes(response.into_body(), usize::MAX)

@@ -23,32 +23,87 @@ use std::path::{Path, PathBuf};
 // ─── ANSI helpers ─────────────────────────────────────────────────────────────
 
 fn green(s: &str) -> String {
-    format!("\x1b[32m{s}\x1b[0m")
+    colour("32", s)
 }
 fn yellow(s: &str) -> String {
-    format!("\x1b[33m{s}\x1b[0m")
+    colour("33", s)
 }
 fn red(s: &str) -> String {
-    format!("\x1b[31m{s}\x1b[0m")
+    colour("31", s)
 }
 fn cyan(s: &str) -> String {
-    format!("\x1b[36m{s}\x1b[0m")
+    colour("36", s)
 }
 fn dim(s: &str) -> String {
-    format!("\x1b[2m{s}\x1b[0m")
+    colour("2", s)
 }
 fn bold(s: &str) -> String {
-    format!("\x1b[1m{s}\x1b[0m")
+    colour("1", s)
 }
 
-const RULE: &str = "\x1b[2m\
-\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\
-\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\
-\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\
-\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\
-\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\
-\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\
-\x1b[0m";
+fn colour(code: &str, s: &str) -> String {
+    if crate::logging::ansi_enabled() {
+        format!("\x1b[{code}m{s}\x1b[0m")
+    } else {
+        s.to_owned()
+    }
+}
+
+fn rule() -> String {
+    dim(&rule_char().repeat(60))
+}
+
+#[cfg(windows)]
+const fn rule_char() -> &'static str {
+    "-"
+}
+
+#[cfg(not(windows))]
+const fn rule_char() -> &'static str {
+    "\u{2500}"
+}
+
+#[cfg(windows)]
+const fn marker() -> &'static str {
+    "*"
+}
+
+#[cfg(not(windows))]
+const fn marker() -> &'static str {
+    "\u{25c8}"
+}
+
+#[cfg(windows)]
+const fn ellipsis() -> &'static str {
+    "..."
+}
+
+#[cfg(not(windows))]
+const fn ellipsis() -> &'static str {
+    "\u{2026}"
+}
+
+#[cfg(windows)]
+const fn bullet() -> &'static str {
+    "-"
+}
+
+#[cfg(not(windows))]
+const fn bullet() -> &'static str {
+    "\u{00b7}"
+}
+
+#[cfg(windows)]
+fn spinner_frame(tick: u8) -> &'static str {
+    const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+    FRAMES[usize::from(tick) % FRAMES.len()]
+}
+
+#[cfg(not(windows))]
+fn spinner_frame(tick: u8) -> &'static str {
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    FRAMES.get(usize::from(tick)).copied().unwrap_or("⠋")
+}
 
 // Left-column label width for aligned rows.
 const LW: usize = 14;
@@ -62,7 +117,7 @@ fn row(out: &mut String, label: &str, value: &str) {
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
 
-#[allow(clippy::cast_precision_loss)]
+#[expect(clippy::cast_precision_loss)]
 fn fmt_bytes(b: i64) -> String {
     const KIB: i64 = 1024;
     const MIB: i64 = 1024 * 1024;
@@ -99,13 +154,13 @@ fn https_cert_label() -> &'static str {
 
 // ─── render_dashboard() ───────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub fn render_dashboard(stats: &ChanStats) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(2048);
 
     // ── Header ────────────────────────────────────────────────────────────────
-    writeln!(out, "{RULE}").ok();
+    writeln!(out, "{}", rule()).ok();
     writeln!(
         out,
         " {}  v{}",
@@ -113,7 +168,7 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
         env!("CARGO_PKG_VERSION")
     )
     .ok();
-    writeln!(out, "{RULE}").ok();
+    writeln!(out, "{}", rule()).ok();
     writeln!(out).ok();
 
     // ── Status ────────────────────────────────────────────────────────────────
@@ -126,9 +181,10 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
     // HTTPS
     if CONFIG.tls.enabled {
         let https_status = format!(
-            "{}  (port {}  \u{00b7}  {})",
+            "{}  (port {}  {}  {})",
             green("RUNNING"),
             cyan(&CONFIG.tls.port.to_string()),
+            bullet(),
             dim(https_cert_label()),
         );
         row(&mut out, "HTTPS", &https_status);
@@ -155,7 +211,11 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
     } else {
         match &stats.onion_address {
             Some(_) => row(&mut out, "Tor", &green("READY")),
-            None => row(&mut out, "Tor", &yellow("BOOTSTRAPPING\u{2026}")),
+            None => row(
+                &mut out,
+                "Tor",
+                &yellow(&format!("BOOTSTRAPPING{}", ellipsis())),
+            ),
         }
     }
 
@@ -183,7 +243,11 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
     match &stats.onion_address {
         Some(addr) => row(&mut out, "Onion", &cyan(&format!("http://{addr}"))),
         None if CONFIG.enable_tor_support => {
-            row(&mut out, "Onion", &dim("waiting for Tor\u{2026}"));
+            row(
+                &mut out,
+                "Onion",
+                &dim(&format!("waiting for Tor{}", ellipsis())),
+            );
         }
         None => {}
     }
@@ -240,24 +304,18 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
 
     // ── Upload spinner ────────────────────────────────────────────────────────
     if stats.active_uploads > 0 {
-        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        // spinner_tick is computed as (fetch_add(1) % 10) as u8 in collect_stats,
-        // so it is always in 0..=9 — a direct index is safe and needs no modulo.
-        let frame = FRAMES
-            .get(usize::from(stats.spinner_tick))
-            .copied()
-            .unwrap_or("⠋");
+        let frame = spinner_frame(stats.spinner_tick);
         writeln!(out, " {}  {} uploading", cyan(frame), stats.active_uploads).ok();
         writeln!(out).ok();
     }
 
     // ── Footer ────────────────────────────────────────────────────────────────
-    writeln!(out, "{RULE}").ok();
+    writeln!(out, "{}", rule()).ok();
     writeln!(out,
         " {} Help  {} Reload  {} Boards  {} New board  {} New admin  {} Del thread  {} Logs  {} Quit",
         bold("[H]"), bold("[R]"), bold("[B]"), bold("[C]"), bold("[A]"), bold("[D]"), bold("[L]"), bold("[Q]"),
     ).ok();
-    writeln!(out, "{RULE}").ok();
+    writeln!(out, "{}", rule()).ok();
 
     out
 }
@@ -267,9 +325,9 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
 pub fn render_log_view() -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(8192);
-    writeln!(out, "{RULE}").ok();
-    writeln!(out, " {} Log View", bold("\u{25c8}")).ok();
-    writeln!(out, "{RULE}").ok();
+    writeln!(out, "{}", rule()).ok();
+    writeln!(out, " {} Log View", bold(marker())).ok();
+    writeln!(out, "{}", rule()).ok();
     writeln!(out).ok();
 
     let logs_dir = crate::config::logs_dir();
@@ -318,9 +376,9 @@ pub fn render_log_view() -> String {
     }
 
     writeln!(out).ok();
-    writeln!(out, "{RULE}").ok();
+    writeln!(out, "{}", rule()).ok();
     writeln!(out, " {} Back", bold("[L]")).ok();
-    writeln!(out, "{RULE}").ok();
+    writeln!(out, "{}", rule()).ok();
     out
 }
 
@@ -333,14 +391,14 @@ fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
         .ok()?
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("log"))
+        .filter(|path| crate::logging::is_main_log_file(path))
         .collect::<Vec<_>>();
     files.sort();
     files.pop()
 }
 
 fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool), String> {
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::{Seek as _, SeekFrom};
 
     let mut file = std::fs::File::open(path).map_err(|e| format!("Open log: {e}"))?;
     let len = file
@@ -351,11 +409,9 @@ fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool), String
     file.seek(SeekFrom::Start(start))
         .map_err(|e| format!("Seek log: {e}"))?;
 
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)
-        .map_err(|e| format!("Read log: {e}"))?;
-
-    let text = String::from_utf8_lossy(&buf).into_owned();
+    let buf = std::fs::read(path).map_err(|e| format!("Read log: {e}"))?;
+    let start = usize::try_from(start).unwrap_or(usize::MAX);
+    let text = String::from_utf8_lossy(buf.get(start..).unwrap_or_default()).into_owned();
     let truncated = start > 0;
     let content = if truncated {
         match text.find('\n') {
@@ -373,9 +429,9 @@ fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool), String
 pub fn render_help() -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(1024);
-    writeln!(out, "{RULE}").ok();
-    writeln!(out, " {} Key Reference", bold("\u{25c8}")).ok();
-    writeln!(out, "{RULE}").ok();
+    writeln!(out, "{}", rule()).ok();
+    writeln!(out, " {} Key Reference", bold(marker())).ok();
+    writeln!(out, "{}", rule()).ok();
     writeln!(out).ok();
     let keys: &[(&str, &str)] = &[
         ("[H]", "Help"),
@@ -395,9 +451,9 @@ pub fn render_help() -> String {
         writeln!(out, " {:<10}  {}", bold(key), desc).ok();
     }
     writeln!(out).ok();
-    writeln!(out, "{RULE}").ok();
+    writeln!(out, "{}", rule()).ok();
     writeln!(out, " {} Back", bold("[H]")).ok();
-    writeln!(out, "{RULE}").ok();
+    writeln!(out, "{}", rule()).ok();
     out
 }
 
@@ -406,9 +462,9 @@ pub fn render_help() -> String {
 pub fn render_board_list(stats: &ChanStats) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(1024);
-    writeln!(out, "{RULE}").ok();
-    writeln!(out, " {} Board List", bold("\u{25c8}")).ok();
-    writeln!(out, "{RULE}").ok();
+    writeln!(out, "{}", rule()).ok();
+    writeln!(out, " {} Board List", bold(marker())).ok();
+    writeln!(out, "{}", rule()).ok();
     writeln!(out).ok();
     if stats.board_rows.is_empty() {
         writeln!(out, " {}", dim("No boards yet. Press [C] to create one.")).ok();
@@ -421,14 +477,14 @@ pub fn render_board_list(stats: &ChanStats) -> String {
             dim("Posts")
         )
         .ok();
-        writeln!(out, " {}", dim(&"\u{2500}".repeat(34))).ok();
+        writeln!(out, " {}", dim(&rule_char().repeat(34))).ok();
         for (short, thr, pst) in &stats.board_rows {
             let label = format!("/{short}/");
             writeln!(out, " {:<14}   {:>8}   {:>8}", cyan(&label), thr, pst).ok();
         }
     }
     writeln!(out).ok();
-    writeln!(out, "{RULE}").ok();
+    writeln!(out, "{}", rule()).ok();
     writeln!(
         out,
         " {} Back   {} New board   {} Del thread",
@@ -437,7 +493,7 @@ pub fn render_board_list(stats: &ChanStats) -> String {
         bold("[D]")
     )
     .ok();
-    writeln!(out, "{RULE}").ok();
+    writeln!(out, "{}", rule()).ok();
     out
 }
 
@@ -446,9 +502,9 @@ pub fn render_board_list(stats: &ChanStats) -> String {
 pub fn render_confirm_quit() -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(256);
-    writeln!(out, "{RULE}").ok();
-    writeln!(out, " {} Confirm Quit", bold("\u{25c8}")).ok();
-    writeln!(out, "{RULE}").ok();
+    writeln!(out, "{}", rule()).ok();
+    writeln!(out, " {} Confirm Quit", bold(marker())).ok();
+    writeln!(out, "{}", rule()).ok();
     writeln!(out).ok();
     writeln!(
         out,
@@ -464,13 +520,13 @@ pub fn render_confirm_quit() -> String {
     )
     .ok();
     writeln!(out).ok();
-    writeln!(out, "{RULE}").ok();
+    writeln!(out, "{}", rule()).ok();
     out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::render_dashboard;
+    use super::{latest_log_file, render_dashboard};
     use crate::server::console::ChanStats;
 
     #[test]
@@ -485,5 +541,23 @@ mod tests {
         assert!(rendered.contains("FFmpeg"));
         assert!(rendered.contains("videos processing"));
         assert!(rendered.contains("3"));
+    }
+
+    #[test]
+    fn log_view_selects_main_log_not_dependency_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("rustchan.2026-04-01.log"), "main").expect("main log");
+        std::fs::write(
+            dir.path().join(crate::logging::DEPENDENCY_LOG_FILE_NAME),
+            "deps",
+        )
+        .expect("dependency log");
+
+        let latest = latest_log_file(dir.path()).expect("latest log");
+
+        assert_eq!(
+            latest.file_name().and_then(|name| name.to_str()),
+            Some("rustchan.2026-04-01.log")
+        );
     }
 }
