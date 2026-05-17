@@ -634,6 +634,8 @@ struct SiteHealthJobDetail {
     #[serde(rename = "type")]
     job_type: String,
     name: String,
+    post_id: Option<i64>,
+    post_url: Option<String>,
     status: String,
     attempts: i64,
     error: Option<String>,
@@ -775,15 +777,22 @@ fn load_site_health_job_details(
     db::recent_background_jobs(conn, status, 10)
         .unwrap_or_default()
         .into_iter()
-        .map(site_health_job_detail)
+        .map(|job| site_health_job_detail(conn, job))
         .collect()
 }
 
-fn site_health_job_detail(job: db::RecentBackgroundJob) -> SiteHealthJobDetail {
+fn site_health_job_detail(
+    conn: &rusqlite::Connection,
+    job: db::RecentBackgroundJob,
+) -> SiteHealthJobDetail {
+    let post_id = job_post_id(&job.payload);
+    let post_url = post_id.and_then(|id| post_url_for_job(conn, id));
     SiteHealthJobDetail {
         id: job.id,
         name: background_job_display_name(&job.job_type).to_owned(),
         job_type: job.job_type,
+        post_id,
+        post_url,
         status: job.status,
         attempts: job.attempts,
         error: job
@@ -792,6 +801,27 @@ fn site_health_job_detail(job: db::RecentBackgroundJob) -> SiteHealthJobDetail {
             .and_then(sanitized_job_error_snippet),
         updated_at: fmt_epoch(job.updated_at),
     }
+}
+
+fn job_post_id(payload: &str) -> Option<i64> {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|value| value.get("d").and_then(|data| data.get("post_id")).cloned())
+        .and_then(|post_id| post_id.as_i64())
+}
+
+fn post_url_for_job(conn: &rusqlite::Connection, post_id: i64) -> Option<String> {
+    conn.query_row(
+        "SELECT b.short_name, p.thread_id
+         FROM posts p
+         JOIN boards b ON b.id = p.board_id
+         WHERE p.id = ?1
+         LIMIT 1",
+        rusqlite::params![post_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+    )
+    .ok()
+    .map(|(board_short, thread_id)| format!("/{board_short}/thread/{thread_id}#p{post_id}"))
 }
 
 fn background_job_display_name(job_type: &str) -> &str {
@@ -2012,15 +2042,44 @@ mod tests {
     async fn site_health_jobs_returns_no_store_json_body() {
         let state = crate::test_support::app_state();
         install_admin_session(&state);
+        let (expected_post_id, expected_post_url);
         {
             let conn = state.db.get().expect("db connection");
+            let board_id =
+                crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+            conn.execute(
+                "INSERT INTO threads (board_id, subject) VALUES (?1, 'job thread')",
+                rusqlite::params![board_id],
+            )
+            .expect("insert thread");
+            let thread_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO posts
+                 (thread_id, board_id, body, body_html, deletion_token, is_op)
+                 VALUES (?1, ?2, 'job body', 'job body', 'delete-token', 1)",
+                rusqlite::params![thread_id, board_id],
+            )
+            .expect("insert post");
+            let post_id = conn.last_insert_rowid();
+            expected_post_id = post_id;
+            expected_post_url = format!("/test/thread/{thread_id}#p{post_id}");
+            let failed_payload = serde_json::json!({
+                "t": "SpamCheck",
+                "d": {
+                    "post_id": post_id,
+                    "ip_hash": "hash",
+                    "body_len": 8
+                }
+            })
+            .to_string();
             conn.execute(
                 "INSERT INTO background_jobs
                  (job_type, payload, status, attempts, last_error, updated_at)
                  VALUES
-                 ('spam_check', '{}', 'failed', 3, ?1, unixepoch()),
+                 ('spam_check', ?1, 'failed', 3, ?2, unixepoch()),
                  ('thread_prune', '{}', 'done', 1, NULL, unixepoch())",
                 rusqlite::params![
+                    failed_payload,
                     "failed reading /Users/example/private.txt with token=abc123 ".repeat(8)
                 ],
             )
@@ -2072,6 +2131,8 @@ mod tests {
             .expect("failed job detail");
         assert_eq!(failed_job["name"], "Spam check");
         assert_eq!(failed_job["attempts"], 3);
+        assert_eq!(failed_job["post_id"], expected_post_id);
+        assert_eq!(failed_job["post_url"], expected_post_url);
         let error = failed_job["error"].as_str().expect("error snippet");
         assert!(error.contains("[redacted]"));
         assert!(!error.contains("/Users/example"));

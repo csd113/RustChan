@@ -53,6 +53,7 @@ pub struct BackgroundJobSummary {
 pub struct RecentBackgroundJob {
     pub id: i64,
     pub job_type: String,
+    pub payload: String,
     pub status: String,
     pub attempts: i64,
     pub last_error: Option<String>,
@@ -1282,7 +1283,7 @@ pub fn recent_background_jobs(
         "unsupported job status"
     );
     let mut stmt = conn.prepare_cached(
-        "SELECT id, job_type, status, attempts, last_error, updated_at
+        "SELECT id, job_type, payload, status, attempts, last_error, updated_at
          FROM background_jobs
          WHERE status = ?1
          ORDER BY updated_at DESC, id DESC
@@ -1293,10 +1294,11 @@ pub fn recent_background_jobs(
             Ok(RecentBackgroundJob {
                 id: row.get(0)?,
                 job_type: row.get(1)?,
-                status: row.get(2)?,
-                attempts: row.get(3)?,
-                last_error: row.get(4)?,
-                updated_at: row.get(5)?,
+                payload: row.get(2)?,
+                status: row.get(3)?,
+                attempts: row.get(4)?,
+                last_error: row.get(5)?,
+                updated_at: row.get(6)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

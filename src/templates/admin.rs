@@ -2252,6 +2252,7 @@ mod tests {
         assert!(html.contains(r#"data-admin-health-job="queued_jobs""#));
         assert!(html.contains(r#"data-admin-health-toggle="failed""#));
         assert!(html.contains(r#"data-admin-health-job-list="failed""#));
+        assert!(html.contains(r"data-admin-health-close"));
         assert!(!html.contains("Tor bootstrap state"));
         assert!(!html.contains("Thumbnail/transcode jobs"));
         assert!(!html.contains("Repair/VACUUM jobs"));

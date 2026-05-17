@@ -902,6 +902,16 @@
       row.appendChild(item);
     }
 
+    function appendJobLinkMeta(row, label, value, href) {
+      var item = document.createElement('span');
+      item.appendChild(document.createTextNode(label + ': '));
+      var link = document.createElement('a');
+      link.href = href;
+      link.textContent = String(value);
+      item.appendChild(link);
+      row.appendChild(item);
+    }
+
     function renderJobList(name, jobs) {
       var list = lists[name];
       if (!list) return;
@@ -923,6 +933,11 @@
         meta.className = 'admin-health-job-meta';
         appendJobMeta(meta, 'id', job.id);
         appendJobMeta(meta, 'type', job.type);
+        if (job.post_id && job.post_url) {
+          appendJobLinkMeta(meta, 'post', job.post_id, job.post_url);
+        } else if (job.post_id) {
+          appendJobMeta(meta, 'post', job.post_id);
+        }
         appendJobMeta(meta, 'status', job.status);
         appendJobMeta(meta, 'attempts', job.attempts);
         appendJobMeta(meta, 'updated', job.updated_at);
@@ -956,6 +971,15 @@
         });
         panels[target].hidden = isOpen;
         details.hidden = isOpen;
+      });
+    });
+
+    container.querySelectorAll('[data-admin-health-close]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        Object.keys(panels).forEach(function (name) {
+          if (panels[name]) panels[name].hidden = true;
+        });
+        if (details) details.hidden = true;
       });
     });
 

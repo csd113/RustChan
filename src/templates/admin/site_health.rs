@@ -145,11 +145,17 @@ fn append_health_job_row(out: &mut String, label: &str, value: &str, key: &str) 
 fn render_recent_jobs_panel() -> String {
     r#"<div class="admin-health-job-details" data-admin-health-job-details hidden>
   <section data-admin-health-job-panel="failed" hidden>
-    <h3>// recent failed jobs</h3>
+    <div class="admin-health-job-details-header">
+      <h3>// recent failed jobs</h3>
+      <button type="button" data-admin-health-close>close</button>
+    </div>
     <div class="admin-health-job-list" data-admin-health-job-list="failed"></div>
   </section>
   <section data-admin-health-job-panel="completed" hidden>
-    <h3>// recently completed jobs</h3>
+    <div class="admin-health-job-details-header">
+      <h3>// recently completed jobs</h3>
+      <button type="button" data-admin-health-close>close</button>
+    </div>
     <div class="admin-health-job-list" data-admin-health-job-list="completed"></div>
   </section>
 </div>"#
