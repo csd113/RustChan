@@ -804,10 +804,8 @@ fn site_health_job_detail(
 }
 
 fn job_post_id(payload: &str) -> Option<i64> {
-    serde_json::from_str::<serde_json::Value>(payload)
-        .ok()
-        .and_then(|value| value.get("d").and_then(|data| data.get("post_id")).cloned())
-        .and_then(|post_id| post_id.as_i64())
+    let value = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+    value.get("d")?.get("post_id")?.as_i64()
 }
 
 fn post_url_for_job(conn: &rusqlite::Connection, post_id: i64) -> Option<String> {

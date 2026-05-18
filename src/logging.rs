@@ -1255,7 +1255,7 @@ mod tests {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             self.inner
                 .lock()
-                .map_err(|_| io::Error::other("buffer lock poisoned"))?
+                .map_err(|_poisoned| io::Error::other("buffer lock poisoned"))?
                 .extend_from_slice(buf);
             Ok(buf.len())
         }

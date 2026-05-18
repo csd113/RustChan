@@ -78,6 +78,10 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
 
 /// Generate a cryptographically secure random hex string.
 ///
+#[expect(
+    clippy::exit,
+    reason = "fail-closed randomness failures must terminate before issuing weak tokens"
+)]
 fn fatal_randomness_error(context: &str, error: &impl std::fmt::Display) -> ! {
     let _ = writeln!(
         std::io::stderr().lock(),
