@@ -44,6 +44,9 @@ pub struct Vp9EncodingProfile {
     pub label: Cow<'static, str>,
 }
 
+const VP9_COMPAT_PIXEL_FORMAT: &str = "yuv420p";
+const VP9_COMPAT_COLOR_SPACE: &str = "bt709";
+
 static ENCODER_LIST: LazyLock<Option<String>> = LazyLock::new(|| {
     output_stdout_with_timeout(&crate::config::CONFIG.ffmpeg_path, &["-encoders"])
 });
@@ -309,7 +312,7 @@ pub fn build_vp9_transcode_args(input: &str, output: &str) -> Vec<String> {
     let cpu_used = profile.cpu_used.to_string();
     let tile_columns = profile.tile_columns.to_string();
     let threads = profile.threads.to_string();
-    let mut args = Vec::with_capacity(28);
+    let mut args = Vec::with_capacity(34);
     args.extend(
         [
             "-loglevel",
@@ -345,7 +348,13 @@ pub fn build_vp9_transcode_args(input: &str, output: &str) -> Vec<String> {
             "-b:v",
             "0",
             "-pix_fmt",
-            "yuv420p",
+            VP9_COMPAT_PIXEL_FORMAT,
+            "-colorspace",
+            VP9_COMPAT_COLOR_SPACE,
+            "-color_primaries",
+            VP9_COMPAT_COLOR_SPACE,
+            "-color_trc",
+            VP9_COMPAT_COLOR_SPACE,
             "-c:a",
             "libopus",
             "-b:a",
@@ -561,7 +570,25 @@ pub fn check_opus_encoder() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::build_vp9_transcode_args;
+    use super::{build_vp9_transcode_args, VP9_COMPAT_COLOR_SPACE, VP9_COMPAT_PIXEL_FORMAT};
+
+    fn paired_arg_index(args: &[String], flag: &str, value: &str) -> Option<usize> {
+        args.windows(2).position(|window| {
+            matches!(window, [actual_flag, actual_value] if actual_flag == flag && actual_value == value)
+        })
+    }
+
+    fn output_arg_index(args: &[String], flag: &str, value: &str) -> usize {
+        let input_index = paired_arg_index(args, "-i", "input.mp4")
+            .unwrap_or_else(|| panic!("missing input marker in ffmpeg args: {args:?}"));
+        let arg_index = paired_arg_index(args, flag, value)
+            .unwrap_or_else(|| panic!("missing ffmpeg arg pair {flag} {value}: {args:?}"));
+        assert!(
+            arg_index > input_index + 1,
+            "{flag} {value} must be an output option after the input argument: {args:?}",
+        );
+        arg_index
+    }
 
     #[test]
     fn vp9_transcode_args_include_platform_tuning_flags() {
@@ -580,6 +607,61 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|w| w.first().is_some_and(|flag| flag == "-threads")));
-        assert!(args.windows(2).any(|w| w == ["-pix_fmt", "yuv420p"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["-pix_fmt", VP9_COMPAT_PIXEL_FORMAT]));
+    }
+
+    #[test]
+    fn vp9_transcode_args_normalise_yuv420p_color_metadata() {
+        let args = build_vp9_transcode_args("input.mp4", "output.webm");
+
+        let pixel_format_index = output_arg_index(&args, "-pix_fmt", VP9_COMPAT_PIXEL_FORMAT);
+        let colorspace_index = output_arg_index(&args, "-colorspace", VP9_COMPAT_COLOR_SPACE);
+        let primaries_index = output_arg_index(&args, "-color_primaries", VP9_COMPAT_COLOR_SPACE);
+        let transfer_index = output_arg_index(&args, "-color_trc", VP9_COMPAT_COLOR_SPACE);
+
+        assert!(
+            pixel_format_index < colorspace_index
+                && colorspace_index < primaries_index
+                && primaries_index < transfer_index,
+            "VP9 color metadata should be applied directly after the forced pixel format: {args:?}",
+        );
+    }
+
+    #[test]
+    fn vp9_yuv420p_output_does_not_inherit_srgb_gbr_metadata() {
+        let args = build_vp9_transcode_args("input.mp4", "output.webm");
+
+        for (flag, value) in [
+            ("-colorspace", VP9_COMPAT_COLOR_SPACE),
+            ("-color_primaries", VP9_COMPAT_COLOR_SPACE),
+            ("-color_trc", VP9_COMPAT_COLOR_SPACE),
+        ] {
+            let color_index = output_arg_index(&args, flag, value);
+            let audio_index = args
+                .windows(2)
+                .position(|window| matches!(window, [actual_flag, actual_value] if actual_flag == "-c:a" && actual_value == "libopus"))
+                .unwrap_or(args.len());
+            assert!(
+                color_index < audio_index,
+                "{flag} {value} should be part of the video output options before audio encoding options: {args:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn ffmpeg_builders_with_forced_compat_pixel_formats_normalise_color_metadata() {
+        let args = build_vp9_transcode_args("input.mp4", "output.webm");
+
+        // Other ffmpeg builders in this crate either produce WebP thumbnails/images
+        // through libwebp or audio waveform PNGs and do not force VP9/H.26x-style
+        // compatibility pixel formats. VP9 transcode is the path that combines
+        // a forced yuv420p profile-0 output with potentially inherited source
+        // color metadata, so it owns the explicit BT.709 normalization contract.
+        output_arg_index(&args, "-pix_fmt", VP9_COMPAT_PIXEL_FORMAT);
+        output_arg_index(&args, "-colorspace", VP9_COMPAT_COLOR_SPACE);
+        output_arg_index(&args, "-color_primaries", VP9_COMPAT_COLOR_SPACE);
+        output_arg_index(&args, "-color_trc", VP9_COMPAT_COLOR_SPACE);
     }
 }
