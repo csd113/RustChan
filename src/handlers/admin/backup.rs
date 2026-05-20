@@ -114,7 +114,8 @@ use archive::{
     canonicalize_restored_banner_dir, create_temp_board_backup_from_full_backup_path,
     create_temp_legacy_board_backup_from_saved_full_v4_path,
     create_temp_legacy_board_backup_from_v4_path, create_temp_legacy_full_backup_from_v4_path,
-    parse_board_backup_manifest_from_zip, validate_full_restore_archive_layout,
+    create_temp_legacy_full_backup_from_v4_transfer_zip, parse_board_backup_manifest_from_zip,
+    validate_full_restore_archive_layout,
 };
 use downloads::prune_stale_temp_board_downloads;
 #[cfg(test)]

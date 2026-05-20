@@ -1,3 +1,12 @@
 .DS_Store
 /target
 /.codex-pet-runs
+/node_modules
+/playwright-report
+/test-results
+/npm-debug.log*
+/rustchan-data
+package-lock.json
+package.json
+playwright.config.ts
+/tests
