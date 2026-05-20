@@ -26,6 +26,17 @@ fn sanitize_board_short_value(board_short: &str) -> String {
         .collect()
 }
 
+fn validate_new_board_short_name(raw_short_name: &str) -> Result<String> {
+    let trimmed = raw_short_name.trim();
+    if trimmed.is_empty() || trimmed.len() > 8 {
+        return Err(AppError::BadRequest("Invalid board name.".into()));
+    }
+    if !trimmed.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return Err(AppError::BadRequest("Invalid board name.".into()));
+    }
+    Ok(trimmed.to_lowercase())
+}
+
 fn resolve_board_short_name(
     boards: Option<&[crate::models::Board]>,
     board_id: i64,
@@ -112,18 +123,7 @@ pub async fn create_board(
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    let short = form
-        .short_name
-        .trim()
-        .to_lowercase()
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(8)
-        .collect::<String>();
-
-    if short.is_empty() {
-        return Err(AppError::BadRequest("Invalid board name.".into()));
-    }
+    let short = validate_new_board_short_name(&form.short_name)?;
     let short_for_flash = short.clone();
 
     let nsfw = form.nsfw.as_deref() == Some("1");
@@ -141,6 +141,11 @@ pub async fn create_board(
         move || -> Result<()> {
             let conn = pool.get()?;
             super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            if db::get_board_by_short(&conn, &short)?.is_some() {
+                return Err(AppError::Conflict(format!(
+                    "Board /{short}/ already exists."
+                )));
+            }
             db::create_board_with_media_flags(
                 &conn,
                 &short,

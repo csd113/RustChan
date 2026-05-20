@@ -738,20 +738,40 @@ pub async fn admin_restore(
                     .map_err(|error| AppError::Internal(anyhow::anyhow!("Reopen zip: {error}")))?;
                 let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
                     .map_err(|error| AppError::BadRequest(format!("Invalid zip: {error}")))?;
+                let mut temp_v4_transfer_zip_guard = None;
 
-                if let Err(error) = validate_full_restore_archive_layout(&archive) {
-                    tracing::warn!(
-                        target: "admin",
-                        route = RestoreKind::Full.route(),
-                        filename = uploaded_filename.as_deref().unwrap_or("<missing>"),
-                        error = %error,
-                        "{} archive layout validation failed",
-                        RestoreKind::Full.title()
-                    );
-                    return Err(error);
+                if let Err(layout_error) = validate_full_restore_archive_layout(&archive) {
+                    if archive.by_name("db/rustchan.sqlite3").is_ok() {
+                        let legacy_path =
+                            create_temp_legacy_full_backup_from_v4_transfer_zip(&mut archive)?;
+                        temp_v4_transfer_zip_guard = Some(
+                            super::archive::TempZipCleanupGuard::new(legacy_path.clone()),
+                        );
+                        let legacy_file = std::fs::File::open(&legacy_path).map_err(|error| {
+                            AppError::Internal(anyhow::anyhow!(
+                                "Open converted Backup v4 transfer zip: {error}"
+                            ))
+                        })?;
+                        archive = zip::ZipArchive::new(std::io::BufReader::new(legacy_file))
+                            .map_err(|error| {
+                                AppError::Internal(anyhow::anyhow!(
+                                    "Open converted Backup v4 transfer archive: {error}"
+                                ))
+                            })?;
+                    } else {
+                        tracing::warn!(
+                            target: "admin",
+                            route = RestoreKind::Full.route(),
+                            filename = uploaded_filename.as_deref().unwrap_or("<missing>"),
+                            error = %layout_error,
+                            "{} archive layout validation failed",
+                            RestoreKind::Full.title()
+                        );
+                        return Err(layout_error);
+                    }
                 }
 
-                execute_full_restore(
+                let fresh_sid = execute_full_restore(
                     &mut live_conn,
                     admin_id,
                     &upload_dir,
@@ -762,7 +782,9 @@ pub async fn admin_restore(
                     "Restore completed, new session issued",
                     "Restore",
                     "Restore",
-                )
+                )?;
+                drop(temp_v4_transfer_zip_guard);
+                Ok(fresh_sid)
             }
         })
         .await

@@ -738,6 +738,7 @@ pub fn base_layout_with_preferences(
 <link rel="stylesheet" href="{stylesheet_href}">
 {admin_stylesheet_link}
 {theme_stylesheet_link}
+<noscript><style>#post-form-wrap{{display:block!important}}</style></noscript>
 <script src="{theme_init_src}"></script>
 </head>
 <body{collapse_attr}>

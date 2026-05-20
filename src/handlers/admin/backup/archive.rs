@@ -201,6 +201,124 @@ pub(super) fn create_temp_legacy_full_backup_from_v4_path(root_dir: &Path) -> Re
     create_temp_legacy_full_backup_from_verified_v4(&verified)
 }
 
+pub(super) fn create_temp_legacy_full_backup_from_v4_transfer_zip<R: std::io::Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<PathBuf> {
+    let mut db_index = None;
+    let mut db_bytes = 0_u64;
+    let mut mapped_files = Vec::new();
+    let mut upload_file_count = 0_u64;
+    let mut favicon_file_count = 0_u64;
+    let mut banner_file_count = 0_u64;
+    let mut tor_hidden_service_key_file_count = 0_u64;
+
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Read Backup v4 transfer entry #{index}: {error}"
+            ))
+        })?;
+        let name = entry.name().to_owned();
+        super::common::validate_restore_safe_entry_name(&name)?;
+        if entry.is_dir() {
+            continue;
+        }
+
+        if name == "db/rustchan.sqlite3" {
+            db_index = Some(index);
+            db_bytes = entry.size();
+        } else if name.starts_with("boards/") {
+            if let Ok((runtime_path, kind)) = v4::logical_upload_path_to_runtime(&name) {
+                mapped_files.push((index, format!("uploads/{runtime_path}")));
+                match kind {
+                    v4::BackupFileKind::OriginalMedia
+                    | v4::BackupFileKind::Thumbnail
+                    | v4::BackupFileKind::Banner
+                    | v4::BackupFileKind::Favicon => {
+                        upload_file_count = upload_file_count.saturating_add(1);
+                    }
+                    _ => {}
+                }
+            }
+        } else if let Some(rel) = name.strip_prefix("site-assets/favicon/") {
+            super::common::validate_restore_safe_entry_name(rel)?;
+            mapped_files.push((index, format!("favicon/{rel}")));
+            favicon_file_count = favicon_file_count.saturating_add(1);
+        } else if let Some(rel) = name.strip_prefix("site-assets/banner/") {
+            super::common::validate_restore_safe_entry_name(rel)?;
+            mapped_files.push((index, format!("banner/{rel}")));
+            banner_file_count = banner_file_count.saturating_add(1);
+        } else if let Some(rel) = name.strip_prefix("tor-keys/") {
+            super::common::validate_restore_safe_entry_name(rel)?;
+            mapped_files.push((
+                index,
+                format!("{}/{}", super::common::FULL_BACKUP_TOR_KEYS_PREFIX, rel),
+            ));
+            tor_hidden_service_key_file_count = tor_hidden_service_key_file_count.saturating_add(1);
+        }
+    }
+
+    let db_index = db_index.ok_or_else(|| {
+        AppError::BadRequest(
+            "Invalid Backup v4 transfer archive: missing db/rustchan.sqlite3.".into(),
+        )
+    })?;
+    let temp_zip = temp_legacy_zip_path("rustchan_v4_transfer_full_restore");
+    let output = std::fs::File::create(&temp_zip).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Create {}: {error}", temp_zip.display()))
+    })?;
+    let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(output));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let manifest = serde_json::json!({
+        "version": 3,
+        "generated_at": Utc::now().timestamp(),
+        "rustchan_version": env!("CARGO_PKG_VERSION"),
+        "db_bytes": db_bytes,
+        "upload_file_count": upload_file_count,
+        "favicon_file_count": favicon_file_count,
+        "banner_file_count": banner_file_count,
+        "tor_hidden_service_keys_included": tor_hidden_service_key_file_count > 0,
+        "tor_hidden_service_key_file_count": tor_hidden_service_key_file_count,
+        "boards": [],
+    });
+    zip.start_file(super::common::FULL_BACKUP_MANIFEST_NAME, options)
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip backup.json: {error}")))?;
+    zip.write_all(
+        &serde_json::to_vec_pretty(&manifest).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("Serialize backup.json: {error}"))
+        })?,
+    )
+    .map_err(|error| AppError::Internal(anyhow::anyhow!("Write backup.json: {error}")))?;
+
+    zip.start_file("chan.db", options)
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip chan.db: {error}")))?;
+    {
+        let mut entry = archive.by_index(db_index).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("Read Backup v4 DB entry: {error}"))
+        })?;
+        super::common::copy_limited(&mut entry, &mut zip, super::common::ZIP_ENTRY_MAX_BYTES)
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy chan.db: {error}")))?;
+    }
+
+    for (index, zip_path) in mapped_files {
+        zip.start_file(&zip_path, zip_file_options_for_path(Path::new(&zip_path)))
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip {zip_path}: {error}")))?;
+        let mut entry = archive.by_index(index).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Read Backup v4 transfer entry #{index}: {error}"
+            ))
+        })?;
+        super::common::copy_limited(&mut entry, &mut zip, super::common::ZIP_ENTRY_MAX_BYTES)
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy {zip_path}: {error}")))?;
+    }
+
+    zip.finish().map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Finalize {}: {error}", temp_zip.display()))
+    })?;
+    Ok(temp_zip)
+}
+
 fn create_temp_legacy_full_backup_from_verified_v4(
     verified: &v4::VerifiedSavedV4Root,
 ) -> Result<PathBuf> {
