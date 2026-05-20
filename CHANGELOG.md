@@ -2,6 +2,22 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## [1.2.1]
+
+### Improved
+
+- Full-site restore now accepts Backup v4 transfer ZIPs by converting the transfer layout into the legacy restore archive shape before running the normal restore flow.
+- VP9/WebM transcoding now forces yuv420p output with explicit BT.709 color metadata, avoiding inherited source color tags that can make browser playback look wrong.
+- Admin site-health job post ID parsing and logging test helpers were tightened up for stricter lint compliance.
+- Local JavaScript test artifacts and runtime folders are now ignored by git.
+
+### Fixed
+
+- New board creation now validates short names instead of silently stripping invalid characters, and duplicate board shorts return a conflict instead of proceeding into creation.
+- No-JavaScript post form rendering now keeps the post form visible when scripts are unavailable.
+- Random token generation keeps its fail-closed behavior while documenting the intentional process exit for Clippy.
+- Rust dependency lockfile entries were refreshed for the `1.2.1` cycle.
+
 ## [1.2.0]
 
 ### Added

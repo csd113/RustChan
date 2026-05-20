@@ -1893,7 +1893,7 @@ mod tests {
     fn sample_site_health() -> AdminPanelSiteHealthView<'static> {
         AdminPanelSiteHealthView {
             server_status: "ready",
-            rustchan_version: "1.2.0",
+            rustchan_version: "1.2.1",
             database_integrity_status: "not checked",
             last_successful_backup: "none saved",
             next_scheduled_backup: "not scheduled",
@@ -1914,7 +1914,7 @@ mod tests {
             failed_jobs: 0,
             backup_jobs: "idle",
             restore_jobs: "not available",
-            diagnostics_text: "RustChan version: 1.2.0\nRecent warnings:\n  none",
+            diagnostics_text: "RustChan version: 1.2.1\nRecent warnings:\n  none",
         }
     }
 
@@ -2246,7 +2246,7 @@ mod tests {
         assert!(html.contains("Database integrity status"));
         assert!(html.contains("open media panel"));
         assert!(html.contains("copy diagnostics"));
-        assert!(html.contains("RustChan version: 1.2.0"));
+        assert!(html.contains("RustChan version: 1.2.1"));
         assert!(html.contains(r#"data-admin-health-jobs-url="/admin/site-health/jobs""#));
         assert!(html.contains(r#"data-admin-health-job="running_jobs""#));
         assert!(html.contains(r#"data-admin-health-job="queued_jobs""#));
