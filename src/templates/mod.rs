@@ -786,6 +786,7 @@ pub fn base_layout_with_preferences(
         </fieldset>
         <input type="hidden" name="show_activity_badges_present" value="1">
         <label><input type="checkbox" name="show_activity_badges" value="1"{badges_checked}> Show new activity badges</label>
+        <button type="submit">save preferences</button>
       </form>
     </details>
     <div id="theme-picker-panel">
