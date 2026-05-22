@@ -2011,12 +2011,12 @@ html:not([data-theme]) .poster-id-btn {
 }
 
 .self-action-controls {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  margin-left: 0;
-  flex-wrap: wrap;
+  display: contents;
 }
+
+.post-controls > .report-btn { order: 3; }
+
+.post-controls .self-action-window-note { order: 4; }
 
 .self-action-page {
   max-width: 72rem;
@@ -5862,6 +5862,12 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
     text-align: center;
   }
 
+  .compress-modal .compress-cancel-btn,
+  .compress-modal .compress-do-btn {
+    min-height: 40px;
+    padding: 8px 12px;
+  }
+
   .nsfw-disclaimer-box {
     width: min(92vw, 460px);
     max-height: 74vh;
@@ -5986,25 +5992,6 @@ html:not([data-theme]) .compress-do-btn {
 
 .upload-progress-wrap {
   max-width: 420px;
-}
-
-/* ── Report button ────────────────────────────────────────────────────────── */
-.report-btn {
-  background: transparent;
-  border: none;
-  color: var(--text-dim);
-  font-family: var(--font);
-  font-size: 0.72rem;
-  cursor: pointer;
-  padding: 0 0.2rem;
-  margin-left: 0.5rem;
-  opacity: 0.6;
-  text-decoration: underline dotted;
-  transition: opacity .15s, color .15s;
-}
-.report-btn:hover {
-  opacity: 1;
-  color: #d44;
 }
 
 /* ── Thread board banner & nav bar ───────────────────────────────────────── */
