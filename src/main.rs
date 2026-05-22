@@ -26,6 +26,7 @@ use std::io::Write as _;
 
 mod banner;
 mod cache;
+mod captcha;
 mod chan_net;
 mod config;
 mod db;

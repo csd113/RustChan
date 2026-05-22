@@ -422,7 +422,7 @@ This means:
 | 9 | Allow external banner links after warning page | banner | `false` | false | Yes | No | DB-backed admin setting only. |
 | 12 | Board NSFW flag | per-board | `false` | false | Yes | No | New-board create form leaves this unchecked. |
 | 16 | Archive overflow threads | per-board | `true` | true | Yes | No | Global prune config can still override hard-delete behavior. |
-| 20 | PoW CAPTCHA on threads and replies | per-board | `false` | false | Yes | No | Per-board admin toggle. |
+| 20 | CAPTCHA on threads and replies | per-board | `false` | false | Yes | No | Per-board admin toggle. |
 | 24 | Allow images | per-board | `true` | true | Yes | No | New boards start with image uploads enabled. |
 | 25 | Allow video | per-board | `true` | true | Yes | No | New boards start with video uploads enabled. |
 | 26 | Allow audio | per-board | `false` | false | Yes | No | New-board create form leaves this unchecked. |

@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod banner;
 pub mod board;
+pub mod captcha;
 pub mod favicon;
 pub mod posting;
 pub mod render;
@@ -267,8 +268,10 @@ pub struct PostFormData {
     pub poll_duration_secs: Option<i64>,
     /// Sage — when true the reply must not bump the thread.
     pub sage: bool,
-    /// `PoW` CAPTCHA nonce — submitted by the thread-creation form when enabled.
-    pub pow_nonce: String,
+    /// Server-side CAPTCHA challenge id submitted by posting forms when enabled.
+    pub captcha_id: String,
+    /// Human-entered CAPTCHA answer submitted by posting forms when enabled.
+    pub captcha_answer: String,
 }
 
 /// Drain all fields from a multipart form into [`PostFormData`].
@@ -302,7 +305,8 @@ pub async fn parse_post_multipart(
     let mut poll_duration_value: Option<i64> = None;
     let mut poll_duration_unit = String::from("hours");
     let mut sage = false;
-    let mut pow_nonce = String::new();
+    let mut captcha_id = String::new();
+    let mut captcha_answer = String::new();
     let mut budget = PublicMultipartBudget::default();
     let mut seen_upload_slots = HashSet::new();
 
@@ -330,7 +334,10 @@ pub async fn parse_post_multipart(
                 let v = read_text_field(field, &mut budget).await?;
                 sage = v == "1" || v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("true");
             }
-            Some("pow_nonce") => pow_nonce = read_text_field(field, &mut budget).await?,
+            Some("captcha_id") => captcha_id = read_text_field(field, &mut budget).await?,
+            Some("captcha_answer") => {
+                captcha_answer = read_text_field(field, &mut budget).await?;
+            }
             Some("poll_question") => {
                 let v = read_text_field(field, &mut budget).await?;
                 if v.chars().count() > 500 {
@@ -442,7 +449,8 @@ pub async fn parse_post_multipart(
         poll_options,
         poll_duration_secs,
         sage,
-        pow_nonce,
+        captcha_id,
+        captcha_answer,
     })
 }
 

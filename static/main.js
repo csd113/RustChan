@@ -1037,8 +1037,8 @@ function submitPostFormWithProgress(form) {
 }
 
 function captchaNonceMissing(form) {
-  var nonceField = form && form.querySelector('input[name="pow_nonce"]');
-  return !!(nonceField && !nonceField.value);
+  var answerField = form && form.querySelector('input[name="captcha_answer"]');
+  return !!(answerField && !answerField.value.trim());
 }
 
 // ─── NSFW disclaimer overlay ────────────────────────────────────────────────
@@ -3392,107 +3392,6 @@ function togglePosterHighlights(threadId, posterId) {
   } catch (e) {}
 })();
 
-// ─── PoW CAPTCHA solver ───────────────────────────────────────────────────────
-// Dynamic values (board name, difficulty) are read from data-pow-board and
-// data-pow-difficulty attributes on each input[name="pow_nonce"] element.
-
-(function () {
-  function sha256Fallback(str) {
-    var msg = new TextEncoder().encode(str);
-    var K = [
-      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
-    ];
-    var H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
-    var len = msg.length, bitLen = len * 8;
-    var padded = new Uint8Array(((len + 9 + 63) & ~63));
-    padded.set(msg);
-    padded[len] = 0x80;
-    var dv = new DataView(padded.buffer);
-    dv.setUint32(padded.length - 4, bitLen >>> 0, false);
-    var r = function (n, x) { return (x >>> n) | (x << (32 - n)); };
-    for (var i = 0; i < padded.length; i += 64) {
-      var w = new Array(64);
-      for (var j = 0; j < 16; j++) w[j] = dv.getUint32(i + j * 4, false);
-      for (var j2 = 16; j2 < 64; j2++) {
-        var s0 = r(7, w[j2 - 15]) ^ r(18, w[j2 - 15]) ^ (w[j2 - 15] >>> 3);
-        var s1 = r(17, w[j2 - 2]) ^ r(19, w[j2 - 2]) ^ (w[j2 - 2] >>> 10);
-        w[j2] = (w[j2 - 16] + s0 + w[j2 - 7] + s1) >>> 0;
-      }
-      var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
-      for (var k = 0; k < 64; k++) {
-        var S1 = r(6, e) ^ r(11, e) ^ r(25, e);
-        var ch = (e & f) ^ (~e & g);
-        var tmp1 = (h + S1 + ch + K[k] + w[k]) >>> 0;
-        var S0 = r(2, a) ^ r(13, a) ^ r(22, a);
-        var maj = (a & b) ^ (a & c) ^ (b & c);
-        var tmp2 = (S0 + maj) >>> 0;
-        h = g; g = f; f = e; e = (d + tmp1) >>> 0; d = c; c = b; b = a; a = (tmp1 + tmp2) >>> 0;
-      }
-      H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + b) >>> 0; H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + d) >>> 0;
-      H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0; H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0;
-    }
-    var out = new Uint8Array(32);
-    var odv = new DataView(out.buffer);
-    for (var ii = 0; ii < 8; ii++) odv.setUint32(ii * 4, H[ii], false);
-    return Promise.resolve(out.buffer);
-  }
-
-  function sha256(str) {
-    if (typeof crypto !== 'undefined' && crypto.subtle) {
-      return crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
-    }
-    return sha256Fallback(str);
-  }
-
-  function countLeadingZeroBits(buf) {
-    var bytes = new Uint8Array(buf);
-    var count = 0;
-    for (var i = 0; i < bytes.length; i++) {
-      if (bytes[i] === 0) { count += 8; }
-      else { count += Math.clz32(bytes[i]) - 24; break; }
-    }
-    return count;
-  }
-
-  async function startPoW(nonceEl, statusEl, board, difficulty) {
-    var minute = Math.floor(Date.now() / 1000 / 60);
-    var challenge = board + ':' + minute;
-    var nonce = 0;
-    if (statusEl) statusEl.textContent = 'solving proof-of-work…';
-    while (true) {
-      var buf = await sha256(challenge + ':' + nonce);
-      if (countLeadingZeroBits(buf) >= difficulty) {
-        nonceEl.value = nonce;
-        if (statusEl) statusEl.textContent = '\u2713 captcha solved';
-        return;
-      }
-      nonce++;
-      if (nonce % 50000 === 0) {
-        if (statusEl) statusEl.textContent = 'solving\u2026 ' + nonce.toLocaleString() + ' attempts';
-        await new Promise(function (r) { setTimeout(r, 0); });
-      }
-    }
-  }
-
-  document.querySelectorAll('input[name="pow_nonce"]').forEach(function (nonceEl) {
-    var difficulty = parseInt(nonceEl.dataset.powDifficulty, 10);
-    var board = nonceEl.dataset.powBoard;
-    if (!board || !difficulty) return;
-    var statusId = nonceEl.id.replace('pow-nonce-', 'captcha-status-');
-    var statusEl = document.getElementById(statusId);
-    startPoW(nonceEl, statusEl, board, difficulty).catch(function (e) {
-      if (statusEl) statusEl.textContent = 'captcha error: ' + e;
-    });
-  });
-})();
-
 // ─── Centralised event delegation ────────────────────────────────────────────
 // Replaces all inline onclick=/onchange=/onsubmit= attribute handlers.
 
@@ -3669,7 +3568,7 @@ document.addEventListener('submit', function (e) {
       e.preventDefault();
       showPostFormFeedback(
         form,
-        'CAPTCHA is still solving. Wait for the checkmark before posting.'
+        'Enter the CAPTCHA text before posting.'
       );
       setPostFormOpen(true, { scrollIntoView: true });
       return;

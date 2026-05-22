@@ -650,7 +650,7 @@ fn render_board_settings_card(
   </div>
   <div class="board-settings-checks">
     <label><input type="checkbox" name="clear_access_password" value="1"> Remove saved password</label>
-    <label><input type="checkbox" name="allow_captcha" value="1"{captcha_checked}> PoW CAPTCHA on threads and replies (hashcash, JS-solved)
+    <label><input type="checkbox" name="allow_captcha" value="1"{captcha_checked}> CAPTCHA on threads and replies
       <span class="admin-quick-help">Enabling this makes posting require JavaScript on this board.</span>
     </label>
   </div>

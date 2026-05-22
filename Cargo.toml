@@ -37,6 +37,7 @@ tower      = "0.5"
 tower-http = { version = "0.6",  features = ["fs", "set-header", "compression-full", "trace"] }
 tokio      = { version = "1",    features = ["full"] }
 tokio-util = "0.7"
+captcha    = { version = "1.0.0", default-features = false }
 
 rusqlite    = { version = "0.39.0", features = ["bundled", "backup"] }
 r2d2        = "0.8"

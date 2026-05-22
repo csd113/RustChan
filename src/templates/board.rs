@@ -873,7 +873,13 @@ pub fn board_page<S: std::hash::BuildHasher>(
 <div class="{post_form_class}" id="post-form-wrap" style="{post_form_style}">
   {}
 </div>"##,
-            super::forms::new_thread_form(&board.short_name, csrf_token, board, new_thread_prefill,),
+            super::forms::new_thread_form(
+                &board.short_name,
+                csrf_token,
+                board,
+                new_thread_prefill,
+                &format!("/{}", board.short_name),
+            ),
             post_form_class = if show_post_form {
                 "post-form-wrap is-open"
             } else {
@@ -1274,7 +1280,17 @@ pub fn catalog_page<S: std::hash::BuildHasher>(
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
   {form}
 </div>"##,
-            form = super::forms::new_thread_form(&board.short_name, csrf_token, board, None)
+            form = super::forms::new_thread_form(
+                &board.short_name,
+                csrf_token,
+                board,
+                None,
+                &if hidden_view {
+                    format!("/{}/hidden", board.short_name)
+                } else {
+                    format!("/{}/catalog", board.short_name)
+                },
+            )
         );
     } else if board.access_mode.requires_unlock_for_posting() {
         body.push_str(&render_post_access_gate(

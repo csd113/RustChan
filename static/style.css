@@ -1058,6 +1058,28 @@ html.no-js .post-form-wrap {
 
 .post-form input[type="file"] { padding: 3px; cursor: pointer; }
 
+.captcha-challenge {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 6px 10px;
+  margin-bottom: 6px;
+}
+
+.captcha-image {
+  display: block;
+  width: 220px;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  background: #fff;
+  image-rendering: auto;
+}
+
+.captcha-refresh-link {
+  white-space: nowrap;
+}
+
 .upload-secondary-toggle {
   margin-top: 6px;
 }

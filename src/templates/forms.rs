@@ -61,19 +61,26 @@ const fn render_uploads_disabled_row() -> &'static str {
         <td><span class="form-field-help">uploads are disabled on this board</span></td></tr>"#
 }
 
-fn render_captcha_row(board_short: &str, reply_suffix: &str) -> String {
-    let difficulty: u32 = crate::utils::crypto::POW_DIFFICULTY;
+fn render_captcha_row(board_short: &str, reply_suffix: &str, refresh_href: &str) -> String {
+    let captcha_id = crate::captcha::new_captcha_id();
+    let board = escape_html(board_short);
+    let image_src = format!("/captcha/{captcha_id}?board={board}");
     format!(
         r#"    <tr id="captcha-row-{board}{suffix}"><td>captcha</td>
         <td>
-          <span id="captcha-status-{board}{suffix}" class="form-field-help">waiting for the JavaScript proof-of-work solver… posting on this board requires JavaScript.</span>
-          <noscript><div class="form-field-help">Posting on this board requires JavaScript because its CAPTCHA uses proof-of-work. Enable JavaScript, wait for the checkmark, then submit.</div></noscript>
-          <input type="hidden" name="pow_nonce" id="pow-nonce-{board}{suffix}" value=""
-                 data-pow-board="{board}" data-pow-difficulty="{difficulty}">
+          <div class="captcha-challenge">
+            <img class="captcha-image" src="{image_src}" alt="CAPTCHA challenge image" width="220" height="120">
+            <a class="form-field-help captcha-refresh-link" href="{refresh_href}">new challenge</a>
+          </div>
+          <input type="hidden" name="captcha_id" value="{captcha_id}">
+          <input type="text" name="captcha_answer" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="16" required>
+          <span class="form-field-help">Enter the text shown in the image. If it expires or fails, request a new challenge.</span>
         </td></tr>"#,
-        board = escape_html(board_short),
+        board = board,
         suffix = reply_suffix,
-        difficulty = difficulty,
+        image_src = escape_html(&image_src),
+        captcha_id = escape_html(&captcha_id),
+        refresh_href = escape_html(refresh_href),
     )
 }
 
@@ -186,6 +193,7 @@ pub(super) fn new_thread_form(
     csrf_token: &str,
     board: &Board,
     prefill: Option<&PostFormState>,
+    refresh_href: &str,
 ) -> String {
     let submission_token = new_submission_token();
     let upload_policy = build_upload_form_policy(board);
@@ -201,16 +209,11 @@ pub(super) fn new_thread_form(
         render_uploads_disabled_row().to_owned()
     };
 
-    // PoW CAPTCHA block — only rendered when the board has it enabled.
-    // PoW config is passed via data-pow-board / data-pow-difficulty
-    // attributes so main.js can start the solver without any inline <script>.
     let captcha_row = if board.allow_captcha {
-        render_captcha_row(board_short, "")
+        render_captcha_row(board_short, "", refresh_href)
     } else {
         String::new()
     };
-
-    // captcha JS block removed — logic lives in /static/main.js.
 
     let poll_option_rows = [render_poll_option_row(1), render_poll_option_row(2)].concat();
     let name_value = prefill.map_or("", |state| state.name.as_str());
@@ -311,9 +314,12 @@ pub(super) fn reply_form(
         render_uploads_disabled_row().to_owned()
     };
 
-    // PoW CAPTCHA block — only rendered when the board has it enabled.
     let captcha_row = if board.allow_captcha {
-        render_captcha_row(board_short, "-reply")
+        render_captcha_row(
+            board_short,
+            "-reply",
+            &format!("/{board_short}/thread/{thread_id}#post-form-wrap"),
+        )
     } else {
         String::new()
     };
@@ -392,7 +398,7 @@ mod tests {
 
     #[test]
     fn new_thread_form_hides_file_input_when_uploads_disabled() {
-        let html = new_thread_form("test", "csrf", &uploads_disabled_board(), None);
+        let html = new_thread_form("test", "csrf", &uploads_disabled_board(), None, "/test");
         assert!(!html.contains("type=\"file\" name=\"file\""));
         assert!(!html.contains("name=\"image_file\""));
         assert!(!html.contains("name=\"audio_file\""));
@@ -410,7 +416,7 @@ mod tests {
 
     #[test]
     fn audio_image_form_is_audio_first_and_cover_image_second() {
-        let html = new_thread_form("test", "csrf", &audio_image_board(), None);
+        let html = new_thread_form("test", "csrf", &audio_image_board(), None, "/test");
         let audio_pos = html.find("name=\"audio_file\"").expect("audio row");
         let image_pos = html.find("name=\"image_file\"").expect("image row");
         assert!(audio_pos < image_pos);
@@ -440,6 +446,7 @@ mod tests {
                 ..uploads_disabled_board()
             },
             None,
+            "/test",
         );
         assert!(html.contains("<td>upload</td>"));
         assert!(html.contains("name=\"file\""));
@@ -450,7 +457,7 @@ mod tests {
     #[test]
     fn post_forms_include_submission_token() {
         let board = uploads_disabled_board();
-        let thread_html = new_thread_form("test", "csrf", &board, None);
+        let thread_html = new_thread_form("test", "csrf", &board, None, "/test");
         let reply_html = reply_form("test", 42, "csrf", &board, None);
 
         assert!(thread_html.contains("name=\"submission_token\""));
@@ -462,7 +469,7 @@ mod tests {
         let initial_row = render_poll_option_row(1);
         assert!(initial_row.contains(&format!(r#"maxlength="{POLL_OPTION_MAX_LENGTH}""#)));
 
-        let html = new_thread_form("test", "csrf", &uploads_disabled_board(), None);
+        let html = new_thread_form("test", "csrf", &uploads_disabled_board(), None, "/test");
         assert!(html.contains(&format!(
             r#"data-poll-option-maxlength="{POLL_OPTION_MAX_LENGTH}""#
         )));
@@ -484,7 +491,7 @@ mod tests {
             body: "draft body".into(),
             sage: true,
         };
-        let thread_html = new_thread_form("test", "csrf", &board, Some(&state));
+        let thread_html = new_thread_form("test", "csrf", &board, Some(&state), "/test");
         let reply_html = reply_form("test", 42, "csrf", &board, Some(&state));
 
         assert!(thread_html.contains(r#"name="name" value="anon""#));
@@ -499,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn captcha_row_includes_noscript_guidance() {
+    fn captcha_row_uses_server_side_image_challenge() {
         let html = new_thread_form(
             "test",
             "csrf",
@@ -508,9 +515,13 @@ mod tests {
                 ..uploads_disabled_board()
             },
             None,
+            "/test",
         );
 
-        assert!(html.contains("posting on this board requires JavaScript"));
-        assert!(html.contains("CAPTCHA uses proof-of-work"));
+        assert!(html.contains("name=\"captcha_id\""));
+        assert!(html.contains("name=\"captcha_answer\""));
+        assert!(html.contains("/captcha/"));
+        assert!(html.contains("new challenge"));
+        assert!(!html.contains("pow_nonce"));
     }
 }
