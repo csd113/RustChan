@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use super::{
-    base_layout, base_layout_with_preferences, compress_modal_script, fmt_ts, fmt_ts_short,
-    report_modal_script, thread_autoupdate_script,
+    admin_ban_delete_modal_script, base_layout, base_layout_with_preferences,
+    compress_modal_script, fmt_ts, fmt_ts_short, report_modal_script, thread_autoupdate_script,
 };
 
 const SELF_ACTION_WINDOW_SECS: i64 = 60;
@@ -446,6 +446,9 @@ pub fn thread_page(
         owned_post_controls,
         edit_overlay_state,
     ));
+    if is_admin {
+        body.push_str(admin_ban_delete_modal_script());
+    }
 
     if !thread.locked && !thread.archived && can_post {
         let form_html = super::forms::reply_form(
@@ -2043,6 +2046,58 @@ mod tests {
         assert!(html.contains(r#"class="edit-modal is-open""#));
         assert!(html.contains(">edited draft</textarea>"));
         assert!(html.contains("Edit failed."));
+    }
+
+    #[test]
+    fn thread_page_includes_admin_ban_delete_modal_only_for_admin() {
+        let board = crate::test_fixtures::sample_board();
+        let post = sample_post();
+
+        let admin_html = thread_page(
+            &board,
+            &sample_thread(),
+            std::slice::from_ref(&post),
+            &std::collections::BTreeMap::new(),
+            "csrf",
+            std::slice::from_ref(&board),
+            true,
+            Some("admin-csrf"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+            crate::templates::UserPreferences::default(),
+        );
+
+        assert!(admin_html.contains(r#"id="ban-delete-modal""#));
+        assert!(admin_html.contains(r#"for="ban-delete-reason""#));
+        assert!(admin_html.contains(r#"for="ban-delete-duration""#));
+
+        let public_html = thread_page(
+            &board,
+            &sample_thread(),
+            std::slice::from_ref(&post),
+            &std::collections::BTreeMap::new(),
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+            crate::templates::UserPreferences::default(),
+        );
+
+        assert!(!public_html.contains(r#"id="ban-delete-modal""#));
     }
 
     #[test]

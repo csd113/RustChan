@@ -406,6 +406,37 @@ pub const fn confirmation_modal_script() -> &'static str {
 </div>"#
 }
 
+#[must_use]
+pub const fn admin_ban_delete_modal_script() -> &'static str {
+    r#"
+<div id="ban-delete-modal" class="compress-modal ban-delete-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="ban-delete-modal-title" aria-describedby="ban-delete-modal-info" aria-hidden="true">
+  <div class="compress-modal-box ban-delete-modal-box">
+    <div class="compress-modal-title ban-delete-modal-title" id="ban-delete-modal-title">Ban IP + delete post</div>
+    <form id="ban-delete-modal-form" novalidate>
+      <div class="compress-modal-info confirm-modal-info ban-delete-modal-info" id="ban-delete-modal-info">
+        This will ban the hashed IP and delete post <strong id="ban-delete-post-label">No.</strong>.
+      </div>
+      <div class="ban-delete-warning" role="note">Destructive moderation action. Cancel is safe.</div>
+      <div class="ban-delete-field">
+        <label for="ban-delete-reason">Ban reason</label>
+        <input type="text" id="ban-delete-reason" maxlength="256" autocomplete="off" placeholder="Rule violation">
+        <div class="ban-delete-help">Leave blank to use Rule violation.</div>
+      </div>
+      <div class="ban-delete-field">
+        <label for="ban-delete-duration">Duration in hours</label>
+        <input type="text" id="ban-delete-duration" inputmode="numeric" pattern="[0-9]*" value="0" autocomplete="off">
+        <div class="ban-delete-help">Use 0 for a permanent ban.</div>
+      </div>
+      <div class="post-error-banner ban-delete-error" id="ban-delete-error" role="alert" hidden></div>
+      <div class="compress-modal-actions ban-delete-actions">
+        <button type="button" class="compress-cancel-btn" id="ban-delete-cancel">Cancel</button>
+        <button type="submit" class="compress-do-btn btn-danger" id="ban-delete-submit">Ban IP + delete</button>
+      </div>
+    </form>
+  </div>
+</div>"#
+}
+
 // ─── Report modal ─────────────────────────────────────────────────────────────
 
 /// Returns the report overlay HTML. Injected once per thread page.
@@ -426,7 +457,8 @@ pub const fn report_modal_script() -> &'static str {
       <input type="text" name="reason" id="report-reason"
              placeholder="reason (optional)" maxlength="256"
              style="width:100%;background:var(--bg-input);border:1px solid var(--border);
-                    color:var(--text);padding:5px 8px;font-family:var(--font);font-size:0.82rem;
+                    color:var(--text);padding:8px 10px;font-family:var(--font);font-size:16px;
+                    min-height:38px;
                     box-sizing:border-box;margin-bottom:0.75rem">
       <div class="compress-modal-actions">
         <button type="button" class="compress-cancel-btn" data-action="close-report">Cancel</button>

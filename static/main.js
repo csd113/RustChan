@@ -3169,20 +3169,108 @@ function clearBanDeletePreparation(form) {
   }
 }
 
-function adminBanDelete(form, pid) {
-  var reason = prompt('Ban reason (leave blank for "Rule violation"):');
-  if (reason === null) return false;
-  var dur = prompt('Ban duration in hours (0 = permanent):');
-  if (dur === null) return false;
-  var hours = parseInt(dur, 10);
-  if (isNaN(hours) || hours < 0) hours = 0;
+var _banDeleteModal = null;
+var _banDeleteForm = null;
+var _banDeleteReason = null;
+var _banDeleteDuration = null;
+var _banDeleteError = null;
+var _banDeleteCancel = null;
+var _banDeletePostLabel = null;
+var _banDeleteTargetForm = null;
+var _banDeleteTargetSubmitter = null;
+var _banDeleteActiveTrigger = null;
+
+function ensureBanDeleteModal() {
+  if (_banDeleteModal) return true;
+  _banDeleteModal = document.getElementById('ban-delete-modal');
+  if (!_banDeleteModal) return false;
+  _banDeleteForm = document.getElementById('ban-delete-modal-form');
+  _banDeleteReason = document.getElementById('ban-delete-reason');
+  _banDeleteDuration = document.getElementById('ban-delete-duration');
+  _banDeleteError = document.getElementById('ban-delete-error');
+  _banDeleteCancel = document.getElementById('ban-delete-cancel');
+  _banDeletePostLabel = document.getElementById('ban-delete-post-label');
+  return !!(
+    _banDeleteForm &&
+    _banDeleteReason &&
+    _banDeleteDuration &&
+    _banDeleteError &&
+    _banDeleteCancel &&
+    _banDeletePostLabel
+  );
+}
+
+function showBanDeleteError(message) {
+  if (!_banDeleteError) return;
+  _banDeleteError.textContent = message;
+  _banDeleteError.hidden = false;
+}
+
+function clearBanDeleteError() {
+  if (!_banDeleteError) return;
+  _banDeleteError.textContent = '';
+  _banDeleteError.hidden = true;
+}
+
+function closeBanDeleteModal(submitted) {
+  if (!ensureBanDeleteModal() || _banDeleteModal.style.display === 'none') return;
+  _banDeleteModal.style.display = 'none';
+  _banDeleteModal.setAttribute('aria-hidden', 'true');
+  clearBanDeleteError();
+  var trigger = _banDeleteActiveTrigger;
+  _banDeleteTargetForm = null;
+  _banDeleteTargetSubmitter = null;
+  _banDeleteActiveTrigger = null;
+  if (!submitted && trigger && typeof trigger.focus === 'function') {
+    trigger.focus();
+  }
+}
+
+function openBanDeleteModal(form, pid, submitter) {
+  if (!ensureBanDeleteModal()) {
+    form.dataset.banDeletePrepared = '1';
+    form.dataset.rcConfirmSubmitBypass = '1';
+    requestFormSubmit(form, submitter);
+    return true;
+  }
+
+  _banDeleteTargetForm = form;
+  _banDeleteTargetSubmitter = submitter || null;
+  _banDeleteActiveTrigger = submitter || document.activeElement;
+  _banDeletePostLabel.textContent = 'No.' + pid;
+  _banDeleteReason.value = '';
+  _banDeleteDuration.value = '0';
+  clearBanDeleteError();
+  _banDeleteModal.style.display = 'flex';
+  _banDeleteModal.setAttribute('aria-hidden', 'false');
+  window.setTimeout(function () {
+    _banDeleteReason.focus();
+  }, 0);
+  return true;
+}
+
+function submitBanDeleteModal() {
+  if (!_banDeleteTargetForm) return;
+  var rawDuration = (_banDeleteDuration.value || '').trim();
+  var hours = rawDuration === '' ? 0 : parseInt(rawDuration, 10);
+  if (isNaN(hours) || hours < 0) {
+    showBanDeleteError('Duration must be 0 or a positive number of hours.');
+    _banDeleteDuration.focus();
+    return;
+  }
+
+  var pid = _banDeleteTargetForm.dataset.banDeletePid;
   var reasonEl = document.getElementById('ban-reason-' + pid);
   var durEl = document.getElementById('ban-dur-' + pid);
-  if (reasonEl) reasonEl.value = reason.trim() || 'Rule violation';
+  if (reasonEl) reasonEl.value = (_banDeleteReason.value || '').trim() || 'Rule violation';
   if (durEl) durEl.value = hours;
-  form.dataset.banDeletePrepared = '1';
-  form.dataset.confirmSubmit = 'Ban IP + delete post No.' + pid + '?';
-  return true;
+
+  var targetForm = _banDeleteTargetForm;
+  var targetSubmitter = _banDeleteTargetSubmitter;
+  targetForm.dataset.banDeletePrepared = '1';
+  targetForm.dataset.rcConfirmSubmitBypass = '1';
+  closeBanDeleteModal(true);
+  requestFormSubmit(targetForm, targetSubmitter);
 }
 
 // ─── Poll management ──────────────────────────────────────────────────────────
@@ -3410,6 +3498,14 @@ function togglePosterHighlights(threadId, posterId) {
 
 document.addEventListener('click', function (e) {
   if (
+    e.target === document.getElementById('ban-delete-modal') ||
+    e.target.id === 'ban-delete-cancel'
+  ) {
+    e.preventDefault();
+    closeBanDeleteModal(false);
+    return;
+  }
+  if (
     e.target === document.getElementById('confirm-modal') ||
     e.target.id === 'confirm-modal-cancel'
   ) {
@@ -3563,6 +3659,11 @@ document.addEventListener('submit', function (e) {
   closeThreadMenus();
   var form = e.target;
   var submitter = e.submitter || null;
+  if (form.id === 'ban-delete-modal-form') {
+    e.preventDefault();
+    submitBanDeleteModal();
+    return;
+  }
   if (form.matches && form.matches('form.post-form')) {
     if (captchaNonceMissing(form)) {
       e.preventDefault();
@@ -3587,11 +3688,7 @@ document.addEventListener('submit', function (e) {
   // data-ban-delete: admin ban+delete form
   if (form.dataset.banDeletePid && form.dataset.banDeletePrepared !== '1') {
     e.preventDefault();
-    if (adminBanDelete(form, form.dataset.banDeletePid)) {
-      requestFormSubmit(form, submitter);
-    } else {
-      clearBanDeletePreparation(form);
-    }
+    openBanDeleteModal(form, form.dataset.banDeletePid, submitter);
     return;
   }
   // data-confirm-submit: prompt before form submission
@@ -3619,6 +3716,11 @@ document.addEventListener('submit', function (e) {
 
 document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape') {
+    if (ensureBanDeleteModal() && _banDeleteModal.style.display !== 'none') {
+      e.preventDefault();
+      closeBanDeleteModal(false);
+      return;
+    }
     if (ensureConfirmModal() && _confirmModal.style.display !== 'none') {
       e.preventDefault();
       closeConfirmModal(false);

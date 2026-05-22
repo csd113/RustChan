@@ -2061,6 +2061,26 @@ html:not([data-theme]) .poster-id-btn {
   background: rgba(255,34,68,0.08);
 }
 
+.post-controls.admin-post-controls .admin-ip-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--green-pale);
+  border-radius: var(--radius-sm);
+  line-height: 1.2;
+}
+
+.post-controls.admin-post-controls .admin-ip-link:hover,
+.post-controls.admin-post-controls .admin-ip-link:focus-visible {
+  border-color: var(--border-glow);
+  color: var(--green-bright);
+  background: color-mix(in srgb, var(--green) 8%, transparent);
+}
+
 /* ── Notices ──────────────────────────────────────────────────────────────── */
 
 .notice {
@@ -2213,8 +2233,8 @@ html:not([data-theme]) .poster-id-btn {
   justify-content: center;
   align-items: center;
   margin-top: 6px;
-  min-height: 26px;
-  padding: 0 24px;
+  min-height: 32px;
+  padding: 0 34px;
 }
 
 .catalog-activity-row {
@@ -2258,8 +2278,10 @@ html:not([data-theme]) .poster-id-btn {
   background: color-mix(in srgb, var(--green) 8%, transparent);
   color: var(--green-dim);
   cursor: pointer;
-  width: 22px;
-  height: 22px;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
   padding: 0;
   opacity: 0;
   transition: opacity 0.15s ease, transform 0.15s ease, color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
@@ -2340,13 +2362,28 @@ html:not([data-theme]) .poster-id-btn {
 
 @media (hover: none), (pointer: coarse) {
   .catalog-thread-menu-toggle {
+    width: 38px;
+    min-width: 38px;
+    height: 38px;
+    min-height: 38px;
     opacity: 1;
     transform: none;
+  }
+
+  .catalog-meta-row {
+    min-height: 40px;
+    padding-right: 44px;
+    padding-left: 44px;
   }
 
   .catalog-card-actions {
     opacity: 1;
     pointer-events: auto;
+  }
+
+  .catalog-thread-menu-item {
+    min-height: 38px;
+    padding: 9px 10px;
   }
 }
 
@@ -2716,14 +2753,18 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
     width: auto;
     max-width: 100%;
     box-sizing: border-box;
-    min-height: 28px;
-    padding: 2px 7px;
+    min-height: 38px;
+    padding: 6px 10px;
     white-space: nowrap;
     overflow-wrap: normal;
     text-align: center;
   }
 
   .post-controls.admin-post-controls .admin-ip-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 38px;
+    padding: 6px 10px;
     margin-left: 0;
   }
 }
@@ -5759,6 +5800,79 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   margin-bottom: 0.75rem;
 }
 
+.ban-delete-modal-box {
+  max-width: 520px;
+}
+
+.ban-delete-modal-title {
+  color: var(--red);
+}
+
+.ban-delete-modal-info {
+  margin-bottom: 0.65rem;
+}
+
+.ban-delete-warning {
+  border: 1px solid rgba(255,68,102,0.5);
+  background: rgba(255,34,68,0.1);
+  color: var(--red);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  padding: 0.5rem 0.65rem;
+  margin-bottom: 0.8rem;
+}
+
+.ban-delete-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0.7rem;
+}
+
+.ban-delete-field label {
+  color: var(--green-pale);
+  font-size: 0.82rem;
+  font-weight: bold;
+}
+
+.ban-delete-field input {
+  width: 100%;
+  min-height: 40px;
+  box-sizing: border-box;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 16px;
+  padding: 8px 10px;
+}
+
+.ban-delete-field input:focus {
+  outline: none;
+  border-color: var(--border-glow);
+  box-shadow: 0 0 0 2px rgba(0,255,65,0.12);
+}
+
+.ban-delete-help {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.ban-delete-error {
+  margin: 0.2rem 0 0.7rem;
+}
+
+.ban-delete-actions {
+  justify-content: flex-end;
+}
+
+.ban-delete-actions .compress-cancel-btn,
+.ban-delete-actions .compress-do-btn {
+  min-height: 40px;
+}
+
 .nsfw-disclaimer-box {
   max-width: 560px;
   max-height: min(78vh, 640px);
@@ -5866,6 +5980,16 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   .compress-modal .compress-do-btn {
     min-height: 40px;
     padding: 8px 12px;
+  }
+
+  .ban-delete-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .ban-delete-actions .compress-cancel-btn,
+  .ban-delete-actions .compress-do-btn {
+    width: 100%;
   }
 
   .nsfw-disclaimer-box {
