@@ -1940,10 +1940,10 @@ html:not([data-theme]) .poster-id-btn {
 /* ── Delete form ──────────────────────────────────────────────────────────── */
 
 .post-controls {
-  margin-top: 8px;
+  margin-top: 6px;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px;
   align-items: center;
   justify-content: flex-start;
   clear: both;
@@ -1973,11 +1973,13 @@ html:not([data-theme]) .poster-id-btn {
   background: var(--bg-input);
   color: var(--green-pale);
   text-decoration: none;
-  font-size: 0.75rem;
-  min-height: 32px;
-  padding: 5px 9px;
-  line-height: 1.2;
+  font-size: 0.68rem;
+  min-height: 26px;
+  padding: 2px 6px;
+  line-height: 1.1;
+  letter-spacing: 0.02em;
   border-radius: var(--radius-sm);
+  box-sizing: border-box;
 }
 
 .post-controls .edit-btn:hover,
@@ -2055,6 +2057,19 @@ html:not([data-theme]) .poster-id-btn {
   color: #cc3344;
 }
 
+.post-controls.admin-post-controls .admin-del-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 26px;
+  padding: 2px 6px;
+  font-size: 0.68rem;
+  line-height: 1.1;
+  letter-spacing: 0.02em;
+  box-sizing: border-box;
+  white-space: nowrap;
+}
+
 .admin-del-btn:hover {
   border-color: var(--red);
   color: var(--red);
@@ -2065,13 +2080,17 @@ html:not([data-theme]) .poster-id-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 32px;
-  padding: 5px 9px;
+  min-height: 26px;
+  padding: 2px 6px;
   border: 1px solid var(--border);
   background: var(--bg-input);
   color: var(--green-pale);
   border-radius: var(--radius-sm);
-  line-height: 1.2;
+  font-size: 0.68rem;
+  line-height: 1.1;
+  letter-spacing: 0.02em;
+  box-sizing: border-box;
+  white-space: nowrap;
 }
 
 .post-controls.admin-post-controls .admin-ip-link:hover,
@@ -2708,7 +2727,7 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   .post-controls.admin-post-controls {
     min-width: 0;
     align-items: center;
-    gap: 6px;
+    gap: 4px;
   }
 
   .admin-toolbar {
@@ -2753,8 +2772,8 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
     width: auto;
     max-width: 100%;
     box-sizing: border-box;
-    min-height: 38px;
-    padding: 6px 10px;
+    min-height: 34px;
+    padding: 4px 8px;
     white-space: nowrap;
     overflow-wrap: normal;
     text-align: center;
@@ -2763,8 +2782,8 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   .post-controls.admin-post-controls .admin-ip-link {
     display: inline-flex;
     align-items: center;
-    min-height: 38px;
-    padding: 6px 10px;
+    min-height: 34px;
+    padding: 4px 8px;
     margin-left: 0;
   }
 }
@@ -3289,11 +3308,15 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   .search-form button,
   .header-search button,
   .board-nav-link,
-  .post-controls .edit-btn,
-  .post-controls .del-btn,
-  .post-controls .report-btn,
   .pagination a {
     min-height: 38px;
+  }
+
+  .post-controls .edit-btn,
+  .post-controls .del-btn,
+  .post-controls .report-btn {
+    min-height: 34px;
+    padding: 4px 8px;
   }
 
   .audio-container,

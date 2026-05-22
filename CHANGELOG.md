@@ -2,6 +2,12 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## [1.2.2]
+
+### Changed
+
+- Bumped the current development version to `1.2.2`.
+
 ## [1.2.1]
 
 ### Improved
