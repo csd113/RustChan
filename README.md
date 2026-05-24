@@ -17,6 +17,7 @@ Current development version: `1.2.2`.
 [What is RustChan?](#what-is-rustchan) ·
 [Why it exists](#why-it-exists) ·
 [Core features](#core-features) ·
+[Screenshots](#screenshots) ·
 [Quick start](#quick-start) ·
 [Configuration](#configuration-and-data) ·
 [Admin panel](#admin-panel-and-cli) ·
@@ -26,12 +27,26 @@ Current development version: `1.2.2`.
 
 </div>
 
+## Screenshots
+
 <p align="center">
-  <img width="100%" alt="RustChan home page" src="https://github.com/user-attachments/assets/3993ae93-aa9f-4285-b623-7a8f286b60ae" />
+  <img width="100%" alt="RustChan home page with multiple boards and site stats" src="docs/screenshots/rustchan-home.png" />
 </p>
 
 <p align="center">
-  <img width="100%" alt="RustChan board view" src="https://github.com/user-attachments/assets/ba89f0e2-0cee-4aa8-a085-4507575c0247" />
+  <img width="100%" alt="RustChan board catalog with thread cards and media thumbnails" src="docs/screenshots/rustchan-catalog.png" />
+</p>
+
+<p align="center">
+  <img width="100%" alt="RustChan thread page with replies, quote links, media preview, and post controls" src="docs/screenshots/rustchan-thread.png" />
+</p>
+
+<p align="center">
+  <img width="100%" alt="RustChan admin dashboard settings view" src="docs/screenshots/rustchan-admin.png" />
+</p>
+
+<p align="center">
+  <img width="60%" alt="RustChan mobile thread view" src="docs/screenshots/rustchan-mobile.png" />
 </p>
 
 ## What Is RustChan?
