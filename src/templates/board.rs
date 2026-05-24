@@ -404,6 +404,9 @@ fn render_catalog_actions(
     hide_label: &str,
     return_to: &str,
 ) -> String {
+    let report_post_id = thread.op_id.unwrap_or(thread.id);
+    let report_fallback =
+        super::report_fallback_form(board_short, report_post_id, thread.id, csrf_token, "submit");
     format!(
         r#"<div class="catalog-card-actions">
   <button type="button" class="catalog-thread-menu-toggle" data-action="toggle-thread-menu" aria-haspopup="true" aria-expanded="false" aria-label="Thread actions"></button>
@@ -426,16 +429,36 @@ fn render_catalog_actions(
       <button type="submit" class="catalog-thread-menu-item">{hide_label}</button>
     </form>
   </div>
+  <div class="catalog-thread-fallback-actions" aria-label="Thread actions">
+    {report_fallback}
+    <form class="catalog-thread-fallback-form" method="POST" action="/{board}/thread-preference">
+      <input type="hidden" name="_csrf" value="{csrf}">
+      <input type="hidden" name="thread_id" value="{thread_id}">
+      <input type="hidden" name="board" value="{board}">
+      <input type="hidden" name="action" value="{pin_action}">
+      <input type="hidden" name="return_to" value="{return_to}">
+      <button type="submit" class="catalog-thread-fallback-submit">{pin_label}</button>
+    </form>
+    <form class="catalog-thread-fallback-form" method="POST" action="/{board}/thread-preference">
+      <input type="hidden" name="_csrf" value="{csrf}">
+      <input type="hidden" name="thread_id" value="{thread_id}">
+      <input type="hidden" name="board" value="{board}">
+      <input type="hidden" name="action" value="{hide_action}">
+      <input type="hidden" name="return_to" value="{return_to}">
+      <button type="submit" class="catalog-thread-fallback-submit">{hide_label}</button>
+    </form>
+  </div>
 </div>"#,
-        post_id = thread.op_id.unwrap_or(thread.id),
+        post_id = report_post_id,
         thread_id = thread.id,
         board = escape_html(board_short),
         csrf = escape_html(csrf_token),
-        pin_action = pin_action,
-        pin_label = pin_label,
-        hide_action = hide_action,
-        hide_label = hide_label,
+        pin_action = escape_html(pin_action),
+        pin_label = escape_html(pin_label),
+        hide_action = escape_html(hide_action),
+        hide_label = escape_html(hide_label),
         return_to = escape_html(return_to),
+        report_fallback = report_fallback,
     )
 }
 
@@ -1940,6 +1963,34 @@ mod tests {
 
         assert!(menu_start > actions_start);
         assert!(report_idx < pin_idx && pin_idx < hide_idx);
+    }
+
+    #[test]
+    fn catalog_actions_render_no_js_fallback_forms() {
+        let board = sample_board();
+        let thread = sample_thread();
+
+        let html = render_catalog_card(
+            &board,
+            &thread,
+            false,
+            None,
+            "csrf",
+            "pin",
+            "Pin thread",
+            "hide",
+            "Hide thread",
+            "/test/catalog",
+        );
+
+        assert!(html.contains(r#"class="catalog-thread-fallback-actions""#));
+        assert!(html.contains(r#"class="report-fallback-form" method="POST" action="/report""#));
+        assert!(html.contains(r#"name="post_id" value="87""#));
+        assert!(html.contains(r#"name="thread_id" value="87""#));
+        assert!(html.contains(r#"method="POST" action="/test/thread-preference""#));
+        assert!(html.contains(r#"name="_csrf" value="csrf""#));
+        assert!(html.contains(r#"name="action" value="pin""#));
+        assert!(html.contains(r#"name="action" value="hide""#));
     }
 
     #[test]

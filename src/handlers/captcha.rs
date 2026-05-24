@@ -52,8 +52,10 @@ mod tests {
 
     #[tokio::test]
     async fn captcha_image_route_returns_png_with_private_no_cache_headers() {
+        const CAPTCHA_ROUTE: &str = concat!("/captcha/", "{id}");
+
         let id = "00000000000000000000000000000006";
-        let app = Router::new().route("/captcha/{id}", get(serve_captcha_image));
+        let app = Router::new().route(CAPTCHA_ROUTE, get(serve_captcha_image));
 
         let response = app
             .oneshot(

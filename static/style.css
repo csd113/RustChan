@@ -2004,12 +2004,94 @@ html:not([data-theme]) .poster-id-btn {
   box-sizing: border-box;
 }
 
+.report-fallback-form {
+  display: none;
+  margin: 0;
+  max-width: 100%;
+}
+
+.report-fallback-details {
+  max-width: 100%;
+}
+
+.report-fallback-summary,
+.report-fallback-submit,
+.catalog-thread-fallback-submit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--green-pale);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.68rem;
+  min-height: 26px;
+  padding: 2px 6px;
+  line-height: 1.1;
+  text-decoration: none;
+  border-radius: var(--radius-sm);
+  box-sizing: border-box;
+}
+
+.report-fallback-summary {
+  list-style: none;
+}
+
+.report-fallback-summary::-webkit-details-marker {
+  display: none;
+}
+
+.report-fallback-details[open] {
+  display: grid;
+  gap: 4px;
+  min-width: min(18rem, 100%);
+}
+
+.report-fallback-reason-label {
+  display: grid;
+  gap: 2px;
+  color: var(--text-dim);
+  font-size: 0.68rem;
+}
+
+.report-fallback-reason {
+  width: 100%;
+  min-height: 30px;
+  box-sizing: border-box;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--green-pale);
+  font-family: var(--font);
+  font-size: 0.78rem;
+  padding: 4px 6px;
+}
+
 .post-controls .edit-btn:hover,
 .post-controls .del-btn:hover,
-.post-controls .report-btn:hover {
+.post-controls .report-btn:hover,
+.report-fallback-summary:hover,
+.report-fallback-summary:focus-visible,
+.report-fallback-submit:hover,
+.report-fallback-submit:focus-visible,
+.catalog-thread-fallback-submit:hover,
+.catalog-thread-fallback-submit:focus-visible {
   border-color: var(--border-glow);
   color: var(--green-bright);
   background: color-mix(in srgb, var(--green) 8%, transparent);
+}
+
+html.no-js #report-modal {
+  display: none !important;
+}
+
+html.no-js .post-controls .report-btn[data-action="open-report"] {
+  display: none;
+}
+
+html.no-js .post-controls .report-fallback-form {
+  display: inline-flex;
 }
 
 .self-action-form .del-btn,
@@ -2382,6 +2464,14 @@ html:not([data-theme]) .poster-id-btn {
   margin: 0;
 }
 
+.catalog-thread-fallback-actions {
+  display: none;
+}
+
+.catalog-thread-fallback-form {
+  margin: 0;
+}
+
 .catalog-thread-menu-item {
   width: 100%;
   border: none;
@@ -2401,6 +2491,45 @@ html:not([data-theme]) .poster-id-btn {
   color: var(--green-bright);
 }
 
+html.no-js .catalog-meta-row {
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0;
+}
+
+html.no-js .catalog-card-actions,
+html.no-js .catalog-item:hover .catalog-card-actions,
+html.no-js .catalog-item:focus-within .catalog-card-actions {
+  position: static;
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+  z-index: auto;
+  margin-left: auto;
+}
+
+html.no-js .catalog-thread-menu-toggle,
+html.no-js .catalog-thread-menu {
+  display: none;
+}
+
+html.no-js .catalog-thread-fallback-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+}
+
+html.no-js .catalog-thread-fallback-actions .report-fallback-form {
+  display: inline-flex;
+}
+
+html.no-js .catalog-thread-fallback-actions .report-fallback-details[open] {
+  min-width: min(13rem, 100%);
+}
+
 @media (hover: none), (pointer: coarse) {
   .catalog-thread-menu-toggle {
     width: 38px;
@@ -2415,6 +2544,11 @@ html:not([data-theme]) .poster-id-btn {
     min-height: 40px;
     padding-right: 44px;
     padding-left: 44px;
+  }
+
+  html.no-js .catalog-meta-row {
+    padding-right: 0;
+    padding-left: 0;
   }
 
   .catalog-card-actions {
@@ -3336,9 +3470,16 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 
   .post-controls .edit-btn,
   .post-controls .del-btn,
-  .post-controls .report-btn {
+  .post-controls .report-btn,
+  .report-fallback-summary,
+  .report-fallback-submit,
+  .catalog-thread-fallback-submit {
     min-height: 34px;
     padding: 4px 8px;
+  }
+
+  .report-fallback-reason {
+    font-size: 16px;
   }
 
   .audio-container,

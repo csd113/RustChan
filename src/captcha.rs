@@ -101,6 +101,10 @@ pub fn generate_captcha_image(
 /// A challenge is removed for every validation attempt. This keeps successful
 /// answers from being replayed and makes guessing impractical because each
 /// challenge permits only one answer attempt within its short lifetime.
+///
+/// # Errors
+/// Returns an error when the request is malformed, the challenge is missing or
+/// expired, or the submitted answer does not match the stored challenge.
 pub fn verify_captcha(
     board_short: &str,
     captcha_id: &str,
@@ -191,8 +195,8 @@ fn is_valid_board_short(board_short: &str) -> bool {
 }
 
 #[cfg(test)]
-pub(crate) mod testing {
-    pub(crate) fn insert_challenge_for_test(
+pub mod testing {
+    pub fn insert_challenge_for_test(
         board_short: &str,
         captcha_id: &str,
         answer: &str,
@@ -211,7 +215,7 @@ pub(crate) mod testing {
         );
     }
 
-    pub(crate) fn challenge_exists_for_test(captcha_id: &str) -> bool {
+    pub fn challenge_exists_for_test(captcha_id: &str) -> bool {
         super::CAPTCHA_CHALLENGES.contains_key(captcha_id)
     }
 }

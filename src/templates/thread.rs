@@ -1285,10 +1285,17 @@ pub fn render_post(
             board = escape_html(board_short),
             csrf = escape_html(csrf_token),
         );
+        let report_fallback = super::report_fallback_form(
+            board_short,
+            post.id,
+            post.thread_id,
+            csrf_token,
+            "submit report",
+        );
 
         let _ = write!(
             html,
-            r#"<div class="post-controls">{self_action_controls}{report_btn}</div>"#
+            r#"<div class="post-controls">{self_action_controls}{report_btn}{report_fallback}</div>"#
         );
     }
 
@@ -1593,6 +1600,40 @@ mod tests {
         assert!(html.contains(r#"name="_csrf" value="admin-csrf""#));
         assert!(html.contains(r#"name="_csrf"   value="admin-csrf""#));
         assert!(html.contains(r#"data-csrf="public-csrf""#));
+    }
+
+    #[test]
+    fn render_post_includes_no_js_report_fallback_form() {
+        let post = sample_post();
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: true,
+                is_admin: false,
+                admin_csrf_token: None,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+                video_audio_muted: false,
+            },
+            0,
+        );
+
+        assert!(html.contains(r#"class="report-btn""#));
+        assert!(html.contains(r#"data-action="open-report""#));
+        assert!(html.contains(r#"class="report-fallback-form" method="POST" action="/report""#));
+        assert!(html.contains(r#"name="_csrf" value="csrf""#));
+        assert!(html.contains(r#"name="post_id" value="1""#));
+        assert!(html.contains(r#"name="thread_id" value="1""#));
+        assert!(html.contains(r#"name="board" value="test""#));
     }
 
     #[test]

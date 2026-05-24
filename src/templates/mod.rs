@@ -469,6 +469,37 @@ pub const fn report_modal_script() -> &'static str {
 </div>"#
 }
 
+#[must_use]
+fn report_fallback_form(
+    board_short: &str,
+    post_id: i64,
+    thread_id: i64,
+    csrf_token: &str,
+    submit_label: &str,
+) -> String {
+    format!(
+        r#"<form class="report-fallback-form" method="POST" action="/report">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="post_id" value="{post_id}">
+  <input type="hidden" name="thread_id" value="{thread_id}">
+  <input type="hidden" name="board" value="{board}">
+  <details class="report-fallback-details">
+    <summary class="report-fallback-summary">report</summary>
+    <label class="report-fallback-reason-label">
+      <span>reason</span>
+      <input class="report-fallback-reason" type="text" name="reason" maxlength="256" placeholder="reason (optional)">
+    </label>
+    <button type="submit" class="report-fallback-submit">{submit_label}</button>
+  </details>
+</form>"#,
+        csrf = escape_html(csrf_token),
+        post_id = post_id,
+        thread_id = thread_id,
+        board = escape_html(board_short),
+        submit_label = escape_html(submit_label),
+    )
+}
+
 // ─── Thread auto-update script ────────────────────────────────────────────────
 
 // All auto-update logic lives in /static/main.js.
