@@ -520,7 +520,6 @@ pub(crate) fn write_root_checksums(root_dir: &Path, extra_paths: &[&Path]) -> Re
         README_FILE_NAME,
         BACKUP_METADATA_FILE_NAME,
         MANIFEST_FILE_NAME,
-        CHECKSUMS_FILE_NAME,
     ] {
         let path = root_dir.join(name);
         if !path.is_file() {
