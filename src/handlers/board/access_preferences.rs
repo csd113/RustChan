@@ -350,6 +350,14 @@ fn thread_activity_cookie(markers: &[ThreadActivityMarker]) -> Option<Cookie<'st
     Some(cookie)
 }
 
+fn activity_cookie_removal(name: &'static str) -> Cookie<'static> {
+    let mut cookie = Cookie::from(name);
+    cookie.set_path("/");
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_secure(CONFIG.https_cookies);
+    cookie
+}
+
 pub fn board_activity_markers_from_jar(jar: &CookieJar) -> HashMap<i64, BoardActivityMarker> {
     jar.get(BOARD_ACTIVITY_COOKIE)
         .map(Cookie::value)
@@ -386,7 +394,7 @@ pub fn remember_board_activity(
     if let Some(cookie) = board_activity_cookie(&markers) {
         jar.add(cookie)
     } else {
-        jar.remove(Cookie::from(BOARD_ACTIVITY_COOKIE))
+        jar.remove(activity_cookie_removal(BOARD_ACTIVITY_COOKIE))
     }
 }
 
@@ -398,7 +406,7 @@ pub fn prune_board_activity_markers(jar: CookieJar, known_board_ids: &HashSet<i6
     if let Some(cookie) = board_activity_cookie(&markers) {
         jar.add(cookie)
     } else {
-        jar.remove(Cookie::from(BOARD_ACTIVITY_COOKIE))
+        jar.remove(activity_cookie_removal(BOARD_ACTIVITY_COOKIE))
     }
 }
 
@@ -422,7 +430,7 @@ pub fn remember_thread_activity(
     if let Some(cookie) = thread_activity_cookie(&markers) {
         jar.add(cookie)
     } else {
-        jar.remove(Cookie::from(THREAD_ACTIVITY_COOKIE))
+        jar.remove(activity_cookie_removal(THREAD_ACTIVITY_COOKIE))
     }
 }
 
@@ -449,7 +457,7 @@ where
     if let Some(cookie) = thread_activity_cookie(&markers) {
         jar.add(cookie)
     } else {
-        jar.remove(Cookie::from(THREAD_ACTIVITY_COOKIE))
+        jar.remove(activity_cookie_removal(THREAD_ACTIVITY_COOKIE))
     }
 }
 
