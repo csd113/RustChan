@@ -35,8 +35,9 @@ use crate::{
     },
 };
 use axum::{
+    extract::FromRequestParts,
     extract::{ConnectInfo, Form, Multipart, Path, Query, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -69,6 +70,33 @@ pub(crate) fn should_set_public_secure_cookie(
     peer: Option<SocketAddr>,
 ) -> bool {
     crate::handlers::admin::should_set_secure_cookie(headers, peer)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct OptionalConnectInfoPeer(pub Option<SocketAddr>);
+
+impl<S> FromRequestParts<S> for OptionalConnectInfoPeer
+where
+    S: Send + Sync,
+{
+    type Rejection = StatusCode;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> impl std::future::Future<Output = std::result::Result<Self, Self::Rejection>> + Send {
+        let peer = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|connect_info| connect_info.0);
+        std::future::ready(Ok(Self(peer)))
+    }
+}
+
+pub(crate) const fn optional_connect_info_peer(
+    peer: OptionalConnectInfoPeer,
+) -> Option<SocketAddr> {
+    peer.0
 }
 
 const PREVIEW_REPLIES: i64 = 3;
@@ -478,8 +506,13 @@ pub(crate) fn board_access_denied_response(
     board_access_required_response(jar, html)
 }
 
-pub async fn banned_page(Query(query): Query<BannedPageQuery>, jar: CookieJar) -> Response {
-    let (jar, csrf) = ensure_csrf(jar);
+pub async fn banned_page(
+    Query(query): Query<BannedPageQuery>,
+    jar: CookieJar,
+    req_headers: HeaderMap,
+    peer: OptionalConnectInfoPeer,
+) -> Response {
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
     let reason = query
         .reason
         .unwrap_or_else(|| "No reason given".to_owned())

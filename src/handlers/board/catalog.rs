@@ -18,10 +18,11 @@ pub async fn catalog(
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
+    peer: OptionalConnectInfoPeer,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
     let user_preferences = user_preferences_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
     let viewer_key = viewer_preference_key(&client_ip, &jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
@@ -265,10 +266,12 @@ pub async fn hidden_threads(
     Path(board_short): Path<String>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
+    req_headers: HeaderMap,
+    peer: OptionalConnectInfoPeer,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
     let user_preferences = user_preferences_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
     let viewer_key = viewer_preference_key(&client_ip, &jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
@@ -343,10 +346,12 @@ pub async fn board_archive(
     Path(board_short): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     jar: CookieJar,
+    req_headers: HeaderMap,
+    peer: OptionalConnectInfoPeer,
 ) -> Result<Response> {
     const ARCHIVE_PER_PAGE: i64 = 20;
     let current_theme = current_theme_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
@@ -428,11 +433,13 @@ pub async fn search(
     Path(board_short): Path<String>,
     Query(q): Query<SearchQuery>,
     jar: CookieJar,
+    req_headers: HeaderMap,
+    peer: OptionalConnectInfoPeer,
 ) -> Result<Response> {
     const SEARCH_PER_PAGE: i64 = 20;
     let current_theme = current_theme_from_jar(&jar);
     let user_preferences = user_preferences_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());

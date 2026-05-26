@@ -28,10 +28,12 @@ pub async fn index(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
     jar: CookieJar,
+    req_headers: HeaderMap,
+    peer: OptionalConnectInfoPeer,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
     let user_preferences = user_preferences_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
     let mut jar = jar;
     let nsfw_consent = has_nsfw_consent(&jar);
     let board_activity_markers = board_activity_markers_from_jar(&jar);
@@ -212,10 +214,11 @@ pub async fn board_index(
     Query(params): Query<HashMap<String, String>>,
     jar: CookieJar,
     req_headers: HeaderMap,
+    peer: OptionalConnectInfoPeer,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
     let user_preferences = user_preferences_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
