@@ -275,7 +275,7 @@ pub async fn view_thread(
 pub async fn post_reply(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
@@ -452,7 +452,7 @@ pub async fn post_reply(
         submit_result.post_id,
         &submit_result.deletion_token,
         submit_result.created_at + crate::handlers::board::SELF_DELETE_WINDOW_SECS,
-        crate::handlers::board::should_set_public_secure_cookie(&req_headers, Some(peer)),
+        crate::handlers::board::should_set_public_secure_cookie(&req_headers, secure_context),
     );
 
     if xhr_request {
@@ -954,6 +954,8 @@ pub async fn delete_own_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
+    req_headers: HeaderMap,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<DeletePostForm>,
 ) -> Result<Response> {
     check_csrf_jar(&jar, form.csrf.as_deref())?;
@@ -1054,14 +1056,26 @@ pub async fn delete_own_post(
     .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
 
     let (thread_id, result) = outcome;
+    let cookie_secure =
+        crate::handlers::board::should_set_public_secure_cookie(&req_headers, secure_context);
     match result {
         crate::db::posts::SelfDeleteOutcome::DeletedReply => {
-            let jar = crate::handlers::board::forget_owned_post(jar, &board_short, post_id);
+            let jar = crate::handlers::board::forget_owned_post_with_secure(
+                jar,
+                &board_short,
+                post_id,
+                cookie_secure,
+            );
             let redirect_url = format!("/{board_short}/thread/{thread_id}");
             Ok((jar, Redirect::to(&redirect_url)).into_response())
         }
         crate::db::posts::SelfDeleteOutcome::DeletedThread => {
-            let jar = crate::handlers::board::forget_owned_post(jar, &board_short, post_id);
+            let jar = crate::handlers::board::forget_owned_post_with_secure(
+                jar,
+                &board_short,
+                post_id,
+                cookie_secure,
+            );
             let redirect_url = format!("/{board_short}/catalog");
             Ok((jar, Redirect::to(&redirect_url)).into_response())
         }

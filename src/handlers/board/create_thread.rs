@@ -12,7 +12,7 @@ use super::*;
 pub async fn create_thread(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
@@ -199,7 +199,7 @@ pub async fn create_thread(
         submit_result.post_id,
         &submit_result.deletion_token,
         submit_result.created_at + SELF_DELETE_WINDOW_SECS,
-        should_set_public_secure_cookie(&req_headers, Some(peer)),
+        should_set_public_secure_cookie(&req_headers, secure_context),
     );
 
     if xhr_request {

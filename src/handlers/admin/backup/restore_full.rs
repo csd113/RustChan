@@ -657,7 +657,7 @@ fn restrict_private_key_material_permissions(path: &Path) -> Result<()> {
 fn full_restore_success_response(
     jar: CookieJar,
     headers: &HeaderMap,
-    peer: std::net::SocketAddr,
+    secure_context: crate::middleware::SecureCookieContext,
     fresh_sid: String,
     xhr_request: bool,
 ) -> Response {
@@ -665,7 +665,7 @@ fn full_restore_success_response(
     new_cookie.set_http_only(true);
     new_cookie.set_same_site(super::ADMIN_COOKIE_SAME_SITE);
     new_cookie.set_path("/");
-    new_cookie.set_secure(super::should_set_secure_cookie(headers, Some(peer)));
+    new_cookie.set_secure(super::should_set_secure_cookie(headers, secure_context));
     new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
 
     if xhr_request {
@@ -688,7 +688,7 @@ pub async fn admin_restore(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     request: Request,
 ) -> Response {
     let xhr_request = is_xml_http_request(&headers);
@@ -716,7 +716,8 @@ pub async fn admin_restore(
     };
 
     let result: Result<String> = async {
-        let session_id = restore_auth_preflight(&state, &headers, &jar, Some(peer)).await?;
+        let session_id =
+            restore_auth_preflight(&state, &headers, &jar, secure_context.peer).await?;
         let upload = stream_restore_upload_to_tempfile(RestoreKind::Full, &mut multipart).await?;
         validate_streamed_restore_upload(RestoreKind::Full, &jar, &upload)?;
         let zip_tmp = upload.temp_file;
@@ -804,7 +805,7 @@ pub async fn admin_restore(
                 return (jar, Redirect::to("/admin")).into_response();
             }
 
-            full_restore_success_response(jar, &headers, peer, fresh_sid, xhr_request)
+            full_restore_success_response(jar, &headers, secure_context, fresh_sid, xhr_request)
         }
         Err(e) => {
             tracing::error!(
@@ -824,11 +825,16 @@ pub async fn restore_saved_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context.peer,
+        form.csrf.as_deref(),
+    )?;
 
     let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
     let upload_dir = CONFIG.upload_dir.clone();
@@ -898,7 +904,11 @@ pub async fn restore_saved_full_backup(
     }
 
     Ok(full_restore_success_response(
-        jar, &headers, peer, fresh_sid, false,
+        jar,
+        &headers,
+        secure_context,
+        fresh_sid,
+        false,
     ))
 }
 
@@ -1079,7 +1089,10 @@ mod tests {
         let response = full_restore_success_response(
             CookieJar::new(),
             &headers,
-            std::net::SocketAddr::from(([127, 0, 0, 1], 41000)),
+            crate::middleware::SecureCookieContext::new(
+                Some(std::net::SocketAddr::from(([127, 0, 0, 1], 41000))),
+                false,
+            ),
             "fresh-session".to_owned(),
             false,
         );

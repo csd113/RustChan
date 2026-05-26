@@ -167,7 +167,7 @@ pub fn remember_owned_post_until_with_secure(
     secure: bool,
 ) -> CookieJar {
     if expires_at <= chrono::Utc::now().timestamp() {
-        return forget_owned_post(jar, board_short, post_id);
+        return forget_owned_post_with_secure(jar, board_short, post_id, secure);
     }
 
     let mut grants = owned_post_grants_from_jar(&jar)
@@ -190,12 +190,17 @@ pub fn remember_owned_post_until_with_secure(
     }
 }
 
-pub fn forget_owned_post(jar: CookieJar, board_short: &str, post_id: i64) -> CookieJar {
+pub fn forget_owned_post_with_secure(
+    jar: CookieJar,
+    board_short: &str,
+    post_id: i64,
+    secure: bool,
+) -> CookieJar {
     let grants = owned_post_grants_from_jar(&jar)
         .into_iter()
         .filter(|grant| !(grant.post_id == post_id && grant.board_short == board_short))
         .collect::<Vec<_>>();
-    if let Some(cookie) = owned_posts_cookie(&grants, CONFIG.https_cookies) {
+    if let Some(cookie) = owned_posts_cookie(&grants, secure) {
         jar.add(cookie)
     } else {
         jar.remove(Cookie::from(OWNED_POSTS_COOKIE))
@@ -504,9 +509,9 @@ pub fn ensure_csrf_with_secure(jar: CookieJar, secure: bool) -> (CookieJar, Stri
 pub fn ensure_csrf_for_request(
     jar: CookieJar,
     headers: &HeaderMap,
-    peer: Option<std::net::SocketAddr>,
+    context: crate::middleware::SecureCookieContext,
 ) -> (CookieJar, String) {
-    ensure_csrf_with_secure(jar, should_set_public_secure_cookie(headers, peer))
+    ensure_csrf_with_secure(jar, should_set_public_secure_cookie(headers, context))
 }
 
 pub async fn set_theme(
@@ -1080,12 +1085,13 @@ pub async fn update_thread_preference(
 #[cfg(test)]
 mod tests {
     use super::{
-        board_activity_markers_from_jar, owned_post_grants_from_jar, owned_posts_cookie,
-        owned_posts_cookie_value, prune_board_activity_markers, remember_owned_post_until,
-        thread_activity_markers_from_jar, OwnedPostGrant, BOARD_ACTIVITY_COOKIE,
-        OWNED_POSTS_COOKIE_MAX_LEN, SELF_DELETE_WINDOW_SECS, THREAD_ACTIVITY_COOKIE,
+        board_activity_markers_from_jar, ensure_csrf_with_secure, owned_post_grants_from_jar,
+        owned_posts_cookie, owned_posts_cookie_value, prune_board_activity_markers,
+        remember_owned_post_until, thread_activity_markers_from_jar, OwnedPostGrant,
+        BOARD_ACTIVITY_COOKIE, OWNED_POSTS_COOKIE_MAX_LEN, SELF_DELETE_WINDOW_SECS,
+        THREAD_ACTIVITY_COOKIE, VISITOR_ID_COOKIE,
     };
-    use axum_extra::extract::cookie::SameSite;
+    use axum_extra::extract::cookie::{CookieJar, SameSite};
     use std::collections::HashSet;
 
     #[test]
@@ -1149,6 +1155,30 @@ mod tests {
             true,
         );
         assert_eq!(secure_cookie.secure(), Some(true));
+    }
+
+    #[test]
+    fn ensure_csrf_with_secure_applies_transport_to_public_cookies() {
+        let (insecure_jar, _) = ensure_csrf_with_secure(CookieJar::new(), false);
+        let insecure_visitor = insecure_jar.get(VISITOR_ID_COOKIE).expect("visitor cookie");
+        let insecure_csrf = insecure_jar.get("csrf_token").expect("csrf cookie");
+        assert_eq!(insecure_visitor.secure(), Some(false));
+        assert_eq!(insecure_visitor.same_site(), Some(SameSite::Lax));
+        assert_eq!(insecure_csrf.secure(), Some(false));
+        assert_eq!(insecure_csrf.same_site(), Some(SameSite::Strict));
+
+        let (secure_jar, _) = ensure_csrf_with_secure(CookieJar::new(), true);
+        assert_eq!(
+            secure_jar
+                .get(VISITOR_ID_COOKIE)
+                .expect("visitor cookie")
+                .secure(),
+            Some(true),
+        );
+        assert_eq!(
+            secure_jar.get("csrf_token").expect("csrf cookie").secure(),
+            Some(true),
+        );
     }
 
     #[test]

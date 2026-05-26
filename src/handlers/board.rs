@@ -27,7 +27,7 @@ use crate::{
     db::{self},
     error::{AppError, Result},
     handlers::{parse_post_multipart, posting, render},
-    middleware::{validate_csrf, validate_signed_csrf, AppState},
+    middleware::{validate_csrf, validate_signed_csrf, AppState, SecureCookieContext},
     models::{Board, Pagination, SearchQuery, SEARCH_QUERY_MAX_CHARS},
     templates,
     utils::crypto::{
@@ -35,16 +35,14 @@ use crate::{
     },
 };
 use axum::{
-    extract::FromRequestParts,
-    extract::{ConnectInfo, Form, Multipart, Path, Query, State},
-    http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode},
+    extract::{Form, Multipart, Path, Query, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
 use std::sync::{atomic::AtomicU64, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use time::Duration;
@@ -67,36 +65,17 @@ pub use reports::*;
 
 pub(crate) fn should_set_public_secure_cookie(
     headers: &HeaderMap,
-    peer: Option<SocketAddr>,
+    context: SecureCookieContext,
 ) -> bool {
-    crate::handlers::admin::should_set_secure_cookie(headers, peer)
+    crate::handlers::admin::should_set_secure_cookie(headers, context)
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct OptionalConnectInfoPeer(pub Option<SocketAddr>);
-
-impl<S> FromRequestParts<S> for OptionalConnectInfoPeer
-where
-    S: Send + Sync,
-{
-    type Rejection = StatusCode;
-
-    fn from_request_parts(
-        parts: &mut Parts,
-        _state: &S,
-    ) -> impl std::future::Future<Output = std::result::Result<Self, Self::Rejection>> + Send {
-        let peer = parts
-            .extensions
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|connect_info| connect_info.0);
-        std::future::ready(Ok(Self(peer)))
-    }
-}
+pub(crate) type OptionalConnectInfoPeer = SecureCookieContext;
 
 pub(crate) const fn optional_connect_info_peer(
     peer: OptionalConnectInfoPeer,
-) -> Option<SocketAddr> {
-    peer.0
+) -> SecureCookieContext {
+    peer
 }
 
 const PREVIEW_REPLIES: i64 = 3;
