@@ -236,9 +236,23 @@ async fn read_upload_field(
     field_name: &'static str,
     budget: &mut PublicMultipartBudget,
 ) -> Result<Option<(TempUpload, String)>> {
-    let fname = field.file_name().unwrap_or(default_name).to_owned();
+    let submitted_filename = field.file_name().map(str::to_owned);
+    let fname = submitted_filename
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(default_name)
+        .to_owned();
     let upload = stream_field_to_temp_file(field, max_bytes, field_name, budget).await?;
-    Ok((upload.size_bytes > 0).then_some((upload, fname)))
+    if upload.size_bytes == 0 {
+        if submitted_filename
+            .as_deref()
+            .is_some_and(|name| !name.is_empty())
+        {
+            return Err(AppError::BadRequest("Uploaded file is empty.".into()));
+        }
+        return Ok(None);
+    }
+    Ok(Some((upload, fname)))
 }
 
 pub struct TempUpload {
@@ -1127,6 +1141,58 @@ trailer << /Root 1 0 R >>
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn multipart_parser_rejects_named_zero_byte_upload() {
+        let router = Router::new().route("/parse", post(parse_default_limits));
+        let (boundary, body) = multipart_body_with_files(
+            &[("_csrf", "csrf123"), ("body", "zero byte")],
+            &[("file", "empty.png", b"", "image/png")],
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/parse")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn multipart_parser_ignores_empty_unselected_file_control() {
+        let router = Router::new().route("/parse", post(parse_default_limits));
+        let (boundary, body) = multipart_body_with_files(
+            &[("_csrf", "csrf123"), ("body", "text only")],
+            &[("file", "", b"", "application/octet-stream")],
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/parse")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[test]

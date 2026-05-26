@@ -185,7 +185,8 @@ fn build_upload_finalize_payload(
         relative_paths,
         primary_hash,
         primary_file_path: primary.map(|file| file.file_path.clone()),
-        primary_thumb_path: primary.map(|file| file.thumb_path.clone()),
+        primary_thumb_path: primary
+            .and_then(|file| (!file.thumb_path.is_empty()).then(|| file.thumb_path.clone())),
         primary_mime_type: primary.map(|file| file.mime_type.clone()),
     })
 }
@@ -1270,6 +1271,32 @@ mod tests {
             Some(i64::try_from(b"cached file".len()).expect("cached size fits"))
         );
         assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+    }
+
+    #[test]
+    fn upload_finalize_payload_omits_empty_generic_thumb_path() {
+        let primary = crate::utils::files::UploadedFile {
+            file_path: "test/file.bin".to_owned(),
+            thumb_path: String::new(),
+            original_name: "file.bin".to_owned(),
+            mime_type: "application/octet-stream".to_owned(),
+            file_size: 4,
+            media_type: crate::models::MediaType::Other,
+            processing_pending: false,
+            dedup_reused: false,
+        };
+
+        let payload = super::build_upload_finalize_payload(
+            std::path::Path::new("/tmp/rustchan-stage"),
+            Some(&primary),
+            None,
+            None,
+        )
+        .expect("generic upload payload");
+
+        assert_eq!(payload.relative_paths, vec!["test/file.bin"]);
+        assert_eq!(payload.primary_file_path.as_deref(), Some("test/file.bin"));
+        assert!(payload.primary_thumb_path.is_none());
     }
 
     #[test]
