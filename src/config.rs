@@ -166,6 +166,18 @@ fn migrate_dir_if_present(old_path: &Path, new_path: &Path) -> anyhow::Result<()
 pub fn migrate_runtime_layout_if_needed() -> anyhow::Result<()> {
     let data_dir = data_dir();
     std::fs::create_dir_all(&data_dir)?;
+    for dir in [
+        runtime_dir(),
+        runtime_tmp_dir(),
+        runtime_temp_board_downloads_dir(),
+        runtime_favicon_dir(),
+        runtime_banner_dir(),
+        backups_dir(),
+        full_backups_dir(),
+        board_backups_dir(),
+    ] {
+        std::fs::create_dir_all(dir)?;
+    }
 
     for &(legacy_name, destination) in RUNTIME_LAYOUT_MIGRATIONS {
         migrate_dir_if_present(&data_dir.join(legacy_name), &destination())?;
@@ -303,13 +315,16 @@ fn load_settings_file() -> SettingsFile {
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return SettingsFile::default();
     };
-    parse_settings_file_str(&raw).unwrap_or_else(|e| {
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "Warning: could not parse settings.toml: {e}"
-        );
-        SettingsFile::default()
-    })
+    parse_settings_file_str(&raw).unwrap_or_else(|_| settings_file_parse_error(&path))
+}
+
+fn settings_file_parse_error(path: &Path) -> ! {
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "CONFIG ERROR: could not parse {}. Refusing to start with fallback defaults; fix or remove settings.toml. Details are omitted to avoid leaking secrets.",
+        path.display()
+    );
+    std::process::exit(78);
 }
 
 fn parse_settings_file_str(raw: &str) -> Result<SettingsFile, toml::de::Error> {

@@ -608,6 +608,7 @@ pub fn process_primary_upload(
     // automatically refreshed to point at the newly saved files.
     let hash = sha256_file_hex(upload.temp_file.path())?;
     if let Some(cached) = crate::db::find_file_by_hash(conn, &hash)? {
+        let same_board_cache = cached_paths_belong_to_board(&cached, &board.short_name);
         let file_ok = std::path::Path::new(upload_dir)
             .join(&cached.file_path)
             .exists();
@@ -616,7 +617,7 @@ pub fn process_primary_upload(
                 .join(&cached.thumb_path)
                 .exists();
 
-        if file_ok && thumb_ok {
+        if same_board_cache && file_ok && thumb_ok {
             let cached_media = crate::models::MediaType::from_mime(&cached.mime_type);
             let cached_size =
                 std::fs::metadata(std::path::Path::new(upload_dir).join(&cached.file_path))
@@ -640,8 +641,10 @@ pub fn process_primary_upload(
 
         // One or both paths are gone — the entry is stale.  Log and fall
         // through so the file is re-saved and the cache is updated below.
+        // Cross-board hits are also re-saved under the current board; otherwise
+        // a protected board could point at public media from another board.
         tracing::debug!(
-            "dedup cache miss (files deleted): file_ok={file_ok} thumb_ok={thumb_ok}, \
+            "dedup cache miss: same_board_cache={same_board_cache} file_ok={file_ok} thumb_ok={thumb_ok}, \
              re-processing upload for hash {hash}"
         );
     }
@@ -666,6 +669,16 @@ pub fn process_primary_upload(
     )
     .map_err(|e| classify_upload_error(&e))?;
     Ok((Some(f), Some(hash)))
+}
+
+fn cached_paths_belong_to_board(cached: &crate::db::CachedFile, board_short: &str) -> bool {
+    upload_path_belongs_to_board(&cached.file_path, board_short)
+        && (cached.thumb_path.is_empty()
+            || upload_path_belongs_to_board(&cached.thumb_path, board_short))
+}
+
+fn upload_path_belongs_to_board(path: &str, board_short: &str) -> bool {
+    path.split('/').next() == Some(board_short)
 }
 
 fn temp_upload_mime(
@@ -1292,6 +1305,63 @@ trailer << /Root 1 0 R >>
             Ok(_) => panic!("malformed image should be rejected before dedup reuse"),
             Err(error) => assert!(error.to_string().contains("image header is malformed")),
         }
+    }
+
+    #[test]
+    fn primary_upload_does_not_reuse_dedup_cache_from_another_board() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        create_file_hash_table(&conn);
+
+        let board = crate::models::Board {
+            short_name: "secret".to_owned(),
+            allow_pdf: true,
+            ..crate::test_fixtures::sample_board()
+        };
+        let uploads_dir = tempfile::tempdir().expect("uploads dir");
+        let save_root = tempfile::tempdir().expect("save root");
+        let pdf = valid_pdf();
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(pdf);
+        let hash = hex::encode(hasher.finalize());
+
+        let public_thumb_dir = uploads_dir.path().join("img/thumbs");
+        std::fs::create_dir_all(&public_thumb_dir).expect("create public thumb dir");
+        std::fs::write(uploads_dir.path().join("img/cached.pdf"), pdf).expect("write public file");
+        std::fs::write(public_thumb_dir.join("cached.svg"), b"<svg></svg>")
+            .expect("write public thumb");
+        crate::db::record_file_hash(
+            &conn,
+            &hash,
+            "img/cached.pdf",
+            "img/thumbs/cached.svg",
+            "application/pdf",
+        )
+        .expect("record cross-board hash");
+
+        let _override = crate::media::thumbnail::override_pdf_renderer_mode(
+            crate::media::thumbnail::TestPdfRendererMode::Unavailable,
+        );
+        let (uploaded, primary_hash) = super::process_primary_upload(
+            Some(temp_upload("doc.pdf", pdf)),
+            &board,
+            &conn,
+            uploads_dir.path().to_str().expect("uploads dir path"),
+            save_root.path().to_str().expect("save root path"),
+            64,
+            1024 * 1024,
+            1024 * 1024,
+            1024 * 1024,
+            false,
+            false,
+            false,
+        )
+        .expect("PDF upload accepted");
+        let uploaded = uploaded.expect("uploaded PDF");
+
+        assert!(uploaded.file_path.starts_with("secret/"));
+        assert!(!uploaded.dedup_reused);
+        assert_eq!(primary_hash.as_deref(), Some(hash.as_str()));
+        assert!(save_root.path().join(&uploaded.file_path).exists());
     }
 
     #[test]
