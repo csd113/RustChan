@@ -2,7 +2,7 @@
 
 All notable changes to RustChan will be documented in this file.
 
-## RustChan 1.2.2
+## RustChan 1.3.0
 
 - Replaced browser proof-of-work posting CAPTCHA with server-generated image CAPTCHA challenges.
 - Improved secure-cookie handling across HTTP, HTTPS, trusted-proxy HTTPS, admin sessions, board access cookies, CSRF cookies, and owned-post cookies.
