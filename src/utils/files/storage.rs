@@ -139,8 +139,8 @@ pub fn save_audio_with_image_thumb_from_path(
     }
     if original_size > max_audio_size {
         return Err(anyhow::anyhow!(
-            "Audio file too large. Maximum size is {} MiB.",
-            max_audio_size / 1024 / 1024
+            "Audio file too large. Maximum audio upload size is {}.",
+            format_upload_limit(max_audio_size)
         ));
     }
 
@@ -332,9 +332,9 @@ fn validate_upload(
     let max_size = max_size_for_media(media_type, options);
     if original_size > max_size {
         anyhow::bail!(
-            "File too large. Maximum {} size is {} MiB.",
+            "File too large. Maximum {} upload size is {}.",
             media_label(media_type),
-            max_size / 1024 / 1024
+            format_upload_limit(max_size)
         );
     }
     if media_type == crate::models::MediaType::Image {
@@ -426,6 +426,8 @@ fn save_processed_upload(
         apply_thumb_exif_orientation(&processed.thumbnail_path, plan.jpeg_orientation);
     }
 
+    let final_size = final_processed_size_within_limit(&processed, options)?;
+
     let filename = processed
         .file_path
         .file_name()
@@ -442,7 +444,7 @@ fn save_processed_upload(
         thumb_path: format!("{}/thumbs/{thumb_filename}", options.board_short),
         original_name: crate::utils::sanitize::sanitize_filename(options.original_filename),
         mime_type: processed.mime_type.clone(),
-        file_size: i64::try_from(processed.final_size).context("File size overflows i64")?,
+        file_size: i64::try_from(final_size).context("File size overflows i64")?,
         media_type: crate::models::MediaType::from_mime(&processed.mime_type),
         processing_pending: if processed.was_converted {
             false
@@ -451,6 +453,66 @@ fn save_processed_upload(
         },
         dedup_reused: false,
     })
+}
+
+fn final_processed_size_within_limit(
+    processed: &crate::media::ProcessedMedia,
+    options: &SaveUploadOptions<'_>,
+) -> Result<u64> {
+    let media_type = crate::models::MediaType::from_mime(&processed.mime_type);
+    let max_size = max_size_for_media(media_type, options);
+    let final_size = std::fs::metadata(&processed.file_path)
+        .with_context(|| {
+            format!(
+                "Failed to stat stored upload {}",
+                processed.file_path.display()
+            )
+        })?
+        .len();
+    if final_size != processed.final_size {
+        tracing::debug!(
+            before_orientation_bytes = processed.final_size,
+            final_bytes = final_size,
+            "stored upload size changed after post-processing"
+        );
+    }
+
+    if final_size <= u64::try_from(max_size).unwrap_or(u64::MAX) {
+        return Ok(final_size);
+    }
+
+    cleanup_processed_outputs(processed);
+    anyhow::bail!(
+        "File too large after media processing. Maximum {} upload size is {}; processed file is {}.",
+        media_label(media_type),
+        format_upload_limit(max_size),
+        format_upload_limit_u64(final_size)
+    );
+}
+
+fn cleanup_processed_outputs(processed: &crate::media::ProcessedMedia) {
+    for path in [&processed.file_path, &processed.thumbnail_path] {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "failed to remove oversized processed upload output"
+                );
+            }
+        }
+    }
+}
+
+fn format_upload_limit(max_bytes: usize) -> String {
+    format_upload_limit_u64(u64::try_from(max_bytes).unwrap_or(u64::MAX))
+}
+
+fn format_upload_limit_u64(max_bytes: u64) -> String {
+    let display_bytes = i64::try_from(max_bytes).unwrap_or(i64::MAX);
+    format_file_size(display_bytes)
 }
 
 fn max_size_for_media(
@@ -770,6 +832,37 @@ endstream endobj
 trailer << /Root 1 0 R >>
 %%EOF
 "
+    }
+
+    #[test]
+    fn final_processed_size_validation_removes_oversized_outputs() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let board_dir = tempdir.path().join("test");
+        let thumb_dir = board_dir.join("thumbs");
+        std::fs::create_dir_all(&thumb_dir).expect("create dirs");
+        let file_path = board_dir.join("stored.png");
+        let thumbnail_path = thumb_dir.join("stored.webp");
+        std::fs::write(&file_path, b"too large").expect("write output");
+        std::fs::write(&thumbnail_path, b"thumb").expect("write thumb");
+
+        let mut options = test_upload_options(tempdir.path(), "stored.png");
+        options.max_image_size = 4;
+        let processed = crate::media::ProcessedMedia {
+            file_path: file_path.clone(),
+            thumbnail_path: thumbnail_path.clone(),
+            mime_type: "image/png".to_owned(),
+            was_converted: false,
+            final_size: 9,
+        };
+
+        let error = super::final_processed_size_within_limit(&processed, &options)
+            .expect_err("oversized processed output should be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("Maximum image upload size is 4 B"));
+        assert!(!file_path.exists());
+        assert!(!thumbnail_path.exists());
     }
 
     fn valid_webm_header() -> &'static [u8] {

@@ -124,6 +124,12 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
         accept_parts.push("application/pdf,.pdf");
         hint_parts.push(format!("pdf · max {generic_upload_mb} MiB"));
     }
+    match (board.allow_images, board.allow_video) {
+        (true, true) => hint_parts.push("oversized images/videos can auto-compress".to_owned()),
+        (true, false) => hint_parts.push("oversized images can auto-compress".to_owned()),
+        (false, true) => hint_parts.push("oversized videos can auto-compress".to_owned()),
+        (false, false) => {}
+    }
 
     let file_accept = if allow_any_files {
         String::new()
@@ -149,7 +155,7 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
               <summary aria-label="Show optional image upload">▾ Optional Image</summary>
               <div class="upload-secondary-panel">
                 <input type="file" name="image_file" aria-label="optional image upload" data-onchange-check-size="1" accept="{IMAGE_ACCEPT}">
-                <span class="form-field-help">{audio_image_hint} · jpg/png/gif/webp/heic · max {image_mb} MiB</span>
+                <span class="form-field-help">{audio_image_hint} · jpg/png/gif/webp/heic · max {image_mb} MiB · oversized images can auto-compress</span>
               </div>
             </details>"#
         )

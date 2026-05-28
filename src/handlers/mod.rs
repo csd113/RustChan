@@ -195,8 +195,8 @@ async fn stream_field_to_temp_file(
                 "multipart upload field exceeded board limit"
             );
             return Err(AppError::UploadTooLarge(format!(
-                "File too large. Maximum upload size is {} MiB.",
-                max_bytes / 1024 / 1024
+                "File too large. Maximum upload size is {}.",
+                format_upload_limit(max_bytes)
             )));
         }
         if sniff_bytes.len() < MIME_SNIFF_BYTES {
@@ -227,6 +227,10 @@ async fn stream_field_to_temp_file(
         sniff_bytes,
         size_bytes,
     })
+}
+
+fn format_upload_limit(max_bytes: usize) -> String {
+    crate::utils::files::format_file_size(i64::try_from(max_bytes).unwrap_or(i64::MAX))
 }
 
 async fn read_upload_field(

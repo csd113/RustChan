@@ -556,18 +556,23 @@ pub fn submit_post(
                 None
             } else {
                 if q.is_empty() {
+                    uploads.rollback_new_files(conn, &upload_dir)?;
                     return Err(AppError::BadRequest(
                         "Polls need a question and at least two options.".into(),
                     ));
                 }
                 if valid_opts.len() < 2 {
+                    uploads.rollback_new_files(conn, &upload_dir)?;
                     return Err(AppError::BadRequest(
                         "Polls need a question and at least two options.".into(),
                     ));
                 }
-                let secs = poll_duration_secs.ok_or_else(|| {
-                    AppError::BadRequest("A duration is required when creating a poll.".into())
-                })?;
+                let Some(secs) = poll_duration_secs else {
+                    uploads.rollback_new_files(conn, &upload_dir)?;
+                    return Err(AppError::BadRequest(
+                        "A duration is required when creating a poll.".into(),
+                    ));
+                };
                 let secs = secs.clamp(60, 30 * 24 * 3600);
                 let expires_at = chrono::Utc::now().timestamp().saturating_add(secs);
                 Some(db::threads::PollInsert {
@@ -1185,10 +1190,51 @@ mod tests {
 
         match error {
             AppError::UploadTooLarge(message) => {
-                assert!(message.contains("Maximum image size is 0 MiB."));
+                assert!(message.contains("Maximum image upload size is 64 B."));
             }
             other => panic!("expected UploadTooLarge, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn submit_post_cleans_staged_upload_when_poll_validation_fails() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+
+        let mut command = thread_command_with_poll(
+            TEST_BOARD,
+            "poll-upload-token",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+            "pick one",
+            vec!["only option"],
+            Some(3600),
+        );
+        command.file_data = Some(temp_upload("cover.png", &one_pixel_png()));
+
+        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+            Ok(result) => panic!(
+                "poll validation should reject submission, got {}",
+                result.redirect_url
+            ),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::BadRequest(message) => {
+                assert_eq!(message, "Polls need a question and at least two options.");
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+
+        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert!(!upload_dir.path().join(TEST_BOARD).exists());
+        let post_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))
+            .expect("post count");
+        assert_eq!(post_count, 0);
     }
 
     #[test]

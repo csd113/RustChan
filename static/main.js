@@ -1442,9 +1442,33 @@ window.requestConfirmation = requestConfirmation;
     return 0;
   }
 
+  function fileExtension(file) {
+    var name = (file && file.name ? file.name : '').toLowerCase();
+    var match = name.match(/\.([a-z0-9]+)$/);
+    return match ? match[1] : '';
+  }
+
+  function fileMediaKind(file) {
+    if (!file) return '';
+    var type = file.type || '';
+    var ext = fileExtension(file);
+    if (type.indexOf('image/') === 0 || /^(jpe?g|png|gif|webp|heic|heif|bmp|tiff?)$/i.test(ext)) return 'image';
+    if (type.indexOf('video/') === 0 || /^(mp4|webm)$/i.test(ext)) return 'video';
+    return '';
+  }
+
+  function limitForFile(file) {
+    var kind = fileMediaKind(file);
+    if (kind === 'image') return getMax('image');
+    if (kind === 'video') return getMax('video');
+    return 0;
+  }
+
   function imageOutputType(file) {
-    if (file.type === 'image/jpeg' || file.type === 'image/jpg') return 'image/jpeg';
-    if (file.type === 'image/png' || file.type === 'image/webp') {
+    var type = file.type || '';
+    var ext = fileExtension(file);
+    if (type === 'image/jpeg' || type === 'image/jpg' || ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+    if (type === 'image/png' || type === 'image/webp' || ext === 'png' || ext === 'webp') {
       return canvasSupportsType('image/webp') ? 'image/webp' : 'image/jpeg';
     }
     return 'image/jpeg';
@@ -1516,6 +1540,50 @@ window.requestConfirmation = requestConfirmation;
     return /\.[^.]+$/.test(name) ? name.replace(/\.[^.]+$/, '') : name;
   }
 
+  function compressionStatusNode(input) {
+    if (!input || !input.parentNode) return null;
+    var existing = input.parentNode.querySelector('.auto-compress-status[data-for-upload-status="1"]');
+    if (existing) return existing;
+    var node = document.createElement('span');
+    node.className = 'form-field-help auto-compress-status';
+    node.dataset.forUploadStatus = '1';
+    input.insertAdjacentElement('afterend', node);
+    return node;
+  }
+
+  function clearCompressionStatus(input) {
+    if (!input || !input.parentNode) return;
+    var existing = input.parentNode.querySelector('.auto-compress-status[data-for-upload-status="1"]');
+    if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+  }
+
+  function setCompressionStatus(input, text) {
+    var node = compressionStatusNode(input);
+    if (node) node.textContent = text;
+  }
+
+  function resetCompressionState(input) {
+    if (!input || !input.dataset) return;
+    delete input.dataset.autoCompressed;
+    delete input.dataset.autoCompressedOriginalName;
+    delete input.dataset.autoCompressedOriginalSize;
+    delete input.dataset.autoCompressedFinalSize;
+    clearCompressionStatus(input);
+  }
+
+  function openCompressModal(input, file, limit) {
+    _input = input;
+    _file = file;
+    _max = limit;
+    var size = formatBytes(file.size);
+    var max = formatBytes(limit);
+    var info = document.getElementById('compress-info');
+    if (info) info.textContent = '"' + file.name + '" is ' + size + '. Board limit is ' + max + '.';
+    _setView('actions');
+    var modal = document.getElementById('compress-modal');
+    if (modal) modal.style.display = 'flex';
+  }
+
   function stopMediaStream(stream) {
     if (!stream || !stream.getTracks) return;
     stream.getTracks().forEach(function (track) {
@@ -1530,6 +1598,9 @@ window.requestConfirmation = requestConfirmation;
       videoEl.removeAttribute('src');
       videoEl.load();
     } catch (e) {}
+    if (videoEl.parentNode) {
+      videoEl.parentNode.removeChild(videoEl);
+    }
   }
 
   function videoRecorderMimeType() {
@@ -1550,27 +1621,20 @@ window.requestConfirmation = requestConfirmation;
   window.checkFileSize = function (input) {
     var file = input.files && input.files[0];
     if (!file) return;
-    var isImg = file.type.startsWith('image/');
-    var isVideo = file.type.startsWith('video/');
-    var limit = isImg ? getMax('image') : (isVideo ? getMax('video') : 0);
+    resetCompressionState(input);
+    var limit = limitForFile(file);
     if (limit === 0 || file.size <= limit) return;
-    _input = input;
-    _file = file;
-    _max = limit;
-    var sizeMiB = (file.size / 1048576).toFixed(1);
-    var limMiB = (limit / 1048576).toFixed(1);
-    var info = document.getElementById('compress-info');
-    if (info) info.textContent = '\u201c' + file.name + '\u201d is ' + sizeMiB + ' MiB \u2014 board limit is ' + limMiB + ' MiB.';
-    _setView('actions');
-    var modal = document.getElementById('compress-modal');
-    if (modal) modal.style.display = 'flex';
+    openCompressModal(input, file, limit);
   };
 
   window.dismissCompressModal = function () {
     if (_compressing) return;
     var modal = document.getElementById('compress-modal');
     if (modal) modal.style.display = 'none';
-    if (_input) { _input.value = ''; }
+    if (_input) {
+      _input.value = '';
+      resetCompressionState(_input);
+    }
     _input = null; _file = null; _compressing = false;
   };
 
@@ -1580,15 +1644,17 @@ window.requestConfirmation = requestConfirmation;
     _setView('progress');
     _setProgress(0, 'Starting\u2026');
 
-    var isImg = _file.type.startsWith('image/');
-    var isVideo = _file.type.startsWith('video/');
+    var kind = fileMediaKind(_file);
+    var isImg = kind === 'image';
+    var isVideo = kind === 'video';
     var promise = isImg ? _compressImage(_file, _max)
       : isVideo ? _compressVideo(_file, _max)
         : Promise.reject(new Error('Unsupported type'));
 
     promise.then(function (blob) {
       if (!blob || blob.size > _max) {
-        _setProgress(100, 'Could not compress to the required size. Please use a smaller file.');
+        var resultSize = blob && blob.size ? ' Result was ' + formatBytes(blob.size) + '.' : '';
+        _setProgress(100, 'Could not compress under ' + formatBytes(_max) + '.' + resultSize + ' Please use a smaller file.');
         _compressing = false;
         _setView('done');
         return;
@@ -1598,8 +1664,12 @@ window.requestConfirmation = requestConfirmation;
       var dt = new DataTransfer();
       dt.items.add(new File([blob], newName, { type: blob.type }));
       _input.files = dt.files;
-      var finalMiB = (blob.size / 1048576).toFixed(2);
-      _setProgress(100, '\u2713 Compressed to ' + finalMiB + ' MiB. Ready to post.');
+      _input.dataset.autoCompressed = '1';
+      _input.dataset.autoCompressedOriginalName = _file.name;
+      _input.dataset.autoCompressedOriginalSize = String(_file.size);
+      _input.dataset.autoCompressedFinalSize = String(blob.size);
+      setCompressionStatus(_input, 'Auto-compressed ' + formatBytes(_file.size) + ' to ' + formatBytes(blob.size) + '.');
+      _setProgress(100, '\u2713 Compressed to ' + formatBytes(blob.size) + '. Ready to post.');
       _compressing = false;
       setTimeout(function () {
         var modal = document.getElementById('compress-modal');
@@ -1611,6 +1681,22 @@ window.requestConfirmation = requestConfirmation;
       _compressing = false;
       _setView('done');
     });
+  };
+
+  window.ensureAutoCompressedUploadsReady = function (form) {
+    if (!form) return true;
+    var inputs = form.querySelectorAll('input[type="file"][data-onchange-check-size]');
+    for (var i = 0; i < inputs.length; i += 1) {
+      var input = inputs[i];
+      var file = input.files && input.files[0];
+      if (!file) continue;
+      var limit = limitForFile(file);
+      if (limit === 0 || file.size <= limit) continue;
+      if (input.dataset.autoCompressed === '1') continue;
+      openCompressModal(input, file, limit);
+      return false;
+    }
+    return true;
   };
 
   function _setView(which) {
@@ -1663,9 +1749,12 @@ window.requestConfirmation = requestConfirmation;
               _setProgress(Math.min(attempt * 15, 90), 'Compressing\u2026 attempt ' + attempt);
               if (!blob) { reject(new Error('Canvas toBlob failed')); return; }
               if (blob.size <= maxBytes) { resolve(blob); return; }
-              if (attempt >= 8) { resolve(blob); return; }
-              quality -= 0.1;
-              if (quality < 0.3) { quality = 0.5; scale *= 0.75; }
+              if (attempt >= 12) { resolve(blob); return; }
+              quality -= 0.12;
+              if (quality < 0.34) {
+                quality = 0.82;
+                scale *= 0.72;
+              }
               tryEncode();
             }, outputType, quality);
           }
@@ -1688,12 +1777,22 @@ window.requestConfirmation = requestConfirmation;
       videoEl.muted = true;
       videoEl.playsInline = true;
       videoEl.src = url;
+      videoEl.style.position = 'fixed';
+      videoEl.style.left = '-9999px';
+      videoEl.style.top = '0';
+      videoEl.style.width = '1px';
+      videoEl.style.height = '1px';
+      videoEl.style.opacity = '0';
+      videoEl.style.pointerEvents = 'none';
+      document.body.appendChild(videoEl);
       var duration = 0;
       var stream = null;
       var recorder = null;
       var progressTimer = null;
       var safetyTimer = null;
       var settled = false;
+      var attempt = 0;
+      var currentBitsPerSec = 0;
 
       function finish(err, blob) {
         if (settled) return;
@@ -1725,25 +1824,53 @@ window.requestConfirmation = requestConfirmation;
           finish(new Error('Video capture stream is not available'));
           return;
         }
+        currentBitsPerSec = Math.max(targetBitsPerSec, 64000);
+        startRecordingAttempt();
+      };
+      videoEl.onerror = function () { finish(new Error('Video load error')); };
+      videoEl.load();
+
+      function startRecordingAttempt() {
+        attempt += 1;
+        if (progressTimer) clearInterval(progressTimer);
+        if (safetyTimer) clearTimeout(safetyTimer);
+        var chunks = [];
         try {
           recorder = new MediaRecorder(stream, {
             mimeType: mimeType,
-            videoBitsPerSecond: Math.max(targetBitsPerSec, 120000)
+            videoBitsPerSecond: currentBitsPerSec
           });
         } catch (e) {
           finish(e);
           return;
         }
-        var chunks = [];
         recorder.ondataavailable = function (e) { if (e.data && e.data.size > 0) chunks.push(e.data); };
         recorder.onstop = function () {
-          finish(null, new Blob(chunks, { type: 'video/webm' }));
+          if (settled) return;
+          var blob = new Blob(chunks, { type: 'video/webm' });
+          if (blob.size > maxBytes && attempt < 4) {
+            currentBitsPerSec = Math.max(Math.floor(currentBitsPerSec * 0.6), 48000);
+            _setProgress(12, 'Retrying at lower bitrate\u2026 attempt ' + (attempt + 1));
+            window.setTimeout(function () {
+              try {
+                videoEl.currentTime = 0;
+              } catch (e) {}
+              startRecordingAttempt();
+            }, 0);
+            return;
+          }
+          finish(null, blob);
         };
         recorder.onerror = function (e) { finish(e.error || new Error('MediaRecorder error')); };
-        videoEl.currentTime = 0;
+        try {
+          videoEl.currentTime = 0;
+        } catch (e) {}
         recorder.start(1000);
         progressTimer = setInterval(function () {
-          _setProgress(Math.min(10 + Math.round((videoEl.currentTime / duration) * 80), 90), 'Re-encoding\u2026 ' + Math.round((videoEl.currentTime / duration) * 100) + '%');
+          _setProgress(
+            Math.min(10 + Math.round((videoEl.currentTime / duration) * 80), 90),
+            'Re-encoding\u2026 attempt ' + attempt + ' · ' + Math.round((videoEl.currentTime / duration) * 100) + '%'
+          );
         }, 500);
         safetyTimer = setTimeout(function () {
           if (recorder && recorder.state !== 'inactive') {
@@ -1760,9 +1887,7 @@ window.requestConfirmation = requestConfirmation;
         videoEl.play().catch(function (err) {
           finish(err || new Error('Video playback failed during compression'));
         });
-      };
-      videoEl.onerror = function () { finish(new Error('Video load error')); };
-      videoEl.load();
+      }
     });
   }
 })();
@@ -3585,6 +3710,10 @@ document.addEventListener('submit', function (e) {
         'Enter the CAPTCHA text before posting.'
       );
       setPostFormOpen(true, { scrollIntoView: true });
+      return;
+    }
+    if (window.ensureAutoCompressedUploadsReady && !window.ensureAutoCompressedUploadsReady(form)) {
+      e.preventDefault();
       return;
     }
     if (submitPostFormWithProgress(form)) {

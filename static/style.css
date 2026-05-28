@@ -5814,6 +5814,12 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   line-height: 1.4;
 }
 
+.auto-compress-status {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--green-pale);
+}
+
 .poll-remove-btn {
   background: transparent;
   border: 1px solid var(--border);
