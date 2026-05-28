@@ -1769,10 +1769,14 @@ window.requestConfirmation = requestConfirmation;
 
 // ─── Report modal ─────────────────────────────────────────────────────────────
 
+var _reportActiveTrigger = null;
+var _editModalActiveTrigger = null;
+
 function openReportModal(postId, threadId, board, csrf, label) {
   var opts = arguments.length > 5 && arguments[5] ? arguments[5] : {};
   var form = document.getElementById('report-form');
   if (!form) return;
+  _reportActiveTrigger = opts.trigger || document.activeElement;
   form.setAttribute('action', opts.action || '/report');
   document.getElementById('report-post-id').value = postId;
   document.getElementById('report-thread-id').value = threadId;
@@ -1800,6 +1804,10 @@ function openReportModal(postId, threadId, board, csrf, label) {
 function closeReportModal() {
   var modal = document.getElementById('report-modal');
   if (modal) modal.style.display = 'none';
+  if (_reportActiveTrigger && typeof _reportActiveTrigger.focus === 'function') {
+    _reportActiveTrigger.focus();
+  }
+  _reportActiveTrigger = null;
 }
 
 function openEditModal(trigger) {
@@ -1811,6 +1819,7 @@ function openEditModal(trigger) {
 
   var postId = trigger.dataset.editPostId;
   if (!postId) return;
+  _editModalActiveTrigger = trigger;
   var source = document.getElementById('edit-body-' + postId);
   var expiry = Number(trigger.dataset.editExpiry || '');
   form.setAttribute('action', '/' + encodeURIComponent(trigger.closest('#thread-posts').dataset.board) + '/post/' + encodeURIComponent(postId) + '/edit');
@@ -1847,6 +1856,10 @@ function closeEditModal() {
   modal.classList.remove('is-open');
   modal.setAttribute('aria-hidden', 'true');
   modal.hidden = true;
+  if (_editModalActiveTrigger && typeof _editModalActiveTrigger.focus === 'function') {
+    _editModalActiveTrigger.focus();
+  }
+  _editModalActiveTrigger = null;
 }
 
 function showEditModalError(message) {
@@ -3466,6 +3479,7 @@ document.addEventListener('click', function (e) {
         e.preventDefault();
         closeThreadMenus();
         openReportModal(t.dataset.pid, t.dataset.tid, t.dataset.board, t.dataset.csrf, t.dataset.reportLabel, {
+          trigger: t,
           action: t.dataset.reportAction,
           ipHash: t.dataset.reportIpHash,
           title: t.dataset.reportTitle,
@@ -3623,6 +3637,12 @@ document.addEventListener('keydown', function (e) {
     if (ensureConfirmModal() && _confirmModal.style.display !== 'none') {
       e.preventDefault();
       closeConfirmModal(false);
+      return;
+    }
+    var reportModal = document.getElementById('report-modal');
+    if (reportModal && reportModal.style.display !== 'none') {
+      e.preventDefault();
+      closeReportModal();
       return;
     }
     closeThreadMenus();

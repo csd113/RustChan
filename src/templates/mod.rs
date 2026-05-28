@@ -454,7 +454,7 @@ pub const fn report_modal_script() -> &'static str {
       <input type="hidden" name="board"     id="report-board">
       <input type="hidden" name="ip_hash"   id="report-ip-hash">
       <div class="compress-modal-info confirm-modal-info" id="report-info"></div>
-      <input type="text" name="reason" id="report-reason"
+      <input type="text" name="reason" id="report-reason" aria-label="report reason"
              placeholder="reason (optional)" maxlength="256"
              style="width:100%;background:var(--bg-input);border:1px solid var(--border);
                     color:var(--text);padding:8px 10px;font-family:var(--font);font-size:16px;
@@ -658,7 +658,7 @@ pub fn base_layout_with_preferences(
     let search_bar = board_short.map_or_else(String::new, |b| {
         format!(
             r#"<form class="search-form" method="GET" action="/{b}/search">
-<input type="text" name="q" placeholder="search /{b}/…" maxlength="{max_len}">
+<input type="text" name="q" aria-label="search /{b}/" placeholder="search /{b}/…" maxlength="{max_len}">
 <button type="submit">go</button>
 </form>"#,
             b = escape_html(b),

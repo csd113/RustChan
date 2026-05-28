@@ -99,7 +99,7 @@ pub fn edit_post_page(
   <input type="hidden" name="_csrf" value="{csrf}">
   <table>
     <tr><td>body</td>
-        <td><textarea name="body" rows="8" maxlength="4096" required>{body_text}</textarea></td></tr>
+        <td><textarea name="body" aria-label="edit post body" rows="8" maxlength="4096" required>{body_text}</textarea></td></tr>
     <tr><td></td>
         <td><button type="submit">save edit</button>
             <a class="edit-btn" href="/{board}/thread/{tid}#p{pid}">cancel</a></td></tr>
@@ -1408,7 +1408,7 @@ fn render_edit_overlay(
       <input type="hidden" name="thread_id" value="{thread_id}">
       <table>
         <tr><td>body</td>
-            <td><textarea id="edit-modal-body" name="body" rows="6" maxlength="4096">{current_body}</textarea></td></tr>
+            <td><textarea id="edit-modal-body" name="body" aria-label="edit post body" rows="6" maxlength="4096">{current_body}</textarea></td></tr>
         <tr><td></td>
             <td><button type="submit">save edit</button>
                 <button type="button" class="edit-btn" data-action="close-edit-modal" style="margin-left:1rem">cancel</button></td></tr>
@@ -1561,7 +1561,7 @@ mod tests {
         assert!(html.contains(r#"href="/test/catalog">[ Catalog ]</a>"#));
         assert!(html.contains(r#"id="board-access-gate""#));
         assert!(html.contains(
-            r#"name="password" maxlength="256" autocomplete="current-password" required"#
+            r#"name="password" aria-label="board password" maxlength="256" autocomplete="current-password" required"#
         ));
     }
 
@@ -2216,7 +2216,9 @@ mod tests {
 
         assert!(html.contains(r#"method="POST" action="/test/post/1/edit""#));
         assert!(html.contains(r#"name="_csrf" value="csrf""#));
-        assert!(html.contains(r#"name="body" rows="8" maxlength="4096" required"#));
+        assert!(html.contains(
+            r#"name="body" aria-label="edit post body" rows="8" maxlength="4096" required"#
+        ));
         assert!(html.contains("available for up to 60 seconds after posting"));
         assert!(html.contains(r#"href="/test/thread/87#p1""#));
     }

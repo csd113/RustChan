@@ -250,7 +250,7 @@ pub(crate) fn render_post_access_gate(
     <tr><td>status</td>
         <td><span style="font-size:0.8rem;color:var(--text-dim)">{description}</span></td></tr>
     <tr><td>password</td>
-        <td><input type="password" name="password" maxlength="256" autocomplete="current-password" required>
+        <td><input type="password" name="password" aria-label="board password" maxlength="256" autocomplete="current-password" required>
             <button type="submit">{button_label}</button></td></tr>
   </table>
 </form>
@@ -299,7 +299,7 @@ pub fn board_access_page(
   <input type="hidden" name="_csrf" value="{csrf}">
   <input type="hidden" name="return_to" value="{return_to}">
   <table class="admin-login-table">
-    <tr><td>password</td><td><input type="password" name="password" maxlength="256" autocomplete="current-password" autofocus required></td></tr>
+    <tr><td>password</td><td><input type="password" name="password" aria-label="board password" maxlength="256" autocomplete="current-password" autofocus required></td></tr>
     <tr><td></td><td><button type="submit">{button_label}</button></td></tr>
   </table>
 </form>

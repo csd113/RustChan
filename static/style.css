@@ -681,6 +681,12 @@ html:not([data-theme]) .board-header h1 { text-shadow: 0 0 10px rgba(0,255,65,0.
 }
 
 .board-desc { color: var(--text-dim); font-size: 0.94rem; margin-top: 6px; line-height: 1.55; }
+.board-header h1,
+.board-desc {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 
 .board-banner-slot,
 .home-banner-box {
@@ -720,6 +726,11 @@ html:not([data-theme]) .board-header h1 { text-shadow: 0 0 10px rgba(0,255,65,0.
   letter-spacing: 0.05em;
   padding-bottom: 4px;
   text-align: center;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.18;
 }
 html:not([data-theme]) .board-thread-header { text-shadow: 0 0 10px rgba(0,255,65,0.4); }
 
@@ -979,6 +990,10 @@ html.no-js .post-form-wrap {
   display: block !important;
 }
 
+.post-form-wrap:target {
+  display: block !important;
+}
+
 /* ── Post form ────────────────────────────────────────────────────────────── */
 
 .post-form-container {
@@ -1020,6 +1035,7 @@ html.no-js .post-form-wrap {
 }
 
 .post-form input[type="text"],
+.post-form input[type="password"],
 .post-form textarea,
 .post-form input[type="file"] {
   -webkit-appearance: none;
@@ -1040,12 +1056,14 @@ html.no-js .post-form-wrap {
 }
 
 .post-form input[type="text"]:focus,
+.post-form input[type="password"]:focus,
 .post-form textarea:focus {
   border-color: var(--border-glow);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--border-glow) 18%, transparent);
 }
 
 .post-form input[type="text"]:focus-visible,
+.post-form input[type="password"]:focus-visible,
 .post-form textarea:focus-visible,
 .post-form input[type="file"]:focus-visible,
 .post-form input[type="number"]:focus-visible,
@@ -1057,6 +1075,25 @@ html.no-js .post-form-wrap {
 }
 
 .post-form input[type="file"] { padding: 3px; cursor: pointer; }
+
+.board-access-form input[type="password"] {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--green-pale);
+  padding: 7px 9px;
+  font-family: var(--font);
+  font-size: 0.85rem;
+  min-height: 36px;
+  border-radius: var(--radius-sm);
+}
+
+.board-access-form input[type="password"]:focus,
+.board-access-form input[type="password"]:focus-visible {
+  border-color: var(--border-glow);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--border-glow) 18%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--border-glow) 78%, white 12%);
+  outline-offset: 2px;
+}
 
 .captcha-challenge {
   display: flex;
@@ -1149,10 +1186,14 @@ html.no-js .post-form-wrap {
 .thread {
   margin-bottom: 18px;
   padding-bottom: 8px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .post {
   scroll-margin-top: calc(var(--header-offset, 58px) + 10px);
+  min-width: 0;
+  max-width: 100%;
 }
 
 .thread-sep {
@@ -1166,6 +1207,9 @@ html.no-js .post-form-wrap {
   border-left: 3px solid var(--green-dim);
   padding: 10px 12px;
   display: flow-root; /* contain floated file-container children */
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-soft);
 }
@@ -1177,6 +1221,9 @@ html.no-js .post-form-wrap {
   margin-left: 32px;
   margin-top: 7px;
   display: flow-root; /* contain floated file-container children */
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
   border-radius: var(--radius-sm);
 }
 
@@ -1425,6 +1472,9 @@ html:not([data-theme]) .poster-id-btn {
 .subject strong,
 .subject a {
   color: var(--amber);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 /* ── Post body ────────────────────────────────────────────────────────────── */
@@ -1434,6 +1484,8 @@ html:not([data-theme]) .poster-id-btn {
   line-height: 1.65;
   color: var(--text);
   white-space: pre-wrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
   word-break: break-word;
   overflow: hidden;
 }
@@ -1920,8 +1972,9 @@ html:not([data-theme]) .poster-id-btn {
   }
 
   .media-close-btn {
-    min-height: 28px;
-    padding: 2px 8px;
+    min-width: 36px;
+    min-height: 36px;
+    padding: 4px 10px;
   }
 }
 
@@ -3177,6 +3230,13 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   margin: 0 0 14px 0;
   border-radius: var(--radius-md);
   letter-spacing: 0.01em;
+}
+
+html:is([data-theme="chanclassic"], [data-theme="aero"], [data-theme="neoncubicle"], [data-theme="fluorogrid"]) .post-error-banner,
+html:is([data-theme="chanclassic"], [data-theme="aero"], [data-theme="neoncubicle"], [data-theme="fluorogrid"]) .admin-flash.flash-error {
+  background: rgba(168, 52, 64, 0.14);
+  border-color: rgba(124, 24, 36, 0.42);
+  color: #7a0014;
 }
 
 /* ── Admin post controls ──────────────────────────────────────────────────── */

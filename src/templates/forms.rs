@@ -73,7 +73,7 @@ fn render_captcha_row(board_short: &str, reply_suffix: &str, refresh_href: &str)
             <a class="form-field-help captcha-refresh-link" href="{refresh_href}">new challenge</a>
           </div>
           <input type="hidden" name="captcha_id" value="{captcha_id}">
-          <input type="text" name="captcha_answer" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="16" required>
+          <input type="text" name="captcha_answer" aria-label="captcha answer" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="16" required>
           <span class="form-field-help">Enter the text shown in the image. If it expires or fails, request a new challenge.</span>
         </td></tr>"#,
         board = board,
@@ -86,7 +86,7 @@ fn render_captcha_row(board_short: &str, reply_suffix: &str, refresh_href: &str)
 
 fn render_poll_option_row(option_number: usize) -> String {
     format!(
-        r#"<div class="poll-option-row"><input type="text" class="poll-option-input" name="poll_option" placeholder="Option {option_number}" maxlength="{POLL_OPTION_MAX_LENGTH}"><button type="button" class="poll-remove-btn" data-action="remove-poll-option" aria-label="Remove poll option" hidden>✕</button></div>"#
+        r#"<div class="poll-option-row"><input type="text" class="poll-option-input" name="poll_option" aria-label="poll option {option_number}" placeholder="Option {option_number}" maxlength="{POLL_OPTION_MAX_LENGTH}"><button type="button" class="poll-remove-btn" data-action="remove-poll-option" aria-label="Remove poll option" hidden>✕</button></div>"#
     )
 }
 
@@ -148,7 +148,7 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
             r#"<details class="upload-secondary-toggle">
               <summary aria-label="Show optional image upload">▾ Optional Image</summary>
               <div class="upload-secondary-panel">
-                <input type="file" name="image_file" data-onchange-check-size="1" accept="{IMAGE_ACCEPT}">
+                <input type="file" name="image_file" aria-label="optional image upload" data-onchange-check-size="1" accept="{IMAGE_ACCEPT}">
                 <span class="form-field-help">{audio_image_hint} · jpg/png/gif/webp/heic · max {image_mb} MiB</span>
               </div>
             </details>"#
@@ -180,7 +180,7 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
 
     format!(
         r#"    <tr><td>{primary_label}</td>
-        <td><input type="file" name="{primary_name}" data-onchange-check-size="1" accept="{primary_accept}">
+        <td><input type="file" name="{primary_name}" aria-label="{primary_label} file" data-onchange-check-size="1" accept="{primary_accept}">
             {primary_hint_html}
             {optional_image_row}</td></tr>"#,
         primary_hint_html = form_hint(&primary_hint),
@@ -228,12 +228,12 @@ pub(super) fn new_thread_form(
   <input type="hidden" name="submission_token" value="{submission_token}">
   <table>
     <tr><td>name</td>
-        <td><input type="text" name="name" value="{name_value}" placeholder="Anonymous" maxlength="64"></td></tr>
+        <td><input type="text" name="name" aria-label="name" value="{name_value}" placeholder="Anonymous" maxlength="64"></td></tr>
     <tr><td>subject</td>
-        <td><input type="text" name="subject" value="{subject_value}" maxlength="128">
+        <td><input type="text" name="subject" aria-label="thread subject" value="{subject_value}" maxlength="128">
             <button type="submit">post thread</button></td></tr>
     <tr><td>body</td>
-        <td><textarea name="body" rows="5" maxlength="4096">{body_value}</textarea>
+        <td><textarea name="body" aria-label="thread body" rows="5" maxlength="4096">{body_value}</textarea>
             <div class="markup-hint">
               <span title="Greentext">&#62;green</span>
               <span title="Bold">**bold**</span>
@@ -339,9 +339,9 @@ pub(super) fn reply_form(
   <input type="hidden" name="submission_token" value="{submission_token}">
   <table>
     <tr><td>name</td>
-        <td><input type="text" name="name" value="{name_value}" placeholder="Anonymous" maxlength="64"></td></tr>
+        <td><input type="text" name="name" aria-label="reply name" value="{name_value}" placeholder="Anonymous" maxlength="64"></td></tr>
     <tr><td>body</td>
-        <td><textarea id="reply-body" name="body" rows="4" maxlength="4096">{body_value}</textarea>
+        <td><textarea id="reply-body" name="body" aria-label="reply body" rows="4" maxlength="4096">{body_value}</textarea>
             <button type="submit">post reply</button></td></tr>
     {uploads_disabled_row}
     {upload_row}
@@ -494,12 +494,14 @@ mod tests {
         let thread_html = new_thread_form("test", "csrf", &board, Some(&state), "/test");
         let reply_html = reply_form("test", 42, "csrf", &board, Some(&state));
 
-        assert!(thread_html.contains(r#"name="name" value="anon""#));
-        assert!(thread_html.contains(r#"name="subject" value="subject""#));
+        assert!(thread_html.contains(r#"name="name" aria-label="name" value="anon""#));
+        assert!(
+            thread_html.contains(r#"name="subject" aria-label="thread subject" value="subject""#)
+        );
         assert!(thread_html.contains(">draft body</textarea>"));
         assert!(!thread_html.contains(r#"name="deletion_token""#));
 
-        assert!(reply_html.contains(r#"name="name" value="anon""#));
+        assert!(reply_html.contains(r#"name="name" aria-label="reply name" value="anon""#));
         assert!(reply_html.contains(">draft body</textarea>"));
         assert!(!reply_html.contains(r#"name="deletion_token""#));
         assert!(reply_html.contains(r#"name="sage" value="1" checked"#));

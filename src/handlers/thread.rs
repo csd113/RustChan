@@ -2147,7 +2147,9 @@ mod tests {
         .expect("utf8 body");
         assert!(body.contains(&format!(r#"action="/test/post/{post_id}/edit""#)));
         assert!(body.contains(r#"name="_csrf""#));
-        assert!(body.contains(r#"name="body" rows="8" maxlength="4096" required"#));
+        assert!(body.contains(
+            r#"name="body" aria-label="edit post body" rows="8" maxlength="4096" required"#
+        ));
         assert!(body.contains("available for up to 60 seconds after posting"));
         assert!(body.contains(&format!(r#"href="/test/thread/{thread_id}#p{post_id}""#)));
     }
