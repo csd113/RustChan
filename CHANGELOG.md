@@ -2,11 +2,17 @@
 
 All notable changes to RustChan will be documented in this file.
 
-## [1.2.2]
+## RustChan 1.2.2
 
-### Changed
-
-- Bumped the current development version to `1.2.2`.
+- Replaced browser proof-of-work posting CAPTCHA with server-generated image CAPTCHA challenges.
+- Improved secure-cookie handling across HTTP, HTTPS, trusted-proxy HTTPS, admin sessions, board access cookies, CSRF cookies, and owned-post cookies.
+- Added no-JS fallbacks and accessibility polish for posting, reporting, catalog actions, board preferences, moderation controls, and own-post edit/delete flows.
+- Hardened upload handling for empty file controls, zero-byte named uploads, empty thumbnail payloads, invalid media, and cross-board media deduplication.
+- Improved activity badge cache behavior, especially on mobile WebKit and browser back/forward navigation.
+- Hardened settings validation so invalid config values fail closed instead of silently falling back.
+- Polished responsive layout, long-content wrapping, modal focus behavior, ESC handling, touch targets, and light-theme error contrast.
+- Updated backup UI metadata handling and dynamic split-part options.
+- Refreshed README screenshots and release documentation.
 
 ## [1.2.1]
 
