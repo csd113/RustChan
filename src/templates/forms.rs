@@ -34,7 +34,8 @@ const fn upload_progress_row() -> &'static str {
 }
 
 const AUDIO_ACCEPT: &str =
-    "audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac";
+    "audio/mpeg,audio/mp3,audio/ogg,application/ogg,audio/oga,audio/opus,audio/flac,audio/x-flac,audio/wav,audio/wave,audio/x-wav,audio/vnd.wave,audio/mp4,audio/m4a,audio/x-m4a,audio/aac,audio/x-aac,audio/webm,.mp3,.ogg,.oga,.opus,.flac,.wav,.m4a,.aac,.webm";
+const VIDEO_ACCEPT: &str = "video/mp4,video/webm,video/x-matroska,video/matroska,.mp4,.webm,.mkv";
 const IMAGE_ACCEPT: &str =
     "image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,.heic,.heif";
 const POLL_OPTION_MAX_LENGTH: usize = 200;
@@ -113,12 +114,14 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
         hint_parts.push(format!("jpg/png/gif/webp/heic · max {image_mb} MiB"));
     }
     if board.allow_video {
-        accept_parts.push("video/mp4,video/webm");
-        hint_parts.push(format!("mp4/webm · max {video_mb} MiB"));
+        accept_parts.push(VIDEO_ACCEPT);
+        hint_parts.push(format!("mp4/webm/mkv · max {video_mb} MiB"));
     }
     if board.allow_audio {
         accept_parts.push(AUDIO_ACCEPT);
-        hint_parts.push(format!("mp3/ogg/flac/wav/m4a · max {audio_mb} MiB"));
+        hint_parts.push(format!(
+            "mp3/ogg/oga/opus/flac/wav/m4a/aac/webm · max {audio_mb} MiB"
+        ));
     }
     if board.allow_pdf {
         accept_parts.push("application/pdf,.pdf");
@@ -179,7 +182,7 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
         file_accept
     };
     let primary_hint = if audio_image_dual_mode {
-        format!("mp3/ogg/flac/wav/m4a · max {audio_mb} MiB")
+        format!("mp3/ogg/oga/opus/flac/wav/m4a/aac/webm · max {audio_mb} MiB")
     } else {
         file_hint
     };
@@ -376,7 +379,7 @@ pub(super) fn reply_form(
 mod tests {
     use super::{
         build_upload_form_policy, new_thread_form, render_poll_option_row, reply_form,
-        PostFormState, POLL_OPTION_MAX_COUNT, POLL_OPTION_MAX_LENGTH,
+        PostFormState, AUDIO_ACCEPT, POLL_OPTION_MAX_COUNT, POLL_OPTION_MAX_LENGTH,
     };
 
     fn uploads_disabled_board() -> crate::models::Board {
@@ -431,10 +434,12 @@ mod tests {
         assert!(html.contains("optional cover image for the audio post"));
         assert!(html.contains("image/heic"));
         assert!(html.contains(".heic"));
-        assert!(html.contains("accept=\"audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac\""));
-        assert!(html.contains("mp3/ogg/flac/wav/m4a · max"));
+        assert!(html.contains(&format!("accept=\"{AUDIO_ACCEPT}\"")));
+        assert!(html.contains("mp3/ogg/oga/opus/flac/wav/m4a/aac/webm · max"));
         assert!(
-            !html.contains("jpg/png/gif/webp/heic · max 8 MiB &nbsp;|&nbsp; mp3/ogg/flac/wav/m4a")
+            !html.contains(
+                "jpg/png/gif/webp/heic · max 8 MiB &nbsp;|&nbsp; mp3/ogg/oga/opus/flac/wav/m4a/aac/webm"
+            )
         );
         assert!(!html.contains("video/mp4,video/webm"));
         assert!(!html.contains("name=\"file\""));

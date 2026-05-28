@@ -663,7 +663,7 @@ html:not([data-theme]) .admin-panel h1 {
 .theme-editor-css-panel textarea {
   width: 100%;
   min-height: 22rem;
-  resize: vertical;
+  resize: none;
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
   font-size: 0.8rem;
   line-height: 1.55;

@@ -24,8 +24,10 @@ fn media_content_type(path: &std::path::Path) -> Option<&'static str> {
         // absence here documents the security decision.
         Some("webm") => Some("video/webm"),
         Some("mp4") => Some("video/mp4"),
+        Some("mkv") => Some("video/x-matroska"),
         Some("mp3") => Some("audio/mpeg"),
-        Some("ogg") => Some("audio/ogg"),
+        Some("ogg" | "oga") => Some("audio/ogg"),
+        Some("opus") => Some("audio/opus"),
         Some("flac") => Some("audio/flac"),
         Some("wav") => Some("audio/wav"),
         Some("m4a") => Some("audio/mp4"),

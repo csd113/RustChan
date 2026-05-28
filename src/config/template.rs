@@ -52,10 +52,10 @@ trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
 # Maximum size for image uploads in MiB (jpg, png, gif, webp, heic).
 max_image_size_mb = 8
 
-# Maximum size for video uploads in MiB (mp4, webm).
+# Maximum size for video uploads in MiB (mp4, webm, mkv).
 max_video_size_mb = 50
 
-# Maximum size for audio uploads in MiB (mp3, ogg, flac, wav, m4a, aac).
+# Maximum size for audio uploads in MiB (mp3, ogg/oga, opus, flac, wav, m4a, aac, webm audio).
 max_audio_size_mb = 150
 
 # Master switch for arbitrary file uploads.

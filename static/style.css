@@ -95,6 +95,7 @@ textarea:focus-visible,
   outline: 2px solid color-mix(in srgb, var(--border-glow) 78%, white 12%);
   outline-offset: 2px;
 }
+textarea { resize: none; }
 html:not([data-theme]) a:hover { text-shadow: 0 0 6px var(--green-bright); }
 
 html:not([data-theme]) .op,
@@ -1049,7 +1050,6 @@ html.no-js .post-form-wrap {
   font-size: 0.85rem;
   width: 100%;
   outline: none;
-  resize: vertical;
   min-height: 36px;
   border-radius: var(--radius-sm);
   transition: border-color 0.2s, box-shadow 0.2s;

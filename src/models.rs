@@ -45,7 +45,7 @@ impl MediaType {
         match ext {
             "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "heif" | "bmp" | "tiff" | "tif"
             | "svg" => Self::Image,
-            "mp4" | "webm" => Self::Video,
+            "mp4" | "webm" | "mkv" => Self::Video,
             "mp3" | "ogg" | "flac" | "wav" | "m4a" | "aac" | "opus" => Self::Audio,
             "pdf" => Self::Pdf,
             _ => Self::Other,

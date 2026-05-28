@@ -869,6 +869,14 @@ mod tests {
         bytes
     }
 
+    fn flac_header_bytes() -> Vec<u8> {
+        b"fLaC\x00\x00\x00\x22tiny test flac bytes".to_vec()
+    }
+
+    fn webm_header_bytes() -> Vec<u8> {
+        b"\x1a\x45\xdf\xa3\x00\x00\x00\x00\x00\x00\x42\x82\x84webm\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec()
+    }
+
     fn pending_upload_stage_count(upload_dir: &std::path::Path) -> usize {
         let pending = upload_dir.join(".pending");
         if !pending.exists() {
@@ -877,6 +885,17 @@ mod tests {
         std::fs::read_dir(pending)
             .expect("read pending dir")
             .count()
+    }
+
+    fn assert_no_partial_post_rows(conn: &rusqlite::Connection) {
+        let thread_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))
+            .expect("thread count");
+        let post_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))
+            .expect("post count");
+        assert_eq!(thread_count, 0);
+        assert_eq!(post_count, 0);
     }
 
     #[test]
@@ -1194,6 +1213,153 @@ mod tests {
             }
             other => panic!("expected UploadTooLarge, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn submit_post_rejects_disabled_audio_without_stale_uploads_or_rows() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let mut command = thread_command(
+            TEST_BOARD,
+            "audio-disabled",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+        );
+        command.file_data = Some(temp_upload("tiny.flac", &flac_header_bytes()));
+
+        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+            Ok(result) => panic!(
+                "audio-disabled board should reject, got {}",
+                result.redirect_url
+            ),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::BadRequest(message) => {
+                assert!(message.contains("Audio uploads are disabled"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert!(!upload_dir.path().join(TEST_BOARD).exists());
+        assert_no_partial_post_rows(&conn);
+    }
+
+    #[test]
+    fn submit_post_rejects_disabled_video_without_stale_uploads_or_rows() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET allow_video = 0 WHERE short_name = ?1",
+            rusqlite::params![TEST_BOARD],
+        )
+        .expect("disable video");
+        let mut command = thread_command(
+            TEST_BOARD,
+            "video-disabled",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+        );
+        command.file_data = Some(temp_upload("tiny.webm", &webm_header_bytes()));
+
+        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+            Ok(result) => panic!(
+                "video-disabled board should reject, got {}",
+                result.redirect_url
+            ),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::BadRequest(message) => {
+                assert!(message.contains("Video uploads are disabled"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert!(!upload_dir.path().join(TEST_BOARD).exists());
+        assert_no_partial_post_rows(&conn);
+    }
+
+    #[test]
+    fn submit_post_rejects_overlimit_audio_without_stale_uploads_or_rows() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET allow_audio = 1, max_audio_size = 8 WHERE short_name = ?1",
+            rusqlite::params![TEST_BOARD],
+        )
+        .expect("shrink audio limit");
+        let mut command = thread_command(
+            TEST_BOARD,
+            "audio-overlimit",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+        );
+        command.file_data = Some(temp_upload("tiny.flac", &flac_header_bytes()));
+
+        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+            Ok(result) => panic!(
+                "over-limit audio should reject, got {}",
+                result.redirect_url
+            ),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::UploadTooLarge(message) => {
+                assert!(message.contains("Maximum audio upload size is 8 B."));
+            }
+            other => panic!("expected UploadTooLarge, got {other:?}"),
+        }
+        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert!(!upload_dir.path().join(TEST_BOARD).exists());
+        assert_no_partial_post_rows(&conn);
+    }
+
+    #[test]
+    fn submit_post_rejects_overlimit_video_without_stale_uploads_or_rows() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET max_video_size = 8 WHERE short_name = ?1",
+            rusqlite::params![TEST_BOARD],
+        )
+        .expect("shrink video limit");
+        let mut command = thread_command(
+            TEST_BOARD,
+            "video-overlimit",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+        );
+        command.file_data = Some(temp_upload("tiny.webm", &webm_header_bytes()));
+
+        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+            Ok(result) => panic!(
+                "over-limit video should reject, got {}",
+                result.redirect_url
+            ),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::UploadTooLarge(message) => {
+                assert!(message.contains("Maximum video upload size is 8 B."));
+            }
+            other => panic!("expected UploadTooLarge, got {other:?}"),
+        }
+        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert!(!upload_dir.path().join(TEST_BOARD).exists());
+        assert_no_partial_post_rows(&conn);
     }
 
     #[test]

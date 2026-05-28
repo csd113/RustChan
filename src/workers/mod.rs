@@ -16,7 +16,7 @@
 //     shutdown drains in-progress jobs before exiting (#7).
 //
 // Job types:
-//   VideoTranscode — MP4 → WebM (VP9 + Opus) via ffmpeg (off the hot path)
+//   VideoTranscode — MP4/MKV → WebM (VP9 + Opus) via ffmpeg (off the hot path)
 //   AudioWaveform  — waveform PNG from audio via ffmpeg (off the hot path)
 //   ThreadPrune    — delete overflow threads from a board asynchronously
 //   SpamCheck      — lightweight abuse signal logging
@@ -58,7 +58,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", content = "d")]
 pub enum Job {
-    /// Transcode an uploaded MP4 to `WebM` (VP9 + Opus) via ffmpeg.
+    /// Transcode an uploaded MP4/MKV to `WebM` (VP9 + Opus) via ffmpeg.
     VideoTranscode {
         post_id: i64,
         /// Path relative to `CONFIG.upload_dir`, e.g. "b/abc123.mp4"
@@ -637,7 +637,7 @@ async fn transcode_video(
     if !ffmpeg_vp9_available {
         warn!(
             "VideoTranscode skipped for post {post_id}: libvpx-vp9 or libopus not available. \
-             Install ffmpeg with VP9 + Opus support to enable MP4→WebM transcoding."
+             Install ffmpeg with VP9 + Opus support to enable MP4/MKV→WebM transcoding."
         );
         return Ok(());
     }
@@ -736,7 +736,7 @@ fn transcode_video_prepare(
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if ext != "mp4" && ext != "webm" {
+    if ext != "mp4" && ext != "webm" && ext != "mkv" {
         debug!("VideoTranscode: skipping unrecognised extension {file_path}");
         return Ok(None);
     }
@@ -1570,6 +1570,7 @@ mod tests {
     #[test]
     fn webm_reencode_uses_distinct_output_name() {
         assert_eq!(transcoded_webm_name("clip", "mp4"), "clip.webm");
+        assert_eq!(transcoded_webm_name("clip", "mkv"), "clip.webm");
         assert_eq!(transcoded_webm_name("clip", "webm"), "clip.vp9.webm");
     }
 

@@ -46,13 +46,21 @@ mod tests {
         assert_eq!(mime_to_ext_pub("image/heif"), "heif");
         assert_eq!(mime_to_ext_pub("video/mp4"), "mp4");
         assert_eq!(mime_to_ext_pub("video/webm"), "webm");
+        assert_eq!(mime_to_ext_pub("video/x-matroska"), "mkv");
+        assert_eq!(mime_to_ext_pub("video/matroska"), "mkv");
         assert_eq!(mime_to_ext_pub("audio/webm"), "webm");
         assert_eq!(mime_to_ext_pub("audio/mpeg"), "mp3");
         assert_eq!(mime_to_ext_pub("audio/ogg"), "ogg");
+        assert_eq!(mime_to_ext_pub("application/ogg"), "ogg");
+        assert_eq!(mime_to_ext_pub("audio/opus"), "opus");
         assert_eq!(mime_to_ext_pub("audio/flac"), "flac");
+        assert_eq!(mime_to_ext_pub("audio/x-flac"), "flac");
         assert_eq!(mime_to_ext_pub("audio/wav"), "wav");
+        assert_eq!(mime_to_ext_pub("audio/x-wav"), "wav");
         assert_eq!(mime_to_ext_pub("audio/mp4"), "m4a");
+        assert_eq!(mime_to_ext_pub("audio/x-m4a"), "m4a");
         assert_eq!(mime_to_ext_pub("audio/aac"), "aac");
+        assert_eq!(mime_to_ext_pub("audio/x-aac"), "aac");
     }
 
     #[test]
@@ -149,6 +157,24 @@ mod tests {
         assert_eq!(
             super::mime::detect_mime_type(data).expect("webm"),
             "video/webm"
+        );
+    }
+
+    #[test]
+    fn detect_matroska_doctype() {
+        let data: &[u8] = b"\x1a\x45\xdf\xa3\xa3\x42\x86\x81\x01\x42\xf7\x81\x01\x42\xf2\x81\x04\x42\xf3\x81\x08\x42\x82\x88matroska\x42\x87\x81\x04";
+        assert_eq!(
+            super::mime::detect_mime_type(data).expect("matroska"),
+            "video/x-matroska"
+        );
+    }
+
+    #[test]
+    fn detect_ogg_opus_header() {
+        let data: &[u8] = b"OggS\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00OpusHead\x01\x01\x38\x01";
+        assert_eq!(
+            super::mime::detect_mime_type(data).expect("opus"),
+            "audio/opus"
         );
     }
 

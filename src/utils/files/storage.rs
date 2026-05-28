@@ -63,26 +63,7 @@ pub fn classify_upload_mime(
         Err(error) => return Err(error),
     };
 
-    if detected == "video/webm" && ffprobe_available {
-        match crate::media::ffmpeg::probe_stream_kind(input_path) {
-            Ok(crate::media::ffmpeg::StreamKind::AudioOnly) => return Ok("audio/webm".to_owned()),
-            Ok(crate::media::ffmpeg::StreamKind::Video) => {}
-            Err(error) => {
-                tracing::debug!(
-                    path = %input_path.display(),
-                    error = %error,
-                    "ffprobe could not refine WebM media type; treating upload as video/webm"
-                );
-            }
-        }
-    } else if detected == "video/webm" {
-        tracing::debug!(
-            path = %input_path.display(),
-            "ffprobe unavailable; treating WebM upload as video/webm"
-        );
-    }
-
-    Ok(detected)
+    refine_probe_mime(input_path, &detected, ffprobe_available)
 }
 
 /// Save and process a primary upload from an already-streamed temporary file.
@@ -143,6 +124,12 @@ pub fn save_audio_with_image_thumb_from_path(
             format_upload_limit(max_audio_size)
         ));
     }
+    validate_av_stream_kind(
+        input_path,
+        &mime_type,
+        crate::models::MediaType::Audio,
+        ffprobe_available,
+    )?;
 
     let file_id = Uuid::new_v4().simple().to_string();
     let ext = mime_to_ext(&mime_type);
@@ -278,7 +265,8 @@ fn build_upload_plan(
         )
         && (validated.media_type != crate::models::MediaType::Video
             || validated.mime_type == "video/mp4"
-            || validated.mime_type == "video/webm");
+            || validated.mime_type == "video/webm"
+            || is_matroska_mime(&validated.mime_type));
 
     Ok(UploadPlan {
         mime_type: validated.mime_type,
@@ -341,6 +329,16 @@ fn validate_upload(
         validate_decodable_image(input_path, &mime_type)?;
     } else if media_type == crate::models::MediaType::Pdf {
         validate_pdf_structure(input_path)?;
+    } else if matches!(
+        media_type,
+        crate::models::MediaType::Audio | crate::models::MediaType::Video
+    ) {
+        validate_av_stream_kind(
+            input_path,
+            &mime_type,
+            media_type,
+            options.ffprobe_available,
+        )?;
     }
 
     let jpeg_orientation = if mime_type == "image/jpeg" {
@@ -686,6 +684,147 @@ fn mime_to_image_format(mime_type: &str) -> Option<image::ImageFormat> {
     }
 }
 
+fn refine_probe_mime(input_path: &Path, detected: &str, ffprobe_available: bool) -> Result<String> {
+    let media_type = crate::models::MediaType::from_mime(detected);
+    let should_probe = matches!(
+        media_type,
+        crate::models::MediaType::Audio | crate::models::MediaType::Video
+    );
+    if !should_probe {
+        return Ok(detected.to_owned());
+    }
+
+    if !ffprobe_available {
+        if is_matroska_mime(detected) {
+            anyhow::bail!(
+                "File appears to be Matroska/MKV, but ffprobe is required to validate MKV uploads."
+            );
+        }
+        if detected == "video/webm" {
+            tracing::debug!(
+                path = %input_path.display(),
+                "ffprobe unavailable; treating WebM upload as video/webm"
+            );
+        }
+        return Ok(detected.to_owned());
+    }
+
+    let stream_kind = crate::media::ffmpeg::probe_stream_kind(input_path).with_context(|| {
+        format!("File appears to be {detected}, but ffprobe could not validate its streams")
+    })?;
+
+    match (media_type, stream_kind) {
+        (crate::models::MediaType::Audio, crate::media::ffmpeg::StreamKind::AudioOnly) => {
+            canonical_audio_mime(input_path, detected)
+        }
+        (crate::models::MediaType::Video, crate::media::ffmpeg::StreamKind::Video) => {
+            Ok(canonical_video_mime(detected).to_owned())
+        }
+        (crate::models::MediaType::Video, crate::media::ffmpeg::StreamKind::AudioOnly)
+            if detected == "video/mp4" || detected == "video/webm" =>
+        {
+            canonical_audio_mime(input_path, detected)
+        }
+        (crate::models::MediaType::Video, crate::media::ffmpeg::StreamKind::AudioOnly)
+            if is_matroska_mime(detected) =>
+        {
+            anyhow::bail!("Matroska/MKV uploads must contain a video stream.")
+        }
+        (crate::models::MediaType::Video, crate::media::ffmpeg::StreamKind::AudioOnly) => {
+            anyhow::bail!("File appears to be {detected}, but contains only audio streams.")
+        }
+        (crate::models::MediaType::Audio, crate::media::ffmpeg::StreamKind::Video) => {
+            anyhow::bail!("File appears to be {detected}, but contains a video stream.")
+        }
+        (
+            crate::models::MediaType::Image
+            | crate::models::MediaType::Pdf
+            | crate::models::MediaType::Other,
+            _,
+        ) => Ok(detected.to_owned()),
+    }
+}
+
+fn canonical_audio_mime(input_path: &Path, detected: &str) -> Result<String> {
+    let codec = crate::media::ffmpeg::probe_audio_codec(input_path).with_context(|| {
+        format!("File appears to be {detected}, but ffprobe could not identify its audio codec")
+    })?;
+    let mime = match codec.as_str() {
+        "flac" => "audio/flac",
+        "mp3" | "mp2" | "mp1" => "audio/mpeg",
+        "aac" => {
+            if detected == "audio/aac" {
+                "audio/aac"
+            } else {
+                "audio/mp4"
+            }
+        }
+        "opus" => {
+            if detected == "video/webm" || detected == "audio/webm" {
+                "audio/webm"
+            } else {
+                "audio/opus"
+            }
+        }
+        "vorbis" => "audio/ogg",
+        codec if codec.starts_with("pcm_") => "audio/wav",
+        _ => detected,
+    };
+    Ok(canonical_audio_mime_variant(mime).to_owned())
+}
+
+fn canonical_audio_mime_variant(mime: &str) -> &str {
+    match mime {
+        "audio/mp3" => "audio/mpeg",
+        "audio/x-flac" => "audio/flac",
+        "audio/wave" | "audio/x-wav" | "audio/vnd.wave" => "audio/wav",
+        "application/ogg" | "audio/oga" => "audio/ogg",
+        "audio/m4a" | "audio/x-m4a" => "audio/mp4",
+        "audio/x-aac" => "audio/aac",
+        _ => mime,
+    }
+}
+
+fn canonical_video_mime(mime: &str) -> &str {
+    match mime {
+        "video/matroska" => "video/x-matroska",
+        _ => mime,
+    }
+}
+
+fn is_matroska_mime(mime: &str) -> bool {
+    matches!(mime, "video/x-matroska" | "video/matroska")
+}
+
+fn validate_av_stream_kind(
+    input_path: &Path,
+    mime_type: &str,
+    media_type: crate::models::MediaType,
+    ffprobe_available: bool,
+) -> Result<()> {
+    if !ffprobe_available {
+        return Ok(());
+    }
+
+    let stream_kind = crate::media::ffmpeg::probe_stream_kind(input_path).with_context(|| {
+        format!("File appears to be {mime_type}, but ffprobe could not validate its streams")
+    })?;
+    let expected_stream_kind = match media_type {
+        crate::models::MediaType::Audio => crate::media::ffmpeg::StreamKind::AudioOnly,
+        crate::models::MediaType::Video => crate::media::ffmpeg::StreamKind::Video,
+        crate::models::MediaType::Image
+        | crate::models::MediaType::Pdf
+        | crate::models::MediaType::Other => return Ok(()),
+    };
+    if stream_kind == expected_stream_kind {
+        return Ok(());
+    }
+    if media_type == crate::models::MediaType::Audio {
+        anyhow::bail!("File appears to be {mime_type}, but contains a video stream.");
+    }
+    anyhow::bail!("File appears to be {mime_type}, but contains only audio streams.");
+}
+
 fn apply_thumb_exif_orientation(thumb_path: &Path, orientation: u32) {
     if orientation <= 1 {
         return;
@@ -763,12 +902,14 @@ fn mime_to_ext(mime: &str) -> &'static str {
         "image/svg+xml" => "svg",
         "video/mp4" => "mp4",
         "video/webm" | "audio/webm" => "webm",
-        "audio/mpeg" => "mp3",
-        "audio/ogg" => "ogg",
-        "audio/flac" => "flac",
-        "audio/wav" => "wav",
-        "audio/mp4" => "m4a",
-        "audio/aac" => "aac",
+        "video/x-matroska" | "video/matroska" => "mkv",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/ogg" | "application/ogg" | "audio/oga" => "ogg",
+        "audio/opus" => "opus",
+        "audio/flac" | "audio/x-flac" => "flac",
+        "audio/wav" | "audio/wave" | "audio/x-wav" | "audio/vnd.wave" => "wav",
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => "m4a",
+        "audio/aac" | "audio/x-aac" => "aac",
         "application/pdf" => "pdf",
         _ => "bin",
     }
@@ -780,6 +921,8 @@ mod tests {
         delete_file_checked, save_audio_with_image_thumb_from_path, save_upload_from_path,
         SaveUploadOptions,
     };
+    use std::path::Path;
+    use std::process::{Command, Stdio};
 
     fn one_pixel_png() -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -867,6 +1010,285 @@ trailer << /Root 1 0 R >>
 
     fn valid_webm_header() -> &'static [u8] {
         b"\x1a\x45\xdf\xa3\x00\x00\x00\x00\x00\x00\x42\x82\x84webm\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+    }
+
+    fn sniff(bytes: &[u8]) -> &[u8] {
+        bytes.get(..bytes.len().min(512)).unwrap_or(bytes)
+    }
+
+    fn ffmpeg_available() -> bool {
+        Command::new(&crate::config::CONFIG.ffmpeg_path)
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn ffprobe_available() -> bool {
+        Command::new(&crate::config::CONFIG.ffprobe_path)
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn generate_ffmpeg_fixture(output: &Path, args: &[&str]) -> Option<Vec<u8>> {
+        let mut command = Command::new(&crate::config::CONFIG.ffmpeg_path);
+        command
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-y")
+            .args(args)
+            .arg(output)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if !command.status().ok()?.success() {
+            return None;
+        }
+        std::fs::read(output).ok()
+    }
+
+    struct AudioFixtureCase<'a> {
+        file_name: &'a str,
+        expected_mime: &'a str,
+        args: &'a [&'a str],
+    }
+
+    const AUDIO_FIXTURE_CASES: &[AudioFixtureCase<'static>] = &[
+        AudioFixtureCase {
+            file_name: "tiny.flac",
+            expected_mime: "audio/flac",
+            args: &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.05",
+                "-c:a",
+                "flac",
+            ],
+        },
+        AudioFixtureCase {
+            file_name: "tiny.mp3",
+            expected_mime: "audio/mpeg",
+            args: &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.05",
+                "-c:a",
+                "libmp3lame",
+                "-b:a",
+                "64k",
+            ],
+        },
+        AudioFixtureCase {
+            file_name: "tiny.wav",
+            expected_mime: "audio/wav",
+            args: &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.05",
+                "-c:a",
+                "pcm_s16le",
+            ],
+        },
+        AudioFixtureCase {
+            file_name: "tiny.ogg",
+            expected_mime: "audio/ogg",
+            args: &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.05",
+                "-c:a",
+                "libvorbis",
+            ],
+        },
+        AudioFixtureCase {
+            file_name: "tiny.oga",
+            expected_mime: "audio/ogg",
+            args: &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.05",
+                "-c:a",
+                "libvorbis",
+            ],
+        },
+        AudioFixtureCase {
+            file_name: "tiny.opus",
+            expected_mime: "audio/opus",
+            args: &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.05",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "32k",
+            ],
+        },
+        AudioFixtureCase {
+            file_name: "tiny.m4a",
+            expected_mime: "audio/mp4",
+            args: &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.05",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "64k",
+            ],
+        },
+        AudioFixtureCase {
+            file_name: "tiny-isom.mp4",
+            expected_mime: "audio/mp4",
+            args: &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.05",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "64k",
+                "-f",
+                "mp4",
+            ],
+        },
+        AudioFixtureCase {
+            file_name: "tiny.aac",
+            expected_mime: "audio/aac",
+            args: &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.05",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "64k",
+                "-f",
+                "adts",
+            ],
+        },
+        AudioFixtureCase {
+            file_name: "tiny-audio.webm",
+            expected_mime: "audio/webm",
+            args: &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.05",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "32k",
+                "-f",
+                "webm",
+            ],
+        },
+    ];
+
+    #[test]
+    fn valid_audio_uploads_accept_common_formats_with_ffprobe() {
+        if !ffmpeg_available() || !ffprobe_available() {
+            eprintln!("skipping ffmpeg audio fixture test; ffmpeg/ffprobe unavailable");
+            return;
+        }
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut checked = 0usize;
+        for case in AUDIO_FIXTURE_CASES {
+            let input_path = tempdir.path().join(case.file_name);
+            let Some(bytes) = generate_ffmpeg_fixture(&input_path, case.args) else {
+                eprintln!(
+                    "skipping audio fixture {}; ffmpeg could not generate it",
+                    case.file_name
+                );
+                continue;
+            };
+            let mut options = test_upload_options(tempdir.path(), case.file_name);
+            options.ffprobe_available = true;
+
+            let uploaded = save_upload_from_path(&input_path, sniff(&bytes), bytes.len(), &options)
+                .unwrap_or_else(|error| panic!("{} should upload: {error:#}", case.file_name));
+
+            assert_eq!(uploaded.mime_type, case.expected_mime, "{}", case.file_name);
+            assert_eq!(uploaded.media_type, crate::models::MediaType::Audio);
+            assert!(tempdir.path().join(&uploaded.file_path).exists());
+            checked = checked.saturating_add(1);
+        }
+
+        assert!(checked >= 8, "expected most audio fixtures to be generated");
+    }
+
+    #[test]
+    fn valid_mkv_uploads_save_as_video_with_probe() {
+        if !ffmpeg_available() || !ffprobe_available() {
+            eprintln!("skipping MKV fixture test; ffmpeg/ffprobe unavailable");
+            return;
+        }
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let input_path = tempdir.path().join("tiny.mkv");
+        let bytes = generate_ffmpeg_fixture(
+            &input_path,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=16x16:d=0.1",
+                "-an",
+                "-c:v",
+                "mpeg4",
+                "-f",
+                "matroska",
+            ],
+        )
+        .expect("generate mkv fixture");
+        let mut options = test_upload_options(tempdir.path(), "browser-octet-stream.bin");
+        options.ffprobe_available = true;
+
+        let uploaded = save_upload_from_path(&input_path, sniff(&bytes), bytes.len(), &options)
+            .expect("valid MKV upload should save");
+
+        assert_eq!(uploaded.mime_type, "video/x-matroska");
+        assert_eq!(uploaded.media_type, crate::models::MediaType::Video);
+        assert!(std::path::Path::new(&uploaded.file_path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("mkv")));
+        assert!(tempdir.path().join(&uploaded.file_path).exists());
+        assert!(tempdir.path().join(&uploaded.thumb_path).exists());
+    }
+
+    #[test]
+    fn fake_mkv_is_rejected_without_outputs() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let input_path = tempdir.path().join("fake.mkv");
+        let fake_mkv = b"\x1a\x45\xdf\xa3\xa3\x42\x86\x81\x01\x42\xf7\x81\x01\x42\xf2\x81\x04\x42\xf3\x81\x08\x42\x82\x88matroska\x42\x87\x81\x04not real media";
+        std::fs::write(&input_path, fake_mkv).expect("write fake mkv");
+        let mut options = test_upload_options(tempdir.path(), "fake.mkv");
+        options.ffprobe_available = true;
+
+        let Err(error) =
+            save_upload_from_path(&input_path, sniff(fake_mkv), fake_mkv.len(), &options)
+        else {
+            panic!("fake MKV should be rejected");
+        };
+
+        assert!(error
+            .to_string()
+            .contains("ffprobe could not validate its streams"));
+        assert!(!tempdir.path().join("test").exists());
     }
 
     #[test]

@@ -961,7 +961,7 @@ appeals are reviewed by site staff. one appeal per 24 hours.</p>
 <input type="hidden" name="_csrf" id="appeal-csrf-field" value="{csrf}">
 <textarea name="reason" rows="4" maxlength="512"
   placeholder="Briefly explain why you believe this ban should be lifted…"
-  style="width:100%;box-sizing:border-box;margin:0.75rem 0;background:var(--bg-post);color:var(--text);border:1px solid var(--border);padding:0.5rem;resize:vertical"></textarea>
+  style="width:100%;box-sizing:border-box;margin:0.75rem 0;background:var(--bg-post);color:var(--text);border:1px solid var(--border);padding:0.5rem;resize:none"></textarea>
 <button type="submit" style="margin-top:0.25rem">submit appeal</button>
 </form>
 <p style="margin-top:1.5rem"><a href="/">return home</a></p>
