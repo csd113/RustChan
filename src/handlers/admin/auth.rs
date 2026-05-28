@@ -29,7 +29,6 @@ use axum_extra::extract::cookie::{Cookie, CookieJar};
 use chrono::Utc;
 use dashmap::DashMap;
 use serde::Deserialize;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -137,7 +136,7 @@ pub fn prune_login_fails() {
 fn ensure_admin_login_csrf(
     jar: CookieJar,
     headers: &HeaderMap,
-    peer: Option<SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
 ) -> (CookieJar, String) {
     let token = jar
         .get("csrf_token")
@@ -151,7 +150,7 @@ fn ensure_admin_login_csrf(
     // embedded webviews while CSRF validation still guards the POST itself.
     cookie.set_same_site(super::ADMIN_COOKIE_SAME_SITE);
     cookie.set_path("/");
-    cookie.set_secure(super::should_set_secure_cookie(headers, peer));
+    cookie.set_secure(super::should_set_secure_cookie(headers, secure_context));
 
     (
         jar.add(cookie),
@@ -163,10 +162,10 @@ async fn render_admin_login_response(
     state: &AppState,
     jar: CookieJar,
     headers: &HeaderMap,
-    peer: SocketAddr,
+    secure_context: crate::middleware::SecureCookieContext,
     error: Option<&str>,
 ) -> Result<Response> {
-    let (jar, csrf) = ensure_admin_login_csrf(jar, headers, Some(peer));
+    let (jar, csrf) = ensure_admin_login_csrf(jar, headers, secure_context);
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let boards = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -195,7 +194,7 @@ pub async fn admin_index(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
 ) -> Result<Response> {
     // Move DB I/O into spawn_blocking.
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
@@ -218,7 +217,7 @@ pub async fn admin_index(
         return Ok(Redirect::to("/admin/panel").into_response());
     }
 
-    let (jar, csrf) = ensure_admin_login_csrf(jar, &headers, Some(peer));
+    let (jar, csrf) = ensure_admin_login_csrf(jar, &headers, secure_context);
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     Ok((
         jar,
@@ -248,7 +247,7 @@ pub async fn admin_login(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     Form(form): Form<LoginForm>,
 ) -> Result<Response> {
@@ -262,7 +261,7 @@ pub async fn admin_login(
             &state,
             jar,
             &headers,
-            peer,
+            secure_context,
             Some("Too many failed admin login attempts. Please wait a few minutes and try again."),
         )
         .await;
@@ -276,7 +275,7 @@ pub async fn admin_login(
         Some(ADMIN_LOGIN_CSRF_SCOPE),
         form.csrf.as_deref().unwrap_or(""),
     );
-    super::require_same_origin_or_valid_csrf(&headers, Some(peer), csrf_valid)?;
+    super::require_same_origin_or_valid_csrf(&headers, secure_context.peer, csrf_valid)?;
     if !csrf_valid {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
@@ -284,8 +283,14 @@ pub async fn admin_login(
     let username = form.username.trim().to_owned();
     let username_log = redact_login_username(&username);
     if username.is_empty() || username.len() > 64 {
-        return render_admin_login_response(&state, jar, &headers, peer, Some("Invalid username."))
-            .await;
+        return render_admin_login_response(
+            &state,
+            jar,
+            &headers,
+            secure_context,
+            Some("Invalid username."),
+        )
+        .await;
     }
 
     let pool = state.db.clone();
@@ -321,7 +326,7 @@ pub async fn admin_login(
                 &state,
                 jar,
                 &headers,
-                peer,
+                secure_context,
                 Some("Invalid username or password."),
             )
             .await
@@ -354,14 +359,14 @@ pub async fn admin_login(
             cookie.set_path("/");
             // Only mark the session cookie Secure when this request is actually
             // arriving over HTTPS (direct TLS or proxy-forwarded HTTPS).
-            let cookie_secure = super::should_set_secure_cookie(&headers, Some(peer));
+            let cookie_secure = super::should_set_secure_cookie(&headers, secure_context);
             cookie.set_secure(cookie_secure);
             // Set Max-Age so browsers expire the cookie after the
             // configured session lifetime instead of persisting it indefinitely.
             cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
 
             tracing::info!(target: "admin", admin_id = admin_id, "Admin logged in");
-            let jar = super::refresh_admin_csrf_cookie(jar.add(cookie));
+            let jar = super::refresh_admin_csrf_cookie(jar.add(cookie), cookie_secure);
             let redirect = if cookie_secure {
                 Redirect::to("/admin/panel")
             } else {
@@ -733,7 +738,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_login_marks_session_cookie_secure_for_https_tunnel_origin() {
+    async fn admin_login_marks_session_cookie_secure_for_direct_https_request() {
         let state = crate::test_support::app_state();
         clear_login_fails(&login_ip_key("127.0.0.1"));
         {
@@ -764,6 +769,7 @@ mod tests {
                     .header(header::ORIGIN, &origin)
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
+                    .extension(crate::middleware::RequestTransport { direct_https: true })
                     .body(Body::from(format!(
                         "username=admin&password=hunter2&_csrf={}",
                         signed_admin_csrf()

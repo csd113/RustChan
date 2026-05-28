@@ -492,10 +492,15 @@ pub async fn admin_ip_history(
     Path(ip_hash): Path<String>,
     Query(params): Query<IpHistoryQuery>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    secure_context: crate::middleware::SecureCookieContext,
 ) -> Result<(CookieJar, Html<String>)> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    let (jar, csrf) = super::ensure_admin_csrf(jar)?;
+    let (jar, csrf) = super::ensure_admin_csrf(
+        jar,
+        super::should_set_secure_cookie(&headers, secure_context),
+    )?;
     let csrf_clone = csrf.clone();
 
     // Sanitise the IP hash: must be exactly a SHA-256 hex string (64 hex chars).
@@ -894,11 +899,16 @@ const fn default_mod_log_page() -> i64 {
 pub async fn mod_log_page(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    secure_context: crate::middleware::SecureCookieContext,
     Query(params): Query<ModLogQuery>,
 ) -> Result<(CookieJar, Html<String>)> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    let (jar, csrf) = super::ensure_admin_csrf(jar)?;
+    let (jar, csrf) = super::ensure_admin_csrf(
+        jar,
+        super::should_set_secure_cookie(&headers, secure_context),
+    )?;
     let csrf_clone = csrf.clone();
     let page = params.page.max(1);
 

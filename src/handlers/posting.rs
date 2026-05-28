@@ -5,7 +5,7 @@ use crate::{
     error::{AppError, Result},
     models::Board,
     utils::{
-        crypto::{hash_ip, new_deletion_token, verify_pow},
+        crypto::{hash_ip, new_deletion_token},
         sanitize::{
             apply_word_filters, escape_html, render_post_body, validate_body,
             validate_body_with_file, validate_name, validate_subject,
@@ -40,7 +40,8 @@ pub struct SubmitPostCommand {
     pub name: String,
     pub body: String,
     pub deletion_token: String,
-    pub pow_nonce: String,
+    pub captcha_id: String,
+    pub captcha_answer: String,
     pub image_file_data: Option<(crate::handlers::TempUpload, String)>,
     pub file_data: Option<(crate::handlers::TempUpload, String)>,
     pub audio_file_data: Option<(crate::handlers::TempUpload, String)>,
@@ -184,7 +185,8 @@ fn build_upload_finalize_payload(
         relative_paths,
         primary_hash,
         primary_file_path: primary.map(|file| file.file_path.clone()),
-        primary_thumb_path: primary.map(|file| file.thumb_path.clone()),
+        primary_thumb_path: primary
+            .and_then(|file| (!file.thumb_path.is_empty()).then(|| file.thumb_path.clone())),
         primary_mime_type: primary.map(|file| file.mime_type.clone()),
     })
 }
@@ -405,7 +407,8 @@ pub fn submit_post(
         name,
         body,
         deletion_token,
-        pow_nonce,
+        captcha_id,
+        captcha_answer,
         image_file_data,
         file_data,
         audio_file_data,
@@ -481,11 +484,9 @@ pub fn submit_post(
         }
     }
 
-    if board.allow_captcha && !verify_pow(&board_short, &pow_nonce) {
-        return Err(AppError::BadRequest(
-            "CAPTCHA verification failed. Please wait for the solver to complete before posting."
-                .into(),
-        ));
+    if board.allow_captcha {
+        crate::captcha::verify_captcha(&board_short, &captcha_id, &captcha_answer)
+            .map_err(|error| AppError::BadRequest(error.user_message().to_owned()))?;
     }
 
     let filters = load_word_filters(conn)?;
@@ -751,7 +752,8 @@ mod tests {
             name: "anon".to_owned(),
             body: body.to_owned(),
             deletion_token: String::new(),
-            pow_nonce: String::new(),
+            captcha_id: String::new(),
+            captcha_answer: String::new(),
             image_file_data: None,
             file_data: None,
             audio_file_data: None,
@@ -788,7 +790,8 @@ mod tests {
             name: "anon".to_owned(),
             body: body.to_owned(),
             deletion_token: String::new(),
-            pow_nonce: String::new(),
+            captcha_id: String::new(),
+            captcha_answer: String::new(),
             image_file_data: None,
             file_data: None,
             audio_file_data: None,
@@ -821,7 +824,8 @@ mod tests {
             name: "anon".to_owned(),
             body: body.to_owned(),
             deletion_token: String::new(),
-            pow_nonce: String::new(),
+            captcha_id: String::new(),
+            captcha_answer: String::new(),
             image_file_data: None,
             file_data: None,
             audio_file_data: None,
@@ -990,11 +994,97 @@ mod tests {
             AppError::BadRequest(message) => {
                 assert_eq!(
                     message,
-                    "CAPTCHA verification failed. Please wait for the solver to complete before posting."
+                    "CAPTCHA verification failed. Enter the text from the image and try again."
                 );
             }
             other => panic!("expected BadRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn submit_post_accepts_valid_captcha_once() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET allow_captcha = 1 WHERE short_name = ?1",
+            rusqlite::params![TEST_BOARD],
+        )
+        .expect("enable captcha");
+        let captcha_id = "00000000000000000000000000000007";
+        crate::captcha::testing::insert_challenge_for_test(
+            TEST_BOARD,
+            captcha_id,
+            "ABC23",
+            chrono::Utc::now().timestamp() + 300,
+        );
+
+        let mut command = thread_command(
+            TEST_BOARD,
+            "captcha-thread-success",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+        );
+        command.captcha_id = captcha_id.to_owned();
+        command.captcha_answer = "abc23".to_owned();
+
+        let result = submit_post(&conn, state.job_queue.as_ref(), command).expect("submit post");
+        assert_eq!(result.board_short, TEST_BOARD);
+
+        let mut replay = thread_command(
+            TEST_BOARD,
+            "captcha-thread-replay",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+        );
+        replay.captcha_id = captcha_id.to_owned();
+        replay.captcha_answer = "ABC23".to_owned();
+        let error = match submit_post(&conn, state.job_queue.as_ref(), replay) {
+            Ok(result) => panic!(
+                "expected captcha replay rejection, got {}",
+                result.redirect_url
+            ),
+            Err(error) => error,
+        };
+        assert!(matches!(error, AppError::BadRequest(message) if message.contains("expired")));
+    }
+
+    #[test]
+    fn submit_post_rejects_expired_captcha() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET allow_captcha = 1 WHERE short_name = ?1",
+            rusqlite::params![TEST_BOARD],
+        )
+        .expect("enable captcha");
+        let captcha_id = "00000000000000000000000000000008";
+        crate::captcha::testing::insert_challenge_for_test(
+            TEST_BOARD,
+            captcha_id,
+            "ABC23",
+            chrono::Utc::now().timestamp() - 1,
+        );
+        let mut command = thread_command(
+            TEST_BOARD,
+            "captcha-thread-expired",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+        );
+        command.captcha_id = captcha_id.to_owned();
+        command.captcha_answer = "ABC23".to_owned();
+
+        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+            Ok(result) => panic!(
+                "expected expired captcha rejection, got {}",
+                result.redirect_url
+            ),
+            Err(error) => error,
+        };
+        assert!(matches!(error, AppError::BadRequest(message) if message.contains("expired")));
     }
 
     #[test]
@@ -1181,6 +1271,32 @@ mod tests {
             Some(i64::try_from(b"cached file".len()).expect("cached size fits"))
         );
         assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+    }
+
+    #[test]
+    fn upload_finalize_payload_omits_empty_generic_thumb_path() {
+        let primary = crate::utils::files::UploadedFile {
+            file_path: "test/file.bin".to_owned(),
+            thumb_path: String::new(),
+            original_name: "file.bin".to_owned(),
+            mime_type: "application/octet-stream".to_owned(),
+            file_size: 4,
+            media_type: crate::models::MediaType::Other,
+            processing_pending: false,
+            dedup_reused: false,
+        };
+
+        let payload = super::build_upload_finalize_payload(
+            std::path::Path::new("/tmp/rustchan-stage"),
+            Some(&primary),
+            None,
+            None,
+        )
+        .expect("generic upload payload");
+
+        assert_eq!(payload.relative_paths, vec!["test/file.bin"]);
+        assert_eq!(payload.primary_file_path.as_deref(), Some("test/file.bin"));
+        assert!(payload.primary_thumb_path.is_none());
     }
 
     #[test]

@@ -27,7 +27,7 @@ use crate::{
     db::{self},
     error::{AppError, Result},
     handlers::{parse_post_multipart, posting, render},
-    middleware::{validate_csrf, validate_signed_csrf, AppState},
+    middleware::{validate_csrf, validate_signed_csrf, AppState, SecureCookieContext},
     models::{Board, Pagination, SearchQuery, SEARCH_QUERY_MAX_CHARS},
     templates,
     utils::crypto::{
@@ -35,7 +35,7 @@ use crate::{
     },
 };
 use axum::{
-    extract::{ConnectInfo, Form, Multipart, Path, Query, State},
+    extract::{Form, Multipart, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse as _, Redirect, Response},
 };
@@ -43,7 +43,6 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
 use std::sync::{atomic::AtomicU64, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use time::Duration;
@@ -66,9 +65,17 @@ pub use reports::*;
 
 pub(crate) fn should_set_public_secure_cookie(
     headers: &HeaderMap,
-    peer: Option<SocketAddr>,
+    context: SecureCookieContext,
 ) -> bool {
-    crate::handlers::admin::should_set_secure_cookie(headers, peer)
+    crate::handlers::admin::should_set_secure_cookie(headers, context)
+}
+
+pub(crate) type OptionalConnectInfoPeer = SecureCookieContext;
+
+pub(crate) const fn optional_connect_info_peer(
+    peer: OptionalConnectInfoPeer,
+) -> SecureCookieContext {
+    peer
 }
 
 const PREVIEW_REPLIES: i64 = 3;
@@ -127,7 +134,7 @@ pub(crate) fn latest_visible_thread_marker_tuple(marker: Option<(i64, i64)>) -> 
 
 pub(crate) const fn activity_html_cache_control(activity_markers_enabled: bool) -> &'static str {
     if activity_markers_enabled {
-        crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE
+        crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE
     } else {
         HTML_CACHE_CONTROL
     }
@@ -478,8 +485,13 @@ pub(crate) fn board_access_denied_response(
     board_access_required_response(jar, html)
 }
 
-pub async fn banned_page(Query(query): Query<BannedPageQuery>, jar: CookieJar) -> Response {
-    let (jar, csrf) = ensure_csrf(jar);
+pub async fn banned_page(
+    Query(query): Query<BannedPageQuery>,
+    jar: CookieJar,
+    req_headers: HeaderMap,
+    peer: OptionalConnectInfoPeer,
+) -> Response {
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
     let reason = query
         .reason
         .unwrap_or_else(|| "No reason given".to_owned())

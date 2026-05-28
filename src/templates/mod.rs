@@ -406,6 +406,37 @@ pub const fn confirmation_modal_script() -> &'static str {
 </div>"#
 }
 
+#[must_use]
+pub const fn admin_ban_delete_modal_script() -> &'static str {
+    r#"
+<div id="ban-delete-modal" class="compress-modal ban-delete-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="ban-delete-modal-title" aria-describedby="ban-delete-modal-info" aria-hidden="true">
+  <div class="compress-modal-box ban-delete-modal-box">
+    <div class="compress-modal-title ban-delete-modal-title" id="ban-delete-modal-title">Ban IP + delete post</div>
+    <form id="ban-delete-modal-form" novalidate>
+      <div class="compress-modal-info confirm-modal-info ban-delete-modal-info" id="ban-delete-modal-info">
+        This will ban the hashed IP and delete post <strong id="ban-delete-post-label">No.</strong>.
+      </div>
+      <div class="ban-delete-warning" role="note">Destructive moderation action. Cancel is safe.</div>
+      <div class="ban-delete-field">
+        <label for="ban-delete-reason">Ban reason</label>
+        <input type="text" id="ban-delete-reason" maxlength="256" autocomplete="off" placeholder="Rule violation">
+        <div class="ban-delete-help">Leave blank to use Rule violation.</div>
+      </div>
+      <div class="ban-delete-field">
+        <label for="ban-delete-duration">Duration in hours</label>
+        <input type="text" id="ban-delete-duration" inputmode="numeric" pattern="[0-9]*" value="0" autocomplete="off">
+        <div class="ban-delete-help">Use 0 for a permanent ban.</div>
+      </div>
+      <div class="post-error-banner ban-delete-error" id="ban-delete-error" role="alert" hidden></div>
+      <div class="compress-modal-actions ban-delete-actions">
+        <button type="button" class="compress-cancel-btn" id="ban-delete-cancel">Cancel</button>
+        <button type="submit" class="compress-do-btn btn-danger" id="ban-delete-submit">Ban IP + delete</button>
+      </div>
+    </form>
+  </div>
+</div>"#
+}
+
 // ─── Report modal ─────────────────────────────────────────────────────────────
 
 /// Returns the report overlay HTML. Injected once per thread page.
@@ -423,10 +454,11 @@ pub const fn report_modal_script() -> &'static str {
       <input type="hidden" name="board"     id="report-board">
       <input type="hidden" name="ip_hash"   id="report-ip-hash">
       <div class="compress-modal-info confirm-modal-info" id="report-info"></div>
-      <input type="text" name="reason" id="report-reason"
+      <input type="text" name="reason" id="report-reason" aria-label="report reason"
              placeholder="reason (optional)" maxlength="256"
              style="width:100%;background:var(--bg-input);border:1px solid var(--border);
-                    color:var(--text);padding:5px 8px;font-family:var(--font);font-size:0.82rem;
+                    color:var(--text);padding:8px 10px;font-family:var(--font);font-size:16px;
+                    min-height:38px;
                     box-sizing:border-box;margin-bottom:0.75rem">
       <div class="compress-modal-actions">
         <button type="button" class="compress-cancel-btn" data-action="close-report">Cancel</button>
@@ -435,6 +467,37 @@ pub const fn report_modal_script() -> &'static str {
     </form>
   </div>
 </div>"#
+}
+
+#[must_use]
+fn report_fallback_form(
+    board_short: &str,
+    post_id: i64,
+    thread_id: i64,
+    csrf_token: &str,
+    submit_label: &str,
+) -> String {
+    format!(
+        r#"<form class="report-fallback-form" method="POST" action="/report">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="post_id" value="{post_id}">
+  <input type="hidden" name="thread_id" value="{thread_id}">
+  <input type="hidden" name="board" value="{board}">
+  <details class="report-fallback-details">
+    <summary class="report-fallback-summary">report</summary>
+    <label class="report-fallback-reason-label">
+      <span>reason</span>
+      <input class="report-fallback-reason" type="text" name="reason" maxlength="256" placeholder="reason (optional)">
+    </label>
+    <button type="submit" class="report-fallback-submit">{submit_label}</button>
+  </details>
+</form>"#,
+        csrf = escape_html(csrf_token),
+        post_id = post_id,
+        thread_id = thread_id,
+        board = escape_html(board_short),
+        submit_label = escape_html(submit_label),
+    )
 }
 
 // ─── Thread auto-update script ────────────────────────────────────────────────
@@ -595,7 +658,7 @@ pub fn base_layout_with_preferences(
     let search_bar = board_short.map_or_else(String::new, |b| {
         format!(
             r#"<form class="search-form" method="GET" action="/{b}/search">
-<input type="text" name="q" placeholder="search /{b}/…" maxlength="{max_len}">
+<input type="text" name="q" aria-label="search /{b}/" placeholder="search /{b}/…" maxlength="{max_len}">
 <button type="submit">go</button>
 </form>"#,
             b = escape_html(b),
@@ -786,6 +849,7 @@ pub fn base_layout_with_preferences(
         </fieldset>
         <input type="hidden" name="show_activity_badges_present" value="1">
         <label><input type="checkbox" name="show_activity_badges" value="1"{badges_checked}> Show new activity badges</label>
+        <button type="submit">save preferences</button>
       </form>
     </details>
     <div id="theme-picker-panel">

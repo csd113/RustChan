@@ -444,6 +444,7 @@ fn render_admin_backups_section(
         ""
     };
     let auto_part_options = split_zip_part_size_options(auto_full_backup_split_zip_part_size_gib);
+    let manual_part_options = split_zip_part_size_options(4);
     format!(
         r#"<div class="admin-panel-backups" id="backups">
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -532,10 +533,7 @@ fn render_admin_backups_section(
       <span class="backup-output-select">
         <span>Part size</span>
         <select name="split_zip_part_size_gib">
-          <option value="1">1 GiB</option>
-          <option value="2">2 GiB</option>
-          <option value="4" selected>4 GiB</option>
-          <option value="8">8 GiB</option>
+          {manual_part_options}
         </select>
       </span>
     </label>
@@ -625,6 +623,7 @@ fn render_admin_backups_section(
         auto_directory_checked = auto_directory_checked,
         auto_split_zip_checked = auto_split_zip_checked,
         auto_part_options = auto_part_options,
+        manual_part_options = manual_part_options,
         auto_full_backup_tor_option = auto_full_backup_tor_option,
         full_backup_create_tor_option = full_backup_create_tor_option,
         full_backup_restore_upload_tor_option = full_backup_restore_upload_tor_option,

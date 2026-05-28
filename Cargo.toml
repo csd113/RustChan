@@ -1,6 +1,6 @@
 [package]
 name = "rustchan"
-version = "1.2.1"
+version = "1.2.2"
 edition = "2021"
 # axum 0.8 requires Rust 1.75; arti-client 0.41 bumps the effective floor to
 # 1.90 — keep both fields in sync.
@@ -37,6 +37,7 @@ tower      = "0.5"
 tower-http = { version = "0.6",  features = ["fs", "set-header", "compression-full", "trace"] }
 tokio      = { version = "1",    features = ["full"] }
 tokio-util = "0.7"
+captcha    = { version = "1.0.0", default-features = false }
 
 rusqlite    = { version = "0.39.0", features = ["bundled", "backup"] }
 r2d2        = "0.8"

@@ -1037,8 +1037,8 @@ function submitPostFormWithProgress(form) {
 }
 
 function captchaNonceMissing(form) {
-  var nonceField = form && form.querySelector('input[name="pow_nonce"]');
-  return !!(nonceField && !nonceField.value);
+  var answerField = form && form.querySelector('input[name="captcha_answer"]');
+  return !!(answerField && !answerField.value.trim());
 }
 
 // ─── NSFW disclaimer overlay ────────────────────────────────────────────────
@@ -1769,10 +1769,14 @@ window.requestConfirmation = requestConfirmation;
 
 // ─── Report modal ─────────────────────────────────────────────────────────────
 
+var _reportActiveTrigger = null;
+var _editModalActiveTrigger = null;
+
 function openReportModal(postId, threadId, board, csrf, label) {
   var opts = arguments.length > 5 && arguments[5] ? arguments[5] : {};
   var form = document.getElementById('report-form');
   if (!form) return;
+  _reportActiveTrigger = opts.trigger || document.activeElement;
   form.setAttribute('action', opts.action || '/report');
   document.getElementById('report-post-id').value = postId;
   document.getElementById('report-thread-id').value = threadId;
@@ -1800,6 +1804,10 @@ function openReportModal(postId, threadId, board, csrf, label) {
 function closeReportModal() {
   var modal = document.getElementById('report-modal');
   if (modal) modal.style.display = 'none';
+  if (_reportActiveTrigger && typeof _reportActiveTrigger.focus === 'function') {
+    _reportActiveTrigger.focus();
+  }
+  _reportActiveTrigger = null;
 }
 
 function openEditModal(trigger) {
@@ -1811,6 +1819,7 @@ function openEditModal(trigger) {
 
   var postId = trigger.dataset.editPostId;
   if (!postId) return;
+  _editModalActiveTrigger = trigger;
   var source = document.getElementById('edit-body-' + postId);
   var expiry = Number(trigger.dataset.editExpiry || '');
   form.setAttribute('action', '/' + encodeURIComponent(trigger.closest('#thread-posts').dataset.board) + '/post/' + encodeURIComponent(postId) + '/edit');
@@ -1847,6 +1856,10 @@ function closeEditModal() {
   modal.classList.remove('is-open');
   modal.setAttribute('aria-hidden', 'true');
   modal.hidden = true;
+  if (_editModalActiveTrigger && typeof _editModalActiveTrigger.focus === 'function') {
+    _editModalActiveTrigger.focus();
+  }
+  _editModalActiveTrigger = null;
 }
 
 function showEditModalError(message) {
@@ -3169,20 +3182,108 @@ function clearBanDeletePreparation(form) {
   }
 }
 
-function adminBanDelete(form, pid) {
-  var reason = prompt('Ban reason (leave blank for "Rule violation"):');
-  if (reason === null) return false;
-  var dur = prompt('Ban duration in hours (0 = permanent):');
-  if (dur === null) return false;
-  var hours = parseInt(dur, 10);
-  if (isNaN(hours) || hours < 0) hours = 0;
+var _banDeleteModal = null;
+var _banDeleteForm = null;
+var _banDeleteReason = null;
+var _banDeleteDuration = null;
+var _banDeleteError = null;
+var _banDeleteCancel = null;
+var _banDeletePostLabel = null;
+var _banDeleteTargetForm = null;
+var _banDeleteTargetSubmitter = null;
+var _banDeleteActiveTrigger = null;
+
+function ensureBanDeleteModal() {
+  if (_banDeleteModal) return true;
+  _banDeleteModal = document.getElementById('ban-delete-modal');
+  if (!_banDeleteModal) return false;
+  _banDeleteForm = document.getElementById('ban-delete-modal-form');
+  _banDeleteReason = document.getElementById('ban-delete-reason');
+  _banDeleteDuration = document.getElementById('ban-delete-duration');
+  _banDeleteError = document.getElementById('ban-delete-error');
+  _banDeleteCancel = document.getElementById('ban-delete-cancel');
+  _banDeletePostLabel = document.getElementById('ban-delete-post-label');
+  return !!(
+    _banDeleteForm &&
+    _banDeleteReason &&
+    _banDeleteDuration &&
+    _banDeleteError &&
+    _banDeleteCancel &&
+    _banDeletePostLabel
+  );
+}
+
+function showBanDeleteError(message) {
+  if (!_banDeleteError) return;
+  _banDeleteError.textContent = message;
+  _banDeleteError.hidden = false;
+}
+
+function clearBanDeleteError() {
+  if (!_banDeleteError) return;
+  _banDeleteError.textContent = '';
+  _banDeleteError.hidden = true;
+}
+
+function closeBanDeleteModal(submitted) {
+  if (!ensureBanDeleteModal() || _banDeleteModal.style.display === 'none') return;
+  _banDeleteModal.style.display = 'none';
+  _banDeleteModal.setAttribute('aria-hidden', 'true');
+  clearBanDeleteError();
+  var trigger = _banDeleteActiveTrigger;
+  _banDeleteTargetForm = null;
+  _banDeleteTargetSubmitter = null;
+  _banDeleteActiveTrigger = null;
+  if (!submitted && trigger && typeof trigger.focus === 'function') {
+    trigger.focus();
+  }
+}
+
+function openBanDeleteModal(form, pid, submitter) {
+  if (!ensureBanDeleteModal()) {
+    form.dataset.banDeletePrepared = '1';
+    form.dataset.rcConfirmSubmitBypass = '1';
+    requestFormSubmit(form, submitter);
+    return true;
+  }
+
+  _banDeleteTargetForm = form;
+  _banDeleteTargetSubmitter = submitter || null;
+  _banDeleteActiveTrigger = submitter || document.activeElement;
+  _banDeletePostLabel.textContent = 'No.' + pid;
+  _banDeleteReason.value = '';
+  _banDeleteDuration.value = '0';
+  clearBanDeleteError();
+  _banDeleteModal.style.display = 'flex';
+  _banDeleteModal.setAttribute('aria-hidden', 'false');
+  window.setTimeout(function () {
+    _banDeleteReason.focus();
+  }, 0);
+  return true;
+}
+
+function submitBanDeleteModal() {
+  if (!_banDeleteTargetForm) return;
+  var rawDuration = (_banDeleteDuration.value || '').trim();
+  var hours = rawDuration === '' ? 0 : parseInt(rawDuration, 10);
+  if (isNaN(hours) || hours < 0) {
+    showBanDeleteError('Duration must be 0 or a positive number of hours.');
+    _banDeleteDuration.focus();
+    return;
+  }
+
+  var pid = _banDeleteTargetForm.dataset.banDeletePid;
   var reasonEl = document.getElementById('ban-reason-' + pid);
   var durEl = document.getElementById('ban-dur-' + pid);
-  if (reasonEl) reasonEl.value = reason.trim() || 'Rule violation';
+  if (reasonEl) reasonEl.value = (_banDeleteReason.value || '').trim() || 'Rule violation';
   if (durEl) durEl.value = hours;
-  form.dataset.banDeletePrepared = '1';
-  form.dataset.confirmSubmit = 'Ban IP + delete post No.' + pid + '?';
-  return true;
+
+  var targetForm = _banDeleteTargetForm;
+  var targetSubmitter = _banDeleteTargetSubmitter;
+  targetForm.dataset.banDeletePrepared = '1';
+  targetForm.dataset.rcConfirmSubmitBypass = '1';
+  closeBanDeleteModal(true);
+  requestFormSubmit(targetForm, targetSubmitter);
 }
 
 // ─── Poll management ──────────────────────────────────────────────────────────
@@ -3304,111 +3405,18 @@ function togglePosterHighlights(threadId, posterId) {
   } catch (e) {}
 })();
 
-// ─── PoW CAPTCHA solver ───────────────────────────────────────────────────────
-// Dynamic values (board name, difficulty) are read from data-pow-board and
-// data-pow-difficulty attributes on each input[name="pow_nonce"] element.
-
-(function () {
-  function sha256Fallback(str) {
-    var msg = new TextEncoder().encode(str);
-    var K = [
-      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
-    ];
-    var H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
-    var len = msg.length, bitLen = len * 8;
-    var padded = new Uint8Array(((len + 9 + 63) & ~63));
-    padded.set(msg);
-    padded[len] = 0x80;
-    var dv = new DataView(padded.buffer);
-    dv.setUint32(padded.length - 4, bitLen >>> 0, false);
-    var r = function (n, x) { return (x >>> n) | (x << (32 - n)); };
-    for (var i = 0; i < padded.length; i += 64) {
-      var w = new Array(64);
-      for (var j = 0; j < 16; j++) w[j] = dv.getUint32(i + j * 4, false);
-      for (var j2 = 16; j2 < 64; j2++) {
-        var s0 = r(7, w[j2 - 15]) ^ r(18, w[j2 - 15]) ^ (w[j2 - 15] >>> 3);
-        var s1 = r(17, w[j2 - 2]) ^ r(19, w[j2 - 2]) ^ (w[j2 - 2] >>> 10);
-        w[j2] = (w[j2 - 16] + s0 + w[j2 - 7] + s1) >>> 0;
-      }
-      var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
-      for (var k = 0; k < 64; k++) {
-        var S1 = r(6, e) ^ r(11, e) ^ r(25, e);
-        var ch = (e & f) ^ (~e & g);
-        var tmp1 = (h + S1 + ch + K[k] + w[k]) >>> 0;
-        var S0 = r(2, a) ^ r(13, a) ^ r(22, a);
-        var maj = (a & b) ^ (a & c) ^ (b & c);
-        var tmp2 = (S0 + maj) >>> 0;
-        h = g; g = f; f = e; e = (d + tmp1) >>> 0; d = c; c = b; b = a; a = (tmp1 + tmp2) >>> 0;
-      }
-      H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + b) >>> 0; H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + d) >>> 0;
-      H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0; H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0;
-    }
-    var out = new Uint8Array(32);
-    var odv = new DataView(out.buffer);
-    for (var ii = 0; ii < 8; ii++) odv.setUint32(ii * 4, H[ii], false);
-    return Promise.resolve(out.buffer);
-  }
-
-  function sha256(str) {
-    if (typeof crypto !== 'undefined' && crypto.subtle) {
-      return crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
-    }
-    return sha256Fallback(str);
-  }
-
-  function countLeadingZeroBits(buf) {
-    var bytes = new Uint8Array(buf);
-    var count = 0;
-    for (var i = 0; i < bytes.length; i++) {
-      if (bytes[i] === 0) { count += 8; }
-      else { count += Math.clz32(bytes[i]) - 24; break; }
-    }
-    return count;
-  }
-
-  async function startPoW(nonceEl, statusEl, board, difficulty) {
-    var minute = Math.floor(Date.now() / 1000 / 60);
-    var challenge = board + ':' + minute;
-    var nonce = 0;
-    if (statusEl) statusEl.textContent = 'solving proof-of-work…';
-    while (true) {
-      var buf = await sha256(challenge + ':' + nonce);
-      if (countLeadingZeroBits(buf) >= difficulty) {
-        nonceEl.value = nonce;
-        if (statusEl) statusEl.textContent = '\u2713 captcha solved';
-        return;
-      }
-      nonce++;
-      if (nonce % 50000 === 0) {
-        if (statusEl) statusEl.textContent = 'solving\u2026 ' + nonce.toLocaleString() + ' attempts';
-        await new Promise(function (r) { setTimeout(r, 0); });
-      }
-    }
-  }
-
-  document.querySelectorAll('input[name="pow_nonce"]').forEach(function (nonceEl) {
-    var difficulty = parseInt(nonceEl.dataset.powDifficulty, 10);
-    var board = nonceEl.dataset.powBoard;
-    if (!board || !difficulty) return;
-    var statusId = nonceEl.id.replace('pow-nonce-', 'captcha-status-');
-    var statusEl = document.getElementById(statusId);
-    startPoW(nonceEl, statusEl, board, difficulty).catch(function (e) {
-      if (statusEl) statusEl.textContent = 'captcha error: ' + e;
-    });
-  });
-})();
-
 // ─── Centralised event delegation ────────────────────────────────────────────
 // Replaces all inline onclick=/onchange=/onsubmit= attribute handlers.
 
 document.addEventListener('click', function (e) {
+  if (
+    e.target === document.getElementById('ban-delete-modal') ||
+    e.target.id === 'ban-delete-cancel'
+  ) {
+    e.preventDefault();
+    closeBanDeleteModal(false);
+    return;
+  }
   if (
     e.target === document.getElementById('confirm-modal') ||
     e.target.id === 'confirm-modal-cancel'
@@ -3471,6 +3479,7 @@ document.addEventListener('click', function (e) {
         e.preventDefault();
         closeThreadMenus();
         openReportModal(t.dataset.pid, t.dataset.tid, t.dataset.board, t.dataset.csrf, t.dataset.reportLabel, {
+          trigger: t,
           action: t.dataset.reportAction,
           ipHash: t.dataset.reportIpHash,
           title: t.dataset.reportTitle,
@@ -3563,12 +3572,17 @@ document.addEventListener('submit', function (e) {
   closeThreadMenus();
   var form = e.target;
   var submitter = e.submitter || null;
+  if (form.id === 'ban-delete-modal-form') {
+    e.preventDefault();
+    submitBanDeleteModal();
+    return;
+  }
   if (form.matches && form.matches('form.post-form')) {
     if (captchaNonceMissing(form)) {
       e.preventDefault();
       showPostFormFeedback(
         form,
-        'CAPTCHA is still solving. Wait for the checkmark before posting.'
+        'Enter the CAPTCHA text before posting.'
       );
       setPostFormOpen(true, { scrollIntoView: true });
       return;
@@ -3587,11 +3601,7 @@ document.addEventListener('submit', function (e) {
   // data-ban-delete: admin ban+delete form
   if (form.dataset.banDeletePid && form.dataset.banDeletePrepared !== '1') {
     e.preventDefault();
-    if (adminBanDelete(form, form.dataset.banDeletePid)) {
-      requestFormSubmit(form, submitter);
-    } else {
-      clearBanDeletePreparation(form);
-    }
+    openBanDeleteModal(form, form.dataset.banDeletePid, submitter);
     return;
   }
   // data-confirm-submit: prompt before form submission
@@ -3619,9 +3629,20 @@ document.addEventListener('submit', function (e) {
 
 document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape') {
+    if (ensureBanDeleteModal() && _banDeleteModal.style.display !== 'none') {
+      e.preventDefault();
+      closeBanDeleteModal(false);
+      return;
+    }
     if (ensureConfirmModal() && _confirmModal.style.display !== 'none') {
       e.preventDefault();
       closeConfirmModal(false);
+      return;
+    }
+    var reportModal = document.getElementById('report-modal');
+    if (reportModal && reportModal.style.display !== 'none') {
+      e.preventDefault();
+      closeReportModal();
       return;
     }
     closeThreadMenus();

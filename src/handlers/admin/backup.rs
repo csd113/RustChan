@@ -857,7 +857,10 @@ mod tests {
             axum::extract::State(state),
             admin_cookie_jar(),
             headers,
-            crate::test_support::connect_info(),
+            crate::middleware::SecureCookieContext::new(
+                Some(crate::test_support::connect_info().0),
+                false,
+            ),
             axum::extract::Form(super::RestoreSavedForm {
                 filename,
                 restore_tor_hidden_service_keys: false,

@@ -471,8 +471,9 @@ async fn run_arti(
     // so operators on censored networks can increase it via settings.toml.
     let bootstrap_timeout =
         std::time::Duration::from_secs(crate::config::CONFIG.tor_bootstrap_timeout_secs);
-    // KEEP ALIVE: dropping tor_client closes all Tor circuits and kills the onion service.
-    let tor_client =
+    // KEEP ALIVE: dropping the final Tor client handle closes all Tor circuits
+    // and kills the onion service.
+    let tor_client: Arc<TorClient<_>> = Arc::new(
         tokio::time::timeout(bootstrap_timeout, TorClient::create_bootstrapped(config))
             .await
             .map_err(|_error| {
@@ -482,7 +483,8 @@ async fn run_arti(
                     crate::config::CONFIG.tor_bootstrap_timeout_secs,
                 )
             })?
-            .map_err(|e| format!("Tor bootstrap failed: {e}"))?;
+            .map_err(|e| format!("Tor bootstrap failed: {e}"))?,
+    );
 
     tracing::info!(target: "rustchan::detect", "Tor: connected to the Tor network");
 

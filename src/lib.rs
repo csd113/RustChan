@@ -2,6 +2,7 @@
 
 pub mod banner;
 pub mod cache;
+pub mod captcha;
 pub mod config;
 pub mod db;
 pub mod error;

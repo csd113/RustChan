@@ -1,13 +1,16 @@
 use crate::{
     banner, db,
     error::{AppError, Result},
-    handlers::board::{board_access_cookie_from_jar, current_theme_from_jar, ensure_csrf},
+    handlers::board::{
+        board_access_cookie_from_jar, current_theme_from_jar, ensure_csrf_for_request,
+        optional_connect_info_peer, OptionalConnectInfoPeer,
+    },
     middleware::AppState,
     templates,
 };
 use axum::{
     extract::{Path, Query, Request, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -133,12 +136,14 @@ pub async fn external_banner_warning_page(
     Path(banner_id): Path<i64>,
     Query(query): Query<ExternalBannerQuery>,
     jar: CookieJar,
+    req_headers: HeaderMap,
+    peer: OptionalConnectInfoPeer,
 ) -> Result<Response> {
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     let current_theme = current_theme_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
     let return_to = banner::safe_return_to(query.return_to.as_deref().unwrap_or("/"));
     let asset = tokio::task::spawn_blocking({
         let pool = state.db.clone();

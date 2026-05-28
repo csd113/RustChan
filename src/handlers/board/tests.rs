@@ -1,6 +1,7 @@
 use axum::{
     body::{to_bytes, Body},
     http::{header, HeaderMap, Request, StatusCode},
+    response::IntoResponse as _,
     routing::{get, post},
     Router,
 };
@@ -273,6 +274,56 @@ fn activity_restore_js_uses_explicit_page_markers() {
     assert!(js.contains("document.querySelector('[data-activity-page]')"));
     assert!(js.contains("pageHasActivityLifecycle()"));
     assert!(!js.contains("document.querySelector('.board-index-header')"));
+}
+
+#[test]
+fn board_activity_cookie_removal_keeps_root_path_attributes() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::COOKIE,
+        "rustchan_board_activity=v1|1.100.1.200"
+            .parse()
+            .expect("cookie header"),
+    );
+    let jar = CookieJar::from_headers(&headers);
+    let jar = super::prune_board_activity_markers(jar, &std::collections::HashSet::new());
+    let response = (jar, StatusCode::NO_CONTENT).into_response();
+    let set_cookie = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find(|value| value.starts_with("rustchan_board_activity="))
+        .expect("board activity removal cookie");
+
+    assert!(set_cookie.contains("Path=/"));
+    assert!(set_cookie.contains("SameSite=Lax"));
+    assert!(set_cookie.contains("Max-Age=0"));
+}
+
+#[test]
+fn thread_activity_cookie_removal_keeps_root_path_attributes() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::COOKIE,
+        "rustchan_thread_activity=v1|1.2.200"
+            .parse()
+            .expect("cookie header"),
+    );
+    let jar = CookieJar::from_headers(&headers);
+    let jar = super::remember_visible_thread_activity(jar, std::iter::empty());
+    let response = (jar, StatusCode::NO_CONTENT).into_response();
+    let set_cookie = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find(|value| value.starts_with("rustchan_thread_activity="))
+        .expect("thread activity removal cookie");
+
+    assert!(set_cookie.contains("Path=/"));
+    assert!(set_cookie.contains("SameSite=Lax"));
+    assert!(set_cookie.contains("Max-Age=0"));
 }
 
 async fn response_body_string(response: axum::response::Response) -> String {
@@ -2185,7 +2236,7 @@ async fn password_protected_board_does_not_leak_homepage_new_activity_badge() {
 }
 
 #[tokio::test]
-async fn new_activity_pages_keep_private_revalidation_cache_headers() {
+async fn new_activity_pages_keep_private_no_store_cache_headers() {
     let state = crate::test_support::app_state();
     set_new_activity_settings(&state, true, true, true);
     let (_board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
@@ -2207,7 +2258,7 @@ async fn new_activity_pages_keep_private_revalidation_cache_headers() {
             .headers()
             .get(header::CACHE_CONTROL)
             .and_then(|value| value.to_str().ok()),
-        Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE)
+        Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE)
     );
 
     let catalog_response = router
@@ -2227,7 +2278,7 @@ async fn new_activity_pages_keep_private_revalidation_cache_headers() {
             .headers()
             .get(header::CACHE_CONTROL)
             .and_then(|value| value.to_str().ok()),
-        Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE)
+        Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE)
     );
 
     let board_response = router
@@ -2247,7 +2298,7 @@ async fn new_activity_pages_keep_private_revalidation_cache_headers() {
             .headers()
             .get(header::CACHE_CONTROL)
             .and_then(|value| value.to_str().ok()),
-        Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE)
+        Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE)
     );
 
     let thread_response = router
@@ -2266,7 +2317,7 @@ async fn new_activity_pages_keep_private_revalidation_cache_headers() {
             .headers()
             .get(header::CACHE_CONTROL)
             .and_then(|value| value.to_str().ok()),
-        Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE)
+        Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE)
     );
 }
 

@@ -650,7 +650,7 @@ fn render_board_settings_card(
   </div>
   <div class="board-settings-checks">
     <label><input type="checkbox" name="clear_access_password" value="1"> Remove saved password</label>
-    <label><input type="checkbox" name="allow_captcha" value="1"{captcha_checked}> PoW CAPTCHA on threads and replies (hashcash, JS-solved)
+    <label><input type="checkbox" name="allow_captcha" value="1"{captcha_checked}> CAPTCHA on threads and replies
       <span class="admin-quick-help">Enabling this makes posting require JavaScript on this board.</span>
     </label>
   </div>
@@ -1893,7 +1893,7 @@ mod tests {
     fn sample_site_health() -> AdminPanelSiteHealthView<'static> {
         AdminPanelSiteHealthView {
             server_status: "ready",
-            rustchan_version: "1.2.1",
+            rustchan_version: "1.2.2",
             database_integrity_status: "not checked",
             last_successful_backup: "none saved",
             next_scheduled_backup: "not scheduled",
@@ -1914,7 +1914,7 @@ mod tests {
             failed_jobs: 0,
             backup_jobs: "idle",
             restore_jobs: "not available",
-            diagnostics_text: "RustChan version: 1.2.1\nRecent warnings:\n  none",
+            diagnostics_text: "RustChan version: 1.2.2\nRecent warnings:\n  none",
         }
     }
 
@@ -2246,7 +2246,7 @@ mod tests {
         assert!(html.contains("Database integrity status"));
         assert!(html.contains("open media panel"));
         assert!(html.contains("copy diagnostics"));
-        assert!(html.contains("RustChan version: 1.2.1"));
+        assert!(html.contains("RustChan version: 1.2.2"));
         assert!(html.contains(r#"data-admin-health-jobs-url="/admin/site-health/jobs""#));
         assert!(html.contains(r#"data-admin-health-job="running_jobs""#));
         assert!(html.contains(r#"data-admin-health-job="queued_jobs""#));

@@ -13,7 +13,10 @@ use crate::{
     db::{self},
     error::{AppError, Result},
     handlers::{
-        board::{admin_scoped_csrf_token, check_csrf_jar, ensure_csrf},
+        board::{
+            admin_scoped_csrf_token, check_csrf_jar, ensure_csrf_for_request,
+            ensure_csrf_with_secure,
+        },
         parse_post_multipart, posting, render,
     },
     middleware::AppState,
@@ -54,10 +57,15 @@ pub async fn view_thread(
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
+    peer: crate::handlers::board::OptionalConnectInfoPeer,
 ) -> Result<Response> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let user_preferences = crate::handlers::board::user_preferences_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = ensure_csrf_for_request(
+        jar,
+        &req_headers,
+        crate::handlers::board::optional_connect_info_peer(peer),
+    );
     let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
     let owned_post_grants = crate::handlers::board::owned_post_grants_from_jar(&jar);
     let admin_session_id = jar
@@ -267,7 +275,7 @@ pub async fn view_thread(
 pub async fn post_reply(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
@@ -357,7 +365,8 @@ pub async fn post_reply(
                     name: form.name,
                     body: form.body,
                     deletion_token: form.deletion_token,
-                    pow_nonce: form.pow_nonce,
+                    captcha_id: form.captcha_id,
+                    captcha_answer: form.captcha_answer,
                     image_file_data: form.image_file,
                     file_data: form.file,
                     audio_file_data: form.audio_file,
@@ -443,7 +452,7 @@ pub async fn post_reply(
         submit_result.post_id,
         &submit_result.deletion_token,
         submit_result.created_at + crate::handlers::board::SELF_DELETE_WINDOW_SECS,
-        crate::handlers::board::should_set_public_secure_cookie(&req_headers, Some(peer)),
+        crate::handlers::board::should_set_public_secure_cookie(&req_headers, secure_context),
     );
 
     if xhr_request {
@@ -515,23 +524,35 @@ async fn load_self_action_post_context(
     .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?
 }
 
+struct EditPostErrorPageRequest<'a> {
+    board_short: &'a str,
+    post_id: i64,
+    jar: &'a CookieJar,
+    admin_session_id: Option<String>,
+    body: &'a str,
+    message: &'a str,
+    csrf_cookie_secure: bool,
+}
+
 async fn render_edit_post_error_page(
     state: &AppState,
-    board_short: &str,
-    post_id: i64,
-    jar: &CookieJar,
-    admin_session_id: Option<String>,
-    body: &str,
-    message: &str,
+    request: EditPostErrorPageRequest<'_>,
 ) -> Result<Response> {
-    let (jar, csrf_token) = ensure_csrf(jar.clone());
+    let (jar, csrf_token) =
+        ensure_csrf_with_secure(request.jar.clone(), request.csrf_cookie_secure);
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
-    let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, board_short);
-    let context =
-        load_self_action_post_context(state, board_short, post_id, admin_session_id, access_cookie)
-            .await?;
+    let access_cookie =
+        crate::handlers::board::board_access_cookie_from_jar(&jar, request.board_short);
+    let context = load_self_action_post_context(
+        state,
+        request.board_short,
+        request.post_id,
+        request.admin_session_id,
+        access_cookie,
+    )
+    .await?;
     let mut post = context.post.clone();
-    body.clone_into(&mut post.body);
+    request.body.clone_into(&mut post.body);
     let boards = crate::templates::live_boards();
     let html = crate::templates::thread::edit_post_page(
         &context.board,
@@ -540,7 +561,7 @@ async fn render_edit_post_error_page(
         &csrf_token,
         boards.as_slice(),
         current_theme.as_deref(),
-        Some(message),
+        Some(request.message),
     );
 
     let mut response = Html(html).into_response();
@@ -556,9 +577,15 @@ pub async fn edit_post_get(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
+    req_headers: HeaderMap,
+    peer: crate::handlers::board::OptionalConnectInfoPeer,
 ) -> Result<Response> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = ensure_csrf_for_request(
+        jar,
+        &req_headers,
+        crate::handlers::board::optional_connect_info_peer(peer),
+    );
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
@@ -660,9 +687,11 @@ pub async fn edit_post_post(
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
     req_headers: HeaderMap,
+    peer: crate::handlers::board::OptionalConnectInfoPeer,
     Form(form): Form<EditForm>,
 ) -> Result<Response> {
     let xhr_request = is_xml_http_request(&req_headers);
+    let peer = crate::handlers::board::optional_connect_info_peer(peer);
     check_csrf_jar(&jar, form.csrf.as_deref())?;
     let owned_grant =
         crate::handlers::board::owned_post_grant_from_jar(&jar, &board_short, post_id).ok_or_else(
@@ -792,12 +821,18 @@ pub async fn edit_post_post(
             } else {
                 render_edit_post_error_page(
                     &state,
-                    &board_short,
-                    post_id,
-                    &jar,
-                    admin_session_id,
-                    &raw_body,
-                    &message,
+                    EditPostErrorPageRequest {
+                        board_short: &board_short,
+                        post_id,
+                        jar: &jar,
+                        admin_session_id,
+                        body: &raw_body,
+                        message: &message,
+                        csrf_cookie_secure: crate::handlers::board::should_set_public_secure_cookie(
+                            &req_headers,
+                            peer,
+                        ),
+                    },
                 )
                 .await
             }
@@ -824,9 +859,15 @@ pub async fn delete_post_get(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
+    req_headers: HeaderMap,
+    peer: crate::handlers::board::OptionalConnectInfoPeer,
 ) -> Result<Response> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = ensure_csrf_for_request(
+        jar,
+        &req_headers,
+        crate::handlers::board::optional_connect_info_peer(peer),
+    );
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
@@ -913,6 +954,8 @@ pub async fn delete_own_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
+    req_headers: HeaderMap,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<DeletePostForm>,
 ) -> Result<Response> {
     check_csrf_jar(&jar, form.csrf.as_deref())?;
@@ -1013,14 +1056,26 @@ pub async fn delete_own_post(
     .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
 
     let (thread_id, result) = outcome;
+    let cookie_secure =
+        crate::handlers::board::should_set_public_secure_cookie(&req_headers, secure_context);
     match result {
         crate::db::posts::SelfDeleteOutcome::DeletedReply => {
-            let jar = crate::handlers::board::forget_owned_post(jar, &board_short, post_id);
+            let jar = crate::handlers::board::forget_owned_post_with_secure(
+                jar,
+                &board_short,
+                post_id,
+                cookie_secure,
+            );
             let redirect_url = format!("/{board_short}/thread/{thread_id}");
             Ok((jar, Redirect::to(&redirect_url)).into_response())
         }
         crate::db::posts::SelfDeleteOutcome::DeletedThread => {
-            let jar = crate::handlers::board::forget_owned_post(jar, &board_short, post_id);
+            let jar = crate::handlers::board::forget_owned_post_with_secure(
+                jar,
+                &board_short,
+                post_id,
+                cookie_secure,
+            );
             let redirect_url = format!("/{board_short}/catalog");
             Ok((jar, Redirect::to(&redirect_url)).into_response())
         }
@@ -2092,7 +2147,9 @@ mod tests {
         .expect("utf8 body");
         assert!(body.contains(&format!(r#"action="/test/post/{post_id}/edit""#)));
         assert!(body.contains(r#"name="_csrf""#));
-        assert!(body.contains(r#"name="body" rows="8" maxlength="4096" required"#));
+        assert!(body.contains(
+            r#"name="body" aria-label="edit post body" rows="8" maxlength="4096" required"#
+        ));
         assert!(body.contains("available for up to 60 seconds after posting"));
         assert!(body.contains(&format!(r#"href="/test/thread/{thread_id}#p{post_id}""#)));
     }

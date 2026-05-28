@@ -29,20 +29,10 @@ use argon2::{
     },
     Algorithm, Argon2, Params, Version,
 };
-use dashmap::DashMap;
 use getrandom::SysRng;
 use rand_core::TryRng as _;
 use sha2::{Digest as _, Sha256};
 use std::io::Write as _;
-use std::sync::LazyLock;
-
-/// Maximum allowed nonce length in characters.
-/// A legitimate nonce is a numeric string from the JS solver; anything longer
-/// than this is adversarial or malformed and is rejected before allocation.
-const MAX_NONCE_LEN: usize = 128;
-
-/// Maximum allowed board short-name length in characters.
-const MAX_BOARD_SHORT_LEN: usize = 32;
 
 /// Hash an admin password using Argon2id.
 ///
@@ -192,117 +182,6 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
-// ─── PoW CAPTCHA (hashcash-style) ────────────────────────────────────────────
-// The challenge is "{board_short}:{unix_minutes}" — valid for a 5-minute window.
-// The client finds a nonce such that SHA-256(challenge + ":" + nonce) has at
-// least POW_DIFFICULTY leading zero bits.
-
-/// Number of leading zero bits required for a valid `PoW` solution.
-/// ~1 M average iterations; ~50–200 ms in browser JS.
-pub const POW_DIFFICULTY: u32 = 20;
-
-/// In-memory nonce replay cache.
-///
-/// Maps `"board_short:nonce"` → unix timestamp (seconds) of first acceptance.
-/// Entries older than [`POW_WINDOW_SECS`] are pruned on every call to
-/// [`verify_pow`] so memory usage is bounded by the rate of legitimate solves.
-static SEEN_NONCES: LazyLock<DashMap<String, i64>> = LazyLock::new(DashMap::new);
-
-/// `PoW` validity window in seconds (5 minutes).
-const POW_WINDOW_SECS: i64 = 300;
-
-/// Number of past minutes (inclusive of current) to accept `PoW` solutions for.
-const POW_GRACE_MINUTES: i64 = 5;
-
-/// Build the expected challenge string for the given board and time.
-#[must_use]
-pub fn pow_challenge(board_short: &str, unix_ts: i64) -> String {
-    let minute = unix_ts / 60;
-    format!("{board_short}:{minute}")
-}
-
-/// Returns `true` if every byte in `s` is ASCII alphanumeric, `_`, or `-`.
-#[inline]
-fn is_valid_board_short(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= MAX_BOARD_SHORT_LEN
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
-/// Returns `true` if `s` is a non-empty, bounded, ASCII-alphanumeric nonce.
-#[inline]
-fn is_valid_nonce(s: &str) -> bool {
-    !s.is_empty() && s.len() <= MAX_NONCE_LEN && s.bytes().all(|b| b.is_ascii_alphanumeric())
-}
-
-/// Verify a submitted `PoW` nonce.
-///
-/// Accepts solutions for the current minute and up to
-/// [`POW_GRACE_MINUTES`] − 1 prior minutes (grace window covering clock skew
-/// and solve time).
-///
-/// Each `(board, nonce)` pair is **atomically** claimed on first successful
-/// verification via the [`DashMap::entry`] API — the shard lock is held for
-/// the duration of the check-and-insert, preventing TOCTOU replay races even
-/// under concurrent load.
-#[must_use]
-pub fn verify_pow(board_short: &str, nonce: &str) -> bool {
-    use dashmap::mapref::entry::Entry;
-
-    // ── Input validation ──────────────────────────────────────────────
-    // Reject empty, oversized, or non-ASCII inputs before any allocation
-    // or hashing work to prevent abuse and cache-key ambiguity.
-    if !is_valid_board_short(board_short) || !is_valid_nonce(nonce) {
-        return false;
-    }
-
-    let now = chrono::Utc::now().timestamp();
-    let now_minutes = now / 60;
-
-    // Prune stale entries to bound memory usage.
-
-    SEEN_NONCES.retain(|_, ts| now - *ts < POW_WINDOW_SECS);
-
-    // Try current minute and the prior (POW_GRACE_MINUTES - 1) minutes.
-    let cache_key = format!("{board_short}:{nonce}");
-    for delta in 0..POW_GRACE_MINUTES {
-        let challenge = pow_challenge(board_short, (now_minutes - delta) * 60);
-        let input = format!("{challenge}:{nonce}");
-        let hash = Sha256::digest(input.as_bytes());
-
-        if leading_zero_bits(&hash) >= POW_DIFFICULTY {
-            // Atomically claim this nonce. entry() holds the shard lock
-            // for the duration, so no concurrent request can slip between
-            // the existence check and the insertion.
-            match SEEN_NONCES.entry(cache_key) {
-                Entry::Vacant(e) => {
-                    e.insert(now);
-                    return true;
-                }
-                Entry::Occupied(_) => {
-                    return false; // already consumed — replay rejected
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Count the number of leading zero bits in a byte slice.
-#[inline]
-fn leading_zero_bits(bytes: &[u8]) -> u32 {
-    let mut count = 0u32;
-    for &byte in bytes {
-        let lz = byte.leading_zeros();
-        count = count.saturating_add(lz);
-        if lz < 8 {
-            break;
-        }
-    }
-    count
-}
-
 // ─── Password validation ──────────────────────────────────────────────────────
 
 /// Validate an admin password meets minimum requirements.
@@ -410,67 +289,5 @@ mod tests {
             sha256_hex(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
-    }
-
-    // ── leading_zero_bits ────────────────────────────────────────────
-
-    #[test]
-    fn leading_zeros_all_zero() {
-        assert_eq!(leading_zero_bits(&[0, 0, 0, 0]), 32);
-    }
-
-    #[test]
-    fn leading_zeros_first_byte_nonzero() {
-        assert_eq!(leading_zero_bits(&[0x0F, 0xFF]), 4);
-        assert_eq!(leading_zero_bits(&[0x80, 0x00]), 0);
-        assert_eq!(leading_zero_bits(&[0x01, 0x00]), 7);
-    }
-
-    #[test]
-    fn leading_zeros_second_byte() {
-        assert_eq!(leading_zero_bits(&[0x00, 0x01]), 15); // 8 + 7
-    }
-
-    #[test]
-    fn leading_zeros_empty() {
-        assert_eq!(leading_zero_bits(&[]), 0);
-    }
-
-    // ── PoW challenge format ─────────────────────────────────────────
-
-    #[test]
-    fn pow_challenge_format() {
-        let c = pow_challenge("b", 120); // 120 seconds = minute 2
-        assert_eq!(c, "b:2");
-    }
-
-    // ── Input validation in verify_pow ───────────────────────────────
-
-    #[test]
-    fn verify_pow_rejects_empty_board() {
-        assert!(!verify_pow("", "12345"));
-    }
-
-    #[test]
-    fn verify_pow_rejects_empty_nonce() {
-        assert!(!verify_pow("b", ""));
-    }
-
-    #[test]
-    fn verify_pow_rejects_oversized_nonce() {
-        let long = "a".repeat(MAX_NONCE_LEN + 1);
-        assert!(!verify_pow("b", &long));
-    }
-
-    #[test]
-    fn verify_pow_rejects_non_ascii_nonce() {
-        assert!(!verify_pow("b", "nonce\x00evil"));
-        assert!(!verify_pow("b", "nönce"));
-    }
-
-    #[test]
-    fn verify_pow_rejects_non_ascii_board() {
-        assert!(!verify_pow("böard", "12345"));
-        assert!(!verify_pow("a:b", "12345")); // colon not allowed
     }
 }

@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use super::{
-    base_layout, base_layout_with_preferences, compress_modal_script, fmt_ts, fmt_ts_short,
-    report_modal_script, thread_autoupdate_script,
+    admin_ban_delete_modal_script, base_layout, base_layout_with_preferences,
+    compress_modal_script, fmt_ts, fmt_ts_short, report_modal_script, thread_autoupdate_script,
 };
 
 const SELF_ACTION_WINDOW_SECS: i64 = 60;
@@ -99,7 +99,7 @@ pub fn edit_post_page(
   <input type="hidden" name="_csrf" value="{csrf}">
   <table>
     <tr><td>body</td>
-        <td><textarea name="body" rows="8" maxlength="4096" required>{body_text}</textarea></td></tr>
+        <td><textarea name="body" aria-label="edit post body" rows="8" maxlength="4096" required>{body_text}</textarea></td></tr>
     <tr><td></td>
         <td><button type="submit">save edit</button>
             <a class="edit-btn" href="/{board}/thread/{tid}#p{pid}">cancel</a></td></tr>
@@ -446,6 +446,9 @@ pub fn thread_page(
         owned_post_controls,
         edit_overlay_state,
     ));
+    if is_admin {
+        body.push_str(admin_ban_delete_modal_script());
+    }
 
     if !thread.locked && !thread.archived && can_post {
         let form_html = super::forms::reply_form(
@@ -1282,10 +1285,17 @@ pub fn render_post(
             board = escape_html(board_short),
             csrf = escape_html(csrf_token),
         );
+        let report_fallback = super::report_fallback_form(
+            board_short,
+            post.id,
+            post.thread_id,
+            csrf_token,
+            "submit report",
+        );
 
         let _ = write!(
             html,
-            r#"<div class="post-controls">{self_action_controls}{report_btn}</div>"#
+            r#"<div class="post-controls">{self_action_controls}{report_btn}{report_fallback}</div>"#
         );
     }
 
@@ -1398,7 +1408,7 @@ fn render_edit_overlay(
       <input type="hidden" name="thread_id" value="{thread_id}">
       <table>
         <tr><td>body</td>
-            <td><textarea id="edit-modal-body" name="body" rows="6" maxlength="4096">{current_body}</textarea></td></tr>
+            <td><textarea id="edit-modal-body" name="body" aria-label="edit post body" rows="6" maxlength="4096">{current_body}</textarea></td></tr>
         <tr><td></td>
             <td><button type="submit">save edit</button>
                 <button type="button" class="edit-btn" data-action="close-edit-modal" style="margin-left:1rem">cancel</button></td></tr>
@@ -1551,7 +1561,7 @@ mod tests {
         assert!(html.contains(r#"href="/test/catalog">[ Catalog ]</a>"#));
         assert!(html.contains(r#"id="board-access-gate""#));
         assert!(html.contains(
-            r#"name="password" maxlength="256" autocomplete="current-password" required"#
+            r#"name="password" aria-label="board password" maxlength="256" autocomplete="current-password" required"#
         ));
     }
 
@@ -1590,6 +1600,40 @@ mod tests {
         assert!(html.contains(r#"name="_csrf" value="admin-csrf""#));
         assert!(html.contains(r#"name="_csrf"   value="admin-csrf""#));
         assert!(html.contains(r#"data-csrf="public-csrf""#));
+    }
+
+    #[test]
+    fn render_post_includes_no_js_report_fallback_form() {
+        let post = sample_post();
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: true,
+                is_admin: false,
+                admin_csrf_token: None,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+                video_audio_muted: false,
+            },
+            0,
+        );
+
+        assert!(html.contains(r#"class="report-btn""#));
+        assert!(html.contains(r#"data-action="open-report""#));
+        assert!(html.contains(r#"class="report-fallback-form" method="POST" action="/report""#));
+        assert!(html.contains(r#"name="_csrf" value="csrf""#));
+        assert!(html.contains(r#"name="post_id" value="1""#));
+        assert!(html.contains(r#"name="thread_id" value="1""#));
+        assert!(html.contains(r#"name="board" value="test""#));
     }
 
     #[test]
@@ -2046,6 +2090,58 @@ mod tests {
     }
 
     #[test]
+    fn thread_page_includes_admin_ban_delete_modal_only_for_admin() {
+        let board = crate::test_fixtures::sample_board();
+        let post = sample_post();
+
+        let admin_html = thread_page(
+            &board,
+            &sample_thread(),
+            std::slice::from_ref(&post),
+            &std::collections::BTreeMap::new(),
+            "csrf",
+            std::slice::from_ref(&board),
+            true,
+            Some("admin-csrf"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+            crate::templates::UserPreferences::default(),
+        );
+
+        assert!(admin_html.contains(r#"id="ban-delete-modal""#));
+        assert!(admin_html.contains(r#"for="ban-delete-reason""#));
+        assert!(admin_html.contains(r#"for="ban-delete-duration""#));
+
+        let public_html = thread_page(
+            &board,
+            &sample_thread(),
+            std::slice::from_ref(&post),
+            &std::collections::BTreeMap::new(),
+            "csrf",
+            std::slice::from_ref(&board),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+            crate::templates::UserPreferences::default(),
+        );
+
+        assert!(!public_html.contains(r#"id="ban-delete-modal""#));
+    }
+
+    #[test]
     fn render_post_uses_in_page_edit_action_without_tokenized_redirect() {
         let mut board = crate::test_fixtures::sample_board();
         board.allow_editing = true;
@@ -2120,7 +2216,9 @@ mod tests {
 
         assert!(html.contains(r#"method="POST" action="/test/post/1/edit""#));
         assert!(html.contains(r#"name="_csrf" value="csrf""#));
-        assert!(html.contains(r#"name="body" rows="8" maxlength="4096" required"#));
+        assert!(html.contains(
+            r#"name="body" aria-label="edit post body" rows="8" maxlength="4096" required"#
+        ));
         assert!(html.contains("available for up to 60 seconds after posting"));
         assert!(html.contains(r#"href="/test/thread/87#p1""#));
     }

@@ -167,7 +167,7 @@ pub fn remember_owned_post_until_with_secure(
     secure: bool,
 ) -> CookieJar {
     if expires_at <= chrono::Utc::now().timestamp() {
-        return forget_owned_post(jar, board_short, post_id);
+        return forget_owned_post_with_secure(jar, board_short, post_id, secure);
     }
 
     let mut grants = owned_post_grants_from_jar(&jar)
@@ -190,12 +190,17 @@ pub fn remember_owned_post_until_with_secure(
     }
 }
 
-pub fn forget_owned_post(jar: CookieJar, board_short: &str, post_id: i64) -> CookieJar {
+pub fn forget_owned_post_with_secure(
+    jar: CookieJar,
+    board_short: &str,
+    post_id: i64,
+    secure: bool,
+) -> CookieJar {
     let grants = owned_post_grants_from_jar(&jar)
         .into_iter()
         .filter(|grant| !(grant.post_id == post_id && grant.board_short == board_short))
         .collect::<Vec<_>>();
-    if let Some(cookie) = owned_posts_cookie(&grants, CONFIG.https_cookies) {
+    if let Some(cookie) = owned_posts_cookie(&grants, secure) {
         jar.add(cookie)
     } else {
         jar.remove(Cookie::from(OWNED_POSTS_COOKIE))
@@ -350,6 +355,14 @@ fn thread_activity_cookie(markers: &[ThreadActivityMarker]) -> Option<Cookie<'st
     Some(cookie)
 }
 
+fn activity_cookie_removal(name: &'static str) -> Cookie<'static> {
+    let mut cookie = Cookie::from(name);
+    cookie.set_path("/");
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_secure(CONFIG.https_cookies);
+    cookie
+}
+
 pub fn board_activity_markers_from_jar(jar: &CookieJar) -> HashMap<i64, BoardActivityMarker> {
     jar.get(BOARD_ACTIVITY_COOKIE)
         .map(Cookie::value)
@@ -386,7 +399,7 @@ pub fn remember_board_activity(
     if let Some(cookie) = board_activity_cookie(&markers) {
         jar.add(cookie)
     } else {
-        jar.remove(Cookie::from(BOARD_ACTIVITY_COOKIE))
+        jar.remove(activity_cookie_removal(BOARD_ACTIVITY_COOKIE))
     }
 }
 
@@ -398,7 +411,7 @@ pub fn prune_board_activity_markers(jar: CookieJar, known_board_ids: &HashSet<i6
     if let Some(cookie) = board_activity_cookie(&markers) {
         jar.add(cookie)
     } else {
-        jar.remove(Cookie::from(BOARD_ACTIVITY_COOKIE))
+        jar.remove(activity_cookie_removal(BOARD_ACTIVITY_COOKIE))
     }
 }
 
@@ -422,7 +435,7 @@ pub fn remember_thread_activity(
     if let Some(cookie) = thread_activity_cookie(&markers) {
         jar.add(cookie)
     } else {
-        jar.remove(Cookie::from(THREAD_ACTIVITY_COOKIE))
+        jar.remove(activity_cookie_removal(THREAD_ACTIVITY_COOKIE))
     }
 }
 
@@ -449,21 +462,21 @@ where
     if let Some(cookie) = thread_activity_cookie(&markers) {
         jar.add(cookie)
     } else {
-        jar.remove(Cookie::from(THREAD_ACTIVITY_COOKIE))
+        jar.remove(activity_cookie_removal(THREAD_ACTIVITY_COOKIE))
     }
 }
 
 // ─── CSRF cookie helper ───────────────────────────────────────────────────────
 
 /// Ensure the CSRF token cookie is set. Returns (`updated_jar`, `token_string`).
-pub fn ensure_csrf(jar: CookieJar) -> (CookieJar, String) {
+pub fn ensure_csrf_with_secure(jar: CookieJar, secure: bool) -> (CookieJar, String) {
     let mut jar = jar;
     if jar.get(VISITOR_ID_COOKIE).is_none() {
         let mut visitor_cookie = Cookie::new(VISITOR_ID_COOKIE, new_csrf_token());
         visitor_cookie.set_http_only(false);
         visitor_cookie.set_same_site(SameSite::Lax);
         visitor_cookie.set_path("/");
-        visitor_cookie.set_secure(CONFIG.https_cookies);
+        visitor_cookie.set_secure(secure);
         visitor_cookie.set_max_age(Duration::days(365));
         jar = jar.add(visitor_cookie);
     }
@@ -485,12 +498,20 @@ pub fn ensure_csrf(jar: CookieJar) -> (CookieJar, String) {
     cookie.set_http_only(false);
     cookie.set_same_site(SameSite::Strict);
     cookie.set_path("/");
-    // set Secure flag based on config (true when behind proxy / HTTPS)
-    cookie.set_secure(CONFIG.https_cookies);
+    cookie.set_secure(secure);
     (
         jar.add(cookie),
         crate::utils::crypto::make_csrf_form_token(&token, &CONFIG.cookie_secret),
     )
+}
+
+/// Ensure the public CSRF token cookie is scoped for the current transport.
+pub fn ensure_csrf_for_request(
+    jar: CookieJar,
+    headers: &HeaderMap,
+    context: crate::middleware::SecureCookieContext,
+) -> (CookieJar, String) {
+    ensure_csrf_with_secure(jar, should_set_public_secure_cookie(headers, context))
 }
 
 pub async fn set_theme(
@@ -748,9 +769,11 @@ pub async fn board_unlock_page(
     Query(query): Query<BoardUnlockQuery>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
+    req_headers: HeaderMap,
+    peer: OptionalConnectInfoPeer,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf(jar);
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
@@ -815,11 +838,14 @@ pub async fn unlock_board_access(
     Path(board_short): Path<String>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
+    req_headers: HeaderMap,
+    peer: OptionalConnectInfoPeer,
     Form(form): Form<BoardUnlockForm>,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
     check_csrf_jar(&jar, form.csrf.as_deref())?;
-    let (jar, csrf) = ensure_csrf(jar);
+    let peer = optional_connect_info_peer(peer);
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
@@ -956,13 +982,22 @@ pub async fn unlock_board_access(
             "Missing board access password hash while creating unlock cookie"
         ))
     })?;
+    let cookie = board_access_cookie(
+        cookie_name,
+        cookie_value,
+        should_set_public_secure_cookie(&req_headers, peer),
+    );
+    Ok((jar.add(cookie), Redirect::to(&return_to)).into_response())
+}
+
+fn board_access_cookie(cookie_name: String, cookie_value: String, secure: bool) -> Cookie<'static> {
     let mut cookie = Cookie::new(cookie_name, cookie_value);
     cookie.set_http_only(true);
     cookie.set_same_site(SameSite::Lax);
     cookie.set_path("/");
-    cookie.set_secure(CONFIG.https_cookies);
+    cookie.set_secure(secure);
     cookie.set_max_age(Duration::days(BOARD_ACCESS_COOKIE_TTL_DAYS));
-    Ok((jar.add(cookie), Redirect::to(&return_to)).into_response())
+    cookie
 }
 
 #[derive(serde::Deserialize)]
@@ -1050,12 +1085,13 @@ pub async fn update_thread_preference(
 #[cfg(test)]
 mod tests {
     use super::{
-        board_activity_markers_from_jar, owned_post_grants_from_jar, owned_posts_cookie,
-        owned_posts_cookie_value, prune_board_activity_markers, remember_owned_post_until,
-        thread_activity_markers_from_jar, OwnedPostGrant, BOARD_ACTIVITY_COOKIE,
-        OWNED_POSTS_COOKIE_MAX_LEN, SELF_DELETE_WINDOW_SECS, THREAD_ACTIVITY_COOKIE,
+        board_activity_markers_from_jar, ensure_csrf_with_secure, owned_post_grants_from_jar,
+        owned_posts_cookie, owned_posts_cookie_value, prune_board_activity_markers,
+        remember_owned_post_until, thread_activity_markers_from_jar, OwnedPostGrant,
+        BOARD_ACTIVITY_COOKIE, OWNED_POSTS_COOKIE_MAX_LEN, SELF_DELETE_WINDOW_SECS,
+        THREAD_ACTIVITY_COOKIE, VISITOR_ID_COOKIE,
     };
-    use axum_extra::extract::cookie::SameSite;
+    use axum_extra::extract::cookie::{CookieJar, SameSite};
     use std::collections::HashSet;
 
     #[test]
@@ -1098,6 +1134,51 @@ mod tests {
         assert_eq!(cookie.secure(), Some(false));
         assert_eq!(cookie.http_only(), Some(true));
         assert_eq!(cookie.same_site(), Some(SameSite::Lax));
+    }
+
+    #[test]
+    fn board_access_cookie_secure_attribute_follows_request() {
+        let insecure_cookie = super::board_access_cookie(
+            "rustchan_board_access_test".to_owned(),
+            "grant".to_owned(),
+            false,
+        );
+        assert_eq!(insecure_cookie.name(), "rustchan_board_access_test");
+        assert_eq!(insecure_cookie.path(), Some("/"));
+        assert_eq!(insecure_cookie.same_site(), Some(SameSite::Lax));
+        assert_eq!(insecure_cookie.http_only(), Some(true));
+        assert_eq!(insecure_cookie.secure(), Some(false));
+
+        let secure_cookie = super::board_access_cookie(
+            "rustchan_board_access_test".to_owned(),
+            "grant".to_owned(),
+            true,
+        );
+        assert_eq!(secure_cookie.secure(), Some(true));
+    }
+
+    #[test]
+    fn ensure_csrf_with_secure_applies_transport_to_public_cookies() {
+        let (insecure_jar, _) = ensure_csrf_with_secure(CookieJar::new(), false);
+        let insecure_visitor = insecure_jar.get(VISITOR_ID_COOKIE).expect("visitor cookie");
+        let insecure_csrf = insecure_jar.get("csrf_token").expect("csrf cookie");
+        assert_eq!(insecure_visitor.secure(), Some(false));
+        assert_eq!(insecure_visitor.same_site(), Some(SameSite::Lax));
+        assert_eq!(insecure_csrf.secure(), Some(false));
+        assert_eq!(insecure_csrf.same_site(), Some(SameSite::Strict));
+
+        let (secure_jar, _) = ensure_csrf_with_secure(CookieJar::new(), true);
+        assert_eq!(
+            secure_jar
+                .get(VISITOR_ID_COOKIE)
+                .expect("visitor cookie")
+                .secure(),
+            Some(true),
+        );
+        assert_eq!(
+            secure_jar.get("csrf_token").expect("csrf cookie").secure(),
+            Some(true),
+        );
     }
 
     #[test]

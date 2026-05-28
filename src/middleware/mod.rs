@@ -6,6 +6,7 @@ mod ip;
 mod normalize;
 mod rate_limit;
 mod state;
+mod transport;
 
 pub use backup_progress::{backup_phase, BackupProgress};
 pub use csrf::{validate_csrf, validate_signed_csrf};
@@ -20,3 +21,4 @@ pub use state::{
     AppState, AutoFullBackupSettings, AutoFullBackupSettingsSnapshot, DbMaintenanceJobPhase,
     DbMaintenanceJobStatus, DbMaintenanceJobs, MaintenanceGate,
 };
+pub use transport::{RequestTransport, SecureCookieContext};

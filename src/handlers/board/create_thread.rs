@@ -12,7 +12,7 @@ use super::*;
 pub async fn create_thread(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
@@ -103,7 +103,8 @@ pub async fn create_thread(
                     name: form.name,
                     body: form.body,
                     deletion_token: form.deletion_token,
-                    pow_nonce: form.pow_nonce,
+                    captcha_id: form.captcha_id,
+                    captcha_answer: form.captcha_answer,
                     image_file_data: form.image_file,
                     file_data: form.file,
                     audio_file_data: form.audio_file,
@@ -198,7 +199,7 @@ pub async fn create_thread(
         submit_result.post_id,
         &submit_result.deletion_token,
         submit_result.created_at + SELF_DELETE_WINDOW_SECS,
-        should_set_public_secure_cookie(&req_headers, Some(peer)),
+        should_set_public_secure_cookie(&req_headers, secure_context),
     );
 
     if xhr_request {

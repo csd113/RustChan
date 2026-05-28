@@ -189,14 +189,22 @@ pub async fn admin_vacuum(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<VacuumForm>,
 ) -> Result<Response> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context.peer,
+        form.csrf.as_deref(),
+    )?;
 
-    let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
+    let (jar, csrf) = super::super::ensure_admin_csrf(
+        jar,
+        super::super::should_set_secure_cookie(&headers, secure_context),
+    )?;
     let _maintenance_guard = state.maintenance_gate.try_begin("Database VACUUM")?;
 
     let html = tokio::task::spawn_blocking({
@@ -240,14 +248,22 @@ pub async fn admin_db_check(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<DbMaintenanceForm>,
 ) -> Result<Response> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context.peer,
+        form.csrf.as_deref(),
+    )?;
 
-    let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
+    let (jar, csrf) = super::super::ensure_admin_csrf(
+        jar,
+        super::super::should_set_secure_cookie(&headers, secure_context),
+    )?;
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
@@ -283,13 +299,21 @@ pub async fn admin_db_repair(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<DbMaintenanceForm>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context.peer,
+        form.csrf.as_deref(),
+    )?;
 
-    let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
+    let (jar, csrf) = super::super::ensure_admin_csrf(
+        jar,
+        super::super::should_set_secure_cookie(&headers, secure_context),
+    )?;
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
@@ -541,11 +565,16 @@ fn backup_progress_label(phase: u64, files_done: u64, files_total: u64) -> Strin
 pub async fn admin_db_repair_status(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    secure_context: crate::middleware::SecureCookieContext,
     Query(query): Query<DbRepairStatusQuery>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
 
-    let (jar, csrf) = super::super::ensure_admin_csrf(jar)?;
+    let (jar, csrf) = super::super::ensure_admin_csrf(
+        jar,
+        super::super::should_set_secure_cookie(&headers, secure_context),
+    )?;
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {

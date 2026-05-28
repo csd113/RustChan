@@ -69,6 +69,13 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
         .layer(axum_middleware::from_fn(move |req, next| {
             hsts_middleware_with_mode(req, next, direct_https, behind_proxy)
         }))
+        .layer(axum_middleware::from_fn(
+            move |mut req: axum::extract::Request, next: axum_middleware::Next| async move {
+                req.extensions_mut()
+                    .insert(crate::middleware::RequestTransport { direct_https });
+                next.run(req).await
+            },
+        ))
         .layer(axum_middleware::from_fn(safe_timeout_middleware))
         .layer(
             tower_http::trace::TraceLayer::new_for_http()

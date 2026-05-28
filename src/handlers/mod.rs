@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod banner;
 pub mod board;
+pub mod captcha;
 pub mod favicon;
 pub mod posting;
 pub mod render;
@@ -235,9 +236,23 @@ async fn read_upload_field(
     field_name: &'static str,
     budget: &mut PublicMultipartBudget,
 ) -> Result<Option<(TempUpload, String)>> {
-    let fname = field.file_name().unwrap_or(default_name).to_owned();
+    let submitted_filename = field.file_name().map(str::to_owned);
+    let fname = submitted_filename
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(default_name)
+        .to_owned();
     let upload = stream_field_to_temp_file(field, max_bytes, field_name, budget).await?;
-    Ok((upload.size_bytes > 0).then_some((upload, fname)))
+    if upload.size_bytes == 0 {
+        if submitted_filename
+            .as_deref()
+            .is_some_and(|name| !name.is_empty())
+        {
+            return Err(AppError::BadRequest("Uploaded file is empty.".into()));
+        }
+        return Ok(None);
+    }
+    Ok(Some((upload, fname)))
 }
 
 pub struct TempUpload {
@@ -267,8 +282,10 @@ pub struct PostFormData {
     pub poll_duration_secs: Option<i64>,
     /// Sage — when true the reply must not bump the thread.
     pub sage: bool,
-    /// `PoW` CAPTCHA nonce — submitted by the thread-creation form when enabled.
-    pub pow_nonce: String,
+    /// Server-side CAPTCHA challenge id submitted by posting forms when enabled.
+    pub captcha_id: String,
+    /// Human-entered CAPTCHA answer submitted by posting forms when enabled.
+    pub captcha_answer: String,
 }
 
 /// Drain all fields from a multipart form into [`PostFormData`].
@@ -302,7 +319,8 @@ pub async fn parse_post_multipart(
     let mut poll_duration_value: Option<i64> = None;
     let mut poll_duration_unit = String::from("hours");
     let mut sage = false;
-    let mut pow_nonce = String::new();
+    let mut captcha_id = String::new();
+    let mut captcha_answer = String::new();
     let mut budget = PublicMultipartBudget::default();
     let mut seen_upload_slots = HashSet::new();
 
@@ -330,7 +348,10 @@ pub async fn parse_post_multipart(
                 let v = read_text_field(field, &mut budget).await?;
                 sage = v == "1" || v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("true");
             }
-            Some("pow_nonce") => pow_nonce = read_text_field(field, &mut budget).await?,
+            Some("captcha_id") => captcha_id = read_text_field(field, &mut budget).await?,
+            Some("captcha_answer") => {
+                captcha_answer = read_text_field(field, &mut budget).await?;
+            }
             Some("poll_question") => {
                 let v = read_text_field(field, &mut budget).await?;
                 if v.chars().count() > 500 {
@@ -442,7 +463,8 @@ pub async fn parse_post_multipart(
         poll_options,
         poll_duration_secs,
         sage,
-        pow_nonce,
+        captcha_id,
+        captcha_answer,
     })
 }
 
@@ -586,6 +608,7 @@ pub fn process_primary_upload(
     // automatically refreshed to point at the newly saved files.
     let hash = sha256_file_hex(upload.temp_file.path())?;
     if let Some(cached) = crate::db::find_file_by_hash(conn, &hash)? {
+        let same_board_cache = cached_paths_belong_to_board(&cached, &board.short_name);
         let file_ok = std::path::Path::new(upload_dir)
             .join(&cached.file_path)
             .exists();
@@ -594,7 +617,7 @@ pub fn process_primary_upload(
                 .join(&cached.thumb_path)
                 .exists();
 
-        if file_ok && thumb_ok {
+        if same_board_cache && file_ok && thumb_ok {
             let cached_media = crate::models::MediaType::from_mime(&cached.mime_type);
             let cached_size =
                 std::fs::metadata(std::path::Path::new(upload_dir).join(&cached.file_path))
@@ -618,8 +641,10 @@ pub fn process_primary_upload(
 
         // One or both paths are gone — the entry is stale.  Log and fall
         // through so the file is re-saved and the cache is updated below.
+        // Cross-board hits are also re-saved under the current board; otherwise
+        // a protected board could point at public media from another board.
         tracing::debug!(
-            "dedup cache miss (files deleted): file_ok={file_ok} thumb_ok={thumb_ok}, \
+            "dedup cache miss: same_board_cache={same_board_cache} file_ok={file_ok} thumb_ok={thumb_ok}, \
              re-processing upload for hash {hash}"
         );
     }
@@ -644,6 +669,16 @@ pub fn process_primary_upload(
     )
     .map_err(|e| classify_upload_error(&e))?;
     Ok((Some(f), Some(hash)))
+}
+
+fn cached_paths_belong_to_board(cached: &crate::db::CachedFile, board_short: &str) -> bool {
+    upload_path_belongs_to_board(&cached.file_path, board_short)
+        && (cached.thumb_path.is_empty()
+            || upload_path_belongs_to_board(&cached.thumb_path, board_short))
+}
+
+fn upload_path_belongs_to_board(path: &str, board_short: &str) -> bool {
+    path.split('/').next() == Some(board_short)
 }
 
 fn temp_upload_mime(
@@ -1121,6 +1156,58 @@ trailer << /Root 1 0 R >>
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    async fn multipart_parser_rejects_named_zero_byte_upload() {
+        let router = Router::new().route("/parse", post(parse_default_limits));
+        let (boundary, body) = multipart_body_with_files(
+            &[("_csrf", "csrf123"), ("body", "zero byte")],
+            &[("file", "empty.png", b"", "image/png")],
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/parse")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn multipart_parser_ignores_empty_unselected_file_control() {
+        let router = Router::new().route("/parse", post(parse_default_limits));
+        let (boundary, body) = multipart_body_with_files(
+            &[("_csrf", "csrf123"), ("body", "text only")],
+            &[("file", "", b"", "application/octet-stream")],
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/parse")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     #[test]
     fn public_multipart_budget_enforces_aggregate_bytes_and_field_count() {
         let mut budget = super::PublicMultipartBudget::default();
@@ -1218,6 +1305,63 @@ trailer << /Root 1 0 R >>
             Ok(_) => panic!("malformed image should be rejected before dedup reuse"),
             Err(error) => assert!(error.to_string().contains("image header is malformed")),
         }
+    }
+
+    #[test]
+    fn primary_upload_does_not_reuse_dedup_cache_from_another_board() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        create_file_hash_table(&conn);
+
+        let board = crate::models::Board {
+            short_name: "secret".to_owned(),
+            allow_pdf: true,
+            ..crate::test_fixtures::sample_board()
+        };
+        let uploads_dir = tempfile::tempdir().expect("uploads dir");
+        let save_root = tempfile::tempdir().expect("save root");
+        let pdf = valid_pdf();
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(pdf);
+        let hash = hex::encode(hasher.finalize());
+
+        let public_thumb_dir = uploads_dir.path().join("img/thumbs");
+        std::fs::create_dir_all(&public_thumb_dir).expect("create public thumb dir");
+        std::fs::write(uploads_dir.path().join("img/cached.pdf"), pdf).expect("write public file");
+        std::fs::write(public_thumb_dir.join("cached.svg"), b"<svg></svg>")
+            .expect("write public thumb");
+        crate::db::record_file_hash(
+            &conn,
+            &hash,
+            "img/cached.pdf",
+            "img/thumbs/cached.svg",
+            "application/pdf",
+        )
+        .expect("record cross-board hash");
+
+        let _override = crate::media::thumbnail::override_pdf_renderer_mode(
+            crate::media::thumbnail::TestPdfRendererMode::Unavailable,
+        );
+        let (uploaded, primary_hash) = super::process_primary_upload(
+            Some(temp_upload("doc.pdf", pdf)),
+            &board,
+            &conn,
+            uploads_dir.path().to_str().expect("uploads dir path"),
+            save_root.path().to_str().expect("save root path"),
+            64,
+            1024 * 1024,
+            1024 * 1024,
+            1024 * 1024,
+            false,
+            false,
+            false,
+        )
+        .expect("PDF upload accepted");
+        let uploaded = uploaded.expect("uploaded PDF");
+
+        assert!(uploaded.file_path.starts_with("secret/"));
+        assert!(!uploaded.dedup_reused);
+        assert_eq!(primary_hash.as_deref(), Some(hash.as_str()));
+        assert!(save_root.path().join(&uploaded.file_path).exists());
     }
 
     #[test]

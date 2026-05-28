@@ -171,6 +171,10 @@ html:not([data-theme]) .admin-panel h1 {
   max-width: 100%;
 }
 
+.admin-section details > summary {
+  min-height: 2.15rem;
+}
+
 .admin-section input[type="text"],
 .admin-section input[type="password"],
 .admin-section input[type="number"],
@@ -2836,6 +2840,14 @@ html:not([data-theme]) .admin-login h1 {
     box-sizing: border-box;
   }
 
+  .admin-section button,
+  .admin-section input[type="submit"],
+  .admin-section a.admin-button-link,
+  .admin-section a.admin-link-button,
+  .admin-section details > summary {
+    min-height: 42px;
+  }
+
   .backup-extract-details {
     max-width: none;
   }
@@ -2858,6 +2870,14 @@ html:not([data-theme]) .admin-login h1 {
   .admin-section textarea,
   .admin-login input {
     font-size: 16px;
+  }
+
+  .admin-section input[type="text"],
+  .admin-section input[type="password"],
+  .admin-section input[type="number"],
+  .admin-section select,
+  .admin-login input {
+    min-height: 42px;
   }
 
   .board-settings-grid,

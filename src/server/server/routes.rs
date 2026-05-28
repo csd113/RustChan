@@ -35,6 +35,10 @@ pub(super) fn public_routes() -> Router<AppState> {
             get(crate::handlers::favicon::serve_apple_touch_icon),
         )
         .route(
+            "/captcha/{id}",
+            get(crate::handlers::captcha::serve_captcha_image),
+        )
+        .route(
             "/android-chrome-192x192.png",
             get(crate::handlers::favicon::serve_android_chrome_192),
         )

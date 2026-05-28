@@ -269,21 +269,21 @@ pub(super) fn require_admin_post_origin_and_csrf(
     }
 }
 
-fn admin_csrf_cookie(raw_token: String) -> Cookie<'static> {
+fn admin_csrf_cookie(raw_token: String, secure: bool) -> Cookie<'static> {
     let mut cookie = Cookie::new("csrf_token", raw_token);
     cookie.set_http_only(false);
     cookie.set_same_site(SameSite::Strict);
     cookie.set_path("/");
-    cookie.set_secure(CONFIG.https_cookies);
+    cookie.set_secure(secure);
     cookie
 }
 
-pub(super) fn refresh_admin_csrf_cookie(jar: CookieJar) -> CookieJar {
-    let cookie = admin_csrf_cookie(new_csrf_token());
+pub(super) fn refresh_admin_csrf_cookie(jar: CookieJar, secure: bool) -> CookieJar {
+    let cookie = admin_csrf_cookie(new_csrf_token(), secure);
     jar.add(cookie)
 }
 
-pub(super) fn ensure_admin_csrf(jar: CookieJar) -> Result<(CookieJar, String)> {
+pub(super) fn ensure_admin_csrf(jar: CookieJar, secure: bool) -> Result<(CookieJar, String)> {
     let raw = jar
         .get("csrf_token")
         .map(axum_extra::extract::cookie::Cookie::value)
@@ -294,7 +294,7 @@ pub(super) fn ensure_admin_csrf(jar: CookieJar) -> Result<(CookieJar, String)> {
         raw
     } else {
         let raw = new_csrf_token();
-        jar = jar.add(admin_csrf_cookie(raw.clone()));
+        jar = jar.add(admin_csrf_cookie(raw.clone(), secure));
         raw
     };
     let session_id = jar
@@ -312,21 +312,25 @@ pub(super) use crate::utils::redirect::encode_query_component;
 
 pub(in crate::handlers) fn should_set_secure_cookie(
     headers: &HeaderMap,
-    peer: Option<SocketAddr>,
+    context: crate::middleware::SecureCookieContext,
 ) -> bool {
-    if !CONFIG.https_cookies {
-        return false;
-    }
+    should_set_secure_cookie_with_config(
+        headers,
+        context,
+        CONFIG.https_cookies,
+        CONFIG.behind_proxy,
+    )
+}
 
-    if crate::middleware::forwarded_proto_is_https(headers, peer, CONFIG.behind_proxy) {
-        return true;
-    }
-
-    if !CONFIG.tls.enabled {
-        return request_origin_uses_https(headers);
-    }
-
-    host_header_uses_https_port(headers) || request_origin_uses_https(headers)
+fn should_set_secure_cookie_with_config(
+    headers: &HeaderMap,
+    context: crate::middleware::SecureCookieContext,
+    https_cookies: bool,
+    behind_proxy: bool,
+) -> bool {
+    https_cookies
+        && (context.direct_https
+            || crate::middleware::forwarded_proto_is_https(headers, context.peer, behind_proxy))
 }
 
 fn host_header_uses_https_port(headers: &HeaderMap) -> bool {
@@ -1380,12 +1384,12 @@ pub async fn admin_panel(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Query(params): Query<AdminPanelQuery>,
 ) -> Result<(CookieJar, Html<String>)> {
     // Move auth check and all DB calls into spawn_blocking.
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
-    let cookie_secure = should_set_secure_cookie(&headers, Some(peer));
+    let cookie_secure = should_set_secure_cookie(&headers, secure_context);
     let mut session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     let mut jar = jar;
     if session_id.is_none() {
@@ -1406,7 +1410,7 @@ pub async fn admin_panel(
             }
         }
     }
-    let (jar, csrf) = ensure_admin_csrf(jar)?;
+    let (jar, csrf) = ensure_admin_csrf(jar, cookie_secure)?;
     let csrf_clone = csrf.clone();
 
     // Build the flash message from query params before entering spawn_blocking.
@@ -1651,10 +1655,11 @@ mod tests {
         admin_live_log, admin_site_health_jobs, consume_admin_session_bootstrap,
         create_admin_session_bootstrap, host_header_uses_https_port, hosts_match_for_same_origin,
         latest_log_file, read_log_tail, request_origin_uses_https,
-        require_same_origin_or_valid_csrf, require_same_origin_request, LiveLogQuery,
-        SESSION_COOKIE,
+        require_same_origin_or_valid_csrf, require_same_origin_request,
+        should_set_secure_cookie_with_config, LiveLogQuery, SESSION_COOKIE,
     };
     use crate::error::AppError;
+    use crate::middleware::SecureCookieContext;
     use axum::{
         body::to_bytes,
         extract::{Query, State},
@@ -1953,6 +1958,72 @@ mod tests {
             HeaderValue::from_static("https://evil.example"),
         );
         assert!(!request_origin_uses_https(&headers));
+    }
+
+    #[test]
+    fn secure_cookie_decision_ignores_spoofed_https_origin_on_plain_http() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:8080"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://localhost:8080"),
+        );
+        let context =
+            SecureCookieContext::new(Some("127.0.0.1:41000".parse().expect("peer")), false);
+
+        assert!(!should_set_secure_cookie_with_config(
+            &headers, context, true, false,
+        ));
+    }
+
+    #[test]
+    fn secure_cookie_decision_ignores_spoofed_https_host_port_on_plain_http() {
+        let mut headers = HeaderMap::new();
+        let host = format!("example.test:{}", crate::config::CONFIG.tls.port);
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_str(&host).expect("host header"),
+        );
+        let context =
+            SecureCookieContext::new(Some("127.0.0.1:41000".parse().expect("peer")), false);
+
+        assert!(!should_set_secure_cookie_with_config(
+            &headers, context, true, false,
+        ));
+    }
+
+    #[test]
+    fn secure_cookie_decision_requires_trusted_proxy_for_forwarded_proto() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:8080"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        let trusted =
+            SecureCookieContext::new(Some("127.0.0.1:41000".parse().expect("peer")), false);
+        let untrusted =
+            SecureCookieContext::new(Some("203.0.113.10:41000".parse().expect("peer")), false);
+
+        assert!(!should_set_secure_cookie_with_config(
+            &headers, trusted, true, false,
+        ));
+        assert!(!should_set_secure_cookie_with_config(
+            &headers, untrusted, true, true,
+        ));
+        assert!(should_set_secure_cookie_with_config(
+            &headers, trusted, true, true,
+        ));
+    }
+
+    #[test]
+    fn secure_cookie_decision_marks_direct_https_secure() {
+        let headers = HeaderMap::new();
+        let context = SecureCookieContext::new(None, true);
+
+        assert!(should_set_secure_cookie_with_config(
+            &headers, context, true, false,
+        ));
+        assert!(!should_set_secure_cookie_with_config(
+            &headers, context, false, false,
+        ));
     }
 
     #[test]
