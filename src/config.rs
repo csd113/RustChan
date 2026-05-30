@@ -1946,14 +1946,24 @@ port = 8080
         let parsed = super::parse_settings_file_str(&template).expect("parse generated template");
         assert_eq!(parsed.cookie_secret.as_deref(), Some(secret.as_str()));
         assert_eq!(parsed.enable_tor_support, Some(true));
+        assert_eq!(parsed.tor_only, Some(false));
+        assert!(parsed.public_hosts.is_none());
         assert_eq!(parsed.tls.as_ref().map(|tls| tls.enabled), Some(false));
         assert_eq!(parsed.tls.as_ref().map(|tls| tls.port), Some(8443));
+        assert_eq!(
+            parsed.tls.as_ref().map(|tls| tls.redirect_http),
+            Some(false)
+        );
+        assert!(template.contains("runtime/tor/state/keystore/"));
 
         let reloaded = Config::from_env();
         assert_eq!(reloaded.cookie_secret, secret);
         assert!(reloaded.enable_tor_support);
+        assert!(!reloaded.tor_only);
+        assert!(reloaded.public_hosts.is_empty());
         assert!(!reloaded.tls.enabled);
         assert_eq!(reloaded.tls.port, 8443);
+        assert!(!reloaded.tls.redirect_http);
 
         match previous {
             Some(contents) => std::fs::write(&path, contents).expect("restore settings file"),

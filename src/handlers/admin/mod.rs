@@ -114,15 +114,7 @@ pub(super) fn require_same_origin_request(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
         .ok_or_else(|| AppError::Forbidden("Missing Host header.".into()))?;
-    let request_scheme =
-        if crate::middleware::forwarded_proto_is_https(headers, peer, CONFIG.behind_proxy)
-            || (CONFIG.tls.enabled && host_header_uses_https_port(headers))
-            || request_origin_uses_https(headers)
-        {
-            "https"
-        } else {
-            "http"
-        };
+    let request_scheme = request_scheme_for_same_origin(headers, peer, request_authority.host());
     let request_port = request_authority
         .port_u16()
         .unwrap_or(if request_scheme == "https" { 443 } else { 80 });
@@ -333,7 +325,42 @@ fn should_set_secure_cookie_with_config(
             || crate::middleware::forwarded_proto_is_https(headers, context.peer, behind_proxy))
 }
 
-fn host_header_uses_https_port(headers: &HeaderMap) -> bool {
+fn request_scheme_for_same_origin(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    request_host: &str,
+) -> &'static str {
+    request_scheme_for_same_origin_with_config(
+        headers,
+        peer,
+        request_host,
+        CONFIG.behind_proxy,
+        CONFIG.tls.enabled,
+        CONFIG.tls.port,
+    )
+}
+
+fn request_scheme_for_same_origin_with_config(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    request_host: &str,
+    behind_proxy: bool,
+    tls_enabled: bool,
+    tls_port: u16,
+) -> &'static str {
+    if crate::middleware::forwarded_proto_is_https(headers, peer, behind_proxy)
+        || request_origin_uses_https(headers)
+        || (tls_enabled
+            && !is_onion_host(request_host)
+            && host_header_uses_https_port_with_config(headers, tls_port))
+    {
+        "https"
+    } else {
+        "http"
+    }
+}
+
+fn host_header_uses_https_port_with_config(headers: &HeaderMap, tls_port: u16) -> bool {
     let Some(host) = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
@@ -346,8 +373,8 @@ fn host_header_uses_https_port(headers: &HeaderMap) -> bool {
     };
 
     match authority.port_u16() {
-        Some(port) => port == CONFIG.tls.port,
-        None => CONFIG.tls.port == 443,
+        Some(port) => port == tls_port,
+        None => tls_port == 443,
     }
 }
 
@@ -404,6 +431,15 @@ fn normalize_same_origin_host(host: &str) -> &str {
     } else {
         host
     }
+}
+
+fn is_onion_host(host: &str) -> bool {
+    let host = normalize_same_origin_host(host);
+    let Some((label, suffix)) = host.rsplit_once('.') else {
+        return false;
+    };
+
+    !label.is_empty() && suffix.eq_ignore_ascii_case("onion")
 }
 
 fn is_loopback_alias(host: &str) -> bool {
@@ -1653,10 +1689,11 @@ pub(super) fn consume_admin_session_bootstrap(token: &str) -> Option<String> {
 mod tests {
     use super::{
         admin_live_log, admin_site_health_jobs, consume_admin_session_bootstrap,
-        create_admin_session_bootstrap, host_header_uses_https_port, hosts_match_for_same_origin,
-        latest_log_file, read_log_tail, request_origin_uses_https,
-        require_same_origin_or_valid_csrf, require_same_origin_request,
-        should_set_secure_cookie_with_config, LiveLogQuery, SESSION_COOKIE,
+        create_admin_session_bootstrap, host_header_uses_https_port_with_config,
+        hosts_match_for_same_origin, latest_log_file, read_log_tail, request_origin_uses_https,
+        request_scheme_for_same_origin_with_config, require_same_origin_or_valid_csrf,
+        require_same_origin_request, should_set_secure_cookie_with_config, LiveLogQuery,
+        SESSION_COOKIE,
     };
     use crate::error::AppError;
     use crate::middleware::SecureCookieContext;
@@ -1666,6 +1703,12 @@ mod tests {
         http::{header, HeaderMap, HeaderValue, StatusCode},
     };
     use axum_extra::extract::cookie::{Cookie, CookieJar};
+
+    const TEST_ONION_HOST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion";
+    const TEST_ONION_ORIGIN: &str =
+        "http://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion";
+    const TEST_ONION_HTTPS_ORIGIN: &str =
+        "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion";
 
     fn same_origin_headers(host: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -1735,6 +1778,77 @@ mod tests {
             HeaderValue::from_static("http://127.0.0.1:8080/admin"),
         );
         assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_accepts_valid_onion_http_origin() {
+        let mut headers = same_origin_headers(TEST_ONION_HOST);
+        headers.insert(header::ORIGIN, HeaderValue::from_static(TEST_ONION_ORIGIN));
+
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_accepts_valid_onion_http_referer() {
+        let mut headers = same_origin_headers(TEST_ONION_HOST);
+        headers.insert(
+            header::REFERER,
+            HeaderValue::from_static(concat!(
+                "http://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion",
+                "/admin/panel"
+            )),
+        );
+
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_rejects_spoofed_onion_origin() {
+        let mut headers = same_origin_headers(TEST_ONION_HOST);
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static(
+                "http://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbm2dqd.onion",
+            ),
+        );
+
+        assert!(require_same_origin_request(&headers, None).is_err());
+    }
+
+    #[test]
+    fn same_origin_request_keeps_onion_http_when_tls_uses_default_https_port() {
+        let mut headers = same_origin_headers(TEST_ONION_HOST);
+        headers.insert(header::ORIGIN, HeaderValue::from_static(TEST_ONION_ORIGIN));
+
+        assert_eq!(
+            request_scheme_for_same_origin_with_config(
+                &headers,
+                None,
+                TEST_ONION_HOST,
+                false,
+                true,
+                443,
+            ),
+            "http"
+        );
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_preserves_default_https_port_for_clearnet_hosts() {
+        let headers = same_origin_headers("example.test");
+
+        assert_eq!(
+            request_scheme_for_same_origin_with_config(
+                &headers,
+                None,
+                "example.test",
+                false,
+                true,
+                443,
+            ),
+            "https"
+        );
     }
 
     #[test]
@@ -1928,14 +2042,20 @@ mod tests {
             header::HOST,
             HeaderValue::from_str(&host).expect("host header"),
         );
-        assert!(host_header_uses_https_port(&headers));
+        assert!(host_header_uses_https_port_with_config(
+            &headers,
+            crate::config::CONFIG.tls.port
+        ));
     }
 
     #[test]
     fn http_host_port_does_not_mark_request_secure() {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, HeaderValue::from_static("example.test:8080"));
-        assert!(!host_header_uses_https_port(&headers));
+        assert!(!host_header_uses_https_port_with_config(
+            &headers,
+            crate::config::CONFIG.tls.port
+        ));
     }
 
     #[test]
@@ -1988,6 +2108,33 @@ mod tests {
             SecureCookieContext::new(Some("127.0.0.1:41000".parse().expect("peer")), false);
 
         assert!(!should_set_secure_cookie_with_config(
+            &headers, context, true, false,
+        ));
+    }
+
+    #[test]
+    fn secure_cookie_decision_keeps_onion_plain_http_cookie_insecure() {
+        let mut headers = same_origin_headers(TEST_ONION_HOST);
+        headers.insert(header::ORIGIN, HeaderValue::from_static(TEST_ONION_ORIGIN));
+        let context =
+            SecureCookieContext::new(Some("127.0.0.1:41000".parse().expect("peer")), false);
+
+        assert!(!should_set_secure_cookie_with_config(
+            &headers, context, true, false,
+        ));
+    }
+
+    #[test]
+    fn secure_cookie_decision_marks_direct_onion_https_cookie_secure() {
+        let mut headers = same_origin_headers(TEST_ONION_HOST);
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static(TEST_ONION_HTTPS_ORIGIN),
+        );
+        let context =
+            SecureCookieContext::new(Some("127.0.0.1:41000".parse().expect("peer")), true);
+
+        assert!(should_set_secure_cookie_with_config(
             &headers, context, true, false,
         ));
     }

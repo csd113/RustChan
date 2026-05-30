@@ -463,6 +463,7 @@ async fn run_arti(
         target: "rustchan::detect",
         cache_dir  = %crate::config::runtime_tor_cache_dir().display(),
         state_dir  = %crate::config::runtime_tor_state_dir().display(),
+        key_dir    = %crate::config::runtime_tor_hidden_service_keys_dir().display(),
         "Tor: bootstrapping — first run downloads ~2 MB of directory data"
     );
 
@@ -495,6 +496,12 @@ async fn run_arti(
     //
     // "rustchan") so operators running multiple instances with a shared
     // runtime/tor/state/ directory can assign distinct names and avoid key collisions.
+    tracing::info!(
+        target: "rustchan::detect",
+        nickname = %crate::config::CONFIG.tor_service_nickname,
+        key_dir = %crate::config::runtime_tor_hidden_service_keys_dir().display(),
+        "Tor: launching onion service"
+    );
     let svc_config = OnionServiceConfigBuilder::default()
         .nickname(crate::config::CONFIG.tor_service_nickname.parse()?)
         .build()?;
@@ -520,9 +527,6 @@ async fn run_arti(
         found.ok_or("onion_address() still None after 5 s — service key unavailable")?
     };
     let onion_name = hsid_to_onion_address(hsid);
-    publish_onion_address(&onion_name, &onion_address).await;
-
-    let mut stream_requests = handle_rend_requests(rend_requests);
 
     // F-05: Cap concurrent proxy tasks to prevent file-descriptor exhaustion
     // under a connection flood. Excess connections are dropped (Arti sends
@@ -537,34 +541,20 @@ async fn run_arti(
             .into_boxed_str(),
     );
 
+    tracing::info!(
+        target: "rustchan::detect",
+        local_target = %local_addr.as_ref(),
+        max_streams,
+        "Tor: onion service ready and forwarding to local HTTP server"
+    );
+    publish_onion_address(&onion_name, &onion_address).await;
+
+    let mut stream_requests = handle_rend_requests(rend_requests);
+
     while let Some(stream_req) = stream_requests.next().await {
         match std::sync::Arc::clone(&sem).try_acquire_owned() {
             Ok(permit) => {
-                let addr = Arc::clone(&local_addr);
-                tokio::spawn(async move {
-                    let _permit = permit; // released on drop
-                                          // unreachable) from normal stream closure (client disconnect,
-                                          // EOF). Infrastructure errors go to ERROR; everything else
-                                          // stays at DEBUG so the log isn't flooded by normal traffic.
-                    if let Err(e) = proxy_tor_stream(stream_req, &addr).await {
-                        let msg = e.to_string();
-                        if msg.contains("local TCP connect failed")
-                            || msg.contains("timed out connecting to local HTTP server")
-                        {
-                            tracing::error!(
-                                target: "rustchan::detect",
-                                error = %e,
-                                "Tor: cannot reach local HTTP server — is axum running?"
-                            );
-                        } else {
-                            tracing::debug!(
-                                target: "rustchan::detect",
-                                error = %e,
-                                "Tor: stream closed"
-                            );
-                        }
-                    }
-                });
+                spawn_tor_stream_proxy(stream_req, permit, Arc::clone(&local_addr));
             }
             Err(_) => {
                 tracing::warn!(
@@ -622,11 +612,37 @@ async fn publish_onion_address(onion_name: &str, onion_address: &RwLock<Option<S
             ║  Back up this directory to preserve your address.    ║\n\
             ╚══════════════════════════════════════════════════════╝\n\n",
             onion = onion_name,
-            keys = crate::config::runtime_tor_state_dir()
-                .join("keys")
-                .display(),
+            keys = crate::config::runtime_tor_hidden_service_keys_dir().display(),
         ));
     }
+}
+
+fn spawn_tor_stream_proxy(
+    stream_req: StreamRequest,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    local_addr: Arc<str>,
+) {
+    tokio::spawn(async move {
+        let _permit = permit; // released on drop
+        if let Err(e) = proxy_tor_stream(stream_req, &local_addr).await {
+            let msg = e.to_string();
+            if msg.contains("local TCP connect failed")
+                || msg.contains("timed out connecting to local HTTP server")
+            {
+                tracing::error!(
+                    target: "rustchan::detect",
+                    error = %e,
+                    "Tor: cannot reach local HTTP server — is axum running?"
+                );
+            } else {
+                tracing::debug!(
+                    target: "rustchan::detect",
+                    error = %e,
+                    "Tor: stream closed"
+                );
+            }
+        }
+    });
 }
 
 // ─── Connection proxy ─────────────────────────────────────────────────────────
