@@ -161,10 +161,19 @@ pub struct AdminSiteHealthDependencySummary {
 pub struct AdminPanelMaintenanceView {
     pub db_size_bytes: i64,
     pub db_size_warning: bool,
+    pub setup_status: AdminPanelSetupStatus,
     pub ffmpeg_timeout_secs: u64,
     pub media_auto_prune_enabled: bool,
     pub media_max_active_content_size_bytes: u64,
     pub media_detection: AdminMediaDetectionView,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum AdminPanelSetupStatus {
+    Available,
+    Complete,
+    Reopened,
+    Initialized,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1700,8 +1709,8 @@ mod tests {
         admin_db_health_result_page, admin_db_repair_idle_page, admin_login_page, admin_panel_page,
         render_board_appearance_card, render_board_settings_card, AdminDetectionStatus,
         AdminMediaDetectionView, AdminPanelAppearanceView, AdminPanelBackupsView,
-        AdminPanelMaintenanceView, AdminPanelModerationView, AdminPanelSiteHealthView,
-        AdminPanelViewModel, AdminSiteHealthDependencySummary,
+        AdminPanelMaintenanceView, AdminPanelModerationView, AdminPanelSetupStatus,
+        AdminPanelSiteHealthView, AdminPanelViewModel, AdminSiteHealthDependencySummary,
     };
     use crate::db::{DbCheckResult, DbHealthReport, DbHealthSnapshot};
     use crate::models::{
@@ -1986,6 +1995,7 @@ mod tests {
             maintenance: AdminPanelMaintenanceView {
                 db_size_bytes: 4096,
                 db_size_warning: false,
+                setup_status: AdminPanelSetupStatus::Complete,
                 ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
                 media_auto_prune_enabled: false,
                 media_max_active_content_size_bytes: 0,
@@ -2622,6 +2632,7 @@ mod tests {
             maintenance: AdminPanelMaintenanceView {
                 db_size_bytes: 4096,
                 db_size_warning: false,
+                setup_status: AdminPanelSetupStatus::Complete,
                 ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
                 media_auto_prune_enabled: false,
                 media_max_active_content_size_bytes: 0,
@@ -2711,6 +2722,7 @@ mod tests {
             maintenance: AdminPanelMaintenanceView {
                 db_size_bytes: 0,
                 db_size_warning: false,
+                setup_status: AdminPanelSetupStatus::Complete,
                 ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
                 media_auto_prune_enabled: false,
                 media_max_active_content_size_bytes: 0,
@@ -2791,6 +2803,7 @@ mod tests {
             maintenance: AdminPanelMaintenanceView {
                 db_size_bytes: 0,
                 db_size_warning: false,
+                setup_status: AdminPanelSetupStatus::Complete,
                 ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
                 media_auto_prune_enabled: false,
                 media_max_active_content_size_bytes: 0,

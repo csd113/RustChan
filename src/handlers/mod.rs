@@ -7,6 +7,7 @@ pub mod captcha;
 pub mod favicon;
 pub mod posting;
 pub mod render;
+pub mod setup;
 pub mod thread;
 
 // ─── Shared multipart form parsing ───────────────────────────────────────────

@@ -98,7 +98,10 @@ fn require_admin_session_with_name(
 /// Check CSRF using the cookie jar. Returns error on mismatch.
 /// Verify admin session from a session ID string.
 /// For use inside `spawn_blocking` closures where we have an open connection.
-fn require_admin_session_sid(conn: &rusqlite::Connection, session_id: Option<&str>) -> Result<i64> {
+pub(in crate::handlers) fn require_admin_session_sid(
+    conn: &rusqlite::Connection,
+    session_id: Option<&str>,
+) -> Result<i64> {
     let sid = session_id.ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
     let session = db::get_session(conn, sid)?
         .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
@@ -228,7 +231,7 @@ pub(super) fn admin_csrf_is_valid(jar: &CookieJar, form_token: Option<&str>) -> 
     validate_signed_csrf(csrf_cookie, session_id, form_token.unwrap_or(""))
 }
 
-pub(super) fn require_same_origin_or_valid_csrf(
+pub(in crate::handlers) fn require_same_origin_or_valid_csrf(
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
     csrf_valid: bool,
@@ -246,7 +249,7 @@ pub(super) fn require_same_origin_or_valid_csrf(
     }
 }
 
-pub(super) fn require_admin_post_origin_and_csrf(
+pub(in crate::handlers) fn require_admin_post_origin_and_csrf(
     jar: &CookieJar,
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
@@ -607,6 +610,7 @@ struct AdminPanelSnapshot {
     board_backups: Vec<crate::models::BackupInfo>,
     db_size_bytes: i64,
     db_size_warning: bool,
+    setup_status: crate::templates::AdminPanelSetupStatus,
     ffmpeg_timeout_secs: u64,
     media_auto_prune_enabled: bool,
     media_max_active_content_size_bytes: u64,
@@ -1132,6 +1136,7 @@ fn load_admin_panel_snapshot(
     let backups_domain = load_backups_domain_data();
     let overview_domain = load_overview_domain_data(&backups_domain.full_backups);
     let maintenance_domain = load_maintenance_domain_data(conn, state);
+    let setup_state = db::setup_state(conn)?;
     let site_health = load_site_health_snapshot(
         conn,
         state,
@@ -1170,6 +1175,7 @@ fn load_admin_panel_snapshot(
             board_backups: backups_domain.board_backups,
             db_size_bytes: maintenance_domain.db_size_bytes,
             db_size_warning: maintenance_domain.db_size_warning,
+            setup_status: admin_panel_setup_status(setup_state),
             ffmpeg_timeout_secs: maintenance_domain.ffmpeg_timeout_secs,
             media_auto_prune_enabled: maintenance_domain.media_auto_prune_enabled,
             media_max_active_content_size_bytes: maintenance_domain
@@ -1186,6 +1192,20 @@ fn load_admin_panel_snapshot(
         },
         onion_address_val,
     ))
+}
+
+const fn admin_panel_setup_status(
+    setup_state: db::SetupState,
+) -> crate::templates::AdminPanelSetupStatus {
+    if setup_state.reopened {
+        crate::templates::AdminPanelSetupStatus::Reopened
+    } else if setup_state.completed {
+        crate::templates::AdminPanelSetupStatus::Complete
+    } else if setup_state.is_available() {
+        crate::templates::AdminPanelSetupStatus::Available
+    } else {
+        crate::templates::AdminPanelSetupStatus::Initialized
+    }
 }
 
 fn build_backup_summary(full_backups: &[BackupInfo]) -> BackupSummary {
@@ -1292,6 +1312,7 @@ fn render_admin_panel_from_snapshot(
         maintenance: crate::templates::AdminPanelMaintenanceView {
             db_size_bytes: snapshot.db_size_bytes,
             db_size_warning: snapshot.db_size_warning,
+            setup_status: snapshot.setup_status,
             ffmpeg_timeout_secs: snapshot.ffmpeg_timeout_secs,
             media_auto_prune_enabled: snapshot.media_auto_prune_enabled,
             media_max_active_content_size_bytes: snapshot.media_max_active_content_size_bytes,

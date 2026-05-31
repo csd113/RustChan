@@ -210,6 +210,8 @@ struct SettingsFile {
     max_video_size_mb: Option<u32>,
     max_audio_size_mb: Option<u32>,
     cookie_secret: Option<String>,
+    behind_proxy: Option<bool>,
+    https_cookies: Option<bool>,
     enable_tor_support: Option<bool>,
     /// When true, the HTTP server binds exclusively to 127.0.0.1 so it is
     /// reachable only through the Tor hidden service. Overrides the host
@@ -694,7 +696,7 @@ impl Config {
         } else {
             bind_addr
         };
-        let behind_proxy = env_bool("CHAN_BEHIND_PROXY", false);
+        let behind_proxy = env_bool("CHAN_BEHIND_PROXY", s.behind_proxy.unwrap_or(false));
         let https_cookies_default = behind_proxy || tls.enabled;
         let trusted_proxy_cidrs = env_list(
             "CHAN_TRUSTED_PROXY_CIDRS",
@@ -802,7 +804,10 @@ impl Config {
             session_duration: env_parse("CHAN_SESSION_SECS", 8 * 3600),
             behind_proxy,
             trusted_proxy_cidrs,
-            https_cookies: env_bool("CHAN_HTTPS_COOKIES", https_cookies_default),
+            https_cookies: env_bool(
+                "CHAN_HTTPS_COOKIES",
+                s.https_cookies.unwrap_or(https_cookies_default),
+            ),
             public_hosts,
             wal_checkpoint_interval: env_parse(
                 "CHAN_WAL_CHECKPOINT_SECS",
@@ -1307,6 +1312,36 @@ pub fn update_settings_file_auto_full_backup(
             ),
         ],
         Some("# ── Federation / ChanNet gateway"),
+    );
+}
+
+#[derive(Clone, Copy)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "settings update mirrors independent runtime setup toggles"
+)]
+pub struct SetupRuntimeSettingsUpdate {
+    pub enable_tor_support: bool,
+    pub tor_only: bool,
+    pub behind_proxy: bool,
+    pub https_cookies: bool,
+    pub max_image_size_mb: u64,
+    pub max_video_size_mb: u64,
+    pub max_audio_size_mb: u64,
+}
+
+pub fn update_settings_file_setup_runtime(update: SetupRuntimeSettingsUpdate) {
+    update_settings_file_entries(
+        &[
+            ("enable_tor_support", update.enable_tor_support.to_string()),
+            ("tor_only", update.tor_only.to_string()),
+            ("behind_proxy", update.behind_proxy.to_string()),
+            ("https_cookies", update.https_cookies.to_string()),
+            ("max_image_size_mb", update.max_image_size_mb.to_string()),
+            ("max_video_size_mb", update.max_video_size_mb.to_string()),
+            ("max_audio_size_mb", update.max_audio_size_mb.to_string()),
+        ],
+        Some("# Optional explicit ffmpeg binary path."),
     );
 }
 
