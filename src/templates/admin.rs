@@ -679,8 +679,11 @@ fn render_board_settings_card(
     <label title="Per-board audio upload size cap in MiB.">
       Audio size limit (MiB)<input type="number" name="max_audio_size_mb" value="{max_audio_size_mb}" min="1">
     </label>
+    <label title="Per-board PDF upload size cap in MiB.">
+      PDF size limit (MiB)<input type="number" name="max_pdf_size_mb" value="{max_pdf_size_mb}" min="1">
+    </label>
   </div>
-  <p class="admin-meta-note">PDF and any-file uploads still use the largest enabled cap for this board.</p>
+  <p class="admin-meta-note">PDF uploads use the PDF cap. Any-file uploads use the largest configured cap for this board.</p>
   <div class="board-settings-checks">
     <label><input type="checkbox" name="allow_images" value="1"{images_checked}> Allow images</label>
     <label><input type="checkbox" name="allow_video" value="1"{video_checked}> Allow video</label>
@@ -801,6 +804,7 @@ fn render_board_settings_card(
             bytes_to_mib(board.max_video_size, crate::config::CONFIG.max_video_size),
         max_audio_size_mb =
             bytes_to_mib(board.max_audio_size, crate::config::CONFIG.max_audio_size),
+        max_pdf_size_mb = bytes_to_mib(board.max_pdf_size, crate::config::CONFIG.max_image_size),
         pdf_checked = checked(board.allow_pdf),
         tripcodes_checked = checked(board.allow_tripcodes),
         video_embeds_checked = checked(board.allow_video_embeds),
@@ -1736,6 +1740,7 @@ mod tests {
             max_image_size: 8 * 1024 * 1024,
             max_video_size: 50 * 1024 * 1024,
             max_audio_size: 150 * 1024 * 1024,
+            max_pdf_size: 8 * 1024 * 1024,
             allow_pdf: false,
             allow_any_files: false,
             allow_tripcodes: true,
@@ -2139,6 +2144,7 @@ mod tests {
             max_image_size: 25 * 1024 * 1024,
             max_video_size: 500 * 1024 * 1024,
             max_audio_size: 300 * 1024 * 1024,
+            max_pdf_size: 12 * 1024 * 1024,
             ..sample_board()
         };
         let html = render_board_settings_card(
@@ -2154,14 +2160,16 @@ mod tests {
         assert!(html.contains(r#"name="max_image_size_mb""#));
         assert!(html.contains(r#"name="max_video_size_mb""#));
         assert!(html.contains(r#"name="max_audio_size_mb""#));
+        assert!(html.contains(r#"name="max_pdf_size_mb""#));
         assert!(html.contains(r#"value="25""#));
         assert!(html.contains(r#"value="500""#));
         assert!(html.contains(r#"value="300""#));
+        assert!(html.contains(r#"value="12""#));
         assert!(!html.contains("Cannot exceed the site-wide"));
         assert!(!html.contains(r#"max="8""#));
         assert!(!html.contains(r#"max="50""#));
         assert!(!html.contains(r#"max="150""#));
-        assert!(html.contains("PDF and any-file uploads still use the largest enabled cap"));
+        assert!(html.contains("PDF uploads use the PDF cap"));
     }
 
     #[test]

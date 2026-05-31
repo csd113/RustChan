@@ -29,6 +29,7 @@ pub struct SaveUploadOptions<'a> {
     pub max_image_size: usize,
     pub max_video_size: usize,
     pub max_audio_size: usize,
+    pub max_pdf_size: usize,
     pub ffmpeg_available: bool,
     pub ffprobe_available: bool,
     pub ffmpeg_webp_available: bool,
@@ -521,10 +522,12 @@ fn max_size_for_media(
         crate::models::MediaType::Video => options.max_video_size,
         crate::models::MediaType::Audio => options.max_audio_size,
         crate::models::MediaType::Image => options.max_image_size,
-        crate::models::MediaType::Pdf | crate::models::MediaType::Other => options
+        crate::models::MediaType::Pdf => options.max_pdf_size,
+        crate::models::MediaType::Other => options
             .max_image_size
             .max(options.max_video_size)
-            .max(options.max_audio_size),
+            .max(options.max_audio_size)
+            .max(options.max_pdf_size),
     }
 }
 
@@ -947,6 +950,7 @@ mod tests {
             max_image_size: 1024 * 1024,
             max_video_size: 1024 * 1024,
             max_audio_size: 1024 * 1024,
+            max_pdf_size: 1024 * 1024,
             ffmpeg_available: false,
             ffprobe_available: false,
             ffmpeg_webp_available: false,

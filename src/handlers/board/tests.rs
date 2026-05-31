@@ -2645,6 +2645,7 @@ async fn create_thread_rejects_uploads_on_upload_disabled_board() {
             i64::try_from(crate::config::CONFIG.max_image_size).expect("image size fits in i64"),
             i64::try_from(crate::config::CONFIG.max_video_size).expect("video size fits in i64"),
             i64::try_from(crate::config::CONFIG.max_audio_size).expect("audio size fits in i64"),
+            i64::try_from(crate::config::CONFIG.max_image_size).expect("pdf size fits in i64"),
             false,
             false,
             true,

@@ -280,6 +280,7 @@ pub struct Board {
     pub max_image_size: i64,   // per-board image upload size limit in bytes
     pub max_video_size: i64,   // per-board video upload size limit in bytes
     pub max_audio_size: i64,   // per-board audio upload size limit in bytes
+    pub max_pdf_size: i64,     // per-board PDF upload size limit in bytes
     pub allow_pdf: bool,       // per-board PDF upload toggle (default: off)
     pub allow_any_files: bool, // per-board arbitrary file upload toggle (default: off)
     pub allow_tripcodes: bool,
@@ -325,10 +326,19 @@ impl Board {
     }
 
     #[must_use]
+    pub fn max_pdf_size_bytes(&self) -> usize {
+        usize::try_from(self.max_pdf_size)
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(crate::config::CONFIG.max_image_size)
+    }
+
+    #[must_use]
     pub fn max_generic_upload_size_bytes(&self) -> usize {
         self.max_image_size_bytes()
             .max(self.max_video_size_bytes())
             .max(self.max_audio_size_bytes())
+            .max(self.max_pdf_size_bytes())
     }
 }
 

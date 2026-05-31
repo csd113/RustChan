@@ -305,6 +305,10 @@ fn admin_moderation_routes() -> Router<AppState> {
             post(crate::handlers::setup::admin_reopen_setup),
         )
         .route(
+            "/admin/setup/close",
+            post(crate::handlers::setup::admin_close_setup),
+        )
+        .route(
             "/admin/db/repair",
             get(crate::handlers::admin::admin_db_repair_status)
                 .post(crate::handlers::admin::admin_db_repair),

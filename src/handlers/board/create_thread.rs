@@ -51,6 +51,7 @@ pub async fn create_thread(
             access_context.board.max_image_size_bytes(),
             access_context.board.max_video_size_bytes(),
             access_context.board.max_audio_size_bytes(),
+            access_context.board.max_pdf_size_bytes(),
         ),
     )
     .await

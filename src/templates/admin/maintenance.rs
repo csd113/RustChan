@@ -17,6 +17,7 @@ struct MaintenanceSectionView<'a> {
     setup_status: &'a str,
     setup_status_detail: &'a str,
     setup_reopen_warning: &'a str,
+    setup_close_control: &'a str,
 }
 
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
@@ -81,6 +82,18 @@ old boards to prevent query performance degradation.
         ),
     };
     let setup_reopen_warning = "Reopening setup exposes live settings for editing. It does not replace existing admin credentials and still requires an authenticated admin session.";
+    let setup_close_control = if matches!(
+        view.maintenance.setup_status,
+        super::AdminPanelSetupStatus::Reopened
+    ) {
+        r#"<form method="POST" action="/admin/setup/close" class="admin-inline-actions">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <button type="submit"
+            data-confirm="Close the setup wizard without changing live settings?">close setup wizard</button>
+  </form>"#
+    } else {
+        ""
+    };
     let section_view = MaintenanceSectionView {
         csrf_token: view.csrf_token,
         db_warn_banner: &db_warn_banner,
@@ -97,6 +110,7 @@ old boards to prevent query performance degradation.
         setup_status,
         setup_status_detail,
         setup_reopen_warning,
+        setup_close_control,
     };
     render_admin_maintenance_section(&section_view)
 }
@@ -299,6 +313,7 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
     <button type="submit"
             data-confirm="Reopen the setup wizard? This edits live settings and remains admin-only. Continue?">reopen setup wizard</button>
   </form>
+  {setup_close_control}
 </div>
 </div>
 </details>
@@ -343,6 +358,9 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
         setup_status = escape_html(view.setup_status),
         setup_status_detail = escape_html(view.setup_status_detail),
         setup_reopen_warning = escape_html(view.setup_reopen_warning),
+        setup_close_control = view
+            .setup_close_control
+            .replace("{csrf}", &escape_html(view.csrf_token)),
         tor_section = view.tor_section,
     )
 }

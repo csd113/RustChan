@@ -775,6 +775,7 @@ mod tests {
             max_image_size: 8 * 1024 * 1024,
             max_video_size: 50 * 1024 * 1024,
             max_audio_size: 150 * 1024 * 1024,
+            max_pdf_size: 8 * 1024 * 1024,
             allow_pdf: false,
             allow_any_files: false,
             allow_tripcodes: true,

@@ -19,6 +19,7 @@ pub struct BoardSettingsForm {
     max_image_size_mb: Option<String>,
     max_video_size_mb: Option<String>,
     max_audio_size_mb: Option<String>,
+    max_pdf_size_mb: Option<String>,
     allow_pdf: Option<String>,
     allow_any_files: Option<String>,
     allow_tripcodes: Option<String>,
@@ -194,6 +195,10 @@ pub async fn update_board_settings(
                 form.max_audio_size_mb.as_deref(),
                 current_board.max_audio_size,
             )?;
+            let max_pdf_size = parse_board_upload_limit_bytes(
+                form.max_pdf_size_mb.as_deref(),
+                current_board.max_pdf_size,
+            )?;
             db::update_board_settings(
                 &mut conn,
                 board_id,
@@ -209,6 +214,7 @@ pub async fn update_board_settings(
                 max_image_size,
                 max_video_size,
                 max_audio_size,
+                max_pdf_size,
                 form.allow_pdf.as_deref() == Some("1"),
                 CONFIG.enable_any_file_uploads_feature
                     && form.allow_any_files.as_deref() == Some("1"),

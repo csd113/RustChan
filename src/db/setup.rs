@@ -94,6 +94,17 @@ pub fn reopen_setup(conn: &rusqlite::Connection, admin_id: i64) -> Result<()> {
 }
 
 /// # Errors
+/// Returns an error if the reopen marker cannot be cleared.
+pub fn close_reopened_setup(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute(
+        "DELETE FROM site_settings WHERE key IN (?1, ?2)",
+        params![SETUP_REOPENED_AT_KEY, SETUP_REOPENED_BY_KEY],
+    )
+    .context("clear setup reopen marker")?;
+    Ok(())
+}
+
+/// # Errors
 /// Returns an error if the setup completion marker cannot be persisted.
 pub fn mark_setup_complete(conn: &rusqlite::Connection) -> Result<()> {
     let now = chrono::Utc::now().timestamp().to_string();
@@ -103,11 +114,7 @@ pub fn mark_setup_complete(conn: &rusqlite::Connection) -> Result<()> {
         params![SETUP_COMPLETED_AT_KEY, now],
     )
     .context("write setup completion marker")?;
-    conn.execute(
-        "DELETE FROM site_settings WHERE key IN (?1, ?2)",
-        params![SETUP_REOPENED_AT_KEY, SETUP_REOPENED_BY_KEY],
-    )
-    .context("clear setup reopen marker")?;
+    close_reopened_setup(conn)?;
     Ok(())
 }
 
@@ -180,6 +187,21 @@ mod tests {
         reopen_setup(&conn, 1).expect("reopen");
         mark_setup_complete(&conn).expect("complete");
 
+        let state = setup_state(&conn).expect("state");
+
+        assert_eq!(state.access, SetupAccess::Initialized);
+        assert!(state.completed);
+        assert!(!state.reopened);
+    }
+
+    #[test]
+    fn close_reopened_setup_relocks_completed_instance_without_clearing_completion() {
+        let pool = crate::db::init_test_pool().expect("pool");
+        let conn = pool.get().expect("conn");
+        mark_setup_complete(&conn).expect("complete");
+        reopen_setup(&conn, 1).expect("reopen");
+
+        close_reopened_setup(&conn).expect("close");
         let state = setup_state(&conn).expect("state");
 
         assert_eq!(state.access, SetupAccess::Initialized);

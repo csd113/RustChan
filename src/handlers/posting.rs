@@ -67,6 +67,7 @@ pub struct UploadConfig<'a> {
     pub max_image_size: usize,
     pub max_video_size: usize,
     pub max_audio_size: usize,
+    pub max_pdf_size: usize,
     pub ffmpeg_available: bool,
     pub ffprobe_available: bool,
     pub ffmpeg_webp_available: bool,
@@ -315,6 +316,7 @@ pub fn process_uploads(
         config.max_image_size,
         config.max_video_size,
         config.max_audio_size,
+        config.max_pdf_size,
         config.ffmpeg_available,
         config.ffprobe_available,
         config.ffmpeg_webp_available,
@@ -424,6 +426,7 @@ pub fn submit_post(
     let effective_max_image_size = board.max_image_size_bytes();
     let effective_max_video_size = board.max_video_size_bytes();
     let effective_max_audio_size = board.max_audio_size_bytes();
+    let effective_max_pdf_size = board.max_pdf_size_bytes();
 
     let reply_context = match &mode {
         SubmitPostMode::Reply { thread_id, sage } => {
@@ -517,6 +520,7 @@ pub fn submit_post(
             max_image_size: effective_max_image_size,
             max_video_size: effective_max_video_size,
             max_audio_size: effective_max_audio_size,
+            max_pdf_size: effective_max_pdf_size,
             ffmpeg_available,
             ffprobe_available,
             ffmpeg_webp_available,
@@ -1170,6 +1174,7 @@ mod tests {
                 max_image_size: 1024 * 1024,
                 max_video_size: 1024 * 1024,
                 max_audio_size: 1024 * 1024,
+                max_pdf_size: 1024 * 1024,
                 ffmpeg_available: false,
                 ffprobe_available: false,
                 ffmpeg_webp_available: false,
@@ -1466,6 +1471,7 @@ mod tests {
                 max_image_size: 1024 * 1024,
                 max_video_size: 1024 * 1024,
                 max_audio_size: 1024 * 1024,
+                max_pdf_size: 1024 * 1024,
                 ffmpeg_available: false,
                 ffprobe_available: false,
                 ffmpeg_webp_available: false,

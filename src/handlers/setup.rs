@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 
 const SETUP_CSRF_SCOPE: &str = "first-run-setup";
+const SETUP_PENDING_ADMIN_HASH_COOKIE: &str = "setup_pending_admin_hash";
 const MIB: u64 = 1024 * 1024;
 const MIB_I64: i64 = 1024 * 1024;
 
@@ -135,6 +136,7 @@ pub struct SetupWizardForm {
     pub admin_username: Option<String>,
     pub admin_password: Option<String>,
     pub admin_password_confirm: Option<String>,
+    pub admin_password_token: Option<String>,
     pub enable_tor: Option<String>,
     pub tor_only: Option<String>,
     pub public_url: Option<String>,
@@ -254,6 +256,72 @@ fn checked(value: Option<&str>) -> &'static str {
     }
 }
 
+fn pending_admin_hash_signature(token: &str, password_hash_hex: &str) -> String {
+    crypto::sha256_hex(
+        format!(
+            "{}:setup-admin-password:{token}:{password_hash_hex}",
+            CONFIG.cookie_secret
+        )
+        .as_bytes(),
+    )
+}
+
+fn make_pending_admin_hash_cookie(
+    token: &str,
+    password_hash: &str,
+    headers: &HeaderMap,
+    secure_context: crate::middleware::SecureCookieContext,
+) -> Cookie<'static> {
+    let password_hash_hex = hex::encode(password_hash.as_bytes());
+    let signature = pending_admin_hash_signature(token, &password_hash_hex);
+    let mut cookie = Cookie::new(
+        SETUP_PENDING_ADMIN_HASH_COOKIE,
+        format!("{token}:{password_hash_hex}:{signature}"),
+    );
+    cookie.set_http_only(true);
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_path("/");
+    cookie.set_secure(crate::handlers::admin::should_set_secure_cookie(
+        headers,
+        secure_context,
+    ));
+    cookie
+}
+
+fn pending_admin_hash_from_cookie(jar: &CookieJar, token: Option<&str>) -> Result<Option<String>> {
+    let Some(token) = token.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(cookie) = jar.get(SETUP_PENDING_ADMIN_HASH_COOKIE) else {
+        return Ok(None);
+    };
+    let mut parts = cookie.value().splitn(3, ':');
+    let Some(cookie_token) = parts.next() else {
+        return Ok(None);
+    };
+    let Some(password_hash_hex) = parts.next() else {
+        return Ok(None);
+    };
+    let Some(signature) = parts.next() else {
+        return Ok(None);
+    };
+    if cookie_token != token {
+        return Ok(None);
+    }
+    let expected = pending_admin_hash_signature(token, password_hash_hex);
+    if signature != expected {
+        return Err(AppError::Forbidden(
+            "Setup admin secret token is invalid.".into(),
+        ));
+    }
+    let password_hash_bytes = hex::decode(password_hash_hex)
+        .map_err(|_error| AppError::BadRequest("Setup admin secret token is malformed.".into()))?;
+    let password_hash = String::from_utf8(password_hash_bytes).map_err(|_error| {
+        AppError::BadRequest("Setup admin secret token is not valid UTF-8.".into())
+    })?;
+    Ok(Some(password_hash))
+}
+
 fn trimmed_limited(value: Option<&str>, max_chars: usize) -> String {
     value
         .unwrap_or_default()
@@ -266,6 +334,14 @@ fn trimmed_limited(value: Option<&str>, max_chars: usize) -> String {
 pub fn parse_setup_form(
     form: &SetupWizardForm,
     admin_count: i64,
+) -> std::result::Result<ParsedSetup, Vec<String>> {
+    parse_setup_form_inner(form, admin_count, false)
+}
+
+fn parse_setup_form_inner(
+    form: &SetupWizardForm,
+    admin_count: i64,
+    admin_secret_available: bool,
 ) -> std::result::Result<ParsedSetup, Vec<String>> {
     let mut errors = Vec::new();
     let preset = parse_preset(&form.preset);
@@ -288,7 +364,7 @@ pub fn parse_setup_form(
         }
         let password = form.admin_password.as_deref().unwrap_or_default();
         let confirmation = form.admin_password_confirm.as_deref().unwrap_or_default();
-        if !validate_password_confirmation(password, confirmation) {
+        if !admin_secret_available && !validate_password_confirmation(password, confirmation) {
             errors.push(
                 "Admin password must be at least 12 characters and match confirmation.".to_owned(),
             );
@@ -468,8 +544,15 @@ async fn load_setup_state(
         let pool = state.db.clone();
         move || -> Result<(db::SetupState, bool)> {
             let conn = pool.get()?;
-            let setup_state = db::ensure_setup_available(&conn)
-                .map_err(|_| AppError::NotFound("Setup wizard is not available.".into()))?;
+            let setup_state = db::setup_state(&conn)?;
+            if !setup_state.is_available() {
+                let message = if setup_state.completed {
+                    "Setup is already complete."
+                } else {
+                    "Setup wizard is not available."
+                };
+                return Err(AppError::NotFound(message.into()));
+            }
             let is_admin = session_id
                 .as_deref()
                 .is_some_and(|sid| db::get_session(&conn, sid).ok().flatten().is_some());
@@ -540,10 +623,28 @@ pub async fn setup_review(
                 .into_response());
         }
     };
-    let (jar, csrf) = ensure_setup_csrf(jar, &headers, secure_context);
+    let (mut jar, csrf) = ensure_setup_csrf(jar, &headers, secure_context);
+    let mut review_form = form.clone();
+    if setup_state.admin_count == 0 {
+        let password = parsed
+            .admin_password
+            .as_deref()
+            .ok_or_else(|| AppError::BadRequest("Initial admin password is required.".into()))?;
+        let password_hash = crypto::hash_password(password)?;
+        let token = crypto::random_hex(32);
+        jar = jar.add(make_pending_admin_hash_cookie(
+            &token,
+            &password_hash,
+            &headers,
+            secure_context,
+        ));
+        review_form.admin_password = None;
+        review_form.admin_password_confirm = None;
+        review_form.admin_password_token = Some(token);
+    }
     Ok((
         jar,
-        Html(setup_review_page(&csrf, setup_state, &form, &parsed)),
+        Html(setup_review_page(&csrf, setup_state, &review_form, &parsed)),
     )
         .into_response())
 }
@@ -557,8 +658,11 @@ pub async fn setup_finish(
 ) -> Result<Response> {
     let (setup_state, _is_admin) = load_setup_state(&state, admin_session_id(&jar)).await?;
     validate_setup_csrf(&jar, &headers, secure_context.peer, form.csrf.as_deref())?;
-    let parsed = parse_setup_form(&form, setup_state.admin_count)
-        .map_err(|errors| AppError::BadRequest(errors.join(" ")))?;
+    let pending_admin_hash =
+        pending_admin_hash_from_cookie(&jar, form.admin_password_token.as_deref())?;
+    let parsed =
+        parse_setup_form_inner(&form, setup_state.admin_count, pending_admin_hash.is_some())
+            .map_err(|errors| AppError::BadRequest(errors.join(" ")))?;
     let board_slug = parsed.board_slug.clone();
     let auto_backup_settings = state.auto_full_backup_settings.clone();
     tokio::task::spawn_blocking({
@@ -572,10 +676,14 @@ pub async fn setup_finish(
                 let username = parsed.admin_username.as_deref().ok_or_else(|| {
                     AppError::BadRequest("Initial admin username is required.".into())
                 })?;
-                let password = parsed.admin_password.as_deref().ok_or_else(|| {
-                    AppError::BadRequest("Initial admin password is required.".into())
-                })?;
-                let password_hash = crypto::hash_password(password)?;
+                let password_hash = if let Some(hash) = pending_admin_hash.as_deref() {
+                    hash.to_owned()
+                } else {
+                    let password = parsed.admin_password.as_deref().ok_or_else(|| {
+                        AppError::BadRequest("Initial admin password is required.".into())
+                    })?;
+                    crypto::hash_password(password)?
+                };
                 db::create_admin(&tx, username, &password_hash)?;
             }
             if db::board_slug_exists(&tx, &parsed.board_slug)? {
@@ -598,13 +706,13 @@ pub async fn setup_finish(
                 "UPDATE boards SET
                  max_threads = ?1, max_archived_threads = ?2, bump_limit = ?3,
                  max_image_size = ?4, max_video_size = ?5, max_audio_size = ?6,
-                 allow_pdf = ?7, allow_any_files = 0, allow_tripcodes = 1,
-                 edit_window_secs = 0, allow_editing = ?8, allow_self_delete = ?9,
-                 allow_archive = ?10, allow_video_embeds = ?11, allow_captcha = ?12,
-                 show_poster_ids = 1, collapse_greentext = 0, post_cooldown_secs = ?13,
-                 default_theme = ?14, banner_mode = 'inherit', access_mode = ?15,
+                 max_pdf_size = ?7, allow_pdf = ?8, allow_any_files = 0, allow_tripcodes = 1,
+                 edit_window_secs = 0, allow_editing = ?9, allow_self_delete = ?10,
+                 allow_archive = ?11, allow_video_embeds = ?12, allow_captcha = ?13,
+                 show_poster_ids = 1, collapse_greentext = 0, post_cooldown_secs = ?14,
+                 default_theme = ?15, banner_mode = 'inherit', access_mode = ?16,
                  access_password_hash = ''
-                 WHERE id = ?16",
+                 WHERE id = ?17",
                 rusqlite::params![
                     if parsed.allow_posting { 150 } else { 0 },
                     150,
@@ -612,6 +720,7 @@ pub async fn setup_finish(
                     parsed.image_limit_bytes,
                     parsed.video_limit_bytes,
                     parsed.audio_limit_bytes,
+                    parsed.pdf_limit_bytes,
                     i32::from(parsed.allow_uploads && parsed.allow_pdf),
                     i32::from(parsed.allow_thread_editing),
                     i32::from(parsed.allow_self_delete),
@@ -670,6 +779,35 @@ pub async fn setup_finish(
                 "setup_pdf_upload_limit_bytes",
                 &parsed.pdf_limit_bytes.to_string(),
             )?;
+            crate::config::update_settings_file_setup(&crate::config::SetupSettingsFileUpdate {
+                forum_name: &parsed.site_name,
+                site_subtitle: &parsed.site_subtitle,
+                homepage_new_thread_badges_enabled: parsed.homepage_new_thread_badges_enabled,
+                homepage_new_reply_badges_enabled: parsed.homepage_new_reply_badges_enabled,
+                thread_new_reply_badges_enabled: parsed.thread_new_reply_badges_enabled,
+                default_theme: &parsed.default_theme,
+                auto_full_backup_interval_hours: parsed.auto_backup_interval_hours,
+                auto_full_backup_copies_to_keep: parsed.backup_retention,
+                auto_full_backup_include_tor_hidden_service_keys: parsed
+                    .include_tor_keys_in_backups,
+                auto_full_backup_storage_mode: "directory",
+                auto_full_backup_split_zip_part_size_gib:
+                    crate::handlers::admin::backup::split_zip_part_size_gib(
+                        CONFIG.auto_full_backup_split_zip_part_size_bytes,
+                    ),
+                runtime: crate::config::SetupRuntimeSettingsUpdate {
+                    enable_tor_support: parsed.enable_tor,
+                    tor_only: parsed.tor_only,
+                    behind_proxy: parsed.behind_proxy,
+                    https_cookies: parsed.https_cookies,
+                    max_image_size_mb: u64::try_from(parsed.image_limit_bytes / MIB_I64)
+                        .unwrap_or(8),
+                    max_video_size_mb: u64::try_from(parsed.video_limit_bytes / MIB_I64)
+                        .unwrap_or(50),
+                    max_audio_size_mb: u64::try_from(parsed.audio_limit_bytes / MIB_I64)
+                        .unwrap_or(150),
+                },
+            })?;
             db::mark_setup_complete(&tx)?;
             tx.commit()?;
 
@@ -684,44 +822,14 @@ pub async fn setup_finish(
                 "directory",
                 CONFIG.auto_full_backup_split_zip_part_size_bytes,
             );
-            crate::config::update_settings_file_site_settings(
-                &parsed.site_name,
-                &parsed.site_subtitle,
-                parsed.homepage_new_thread_badges_enabled,
-                parsed.homepage_new_reply_badges_enabled,
-                parsed.thread_new_reply_badges_enabled,
-                &parsed.default_theme,
-            );
-            crate::config::update_settings_file_auto_full_backup(
-                parsed.auto_backup_interval_hours,
-                parsed.backup_retention,
-                parsed.include_tor_keys_in_backups,
-                "directory",
-                crate::handlers::admin::backup::split_zip_part_size_gib(
-                    CONFIG.auto_full_backup_split_zip_part_size_bytes,
-                ),
-            );
-            crate::config::update_settings_file_setup_runtime(
-                crate::config::SetupRuntimeSettingsUpdate {
-                    enable_tor_support: parsed.enable_tor,
-                    tor_only: parsed.tor_only,
-                    behind_proxy: parsed.behind_proxy,
-                    https_cookies: parsed.https_cookies,
-                    max_image_size_mb: u64::try_from(parsed.image_limit_bytes / MIB_I64)
-                        .unwrap_or(8),
-                    max_video_size_mb: u64::try_from(parsed.video_limit_bytes / MIB_I64)
-                        .unwrap_or(50),
-                    max_audio_size_mb: u64::try_from(parsed.audio_limit_bytes / MIB_I64)
-                        .unwrap_or(150),
-                },
-            );
             Ok(())
         }
     })
     .await
     .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
 
-    Ok(Redirect::to(&format!("/{board_slug}")).into_response())
+    let jar = jar.remove(Cookie::from(SETUP_PENDING_ADMIN_HASH_COOKIE));
+    Ok((jar, Redirect::to(&format!("/{board_slug}"))).into_response())
 }
 
 #[derive(Deserialize)]
@@ -759,6 +867,37 @@ pub async fn admin_reopen_setup(
     Ok(Redirect::to("/setup").into_response())
 }
 
+pub async fn admin_close_setup(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Form(form): Form<ReopenSetupForm>,
+) -> Result<Response> {
+    let session_id = admin_session_id(&jar);
+    crate::handlers::admin::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        Some(peer),
+        form.csrf.as_deref(),
+    )?;
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            crate::handlers::admin::require_admin_session_sid(&conn, session_id.as_deref())?;
+            db::close_reopened_setup(&conn)?;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
+    Ok(Redirect::to(
+        "/admin/panel?flash=Setup+wizard+closed.&open=database-maintenance#database-maintenance",
+    )
+    .into_response())
+}
+
 impl SetupWizardForm {
     #[must_use]
     pub fn defaults_for(preset: SetupPreset) -> Self {
@@ -772,6 +911,7 @@ impl SetupWizardForm {
             admin_username: Some("admin".to_owned()),
             admin_password: None,
             admin_password_confirm: None,
+            admin_password_token: None,
             enable_tor: Some("1".to_owned()),
             tor_only: None,
             public_url: None,
@@ -913,7 +1053,7 @@ fn setup_form_page(
 <label class="setup-check"><input type="checkbox" name="allow_archive" value="1"{allow_archive}> Archive overflow threads</label>
 </div></section>
 <section class="setup-section"><h2>6. Uploads and media</h2>
-<p class="admin-copy">ffmpeg: <strong>{ffmpeg}</strong>; ffprobe: <strong>{ffprobe}</strong>. PDF uploads use RustChan's generic upload guard; the PDF limit is stored for future native PDF-limit support.</p>
+<p class="admin-copy">ffmpeg: <strong>{ffmpeg}</strong>; ffprobe: <strong>{ffprobe}</strong>. PDF uploads use the PDF limit shown here; other file types use their matching media limits.</p>
 <div class="setup-grid">
 <label class="setup-check"><input type="checkbox" name="allow_uploads" value="1"{allow_uploads}> Allow image uploads</label>
 <label class="setup-check"><input type="checkbox" name="allow_video" value="1"{allow_video}> Allow video uploads</label>
@@ -1168,12 +1308,8 @@ fn hidden_form_fields(csrf: &str, form: &SetupWizardForm) -> String {
             form.admin_username.as_deref().unwrap_or_default(),
         ),
         (
-            "admin_password",
-            form.admin_password.as_deref().unwrap_or_default(),
-        ),
-        (
-            "admin_password_confirm",
-            form.admin_password_confirm.as_deref().unwrap_or_default(),
+            "admin_password_token",
+            form.admin_password_token.as_deref().unwrap_or_default(),
         ),
         ("public_url", form.public_url.as_deref().unwrap_or_default()),
         ("board_slug", form.board_slug.as_str()),
@@ -1251,7 +1387,7 @@ mod tests {
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
-        routing::get,
+        routing::{get, post},
         Router,
     };
     use tower::ServiceExt as _;
@@ -1285,6 +1421,55 @@ mod tests {
         assert!(defaults.allow_captcha);
     }
 
+    fn setup_form_body(csrf: &str, board_slug: &str, password: Option<&str>) -> String {
+        let mut fields = vec![
+            ("_csrf", csrf.to_owned()),
+            ("preset", "public".to_owned()),
+            ("site_name", "Test RustChan".to_owned()),
+            ("site_subtitle", String::new()),
+            ("default_theme", crate::theme::HARD_DEFAULT_THEME.to_owned()),
+            ("admin_username", "admin".to_owned()),
+            ("board_slug", board_slug.to_owned()),
+            ("board_name", "Test Board".to_owned()),
+            ("board_description", String::new()),
+            ("board_visibility", "public".to_owned()),
+            ("allow_posting", "1".to_owned()),
+            ("allow_uploads", "1".to_owned()),
+            ("allow_video", "1".to_owned()),
+            ("allow_pdf", "1".to_owned()),
+            ("allow_video_embeds", "1".to_owned()),
+            ("allow_thread_editing", "1".to_owned()),
+            ("allow_self_delete", "1".to_owned()),
+            ("allow_archive", "1".to_owned()),
+            ("image_limit_mib", "8".to_owned()),
+            ("video_limit_mib", "50".to_owned()),
+            ("audio_limit_mib", "150".to_owned()),
+            ("pdf_limit_mib", "7".to_owned()),
+            ("captcha_type", "builtin".to_owned()),
+            ("post_cooldown_secs", "0".to_owned()),
+            ("homepage_new_thread_badges_enabled", "1".to_owned()),
+            ("homepage_new_reply_badges_enabled", "1".to_owned()),
+            ("thread_new_reply_badges_enabled", "1".to_owned()),
+            ("backup_retention", "1".to_owned()),
+        ];
+        if let Some(password) = password {
+            fields.push(("admin_password", password.to_owned()));
+            fields.push(("admin_password_confirm", password.to_owned()));
+        }
+        fields
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join("&")
+    }
+
+    fn setup_csrf_pair() -> (String, String) {
+        let raw = "csrf123".to_owned();
+        let form =
+            crypto::make_scoped_csrf_form_token(&raw, &CONFIG.cookie_secret, SETUP_CSRF_SCOPE);
+        (raw, form)
+    }
+
     #[tokio::test]
     async fn initialized_instance_blocks_setup_route() {
         let state = crate::test_support::app_state();
@@ -1314,5 +1499,152 @@ mod tests {
             .expect("body");
         let body = String::from_utf8(body.to_vec()).expect("utf8");
         assert!(body.contains("Setup wizard is not available"));
+    }
+
+    #[tokio::test]
+    async fn initialized_instance_blocks_setup_post_routes() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("conn");
+            crate::db::mark_setup_complete(&conn).expect("complete");
+        }
+        let app = Router::new()
+            .route("/setup/review", post(setup_review))
+            .route("/setup/finish", post(setup_finish))
+            .with_state(state);
+        let (_raw_csrf, form_csrf) = setup_csrf_pair();
+        let body = setup_form_body(&form_csrf, "b", Some("long-enough-password"));
+
+        for uri in ["/setup/review", "/setup/finish"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header(header::HOST, "localhost")
+                        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .header(header::COOKIE, "csrf_token=csrf123")
+                        .extension(crate::test_support::connect_info())
+                        .body(Body::from(body.clone()))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
+    async fn setup_review_does_not_echo_admin_password() {
+        let state = crate::test_support::app_state();
+        let app = Router::new()
+            .route("/setup/review", post(setup_review))
+            .with_state(state);
+        let (_raw_csrf, form_csrf) = setup_csrf_pair();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/setup/review")
+                    .header(header::HOST, "localhost")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(setup_form_body(
+                        &form_csrf,
+                        "b",
+                        Some("long-enough-password"),
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body = String::from_utf8(body.to_vec()).expect("utf8");
+        assert!(!body.contains("long-enough-password"));
+        assert!(!body.contains("admin_password\""));
+        assert!(body.contains("admin_password_token"));
+    }
+
+    #[tokio::test]
+    async fn failed_setup_finish_does_not_mark_complete() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("conn");
+            crate::db::create_board(&conn, "b", "Existing", "", false).expect("board");
+        }
+        let app = Router::new()
+            .route("/setup/finish", post(setup_finish))
+            .with_state(state.clone());
+        let (_raw_csrf, form_csrf) = setup_csrf_pair();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/setup/finish")
+                    .header(header::HOST, "localhost")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(setup_form_body(
+                        &form_csrf,
+                        "b",
+                        Some("long-enough-password"),
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let conn = state.db.get().expect("conn");
+        let setup_state = db::setup_state(&conn).expect("state");
+        assert!(!setup_state.completed);
+    }
+
+    #[tokio::test]
+    async fn setup_finish_marks_completion_durably_and_persists_pdf_limit() {
+        let state = crate::test_support::app_state();
+        let app = Router::new()
+            .route("/setup/finish", post(setup_finish))
+            .with_state(state.clone());
+        let (_raw_csrf, form_csrf) = setup_csrf_pair();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/setup/finish")
+                    .header(header::HOST, "localhost")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(setup_form_body(
+                        &form_csrf,
+                        "pdf",
+                        Some("long-enough-password"),
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let conn = state.db.get().expect("conn");
+        let setup_state = db::setup_state(&conn).expect("state");
+        assert!(setup_state.completed);
+        assert!(!setup_state.reopened);
+        let board = db::get_board_by_short(&conn, "pdf")
+            .expect("load board")
+            .expect("board");
+        assert_eq!(board.max_pdf_size, 7 * MIB_I64);
     }
 }

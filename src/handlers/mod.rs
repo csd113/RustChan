@@ -302,11 +302,13 @@ pub async fn parse_post_multipart(
     max_image_size: usize,
     max_video_size: usize,
     max_audio_size: usize,
+    max_pdf_size: usize,
 ) -> Result<PostFormData> {
     tracing::info!(
         max_image_bytes = max_image_size,
         max_video_bytes = max_video_size,
         max_audio_bytes = max_audio_size,
+        max_pdf_bytes = max_pdf_size,
         "accepted multipart upload limits for post request"
     );
 
@@ -398,7 +400,10 @@ pub async fn parse_post_multipart(
                 }
                 file = read_upload_field(
                     field,
-                    max_image_size.max(max_video_size).max(max_audio_size),
+                    max_image_size
+                        .max(max_video_size)
+                        .max(max_audio_size)
+                        .max(max_pdf_size),
                     "upload",
                     "file",
                     &mut budget,
@@ -528,6 +533,7 @@ pub fn process_primary_upload(
     max_image_size: usize,
     max_video_size: usize,
     max_audio_size: usize,
+    max_pdf_size: usize,
     ffmpeg_available: bool,
     ffprobe_available: bool,
     ffmpeg_webp_available: bool,
@@ -591,6 +597,7 @@ pub fn process_primary_upload(
             max_image_size,
             max_video_size,
             max_audio_size,
+            max_pdf_size,
             ffmpeg_available,
             ffprobe_available,
             ffmpeg_webp_available,
@@ -666,6 +673,7 @@ pub fn process_primary_upload(
             max_image_size,
             max_video_size,
             max_audio_size,
+            max_pdf_size,
             ffmpeg_available,
             ffprobe_available,
             ffmpeg_webp_available,
@@ -765,6 +773,7 @@ pub fn process_audio_first_uploads(
     max_image_size: usize,
     max_video_size: usize,
     max_audio_size: usize,
+    max_pdf_size: usize,
     ffmpeg_available: bool,
     ffprobe_available: bool,
     ffmpeg_webp_available: bool,
@@ -787,6 +796,7 @@ pub fn process_audio_first_uploads(
             max_image_size,
             max_video_size,
             max_audio_size,
+            max_pdf_size,
             ffmpeg_available,
             ffprobe_available,
             ffmpeg_webp_available,
@@ -1007,7 +1017,8 @@ trailer << /Root 1 0 R >>
     async fn parse_scaled_audio_limit(
         multipart: axum::extract::Multipart,
     ) -> crate::error::Result<&'static str> {
-        let form = parse_post_multipart(multipart, Some("csrf123"), 1_024, 1_024, 5_000).await?;
+        let form =
+            parse_post_multipart(multipart, Some("csrf123"), 1_024, 1_024, 5_000, 1_024).await?;
         let (upload, _) = form.audio_file.expect("audio upload");
         assert_eq!(upload.size_bytes, 4_500);
         Ok("ok")
@@ -1016,7 +1027,7 @@ trailer << /Root 1 0 R >>
     async fn parse_scaled_audio_oversize(
         multipart: axum::extract::Multipart,
     ) -> crate::error::Result<&'static str> {
-        parse_post_multipart(multipart, Some("csrf123"), 1_024, 1_024, 5_000).await?;
+        parse_post_multipart(multipart, Some("csrf123"), 1_024, 1_024, 5_000, 1_024).await?;
         Ok("ok")
     }
 
@@ -1093,7 +1104,7 @@ trailer << /Root 1 0 R >>
     async fn parse_default_limits(
         multipart: axum::extract::Multipart,
     ) -> crate::error::Result<&'static str> {
-        parse_post_multipart(multipart, Some("csrf123"), 1_024, 1_024, 1_024).await?;
+        parse_post_multipart(multipart, Some("csrf123"), 1_024, 1_024, 1_024, 1_024).await?;
         Ok("ok")
     }
 
@@ -1249,6 +1260,7 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
+            1024 * 1024,
             false,
             false,
             false,
@@ -1298,6 +1310,7 @@ trailer << /Root 1 0 R >>
             uploads_dir.path().to_str().expect("uploads dir path"),
             save_root.path().to_str().expect("save root path"),
             64,
+            1024 * 1024,
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
@@ -1356,6 +1369,7 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
+            1024 * 1024,
             false,
             false,
             false,
@@ -1390,6 +1404,7 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
+            1024 * 1024,
             false,
             false,
             false,
@@ -1400,6 +1415,42 @@ trailer << /Root 1 0 R >>
             Err(error) => assert!(error.to_string().contains("PDF uploads are disabled")),
         }
         assert!(!save_root.path().join(&board.short_name).exists());
+    }
+
+    #[test]
+    fn primary_upload_rejects_pdf_over_pdf_size_limit() {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        create_file_hash_table(&conn);
+
+        let board = crate::models::Board {
+            allow_pdf: true,
+            max_pdf_size: 8,
+            max_video_size: 1024 * 1024,
+            max_audio_size: 1024 * 1024,
+            ..crate::test_fixtures::sample_board()
+        };
+        let uploads_dir = tempfile::tempdir().expect("uploads dir");
+        let save_root = tempfile::tempdir().expect("save root");
+        let result = super::process_primary_upload(
+            Some(temp_upload("doc.pdf", valid_pdf())),
+            &board,
+            &conn,
+            uploads_dir.path().to_str().expect("uploads dir path"),
+            save_root.path().to_str().expect("save root path"),
+            64,
+            1024 * 1024,
+            1024 * 1024,
+            1024 * 1024,
+            board.max_pdf_size_bytes(),
+            false,
+            false,
+            false,
+        );
+
+        match result {
+            Ok(_) => panic!("oversized PDF should be rejected"),
+            Err(error) => assert!(error.to_string().contains("Maximum PDF upload size is 8 B")),
+        }
     }
 
     #[test]
@@ -1420,6 +1471,7 @@ trailer << /Root 1 0 R >>
             uploads_dir.path().to_str().expect("uploads dir path"),
             save_root.path().to_str().expect("save root path"),
             64,
+            1024 * 1024,
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
@@ -1456,6 +1508,7 @@ trailer << /Root 1 0 R >>
             uploads_dir.path().to_str().expect("uploads dir path"),
             save_root.path().to_str().expect("save root path"),
             64,
+            1024 * 1024,
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,

@@ -22,6 +22,7 @@ const BASE_SCHEMA_SQL: &str = "
         max_image_size  INTEGER NOT NULL DEFAULT 8388608,
         max_video_size  INTEGER NOT NULL DEFAULT 52428800,
         max_audio_size  INTEGER NOT NULL DEFAULT 157286400,
+        max_pdf_size    INTEGER NOT NULL DEFAULT 157286400,
         allow_pdf       INTEGER NOT NULL DEFAULT 0,
         allow_any_files INTEGER NOT NULL DEFAULT 0,
         edit_window_secs    INTEGER NOT NULL DEFAULT 0,
@@ -309,7 +310,7 @@ const INDEX_SCHEMA_SQL: &str = "
         ON post_submissions(created_at ASC);
 ";
 
-const LEGACY_BASELINE_COLUMN_ADDITIONS: [(&str, &str, &str); 33] = [
+const LEGACY_BASELINE_COLUMN_ADDITIONS: [(&str, &str, &str); 34] = [
     (
         "boards",
         "display_order",
@@ -354,6 +355,11 @@ const LEGACY_BASELINE_COLUMN_ADDITIONS: [(&str, &str, &str); 33] = [
         "boards",
         "max_audio_size",
         "ALTER TABLE boards ADD COLUMN max_audio_size INTEGER NOT NULL DEFAULT 157286400",
+    ),
+    (
+        "boards",
+        "max_pdf_size",
+        "ALTER TABLE boards ADD COLUMN max_pdf_size INTEGER NOT NULL DEFAULT 157286400",
     ),
     (
         "boards",
@@ -1413,15 +1419,16 @@ mod tests {
         assert!(table_has_column(&conn, "boards", "allow_self_delete"));
         assert!(table_has_column(&conn, "boards", "allow_archive"));
         assert!(table_has_column(&conn, "boards", "allow_pdf"));
+        assert!(table_has_column(&conn, "boards", "max_pdf_size"));
 
-        let flags: (i64, i64, i64) = conn
+        let flags: (i64, i64, i64, i64) = conn
             .query_row(
-                "SELECT allow_self_delete, allow_archive, allow_pdf FROM boards WHERE id = 1",
+                "SELECT allow_self_delete, allow_archive, allow_pdf, max_pdf_size FROM boards WHERE id = 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .expect("read repaired board flags");
-        assert_eq!(flags, (0, 1, 0));
+        assert_eq!(flags, (0, 1, 0, 157_286_400));
     }
 
     #[test]
