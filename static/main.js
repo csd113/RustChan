@@ -102,6 +102,89 @@ function applyQueuedPostSubmitAnchor() {
   }
 }
 
+// ─── Tor address copy control ────────────────────────────────────────────────
+
+function copyTextWithTextareaFallback(text) {
+  return new Promise(function (resolve, reject) {
+    var textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '0';
+    textarea.style.left = '0';
+    textarea.style.width = '1px';
+    textarea.style.height = '1px';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length);
+
+    var copied = false;
+    try {
+      copied = document.execCommand('copy');
+    } catch (e) {
+      copied = false;
+    }
+    textarea.remove();
+
+    if (copied) {
+      resolve();
+    } else {
+      reject(new Error('copy command failed'));
+    }
+  });
+}
+
+function copyTextToClipboard(text) {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    return navigator.clipboard.writeText(text).catch(function () {
+      return copyTextWithTextareaFallback(text);
+    });
+  }
+  return copyTextWithTextareaFallback(text);
+}
+
+function initTorCopyButtons(root) {
+  (root || document).querySelectorAll('.tor-copy-button').forEach(function (button) {
+    var address = button.dataset.torAddress;
+    if (!address) {
+      var addressEl = button.parentNode && button.parentNode.querySelector('.onion-addr');
+      address = addressEl ? addressEl.textContent.trim() : '';
+    }
+    if (!address) return;
+
+    var status = button.parentNode.querySelector('.tor-copy-status');
+    var defaultText = button.textContent;
+    var resetTimer = null;
+    button.hidden = false;
+
+    button.addEventListener('click', function () {
+      copyTextToClipboard(address).then(function () {
+        button.textContent = 'Copied';
+        button.classList.add('is-copied');
+        if (status) status.textContent = 'Copied Tor address';
+        window.clearTimeout(resetTimer);
+        resetTimer = window.setTimeout(function () {
+          button.textContent = defaultText;
+          button.classList.remove('is-copied');
+          if (status) status.textContent = '';
+        }, 1800);
+      }).catch(function () {
+        button.textContent = 'Error';
+        if (status) status.textContent = 'Copy failed';
+        window.clearTimeout(resetTimer);
+        resetTimer = window.setTimeout(function () {
+          button.textContent = defaultText;
+          if (status) status.textContent = '';
+        }, 2200);
+      });
+    });
+  });
+}
+
+initTorCopyButtons(document);
+
 // ─── Localize post timestamps to device timezone ──────────────────────────────
 
 function padTwoDigits(value) {

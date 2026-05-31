@@ -712,10 +712,10 @@ pub fn index_page<S: std::hash::BuildHasher>(
 
     let mut access_links = String::new();
     if let Some(addr) = onion_address {
+        let escaped_addr = escape_html(addr);
         let _ = write!(
             access_links,
-            r#"<p class="index-onion"><code class="onion-addr">{}</code></p>"#,
-            escape_html(addr)
+            r#"<p class="index-onion"><code class="onion-addr">{escaped_addr}</code><button type="button" class="tor-copy-button" data-tor-address="{escaped_addr}" aria-label="Copy Tor address" hidden>Copy</button><span class="tor-copy-status" aria-live="polite"></span></p>"#
         );
     }
     let onion_html = if access_links.is_empty() {
@@ -1830,6 +1830,34 @@ mod tests {
         assert!(html.contains("audio files uploaded"));
         assert!(html.contains(">3</span><span class=\"index-stat-label\">audio files uploaded"));
         assert!(html.contains("2.00 GB"));
+    }
+
+    #[test]
+    fn index_page_renders_tor_copy_button_as_js_enhancement() {
+        let address = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion";
+        let html = index_page(
+            &[],
+            None,
+            "csrf",
+            None,
+            Some(address),
+            "",
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+            true,
+            false,
+            crate::templates::UserPreferences::default(),
+        );
+
+        assert!(html.contains(r#"<code class="onion-addr">aaaaaaaa"#));
+        assert!(html.contains(r#"<button type="button" class="tor-copy-button""#));
+        assert!(html.contains(
+            r#"data-tor-address="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion""#
+        ));
+        assert!(html.contains(r#"aria-label="Copy Tor address" hidden>Copy</button>"#));
+        assert!(html.contains(r#"<span class="tor-copy-status" aria-live="polite"></span>"#));
     }
 
     #[test]
