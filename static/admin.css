@@ -158,6 +158,191 @@ html:not([data-theme]) .admin-panel h1 {
   letter-spacing: 0.04em;
 }
 
+.admin-control-center {
+  display: grid;
+  gap: 1rem;
+}
+
+.admin-control-center-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.admin-control-center-header h2 {
+  margin-bottom: 0.35rem;
+}
+
+.admin-control-center-status {
+  flex: 0 0 auto;
+}
+
+.admin-dashboard-block {
+  display: grid;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.admin-dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.75rem;
+}
+
+.admin-dashboard-grid-overview {
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+}
+
+.admin-dashboard-card {
+  display: grid;
+  gap: 0.45rem;
+  min-width: 0;
+  min-height: 9rem;
+  padding: 0.85rem 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: color-mix(in srgb, var(--bg-input) 40%, transparent);
+  border-radius: var(--radius-md, 6px);
+}
+
+.admin-dashboard-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.admin-dashboard-card-top > span:first-child {
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: 0.76rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.admin-dashboard-card strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 1rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.admin-dashboard-card p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.admin-dashboard-card-link {
+  align-self: end;
+  justify-self: start;
+  color: var(--green-pale);
+  font-size: 0.78rem;
+  text-decoration: underline;
+  text-underline-offset: 0.14em;
+}
+
+.admin-dashboard-card-link:hover,
+.admin-dashboard-card-link:focus-visible {
+  color: var(--green-bright);
+}
+
+.admin-state-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 1.35rem;
+  padding: 0.08rem 0.45rem;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.admin-state-pill-ok {
+  color: var(--green-bright);
+  background: rgba(0, 255, 65, 0.07);
+}
+
+.admin-state-pill-warning {
+  color: var(--yellow, #f4c95d);
+  background: rgba(244, 201, 93, 0.08);
+}
+
+.admin-state-pill-action-needed {
+  color: var(--red-bright, #ff7070);
+  background: rgba(255, 80, 80, 0.1);
+}
+
+.admin-state-pill-disabled,
+.admin-state-pill-unknown {
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--bg-panel) 66%, transparent);
+}
+
+.admin-dashboard-card-warning {
+  border-color: color-mix(in srgb, var(--yellow, #f4c95d) 48%, var(--border));
+}
+
+.admin-dashboard-card-action-needed {
+  border-color: color-mix(in srgb, var(--red-bright, #ff7070) 50%, var(--border));
+}
+
+.admin-dashboard-card-unknown,
+.admin-dashboard-card-disabled {
+  border-style: dashed;
+}
+
+.admin-dashboard-actions {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.admin-dashboard-actions > * {
+  flex: 0 1 auto;
+}
+
+.admin-dashboard-action-details {
+  position: relative;
+  min-width: min(100%, 13rem);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  border-radius: var(--radius-sm, 3px);
+}
+
+.admin-dashboard-action-details > summary {
+  display: flex;
+  align-items: center;
+  min-height: 2.2rem;
+  padding: 0.35rem 0.7rem;
+  color: var(--green-pale);
+  cursor: pointer;
+  list-style: none;
+}
+
+.admin-dashboard-action-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.admin-dashboard-action-details[open] {
+  padding-bottom: 0.6rem;
+}
+
+.admin-dashboard-action-details form,
+.admin-dashboard-action-details p,
+.admin-dashboard-action-details a {
+  margin: 0.5rem 0.6rem 0;
+}
+
 .admin-section form {
   display: flex;
   flex-wrap: wrap;
@@ -2710,6 +2895,37 @@ html:not([data-theme]) .admin-login h1 {
 
   .admin-health-grid {
     grid-template-columns: 1fr;
+  }
+
+  .admin-control-center-header,
+  .admin-dashboard-card-top {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .admin-control-center-status {
+    width: 100%;
+  }
+
+  .admin-dashboard-grid,
+  .admin-dashboard-grid-overview {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-dashboard-card {
+    min-height: 0;
+  }
+
+  .admin-dashboard-actions {
+    flex-direction: column;
+  }
+
+  .admin-dashboard-actions > *,
+  .admin-dashboard-action-details,
+  .admin-dashboard-action-details .admin-link-button,
+  .admin-dashboard-action-details button {
+    width: 100%;
+    box-sizing: border-box;
   }
 
   .admin-health-row {

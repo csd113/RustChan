@@ -83,6 +83,7 @@ pub struct AdminPanelViewModel<'a> {
     pub csrf_token: &'a str,
     pub boards: &'a [Board],
     pub current_theme: Option<&'a str>,
+    pub dashboard: AdminPanelDashboardView<'a>,
     pub moderation: AdminPanelModerationView<'a>,
     pub appearance: AdminPanelAppearanceView<'a>,
     pub site_health: AdminPanelSiteHealthView<'a>,
@@ -91,6 +92,51 @@ pub struct AdminPanelViewModel<'a> {
     pub tor_address: Option<&'a str>,
     pub flash: Option<AdminPanelFlash<'a>>,
     pub open_section: Option<&'a str>,
+}
+
+pub struct AdminPanelDashboardView<'a> {
+    pub version: &'a str,
+    pub build: &'a str,
+    pub setup_status: &'a str,
+    pub setup_detail: &'a str,
+    pub setup_state: AdminDashboardState,
+    pub site_title: &'a str,
+    pub public_url: &'a str,
+    pub db_status: &'a str,
+    pub db_detail: &'a str,
+    pub db_state: AdminDashboardState,
+    pub backup_status: &'a str,
+    pub backup_detail: &'a str,
+    pub backup_state: AdminDashboardState,
+    pub storage_status: &'a str,
+    pub storage_detail: &'a str,
+    pub storage_state: AdminDashboardState,
+    pub tor_status: &'a str,
+    pub tor_detail: &'a str,
+    pub tor_state: AdminDashboardState,
+    pub dependency_status: &'a str,
+    pub dependency_detail: &'a str,
+    pub dependency_state: AdminDashboardState,
+    pub job_status: &'a str,
+    pub job_detail: &'a str,
+    pub job_state: AdminDashboardState,
+    pub board_count: &'a str,
+    pub thread_count: &'a str,
+    pub post_count: &'a str,
+    pub recent_activity: &'a str,
+    pub media_summary: &'a str,
+    pub report_status: &'a str,
+    pub report_detail: &'a str,
+    pub report_state: AdminDashboardState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdminDashboardState {
+    Ok,
+    Warning,
+    ActionNeeded,
+    Disabled,
+    Unknown,
 }
 
 pub struct AdminPanelModerationView<'a> {
@@ -1711,10 +1757,11 @@ pub fn admin_ip_history_page(
 mod tests {
     use super::{
         admin_db_health_result_page, admin_db_repair_idle_page, admin_login_page, admin_panel_page,
-        render_board_appearance_card, render_board_settings_card, AdminDetectionStatus,
-        AdminMediaDetectionView, AdminPanelAppearanceView, AdminPanelBackupsView,
-        AdminPanelMaintenanceView, AdminPanelModerationView, AdminPanelSetupStatus,
-        AdminPanelSiteHealthView, AdminPanelViewModel, AdminSiteHealthDependencySummary,
+        render_board_appearance_card, render_board_settings_card, AdminDashboardState,
+        AdminDetectionStatus, AdminMediaDetectionView, AdminPanelAppearanceView,
+        AdminPanelBackupsView, AdminPanelDashboardView, AdminPanelMaintenanceView,
+        AdminPanelModerationView, AdminPanelSetupStatus, AdminPanelSiteHealthView,
+        AdminPanelViewModel, AdminSiteHealthDependencySummary,
     };
     use crate::db::{DbCheckResult, DbHealthReport, DbHealthSnapshot};
     use crate::models::{
@@ -1932,6 +1979,44 @@ mod tests {
         }
     }
 
+    fn sample_dashboard() -> AdminPanelDashboardView<'static> {
+        AdminPanelDashboardView {
+            version: "1.3.0",
+            build: "test/test",
+            setup_status: "complete",
+            setup_detail: "Public setup routes are blocked.",
+            setup_state: AdminDashboardState::Ok,
+            site_title: "RustChan",
+            public_url: "not configured",
+            db_status: "ready",
+            db_detail: "Integrity: not checked.",
+            db_state: AdminDashboardState::Unknown,
+            backup_status: "current",
+            backup_detail: "All saved backups verified.",
+            backup_state: AdminDashboardState::Ok,
+            storage_status: "uploads unknown",
+            storage_detail: "Data directory unknown; active media unknown.",
+            storage_state: AdminDashboardState::Unknown,
+            tor_status: "disabled",
+            tor_detail: "Tor support is disabled in configuration.",
+            tor_state: AdminDashboardState::Disabled,
+            dependency_status: "ready",
+            dependency_detail: "ffmpeg found; ffprobe found; WebP found; VP9 found; Opus found.",
+            dependency_state: AdminDashboardState::Ok,
+            job_status: "idle",
+            job_detail: "Recently completed 0; backup job idle; restore jobs not available.",
+            job_state: AdminDashboardState::Ok,
+            board_count: "1 board",
+            thread_count: "0 active / 0 total",
+            post_count: "0 posts",
+            recent_activity: "0 posts in 24h; 0 in 7d",
+            media_summary: "0 upload posts; 0 images, 0 video, 0 audio; 0 B active",
+            report_status: "no open reports",
+            report_detail: "0 reports in 7d; 0 open appeals.",
+            report_state: AdminDashboardState::Ok,
+        }
+    }
+
     fn render_admin_panel_for_test(
         boards: &[Board],
         reports: &[ReportWithContext],
@@ -1964,6 +2049,7 @@ mod tests {
             csrf_token: "csrf",
             boards,
             current_theme: None,
+            dashboard: sample_dashboard(),
             moderation: AdminPanelModerationView {
                 bans: &[],
                 filters: &[],
@@ -2604,6 +2690,7 @@ mod tests {
             csrf_token: "csrf",
             boards: std::slice::from_ref(&board),
             current_theme: Some("blue-sky"),
+            dashboard: sample_dashboard(),
             moderation: AdminPanelModerationView {
                 bans: &[],
                 filters: &[],
@@ -2694,6 +2781,7 @@ mod tests {
             csrf_token: "csrf",
             boards: std::slice::from_ref(&board),
             current_theme: Some("blue-sky"),
+            dashboard: sample_dashboard(),
             moderation: AdminPanelModerationView {
                 bans: &[],
                 filters: &[],
@@ -2775,6 +2863,7 @@ mod tests {
             csrf_token: "csrf",
             boards: std::slice::from_ref(&board),
             current_theme: Some("blue-sky"),
+            dashboard: sample_dashboard(),
             moderation: AdminPanelModerationView {
                 bans: &[],
                 filters: &[],
