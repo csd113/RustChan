@@ -163,6 +163,10 @@ html:not([data-theme]) .admin-panel h1 {
   gap: 1rem;
 }
 
+.admin-dropdown-content.admin-control-center {
+  padding-top: 0.9rem;
+}
+
 .admin-control-center-header {
   display: flex;
   justify-content: space-between;
@@ -1168,6 +1172,30 @@ html:not([data-theme]) .admin-panel h1 {
   min-width: 0;
   overflow-wrap: anywhere;
   text-align: right;
+}
+
+.admin-health-row-actions {
+  align-items: center;
+}
+
+.admin-health-job-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.admin-health-dismiss-form {
+  display: inline-flex;
+  margin: 0;
+}
+
+.admin-health-dismiss-form button {
+  min-height: 1.75rem;
+  padding: 0.18rem 0.5rem;
+  font-size: 0.72rem;
 }
 
 .admin-health-inspect-button {
@@ -2936,6 +2964,16 @@ html:not([data-theme]) .admin-login h1 {
 
   .admin-health-row strong {
     text-align: left;
+  }
+
+  .admin-health-job-actions {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .admin-health-dismiss-form,
+  .admin-health-dismiss-form button {
+    width: 100%;
   }
 
   .admin-health-inspect-button {

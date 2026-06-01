@@ -1122,6 +1122,8 @@ pub fn cleanup_expired_poll_votes(
 // Jobs flow through: pending → running → done | failed
 // claim_next_job uses UPDATE … RETURNING for atomic claim with no TOCTOU race.
 
+const FAILED_BACKGROUND_JOBS_ACK_ID_KEY: &str = "failed_background_jobs_acknowledged_through_id";
+
 /// Persist a new job in the pending state. Returns the new row id.
 ///
 /// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
@@ -1244,14 +1246,15 @@ pub fn pending_job_count(conn: &rusqlite::Connection) -> Result<i64> {
 /// # Errors
 /// Returns an error if the database queries fail.
 pub fn background_job_summary(conn: &rusqlite::Connection) -> Result<BackgroundJobSummary> {
+    let acknowledged_failed_id = acknowledged_failed_background_job_id(conn)?;
     let (running, queued, recent_completed, failed) = conn.query_row(
         "SELECT
              SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END),
              SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END),
              SUM(CASE WHEN status = 'done' AND updated_at >= unixepoch() - 86400 THEN 1 ELSE 0 END),
-             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)
+             SUM(CASE WHEN status = 'failed' AND id > ?1 THEN 1 ELSE 0 END)
          FROM background_jobs",
-        [],
+        params![acknowledged_failed_id],
         |row| {
             Ok((
                 row.get::<_, Option<i64>>(0)?.unwrap_or(0),
@@ -1267,6 +1270,37 @@ pub fn background_job_summary(conn: &rusqlite::Connection) -> Result<BackgroundJ
         recent_completed,
         failed,
     })
+}
+
+fn acknowledged_failed_background_job_id(conn: &rusqlite::Connection) -> Result<i64> {
+    let value = super::get_site_setting(conn, FAILED_BACKGROUND_JOBS_ACK_ID_KEY)?;
+    Ok(value
+        .as_deref()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0)
+        .max(0))
+}
+
+/// Mark all currently failed background jobs as acknowledged for admin counters.
+///
+/// This intentionally preserves the `background_jobs` rows, payloads, and
+/// errors. Only the admin attention counter is reset until a newer failure
+/// appears.
+///
+/// # Errors
+/// Returns an error if the database queries or site-setting update fail.
+pub fn acknowledge_failed_background_jobs(conn: &rusqlite::Connection) -> Result<i64> {
+    let max_failed_id = conn.query_row(
+        "SELECT COALESCE(MAX(id), 0) FROM background_jobs WHERE status = 'failed'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    super::set_site_setting(
+        conn,
+        FAILED_BACKGROUND_JOBS_ACK_ID_KEY,
+        &max_failed_id.to_string(),
+    )?;
+    Ok(max_failed_id)
 }
 
 /// Return recent terminal background jobs for bounded admin diagnostics.
@@ -1573,12 +1607,13 @@ pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_next_job, count_posts_by_media_processing_state, count_search_results, get_post,
-        get_post_submission, get_posts_for_thread, is_stale_media_target_error,
-        recent_background_jobs, record_post_submission, recover_interrupted_background_jobs,
-        replace_transcoded_media, search_posts, search_terms, self_delete_post,
-        set_post_media_processing_state, to_fts_query, update_post_thumb_path, SelfDeleteOutcome,
-        MEDIA_PROCESSING_FAILED, MEDIA_PROCESSING_PENDING,
+        acknowledge_failed_background_jobs, background_job_summary, claim_next_job,
+        count_posts_by_media_processing_state, count_search_results, get_post, get_post_submission,
+        get_posts_for_thread, is_stale_media_target_error, recent_background_jobs,
+        record_post_submission, recover_interrupted_background_jobs, replace_transcoded_media,
+        search_posts, search_terms, self_delete_post, set_post_media_processing_state,
+        to_fts_query, update_post_thumb_path, SelfDeleteOutcome, MEDIA_PROCESSING_FAILED,
+        MEDIA_PROCESSING_PENDING,
     };
     use crate::db::{
         create_board, create_reply_with_thread_update, create_thread_with_optional_poll,
@@ -1707,6 +1742,53 @@ mod tests {
         assert_eq!(job.attempts, 2);
         assert_eq!(job.last_error.as_deref(), Some("newer"));
         assert!(older < newer);
+    }
+
+    #[test]
+    fn failed_background_job_acknowledgement_preserves_history() {
+        let conn = test_conn();
+        let payload = r#"{"t":"SpamCheck","d":{"post_id":1,"ip_hash":"hash","body_len":5}}"#;
+        insert_background_job(&conn, "spam_check", payload, "failed", 3, Some("older"));
+        let acknowledged =
+            insert_background_job(&conn, "thread_prune", payload, "failed", 3, Some("newer"));
+
+        assert_eq!(
+            background_job_summary(&conn)
+                .expect("summary before ack")
+                .failed,
+            2
+        );
+        assert_eq!(
+            acknowledge_failed_background_jobs(&conn).expect("acknowledge failed jobs"),
+            acknowledged
+        );
+        assert_eq!(
+            background_job_summary(&conn)
+                .expect("summary after ack")
+                .failed,
+            0
+        );
+        assert_eq!(
+            recent_background_jobs(&conn, "failed", 10)
+                .expect("recent failed jobs")
+                .len(),
+            2
+        );
+
+        insert_background_job(
+            &conn,
+            "spam_check",
+            payload,
+            "failed",
+            3,
+            Some("new failure"),
+        );
+        assert_eq!(
+            background_job_summary(&conn)
+                .expect("summary after new failure")
+                .failed,
+            1
+        );
     }
 
     #[test]

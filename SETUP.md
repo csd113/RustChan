@@ -599,6 +599,13 @@ Before major updates, back up:
 
 Or use the built-in backup tools from the admin panel.
 
+RustChan `1.3.0` resets the database baseline: fresh installs create the
+current `1.3.0` schema directly instead of replaying pre-release internal
+migrations. Existing in-development databases that structurally match that
+schema are marked as database schema version `1.3.0`; partial, unknown, or
+corrupt schemas are rejected without deleting data. Future released schema
+changes should add normal forward migrations tied to RustChan release versions.
+
 ## Troubleshooting
 
 ### The TUI shows ffmpeg warnings

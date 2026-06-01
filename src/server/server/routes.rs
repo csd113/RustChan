@@ -174,6 +174,10 @@ fn admin_auth_routes() -> Router<AppState> {
             get(crate::handlers::admin::admin_site_health_jobs),
         )
         .route(
+            "/admin/site-health/jobs/dismiss",
+            post(crate::handlers::admin::dismiss_failed_site_health_jobs),
+        )
+        .route(
             "/admin/log/live",
             get(crate::handlers::admin::admin_live_log),
         )

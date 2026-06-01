@@ -277,6 +277,7 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).expect("utf8 metrics");
         assert!(body.contains("rustchan_requests_total"));
         assert!(body.contains("rustchan_job_queue_pending"));
+        assert!(body.contains("rustchan_database_schema_valid{version=\"1.3.0\"} 1"));
     }
 
     #[tokio::test]

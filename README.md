@@ -163,6 +163,12 @@ rustchan-data/
 
 That folder is the thing to back up if you want to move the site or keep it safe.
 
+For RustChan `1.3.0`, fresh databases are created directly from the `1.3.0`
+baseline schema. Earlier internal development migrations were squashed before
+release; a database that already matches the baseline is marked as schema
+version `1.3.0`, while partial or unknown schemas fail closed without deleting
+data.
+
 `settings.toml` is generated automatically on first run and documents the available options inline. A few of the more important ones:
 
 ```toml
@@ -214,6 +220,7 @@ CLI admin commands include:
 - `rustchan-cli admin ban`
 - `rustchan-cli admin unban`
 - `rustchan-cli admin list-bans`
+- `rustchan-cli admin db-status`
 
 Run `rustchan-cli admin --help` for the full command list and flags.
 

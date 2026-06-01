@@ -10,6 +10,7 @@ All notable changes to RustChan will be documented in this file.
 - Hardened upload handling for empty file controls, zero-byte named uploads, empty thumbnail payloads, invalid media, and cross-board media deduplication.
 - Improved activity badge cache behavior, especially on mobile WebKit and browser back/forward navigation.
 - Hardened settings validation so invalid config values fail closed instead of silently falling back.
+- Squashed the pre-release internal database migration ladder into a clean `1.3.0` baseline schema. Fresh databases now install that baseline directly, structurally matching in-development databases are stamped as schema version `1.3.0`, and partial or unknown schemas fail closed with diagnostics instead of blind migration attempts.
 - Polished responsive layout, long-content wrapping, modal focus behavior, ESC handling, touch targets, and light-theme error contrast.
 - Updated backup UI metadata handling and dynamic split-part options.
 - Refreshed README screenshots and release documentation.

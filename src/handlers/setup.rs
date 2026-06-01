@@ -576,14 +576,18 @@ pub async fn setup_get(
     secure_context: crate::middleware::SecureCookieContext,
 ) -> Result<Response> {
     let (setup_state, _is_admin) = load_setup_state(&state, admin_session_id(&jar)).await?;
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_setup_csrf(jar, &headers, secure_context);
+    let form =
+        SetupWizardForm::defaults_for(parse_preset(query.preset.as_deref().unwrap_or("public")));
     let body = setup_form_page(
         &csrf,
         setup_state,
-        &SetupWizardForm::defaults_for(parse_preset(query.preset.as_deref().unwrap_or("public"))),
+        &form,
         &[],
         request_transport_warning(&headers, secure_context).as_deref(),
         &state,
+        current_theme.as_deref(),
     );
     Ok((jar, Html(body)).into_response())
 }
@@ -601,6 +605,7 @@ pub async fn setup_review(
     Form(form): Form<SetupWizardForm>,
 ) -> Result<Response> {
     let (setup_state, _is_admin) = load_setup_state(&state, admin_session_id(&jar)).await?;
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     validate_setup_csrf(&jar, &headers, secure_context.peer, form.csrf.as_deref())?;
     let parsed = match parse_setup_form(&form, setup_state.admin_count) {
         Ok(parsed) => parsed,
@@ -617,6 +622,7 @@ pub async fn setup_review(
                         &errors,
                         request_transport_warning(&headers, secure_context).as_deref(),
                         &state,
+                        current_theme.as_deref(),
                     )),
                 ),
             )
@@ -644,7 +650,13 @@ pub async fn setup_review(
     }
     Ok((
         jar,
-        Html(setup_review_page(&csrf, setup_state, &review_form, &parsed)),
+        Html(setup_review_page(
+            &csrf,
+            setup_state,
+            &review_form,
+            &parsed,
+            current_theme.as_deref(),
+        )),
     )
         .into_response())
 }
@@ -976,6 +988,7 @@ fn setup_form_page(
     errors: &[String],
     transport_warning: Option<&str>,
     app_state: &AppState,
+    current_theme: Option<&str>,
 ) -> String {
     let mut alerts = String::new();
     if state.requires_admin_auth() {
@@ -1144,8 +1157,8 @@ fn setup_form_page(
         &body,
         csrf,
         boards.as_ref(),
-        None,
-        None,
+        current_theme,
+        form.default_theme.as_deref(),
         false,
         "/setup",
     )
@@ -1156,6 +1169,7 @@ fn setup_review_page(
     state: db::SetupState,
     form: &SetupWizardForm,
     parsed: &ParsedSetup,
+    current_theme: Option<&str>,
 ) -> String {
     let hidden = hidden_form_fields(csrf, form);
     let admin_line = if state.admin_count == 0 {
@@ -1228,8 +1242,8 @@ fn setup_review_page(
         &body,
         csrf,
         boards.as_ref(),
-        None,
-        None,
+        current_theme,
+        Some(&parsed.default_theme),
         false,
         "/setup",
     )
@@ -1470,6 +1484,32 @@ mod tests {
         (raw, form)
     }
 
+    fn install_setup_theme_test_state() {
+        crate::templates::set_live_default_theme("forest");
+        crate::templates::set_live_themes(vec![
+            crate::models::Theme {
+                slug: "forest".to_owned(),
+                display_name: "Forest".to_owned(),
+                description: "Forest theme".to_owned(),
+                swatch_hex: "#7ab84e".to_owned(),
+                enabled: true,
+                sort_order: 1,
+                is_builtin: true,
+                custom_css: String::new(),
+            },
+            crate::models::Theme {
+                slug: "blue-sky".to_owned(),
+                display_name: "Blue Sky".to_owned(),
+                description: "Bright theme".to_owned(),
+                swatch_hex: "#66aaff".to_owned(),
+                enabled: true,
+                sort_order: 2,
+                is_builtin: true,
+                custom_css: String::new(),
+            },
+        ]);
+    }
+
     #[tokio::test]
     async fn initialized_instance_blocks_setup_route() {
         let state = crate::test_support::app_state();
@@ -1534,6 +1574,72 @@ mod tests {
 
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
+    }
+
+    #[tokio::test]
+    async fn setup_get_uses_current_theme_cookie() {
+        install_setup_theme_test_state();
+        let state = crate::test_support::app_state();
+        let app = Router::new()
+            .route("/setup", get(setup_get))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/setup")
+                    .header(header::HOST, "localhost")
+                    .header(header::COOKIE, "rustchan_theme=blue-sky")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body = String::from_utf8(body.to_vec()).expect("utf8");
+        assert!(body.contains(r#"data-active-theme="blue-sky""#));
+        assert!(body.contains(r#"data-theme="blue-sky""#));
+    }
+
+    #[tokio::test]
+    async fn setup_review_uses_selected_default_theme_without_js() {
+        install_setup_theme_test_state();
+        let state = crate::test_support::app_state();
+        let app = Router::new()
+            .route("/setup/review", post(setup_review))
+            .with_state(state);
+        let (_raw_csrf, form_csrf) = setup_csrf_pair();
+        let body = setup_form_body(&form_csrf, "b", Some("long-enough-password"))
+            .replace("default_theme=forest", "default_theme=blue-sky");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/setup/review")
+                    .header(header::HOST, "localhost")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body = String::from_utf8(body.to_vec()).expect("utf8");
+        assert!(body.contains(r#"data-active-theme="blue-sky""#));
+        assert!(body.contains(r#"data-theme="blue-sky""#));
+        assert!(body.contains(r#"name="default_theme" value="blue-sky""#));
     }
 
     #[tokio::test]

@@ -708,12 +708,16 @@ struct DashboardSummaryInputs<'a> {
 
 struct SiteHealthSnapshot {
     server_status: String,
+    database_schema_status: String,
     database_integrity_status: String,
     last_successful_backup: String,
     next_scheduled_backup: String,
     data_dir_usage: String,
     upload_dir_size: String,
     tor_status: String,
+    tor_service_status: String,
+    tor_mode: String,
+    tor_config_summary: String,
     running_jobs: i64,
     queued_jobs: i64,
     recent_completed_jobs: i64,
@@ -817,7 +821,7 @@ fn load_site_health_snapshot(
     state: &AppState,
     full_backups: &[BackupInfo],
     auto_full_backup_settings: &crate::middleware::AutoFullBackupSettingsSnapshot,
-    _onion_address_val: Option<&str>,
+    onion_address_val: Option<&str>,
 ) -> SiteHealthSnapshot {
     let server_status = conn
         .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
@@ -825,6 +829,7 @@ fn load_site_health_snapshot(
         .filter(|value| *value == 1)
         .map_or_else(|| "degraded".to_owned(), |_| "ready".to_owned());
     let database_integrity_status = db_integrity_status(&state.db_maintenance_jobs.snapshot());
+    let database_schema_status = db::database_schema_status_label(conn);
     let last_successful_backup = full_backups
         .iter()
         .find(|backup| backup.verified)
@@ -835,9 +840,16 @@ fn load_site_health_snapshot(
     let upload_dir_size = safe_dir_size_label(Path::new(&CONFIG.upload_dir));
     let jobs = load_site_health_jobs_snapshot(conn, state);
     let recent_warnings = recent_warning_lines().unwrap_or_else(|| "not available".to_owned());
+    let tor_service_status = tor_service_status_label(onion_address_val);
+    let tor_mode = tor_mode_label();
+    let tor_config_summary = format!(
+        "bootstrap timeout {}s; max streams {}",
+        CONFIG.tor_bootstrap_timeout_secs, CONFIG.tor_max_concurrent_streams
+    );
 
     SiteHealthSnapshot {
         server_status,
+        database_schema_status,
         database_integrity_status,
         last_successful_backup,
         next_scheduled_backup,
@@ -848,6 +860,9 @@ fn load_site_health_snapshot(
         } else {
             "disabled".to_owned()
         },
+        tor_service_status,
+        tor_mode,
+        tor_config_summary,
         running_jobs: jobs.running,
         queued_jobs: jobs.queued,
         recent_completed_jobs: jobs.recent_completed,
@@ -855,6 +870,26 @@ fn load_site_health_snapshot(
         backup_jobs: jobs.backup,
         restore_jobs: jobs.restore,
         recent_warnings,
+    }
+}
+
+fn tor_service_status_label(onion_address: Option<&str>) -> String {
+    if !CONFIG.enable_tor_support {
+        "disabled".to_owned()
+    } else if onion_address.is_some() {
+        "onion service ready".to_owned()
+    } else {
+        "starting or unavailable".to_owned()
+    }
+}
+
+fn tor_mode_label() -> String {
+    if !CONFIG.enable_tor_support {
+        "clearnet only".to_owned()
+    } else if CONFIG.tor_only {
+        "Tor only".to_owned()
+    } else {
+        "clearnet and Tor".to_owned()
     }
 }
 
@@ -1482,6 +1517,7 @@ fn dashboard_database_status(
     site_health: &SiteHealthSnapshot,
 ) -> (String, String, crate::templates::AdminDashboardState) {
     let state = if site_health.server_status != "ready"
+        || site_health.database_schema_status.contains("mismatch")
         || site_health.database_integrity_status.contains("failed")
     {
         crate::templates::AdminDashboardState::ActionNeeded
@@ -1494,7 +1530,10 @@ fn dashboard_database_status(
     };
     (
         site_health.server_status.clone(),
-        format!("Integrity: {}.", site_health.database_integrity_status),
+        format!(
+            "Schema: {}; integrity: {}.",
+            site_health.database_schema_status, site_health.database_integrity_status
+        ),
         state,
     )
 }
@@ -1887,6 +1926,7 @@ fn build_site_health_view<'a>(
     crate::templates::AdminPanelSiteHealthView {
         server_status: &snapshot.site_health.server_status,
         rustchan_version: env!("CARGO_PKG_VERSION"),
+        database_schema_status: &snapshot.site_health.database_schema_status,
         database_integrity_status: &snapshot.site_health.database_integrity_status,
         last_successful_backup: &snapshot.site_health.last_successful_backup,
         next_scheduled_backup: &snapshot.site_health.next_scheduled_backup,
@@ -1894,6 +1934,10 @@ fn build_site_health_view<'a>(
         upload_dir_size: &snapshot.site_health.upload_dir_size,
         tor_status: &snapshot.site_health.tor_status,
         tor_onion_address: tor_address,
+        tor_service_status: &snapshot.site_health.tor_service_status,
+        tor_mode: &snapshot.site_health.tor_mode,
+        tor_config_summary: &snapshot.site_health.tor_config_summary,
+        tor_detail: &snapshot.dashboard.tor_detail,
         dependency_summary: crate::templates::AdminSiteHealthDependencySummary {
             ffmpeg: detection_status(snapshot.ffmpeg_available),
             ffprobe: detection_status(snapshot.ffprobe_available),
@@ -1938,6 +1982,7 @@ fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&st
     let tor_detail = tor_address.unwrap_or("not available");
     format!(
         "RustChan version: {version}\n\
+         Database schema: {schema}\n\
          OS: {os}-{arch}\n\
          SQLite: {sqlite}\n\
          ffmpeg: {ffmpeg}\n\
@@ -1950,6 +1995,7 @@ fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&st
          Dependency log: configured\n\
          Recent warnings:\n{warnings}\n",
         version = env!("CARGO_PKG_VERSION"),
+        schema = snapshot.site_health.database_schema_status.as_str(),
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
         sqlite = rusqlite::version(),
@@ -2100,6 +2146,54 @@ pub async fn admin_site_health_jobs(
         .into_response())
 }
 
+#[derive(Deserialize)]
+pub struct DismissFailedJobsForm {
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
+}
+
+pub async fn dismiss_failed_site_health_jobs(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    axum::extract::Form(form): axum::extract::Form<DismissFailedJobsForm>,
+) -> Result<Response> {
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+
+    let failed_before = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<i64> {
+            let conn = pool.get()?;
+            let (admin_id, admin_name) =
+                require_admin_session_with_name(&conn, session_id.as_deref())?;
+            let failed_before = db::background_job_summary(&conn)?.failed;
+            let acknowledged_through = db::acknowledge_failed_background_jobs(&conn)?;
+            db::log_mod_action(
+                &conn,
+                admin_id,
+                &admin_name,
+                "dismiss_failed_jobs",
+                "background_jobs",
+                None,
+                "",
+                &format!("acknowledged failed background jobs through id {acknowledged_through}"),
+            )?;
+            Ok(failed_before)
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    let message = if failed_before == 0 {
+        "Failed job counter was already clear."
+    } else {
+        "Failed job counter dismissed."
+    };
+    Ok(admin_panel_redirect_anchor_open(message, "site-health", "site-health").into_response())
+}
+
 pub async fn admin_live_log(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -2240,18 +2334,19 @@ mod tests {
     use super::{
         admin_live_log, admin_site_health_jobs, consume_admin_session_bootstrap,
         create_admin_session_bootstrap, dashboard_backup_status, dashboard_recent_count,
-        dashboard_thread_counts, host_header_uses_https_port_with_config,
-        hosts_match_for_same_origin, latest_log_file, load_dashboard_activity_snapshot,
-        optional_count_query, read_log_tail, request_origin_uses_https,
-        request_scheme_for_same_origin_with_config, require_same_origin_or_valid_csrf,
-        require_same_origin_request, should_set_secure_cookie_with_config, BackupSummary,
-        LiveLogQuery, SESSION_COOKIE,
+        dashboard_thread_counts, dismiss_failed_site_health_jobs,
+        host_header_uses_https_port_with_config, hosts_match_for_same_origin, latest_log_file,
+        load_dashboard_activity_snapshot, optional_count_query, read_log_tail,
+        request_origin_uses_https, request_scheme_for_same_origin_with_config,
+        require_same_origin_or_valid_csrf, require_same_origin_request,
+        should_set_secure_cookie_with_config, BackupSummary, DismissFailedJobsForm, LiveLogQuery,
+        SESSION_COOKIE,
     };
     use crate::error::AppError;
     use crate::middleware::SecureCookieContext;
     use axum::{
         body::to_bytes,
-        extract::{Query, State},
+        extract::{ConnectInfo, Form, Query, State},
         http::{header, HeaderMap, HeaderValue, StatusCode},
     };
     use axum_extra::extract::cookie::{Cookie, CookieJar};
@@ -2897,6 +2992,14 @@ mod tests {
         .expect("create session");
     }
 
+    fn admin_signed_csrf() -> String {
+        crate::utils::crypto::make_scoped_csrf_form_token(
+            "csrf123",
+            &crate::config::CONFIG.cookie_secret,
+            "session123",
+        )
+    }
+
     #[tokio::test]
     async fn live_log_requires_admin_auth() {
         let state = crate::test_support::app_state();
@@ -3027,6 +3130,65 @@ mod tests {
         assert!(!error.contains("/Users/example"));
         assert!(!error.contains("abc123"));
         assert!(error.chars().count() <= 183);
+    }
+
+    #[tokio::test]
+    async fn dismiss_failed_site_health_jobs_resets_counter_without_deleting_history() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        {
+            let conn = state.db.get().expect("db connection");
+            conn.execute(
+                "INSERT INTO background_jobs
+                 (job_type, payload, status, attempts, last_error, updated_at)
+                 VALUES
+                 ('video_transcode', '{}', 'failed', 3, 'ffmpeg failed', unixepoch())",
+                [],
+            )
+            .expect("insert failed job");
+            assert_eq!(
+                crate::db::background_job_summary(&conn)
+                    .expect("summary before dismiss")
+                    .failed,
+                1
+            );
+        }
+        let mut headers = same_origin_headers("localhost");
+        headers.insert(header::ORIGIN, HeaderValue::from_static("http://localhost"));
+        let response = dismiss_failed_site_health_jobs(
+            State(state.clone()),
+            CookieJar::new()
+                .add(Cookie::new("csrf_token", "csrf123"))
+                .add(Cookie::new(SESSION_COOKIE, "session123")),
+            headers,
+            ConnectInfo("127.0.0.1:3000".parse().expect("peer address")),
+            Form(DismissFailedJobsForm {
+                csrf: Some(admin_signed_csrf()),
+            }),
+        )
+        .await
+        .expect("dismiss response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(header::LOCATION),
+            Some(&HeaderValue::from_static(
+                "/admin/panel?flash=Failed%20job%20counter%20dismissed.&open=site-health#site-health"
+            ))
+        );
+        let conn = state.db.get().expect("db connection");
+        assert_eq!(
+            crate::db::background_job_summary(&conn)
+                .expect("summary after dismiss")
+                .failed,
+            0
+        );
+        assert_eq!(
+            crate::db::recent_background_jobs(&conn, "failed", 10)
+                .expect("recent failed history")
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

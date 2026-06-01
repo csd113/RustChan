@@ -39,6 +39,7 @@ impl DbCheckResult {
 
 #[derive(Debug, Clone)]
 pub struct DbHealthSnapshot {
+    pub schema: DbCheckResult,
     pub integrity: DbCheckResult,
     pub foreign_keys: DbCheckResult,
 }
@@ -46,7 +47,7 @@ pub struct DbHealthSnapshot {
 impl DbHealthSnapshot {
     #[must_use]
     pub const fn ok(&self) -> bool {
-        self.integrity.ok && self.foreign_keys.ok
+        self.schema.ok && self.integrity.ok && self.foreign_keys.ok
     }
 }
 
@@ -902,8 +903,28 @@ fn foreign_key_check_status(conn: &rusqlite::Connection) -> DbCheckResult {
 
 fn db_health_snapshot(conn: &rusqlite::Connection) -> DbHealthSnapshot {
     DbHealthSnapshot {
+        schema: schema_check_status(conn),
         integrity: integrity_check_status(conn),
         foreign_keys: foreign_key_check_status(conn),
+    }
+}
+
+fn schema_check_status(conn: &rusqlite::Connection) -> DbCheckResult {
+    match super::schema::verify_database_schema(conn) {
+        Ok(()) => DbCheckResult {
+            ok: true,
+            messages: vec![format!(
+                "{} baseline verified",
+                super::schema::baseline_schema_version()
+            )],
+        },
+        Err(error) => DbCheckResult {
+            ok: false,
+            messages: vec![format!(
+                "{} baseline mismatch: {error}",
+                super::schema::baseline_schema_version()
+            )],
+        },
     }
 }
 

@@ -12,6 +12,7 @@
 //   rustchan-cli admin ban    <ip_hash> <reason> [hours]
 //   rustchan-cli admin unban  <ban_id>
 //   rustchan-cli admin list-bans
+//   rustchan-cli admin db-status
 //
 // Data lives in  <exe-dir>/rustchan-data/   (override with CHAN_DB / CHAN_UPLOADS)
 // Static CSS is compiled into the binary — no external files needed.

@@ -623,7 +623,7 @@ mod tests {
             &root,
             v4::BackupScope::FullSite,
             v4::board_fixture_files_for_test(),
-            Some(b"sqlite".to_vec()),
+            Some(v4::valid_db_snapshot_for_test()),
             1_715_010_000_i64,
         );
         (dir, root)

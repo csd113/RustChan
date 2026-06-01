@@ -39,6 +39,8 @@ struct HealthPayload {
 struct ReadyPayload {
     status: &'static str,
     database_ready: bool,
+    database_schema_version: &'static str,
+    database_schema_valid: bool,
     tor_enabled: bool,
     tor_onion_ready: bool,
     worker_queue_pending: i64,
@@ -61,12 +63,13 @@ pub(super) async fn healthz() -> impl IntoResponse {
 pub(super) async fn readyz(State(state): State<AppState>) -> Response {
     let (
         database_ready,
+        database_schema_valid,
         media_processing_failed,
         latest_full_backup_verified,
         latest_full_backup_age_hours,
     ) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> (bool, i64, bool, Option<i64>) {
+        move || -> (bool, bool, i64, bool, Option<i64>) {
             let full_backups = list_backup_files(&full_backup_dir(), BackupListKind::Full);
             let latest_backup = full_backups.first().cloned();
             let latest_full_backup_verified =
@@ -82,19 +85,22 @@ pub(super) async fn readyz(State(state): State<AppState>) -> Response {
                         .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
                         .ok()
                         .is_some_and(|value| value == 1);
+                    let schema_valid = crate::db::verify_database_schema(&conn).is_ok();
                     let failed = crate::db::count_posts_by_media_processing_state(
                         &conn,
                         crate::db::MEDIA_PROCESSING_FAILED,
                     )
                     .unwrap_or(0);
                     (
-                        ready,
+                        ready && schema_valid,
+                        schema_valid,
                         failed,
                         latest_full_backup_verified,
                         latest_full_backup_age_hours,
                     )
                 }
                 Err(_) => (
+                    false,
                     false,
                     0,
                     latest_full_backup_verified,
@@ -104,7 +110,7 @@ pub(super) async fn readyz(State(state): State<AppState>) -> Response {
         }
     })
     .await
-    .unwrap_or((false, 0, false, None));
+    .unwrap_or((false, false, 0, false, None));
 
     let tor_onion_ready = if CONFIG.enable_tor_support {
         state.onion_address.read().await.is_some()
@@ -114,6 +120,8 @@ pub(super) async fn readyz(State(state): State<AppState>) -> Response {
     let payload = ReadyPayload {
         status: if database_ready { "ready" } else { "degraded" },
         database_ready,
+        database_schema_version: crate::db::baseline_schema_version(),
+        database_schema_valid,
         tor_enabled: CONFIG.enable_tor_support,
         tor_onion_ready,
         worker_queue_pending: state.job_queue.pending_count(),
@@ -141,12 +149,13 @@ pub(super) async fn metrics(State(state): State<AppState>) -> Response {
     let (
         media_processing_pending,
         media_processing_failed,
+        database_schema_valid,
         full_backup_count,
         latest_full_backup_verified,
         latest_full_backup_age_seconds,
     ) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> (i64, i64, i64, bool, i64) {
+        move || -> (i64, i64, bool, i64, bool, i64) {
             let full_backups = list_backup_files(&full_backup_dir(), BackupListKind::Full);
             let full_backup_count = i64::try_from(full_backups.len()).unwrap_or(i64::MAX);
             let latest_full_backup_verified =
@@ -157,24 +166,29 @@ pub(super) async fn metrics(State(state): State<AppState>) -> Response {
                 .map(|ts| chrono::Utc::now().timestamp().saturating_sub(ts).max(0))
                 .unwrap_or(-1);
             match pool.get() {
-                Ok(conn) => (
-                    crate::db::count_posts_by_media_processing_state(
-                        &conn,
-                        crate::db::MEDIA_PROCESSING_PENDING,
+                Ok(conn) => {
+                    let database_schema_valid = crate::db::verify_database_schema(&conn).is_ok();
+                    (
+                        crate::db::count_posts_by_media_processing_state(
+                            &conn,
+                            crate::db::MEDIA_PROCESSING_PENDING,
+                        )
+                        .unwrap_or(0),
+                        crate::db::count_posts_by_media_processing_state(
+                            &conn,
+                            crate::db::MEDIA_PROCESSING_FAILED,
+                        )
+                        .unwrap_or(0),
+                        database_schema_valid,
+                        full_backup_count,
+                        latest_full_backup_verified,
+                        latest_full_backup_age_seconds,
                     )
-                    .unwrap_or(0),
-                    crate::db::count_posts_by_media_processing_state(
-                        &conn,
-                        crate::db::MEDIA_PROCESSING_FAILED,
-                    )
-                    .unwrap_or(0),
-                    full_backup_count,
-                    latest_full_backup_verified,
-                    latest_full_backup_age_seconds,
-                ),
+                }
                 Err(_) => (
                     0,
                     0,
+                    false,
                     full_backup_count,
                     latest_full_backup_verified,
                     latest_full_backup_age_seconds,
@@ -183,7 +197,7 @@ pub(super) async fn metrics(State(state): State<AppState>) -> Response {
         }
     })
     .await
-    .unwrap_or((0, 0, 0, false, -1));
+    .unwrap_or((0, 0, false, 0, false, -1));
 
     let body = format!(
         concat!(
@@ -203,6 +217,8 @@ pub(super) async fn metrics(State(state): State<AppState>) -> Response {
             "rustchan_media_processing_pending {}\n",
             "# TYPE rustchan_media_processing_failed gauge\n",
             "rustchan_media_processing_failed {}\n",
+            "# TYPE rustchan_database_schema_valid gauge\n",
+            "rustchan_database_schema_valid{{version=\"{}\"}} {}\n",
             "# TYPE rustchan_full_backups_saved gauge\n",
             "rustchan_full_backups_saved {}\n",
             "# TYPE rustchan_latest_full_backup_verified gauge\n",
@@ -234,6 +250,8 @@ pub(super) async fn metrics(State(state): State<AppState>) -> Response {
         state.job_queue.dropped_count(),
         media_processing_pending,
         media_processing_failed,
+        crate::db::baseline_schema_version(),
+        u8::from(database_schema_valid),
         full_backup_count,
         u8::from(latest_full_backup_verified),
         latest_full_backup_age_seconds,

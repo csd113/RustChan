@@ -34,6 +34,13 @@ mod tests {
     fn format_mib() {
         assert_eq!(format_file_size(1024 * 1024), "1.0 MiB");
         assert_eq!(format_file_size(1024 * 1024 * 2), "2.0 MiB");
+        assert_eq!(format_file_size(1024 * 1024 * 1024 - 1), "1024.0 MiB");
+    }
+
+    #[test]
+    fn format_gib() {
+        assert_eq!(format_file_size(1024 * 1024 * 1024), "1.0 GiB");
+        assert_eq!(format_file_size(2 * 1024 * 1024 * 1024), "2.0 GiB");
     }
 
     #[test]

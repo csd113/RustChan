@@ -44,6 +44,7 @@ pub(super) fn render_site_settings(view: &AdminPanelViewModel<'_>) -> String {
         view.appearance.homepage_new_reply_badges_enabled,
         view.appearance.thread_new_reply_badges_enabled,
         &render_enabled_theme_options(view),
+        view.dashboard.public_url,
         &global_favicon_preview,
         global_favicon_label,
         global_favicon_button,
@@ -718,6 +719,7 @@ fn render_admin_site_settings_section(
     homepage_new_reply_badges_enabled: bool,
     thread_new_reply_badges_enabled: bool,
     enabled_theme_options: &str,
+    public_url: &str,
     global_favicon_preview: &str,
     global_favicon_label: &str,
     global_favicon_button: &str,
@@ -768,6 +770,14 @@ fn render_admin_site_settings_section(
   <button type="submit">save settings</button>
 </div>
 </form>
+<div class="admin-subsection admin-subsection-tight" id="public-url-settings">
+  <div class="admin-card-header">
+    <h3>// public URL</h3>
+    <p>Current configured public entry point.</p>
+  </div>
+  <p class="admin-copy"><strong>{public_url}</strong></p>
+  <p class="admin-meta-note">Runtime host trust is read from settings.toml public_hosts.</p>
+</div>
 <div class="favicon-inline-row favicon-inline-row-global">
 {global_favicon_preview}
 <form method="POST" action="/admin/site/favicon" enctype="multipart/form-data" class="favicon-inline-form">
@@ -803,6 +813,7 @@ fn render_admin_site_settings_section(
             ""
         },
         enabled_theme_options = enabled_theme_options,
+        public_url = escape_html(public_url),
         global_favicon_preview = global_favicon_preview,
         global_favicon_label = global_favicon_label,
         global_favicon_button = global_favicon_button,

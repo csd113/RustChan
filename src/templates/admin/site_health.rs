@@ -10,6 +10,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let health = &view.site_health;
     let rows = render_health_rows(view);
     let dependency_rows = render_dependency_summary(view);
+    let tor_rows = render_tor_diagnostics(view);
     let recent_jobs = render_recent_jobs_panel();
     let diagnostics = escape_html(health.diagnostics_text);
     format!(
@@ -22,6 +23,13 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
 <div class="admin-dropdown-content admin-site-health" data-admin-health-jobs-url="/admin/site-health/jobs">
   <div class="admin-health-grid">{rows}</div>
   {recent_jobs}
+  <div class="admin-subsection admin-subsection-tight admin-health-tor" id="tor-status">
+    <div class="admin-card-header">
+      <h3>// Tor diagnostics</h3>
+      <p>Runtime onion-service state and safe configuration signals.</p>
+    </div>
+    <div class="admin-health-grid">{tor_rows}</div>
+  </div>
   <div class="admin-subsection admin-subsection-tight admin-health-dependencies">
     <div class="admin-card-header">
       <h3>// optional dependency summary</h3>
@@ -57,6 +65,7 @@ fn render_health_rows(view: &AdminPanelViewModel<'_>) -> String {
     for (label, value) in [
         ("Server status", health.server_status),
         ("RustChan version", health.rustchan_version),
+        ("Database schema", health.database_schema_status),
         (
             "Database integrity status",
             health.database_integrity_status,
@@ -65,11 +74,6 @@ fn render_health_rows(view: &AdminPanelViewModel<'_>) -> String {
         ("Next scheduled backup", health.next_scheduled_backup),
         ("Disk usage for rustchan-data/", health.data_dir_usage),
         ("Upload directory size", health.upload_dir_size),
-        ("Tor status", health.tor_status),
-        (
-            "Tor onion address",
-            health.tor_onion_address.unwrap_or("not available"),
-        ),
     ] {
         append_health_row(&mut rows, label, value);
     }
@@ -84,27 +88,43 @@ fn append_job_rows(rows: &mut String, view: &AdminPanelViewModel<'_>) {
         "Running jobs",
         &health.running_jobs.to_string(),
         "running_jobs",
+        view.csrf_token,
     );
     append_health_job_row(
         rows,
         "Queued jobs",
         &health.queued_jobs.to_string(),
         "queued_jobs",
+        view.csrf_token,
     );
     append_health_job_row(
         rows,
         "Recent completed jobs",
         &health.recent_completed_jobs.to_string(),
         "recent_completed_jobs",
+        view.csrf_token,
     );
     append_health_job_row(
         rows,
         "Failed jobs",
         &health.failed_jobs.to_string(),
         "failed_jobs",
+        view.csrf_token,
     );
-    append_health_job_row(rows, "Backup jobs", health.backup_jobs, "backup_jobs");
-    append_health_job_row(rows, "Restore jobs", health.restore_jobs, "restore_jobs");
+    append_health_job_row(
+        rows,
+        "Backup jobs",
+        health.backup_jobs,
+        "backup_jobs",
+        view.csrf_token,
+    );
+    append_health_job_row(
+        rows,
+        "Restore jobs",
+        health.restore_jobs,
+        "restore_jobs",
+        view.csrf_token,
+    );
 }
 
 fn append_health_row(out: &mut String, label: &str, value: &str) {
@@ -116,7 +136,18 @@ fn append_health_row(out: &mut String, label: &str, value: &str) {
     );
 }
 
-fn append_health_job_row(out: &mut String, label: &str, value: &str, key: &str) {
+fn append_health_job_row(out: &mut String, label: &str, value: &str, key: &str, csrf_token: &str) {
+    if key == "failed_jobs" {
+        let _ = write!(
+            out,
+            r#"<div class="admin-health-row admin-health-row-actions"><span>{label}</span><span class="admin-health-job-actions"><button type="button" class="admin-health-inspect-button" data-admin-health-toggle="failed"><strong data-admin-health-job="{key}">{value}</strong></button><form method="POST" action="/admin/site-health/jobs/dismiss" class="admin-health-dismiss-form"><input type="hidden" name="_csrf" value="{csrf}"><button type="submit">dismiss counter</button></form></span></div>"#,
+            label = escape_html(label),
+            key = escape_html(key),
+            value = escape_html(value),
+            csrf = escape_html(csrf_token),
+        );
+        return;
+    }
     if matches!(key, "failed_jobs" | "recent_completed_jobs") {
         let target = if key == "failed_jobs" {
             "failed"
@@ -173,6 +204,25 @@ fn render_dependency_summary(view: &AdminPanelViewModel<'_>) -> String {
         ("Opus support", dependencies.opus),
     ] {
         append_health_row(&mut rows, label, detection_label(status));
+    }
+    rows
+}
+
+fn render_tor_diagnostics(view: &AdminPanelViewModel<'_>) -> String {
+    let health = &view.site_health;
+    let mut rows = String::new();
+    for (label, value) in [
+        ("Tor support", health.tor_status),
+        (
+            "Onion availability",
+            health.tor_onion_address.unwrap_or("not available"),
+        ),
+        ("Onion service", health.tor_service_status),
+        ("Access mode", health.tor_mode),
+        ("Runtime config", health.tor_config_summary),
+        ("Status detail", health.tor_detail),
+    ] {
+        append_health_row(&mut rows, label, value);
     }
     rows
 }

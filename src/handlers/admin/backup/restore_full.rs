@@ -542,6 +542,12 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     let backup_result = (|| -> Result<()> {
         let src = rusqlite::Connection::open(&temp_db)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Open backup source: {error}")))?;
+        db::normalize_database_schema_version(&src).map_err(|error| {
+            AppError::BadRequest(format!(
+                "Restored database does not match the RustChan {} baseline: {error}",
+                db::baseline_schema_version()
+            ))
+        })?;
         validate_full_restore_db_trust_boundary(&src)?;
         scrub_full_restore_runtime_state(&src)?;
         db::rebuild_pending_fs_ops_for_restore(&src)?;

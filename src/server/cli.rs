@@ -82,9 +82,20 @@ pub enum AdminAction {
         ban_id: i64,
     },
     ListBans,
+    DbStatus,
 }
 
 // ─── Admin CLI mode ───────────────────────────────────────────────────────────
+
+fn write_db_status_output<W: std::io::Write>(
+    mut writer: W,
+    schema_status: &str,
+    sqlite_version: &str,
+) -> std::io::Result<()> {
+    writeln!(writer, "Database schema: {schema_status}")?;
+    writeln!(writer, "SQLite: {sqlite_version}")?;
+    Ok(())
+}
 
 #[expect(clippy::too_many_lines)]
 pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
@@ -294,13 +305,21 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                 }
             }
         }
+        AdminAction::DbStatus => {
+            let schema_status = db::database_schema_status_label(&conn);
+            write_db_status_output(
+                std::io::stdout().lock(),
+                &schema_status,
+                rusqlite::version(),
+            )?;
+        }
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AdminAction, Cli, Command};
+    use super::{write_db_status_output, AdminAction, Cli, Command};
     use clap::Parser as _;
 
     #[test]
@@ -362,5 +381,29 @@ mod tests {
         };
 
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn db_status_command_is_available() {
+        let cli = Cli::parse_from(["rustchan-cli", "admin", "db-status"]);
+
+        let Some(Command::Admin {
+            action: AdminAction::DbStatus,
+        }) = cli.command
+        else {
+            panic!("expected db-status command");
+        };
+    }
+
+    #[test]
+    fn db_status_output_uses_release_schema_version() {
+        let mut out = Vec::new();
+
+        write_db_status_output(&mut out, "1.3.0 baseline verified", "3.test")
+            .expect("write db status output");
+
+        let output = String::from_utf8(out).expect("utf8 output");
+        assert!(output.contains("Database schema: 1.3.0 baseline verified"));
+        assert!(output.contains("SQLite: 3.test"));
     }
 }

@@ -206,12 +206,18 @@ fn is_not_found_error(error: &anyhow::Error) -> bool {
 // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
 #[expect(clippy::cast_precision_loss)]
 pub fn format_file_size(bytes: i64) -> String {
-    if bytes < 1024 {
+    const KIB: i64 = 1024;
+    const MIB: i64 = KIB * 1024;
+    const GIB: i64 = MIB * 1024;
+
+    if bytes < KIB {
         format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else if bytes < MIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else if bytes < GIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
     } else {
-        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
     }
 }
 

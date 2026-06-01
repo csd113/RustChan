@@ -178,6 +178,7 @@ pub struct AdminPanelBackupsView<'a> {
 pub struct AdminPanelSiteHealthView<'a> {
     pub server_status: &'a str,
     pub rustchan_version: &'a str,
+    pub database_schema_status: &'a str,
     pub database_integrity_status: &'a str,
     pub last_successful_backup: &'a str,
     pub next_scheduled_backup: &'a str,
@@ -185,6 +186,10 @@ pub struct AdminPanelSiteHealthView<'a> {
     pub upload_dir_size: &'a str,
     pub tor_status: &'a str,
     pub tor_onion_address: Option<&'a str>,
+    pub tor_service_status: &'a str,
+    pub tor_mode: &'a str,
+    pub tor_config_summary: &'a str,
+    pub tor_detail: &'a str,
     pub dependency_summary: AdminSiteHealthDependencySummary,
     pub running_jobs: i64,
     pub queued_jobs: i64,
@@ -1478,7 +1483,8 @@ pub fn admin_db_repair_failed_page(
 
 fn render_db_health_snapshot(snapshot: &crate::db::DbHealthSnapshot) -> String {
     format!(
-        "{integrity}{foreign_keys}",
+        "{schema}{integrity}{foreign_keys}",
+        schema = render_db_check_result("schema baseline", &snapshot.schema),
         integrity = render_db_check_result("integrity check", &snapshot.integrity),
         foreign_keys = render_db_check_result("foreign key check", &snapshot.foreign_keys),
     )
@@ -1955,6 +1961,7 @@ mod tests {
         AdminPanelSiteHealthView {
             server_status: "ready",
             rustchan_version: "1.3.0",
+            database_schema_status: "1.3.0 baseline verified",
             database_integrity_status: "not checked",
             last_successful_backup: "none saved",
             next_scheduled_backup: "not scheduled",
@@ -1962,6 +1969,10 @@ mod tests {
             upload_dir_size: "unknown",
             tor_status: "disabled",
             tor_onion_address: None,
+            tor_service_status: "disabled",
+            tor_mode: "clearnet only",
+            tor_config_summary: "bootstrap timeout 30s; max streams 64",
+            tor_detail: "Tor support is disabled in configuration.",
             dependency_summary: AdminSiteHealthDependencySummary {
                 ffmpeg: AdminDetectionStatus::Detected,
                 ffprobe: AdminDetectionStatus::Detected,
@@ -1975,7 +1986,8 @@ mod tests {
             failed_jobs: 0,
             backup_jobs: "idle",
             restore_jobs: "not available",
-            diagnostics_text: "RustChan version: 1.3.0\nRecent warnings:\n  none",
+            diagnostics_text:
+                "RustChan version: 1.3.0\nDatabase schema: 1.3.0 baseline verified\nRecent warnings:\n  none",
         }
     }
 
@@ -2351,13 +2363,22 @@ mod tests {
         assert!(html.contains("open media panel"));
         assert!(html.contains("copy diagnostics"));
         assert!(html.contains("RustChan version: 1.3.0"));
+        assert!(html.contains("Database schema"));
+        assert!(html.contains("1.3.0 baseline verified"));
         assert!(html.contains(r#"data-admin-health-jobs-url="/admin/site-health/jobs""#));
         assert!(html.contains(r#"data-admin-health-job="running_jobs""#));
         assert!(html.contains(r#"data-admin-health-job="queued_jobs""#));
         assert!(html.contains(r#"data-admin-health-toggle="failed""#));
         assert!(html.contains(r#"data-admin-health-job-list="failed""#));
+        assert!(html.contains(r#"action="/admin/site-health/jobs/dismiss""#));
+        assert!(html.contains(r#"name="_csrf" value="csrf""#));
+        assert!(html.contains("dismiss counter"));
         assert!(html.contains(r"data-admin-health-close"));
-        assert!(!html.contains("Tor bootstrap state"));
+        assert!(html.contains(r#"id="tor-status""#));
+        assert!(html.contains("// Tor diagnostics"));
+        assert!(html.contains("Onion service"));
+        assert!(html.contains("Runtime config"));
+        assert!(html.contains("Tor support is disabled in configuration."));
         assert!(!html.contains("Thumbnail/transcode jobs"));
         assert!(!html.contains("Repair/VACUUM jobs"));
     }
@@ -2375,6 +2396,41 @@ mod tests {
 
         assert!(html.contains(
             r#"<details class="admin-dropdown" data-admin-dropdown-key="site-health" open>"#
+        ));
+    }
+
+    #[test]
+    fn admin_panel_control_center_uses_persistent_dropdown_pattern() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+        let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
+
+        assert!(html.contains(
+            r#"<section class="admin-section admin-section-collapsible" id="control-center""#
+        ));
+        assert!(html.contains(r#"data-admin-dropdown-key="control-center""#));
+        assert!(!html.contains(
+            r#"<details class="admin-dropdown" data-admin-dropdown-key="control-center" open>"#
+        ));
+        assert!(html.contains(r##"href="#public-url-settings""##));
+        assert!(html.contains(r##"href="#tor-status""##));
+        assert!(html.contains(r#"id="public-url-settings""#));
+        assert!(html.contains("settings.toml public_hosts"));
+    }
+
+    #[test]
+    fn admin_panel_control_center_honors_open_target() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+        let html = render_admin_panel_for_test(
+            std::slice::from_ref(&board),
+            &[],
+            &themes,
+            Some("control-center"),
+        );
+
+        assert!(html.contains(
+            r#"<details class="admin-dropdown" data-admin-dropdown-key="control-center" open>"#
         ));
     }
 
@@ -2457,6 +2513,10 @@ mod tests {
     fn admin_db_result_pages_use_shared_status_surfaces() {
         let report = DbHealthReport {
             before: DbHealthSnapshot {
+                schema: DbCheckResult {
+                    ok: true,
+                    messages: vec!["1.3.0 baseline verified".into()],
+                },
                 integrity: DbCheckResult {
                     ok: false,
                     messages: vec!["row 1".into(), "row 2".into()],

@@ -137,15 +137,22 @@ fn render_admin_dashboard_section(view: &AdminPanelViewModel<'_>) -> String {
     let health_cards = render_dashboard_health_cards(view);
     let activity_cards = render_dashboard_activity_cards(view);
     let quick_actions = render_dashboard_quick_actions(view);
+    let open_attr = if view.open_section == Some("control-center") {
+        " open"
+    } else {
+        ""
+    };
 
     format!(
         r#"<!-- ═══════════════════════════════════════════════════════════════════════════
      // control center
      ═══════════════════════════════════════════════════════════════════════════ -->
-<section class="admin-section admin-control-center" id="control-center" aria-labelledby="control-center-title">
+<section class="admin-section admin-section-collapsible" id="control-center" aria-labelledby="control-center-title">
+<details class="admin-dropdown" data-admin-dropdown-key="control-center"{open_attr}>
+<summary><span id="control-center-title">// control center</span><span class="admin-dropdown-badges">{overall_status}</span></summary>
+<div class="admin-dropdown-content admin-control-center">
   <div class="admin-control-center-header">
     <div>
-      <h2 id="control-center-title">// control center</h2>
       <p class="admin-panel-lead">Operational summary for {site_title}.</p>
     </div>
     <div class="admin-control-center-status">
@@ -180,9 +187,12 @@ fn render_admin_dashboard_section(view: &AdminPanelViewModel<'_>) -> String {
     </div>
     {quick_actions}
   </div>
+</div>
+</details>
 </section>"#,
         site_title = escape_html(dashboard.site_title),
         overall_status = render_dashboard_overall_status(dashboard),
+        open_attr = open_attr,
     )
 }
 
@@ -267,8 +277,8 @@ fn render_dashboard_overview_cards(view: &AdminPanelViewModel<'_>) -> String {
             } else {
                 AdminDashboardState::Ok
             },
-            href: Some("/"),
-            action: Some("open home"),
+            href: Some("#public-url-settings"),
+            action: Some("public URL"),
         },
     );
     out
@@ -317,8 +327,8 @@ fn render_dashboard_health_cards(view: &AdminPanelViewModel<'_>) -> String {
             value: dashboard.tor_status,
             detail: dashboard.tor_detail,
             state: dashboard.tor_state,
-            href: Some("#database-maintenance"),
-            action: Some("maintenance"),
+            href: Some("#tor-status"),
+            action: Some("tor status"),
         },
     );
     append_dashboard_metric(
