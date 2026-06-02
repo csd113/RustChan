@@ -1967,12 +1967,12 @@ mod tests {
             next_scheduled_backup: "not scheduled",
             data_dir_usage: "unknown",
             upload_dir_size: "unknown",
-            tor_status: "disabled",
+            tor_status: "disabled; set enable_tor_support = true in settings.toml, then restart",
             tor_onion_address: None,
-            tor_service_status: "disabled",
+            tor_service_status: "not started; enable Tor support in settings.toml and restart",
             tor_mode: "clearnet only",
             tor_config_summary: "bootstrap timeout 30s; max streams 64",
-            tor_detail: "Tor support is disabled in configuration.",
+            tor_detail: "Set enable_tor_support = true in settings.toml, then restart RustChan.",
             dependency_summary: AdminSiteHealthDependencySummary {
                 ffmpeg: AdminDetectionStatus::Detected,
                 ffprobe: AdminDetectionStatus::Detected,
@@ -2010,7 +2010,7 @@ mod tests {
             storage_detail: "Data directory unknown; active media unknown.",
             storage_state: AdminDashboardState::Unknown,
             tor_status: "disabled",
-            tor_detail: "Tor support is disabled in configuration.",
+            tor_detail: "Set enable_tor_support = true in settings.toml, then restart RustChan.",
             tor_state: AdminDashboardState::Disabled,
             dependency_status: "ready",
             dependency_detail: "ffmpeg found; ffprobe found; WebP found; VP9 found; Opus found.",
@@ -2378,7 +2378,7 @@ mod tests {
         assert!(html.contains("// Tor diagnostics"));
         assert!(html.contains("Onion service"));
         assert!(html.contains("Runtime config"));
-        assert!(html.contains("Tor support is disabled in configuration."));
+        assert!(html.contains("Set enable_tor_support = true in settings.toml"));
         assert!(!html.contains("Thumbnail/transcode jobs"));
         assert!(!html.contains("Repair/VACUUM jobs"));
     }

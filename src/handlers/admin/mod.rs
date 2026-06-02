@@ -858,7 +858,7 @@ fn load_site_health_snapshot(
         tor_status: if CONFIG.enable_tor_support {
             "enabled".to_owned()
         } else {
-            "disabled".to_owned()
+            "disabled; set enable_tor_support = true in settings.toml, then restart".to_owned()
         },
         tor_service_status,
         tor_mode,
@@ -875,11 +875,11 @@ fn load_site_health_snapshot(
 
 fn tor_service_status_label(onion_address: Option<&str>) -> String {
     if !CONFIG.enable_tor_support {
-        "disabled".to_owned()
+        "not started; enable Tor support in settings.toml and restart".to_owned()
     } else if onion_address.is_some() {
         "onion service ready".to_owned()
     } else {
-        "starting or unavailable".to_owned()
+        "starting or unavailable; check logs if bootstrap does not finish".to_owned()
     }
 }
 
@@ -1612,7 +1612,7 @@ fn dashboard_tor_status(
     if !CONFIG.enable_tor_support {
         return (
             "disabled".to_owned(),
-            "Tor support is disabled in configuration.".to_owned(),
+            "Set enable_tor_support = true in settings.toml, then restart RustChan.".to_owned(),
             crate::templates::AdminDashboardState::Disabled,
         );
     }
@@ -1625,7 +1625,8 @@ fn dashboard_tor_status(
     } else {
         (
             "enabled, address pending".to_owned(),
-            "Tor support is enabled but no onion address is currently available.".to_owned(),
+            "Wait for bootstrap, or check Site Health Tor diagnostics if no onion appears."
+                .to_owned(),
             crate::templates::AdminDashboardState::Warning,
         )
     }

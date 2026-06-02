@@ -41,14 +41,14 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
 {maintenance_section}
 
 <!-- ── Backup progress modal ─────────────────────────────────────────────── -->
-<div id="backup-modal" class="compress-modal admin-modal-hidden" role="dialog" aria-modal="true" aria-labelledby="backup-modal-title">
+<div id="backup-modal" class="compress-modal admin-modal-hidden" role="dialog" aria-modal="true" aria-labelledby="backup-modal-title" aria-hidden="true" hidden inert>
   <div class="compress-modal-box">
     <div class="compress-modal-title" id="backup-modal-title">&#128190; Creating Backup…</div>
     <div class="compress-progress admin-progress-spaced" id="backup-progress-wrap">
       <div class="compress-progress-track"><div class="compress-progress-bar" id="backup-progress-bar"></div></div>
       <div class="compress-progress-text" id="backup-progress-text">Starting…</div>
     </div>
-    <div class="compress-done-actions admin-modal-hidden" id="backup-done-actions">
+    <div class="compress-done-actions admin-modal-hidden" id="backup-done-actions" hidden>
       <button class="compress-cancel-btn" data-action="close-backup-modal">&#10003; Done — reload</button>
     </div>
   </div>
@@ -271,7 +271,11 @@ fn render_dashboard_overview_cards(view: &AdminPanelViewModel<'_>) -> String {
         DashboardMetric {
             label: "Public URL",
             value: dashboard.public_url,
-            detail: "Configured public host, when available.",
+            detail: if dashboard.public_url == "not configured" {
+                "Add a public_hosts entry in settings.toml, then restart RustChan."
+            } else {
+                "To change this, edit settings.toml public_hosts and restart RustChan."
+            },
             state: if dashboard.public_url == "not configured" {
                 AdminDashboardState::Unknown
             } else {

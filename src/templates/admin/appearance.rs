@@ -35,6 +35,11 @@ pub(super) fn render_site_settings(view: &AdminPanelViewModel<'_>) -> String {
     } else {
         "No custom global favicon uploaded yet."
     };
+    let public_url_help = if view.dashboard.public_url == "not configured" {
+        "No public URL is configured. Add at least one hostname to settings.toml public_hosts, then restart RustChan."
+    } else {
+        "Runtime host trust uses settings.toml public_hosts. To change this URL, edit public_hosts and restart RustChan."
+    };
 
     render_admin_site_settings_section(
         view.csrf_token,
@@ -45,6 +50,7 @@ pub(super) fn render_site_settings(view: &AdminPanelViewModel<'_>) -> String {
         view.appearance.thread_new_reply_badges_enabled,
         &render_enabled_theme_options(view),
         view.dashboard.public_url,
+        public_url_help,
         &global_favicon_preview,
         global_favicon_label,
         global_favicon_button,
@@ -709,6 +715,17 @@ fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
     (builtin_theme_cards, custom_theme_cards)
 }
 
+fn render_public_url_copy_button(public_url: &str) -> String {
+    if public_url == "not configured" {
+        String::new()
+    } else {
+        format!(
+            r#"<button type="button" class="admin-copy-button" data-admin-copy-text="{public_url}" hidden>Copy</button>"#,
+            public_url = escape_html(public_url),
+        )
+    }
+}
+
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(clippy::too_many_arguments)]
 fn render_admin_site_settings_section(
@@ -720,11 +737,13 @@ fn render_admin_site_settings_section(
     thread_new_reply_badges_enabled: bool,
     enabled_theme_options: &str,
     public_url: &str,
+    public_url_help: &str,
     global_favicon_preview: &str,
     global_favicon_label: &str,
     global_favicon_button: &str,
     global_favicon_status: &str,
 ) -> String {
+    let public_url_copy_button = render_public_url_copy_button(public_url);
     format!(
         r#"<div class="admin-panel-site-settings" id="site-settings-panel">
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -775,8 +794,8 @@ fn render_admin_site_settings_section(
     <h3>// public URL</h3>
     <p>Current configured public entry point.</p>
   </div>
-  <p class="admin-copy"><strong>{public_url}</strong></p>
-  <p class="admin-meta-note">Runtime host trust is read from settings.toml public_hosts.</p>
+  <p class="admin-copy admin-copy-action-row"><strong>{public_url}</strong>{public_url_copy_button}</p>
+  <p class="admin-meta-note">{public_url_help}</p>
 </div>
 <div class="favicon-inline-row favicon-inline-row-global">
 {global_favicon_preview}
@@ -814,6 +833,8 @@ fn render_admin_site_settings_section(
         },
         enabled_theme_options = enabled_theme_options,
         public_url = escape_html(public_url),
+        public_url_help = escape_html(public_url_help),
+        public_url_copy_button = public_url_copy_button,
         global_favicon_preview = global_favicon_preview,
         global_favicon_label = global_favicon_label,
         global_favicon_button = global_favicon_button,

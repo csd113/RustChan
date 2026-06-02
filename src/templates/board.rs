@@ -409,8 +409,8 @@ fn render_catalog_actions(
         super::report_fallback_form(board_short, report_post_id, thread.id, csrf_token, "submit");
     format!(
         r#"<div class="catalog-card-actions">
-  <button type="button" class="catalog-thread-menu-toggle" data-action="toggle-thread-menu" aria-haspopup="true" aria-expanded="false" aria-label="Thread actions"></button>
-  <div class="catalog-thread-menu" hidden>
+  <button type="button" class="catalog-thread-menu-toggle" data-action="toggle-thread-menu" aria-haspopup="true" aria-expanded="false" aria-controls="catalog-thread-menu-{thread_id}" aria-label="Thread actions"></button>
+  <div class="catalog-thread-menu" id="catalog-thread-menu-{thread_id}" hidden inert aria-hidden="true">
     <button type="button" class="catalog-thread-menu-item" data-action="open-report" data-pid="{post_id}" data-tid="{thread_id}" data-board="{board}" data-csrf="{csrf}" data-report-label="Reporting thread No.{thread_id}">Report thread</button>
     <form method="POST" action="/{board}/thread-preference">
       <input type="hidden" name="_csrf" value="{csrf}">
@@ -429,25 +429,28 @@ fn render_catalog_actions(
       <button type="submit" class="catalog-thread-menu-item">{hide_label}</button>
     </form>
   </div>
-  <div class="catalog-thread-fallback-actions" aria-label="Thread actions">
-    {report_fallback}
-    <form class="catalog-thread-fallback-form" method="POST" action="/{board}/thread-preference">
-      <input type="hidden" name="_csrf" value="{csrf}">
-      <input type="hidden" name="thread_id" value="{thread_id}">
-      <input type="hidden" name="board" value="{board}">
-      <input type="hidden" name="action" value="{pin_action}">
-      <input type="hidden" name="return_to" value="{return_to}">
-      <button type="submit" class="catalog-thread-fallback-submit">{pin_label}</button>
-    </form>
-    <form class="catalog-thread-fallback-form" method="POST" action="/{board}/thread-preference">
-      <input type="hidden" name="_csrf" value="{csrf}">
-      <input type="hidden" name="thread_id" value="{thread_id}">
-      <input type="hidden" name="board" value="{board}">
-      <input type="hidden" name="action" value="{hide_action}">
-      <input type="hidden" name="return_to" value="{return_to}">
-      <button type="submit" class="catalog-thread-fallback-submit">{hide_label}</button>
-    </form>
-  </div>
+  <details class="catalog-thread-fallback-actions" aria-label="Thread actions" open>
+    <summary class="catalog-thread-fallback-summary">actions</summary>
+    <div class="catalog-thread-fallback-group">
+      {report_fallback}
+      <form class="catalog-thread-fallback-form" method="POST" action="/{board}/thread-preference">
+        <input type="hidden" name="_csrf" value="{csrf}">
+        <input type="hidden" name="thread_id" value="{thread_id}">
+        <input type="hidden" name="board" value="{board}">
+        <input type="hidden" name="action" value="{pin_action}">
+        <input type="hidden" name="return_to" value="{return_to}">
+        <button type="submit" class="catalog-thread-fallback-submit">{pin_label}</button>
+      </form>
+      <form class="catalog-thread-fallback-form" method="POST" action="/{board}/thread-preference">
+        <input type="hidden" name="_csrf" value="{csrf}">
+        <input type="hidden" name="thread_id" value="{thread_id}">
+        <input type="hidden" name="board" value="{board}">
+        <input type="hidden" name="action" value="{hide_action}">
+        <input type="hidden" name="return_to" value="{return_to}">
+        <button type="submit" class="catalog-thread-fallback-submit">{hide_label}</button>
+      </form>
+    </div>
+  </details>
 </div>"#,
         post_id = report_post_id,
         thread_id = thread.id,
@@ -737,9 +740,9 @@ pub fn index_page<S: std::hash::BuildHasher>(
             ""
         };
         let hidden_attr = if nsfw_prompt_board.is_some() {
-            ""
+            r#" aria-hidden="false""#
         } else {
-            " hidden"
+            r#" hidden inert aria-hidden="true""#
         };
         let board_label = nsfw_prompt_board
             .map(|b| format!("/{}/", escape_html(&b.short_name)))
@@ -754,10 +757,10 @@ pub fn index_page<S: std::hash::BuildHasher>(
             })
             .unwrap_or_default();
         format!(
-            r#"<div id="nsfw-disclaimer-overlay" class="compress-modal nsfw-disclaimer-overlay{open_class}"{hidden_attr}>
+            r#"<div id="nsfw-disclaimer-overlay" class="compress-modal nsfw-disclaimer-overlay{open_class}" role="dialog" aria-modal="true" aria-labelledby="nsfw-disclaimer-title" aria-describedby="nsfw-disclaimer-info"{hidden_attr}>
   <div class="compress-modal-box nsfw-disclaimer-box">
-    <div class="compress-modal-title">Disclaimer</div>
-    <div class="compress-modal-info">
+    <div class="compress-modal-title" id="nsfw-disclaimer-title">Disclaimer</div>
+    <div class="compress-modal-info" id="nsfw-disclaimer-info">
       <p class="nsfw-disclaimer-intro">To access this section, you understand and agree to the following:</p>
       <ol class="nsfw-disclaimer-list">
         <li>The content of this website is for mature audiences only and may not be suitable for minors. If you are a minor or it is illegal for you to access mature images and language, do not proceed.</li>

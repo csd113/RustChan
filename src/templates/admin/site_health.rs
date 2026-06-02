@@ -46,7 +46,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
       <div class="admin-diagnostics-header">
         <h3 id="admin-diagnostics-title">// diagnostics</h3>
         <div class="admin-diagnostics-actions">
-          <button type="button" data-admin-diagnostics-copy>copy</button>
+          <button type="button" data-admin-diagnostics-copy>Copy</button>
           <button type="button" data-admin-diagnostics-close>close</button>
         </div>
       </div>
@@ -99,7 +99,7 @@ fn append_job_rows(rows: &mut String, view: &AdminPanelViewModel<'_>) {
     );
     append_health_job_row(
         rows,
-        "Recent completed jobs",
+        "Completed jobs",
         &health.recent_completed_jobs.to_string(),
         "recent_completed_jobs",
         view.csrf_token,
@@ -138,13 +138,19 @@ fn append_health_row(out: &mut String, label: &str, value: &str) {
 
 fn append_health_job_row(out: &mut String, label: &str, value: &str, key: &str, csrf_token: &str) {
     if key == "failed_jobs" {
+        let disabled_attr = if value == "0" {
+            r#" disabled aria-disabled="true""#
+        } else {
+            ""
+        };
         let _ = write!(
             out,
-            r#"<div class="admin-health-row admin-health-row-actions"><span>{label}</span><span class="admin-health-job-actions"><button type="button" class="admin-health-inspect-button" data-admin-health-toggle="failed"><strong data-admin-health-job="{key}">{value}</strong></button><form method="POST" action="/admin/site-health/jobs/dismiss" class="admin-health-dismiss-form"><input type="hidden" name="_csrf" value="{csrf}"><button type="submit">dismiss counter</button></form></span></div>"#,
+            r#"<div class="admin-health-row admin-health-row-actions"><button type="button" class="admin-health-inspect-button admin-health-count-button" data-admin-health-toggle="failed" aria-expanded="false" aria-controls="admin-health-job-panel-failed"><span>{label} (<strong data-admin-health-job="{key}">{value}</strong>)</span></button><form method="POST" action="/admin/site-health/jobs/dismiss" class="admin-health-dismiss-form"><input type="hidden" name="_csrf" value="{csrf}"><button type="submit" data-admin-health-failed-dismiss{disabled_attr}>dismiss counter</button></form></div>"#,
             label = escape_html(label),
             key = escape_html(key),
             value = escape_html(value),
             csrf = escape_html(csrf_token),
+            disabled_attr = disabled_attr,
         );
         return;
     }
@@ -156,7 +162,7 @@ fn append_health_job_row(out: &mut String, label: &str, value: &str, key: &str, 
         };
         let _ = write!(
             out,
-            r#"<div class="admin-health-row"><span>{label}</span><button type="button" class="admin-health-inspect-button" data-admin-health-toggle="{target}"><strong data-admin-health-job="{key}">{value}</strong></button></div>"#,
+            r#"<div class="admin-health-row"><button type="button" class="admin-health-inspect-button admin-health-count-button" data-admin-health-toggle="{target}" aria-expanded="false" aria-controls="admin-health-job-panel-{target}"><span>{label} (<strong data-admin-health-job="{key}">{value}</strong>)</span></button></div>"#,
             label = escape_html(label),
             key = escape_html(key),
             target = escape_html(target),
@@ -174,15 +180,15 @@ fn append_health_job_row(out: &mut String, label: &str, value: &str, key: &str, 
 }
 
 fn render_recent_jobs_panel() -> String {
-    r#"<div class="admin-health-job-details" data-admin-health-job-details hidden>
-  <section data-admin-health-job-panel="failed" hidden>
+    r#"<div class="admin-health-job-details" data-admin-health-job-details hidden inert aria-hidden="true">
+  <section id="admin-health-job-panel-failed" data-admin-health-job-panel="failed" hidden inert aria-hidden="true">
     <div class="admin-health-job-details-header">
       <h3>// recent failed jobs</h3>
       <button type="button" data-admin-health-close>close</button>
     </div>
     <div class="admin-health-job-list" data-admin-health-job-list="failed"></div>
   </section>
-  <section data-admin-health-job-panel="completed" hidden>
+  <section id="admin-health-job-panel-completed" data-admin-health-job-panel="completed" hidden inert aria-hidden="true">
     <div class="admin-health-job-details-header">
       <h3>// recently completed jobs</h3>
       <button type="button" data-admin-health-close>close</button>
