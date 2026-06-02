@@ -311,6 +311,14 @@ const INDEX_SCHEMA_SQL: &str = "
         ON post_submissions(created_at ASC);
 ";
 
+const LEGACY_THEME_SORT_INDEX: &str = "idx_themes_enabled_sort";
+const LEGACY_BOARD_ZERO_DEFAULT_COLUMNS: [&str; 4] = [
+    "allow_editing",
+    "allow_self_delete",
+    "allow_video_embeds",
+    "show_poster_ids",
+];
+
 pub(super) fn install_or_migrate_schema(conn: &rusqlite::Connection) -> Result<()> {
     if is_fresh_database(conn)? {
         install_baseline_schema(conn)?;
@@ -336,6 +344,7 @@ pub(super) fn verify_database_schema(conn: &rusqlite::Connection) -> Result<()> 
 }
 
 pub(super) fn normalize_database_schema_version(conn: &rusqlite::Connection) -> Result<()> {
+    repair_known_legacy_baseline_drift(conn)?;
     verify_database_schema_structure(conn)?;
     if read_schema_version(conn)?.as_deref() != Some(BASELINE_SCHEMA_VERSION) {
         stamp_schema_version(conn)?;
@@ -489,6 +498,303 @@ fn ensure_board_access_invariants(conn: &rusqlite::Connection) -> Result<()> {
         ",
     )
     .context("Board access invariant creation failed")
+}
+
+fn repair_known_legacy_baseline_drift(conn: &rusqlite::Connection) -> Result<()> {
+    if !is_known_legacy_schema_version(read_schema_version(conn)?.as_deref()) {
+        return Ok(());
+    }
+
+    let expected = expected_schema_shape()?;
+    let actual = schema_shape(conn)?;
+    if !can_repair_known_legacy_baseline_drift(&expected, &actual) {
+        return Ok(());
+    }
+
+    if actual.objects.contains_key(LEGACY_THEME_SORT_INDEX) {
+        conn.execute_batch("DROP INDEX IF EXISTS idx_themes_enabled_sort")
+            .context("Drop legacy themes sort index failed")?;
+    }
+
+    if boards_table_requires_baseline_rebuild(&expected, &actual) {
+        rebuild_boards_table_for_baseline(conn)?;
+        ensure_board_access_invariants(conn)?;
+    }
+
+    Ok(())
+}
+
+fn is_known_legacy_schema_version(version: Option<&str>) -> bool {
+    match version.and_then(|value| value.parse::<i64>().ok()) {
+        Some(1..=41) => true,
+        Some(_) | None => false,
+    }
+}
+
+fn can_repair_known_legacy_baseline_drift(expected: &SchemaShape, actual: &SchemaShape) -> bool {
+    schema_objects_are_legacy_repairable(expected, actual)
+        && tables_are_legacy_repairable(expected, actual)
+}
+
+fn schema_objects_are_legacy_repairable(expected: &SchemaShape, actual: &SchemaShape) -> bool {
+    for (name, expected_object) in &expected.objects {
+        let Some(actual_object) = actual.objects.get(name) else {
+            return false;
+        };
+        if actual_object.kind != expected_object.kind {
+            return false;
+        }
+        if matches!(expected_object.kind.as_str(), "index" | "trigger")
+            && actual_object.sql != expected_object.sql
+        {
+            return false;
+        }
+    }
+
+    for (name, actual_object) in &actual.objects {
+        if expected.objects.contains_key(name) {
+            continue;
+        }
+        if name == LEGACY_THEME_SORT_INDEX
+            && actual_object.kind == "index"
+            && actual_object
+                .sql
+                .as_deref()
+                .is_some_and(is_legacy_theme_sort_index)
+        {
+            continue;
+        }
+        return false;
+    }
+
+    true
+}
+
+fn is_legacy_theme_sort_index(sql: &str) -> bool {
+    sql == normalize_schema_sql(
+        "CREATE INDEX idx_themes_enabled_sort ON themes(enabled, sort_order, slug)",
+    )
+}
+
+fn tables_are_legacy_repairable(expected: &SchemaShape, actual: &SchemaShape) -> bool {
+    for (table, expected_table) in &expected.tables {
+        let Some(actual_table) = actual.tables.get(table) else {
+            return false;
+        };
+        let repairable = match table.as_str() {
+            "boards" => boards_table_is_legacy_repairable(expected_table, actual_table),
+            "themes" => themes_table_is_legacy_repairable(expected_table, actual_table),
+            _ => actual_table == expected_table,
+        };
+        if !repairable {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn themes_table_is_legacy_repairable(expected: &TableShape, actual: &TableShape) -> bool {
+    if actual.columns != expected.columns || actual.foreign_keys != expected.foreign_keys {
+        return false;
+    }
+
+    let mut actual_indexes = actual.indexes.clone();
+    actual_indexes.remove(LEGACY_THEME_SORT_INDEX);
+    actual_indexes == expected.indexes
+}
+
+fn boards_table_is_legacy_repairable(expected: &TableShape, actual: &TableShape) -> bool {
+    actual.foreign_keys == expected.foreign_keys
+        && legacy_board_columns_match(expected, actual)
+        && legacy_board_indexes_are_repairable(actual)
+}
+
+fn legacy_board_columns_match(expected: &TableShape, actual: &TableShape) -> bool {
+    if actual.columns.len() != expected.columns.len() {
+        return false;
+    }
+
+    for (column, expected_shape) in &expected.columns {
+        let Some(actual_shape) = actual.columns.get(column) else {
+            return false;
+        };
+        if !legacy_board_column_matches(column, expected_shape, actual_shape) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn legacy_board_column_matches(column: &str, expected: &ColumnShape, actual: &ColumnShape) -> bool {
+    if actual == expected {
+        return true;
+    }
+    if !LEGACY_BOARD_ZERO_DEFAULT_COLUMNS.contains(&column) {
+        return false;
+    }
+
+    let mut legacy_expected = expected.clone();
+    legacy_expected.default_value = Some("0".to_owned());
+    actual == &legacy_expected
+}
+
+fn legacy_board_indexes_are_repairable(actual: &TableShape) -> bool {
+    actual.indexes.len() == 1
+        && actual.indexes.values().any(|index| {
+            index.unique
+                && index.origin == "u"
+                && !index.partial
+                && index.where_clause.is_none()
+                && index.columns.len() == 1
+                && index
+                    .columns
+                    .first()
+                    .and_then(|column| column.name.as_deref())
+                    == Some("short_name")
+        })
+}
+
+fn boards_table_requires_baseline_rebuild(expected: &SchemaShape, actual: &SchemaShape) -> bool {
+    actual.tables.get("boards") != expected.tables.get("boards")
+        || required_fragments_missing_for_table(actual, "boards")
+}
+
+fn required_fragments_missing_for_table(shape: &SchemaShape, table: &str) -> bool {
+    let Some(object) = shape.objects.get(table) else {
+        return true;
+    };
+    let Some(sql) = object.sql.as_deref() else {
+        return true;
+    };
+
+    REQUIRED_TABLE_SQL_FRAGMENTS
+        .iter()
+        .filter(|(fragment_table, _)| *fragment_table == table)
+        .any(|(_, fragment)| !sql.contains(&normalize_schema_sql(fragment)))
+}
+
+fn rebuild_boards_table_for_baseline(conn: &rusqlite::Connection) -> Result<()> {
+    run_structural_schema_repair(
+        conn,
+        r"
+        CREATE TABLE boards_new (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            display_order   INTEGER NOT NULL DEFAULT 0,
+            short_name      TEXT NOT NULL UNIQUE,
+            name            TEXT NOT NULL,
+            description     TEXT NOT NULL DEFAULT '',
+            nsfw            INTEGER NOT NULL DEFAULT 0,
+            max_threads     INTEGER NOT NULL DEFAULT 150,
+            max_archived_threads INTEGER NOT NULL DEFAULT 150,
+            bump_limit      INTEGER NOT NULL DEFAULT 500,
+            allow_video     INTEGER NOT NULL DEFAULT 1,
+            allow_tripcodes INTEGER NOT NULL DEFAULT 1,
+            allow_images    INTEGER NOT NULL DEFAULT 1,
+            allow_audio     INTEGER NOT NULL DEFAULT 0,
+            max_image_size  INTEGER NOT NULL DEFAULT 8388608,
+            max_video_size  INTEGER NOT NULL DEFAULT 52428800,
+            max_audio_size  INTEGER NOT NULL DEFAULT 157286400,
+            max_pdf_size    INTEGER NOT NULL DEFAULT 157286400,
+            allow_pdf       INTEGER NOT NULL DEFAULT 0,
+            allow_any_files INTEGER NOT NULL DEFAULT 0,
+            edit_window_secs    INTEGER NOT NULL DEFAULT 0,
+            allow_editing       INTEGER NOT NULL DEFAULT 1,
+            allow_self_delete   INTEGER NOT NULL DEFAULT 1,
+            allow_archive       INTEGER NOT NULL DEFAULT 1,
+            allow_video_embeds  INTEGER NOT NULL DEFAULT 1,
+            allow_captcha       INTEGER NOT NULL DEFAULT 0,
+            show_poster_ids     INTEGER NOT NULL DEFAULT 1,
+            collapse_greentext  INTEGER NOT NULL DEFAULT 0,
+            post_cooldown_secs  INTEGER NOT NULL DEFAULT 0,
+            default_theme       TEXT NOT NULL DEFAULT '',
+            banner_mode         TEXT NOT NULL DEFAULT 'inherit'
+                                    CHECK (banner_mode IN ('inherit', 'none', 'override')),
+            access_mode         TEXT NOT NULL DEFAULT 'public'
+                                    CHECK (access_mode IN ('public', 'view_password', 'post_password')),
+            access_password_hash TEXT NOT NULL DEFAULT '',
+            created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+
+        INSERT INTO boards_new (
+            id, display_order, short_name, name, description, nsfw, max_threads,
+            max_archived_threads, bump_limit, allow_video, allow_tripcodes,
+            allow_images, allow_audio, max_image_size, max_video_size,
+            max_audio_size, max_pdf_size, allow_pdf, allow_any_files,
+            edit_window_secs, allow_editing, allow_self_delete, allow_archive,
+            allow_video_embeds, allow_captcha, show_poster_ids,
+            collapse_greentext, post_cooldown_secs, default_theme,
+            banner_mode, access_mode, access_password_hash, created_at
+        )
+        SELECT
+            id, display_order, short_name, name, description, nsfw, max_threads,
+            max_archived_threads, bump_limit, allow_video, allow_tripcodes,
+            allow_images, allow_audio, max_image_size, max_video_size,
+            max_audio_size, max_pdf_size, allow_pdf, allow_any_files,
+            edit_window_secs, allow_editing, allow_self_delete, allow_archive,
+            allow_video_embeds, allow_captcha, show_poster_ids,
+            collapse_greentext, post_cooldown_secs, default_theme,
+            CASE
+                WHEN banner_mode IN ('inherit', 'none', 'override') THEN banner_mode
+                ELSE 'inherit'
+            END,
+            CASE
+                WHEN access_mode IN ('public', 'view_password', 'post_password') THEN access_mode
+                ELSE 'view_password'
+            END,
+            access_password_hash, created_at
+        FROM boards;
+
+        DROP TABLE boards;
+        ALTER TABLE boards_new RENAME TO boards;
+        ",
+        "Structural migration: rebuild boards table for 1.3.0 baseline failed",
+        "Applied structural migration: boards table matches 1.3.0 baseline",
+    )
+}
+
+fn run_structural_schema_repair(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    failure_context: &str,
+    success_log: &str,
+) -> Result<()> {
+    let foreign_keys_enabled = conn
+        .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+        .context("Read foreign key setting before schema repair failed")?
+        != 0;
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")
+        .with_context(|| format!("Disable foreign keys for {failure_context}"))?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .with_context(|| format!("Begin transaction for {failure_context}"))?;
+
+    match conn.execute_batch(sql) {
+        Ok(()) => {
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                let _ = conn.execute_batch("ROLLBACK");
+                restore_foreign_keys(conn, foreign_keys_enabled);
+                return Err(error).with_context(|| format!("Commit {failure_context}"));
+            }
+            restore_foreign_keys(conn, foreign_keys_enabled);
+            tracing::info!(target: "db", "{success_log}");
+            Ok(())
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            restore_foreign_keys(conn, foreign_keys_enabled);
+            Err(error).context(failure_context.to_owned())
+        }
+    }
+}
+
+fn restore_foreign_keys(conn: &rusqlite::Connection, enabled: bool) {
+    let statement = if enabled {
+        "PRAGMA foreign_keys = ON;"
+    } else {
+        "PRAGMA foreign_keys = OFF;"
+    };
+    let _ = conn.execute_batch(statement);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -940,8 +1246,9 @@ fn normalize_schema_sql(sql: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        baseline_schema_version, create_baseline_schema_objects, install_or_migrate_schema,
-        normalize_database_schema_version, read_schema_version, verify_database_schema,
+        baseline_schema_version, create_baseline_schema_objects, ensure_board_access_invariants,
+        install_or_migrate_schema, normalize_database_schema_version, read_schema_version,
+        verify_database_schema,
     };
 
     fn schema_version(conn: &rusqlite::Connection) -> String {
@@ -959,6 +1266,91 @@ mod tests {
             |row| row.get(0),
         )
         .expect("inspect sqlite object")
+    }
+
+    fn column_default(conn: &rusqlite::Connection, table: &str, column: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT dflt_value FROM pragma_table_info(?1) WHERE name = ?2",
+            rusqlite::params![table, column],
+            |row| row.get(0),
+        )
+        .expect("read column default")
+    }
+
+    fn rebuild_boards_with_historical_v41_shape(conn: &rusqlite::Connection) {
+        conn.execute_batch(
+            r"
+            PRAGMA foreign_keys = OFF;
+            BEGIN IMMEDIATE;
+
+            CREATE TABLE boards_legacy (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                short_name      TEXT NOT NULL UNIQUE,
+                name            TEXT NOT NULL,
+                description     TEXT NOT NULL DEFAULT '',
+                nsfw            INTEGER NOT NULL DEFAULT 0,
+                max_threads     INTEGER NOT NULL DEFAULT 150,
+                bump_limit      INTEGER NOT NULL DEFAULT 500,
+                created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+                display_order   INTEGER NOT NULL DEFAULT 0,
+                max_archived_threads INTEGER NOT NULL DEFAULT 150,
+                allow_video     INTEGER NOT NULL DEFAULT 1,
+                allow_tripcodes INTEGER NOT NULL DEFAULT 1,
+                allow_images    INTEGER NOT NULL DEFAULT 1,
+                allow_audio     INTEGER NOT NULL DEFAULT 0,
+                max_image_size  INTEGER NOT NULL DEFAULT 8388608,
+                max_video_size  INTEGER NOT NULL DEFAULT 52428800,
+                max_audio_size  INTEGER NOT NULL DEFAULT 157286400,
+                max_pdf_size    INTEGER NOT NULL DEFAULT 157286400,
+                allow_pdf       INTEGER NOT NULL DEFAULT 0,
+                allow_any_files INTEGER NOT NULL DEFAULT 0,
+                edit_window_secs    INTEGER NOT NULL DEFAULT 0,
+                allow_editing       INTEGER NOT NULL DEFAULT 0,
+                allow_self_delete   INTEGER NOT NULL DEFAULT 0,
+                allow_archive       INTEGER NOT NULL DEFAULT 1,
+                allow_video_embeds  INTEGER NOT NULL DEFAULT 0,
+                allow_captcha       INTEGER NOT NULL DEFAULT 0,
+                show_poster_ids     INTEGER NOT NULL DEFAULT 0,
+                collapse_greentext  INTEGER NOT NULL DEFAULT 0,
+                post_cooldown_secs  INTEGER NOT NULL DEFAULT 0,
+                default_theme       TEXT NOT NULL DEFAULT '',
+                access_mode         TEXT NOT NULL DEFAULT 'public',
+                access_password_hash TEXT NOT NULL DEFAULT '',
+                banner_mode         TEXT NOT NULL DEFAULT 'inherit'
+            );
+
+            INSERT INTO boards_legacy (
+                id, short_name, name, description, nsfw, max_threads,
+                bump_limit, created_at, display_order, max_archived_threads,
+                allow_video, allow_tripcodes, allow_images, allow_audio,
+                max_image_size, max_video_size, max_audio_size, max_pdf_size,
+                allow_pdf, allow_any_files, edit_window_secs, allow_editing,
+                allow_self_delete, allow_archive, allow_video_embeds,
+                allow_captcha, show_poster_ids, collapse_greentext,
+                post_cooldown_secs, default_theme, access_mode,
+                access_password_hash, banner_mode
+            )
+            SELECT
+                id, short_name, name, description, nsfw, max_threads,
+                bump_limit, created_at, display_order, max_archived_threads,
+                allow_video, allow_tripcodes, allow_images, allow_audio,
+                max_image_size, max_video_size, max_audio_size, max_pdf_size,
+                allow_pdf, allow_any_files, edit_window_secs, allow_editing,
+                allow_self_delete, allow_archive, allow_video_embeds,
+                allow_captcha, show_poster_ids, collapse_greentext,
+                post_cooldown_secs, default_theme, access_mode,
+                access_password_hash, banner_mode
+            FROM boards;
+
+            DROP TABLE boards;
+            ALTER TABLE boards_legacy RENAME TO boards;
+
+            COMMIT;
+            PRAGMA foreign_keys = ON;
+            ",
+        )
+        .expect("rebuild boards into historical v41 shape");
+        ensure_board_access_invariants(conn).expect("restore board access triggers");
     }
 
     #[test]
@@ -1009,6 +1401,79 @@ mod tests {
             })
             .expect("read preserved post");
         assert_eq!(body, "preserved body");
+    }
+
+    #[test]
+    fn historical_v41_schema_drift_repairs_to_130_baseline_without_data_loss() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+        create_baseline_schema_objects(&conn).expect("create baseline objects");
+        conn.execute(
+            "INSERT INTO boards (
+                id, short_name, name, allow_editing, allow_self_delete,
+                allow_video_embeds, show_poster_ids, banner_mode, access_mode
+             )
+             VALUES (1, 'b', 'Random', 0, 1, 0, 1, 'override', 'public')",
+            [],
+        )
+        .expect("insert board before legacy reshape");
+        rebuild_boards_with_historical_v41_shape(&conn);
+        conn.execute_batch(
+            "CREATE INDEX idx_themes_enabled_sort
+                 ON themes(enabled, sort_order, slug);
+             CREATE TABLE schema_version (
+                 version INTEGER NOT NULL DEFAULT 0,
+                 UNIQUE(version)
+             );
+             INSERT INTO schema_version (version) VALUES (41);",
+        )
+        .expect("create historical v41 drift markers");
+
+        let error =
+            verify_database_schema(&conn).expect_err("legacy drift should fail strict check");
+        let message = error.to_string();
+        assert!(
+            message.contains("idx_themes_enabled_sort")
+                && message.contains("boards.allow_editing definition differs")
+                && message.contains("missing required constraint CHECK (access_mode"),
+            "unexpected strict-check error: {error:#}"
+        );
+
+        install_or_migrate_schema(&conn).expect("repair historical v41 schema drift");
+
+        assert_eq!(schema_version(&conn), "1.3.0");
+        assert!(!object_exists(&conn, "index", "idx_themes_enabled_sort"));
+        verify_database_schema(&conn).expect("repaired schema verifies");
+        assert_eq!(
+            column_default(&conn, "boards", "allow_editing").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            column_default(&conn, "boards", "allow_self_delete").as_deref(),
+            Some("1")
+        );
+
+        let board_flags: (i64, i64, i64, i64, String, String) = conn
+            .query_row(
+                "SELECT allow_editing, allow_self_delete, allow_video_embeds,
+                        show_poster_ids, banner_mode, access_mode
+                 FROM boards WHERE id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("read preserved board flags");
+        assert_eq!(
+            board_flags,
+            (0, 1, 0, 1, "override".to_owned(), "public".to_owned())
+        );
     }
 
     #[test]
