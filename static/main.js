@@ -4094,12 +4094,12 @@ if (window.visualViewport) {
 
     if (type === 'youtube') {
       var img = document.createElement('img');
-      img.className = 'thumb';
+      img.className = 'thumb embed-thumb';
       img.loading = 'lazy';
+      img.decoding = 'async';
       img.alt = 'video thumbnail';
-      // hqdefault (480×360) gives a larger, higher-quality thumbnail than
-      // mqdefault (320×180) and is reliably available for all YouTube videos.
-      img.src = 'https://img.youtube.com/vi/' + id + '/hqdefault.jpg';
+      // mqdefault is 16:9; hqdefault is 4:3 and often includes padded whitespace.
+      img.src = 'https://img.youtube.com/vi/' + id + '/mqdefault.jpg';
       preview.appendChild(img);
     } else if (type === 'streamable') {
       var ph = document.createElement('div');

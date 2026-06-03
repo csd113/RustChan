@@ -5709,25 +5709,36 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
 
 /* ── Video embed unfurl widget ──────────────────────────────────────────────── */
 
+.video-embed-container {
+  --embed-thumb-width: 150px;
+}
+
+.reply .video-embed-container {
+  --embed-thumb-width: 80px;
+}
+
+.video-embed-container .embed-thumb {
+  width: var(--embed-thumb-width);
+  height: auto;
+  max-width: 100%;
+  max-height: none;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+
 .embed-placeholder-thumb {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 150px;
-  height: 85px;
+  width: var(--embed-thumb-width, 150px);
+  aspect-ratio: 16 / 9;
+  max-width: 100%;
+  max-height: none;
   background: var(--bg-panel);
   color: var(--text-dim);
   font-size: 0.82rem;
   border: 1px solid var(--border);
-}
-
-@media (max-width: 700px) {
-  .embed-placeholder-thumb {
-    width: 100%;
-    max-width: 100%;
-    max-height: min(44vw, 220px);
-    object-fit: cover;
-  }
+  box-sizing: border-box;
 }
 
 .embed-iframe {
