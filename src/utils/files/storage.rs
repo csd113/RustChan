@@ -1209,6 +1209,10 @@ trailer << /Root 1 0 R >>
     ];
 
     #[test]
+    #[expect(
+        clippy::print_stderr,
+        reason = "test skip diagnostics must remain visible when optional ffmpeg fixtures are unavailable"
+    )]
     fn valid_audio_uploads_accept_common_formats_with_ffprobe() {
         if !ffmpeg_available() || !ffprobe_available() {
             eprintln!("skipping ffmpeg audio fixture test; ffmpeg/ffprobe unavailable");
@@ -1242,6 +1246,10 @@ trailer << /Root 1 0 R >>
     }
 
     #[test]
+    #[expect(
+        clippy::print_stderr,
+        reason = "test skip diagnostics must remain visible when optional ffmpeg fixtures are unavailable"
+    )]
     fn valid_mkv_uploads_save_as_video_with_probe() {
         if !ffmpeg_available() || !ffprobe_available() {
             eprintln!("skipping MKV fixture test; ffmpeg/ffprobe unavailable");

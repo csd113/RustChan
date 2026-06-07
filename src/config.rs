@@ -326,6 +326,10 @@ fn load_settings_file() -> SettingsFile {
     parse_settings_file_str(&raw).unwrap_or_else(|_| settings_file_parse_error(&path))
 }
 
+#[expect(
+    clippy::exit,
+    reason = "invalid configuration must terminate with the standard EX_CONFIG status"
+)]
 fn settings_file_parse_error(path: &Path) -> ! {
     let _ = writeln!(
         std::io::stderr().lock(),

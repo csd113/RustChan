@@ -682,8 +682,9 @@ pub async fn setup_finish(
         move || -> Result<()> {
             let mut conn = pool.get()?;
             let tx = conn.transaction()?;
-            db::ensure_setup_available(&tx)
-                .map_err(|_| AppError::NotFound("Setup wizard is not available.".into()))?;
+            db::ensure_setup_available(&tx).map_err(|_setup_state_error| {
+                AppError::NotFound("Setup wizard is not available.".into())
+            })?;
             if db::admin_count(&tx)? == 0 {
                 let username = parsed.admin_username.as_deref().ok_or_else(|| {
                     AppError::BadRequest("Initial admin username is required.".into())
