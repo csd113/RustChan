@@ -474,7 +474,7 @@ async fn run_arti(
         std::time::Duration::from_secs(crate::config::CONFIG.tor_bootstrap_timeout_secs);
     // KEEP ALIVE: dropping the final Tor client handle closes all Tor circuits
     // and kills the onion service.
-    let tor_client: Arc<TorClient<_>> = Arc::new(
+    let tor_client: Arc<TorClient<_>> =
         tokio::time::timeout(bootstrap_timeout, TorClient::create_bootstrapped(config))
             .await
             .map_err(|_error| {
@@ -484,12 +484,11 @@ async fn run_arti(
                     crate::config::CONFIG.tor_bootstrap_timeout_secs,
                 )
             })?
-            .map_err(|e| format!("Tor bootstrap failed: {e}"))?,
-    );
+            .map_err(|e| format!("Tor bootstrap failed: {e}"))?;
 
     tracing::info!(target: "rustchan::detect", "Tor: connected to the Tor network");
 
-    // Security hardening options available in OnionServiceConfigBuilder (Arti 0.41):
+    // Security hardening options available in OnionServiceConfigBuilder (Arti 0.43):
     //   .pow_resistance(...)          — proof-of-work DoS resistance
     //   .rate_limit_num_intro_points  — cap introduction point abuse
     // Currently left at defaults. Consider exposing these in settings.toml (F-18).
@@ -511,7 +510,7 @@ async fn run_arti(
         .launch_onion_service(svc_config)?
         .ok_or("launch_onion_service returned None — unexpected with code-only config")?;
 
-    // F-03: onion_address() can return None during early bringup in Arti 0.41;
+    // F-03: onion_address() can return None during early bringup in Arti;
     // key material is not guaranteed to be readable synchronously at launch time.
     // Retry up to 10 times at 500 ms intervals (5 s total) before failing.
     let hsid = {
@@ -688,7 +687,7 @@ async fn proxy_tor_stream(
 
 /// Encode an [`HsId`] (Ed25519 public key) as a v3 `.onion` address string.
 ///
-/// [`HsId`] does not implement `std::fmt::Display` in arti-client 0.41.
+/// [`HsId`] does not implement `std::fmt::Display` in arti-client.
 /// Encoded manually using `HsId: AsRef<[u8; 32]>`.
 ///
 /// Format: `base32( pubkey || sha3_256(".onion checksum" || pubkey || version)[..2] || version )`

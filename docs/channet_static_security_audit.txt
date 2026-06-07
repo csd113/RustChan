@@ -1,0 +1,355 @@
+ChanNet Static Security Audit
+=============================
+
+Date: 2026-06-07
+Repository: RustChan
+Scope: Static-only audit of ChanNet. This record was created after the audit
+and is intended for future reference.
+
+Audit Scope
+-----------
+
+Included:
+- src/chan_net/**
+- src/db/chan_net.rs
+- Router/server wiring that exposes ChanNet routes
+- Config fields, docs, tests, and handlers directly related to ChanNet
+- Shared utilities only where ChanNet calls them
+
+Threat model:
+- Anonymous remote caller hitting ChanNet routes
+- Malicious adjacent-project caller
+- High-volume/spam caller
+- Malformed JSON/form input
+- Path/query/body abuse
+- Database state corruption attempts
+- Replay/duplicate message attempts
+- Privacy/info-leak attempts
+- Cross-board/thread/post reference abuse
+- Deployment where ChanNet is exposed on clearnet or onion
+
+Important Context
+-----------------
+
+ChanNet is intentionally designed with unauthenticated adjacent-project routes
+for future RustWave use. This audit does not classify unauthenticated ChanNet
+route existence as a vulnerability by itself.
+
+The optional second listener is off unless the server is started with
+--chan-net. By default it binds to 127.0.0.1:7070. The /chan/refresh and
+/chan/poll routes require X-ChanNet-Key when a key is configured.
+
+Final Verdict
+-------------
+
+STATIC FAIL
+
+The static audit found security-relevant issues beyond the intentional
+unauthenticated adjacent-project design. The highest-impact findings are
+protected-board export bypass and locked-thread reply bypass through
+/chan/command reply_push.
+
+ChanNet Route Inventory
+-----------------------
+
+GET /chan/status
+- Inputs: none
+- Response: JSON object with service, chan_net, version, boards, posts
+- Main effect: DB counts only
+- Code path: src/chan_net/status.rs::chan_status
+
+POST /chan/export
+- Inputs: none
+- Response: application/zip
+- Main effect: builds a full active-board/post snapshot
+- Code path: src/chan_net/export.rs::chan_export -> snapshot::build_snapshot
+
+POST /chan/import
+- Inputs: raw ZIP body, capped by CONFIG.chan_net_max_body
+- Response: JSON {"imported": N}
+- Main effect: writes boards, chan_net_posts, and import ledger rows
+- Code path: src/chan_net/import.rs::chan_import -> do_import
+
+POST /chan/refresh
+- Inputs: X-ChanNet-Key
+- Response: JSON {"status", "local_tx_id", "broadcast_tx_id"}
+- Main effect: builds a local snapshot and POSTs it to rustwave_url
+- Code path: src/chan_net/refresh.rs::chan_refresh
+
+POST /chan/poll
+- Inputs: X-ChanNet-Key
+- Response: JSON {"imported": N}
+- Main effect: pulls up to 50 remote ZIP snapshots and imports them
+- Code path: src/chan_net/poll.rs::chan_poll -> import::do_import
+
+POST /chan/command
+- Inputs: application/json command body, capped by
+  CONFIG.chan_net_command_max_body
+- Response: ZIP with Content-Disposition
+- Main effect: export commands return scoped ZIPs; reply_push inserts a live
+  post into posts
+- Code path: src/chan_net/command.rs::chan_command
+
+Intentional Design Choices
+--------------------------
+
+Not reported as standalone vulnerabilities:
+- ChanNet has unauthenticated routes by design for adjacent-project use.
+- ChanNet is a separate listener and is off unless --chan-net is used.
+- Text-only snapshots and gateway replies omit media paths, MIME types,
+  thumbnails, and binary data by design.
+
+Positive Observations
+---------------------
+
+- No SQL injection was found in the ChanNet paths inspected. Inputs are
+  parameterized. The dynamic SQL in selective_snapshot::fetch_posts only
+  appends fixed fragments.
+- No request-controlled SSRF was found. rustwave_url is configuration-derived
+  and startup validation requires http:// or https://.
+- No filesystem extraction or ZIP path traversal was found in snapshot import.
+  ZIP filenames are whitelisted and entries are parsed in memory.
+- No ChanNet-specific stored XSS was found in reply_push. The live reply path
+  escapes content with escape_html and stores rendered body_html through the
+  existing post-body pipeline.
+
+Findings
+--------
+
+HIGH: Protected board data is exported without board-access policy
+
+Exploit scenario:
+A caller that can reach ChanNet can export text from view_password or
+post_password boards using /chan/export or /chan/command variants such as
+full_export, board_export, thread_export, archive_export, and force_refresh.
+This bypasses the main web board access gate.
+
+Affected files/functions/routes:
+- src/chan_net/snapshot.rs::build_snapshot
+- src/chan_net/selective_snapshot.rs::build_full_snapshot
+- src/chan_net/selective_snapshot.rs::build_board_snapshot
+- src/chan_net/selective_snapshot.rs::build_thread_snapshot
+- src/chan_net/selective_snapshot.rs::build_archive_snapshot
+- src/chan_net/selective_snapshot.rs::build_force_refresh_snapshot
+- POST /chan/export
+- POST /chan/command
+
+Evidence from code:
+- Normal web routes call board_access_preflight in src/handlers/board.rs.
+- ChanNet snapshot queries select boards/posts without filtering
+  boards.access_mode.
+- Board access modes include public, view_password, and post_password in
+  src/models.rs.
+
+Suggested fix:
+Define an explicit ChanNet sharing policy. Default snapshot exports to public
+or explicitly ChanNet-enabled boards only, and apply the same policy in every
+snapshot builder.
+
+HIGH: reply_push can post into locked threads
+
+Exploit scenario:
+A malicious adjacent caller can post live replies into a moderator-locked
+thread via POST /chan/command with type=reply_push.
+
+Affected files/functions/routes:
+- src/db/chan_net.rs::insert_reply_into_thread
+- src/chan_net/command.rs::chan_command
+- POST /chan/command reply_push
+
+Evidence from code:
+- Normal posting rejects locked threads in src/handlers/posting.rs when
+  thread.locked is true.
+- ChanNet reply insertion checks thread id, board short name, and
+  t.archived = 0, but does not check t.locked = 0.
+- insert_reply_into_thread then calls create_reply_with_thread_update, which
+  inserts the post and increments reply_count/bumped_at.
+
+Suggested fix:
+Add locked-thread rejection to the ChanNet precondition, for example by adding
+AND t.locked = 0 to the lookup and returning the same class of error as normal
+posting.
+
+MEDIUM: reply_push has no replay/idempotency protection
+
+Exploit scenario:
+Replaying the same JSON creates duplicate live replies. The timestamp field is
+ignored for storage, and there is no remote message id, submission token, or
+unique key tied to the adjacent caller's message.
+
+Affected files/functions/routes:
+- src/chan_net/command.rs::Command::ReplyPush
+- src/db/chan_net.rs::insert_reply_into_thread
+- src/db/posts.rs::create_post_inner
+- POST /chan/command reply_push
+
+Evidence from code:
+- ReplyPush fields are board, thread_id, author, content, timestamp.
+- insert_reply_into_thread ignores timestamp.
+- create_post_inner performs a plain INSERT INTO posts ... RETURNING id.
+
+Suggested fix:
+Require a stable remote message id or tx id for reply_push, store it durably
+with a unique constraint, and reject duplicates before inserting a live post.
+
+MEDIUM: ZIP import can decompress/deserialize beyond the request body cap
+
+Exploit scenario:
+A small ZIP under chan_net_max_body can contain very large uncompressed JSON
+entries. unpack_snapshot reads each JSON file to the end and deserializes the
+whole array, allowing memory and CPU exhaustion.
+
+Affected files/functions/routes:
+- src/chan_net/snapshot.rs::unpack_snapshot
+- src/chan_net/import.rs::do_import
+- POST /chan/import
+- POST /chan/poll
+
+Evidence from code:
+- /chan/import applies DefaultBodyLimit::max(CONFIG.chan_net_max_body).
+- unpack_snapshot uses f.read_to_end into Vec for boards.json, posts.json, and
+  metadata.json.
+- There is no uncompressed entry size cap, maximum board count, maximum post
+  count, or streaming parser bound.
+
+Suggested fix:
+Enforce per-entry uncompressed limits, maximum boards/posts, and total decoded
+object limits before or during JSON parsing.
+
+MEDIUM: Import dedupe and DB writes are not atomic
+
+Exploit scenario:
+Concurrent imports with the same tx_id can pass the in-memory ledger check
+before either records the durable ledger row. Both can then write content. A
+mid-import DB error can also leave partial boards/posts without recording the
+tx_id, allowing retries to operate on partially applied state.
+
+Affected files/functions/routes:
+- src/chan_net/import.rs::do_import
+- src/db/chan_net.rs::record_import_tx_id
+- POST /chan/import
+- POST /chan/poll
+
+Evidence from code:
+- do_import checks the in-memory ledger before DB writes.
+- The blocking import loop inserts boards and posts, then records the tx_id.
+- The writes are not wrapped in an explicit DB transaction.
+- record_import_tx_id uses INSERT OR IGNORE, so duplicate durable claims are
+  not treated as an import-stopping condition.
+
+Suggested fix:
+Wrap import in a transaction. Claim the tx_id with a unique insert before
+content writes and roll back the claim/content together on failure.
+
+MEDIUM: Snapshot import accepts invalid board/post metadata
+
+Exploit scenario:
+A remote snapshot can create boards with short names that normal setup rejects,
+including overlong or path-hostile values. It can also provide unbounded
+authors/titles and out-of-range remote ids/timestamps, resulting in corrupted
+or hard-to-manage DB state.
+
+Affected files/functions/routes:
+- src/chan_net/import.rs::do_import
+- src/db/chan_net.rs::insert_board_if_absent
+- src/db/chan_net.rs::insert_post_if_absent
+- POST /chan/import
+- POST /chan/poll
+
+Evidence from code:
+- Normal setup validates board slugs as 1-8 lowercase ASCII letters/digits.
+- ChanNet import only checks that post.board is non-empty and content length is
+  <= 32,768.
+- insert_board_if_absent inserts incoming board.id directly as boards.short_name.
+- SnapshotPost uses u64 post_id and timestamp, which are cast to signed
+  integers before DB insertion.
+
+Suggested fix:
+Validate imported board ids against the local slug policy or a separate strict
+remote-id type. Bound title and author lengths. Reject posts referencing boards
+not present in the snapshot. Validate remote ids/timestamps before casting.
+
+LOW: Heavy ChanNet routes lack rate/concurrency limits
+
+Exploit scenario:
+Repeated /chan/export, force_refresh, import, or poll calls can saturate DB
+connections, blocking threads, CPU, and memory through in-memory ZIP builds and
+large JSON processing.
+
+Affected files/functions/routes:
+- src/chan_net/mod.rs::chan_router
+- src/chan_net/export.rs::chan_export
+- src/chan_net/selective_snapshot.rs::build_force_refresh_snapshot
+- POST /chan/export
+- POST /chan/import
+- POST /chan/command force_refresh
+- POST /chan/poll
+
+Evidence from code:
+- src/chan_net/mod.rs explicitly excludes rate-limit middleware for ChanNet.
+- Main server router applies rate_limit_middleware separately to the main web
+  router.
+- ChanNet export and command builders build ZIPs in memory.
+
+Suggested fix:
+Add ChanNet-specific rate or concurrency gates for heavyweight routes. If
+operators expose ChanNet beyond loopback, require the existing API key or a
+separate capability token for resource-heavy operations.
+
+INFORMATIONAL: /chan/status leaks version and aggregate activity
+
+Exploit scenario:
+Reachable callers can observe RustChan version and board/post counts, which can
+aid fingerprinting and activity monitoring.
+
+Affected files/functions/routes:
+- src/chan_net/status.rs::chan_status
+- GET /chan/status
+
+Evidence from code:
+- The JSON response includes env!("CARGO_PKG_VERSION"), boards count, and posts
+  count.
+
+Suggested fix:
+Consider a minimal default health response, with detailed status available only
+when explicitly enabled.
+
+Coverage Gaps
+-------------
+
+Existing ChanNet-specific coverage is thin. The audit found a focused DB test
+for gateway reply escaping and NULL ip_hash preservation, plus broader
+sanitizer/config tests, but not enough route-level ChanNet coverage.
+
+Recommended future tests:
+- Protected-board export policy for /chan/export and every /chan/command export
+  variant.
+- Locked-thread reply_push rejection.
+- Duplicate/replayed reply_push rejection.
+- Concurrent same-tx_id imports.
+- ZIP bomb or large uncompressed entry rejection.
+- Invalid imported board/post metadata rejection.
+- /chan/refresh and /chan/poll API-key behavior.
+- JSON body-limit error shape for /chan/command.
+- Full/force export resource-limit behavior.
+- Import rollback behavior when one board/post insert fails.
+
+Commands Used During Audit
+--------------------------
+
+Only read-only inspection commands were used:
+- pwd
+- git status --short
+- rg --files
+- targeted rg -n searches
+- find for ChanNet-related files
+- nl -ba ... | sed -n ... for source inspection
+- unzip -p docs/channet_api_reference.docx word/document.xml | tr '<' '\n' | rg -n ...
+
+No cargo fmt, clippy, tests, Playwright, migration generation, commits, or
+automated fixers were run during the static audit.
+
+Files Changed By This Follow-Up
+-------------------------------
+
+- docs/channet_static_security_audit.txt
