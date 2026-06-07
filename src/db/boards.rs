@@ -1299,6 +1299,9 @@ mod tests {
 
     #[test]
     fn delete_board_records_durable_board_directory_cleanup() {
+        let _runtime_guard = crate::config::RUNTIME_LAYOUT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let upload_dir = temp_dir.path().join("uploads");
         let board_dir = upload_dir.join("gone");

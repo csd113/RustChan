@@ -1198,8 +1198,6 @@ mod tests {
     };
     use crate::db::{init_test_pool, insert_pending_fs_op};
 
-    static GLOBAL_ASSET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     struct LiveDirGuard {
         path: std::path::PathBuf,
         backup: Option<std::path::PathBuf>,
@@ -1251,6 +1249,9 @@ mod tests {
     }
 
     fn full_restore_payload_for_live(live: &std::path::Path) -> FullRestoreSwapPayload {
+        // Production startup creates this before restore validation resolves
+        // the allowed global favicon and banner restore targets.
+        std::fs::create_dir_all(crate::config::runtime_dir()).expect("create runtime dir");
         FullRestoreSwapPayload {
             staged: generated_restore_path(live, "restore-stage")
                 .display()
@@ -1942,7 +1943,7 @@ mod tests {
 
     #[test]
     fn reconcile_full_restore_recovers_global_favicon_and_banner_swaps_idempotently() {
-        let _guard = GLOBAL_ASSET_TEST_LOCK
+        let _guard = crate::config::RUNTIME_LAYOUT_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let favicon_live = crate::favicon::global_backup_source_dir();

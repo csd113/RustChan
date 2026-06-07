@@ -9,6 +9,9 @@ use std::sync::LazyLock;
 
 mod template;
 
+#[cfg(test)]
+pub static RUNTIME_LAYOUT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Absolute path to the directory the running binary lives in.
 fn binary_dir() -> PathBuf {
     std::env::current_exe()
