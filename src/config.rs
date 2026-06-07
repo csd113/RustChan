@@ -213,6 +213,11 @@ struct SettingsFile {
     cookie_secret: Option<String>,
     behind_proxy: Option<bool>,
     https_cookies: Option<bool>,
+    /// Expose detailed `/readyz` internals such as schema, backup, media queue,
+    /// maintenance, and Tor readiness to unauthenticated clients. Default: false.
+    public_readiness_details: Option<bool>,
+    /// Expose unauthenticated Prometheus metrics at `/metrics`. Default: false.
+    public_metrics_enabled: Option<bool>,
     enable_tor_support: Option<bool>,
     /// When true, the HTTP server binds exclusively to 127.0.0.1 so it is
     /// reachable only through the Tor hidden service. Overrides the host
@@ -559,6 +564,10 @@ pub struct Config {
     /// Trusted proxy CIDR allowlist for forwarding headers.
     pub trusted_proxy_cidrs: Vec<String>,
     pub https_cookies: bool,
+    /// When true, `/readyz` includes detailed operational internals for public clients.
+    pub public_readiness_details: bool,
+    /// When true, `/metrics` exposes Prometheus metrics to unauthenticated clients.
+    pub public_metrics_enabled: bool,
     /// Public hostnames accepted by the HTTP→HTTPS redirect listener.
     pub public_hosts: Vec<String>,
     /// Interval in seconds between WAL checkpoint runs. 0 = disabled.
@@ -808,6 +817,14 @@ impl Config {
             https_cookies: env_bool(
                 "CHAN_HTTPS_COOKIES",
                 s.https_cookies.unwrap_or(https_cookies_default),
+            ),
+            public_readiness_details: env_bool(
+                "CHAN_PUBLIC_READINESS_DETAILS",
+                s.public_readiness_details.unwrap_or(false),
+            ),
+            public_metrics_enabled: env_bool(
+                "CHAN_PUBLIC_METRICS_ENABLED",
+                s.public_metrics_enabled.unwrap_or(false),
             ),
             public_hosts,
             wal_checkpoint_interval: env_parse(
@@ -1610,6 +1627,8 @@ mod tests {
             behind_proxy: false,
             trusted_proxy_cidrs: vec!["127.0.0.1/32".to_owned(), "::1/128".to_owned()],
             https_cookies: false,
+            public_readiness_details: false,
+            public_metrics_enabled: false,
             public_hosts: Vec::new(),
             wal_checkpoint_interval: 3600,
             auto_vacuum_interval_hours: 24,
@@ -2004,6 +2023,8 @@ port = 8080
         assert!(template.contains("auto_full_backup_include_tor_hidden_service_keys = true"));
         assert!(template.contains(r#"auto_full_backup_storage_mode = "directory""#));
         assert!(template.contains("auto_full_backup_split_zip_part_size_gib = 4"));
+        assert!(template.contains("public_readiness_details = false"));
+        assert!(template.contains("public_metrics_enabled = false"));
         assert!(template.contains(
             r#"enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]"#
         ));
@@ -2037,6 +2058,8 @@ port = 8080
         assert_eq!(parsed.cookie_secret.as_deref(), Some(secret.as_str()));
         assert_eq!(parsed.enable_tor_support, Some(true));
         assert_eq!(parsed.tor_only, Some(false));
+        assert_eq!(parsed.public_readiness_details, Some(false));
+        assert_eq!(parsed.public_metrics_enabled, Some(false));
         assert!(parsed.public_hosts.is_none());
         assert_eq!(parsed.tls.as_ref().map(|tls| tls.enabled), Some(false));
         assert_eq!(parsed.tls.as_ref().map(|tls| tls.port), Some(8443));
@@ -2050,6 +2073,8 @@ port = 8080
         assert_eq!(reloaded.cookie_secret, secret);
         assert!(reloaded.enable_tor_support);
         assert!(!reloaded.tor_only);
+        assert!(!reloaded.public_readiness_details);
+        assert!(!reloaded.public_metrics_enabled);
         assert!(reloaded.public_hosts.is_empty());
         assert!(!reloaded.tls.enabled);
         assert_eq!(reloaded.tls.port, 8443);

@@ -224,6 +224,19 @@ CLI admin commands include:
 
 Run `rustchan-cli admin --help` for the full command list and flags.
 
+## Observability Endpoints
+
+`/healthz` is intentionally public and minimal for liveness checks. `/readyz` returns only readiness status by default, and `/metrics` returns `404` unless explicitly enabled.
+
+If a trusted Prometheus scraper or private load balancer needs detailed internals, enable the public surface in `settings.toml` and restrict access at your reverse proxy or network boundary:
+
+```toml
+public_readiness_details = true
+public_metrics_enabled = true
+```
+
+The detailed readiness and metrics output includes operational state such as database schema health, backup freshness, media backlog, maintenance state, and Tor readiness. Do not expose those endpoints directly to the public internet or onion visitors.
+
 ## Tor And ChanNet
 
 RustChan includes built-in Tor onion service support via Arti. You do not need to install or manage a separate `tor` daemon.

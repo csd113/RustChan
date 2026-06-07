@@ -6,8 +6,6 @@
 )]
 
 use std::sync::atomic::Ordering;
-use std::sync::LazyLock;
-use std::time::Instant;
 
 use axum::{
     extract::State,
@@ -23,14 +21,9 @@ use crate::middleware::AppState;
 
 use super::{ACTIVE_IPS, ACTIVE_UPLOADS, IN_FLIGHT, REQUEST_COUNT};
 
-static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
-
 #[derive(Serialize)]
 struct HealthPayload {
     status: &'static str,
-    uptime_seconds: u64,
-    request_count: u64,
-    in_flight_requests: u64,
 }
 
 #[derive(Serialize)]
@@ -51,16 +44,52 @@ struct ReadyPayload {
     latest_full_backup_age_hours: Option<i64>,
 }
 
+#[derive(Serialize)]
+struct PublicReadyPayload {
+    status: &'static str,
+}
+
 pub(super) async fn healthz() -> impl IntoResponse {
-    Json(HealthPayload {
-        status: "ok",
-        uptime_seconds: START_TIME.elapsed().as_secs(),
-        request_count: REQUEST_COUNT.load(Ordering::Relaxed),
-        in_flight_requests: IN_FLIGHT.load(Ordering::Relaxed),
-    })
+    Json(HealthPayload { status: "ok" })
 }
 
 pub(super) async fn readyz(State(state): State<AppState>) -> Response {
+    readyz_response(state, CONFIG.public_readiness_details).await
+}
+
+async fn readyz_response(state: AppState, include_details: bool) -> Response {
+    if !include_details {
+        let database_ready = tokio::task::spawn_blocking({
+            let pool = state.db.clone();
+            move || match pool.get() {
+                Ok(conn) => {
+                    let ready = conn
+                        .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                        .ok()
+                        .is_some_and(|value| value == 1);
+                    ready && crate::db::verify_database_schema(&conn).is_ok()
+                }
+                Err(_) => false,
+            }
+        })
+        .await
+        .unwrap_or(false);
+
+        let status_label = if database_ready { "ready" } else { "degraded" };
+        let status = if database_ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
+        return (
+            status,
+            Json(PublicReadyPayload {
+                status: status_label,
+            }),
+        )
+            .into_response();
+    }
+
     let (
         database_ready,
         database_schema_valid,
@@ -117,8 +146,14 @@ pub(super) async fn readyz(State(state): State<AppState>) -> Response {
     } else {
         false
     };
+    let status_label = if database_ready { "ready" } else { "degraded" };
+    let status = if database_ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
     let payload = ReadyPayload {
-        status: if database_ready { "ready" } else { "degraded" },
+        status: status_label,
         database_ready,
         database_schema_version: crate::db::baseline_schema_version(),
         database_schema_valid,
@@ -131,15 +166,17 @@ pub(super) async fn readyz(State(state): State<AppState>) -> Response {
         latest_full_backup_verified,
         latest_full_backup_age_hours,
     };
-    let status = if database_ready {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
     (status, Json(payload)).into_response()
 }
 
 pub(super) async fn metrics(State(state): State<AppState>) -> Response {
+    if !CONFIG.public_metrics_enabled {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    metrics_response(state).await
+}
+
+async fn metrics_response(state: AppState) -> Response {
     let backup = &state.backup_progress;
     let tor_onion_ready = if CONFIG.enable_tor_support {
         state.onion_address.read().await.is_some()
@@ -274,4 +311,76 @@ pub(super) async fn metrics(State(state): State<AppState>) -> Response {
         body,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{metrics_response, readyz_response};
+    use axum::{body::to_bytes, http::StatusCode};
+
+    #[tokio::test]
+    async fn public_readyz_response_hides_operational_details() {
+        let response = readyz_response(crate::test_support::app_state(), false).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("ready body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("ready json");
+
+        assert_eq!(
+            body.get("status").and_then(serde_json::Value::as_str),
+            Some("ready")
+        );
+        assert!(body.get("database_schema_version").is_none());
+        assert!(body.get("database_schema_valid").is_none());
+        assert!(body.get("worker_queue_pending").is_none());
+        assert!(body.get("media_processing_failed").is_none());
+        assert!(body.get("latest_full_backup_verified").is_none());
+        assert!(body.get("tor_enabled").is_none());
+    }
+
+    #[tokio::test]
+    async fn detailed_readyz_response_remains_available_when_enabled() {
+        let response = readyz_response(crate::test_support::app_state(), true).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("ready body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("ready json");
+
+        assert_eq!(
+            body.get("status").and_then(serde_json::Value::as_str),
+            Some("ready")
+        );
+        assert_eq!(
+            body.get("database_schema_version")
+                .and_then(serde_json::Value::as_str),
+            Some(crate::db::baseline_schema_version())
+        );
+        assert_eq!(
+            body.get("database_schema_valid")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert!(body.get("worker_queue_pending").is_some());
+        assert!(body.get("latest_full_backup_verified").is_some());
+        assert!(body.get("tor_enabled").is_some());
+    }
+
+    #[tokio::test]
+    async fn metrics_response_remains_available_for_enabled_scrapers() {
+        let response = metrics_response(crate::test_support::app_state()).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("metrics body");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 metrics");
+
+        assert!(body.contains("rustchan_requests_total"));
+        assert!(body.contains("rustchan_job_queue_pending"));
+        assert!(body.contains("rustchan_database_schema_valid{version=\"1.3.0\"} 1"));
+    }
 }
