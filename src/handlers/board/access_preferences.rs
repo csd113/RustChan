@@ -514,14 +514,22 @@ pub fn ensure_csrf_for_request(
     ensure_csrf_with_secure(jar, should_set_public_secure_cookie(headers, context))
 }
 
+#[derive(serde::Deserialize)]
+pub struct ThemePreferenceQuery {
+    pub return_to: Option<String>,
+    #[serde(rename = "_csrf")]
+    pub csrf: Option<String>,
+}
+
 pub async fn set_theme(
     Path(theme): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
+    Query(params): Query<ThemePreferenceQuery>,
     jar: CookieJar,
     headers: HeaderMap,
 ) -> Result<Response> {
     let theme = crate::templates::normalize_theme_slug(&theme)
         .ok_or_else(|| AppError::BadRequest("Unknown theme.".into()))?;
+    check_csrf_jar(&jar, params.csrf.as_deref())?;
 
     let mut cookie = Cookie::new(USER_THEME_COOKIE, theme.to_string());
     cookie.set_http_only(false);
@@ -540,8 +548,9 @@ pub async fn set_theme(
     }
 
     let redirect_to = params
-        .get("return_to")
-        .map(|value| safe_return_to(Some(value.as_str()), "/"))
+        .return_to
+        .as_deref()
+        .map(|value| safe_return_to(Some(value), "/"))
         .or_else(|| safe_referer_return_to(&headers))
         .unwrap_or_else(|| "/".to_owned());
     Ok((jar, Redirect::to(&redirect_to)).into_response())

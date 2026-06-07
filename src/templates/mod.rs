@@ -699,9 +699,10 @@ pub fn base_layout_with_preferences(
     let active_theme_value_attr = format!(r#" data-active-theme="{}""#, escape_html(&active_theme));
     let theme_href = |theme: &str| {
         format!(
-            "/theme/{}?return_to={}",
+            "/theme/{}?return_to={}&_csrf={}",
             escape_html(theme),
-            urlencoding_simple(current_path)
+            urlencoding_simple(current_path),
+            urlencoding_simple(csrf_token)
         )
     };
     let stylesheet_href = static_asset_url("/static/style.css");

@@ -2918,6 +2918,7 @@ async fn theme_redirect_rejects_external_referer_fallback() {
             Request::builder()
                 .method("GET")
                 .uri("/theme/forest")
+                .header(header::COOKIE, "csrf_token=csrf123")
                 .header(header::REFERER, "https://evil.example/secret/catalog")
                 .body(Body::empty())
                 .expect("request"),
@@ -2925,14 +2926,57 @@ async fn theme_redirect_rejects_external_referer_fallback() {
         .await
         .expect("response");
 
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn theme_redirect_requires_csrf_before_setting_cookie() {
+    let router = Router::new()
+        .route("/theme/{theme}", get(crate::handlers::board::set_theme))
+        .with_state(crate::test_support::app_state());
+
+    let rejected = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/theme/forest?return_to=%2Fsecret%2Fcatalog")
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("rejected response");
+
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    assert!(rejected.headers().get(header::SET_COOKIE).is_none());
+
+    let accepted = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/theme/forest?return_to=%2Fsecret%2Fcatalog&_csrf=csrf123")
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("accepted response");
+
+    assert_eq!(accepted.status(), StatusCode::SEE_OTHER);
     assert_eq!(
-        response
+        accepted
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok()),
-        Some("/")
+        Some("/secret/catalog")
     );
+    assert!(accepted
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| value.starts_with("rustchan_theme=forest;")));
 }
 
 #[test]
