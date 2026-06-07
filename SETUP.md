@@ -413,6 +413,19 @@ This means:
 - HTTPS support is configured but disabled until you turn it on
 - when enabled, RustChan can generate a local self-signed development certificate
 
+## Observability Endpoints
+
+`/healthz` is public and intentionally minimal. `/readyz` returns only a readiness status by default, and `/metrics` returns `404` unless explicitly enabled.
+
+Only enable detailed readiness or metrics for a trusted scrape path:
+
+```toml
+public_readiness_details = true
+public_metrics_enabled = true
+```
+
+Detailed readiness and metrics include operational state such as database schema health, backup freshness, media backlog, maintenance state, and Tor readiness. If you expose them, use a reverse-proxy allowlist, private network, or equivalent network boundary. Tor-facing deployments should keep the defaults unless you intentionally monitor those endpoints externally.
+
 ## Default Settings
 
 | # | Setting | Scope | Default | Enabled by default? | Admin? | Config? | Notes |
@@ -442,6 +455,8 @@ This means:
 | 51 | ACME staging | TLS | `true` | true | No | Yes | Applies if the ACME section is enabled and the field is omitted. |
 | 53 | Built-in Tor support | Tor | `true` | true | No | Yes | Generated config enables Tor support by default. |
 | 54 | Tor-only mode | Tor | `false` | false | No | Yes | Keeps clearnet access on unless you explicitly disable it. |
+| 55 | Public detailed readiness | observability | `false` | false | No | Yes | Keep off unless `/readyz` is behind a trusted scrape path. |
+| 56 | Public metrics | observability | `false` | false | No | Yes | Keep off unless `/metrics` is behind a trusted scrape path. |
 | 60 | Include Tor hidden-service keys in automatic full backups | backup / Tor | `true` | true | Yes | Yes | Admin saves rewrite `settings.toml`; existing installs keep their current configured value until changed. |
 | 66 | Archive before prune | maintenance / archive | `true` | true | No | Yes | Global override: prune archives instead of hard-deletes. |
 | 72 | ChanNet API key set | ChanNet | `""` | false | No | Yes | Empty disables the protected ChanNet endpoints. |
