@@ -8,6 +8,8 @@ All notable changes to RustChan will be documented in this file.
 - Improved secure-cookie handling across HTTP, HTTPS, trusted-proxy HTTPS, admin sessions, board access cookies, CSRF cookies, and owned-post cookies.
 - Added no-JS fallbacks and accessibility polish for posting, reporting, catalog actions, board preferences, moderation controls, and own-post edit/delete flows.
 - Hardened upload handling for empty file controls, zero-byte named uploads, empty thumbnail payloads, invalid media, and cross-board media deduplication.
+- Tightened post upload validation so rejected media now returns semantic HTTP statuses for JS and no-JS submissions, exact-limit PDFs are accepted while cap + 1 PDFs are rejected, and malformed ADTS AAC is rejected before storage or background job creation.
+- Fixed late-cycle no-JS and pending-media regressions: Firefox no-JS theme changes persist through safe local redirects, and thread update controls expose a stable `data-action="fetch-updates"` hook for pending-media refreshes.
 - Improved activity badge cache behavior, especially on mobile WebKit and browser back/forward navigation.
 - Hardened settings validation so invalid config values fail closed instead of silently falling back.
 - Squashed the pre-release internal database migration ladder into a clean `1.3.0` baseline schema. Fresh databases now install that baseline directly, structurally matching in-development databases are stamped as schema version `1.3.0`, and partial or unknown schemas fail closed with diagnostics instead of blind migration attempts.
