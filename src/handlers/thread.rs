@@ -383,17 +383,23 @@ pub async fn post_reply(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
-    // BadRequest → re-render the thread page with an inline error banner so the
-    // user sees the message in context (e.g. "wait for captcha to solve") without
-    // being redirected to a separate error page and losing their scroll position.
+    // Expected post validation errors re-render the thread page with an inline
+    // error banner so the user sees the message in context without being
+    // redirected to a separate error page and losing their scroll position.
     let submit_result = match result {
         Ok(submit_result) => submit_result,
-        Err(AppError::BadRequest(msg)) => {
+        Err(error) => {
+            let (status, msg) = match crate::handlers::board::handled_post_error_status(error) {
+                Ok(handled) => handled,
+                Err(error) => {
+                    if xhr_request {
+                        return crate::handlers::board::xhr_post_error_response(error);
+                    }
+                    return Err(error);
+                }
+            };
             if xhr_request {
-                return crate::handlers::board::xhr_handled_error_response(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    &msg,
-                );
+                return crate::handlers::board::xhr_error_response(status, &msg);
             }
             let db_pool = state.db.clone();
             let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
@@ -435,14 +441,8 @@ pub async fn post_reply(
             .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
             let mut resp = axum::response::Html(html).into_response();
-            *resp.status_mut() = axum::http::StatusCode::UNPROCESSABLE_ENTITY;
+            *resp.status_mut() = status;
             return Ok(resp);
-        }
-        Err(error) => {
-            if xhr_request {
-                return crate::handlers::board::xhr_post_error_response(error);
-            }
-            return Err(error);
         }
     };
 
@@ -1613,6 +1613,85 @@ mod tests {
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
+    #[tokio::test]
+    async fn post_reply_rejects_mime_mismatch_with_415_inline_error() {
+        let state = crate::test_support::app_state();
+        let (board_id, thread_id) = {
+            let conn = state.db.get().expect("db connection");
+            let board_id =
+                crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+            let post = crate::db::NewPost {
+                thread_id: 0,
+                board_id,
+                name: "anon".to_owned(),
+                tripcode: None,
+                subject: Some("subject".to_owned()),
+                body: "op".to_owned(),
+                body_html: "op".to_owned(),
+                ip_hash: None,
+                file_path: None,
+                file_name: None,
+                file_size: None,
+                thumb_path: None,
+                mime_type: None,
+                media_type: None,
+                audio_file_path: None,
+                audio_file_name: None,
+                audio_file_size: None,
+                audio_mime_type: None,
+                deletion_token: "token".to_owned(),
+                is_op: true,
+            };
+            let (thread_id, _, _) = crate::db::create_thread_with_optional_poll(
+                &conn,
+                board_id,
+                Some("subject"),
+                &post,
+                "",
+                None,
+                None,
+            )
+            .expect("create thread");
+            (board_id, thread_id)
+        };
+        assert!(board_id > 0);
+
+        let router = Router::new()
+            .route("/{board}/thread/{id}", post(super::post_reply))
+            .with_state(state);
+        let (boundary, body) = crate::test_support::multipart_body(
+            &[("_csrf", "csrf123"), ("body", "bad media reply")],
+            Some(("file", "fake.png", b"plain text", "image/png")),
+        );
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/test/thread/{thread_id}"))
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("utf8 body");
+        assert!(body.contains("post-error-banner"));
+        assert!(body.contains("File type not allowed"));
+    }
+
     fn seed_owned_post(
         state: &crate::middleware::AppState,
         allow_editing: bool,
@@ -1933,7 +2012,7 @@ mod tests {
             .await
             .expect("reply response");
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             response
                 .headers()

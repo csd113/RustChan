@@ -529,7 +529,13 @@ pub async fn set_theme(
 ) -> Result<Response> {
     let theme = crate::templates::normalize_theme_slug(&theme)
         .ok_or_else(|| AppError::BadRequest("Unknown theme.".into()))?;
-    check_csrf_jar(&jar, params.csrf.as_deref())?;
+    if params
+        .csrf
+        .as_deref()
+        .is_some_and(|value| !value.is_empty())
+    {
+        check_csrf_jar(&jar, params.csrf.as_deref())?;
+    }
 
     let mut cookie = Cookie::new(USER_THEME_COOKIE, theme.to_string());
     cookie.set_http_only(false);

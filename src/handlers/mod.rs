@@ -549,7 +549,7 @@ pub fn process_primary_upload(
         ffprobe_available,
         allow_any_files,
     )
-    .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    .map_err(|error| classify_upload_error(&error))?;
     let detected_media = crate::models::MediaType::from_mime(&detected_mime);
 
     match detected_media {
@@ -705,7 +705,7 @@ fn temp_upload_mime(
         ffprobe_available,
         allow_any_files,
     )
-    .map_err(|error| AppError::BadRequest(error.to_string()))
+    .map_err(|error| classify_upload_error(&error))
 }
 
 /// Process the secondary audio file for an image+audio combo upload.
@@ -1108,6 +1108,16 @@ trailer << /Root 1 0 R >>
         Ok("ok")
     }
 
+    async fn parse_pdf_limit(
+        multipart: axum::extract::Multipart,
+    ) -> crate::error::Result<&'static str> {
+        let form =
+            parse_post_multipart(multipart, Some("csrf123"), 1_024, 1_024, 1_024, 2_048).await?;
+        let (upload, _) = form.file.expect("file upload");
+        assert_eq!(upload.size_bytes, 2_048);
+        Ok("ok")
+    }
+
     fn multipart_body_with_files(
         fields: &[(&str, &str)],
         files: &[(&str, &str, &[u8], &str)],
@@ -1196,6 +1206,56 @@ trailer << /Root 1 0 R >>
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn multipart_parser_counts_file_payload_not_multipart_overhead_for_exact_limit() {
+        let router = Router::new().route("/parse", post(parse_pdf_limit));
+        let pdf = vec![b'p'; 2_048];
+        let (boundary, body) = multipart_body_with_files(
+            &[("_csrf", "csrf123"), ("body", "pdf")],
+            &[("file", "exact.pdf", &pdf, "application/pdf")],
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/parse")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let over_pdf = vec![b'p'; 2_049];
+        let (boundary, body) = multipart_body_with_files(
+            &[("_csrf", "csrf123"), ("body", "pdf")],
+            &[("file", "over.pdf", &over_pdf, "application/pdf")],
+        );
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/parse")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

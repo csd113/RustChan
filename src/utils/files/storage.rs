@@ -340,6 +340,9 @@ fn validate_upload(
         media_type,
         crate::models::MediaType::Audio | crate::models::MediaType::Video
     ) {
+        if mime_type == "audio/aac" {
+            validate_adts_aac_structure(input_path)?;
+        }
         validate_av_stream_kind(
             input_path,
             &mime_type,
@@ -834,6 +837,74 @@ fn validate_av_stream_kind(
     anyhow::bail!("File appears to be {mime_type}, but contains only audio streams.");
 }
 
+fn validate_adts_aac_structure(input_path: &Path) -> Result<()> {
+    let data = std::fs::read(input_path)
+        .with_context(|| format!("Failed to read {} for AAC validation", input_path.display()))?;
+    validate_adts_aac_bytes(&data)
+}
+
+fn validate_adts_aac_bytes(data: &[u8]) -> Result<()> {
+    const MALFORMED_AAC_ERROR: &str =
+        "File appears to be audio/aac, but its ADTS stream is malformed or incomplete.";
+    const ADTS_HEADER_BYTES: usize = 7;
+    const ADTS_HEADER_BYTES_WITH_CRC: usize = 9;
+
+    if data.len() < ADTS_HEADER_BYTES {
+        anyhow::bail!(MALFORMED_AAC_ERROR);
+    }
+
+    let mut offset = 0usize;
+    let mut frames = 0usize;
+    while offset < data.len() {
+        let remaining = data.len().saturating_sub(offset);
+        if remaining < ADTS_HEADER_BYTES {
+            anyhow::bail!(MALFORMED_AAC_ERROR);
+        }
+        let frame = data
+            .get(offset..)
+            .ok_or_else(|| anyhow::anyhow!(MALFORMED_AAC_ERROR))?;
+        let header: &[u8; ADTS_HEADER_BYTES] = frame
+            .get(..ADTS_HEADER_BYTES)
+            .and_then(|header| header.try_into().ok())
+            .ok_or_else(|| anyhow::anyhow!(MALFORMED_AAC_ERROR))?;
+        let [b0, b1, b2, b3, b4, b5, _b6] = *header;
+        if b0 != 0xFF || (b1 & 0xF0) != 0xF0 {
+            anyhow::bail!(MALFORMED_AAC_ERROR);
+        }
+        let layer = (b1 & 0x06) >> 1;
+        if layer != 0 {
+            anyhow::bail!(MALFORMED_AAC_ERROR);
+        }
+        let protection_absent = (b1 & 0x01) != 0;
+        let profile = (b2 & 0xC0) >> 6;
+        let sampling_frequency_index = (b2 & 0x3C) >> 2;
+        let channel_configuration = ((b2 & 0x01) << 2) | ((b3 & 0xC0) >> 6);
+        if profile == 3 || sampling_frequency_index == 15 || channel_configuration > 7 {
+            anyhow::bail!(MALFORMED_AAC_ERROR);
+        }
+
+        let header_len = if protection_absent {
+            ADTS_HEADER_BYTES
+        } else {
+            ADTS_HEADER_BYTES_WITH_CRC
+        };
+        let frame_len = ((usize::from(b3 & 0x03)) << 11)
+            | (usize::from(b4) << 3)
+            | (usize::from(b5 & 0xE0) >> 5);
+        if frame_len < header_len || frame_len > remaining {
+            anyhow::bail!(MALFORMED_AAC_ERROR);
+        }
+
+        frames = frames.saturating_add(1);
+        offset = offset.saturating_add(frame_len);
+    }
+
+    if frames == 0 {
+        anyhow::bail!(MALFORMED_AAC_ERROR);
+    }
+    Ok(())
+}
+
 fn apply_thumb_exif_orientation(thumb_path: &Path, orientation: u32) {
     if orientation <= 1 {
         return;
@@ -928,7 +999,7 @@ fn mime_to_ext(mime: &str) -> &'static str {
 mod tests {
     use super::{
         delete_file_checked, save_audio_with_image_thumb_from_path, save_upload_from_path,
-        SaveUploadOptions,
+        validate_adts_aac_bytes, SaveUploadOptions,
     };
     use std::path::Path;
     use std::process::{Command, Stdio};
@@ -1018,12 +1089,72 @@ trailer << /Root 1 0 R >>
         assert!(!thumbnail_path.exists());
     }
 
+    #[test]
+    fn pdf_size_limit_is_inclusive_for_original_payload() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let input_path = tempdir.path().join("exact.pdf");
+        let pdf = valid_pdf();
+        std::fs::write(&input_path, pdf).expect("write pdf");
+        let mut options = test_upload_options(tempdir.path(), "exact.pdf");
+        options.max_pdf_size = pdf.len();
+
+        let uploaded = save_upload_from_path(&input_path, sniff(pdf), pdf.len(), &options)
+            .expect("PDF exactly at limit should upload");
+        assert_eq!(uploaded.mime_type, "application/pdf");
+
+        let over_path = tempdir.path().join("over.pdf");
+        let mut over_pdf = pdf.to_vec();
+        over_pdf.push(b'\n');
+        std::fs::write(&over_path, &over_pdf).expect("write over-limit pdf");
+        let Err(error) =
+            save_upload_from_path(&over_path, sniff(&over_pdf), over_pdf.len(), &options)
+        else {
+            panic!("PDF over limit should be rejected");
+        };
+        assert!(error.to_string().contains("Maximum PDF upload size is"));
+    }
+
     fn valid_webm_header() -> &'static [u8] {
         b"\x1a\x45\xdf\xa3\x00\x00\x00\x00\x00\x00\x42\x82\x84webm\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
     }
 
     fn sniff(bytes: &[u8]) -> &[u8] {
         bytes.get(..bytes.len().min(512)).unwrap_or(bytes)
+    }
+
+    fn adts_aac_fixture(size: usize) -> Vec<u8> {
+        assert!(size >= 7);
+        assert!(size <= 0x1FFF);
+        let header = [
+            0xFF,
+            0xF1,
+            0x50,
+            0x80 | u8::try_from((size >> 11) & 0x03).expect("frame length high bits"),
+            u8::try_from((size >> 3) & 0xFF).expect("frame length middle bits"),
+            u8::try_from((size & 0x07) << 5).expect("frame length low bits") | 0x1F,
+            0xFC,
+        ];
+        let mut bytes = Vec::with_capacity(size);
+        bytes.extend_from_slice(&header);
+        bytes.resize(size, 0);
+        for (idx, byte) in bytes.iter_mut().enumerate().skip(7) {
+            *byte = u8::try_from(idx % 251).expect("payload byte");
+        }
+        bytes
+    }
+
+    #[test]
+    fn adts_aac_validation_rejects_prefix_only_payload() {
+        let malformed = [0xFF, 0xF1, 0x50, 0x80, 0x93, 0xD6, 0x3D, 0x78, 0x77, 0x6A];
+        let error = validate_adts_aac_bytes(&malformed)
+            .expect_err("random bytes with an AAC prefix should be rejected");
+        assert!(error.to_string().contains("ADTS stream is malformed"));
+    }
+
+    #[test]
+    fn adts_aac_validation_accepts_complete_frame_sequence() {
+        let aac = adts_aac_fixture(128);
+        validate_adts_aac_bytes(&aac).expect("complete ADTS frame should validate");
     }
 
     fn ffmpeg_available() -> bool {

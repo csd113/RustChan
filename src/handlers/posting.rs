@@ -877,6 +877,18 @@ mod tests {
         b"fLaC\x00\x00\x00\x22tiny test flac bytes".to_vec()
     }
 
+    fn malformed_aac_bytes() -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(2_048);
+        bytes.extend_from_slice(&[0xFF, 0xF1, 0x50, 0x80]);
+        bytes.resize(2_048, 0);
+        let mut state = 4_u32;
+        for byte in bytes.iter_mut().skip(4) {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *byte = u8::try_from(state & 0xFF).expect("masked byte fits in u8");
+        }
+        bytes
+    }
+
     fn webm_header_bytes() -> Vec<u8> {
         b"\x1a\x45\xdf\xa3\x00\x00\x00\x00\x00\x00\x42\x82\x84webm\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec()
     }
@@ -1251,6 +1263,46 @@ mod tests {
         assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
         assert!(!upload_dir.path().join(TEST_BOARD).exists());
         assert_no_partial_post_rows(&conn);
+    }
+
+    #[test]
+    fn submit_post_rejects_malformed_aac_without_jobs_or_rows() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET allow_audio = 1 WHERE short_name = ?1",
+            rusqlite::params![TEST_BOARD],
+        )
+        .expect("enable audio");
+        let mut command = thread_command(
+            TEST_BOARD,
+            "malformed-aac",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+        );
+        command.file_data = Some(temp_upload("broken.aac", &malformed_aac_bytes()));
+        command.ffmpeg_available = true;
+
+        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+            Ok(result) => panic!("malformed AAC should reject, got {}", result.redirect_url),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::BadRequest(message) => {
+                assert!(message.contains("ADTS stream is malformed"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert!(!upload_dir.path().join(TEST_BOARD).exists());
+        assert_no_partial_post_rows(&conn);
+        let job_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row.get(0))
+            .expect("job count");
+        assert_eq!(job_count, 0);
     }
 
     #[test]
