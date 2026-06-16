@@ -60,9 +60,9 @@ mod http;
 mod listing;
 mod restore_board;
 mod restore_full;
+mod saved_backup;
 mod types;
-mod v4;
-pub(crate) use v4::BackupStorageMode;
+pub(crate) use saved_backup::BackupStorageMode;
 
 use common::{
     copy_limited, create_staging_dir, extract_uploads_to_dir, log_backup_phase,
@@ -1642,7 +1642,7 @@ mod tests {
             }
         }
 
-        let backup_root = crate::handlers::admin::backup::v4::backups_root_dir();
+        let backup_root = crate::handlers::admin::backup::saved_backup::backups_root_dir();
         std::fs::create_dir_all(&backup_root).expect("backup root");
         let older_completed_dir = backup_root.join("2099-01-01_000001_full-site-newer-mtime-test");
         let newer_dir_mtime_dir =
@@ -1651,18 +1651,18 @@ mod tests {
             older_completed_dir.clone(),
             newer_dir_mtime_dir.clone(),
         ]);
-        crate::handlers::admin::backup::v4::write_saved_v4_fixture_for_test(
+        crate::handlers::admin::backup::saved_backup::write_saved_v4_fixture_for_test(
             &older_completed_dir,
-            crate::handlers::admin::backup::v4::BackupScope::FullSite,
-            crate::handlers::admin::backup::v4::board_fixture_files_for_test(),
+            crate::handlers::admin::backup::saved_backup::BackupScope::FullSite,
+            crate::handlers::admin::backup::saved_backup::board_fixture_files_for_test(),
             Some(b"sqlite".to_vec()),
             4_102_444_800,
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
-        crate::handlers::admin::backup::v4::write_saved_v4_fixture_for_test(
+        crate::handlers::admin::backup::saved_backup::write_saved_v4_fixture_for_test(
             &newer_dir_mtime_dir,
-            crate::handlers::admin::backup::v4::BackupScope::FullSite,
-            crate::handlers::admin::backup::v4::board_fixture_files_for_test(),
+            crate::handlers::admin::backup::saved_backup::BackupScope::FullSite,
+            crate::handlers::admin::backup::saved_backup::board_fixture_files_for_test(),
             Some(b"sqlite".to_vec()),
             4_102_444_700,
         );

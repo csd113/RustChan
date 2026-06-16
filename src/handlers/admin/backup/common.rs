@@ -777,7 +777,7 @@ mod tests {
     fn verify_full_backup_zip_accepts_manifest_backed_archive() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let zip_path = temp_dir.path().join("full.zip");
-        let db_bytes = super::super::v4::valid_db_snapshot_for_test();
+        let db_bytes = super::super::saved_backup::valid_db_snapshot_for_test();
         let manifest = FullBackupManifest {
             version: 1,
             generated_at: 1_700_000_000,
@@ -860,7 +860,7 @@ mod tests {
     fn verify_full_backup_zip_defaults_legacy_tor_metadata_to_not_included() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let zip_path = temp_dir.path().join("legacy-full.zip");
-        let db_bytes = super::super::v4::valid_db_snapshot_for_test();
+        let db_bytes = super::super::saved_backup::valid_db_snapshot_for_test();
         let manifest = json!({
             "version": 2,
             "generated_at": 1_700_000_000_i64,
@@ -890,7 +890,7 @@ mod tests {
     fn verify_full_backup_zip_rejects_tor_manifest_mismatch() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let zip_path = temp_dir.path().join("tor-mismatch.zip");
-        let db_bytes = super::super::v4::valid_db_snapshot_for_test();
+        let db_bytes = super::super::saved_backup::valid_db_snapshot_for_test();
         let manifest = FullBackupManifest {
             version: 3,
             generated_at: 1_700_000_000,

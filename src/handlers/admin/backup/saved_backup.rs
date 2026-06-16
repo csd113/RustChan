@@ -1,3 +1,5 @@
+//! Saved Backup v4 format definitions, filesystem layout helpers, and strict verification.
+
 use crate::error::{AppError, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};

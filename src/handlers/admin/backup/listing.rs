@@ -47,7 +47,7 @@ fn current_dir_modified(dir: &Path) -> Option<SystemTime> {
 
 fn current_source_modified(dir: &Path) -> Option<SystemTime> {
     let mut modified = current_dir_modified(dir);
-    let root_modified = current_dir_modified(&v4::backups_root_dir());
+    let root_modified = current_dir_modified(&saved_backup::backups_root_dir());
     if root_modified > modified {
         modified = root_modified;
     }
@@ -69,31 +69,31 @@ fn modified_string_from_epoch(epoch: Option<i64>) -> String {
         .unwrap_or_default()
 }
 
-const fn metadata_scope_matches(kind: BackupListKind, scope: v4::BackupScope) -> bool {
+const fn metadata_scope_matches(kind: BackupListKind, scope: saved_backup::BackupScope) -> bool {
     match kind {
         BackupListKind::Full => matches!(
             scope,
-            v4::BackupScope::FullSite
-                | v4::BackupScope::SelectedBoards
-                | v4::BackupScope::PreMaintenance
+            saved_backup::BackupScope::FullSite
+                | saved_backup::BackupScope::SelectedBoards
+                | saved_backup::BackupScope::PreMaintenance
         ),
-        BackupListKind::Board => matches!(scope, v4::BackupScope::Board),
+        BackupListKind::Board => matches!(scope, saved_backup::BackupScope::Board),
     }
 }
 
-fn scope_label(scope: v4::BackupScope) -> String {
+fn scope_label(scope: saved_backup::BackupScope) -> String {
     match scope {
-        v4::BackupScope::FullSite => "Full site".to_owned(),
-        v4::BackupScope::Board => "Board".to_owned(),
-        v4::BackupScope::SelectedBoards => "Selected boards".to_owned(),
-        v4::BackupScope::PreMaintenance => "Pre-maintenance".to_owned(),
+        saved_backup::BackupScope::FullSite => "Full site".to_owned(),
+        saved_backup::BackupScope::Board => "Board".to_owned(),
+        saved_backup::BackupScope::SelectedBoards => "Selected boards".to_owned(),
+        saved_backup::BackupScope::PreMaintenance => "Pre-maintenance".to_owned(),
     }
 }
 
 fn validate_v4_listing_metadata(
-    layout: &v4::SavedBackupLayout,
-    metadata: &v4::BackupMetadata,
-    manifest: &v4::BackupManifest,
+    layout: &saved_backup::SavedBackupLayout,
+    metadata: &saved_backup::BackupMetadata,
+    manifest: &saved_backup::BackupManifest,
 ) -> Result<()> {
     if metadata.backup_id != manifest.backup_id {
         return Err(AppError::BadRequest(format!(
@@ -121,7 +121,7 @@ fn validate_v4_listing_metadata(
     }
     if !matches!(
         metadata.storage_mode,
-        v4::BackupStorageMode::Directory | v4::BackupStorageMode::SplitZip
+        saved_backup::BackupStorageMode::Directory | saved_backup::BackupStorageMode::SplitZip
     ) {
         return Err(AppError::BadRequest(format!(
             "Saved backup {} uses unsupported saved-v4 storage mode '{}'.",
@@ -170,15 +170,17 @@ fn validate_v4_listing_metadata(
     }
 
     match metadata.storage_mode {
-        v4::BackupStorageMode::Directory if !manifest.parts.is_empty() => {
+        saved_backup::BackupStorageMode::Directory if !manifest.parts.is_empty() => {
             Err(AppError::BadRequest(format!(
                 "Saved backup {} is directory mode but contains split ZIP metadata.",
                 layout.backup_ref
             )))
         }
-        v4::BackupStorageMode::SplitZip => validate_split_zip_listing_metadata(layout, manifest),
-        v4::BackupStorageMode::Directory => Ok(()),
-        v4::BackupStorageMode::SingleZip | v4::BackupStorageMode::LegacyZip => {
+        saved_backup::BackupStorageMode::SplitZip => {
+            validate_split_zip_listing_metadata(layout, manifest)
+        }
+        saved_backup::BackupStorageMode::Directory => Ok(()),
+        saved_backup::BackupStorageMode::SingleZip | saved_backup::BackupStorageMode::LegacyZip => {
             Err(AppError::BadRequest(format!(
                 "Saved backup {} uses unsupported saved-v4 storage mode '{}'.",
                 layout.backup_ref,
@@ -189,8 +191,8 @@ fn validate_v4_listing_metadata(
 }
 
 fn validate_split_zip_listing_metadata(
-    layout: &v4::SavedBackupLayout,
-    manifest: &v4::BackupManifest,
+    layout: &saved_backup::SavedBackupLayout,
+    manifest: &saved_backup::BackupManifest,
 ) -> Result<()> {
     if manifest.parts.is_empty() {
         return Err(AppError::BadRequest(format!(
@@ -265,7 +267,7 @@ fn validate_split_zip_listing_metadata(
                 layout.backup_ref, entry.logical_path
             )));
         }
-        v4::sanitize_logical_path(&entry.logical_path)?;
+        saved_backup::sanitize_logical_path(&entry.logical_path)?;
         let Some(part_filename) = entry.zip_part.as_deref() else {
             continue;
         };
@@ -279,18 +281,18 @@ fn validate_split_zip_listing_metadata(
             .zip_entry_path
             .as_deref()
             .unwrap_or(&entry.logical_path);
-        v4::sanitize_logical_path(entry_path)?;
+        saved_backup::sanitize_logical_path(entry_path)?;
     }
     Ok(())
 }
 
 fn list_v4_backups(kind: BackupListKind) -> Vec<BackupInfo> {
     let mut backups = Vec::new();
-    for layout in v4::iter_saved_backup_layouts() {
-        let Ok(metadata) = v4::load_metadata(&layout.metadata_path) else {
+    for layout in saved_backup::iter_saved_backup_layouts() {
+        let Ok(metadata) = saved_backup::load_metadata(&layout.metadata_path) else {
             continue;
         };
-        let Ok(manifest) = v4::load_manifest(&layout.manifest_path) else {
+        let Ok(manifest) = saved_backup::load_manifest(&layout.manifest_path) else {
             continue;
         };
         let listing_validation = validate_v4_listing_metadata(&layout, &metadata, &manifest);
@@ -342,7 +344,8 @@ fn list_v4_backups(kind: BackupListKind) -> Vec<BackupInfo> {
             boards: metadata.included_boards.clone(),
             server_path: layout.root_dir.display().to_string(),
             manifest_path: layout.manifest_path.display().to_string(),
-            downloadable_archive: metadata.storage_mode == v4::BackupStorageMode::SingleZip,
+            downloadable_archive: metadata.storage_mode
+                == saved_backup::BackupStorageMode::SingleZip,
         });
 
         let _ = manifest;
@@ -467,7 +470,7 @@ pub fn list_backup_files(dir: &std::path::Path, kind: BackupListKind) -> Vec<Bac
 }
 
 pub(super) fn safe_saved_backup_dir_for_delete(path: &Path) -> Result<()> {
-    let backup_root = v4::backups_root_dir();
+    let backup_root = saved_backup::backups_root_dir();
     crate::utils::fs_security::assert_dir_no_symlink(path).map_err(|error| {
         AppError::BadRequest(format!(
             "Saved backup directory {} is unsafe to delete: {error}",
@@ -574,7 +577,7 @@ mod tests {
 
     #[test]
     fn safe_saved_backup_dir_for_delete_rejects_paths_outside_backup_root() {
-        let backup_root = v4::backups_root_dir();
+        let backup_root = saved_backup::backups_root_dir();
         std::fs::create_dir_all(&backup_root).expect("backup root");
         let data_dir = backup_root.parent().expect("backup root has parent");
         let outside = tempfile::Builder::new()

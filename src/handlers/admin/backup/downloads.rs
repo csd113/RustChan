@@ -192,12 +192,12 @@ pub async fn download_backup(
         }
         let safe_part = sanitize_backup_zip_filename(part_name)?;
         let backup_root = crate::config::backups_dir().join(&safe_filename);
-        let expected_scopes: &[v4::BackupScope] = match kind.as_str() {
-            "full" => &[v4::BackupScope::FullSite],
-            "board" => &[v4::BackupScope::Board],
+        let expected_scopes: &[saved_backup::BackupScope] = match kind.as_str() {
+            "full" => &[saved_backup::BackupScope::FullSite],
+            "board" => &[saved_backup::BackupScope::Board],
             _ => unreachable!("validated above"),
         };
-        let verified = v4::verify_saved_v4_root(&backup_root, expected_scopes)?;
+        let verified = saved_backup::verify_saved_v4_root(&backup_root, expected_scopes)?;
         let part_filename = format!("parts/{safe_part}");
         let part = verified
             .manifest
@@ -221,7 +221,7 @@ pub async fn download_backup(
                 "Backup part size changed since verification.".into(),
             ));
         }
-        let file_sha256 = v4::sha256_hex_for_file(&resolved)?;
+        let file_sha256 = saved_backup::sha256_hex_for_file(&resolved)?;
         if file_sha256 != part.sha256 {
             return Err(AppError::BadRequest(
                 "Backup part checksum changed since verification.".into(),
