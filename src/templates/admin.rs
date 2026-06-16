@@ -49,7 +49,7 @@ pub fn admin_login_page(
   <input type="password" name="password" required autocomplete="current-password">
 </label>
 <div class="admin-login-actions">
-  <button type="submit">authenticate</button>
+  <button type="submit">Login</button>
 </div>
 </form>
 </div>"#,
