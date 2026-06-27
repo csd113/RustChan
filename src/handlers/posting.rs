@@ -439,6 +439,9 @@ pub fn submit_post(
             if thread.locked {
                 return Err(AppError::Forbidden("This thread is locked.".into()));
             }
+            if thread.archived {
+                return Err(AppError::Forbidden("This thread is archived.".into()));
+            }
 
             Some((*thread_id, *sage, thread.reply_count))
         }
@@ -641,7 +644,14 @@ pub fn submit_post(
             ) {
                 Ok(post_id) => post_id,
                 Err(error) => {
+                    let stale_state_error = error.to_string();
                     uploads.rollback_new_files(conn, &upload_dir)?;
+                    if stale_state_error.contains("This thread is locked.") {
+                        return Err(AppError::Forbidden("This thread is locked.".into()));
+                    }
+                    if stale_state_error.contains("This thread is archived.") {
+                        return Err(AppError::Forbidden("This thread is archived.".into()));
+                    }
                     return Err(error.into());
                 }
             };

@@ -32,6 +32,7 @@ use axum::{
     Json, Router,
 };
 use serde_json::json;
+use std::sync::Arc;
 
 // ── ChanError ─────────────────────────────────────────────────────────────────
 //
@@ -125,18 +126,20 @@ async fn json_body_limit_error(req: axum::http::Request<axum::body::Body>, next:
 // ─── ChanNet API key middleware ───────────────────────────────────────────────
 
 /// Middleware that enforces the pre-shared `X-ChanNet-Key` header on sensitive
-/// `ChanNet` endpoints (/chan/refresh and /chan/poll).
+/// `ChanNet` endpoints.
 ///
-/// These endpoints were previously unauthenticated. Any process
-/// that could reach the `ChanNet` bind address could trigger a full DB snapshot
-/// push (refresh) or pull-and-import from a remote node (poll) with no
-/// credentials. The API key is configured via `CHAN_NET_API_KEY` / settings.toml.
+/// Any process that can reach the `ChanNet` bind address can otherwise trigger
+/// snapshot export/import or gateway commands with no credentials. The API key
+/// is configured via `CHAN_NET_API_KEY` / settings.toml.
 ///
 /// If `chan_net_api_key` is empty the request is rejected with 403 Forbidden
 /// (the feature is intentionally disabled rather than wide open).
-async fn verify_chan_api_key(req: axum::extract::Request, next: Next) -> Response {
+async fn verify_chan_api_key(
+    axum::extract::State(expected): axum::extract::State<Arc<str>>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
     use subtle::ConstantTimeEq as _;
-    let expected = &crate::config::CONFIG.chan_net_api_key;
     if expected.is_empty() {
         // API key not configured — refuse the request to prevent accidental
         // exposure when an operator forgets to set the key.
@@ -167,9 +170,21 @@ async fn verify_chan_api_key(req: axum::extract::Request, next: Next) -> Respons
 /// being rejected as 413 before validation runs. The config default is
 /// `128 * 1024`. Do NOT set it below `34_000` bytes.
 pub fn chan_router(state: AppState) -> Router {
-    Router::new()
-        // ── Status ──────────────────────────────────────────────────────────
-        .route("/chan/status", get(status::chan_status))
+    chan_router_with_auth(
+        state,
+        Arc::from(CONFIG.chan_net_api_key.as_str()),
+        CONFIG.chan_net_command_max_body,
+        CONFIG.chan_net_max_body,
+    )
+}
+
+fn chan_router_with_auth(
+    state: AppState,
+    api_key: Arc<str>,
+    command_max_body: usize,
+    import_max_body: usize,
+) -> Router {
+    let protected_routes = Router::new()
         // ── RustWave gateway — raw JSON in, ZIP data package out ─────────────
         //
         // The json_body_limit_error middleware is applied *outside* the
@@ -178,23 +193,143 @@ pub fn chan_router(state: AppState) -> Router {
         .route(
             "/chan/command",
             post(command::chan_command)
-                .layer(DefaultBodyLimit::max(CONFIG.chan_net_command_max_body))
+                .layer(DefaultBodyLimit::max(command_max_body))
                 .layer(middleware::from_fn(json_body_limit_error)),
         )
         // ── Federation sync — ZIP in, ZIP out ────────────────────────────────
         .route("/chan/export", post(export::chan_export))
         .route(
             "/chan/import",
-            post(import::chan_import).layer(DefaultBodyLimit::max(CONFIG.chan_net_max_body)),
+            post(import::chan_import).layer(DefaultBodyLimit::max(import_max_body)),
         )
-        // /chan/refresh and /chan/poll now require X-ChanNet-Key.
-        .route(
-            "/chan/refresh",
-            post(refresh::chan_refresh).layer(middleware::from_fn(verify_chan_api_key)),
-        )
-        .route(
-            "/chan/poll",
-            post(poll::chan_poll).layer(middleware::from_fn(verify_chan_api_key)),
-        )
+        .route("/chan/refresh", post(refresh::chan_refresh))
+        .route("/chan/poll", post(poll::chan_poll))
+        .route_layer(middleware::from_fn_with_state(api_key, verify_chan_api_key));
+
+    Router::new()
+        // ── Status ──────────────────────────────────────────────────────────
+        .route("/chan/status", get(status::chan_status))
+        .merge(protected_routes)
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chan_router_with_auth;
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+    };
+    use std::sync::Arc;
+    use tower::ServiceExt as _;
+
+    const TEST_KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn chan_test_state() -> crate::middleware::AppState {
+        let mut state = crate::test_support::app_state();
+        state.chan_ledger = Some(Arc::new(parking_lot::Mutex::new(
+            crate::chan_net::ledger::TxLedger::default(),
+        )));
+        state
+    }
+
+    fn chan_test_router(state: crate::middleware::AppState) -> axum::Router {
+        chan_router_with_auth(state, Arc::from(TEST_KEY), 128 * 1024, 10 * 1024 * 1024)
+    }
+
+    #[tokio::test]
+    async fn protected_chan_routes_reject_missing_and_wrong_key() {
+        let router = chan_test_router(chan_test_state());
+        let cases = [
+            ("/chan/command", Body::from(r#"{"type":"full_export"}"#)),
+            ("/chan/export", Body::empty()),
+            ("/chan/import", Body::from(Vec::<u8>::new())),
+        ];
+
+        for (path, body) in cases {
+            let missing = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(body)
+                        .expect("missing-key request"),
+                )
+                .await
+                .expect("missing-key response");
+            assert_eq!(missing.status(), StatusCode::UNAUTHORIZED, "{path}");
+
+            let wrong = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("X-ChanNet-Key", "wrong-key")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(r#"{"type":"full_export"}"#))
+                        .expect("wrong-key request"),
+                )
+                .await
+                .expect("wrong-key response");
+            assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_chan_routes_accept_correct_key() {
+        let state = chan_test_state();
+        let snapshot = {
+            let conn = state.db.get().expect("db connection");
+            crate::chan_net::snapshot::build_snapshot(&conn)
+                .expect("snapshot")
+                .0
+        };
+        let router = chan_test_router(state);
+
+        let command = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chan/command")
+                    .header("X-ChanNet-Key", TEST_KEY)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"type":"full_export"}"#))
+                    .expect("command request"),
+            )
+            .await
+            .expect("command response");
+        assert_eq!(command.status(), StatusCode::OK);
+
+        let export = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chan/export")
+                    .header("X-ChanNet-Key", TEST_KEY)
+                    .body(Body::empty())
+                    .expect("export request"),
+            )
+            .await
+            .expect("export response");
+        assert_eq!(export.status(), StatusCode::OK);
+
+        let import = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chan/import")
+                    .header("X-ChanNet-Key", TEST_KEY)
+                    .header(header::CONTENT_TYPE, "application/zip")
+                    .body(Body::from(snapshot))
+                    .expect("import request"),
+            )
+            .await
+            .expect("import response");
+        assert_eq!(import.status(), StatusCode::OK);
+    }
 }

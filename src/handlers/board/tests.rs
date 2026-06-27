@@ -2327,6 +2327,47 @@ async fn password_protected_board_does_not_leak_homepage_new_activity_badge() {
 }
 
 #[tokio::test]
+async fn thread_updates_rejects_thread_id_from_other_board() {
+    let state = crate::test_support::app_state();
+    let (_public_board_id, _public_thread_id) = seed_board_with_thread(&state, "pub", "public op");
+    let (secret_board_id, secret_thread_id) =
+        seed_board_with_thread(&state, "secret", "protected op");
+    {
+        let conn = state.db.get().expect("db connection");
+        let password_hash =
+            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+        conn.execute(
+            "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE id = ?3",
+            rusqlite::params!["view_password", password_hash, secret_board_id],
+        )
+        .expect("protect secret board");
+    }
+    create_reply_on_thread(
+        &state,
+        secret_board_id,
+        secret_thread_id,
+        "protected reply should not leak",
+    );
+    let router = activity_router(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/pub/thread/{secret_thread_id}/updates?since=0"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = response_body_string(response).await;
+    assert!(!body.contains("protected op"));
+    assert!(!body.contains("protected reply should not leak"));
+}
+
+#[tokio::test]
 async fn new_activity_pages_keep_private_no_store_cache_headers() {
     let state = crate::test_support::app_state();
     set_new_activity_settings(&state, true, true, true);

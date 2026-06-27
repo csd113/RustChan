@@ -163,9 +163,208 @@ fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Resul
     Ok(())
 }
 
+fn recompute_restored_post_body_html(conn: &rusqlite::Connection) -> Result<()> {
+    let posts = {
+        let mut stmt = conn
+            .prepare("SELECT id, body FROM posts")
+            .map_err(|error| {
+                AppError::BadRequest(format!("Restored database is invalid: {error}"))
+            })?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| {
+                AppError::BadRequest(format!("Restored database is invalid: {error}"))
+            })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| {
+                AppError::BadRequest(format!(
+                    "Restored database has an invalid post body row: {error}"
+                ))
+            })?
+    };
+
+    let mut update = conn
+        .prepare("UPDATE posts SET body_html = ?1 WHERE id = ?2")
+        .map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Prepare restored body_html update: {error}"
+            ))
+        })?;
+    for (post_id, body) in posts {
+        let body_html = render_restored_body_html(&body);
+        update
+            .execute(params![body_html, post_id])
+            .map_err(|error| {
+                AppError::Internal(anyhow::anyhow!(
+                    "Update restored body_html for post {post_id}: {error}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
 fn scrub_full_restore_runtime_state(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute("DELETE FROM admin_sessions", [])
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Clear restored sessions: {error}")))?;
+    Ok(())
+}
+
+struct FullRestoreTempPaths {
+    temp_db: PathBuf,
+    db_snapshot: PathBuf,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FULL_RESTORE_RUNTIME_TMP_ROOT_FOR_TEST: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn full_restore_runtime_tmp_dir() -> PathBuf {
+    FULL_RESTORE_RUNTIME_TMP_ROOT_FOR_TEST.with(|root| {
+        if let Some(path) = root.borrow().as_ref() {
+            path.clone()
+        } else {
+            crate::config::runtime_tmp_dir()
+        }
+    })
+}
+
+#[cfg(not(test))]
+fn full_restore_runtime_tmp_dir() -> PathBuf {
+    crate::config::runtime_tmp_dir()
+}
+
+struct FullRestoreTempCleanupGuard {
+    db_paths: [PathBuf; 2],
+}
+
+impl FullRestoreTempCleanupGuard {
+    fn new(paths: &FullRestoreTempPaths) -> Self {
+        Self {
+            db_paths: [paths.temp_db.clone(), paths.db_snapshot.clone()],
+        }
+    }
+}
+
+impl Drop for FullRestoreTempCleanupGuard {
+    fn drop(&mut self) {
+        for path in &self.db_paths {
+            remove_sqlite_db_and_sidecars(path);
+        }
+    }
+}
+
+fn sqlite_db_and_sidecar_paths(path: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![path.to_path_buf()];
+    let Some(file_name) = path.file_name() else {
+        return paths;
+    };
+
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar_name = file_name.to_os_string();
+        sidecar_name.push(suffix);
+        paths.push(path.with_file_name(sidecar_name));
+    }
+    paths
+}
+
+fn remove_sqlite_db_and_sidecars(path: &Path) {
+    for candidate in sqlite_db_and_sidecar_paths(path) {
+        if let Err(error) = std::fs::remove_file(&candidate) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                warn!(
+                    path = %candidate.display(),
+                    %error,
+                    "Failed to remove full restore temporary SQLite file"
+                );
+            }
+        }
+    }
+}
+
+fn prepare_full_restore_temp_paths(tmp_id: &str) -> Result<FullRestoreTempPaths> {
+    prepare_full_restore_temp_paths_in(&full_restore_runtime_tmp_dir(), tmp_id)
+}
+
+fn prepare_full_restore_temp_paths_in(
+    runtime_tmp_root: &Path,
+    tmp_id: &str,
+) -> Result<FullRestoreTempPaths> {
+    let temp_dir = runtime_tmp_root.join("full-restore");
+    crate::config::ensure_private_dir(&temp_dir).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Create private full restore temp dir {}: {error}",
+            temp_dir.display()
+        ))
+    })?;
+    Ok(FullRestoreTempPaths {
+        temp_db: temp_dir.join(format!("chan_restore_{tmp_id}.db")),
+        db_snapshot: temp_dir.join(format!("chan_restore_live_before_{tmp_id}.db")),
+    })
+}
+
+fn restrict_restore_temp_file(path: &Path) -> Result<()> {
+    crate::config::restrict_private_file_permissions(path).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Set private permissions on {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn create_private_restore_temp_db(path: &Path) -> Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|error| {
+                AppError::Internal(anyhow::anyhow!(
+                    "Create private temp DB {}: {error}",
+                    path.display()
+                ))
+            })?;
+        restrict_restore_temp_file(path)?;
+        Ok(file)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| {
+                AppError::Internal(anyhow::anyhow!(
+                    "Create private temp DB {}: {error}",
+                    path.display()
+                ))
+            })?;
+        restrict_restore_temp_file(path)?;
+        Ok(file)
+    }
+}
+
+fn create_live_restore_snapshot(
+    live_conn: &rusqlite::Connection,
+    db_snapshot: &Path,
+) -> Result<()> {
+    let db_snapshot_str = db_snapshot
+        .to_str()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Snapshot path is non-UTF-8")))?
+        .replace('\'', "''");
+    live_conn
+        .execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Snapshot live DB: {error}")))?;
+    restrict_restore_temp_file(db_snapshot)?;
     Ok(())
 }
 
@@ -200,9 +399,13 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
             super::common::TorHiddenServiceKeysAvailability::Available(dir) => Some(dir),
         };
 
-    let temp_dir = std::env::temp_dir();
     let tmp_id = uuid::Uuid::new_v4().simple().to_string();
-    let temp_db = temp_dir.join(format!("chan_restore_{tmp_id}.db"));
+    let temp_paths = prepare_full_restore_temp_paths(&tmp_id)?;
+    let _temp_file_cleanup = FullRestoreTempCleanupGuard::new(&temp_paths);
+    let FullRestoreTempPaths {
+        temp_db,
+        db_snapshot,
+    } = temp_paths;
     let upload_root = PathBuf::from(upload_dir);
     let staged_upload_root = create_staging_dir(&upload_root, "restore-stage")?;
     let live_global_favicon_dir = crate::favicon::global_backup_source_dir();
@@ -272,7 +475,6 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
                 },
             )
         });
-    let db_snapshot = temp_dir.join(format!("chan_restore_live_before_{tmp_id}.db"));
     let mut db_extracted = false;
 
     for index in 0..archive.len() {
@@ -283,8 +485,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         validate_restore_safe_entry_name(&name)?;
 
         if name == "chan.db" {
-            let mut out = std::fs::File::create(&temp_db)
-                .map_err(|error| AppError::Internal(anyhow::anyhow!("Create temp DB: {error}")))?;
+            let mut out = create_private_restore_temp_db(&temp_db)?;
             copy_limited_with_total_budget(
                 &mut entry,
                 &mut out,
@@ -294,6 +495,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
                 "Full restore archive",
             )
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Write temp DB: {error}")))?;
+            restrict_restore_temp_file(&temp_db)?;
 
             let mut header = [0u8; 16];
             {
@@ -450,13 +652,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         )));
     }
 
-    let db_snapshot_str = db_snapshot
-        .to_str()
-        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Snapshot path is non-UTF-8")))?
-        .replace('\'', "''");
-    live_conn
-        .execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
-        .map_err(|error| AppError::Internal(anyhow::anyhow!("Snapshot live DB: {error}")))?;
+    create_live_restore_snapshot(live_conn, &db_snapshot)?;
 
     if banner_extracted {
         canonicalize_restored_banner_dir(&staged_global_banner_dir)?;
@@ -549,6 +745,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
             ))
         })?;
         validate_full_restore_db_trust_boundary(&src)?;
+        recompute_restored_post_body_html(&src)?;
         scrub_full_restore_runtime_state(&src)?;
         db::rebuild_pending_fs_ops_for_restore(&src)?;
         db::insert_pending_fs_op(&src, &pending_restore_op)?;
@@ -939,6 +1136,25 @@ mod tests {
         }
     }
 
+    struct FullRestoreRuntimeTmpRootOverride {
+        previous: Option<std::path::PathBuf>,
+    }
+
+    impl FullRestoreRuntimeTmpRootOverride {
+        fn new(runtime_tmp_root: &std::path::Path) -> Self {
+            let previous = super::FULL_RESTORE_RUNTIME_TMP_ROOT_FOR_TEST
+                .with(|root| root.replace(Some(runtime_tmp_root.to_path_buf())));
+            Self { previous }
+        }
+    }
+
+    impl Drop for FullRestoreRuntimeTmpRootOverride {
+        fn drop(&mut self) {
+            super::FULL_RESTORE_RUNTIME_TMP_ROOT_FOR_TEST
+                .with(|root| root.replace(self.previous.take()));
+        }
+    }
+
     fn create_snapshot_db() -> std::path::PathBuf {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let db_path = temp_dir.path().join("snapshot.db");
@@ -949,6 +1165,126 @@ mod tests {
         conn.execute_batch(&format!("VACUUM INTO '{db_path_str}'"))
             .expect("vacuum snapshot");
         temp_dir.keep().join("snapshot.db")
+    }
+
+    fn write_sqlite_sidecars(path: &std::path::Path) {
+        for sidecar in super::sqlite_db_and_sidecar_paths(path).into_iter().skip(1) {
+            std::fs::write(sidecar, b"sqlite sidecar").expect("write SQLite sidecar");
+        }
+    }
+
+    fn assert_sqlite_db_and_sidecars_absent(path: &std::path::Path) {
+        for candidate in super::sqlite_db_and_sidecar_paths(path) {
+            let display = candidate.display();
+            assert!(
+                !candidate.exists(),
+                "temporary SQLite file should be removed: {display}"
+            );
+        }
+    }
+
+    fn assert_full_restore_temp_dir_empty(runtime_tmp_root: &std::path::Path) {
+        let full_restore_dir = runtime_tmp_root.join("full-restore");
+        if !full_restore_dir.exists() {
+            return;
+        }
+
+        let mut leftovers = Vec::new();
+        for entry in std::fs::read_dir(&full_restore_dir).expect("read full restore temp dir") {
+            leftovers.push(entry.expect("full restore temp dir entry").path());
+        }
+        let display = leftovers
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(
+            leftovers.is_empty(),
+            "full restore temp dir should be empty, found: {display}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn unix_mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_restore_temp_db_files_are_private() {
+        let runtime_tmp_root = tempfile::tempdir().expect("tempdir");
+        let tmp_id = format!("test_{}", uuid::Uuid::new_v4().simple());
+        let paths = super::prepare_full_restore_temp_paths_in(runtime_tmp_root.path(), &tmp_id)
+            .expect("prepare temp paths");
+        let temp_parent = paths.temp_db.parent().expect("temp db parent");
+
+        assert_eq!(unix_mode(temp_parent), 0o700);
+
+        {
+            let mut file =
+                super::create_private_restore_temp_db(&paths.temp_db).expect("create temp db");
+            file.write_all(b"uploaded database bytes")
+                .expect("write temp db");
+        }
+        super::restrict_restore_temp_file(&paths.temp_db).expect("restrict copied temp db");
+        assert_eq!(unix_mode(&paths.temp_db), 0o600);
+
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db conn");
+        super::create_live_restore_snapshot(&conn, &paths.db_snapshot)
+            .expect("create live snapshot");
+        assert_eq!(unix_mode(&paths.db_snapshot), 0o600);
+    }
+
+    #[test]
+    fn full_restore_failure_after_extracted_db_creation_removes_temp_db_and_sidecars() {
+        let runtime_tmp_root = tempfile::tempdir().expect("tempdir");
+        let tmp_id = format!("test_{}", uuid::Uuid::new_v4().simple());
+        let paths = super::prepare_full_restore_temp_paths_in(runtime_tmp_root.path(), &tmp_id)
+            .expect("prepare temp paths");
+
+        {
+            let _cleanup = super::FullRestoreTempCleanupGuard::new(&paths);
+            let mut file =
+                super::create_private_restore_temp_db(&paths.temp_db).expect("create temp db");
+            file.write_all(b"uploaded database bytes")
+                .expect("write temp db");
+            write_sqlite_sidecars(&paths.temp_db);
+        }
+
+        assert_sqlite_db_and_sidecars_absent(&paths.temp_db);
+    }
+
+    #[test]
+    fn full_restore_failure_after_snapshot_creation_removes_snapshot_and_sidecars() {
+        let runtime_tmp_root = tempfile::tempdir().expect("tempdir");
+        let tmp_id = format!("test_{}", uuid::Uuid::new_v4().simple());
+        let paths = super::prepare_full_restore_temp_paths_in(runtime_tmp_root.path(), &tmp_id)
+            .expect("prepare temp paths");
+
+        {
+            let _cleanup = super::FullRestoreTempCleanupGuard::new(&paths);
+            let mut file =
+                super::create_private_restore_temp_db(&paths.temp_db).expect("create temp db");
+            file.write_all(b"uploaded database bytes")
+                .expect("write temp db");
+            write_sqlite_sidecars(&paths.temp_db);
+
+            let pool = crate::db::init_test_pool().expect("test pool");
+            let conn = pool.get().expect("db conn");
+            super::create_live_restore_snapshot(&conn, &paths.db_snapshot)
+                .expect("create live snapshot");
+            write_sqlite_sidecars(&paths.db_snapshot);
+        }
+
+        assert_sqlite_db_and_sidecars_absent(&paths.temp_db);
+        assert_sqlite_db_and_sidecars_absent(&paths.db_snapshot);
     }
 
     fn write_full_backup_zip(
@@ -1054,6 +1390,38 @@ mod tests {
             .expect("collect sessions");
 
         (fresh_sid, session_ids)
+    }
+
+    #[test]
+    fn full_restore_success_removes_restore_temp_db_files_after_completion() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let runtime_tmp_root = temp_dir.path().join("runtime-tmp");
+        let _runtime_tmp_root_override = FullRestoreRuntimeTmpRootOverride::new(&runtime_tmp_root);
+        let zip_path = temp_dir.path().join("backup.zip");
+        write_full_backup_zip(&zip_path, None, false);
+
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let mut live_conn = pool.get().expect("db conn");
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let upload_dir = temp_dir.path().join("uploads");
+        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+
+        execute_full_restore(
+            &mut live_conn,
+            1,
+            upload_dir.to_str().expect("upload dir"),
+            None,
+            false,
+            &mut archive,
+            "Test restore",
+            "Test restore completed",
+            "Test restore",
+            "Test restore",
+        )
+        .expect("restore should succeed");
+
+        assert_full_restore_temp_dir_empty(&runtime_tmp_root);
     }
 
     fn read_tree(root: &std::path::Path) -> BTreeMap<String, String> {
@@ -1233,6 +1601,87 @@ mod tests {
         let (fresh_sid, session_ids) = restore_zip_into_temp_site(&zip_path);
 
         assert_eq!(session_ids, vec![fresh_sid]);
+    }
+
+    #[test]
+    fn full_restore_recomputes_untrusted_body_html() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = create_snapshot_db();
+        let post_id = {
+            let conn = rusqlite::Connection::open(&db_path).expect("open snapshot");
+            let board_id = conn
+                .query_row(
+                    "SELECT id FROM boards WHERE short_name = 'tech'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("board id");
+            let post = crate::db::NewPost {
+                thread_id: 0,
+                board_id,
+                name: "anon".to_owned(),
+                tripcode: None,
+                subject: Some("subject".to_owned()),
+                body: "plain restored body".to_owned(),
+                body_html: "<img src=x onerror=alert(1)>".to_owned(),
+                ip_hash: None,
+                file_path: None,
+                file_name: None,
+                file_size: None,
+                thumb_path: None,
+                mime_type: None,
+                media_type: None,
+                audio_file_path: None,
+                audio_file_name: None,
+                audio_file_size: None,
+                audio_mime_type: None,
+                deletion_token: "token".to_owned(),
+                is_op: true,
+            };
+            crate::db::create_thread_with_optional_poll(
+                &conn,
+                board_id,
+                Some("subject"),
+                &post,
+                "",
+                None,
+                None,
+            )
+            .expect("create restored thread")
+            .1
+        };
+        let zip_path = temp_dir.path().join("backup.zip");
+        write_full_backup_zip_from_db(&zip_path, &db_path, None, false);
+
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let mut live_conn = pool.get().expect("db conn");
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let upload_dir = temp_dir.path().join("uploads");
+        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        execute_full_restore(
+            &mut live_conn,
+            1,
+            upload_dir.to_str().expect("upload dir"),
+            None,
+            false,
+            &mut archive,
+            "Test restore",
+            "Test restore completed",
+            "Test restore",
+            "Test restore",
+        )
+        .expect("restore should succeed");
+
+        let body_html: String = live_conn
+            .query_row(
+                "SELECT body_html FROM posts WHERE id = ?1",
+                rusqlite::params![post_id],
+                |row| row.get(0),
+            )
+            .expect("restored body_html");
+        assert!(body_html.contains("plain restored body"));
+        assert!(!body_html.contains("<img"));
     }
 
     #[test]

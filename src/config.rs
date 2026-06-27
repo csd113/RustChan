@@ -121,6 +121,82 @@ pub fn runtime_banner_dir() -> PathBuf {
     runtime_dir().join("banner")
 }
 
+/// Create a private directory and repair its mode on Unix.
+///
+/// On non-Unix platforms this preserves the existing platform behavior.
+///
+/// # Errors
+/// Returns an error if the directory cannot be created or its mode cannot be set.
+pub fn ensure_private_dir(path: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(path)?;
+    restrict_private_dir_permissions(path)
+}
+
+/// Repair a secret-bearing directory mode on Unix.
+///
+/// # Errors
+/// Returns an error if the mode cannot be changed.
+pub fn restrict_private_dir_permissions(path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    #[cfg(not(unix))]
+    let _ = path;
+
+    Ok(())
+}
+
+/// Repair a secret-bearing file mode on Unix.
+///
+/// # Errors
+/// Returns an error if the mode cannot be changed.
+pub fn restrict_private_file_permissions(path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    #[cfg(not(unix))]
+    let _ = path;
+
+    Ok(())
+}
+
+/// Write a secret-bearing file and repair its mode on Unix.
+///
+/// # Errors
+/// Returns an error if the parent directory cannot be created, the file cannot
+/// be written, or its mode cannot be set.
+pub fn write_private_file(path: &Path, contents: impl AsRef<[u8]>) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        ensure_private_dir(parent)?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(contents.as_ref())?;
+        file.sync_all()?;
+    }
+
+    #[cfg(not(unix))]
+    std::fs::write(path, contents)?;
+
+    restrict_private_file_permissions(path)?;
+    Ok(())
+}
+
 type RuntimeDirMigration = (&'static str, fn() -> PathBuf);
 
 const RUNTIME_LAYOUT_MIGRATIONS: &[RuntimeDirMigration] = &[
@@ -156,7 +232,7 @@ fn migrate_dir_if_present(old_path: &Path, new_path: &Path) -> anyhow::Result<()
         return Ok(());
     }
     if let Some(parent) = new_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        ensure_private_dir(parent)?;
     }
     std::fs::rename(old_path, new_path)?;
     Ok(())
@@ -169,7 +245,7 @@ fn migrate_dir_if_present(old_path: &Path, new_path: &Path) -> anyhow::Result<()
 /// created or removed, or if an old and new path conflict by type.
 pub fn migrate_runtime_layout_if_needed() -> anyhow::Result<()> {
     let data_dir = data_dir();
-    std::fs::create_dir_all(&data_dir)?;
+    ensure_private_dir(&data_dir)?;
     for dir in [
         runtime_dir(),
         runtime_tmp_dir(),
@@ -180,7 +256,7 @@ pub fn migrate_runtime_layout_if_needed() -> anyhow::Result<()> {
         full_backups_dir(),
         board_backups_dir(),
     ] {
-        std::fs::create_dir_all(dir)?;
+        ensure_private_dir(&dir)?;
     }
 
     for &(legacy_name, destination) in RUNTIME_LAYOUT_MIGRATIONS {
@@ -346,6 +422,16 @@ fn parse_settings_file_str(raw: &str) -> Result<SettingsFile, toml::de::Error> {
     toml::from_str(raw)
 }
 
+fn bind_addr_is_loopback(bind_addr: &str) -> bool {
+    if let Ok(addr) = bind_addr.parse::<std::net::SocketAddr>() {
+        return addr.ip().is_loopback();
+    }
+
+    bind_addr
+        .strip_prefix("localhost:")
+        .is_some_and(|port| port.parse::<u16>().is_ok())
+}
+
 /// Create settings.toml with defaults if it does not exist yet.
 /// Call this once at startup (before CONFIG is accessed for the first time).
 ///
@@ -355,6 +441,12 @@ fn parse_settings_file_str(raw: &str) -> Result<SettingsFile, toml::de::Error> {
 pub fn generate_settings_file_if_missing() {
     let path = settings_file_path();
     if path.exists() {
+        if let Err(error) = restrict_private_file_permissions(&path) {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "Warning: could not repair settings.toml permissions: {error}"
+            );
+        }
         return;
     }
     // Generate a random 64-hex-char secret (32 bytes of entropy).
@@ -365,7 +457,7 @@ pub fn generate_settings_file_if_missing() {
     );
     let secret = hex::encode(secret_bytes);
     let content = template::settings_template(&secret);
-    match std::fs::write(&path, content) {
+    match write_private_file(&path, content) {
         Ok(()) => {
             let _ = writeln!(
                 std::io::stdout().lock(),
@@ -1059,27 +1151,9 @@ impl Config {
         // into bootstrap as a cryptic internal error — invisible at startup.
         if self.enable_tor_support {
             for dir in [runtime_tor_state_dir(), runtime_tor_cache_dir()] {
-                std::fs::create_dir_all(&dir).map_err(|e| {
+                ensure_private_dir(&dir).map_err(|e| {
                     anyhow::anyhow!("CONFIG ERROR: cannot create Tor dir {}: {e}", dir.display())
                 })?;
-                // Arti requires runtime/tor/state/ to have permissions 0700 (no group
-                // or other read access) for its key material. create_dir_all
-                // respects the process umask, typically yielding 0755, which
-                // Arti rejects with "problem with filesystem permissions".
-                // Explicitly set 0700 on Unix so Arti accepts the directory.
-                // runtime/tor/cache/ holds no sensitive data and is left at normal
-                // permissions, but we restrict it too for defence-in-depth.
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt as _;
-                    let perms = std::fs::Permissions::from_mode(0o700);
-                    std::fs::set_permissions(&dir, perms).map_err(|e| {
-                        anyhow::anyhow!(
-                            "CONFIG ERROR: cannot set permissions on Tor dir {}: {e}",
-                            dir.display()
-                        )
-                    })?;
-                }
                 let probe = dir.join(".write_probe");
                 std::fs::write(&probe, b"").map_err(|_error| {
                     anyhow::anyhow!(
@@ -1129,6 +1203,21 @@ impl Config {
             );
         }
         validate_ffmpeg_timeout_secs(self.ffmpeg_timeout_secs)?;
+        Ok(())
+    }
+
+    /// Validate `ChanNet` listener settings when the `ChanNet` service is enabled.
+    ///
+    /// # Errors
+    /// Returns an error if `ChanNet` would bind to a non-loopback address without
+    /// a configured pre-shared key.
+    pub fn validate_chan_net_listener(&self) -> anyhow::Result<()> {
+        if self.chan_net_api_key.is_empty() && !bind_addr_is_loopback(&self.chan_net_bind) {
+            anyhow::bail!(
+                "CONFIG ERROR: --chan-net with chan_net_bind '{}' requires chan_net_api_key when binding outside loopback.",
+                self.chan_net_bind
+            );
+        }
         Ok(())
     }
 
@@ -1248,6 +1337,8 @@ fn update_settings_file_entries_result(
     tmp.persist(&path)
         .map_err(|error| error.error)
         .with_context(|| format!("could not atomically replace {}", path.display()))?;
+    restrict_private_file_permissions(&path)
+        .with_context(|| format!("could not repair permissions on {}", path.display()))?;
     Ok(())
 }
 
@@ -2000,6 +2091,67 @@ port = 8080
 
         config.chan_net_api_key = "x".repeat(32);
         config.validate().expect("32-char key is accepted");
+    }
+
+    #[test]
+    fn validate_chan_net_listener_requires_key_for_non_loopback_bind() {
+        let mut config = valid_config();
+        config.chan_net_api_key.clear();
+        config.chan_net_bind = "0.0.0.0:7070".to_owned();
+
+        let error = config
+            .validate_chan_net_listener()
+            .expect_err("non-loopback bind without key should fail")
+            .to_string();
+        assert_eq!(
+            error,
+            "CONFIG ERROR: --chan-net with chan_net_bind '0.0.0.0:7070' requires chan_net_api_key when binding outside loopback."
+        );
+
+        config.chan_net_bind = "127.0.0.1:7070".to_owned();
+        config
+            .validate_chan_net_listener()
+            .expect("loopback bind may disable endpoints");
+
+        config.chan_net_bind = "localhost:7070".to_owned();
+        config
+            .validate_chan_net_listener()
+            .expect("localhost bind may disable endpoints");
+
+        config.chan_net_bind = "0.0.0.0:7070".to_owned();
+        config.chan_net_api_key = "x".repeat(32);
+        config
+            .validate_chan_net_listener()
+            .expect("non-loopback bind with key is accepted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_file_helpers_set_owner_only_modes() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let private_dir = temp_dir.path().join("private");
+        super::ensure_private_dir(&private_dir).expect("private dir");
+        assert_eq!(
+            std::fs::metadata(&private_dir)
+                .expect("dir metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+
+        let private_file = private_dir.join("settings.toml");
+        super::write_private_file(&private_file, b"secret").expect("private file");
+        assert_eq!(
+            std::fs::metadata(&private_file)
+                .expect("file metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
 
     #[test]

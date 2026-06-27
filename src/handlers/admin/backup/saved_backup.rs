@@ -278,7 +278,7 @@ pub(crate) fn build_backup_id(_scope: BackupScope, scope_label: &str) -> String 
 
 pub(crate) fn create_backup_root(backup_id: &str) -> Result<PathBuf> {
     let root = backups_root_dir().join(backup_id);
-    std::fs::create_dir_all(&root).map_err(|error| {
+    crate::config::ensure_private_dir(&root).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
             "Create backup directory {}: {error}",
             root.display()
@@ -349,14 +349,14 @@ pub(crate) fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<
     let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Serialize {}: {error}", path.display()))
     })?;
-    std::fs::write(path, bytes).map_err(|error| {
+    crate::config::write_private_file(path, &bytes).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Write {}: {error}", path.display()))
     })?;
     Ok(())
 }
 
 pub(crate) fn write_text(path: &Path, text: &str) -> Result<()> {
-    std::fs::write(path, text.as_bytes()).map_err(|error| {
+    crate::config::write_private_file(path, text.as_bytes()).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Write {}: {error}", path.display()))
     })?;
     Ok(())

@@ -23,7 +23,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     render_admin_moderation_section(
         view.csrf_token,
         &render_report_rows(view),
-        &render_appeal_rows(view),
+        &render_appeal_rows(view.csrf_token, view.moderation.appeals),
         &render_ban_rows(view),
         &render_filter_rows(view),
         &report_badge,
@@ -139,17 +139,18 @@ fn render_report_rows(view: &AdminPanelViewModel<'_>) -> String {
     report_rows
 }
 
-fn render_appeal_rows(view: &AdminPanelViewModel<'_>) -> String {
+fn render_appeal_rows(csrf_token: &str, appeals: &[crate::models::BanAppeal]) -> String {
     let mut appeal_rows = String::new();
-    if view.moderation.appeals.is_empty() {
+    if appeals.is_empty() {
         appeal_rows.push_str(
             r#"<tr><td colspan="4" style="color:var(--text-dim);text-align:center">no open appeals</td></tr>"#,
         );
     }
-    for a in view.moderation.appeals {
+    for a in appeals {
         let reason = escape_html(a.reason.trim());
         let age = fmt_ts(a.created_at);
         let ip_short = a.ip_hash.get(..16).unwrap_or(&a.ip_hash);
+        let ip_short = escape_html(ip_short);
         let _ = write!(
             appeal_rows,
             r#"<tr>
@@ -174,7 +175,7 @@ fn render_appeal_rows(view: &AdminPanelViewModel<'_>) -> String {
             ip_short = ip_short,
             reason = reason,
             age = escape_html(&age),
-            csrf = escape_html(view.csrf_token),
+            csrf = escape_html(csrf_token),
             aid = a.id,
             ip_hash = escape_html(&a.ip_hash)
         );
@@ -321,4 +322,40 @@ fn render_admin_moderation_section(
         filter_badge = filter_badge,
         moderation_summary_counter = escape_html(moderation_summary_counter),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_appeal_rows;
+    use crate::models::BanAppeal;
+
+    #[test]
+    fn appeal_ip_prefix_is_escaped_for_html_like_and_multibyte_input() {
+        let script_tag = ["<", "script", ">"].concat();
+        let script_close = ["</", "script", ">"].concat();
+        let multibyte_attack = format!("éééé{script_tag}alert(1){script_close}");
+        let appeals = [
+            BanAppeal {
+                id: 1,
+                ip_hash: "<img src=x onerror=alert(1)>".to_owned(),
+                reason: "html-like".to_owned(),
+                status: "open".to_owned(),
+                created_at: 1,
+            },
+            BanAppeal {
+                id: 2,
+                ip_hash: multibyte_attack,
+                reason: "multibyte".to_owned(),
+                status: "open".to_owned(),
+                created_at: 2,
+            },
+        ];
+
+        let rows = render_appeal_rows("csrf", &appeals);
+
+        assert!(rows.contains("&lt;img src=x oner"));
+        assert!(!rows.contains("<img"));
+        assert!(!rows.contains(&script_tag));
+        assert!(rows.contains("éééé&lt;script&gt;"));
+    }
 }

@@ -8,12 +8,12 @@ pub(super) fn temp_board_download_token_path(filename: &str) -> PathBuf {
 }
 
 pub fn write_temp_board_download_token(filename: &str, token: &str) -> Result<()> {
-    std::fs::create_dir_all(temp_board_download_dir()).map_err(|error| {
+    crate::config::ensure_private_dir(&temp_board_download_dir()).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create temp board backup dir: {error}"))
     })?;
-    std::fs::write(temp_board_download_token_path(filename), token).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("Write temp board download token: {error}"))
-    })?;
+    crate::config::write_private_file(&temp_board_download_token_path(filename), token).map_err(
+        |error| AppError::Internal(anyhow::anyhow!("Write temp board download token: {error}")),
+    )?;
     Ok(())
 }
 
@@ -147,41 +147,34 @@ pub async fn download_backup(
         sanitize_backup_zip_filename(&filename)?
     };
 
-    match kind.as_str() {
-        "temp-board" => {
-            prune_stale_temp_board_downloads();
-            if let Some(token) = query.token.as_deref() {
-                if !consume_temp_board_download_token(&safe_filename, token)? {
-                    return Err(AppError::Forbidden(
-                        "Invalid or expired download token.".into(),
-                    ));
-                }
-            } else {
-                tokio::task::spawn_blocking({
-                    let pool = state.db.clone();
-                    move || -> Result<()> {
-                        let conn = pool.get()?;
-                        super::require_admin_session_sid(&conn, session_id.as_deref())?;
-                        Ok(())
-                    }
-                })
-                .await
-                .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-            }
-        }
-        "full" | "board" => {
-            tokio::task::spawn_blocking({
-                let pool = state.db.clone();
-                move || -> Result<()> {
-                    let conn = pool.get()?;
-                    super::require_admin_session_sid(&conn, session_id.as_deref())?;
-                    Ok(())
-                }
-            })
-            .await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-        }
+    let requires_temp_token = match kind.as_str() {
+        "temp-board" => true,
+        "full" | "board" => false,
         _ => return Err(AppError::BadRequest("Unknown backup kind.".into())),
+    };
+
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<()> {
+            let conn = pool.get()?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    if requires_temp_token {
+        prune_stale_temp_board_downloads();
+        let token = query
+            .token
+            .as_deref()
+            .ok_or_else(|| AppError::Forbidden("Invalid or expired download token.".into()))?;
+        if !consume_temp_board_download_token(&safe_filename, token)? {
+            return Err(AppError::Forbidden(
+                "Invalid or expired download token.".into(),
+            ));
+        }
     }
 
     if let Some(part_name) = query.part.as_deref() {
