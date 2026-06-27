@@ -14,6 +14,7 @@ mod migrations;
 mod pool;
 pub mod posts;
 mod schema;
+pub mod setup;
 pub mod themes;
 pub mod threads;
 mod types;
@@ -30,9 +31,40 @@ pub use banners::*;
 pub use boards::*;
 pub use fs_ops::*;
 pub use posts::*;
+pub use setup::*;
 pub use themes::*;
 pub use threads::*;
 pub use user_thread_prefs::*;
+
+/// Return the database schema version for the current release baseline.
+#[must_use]
+pub const fn baseline_schema_version() -> &'static str {
+    schema::baseline_schema_version()
+}
+
+/// Verify that the open database exactly matches the current release baseline.
+///
+/// # Errors
+/// Returns an error if integrity checks fail, schema objects differ from the
+/// baseline, or the recorded schema version is not current.
+pub fn verify_database_schema(conn: &rusqlite::Connection) -> Result<()> {
+    schema::verify_database_schema(conn)
+}
+
+/// Verify the database baseline and stamp the current schema version when safe.
+///
+/// # Errors
+/// Returns an error if the database does not structurally match the current
+/// release baseline or cannot be stamped with the current schema version.
+pub fn normalize_database_schema_version(conn: &rusqlite::Connection) -> Result<()> {
+    schema::normalize_database_schema_version(conn)
+}
+
+/// Return a human-readable database schema status label for diagnostics.
+#[must_use]
+pub fn database_schema_status_label(conn: &rusqlite::Connection) -> String {
+    schema::database_schema_status_label(conn)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletePathsResult {

@@ -34,7 +34,8 @@ const fn upload_progress_row() -> &'static str {
 }
 
 const AUDIO_ACCEPT: &str =
-    "audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac";
+    "audio/mpeg,audio/mp3,audio/ogg,application/ogg,audio/oga,audio/opus,audio/flac,audio/x-flac,audio/wav,audio/wave,audio/x-wav,audio/vnd.wave,audio/mp4,audio/m4a,audio/x-m4a,audio/aac,audio/x-aac,audio/webm,.mp3,.ogg,.oga,.opus,.flac,.wav,.m4a,.aac,.webm";
+const VIDEO_ACCEPT: &str = "video/mp4,video/webm,video/x-matroska,video/matroska,.mp4,.webm,.mkv";
 const IMAGE_ACCEPT: &str =
     "image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,.heic,.heif";
 const POLL_OPTION_MAX_LENGTH: usize = 200;
@@ -58,26 +59,29 @@ fn form_hint(text: &str) -> String {
 
 const fn render_uploads_disabled_row() -> &'static str {
     r#"    <tr><td>uploads</td>
-        <td><span class="form-field-help">uploads are disabled on this board</span></td></tr>"#
+        <td><span class="post-form-mobile-label">Uploads</span><span class="form-field-help">uploads are disabled on this board</span></td></tr>"#
 }
 
 fn render_captcha_row(board_short: &str, reply_suffix: &str, refresh_href: &str) -> String {
     let captcha_id = crate::captcha::new_captcha_id();
     let board = escape_html(board_short);
     let image_src = format!("/captcha/{captcha_id}?board={board}");
+    let answer_id = format!("captcha-answer-{board}{reply_suffix}");
     format!(
-        r#"    <tr id="captcha-row-{board}{suffix}"><td>captcha</td>
+        r#"    <tr id="captcha-row-{board}{suffix}"><td><label for="{answer_id}">captcha</label></td>
         <td>
+          <label class="post-form-mobile-label" for="{answer_id}">Captcha</label>
           <div class="captcha-challenge">
             <img class="captcha-image" src="{image_src}" alt="CAPTCHA challenge image" width="220" height="120">
             <a class="form-field-help captcha-refresh-link" href="{refresh_href}">new challenge</a>
           </div>
           <input type="hidden" name="captcha_id" value="{captcha_id}">
-          <input type="text" name="captcha_answer" aria-label="captcha answer" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="16" required>
+          <input type="text" id="{answer_id}" name="captcha_answer" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="16" required>
           <span class="form-field-help">Enter the text shown in the image. If it expires or fails, request a new challenge.</span>
         </td></tr>"#,
         board = board,
         suffix = reply_suffix,
+        answer_id = escape_html(&answer_id),
         image_src = escape_html(&image_src),
         captcha_id = escape_html(&captcha_id),
         refresh_href = escape_html(refresh_href),
@@ -90,21 +94,24 @@ fn render_poll_option_row(option_number: usize) -> String {
     )
 }
 
-fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
-    let image_max_bytes = board.max_image_size_bytes();
-    let video_max_bytes = board.max_video_size_bytes();
-    let audio_max_bytes = board.max_audio_size_bytes();
-    let image_mb = image_max_bytes / 1024 / 1024;
-    let video_mb = video_max_bytes / 1024 / 1024;
-    let audio_mb = audio_max_bytes / 1024 / 1024;
-    let generic_upload_mb = board.max_generic_upload_size_bytes() / 1024 / 1024;
-    let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
-    let audio_image_dual_mode = board.allow_audio
-        && board.allow_images
-        && !board.allow_video
-        && !board.allow_pdf
-        && !allow_any_files;
+type UploadSizeLimitsMb = (usize, usize, usize, usize, usize);
 
+fn upload_size_limits_mb(board: &Board) -> UploadSizeLimitsMb {
+    (
+        board.max_image_size_bytes() / 1024 / 1024,
+        board.max_video_size_bytes() / 1024 / 1024,
+        board.max_audio_size_bytes() / 1024 / 1024,
+        board.max_pdf_size_bytes() / 1024 / 1024,
+        board.max_generic_upload_size_bytes() / 1024 / 1024,
+    )
+}
+
+fn single_upload_accept_and_hint(
+    board: &Board,
+    allow_any_files: bool,
+    limits: UploadSizeLimitsMb,
+) -> (String, String) {
+    let (image_mb, video_mb, audio_mb, pdf_mb, generic_upload_mb) = limits;
     let mut accept_parts: Vec<&str> = Vec::new();
     let mut hint_parts: Vec<String> = Vec::new();
 
@@ -113,16 +120,24 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
         hint_parts.push(format!("jpg/png/gif/webp/heic · max {image_mb} MiB"));
     }
     if board.allow_video {
-        accept_parts.push("video/mp4,video/webm");
-        hint_parts.push(format!("mp4/webm · max {video_mb} MiB"));
+        accept_parts.push(VIDEO_ACCEPT);
+        hint_parts.push(format!("mp4/webm/mkv · max {video_mb} MiB"));
     }
     if board.allow_audio {
         accept_parts.push(AUDIO_ACCEPT);
-        hint_parts.push(format!("mp3/ogg/flac/wav/m4a · max {audio_mb} MiB"));
+        hint_parts.push(format!(
+            "mp3/ogg/oga/opus/flac/wav/m4a/aac/webm · max {audio_mb} MiB"
+        ));
     }
     if board.allow_pdf {
         accept_parts.push("application/pdf,.pdf");
-        hint_parts.push(format!("pdf · max {generic_upload_mb} MiB"));
+        hint_parts.push(format!("pdf · max {pdf_mb} MiB"));
+    }
+    match (board.allow_images, board.allow_video) {
+        (true, true) => hint_parts.push("oversized images/videos can auto-compress".to_owned()),
+        (true, false) => hint_parts.push("oversized images can auto-compress".to_owned()),
+        (false, true) => hint_parts.push("oversized videos can auto-compress".to_owned()),
+        (false, false) => {}
     }
 
     let file_accept = if allow_any_files {
@@ -130,26 +145,38 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
     } else {
         accept_parts.join(",")
     };
-    let file_hint = if allow_any_files {
-        if hint_parts.is_empty() {
-            format!("other files download safely as attachments · max {generic_upload_mb} MiB")
-        } else {
-            format!(
-                "{} &nbsp;|&nbsp; other files download safely as attachments",
-                hint_parts.join(" &nbsp;|&nbsp; ")
-            )
-        }
+    let file_hint = if allow_any_files && hint_parts.is_empty() {
+        format!("other files download safely as attachments · max {generic_upload_mb} MiB")
+    } else if allow_any_files {
+        format!(
+            "{} &nbsp;|&nbsp; other files download safely as attachments",
+            hint_parts.join(" &nbsp;|&nbsp; ")
+        )
     } else {
         hint_parts.join(" &nbsp;|&nbsp; ")
     };
+    (file_accept, file_hint)
+}
+
+fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
+    let limits = upload_size_limits_mb(board);
+    let (image_mb, _, audio_mb, _, _) = limits;
+    let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
+    let audio_image_dual_mode = board.allow_audio
+        && board.allow_images
+        && !board.allow_video
+        && !board.allow_pdf
+        && !allow_any_files;
+    let (file_accept, file_hint) = single_upload_accept_and_hint(board, allow_any_files, limits);
 
     let optional_image_row = if audio_image_dual_mode {
         format!(
             r#"<details class="upload-secondary-toggle">
               <summary aria-label="Show optional image upload">▾ Optional Image</summary>
               <div class="upload-secondary-panel">
-                <input type="file" name="image_file" aria-label="optional image upload" data-onchange-check-size="1" accept="{IMAGE_ACCEPT}">
-                <span class="form-field-help">{audio_image_hint} · jpg/png/gif/webp/heic · max {image_mb} MiB</span>
+                <label class="upload-secondary-label" for="post-form-image-file">optional image</label>
+                <input type="file" id="post-form-image-file" name="image_file" data-onchange-check-size="1" accept="{IMAGE_ACCEPT}">
+                <span class="form-field-help">{audio_image_hint} · jpg/png/gif/webp/heic · max {image_mb} MiB · oversized images can auto-compress</span>
               </div>
             </details>"#
         )
@@ -167,22 +194,35 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
     } else {
         "upload"
     };
+    let primary_id = if primary_name == "audio_file" {
+        "post-form-audio-file"
+    } else {
+        "post-form-file"
+    };
     let primary_accept = if audio_image_dual_mode {
         AUDIO_ACCEPT.to_owned()
     } else {
         file_accept
     };
     let primary_hint = if audio_image_dual_mode {
-        format!("mp3/ogg/flac/wav/m4a · max {audio_mb} MiB")
+        format!("mp3/ogg/oga/opus/flac/wav/m4a/aac/webm · max {audio_mb} MiB")
     } else {
         file_hint
     };
 
+    let mobile_label = if primary_name == "audio_file" {
+        "Audio"
+    } else {
+        "Upload"
+    };
+
     format!(
-        r#"    <tr><td>{primary_label}</td>
-        <td><input type="file" name="{primary_name}" aria-label="{primary_label} file" data-onchange-check-size="1" accept="{primary_accept}">
+        r#"    <tr><td><label for="{primary_id}">{primary_label}</label></td>
+        <td><label class="post-form-mobile-label" for="{primary_id}">{mobile_label}</label><input type="file" id="{primary_id}" name="{primary_name}" data-onchange-check-size="1" accept="{primary_accept}">
             {primary_hint_html}
             {optional_image_row}</td></tr>"#,
+        primary_id = primary_id,
+        mobile_label = mobile_label,
         primary_hint_html = form_hint(&primary_hint),
     )
 }
@@ -227,13 +267,13 @@ pub(super) fn new_thread_form(
   <input type="hidden" name="_csrf" value="{csrf}">
   <input type="hidden" name="submission_token" value="{submission_token}">
   <table>
-    <tr><td>name</td>
-        <td><input type="text" name="name" aria-label="name" value="{name_value}" placeholder="Anonymous" maxlength="64"></td></tr>
-    <tr><td>subject</td>
-        <td><input type="text" name="subject" aria-label="thread subject" value="{subject_value}" maxlength="128">
+    <tr><td><label for="thread-name">name</label></td>
+        <td><label class="post-form-mobile-label" for="thread-name">Name</label><input type="text" id="thread-name" name="name" value="{name_value}" placeholder="Anonymous" maxlength="64"></td></tr>
+    <tr><td><label for="thread-subject">subject</label></td>
+        <td><label class="post-form-mobile-label" for="thread-subject">Subject</label><input type="text" id="thread-subject" name="subject" value="{subject_value}" maxlength="128">
             <button type="submit">post thread</button></td></tr>
-    <tr><td>body</td>
-        <td><textarea name="body" aria-label="thread body" rows="5" maxlength="4096">{body_value}</textarea>
+    <tr><td><label for="thread-body">body</label></td>
+        <td><label class="post-form-mobile-label" for="thread-body">Body</label><textarea id="thread-body" name="body" rows="5" maxlength="4096">{body_value}</textarea>
             <div class="markup-hint">
               <span title="Greentext">&#62;green</span>
               <span title="Bold">**bold**</span>
@@ -249,6 +289,7 @@ pub(super) fn new_thread_form(
     {upload_progress_row}
     {captcha_row}
         <td colspan="2">
+        <span class="post-form-mobile-label">Poll</span>
         <details class="poll-creator">
           <summary>[ 📊 Add a Poll to this thread ]</summary>
           <div class="poll-creator-inner">
@@ -338,16 +379,16 @@ pub(super) fn reply_form(
   <input type="hidden" name="_csrf" value="{csrf}">
   <input type="hidden" name="submission_token" value="{submission_token}">
   <table>
-    <tr><td>name</td>
-        <td><input type="text" name="name" aria-label="reply name" value="{name_value}" placeholder="Anonymous" maxlength="64"></td></tr>
-    <tr><td>body</td>
-        <td><textarea id="reply-body" name="body" aria-label="reply body" rows="4" maxlength="4096">{body_value}</textarea>
+    <tr><td><label for="reply-name">name</label></td>
+        <td><label class="post-form-mobile-label" for="reply-name">Name</label><input type="text" id="reply-name" name="name" value="{name_value}" placeholder="Anonymous" maxlength="64"></td></tr>
+    <tr><td><label for="reply-body">body</label></td>
+        <td><label class="post-form-mobile-label" for="reply-body">Body</label><textarea id="reply-body" name="body" rows="4" maxlength="4096">{body_value}</textarea>
             <button type="submit">post reply</button></td></tr>
     {uploads_disabled_row}
     {upload_row}
     {upload_progress_row}
     <tr><td>options</td>
-        <td><label class="sage-label"><input type="checkbox" name="sage" value="1"{sage_checked}> sage <span class="sage-hint">(don&apos;t bump thread)</span></label></td></tr>
+        <td><span class="post-form-mobile-label">Options</span><label class="sage-label"><input type="checkbox" name="sage" value="1"{sage_checked}> sage <span class="sage-hint">(don&apos;t bump thread)</span></label></td></tr>
     {captcha_row}
   </table>
 </form>
@@ -370,7 +411,7 @@ pub(super) fn reply_form(
 mod tests {
     use super::{
         build_upload_form_policy, new_thread_form, render_poll_option_row, reply_form,
-        PostFormState, POLL_OPTION_MAX_COUNT, POLL_OPTION_MAX_LENGTH,
+        PostFormState, AUDIO_ACCEPT, POLL_OPTION_MAX_COUNT, POLL_OPTION_MAX_LENGTH,
     };
 
     fn uploads_disabled_board() -> crate::models::Board {
@@ -420,15 +461,17 @@ mod tests {
         let audio_pos = html.find("name=\"audio_file\"").expect("audio row");
         let image_pos = html.find("name=\"image_file\"").expect("image row");
         assert!(audio_pos < image_pos);
-        assert!(html.contains("<td>audio</td>"));
+        assert!(html.contains(r#"<td><label for="post-form-audio-file">audio</label></td>"#));
         assert!(html.contains("Optional Image"));
         assert!(html.contains("optional cover image for the audio post"));
         assert!(html.contains("image/heic"));
         assert!(html.contains(".heic"));
-        assert!(html.contains("accept=\"audio/mpeg,audio/ogg,audio/flac,audio/wav,audio/mp4,audio/aac,audio/webm,.mp3,.ogg,.flac,.wav,.m4a,.aac\""));
-        assert!(html.contains("mp3/ogg/flac/wav/m4a · max"));
+        assert!(html.contains(&format!("accept=\"{AUDIO_ACCEPT}\"")));
+        assert!(html.contains("mp3/ogg/oga/opus/flac/wav/m4a/aac/webm · max"));
         assert!(
-            !html.contains("jpg/png/gif/webp/heic · max 8 MiB &nbsp;|&nbsp; mp3/ogg/flac/wav/m4a")
+            !html.contains(
+                "jpg/png/gif/webp/heic · max 8 MiB &nbsp;|&nbsp; mp3/ogg/oga/opus/flac/wav/m4a/aac/webm"
+            )
         );
         assert!(!html.contains("video/mp4,video/webm"));
         assert!(!html.contains("name=\"file\""));
@@ -494,14 +537,15 @@ mod tests {
         let thread_html = new_thread_form("test", "csrf", &board, Some(&state), "/test");
         let reply_html = reply_form("test", 42, "csrf", &board, Some(&state));
 
-        assert!(thread_html.contains(r#"name="name" aria-label="name" value="anon""#));
-        assert!(
-            thread_html.contains(r#"name="subject" aria-label="thread subject" value="subject""#)
-        );
+        assert!(thread_html.contains(r#"<label for="thread-name">name</label>"#));
+        assert!(thread_html.contains(r#"id="thread-name" name="name" value="anon""#));
+        assert!(thread_html.contains(r#"<label for="thread-subject">subject</label>"#));
+        assert!(thread_html.contains(r#"id="thread-subject" name="subject" value="subject""#));
         assert!(thread_html.contains(">draft body</textarea>"));
         assert!(!thread_html.contains(r#"name="deletion_token""#));
 
-        assert!(reply_html.contains(r#"name="name" aria-label="reply name" value="anon""#));
+        assert!(reply_html.contains(r#"<label for="reply-name">name</label>"#));
+        assert!(reply_html.contains(r#"id="reply-name" name="name" value="anon""#));
         assert!(reply_html.contains(">draft body</textarea>"));
         assert!(!reply_html.contains(r#"name="deletion_token""#));
         assert!(reply_html.contains(r#"name="sage" value="1" checked"#));

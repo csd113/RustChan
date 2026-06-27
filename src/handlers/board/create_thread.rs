@@ -51,6 +51,7 @@ pub async fn create_thread(
             access_context.board.max_image_size_bytes(),
             access_context.board.max_video_size_bytes(),
             access_context.board.max_audio_size_bytes(),
+            access_context.board.max_pdf_size_bytes(),
         ),
     )
     .await
@@ -120,13 +121,23 @@ pub async fn create_thread(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
-    // BadRequest → re-render the board page with an inline error banner so the
-    // user sees the message in context without being sent to a separate error page.
+    // Expected post validation errors re-render the board page with an inline
+    // error banner so the user sees the message in context without being sent
+    // to a separate error page.
     let submit_result = match result {
         Ok(submit_result) => submit_result,
-        Err(AppError::BadRequest(msg)) => {
+        Err(error) => {
+            let (status, msg) = match handled_post_error_status(error) {
+                Ok(handled) => handled,
+                Err(error) => {
+                    if xhr_request {
+                        return xhr_post_error_response(error);
+                    }
+                    return Err(error);
+                }
+            };
             if xhr_request {
-                return xhr_handled_error_response(StatusCode::UNPROCESSABLE_ENTITY, &msg);
+                return xhr_error_response(status, &msg);
             }
             let board_short_render = board_short_err.clone();
             let pool = state.db.clone();
@@ -181,14 +192,8 @@ pub async fn create_thread(
             .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
             let mut resp = Html(html).into_response();
-            *resp.status_mut() = axum::http::StatusCode::UNPROCESSABLE_ENTITY;
+            *resp.status_mut() = status;
             return Ok(resp);
-        }
-        Err(error) => {
-            if xhr_request {
-                return xhr_post_error_response(error);
-            }
-            return Err(error);
         }
     };
 

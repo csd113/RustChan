@@ -207,7 +207,7 @@ pub fn ffmpeg_thumbnail(input: &Path, output: &Path, max_dim: u32) -> Result<()>
     .with_context(|| format!("thumbnail generation failed for {in_str}"))
 }
 
-/// Probe whether a `WebM` container is audio-only or contains video streams.
+/// Probe whether a media container is audio-only or contains video streams.
 ///
 /// # Errors
 /// Returns an error if `ffprobe` cannot be spawned, times out, exits non-zero,
@@ -263,12 +263,29 @@ pub fn probe_stream_kind(path: &Path) -> Result<StreamKind> {
 /// Returns an error if `ffprobe` cannot be spawned, exits non-zero, or its
 /// output contains no recognisable codec name.
 pub fn probe_video_codec(path: &str) -> Result<String> {
+    probe_codec(path, "v:0", "video")
+}
+
+/// Probe the primary audio codec of a media file using `ffprobe`.
+///
+/// Returns the lowercase codec name (e.g. `"flac"`, `"mp3"`, `"opus"`) on
+/// success.
+///
+/// # Errors
+/// Returns an error if `ffprobe` cannot be spawned, exits non-zero, or its
+/// output contains no recognisable codec name.
+pub fn probe_audio_codec(path: &Path) -> Result<String> {
+    let path_str = path_to_str(path)?;
+    probe_codec(path_str, "a:0", "audio")
+}
+
+fn probe_codec(path: &str, stream_selector: &str, stream_label: &str) -> Result<String> {
     let output = run_command_with_timeout(
         ffprobe_command().args([
             "-v",
             "quiet",
             "-select_streams",
-            "v:0",
+            stream_selector,
             "-show_entries",
             "stream=codec_name",
             "-of",
@@ -293,7 +310,7 @@ pub fn probe_video_codec(path: &str) -> Result<String> {
 
     if codec.is_empty() {
         return Err(anyhow::anyhow!(
-            "ffprobe returned no codec name for: {path}"
+            "ffprobe returned no {stream_label} codec name for: {path}"
         ));
     }
 

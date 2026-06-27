@@ -60,9 +60,9 @@ mod http;
 mod listing;
 mod restore_board;
 mod restore_full;
+mod saved_backup;
 mod types;
-mod v4;
-pub(crate) use v4::BackupStorageMode;
+pub(crate) use saved_backup::BackupStorageMode;
 
 use common::{
     copy_limited, create_staging_dir, extract_uploads_to_dir, log_backup_phase,
@@ -529,6 +529,12 @@ pub fn temp_board_download_dir() -> PathBuf {
 
 // ─── Board-level backup / restore ─────────────────────────────────────────────
 
+#[derive(Deserialize)]
+pub struct BoardBackupDownloadQuery {
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
+}
+
 /// Stream a board-level backup zip: manifest JSON + that board's upload files.
 ///
 /// MEM-FIX: Same approach as `admin_backup` — build zip into a `NamedTempFile` on
@@ -536,8 +542,11 @@ pub fn temp_board_download_dir() -> PathBuf {
 pub async fn board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
+    Query(query): Query<BoardBackupDownloadQuery>,
     axum::extract::Path(board_short): axum::extract::Path<String>,
 ) -> Result<Response> {
+    check_admin_csrf_jar(&jar, query.csrf.as_deref())?;
+
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     let safe_board = board_short
         .chars()
@@ -757,6 +766,53 @@ mod tests {
 
     fn unique_zip_name(prefix: &str) -> String {
         format!("{prefix}-{}.zip", uuid::Uuid::new_v4().simple())
+    }
+
+    #[tokio::test]
+    async fn board_backup_get_requires_admin_csrf() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        let board_short = format!("b{}", &uuid::Uuid::new_v4().simple().to_string()[..7]);
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, &board_short, "Board", "", false).expect("create board");
+        }
+        let app = Router::new()
+            .route("/admin/board/backup/{board}", get(super::board_backup))
+            .with_state(state);
+        let cookie = "csrf_token=csrf123; chan_admin_session=session123";
+
+        let rejected = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/admin/board/backup/{board_short}"))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("rejected response");
+
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+
+        let accepted = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/admin/board/backup/{board_short}?_csrf={}",
+                        admin_signed_csrf()
+                    ))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("accepted response");
+
+        assert_eq!(accepted.status(), StatusCode::NOT_FOUND);
     }
 
     fn extract_location_query_param(location: &str, key: &str) -> Option<String> {
@@ -1586,7 +1642,7 @@ mod tests {
             }
         }
 
-        let backup_root = crate::handlers::admin::backup::v4::backups_root_dir();
+        let backup_root = crate::handlers::admin::backup::saved_backup::backups_root_dir();
         std::fs::create_dir_all(&backup_root).expect("backup root");
         let older_completed_dir = backup_root.join("2099-01-01_000001_full-site-newer-mtime-test");
         let newer_dir_mtime_dir =
@@ -1595,18 +1651,18 @@ mod tests {
             older_completed_dir.clone(),
             newer_dir_mtime_dir.clone(),
         ]);
-        crate::handlers::admin::backup::v4::write_saved_v4_fixture_for_test(
+        crate::handlers::admin::backup::saved_backup::write_saved_v4_fixture_for_test(
             &older_completed_dir,
-            crate::handlers::admin::backup::v4::BackupScope::FullSite,
-            crate::handlers::admin::backup::v4::board_fixture_files_for_test(),
+            crate::handlers::admin::backup::saved_backup::BackupScope::FullSite,
+            crate::handlers::admin::backup::saved_backup::board_fixture_files_for_test(),
             Some(b"sqlite".to_vec()),
             4_102_444_800,
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
-        crate::handlers::admin::backup::v4::write_saved_v4_fixture_for_test(
+        crate::handlers::admin::backup::saved_backup::write_saved_v4_fixture_for_test(
             &newer_dir_mtime_dir,
-            crate::handlers::admin::backup::v4::BackupScope::FullSite,
-            crate::handlers::admin::backup::v4::board_fixture_files_for_test(),
+            crate::handlers::admin::backup::saved_backup::BackupScope::FullSite,
+            crate::handlers::admin::backup::saved_backup::board_fixture_files_for_test(),
             Some(b"sqlite".to_vec()),
             4_102_444_700,
         );

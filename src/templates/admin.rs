@@ -83,6 +83,7 @@ pub struct AdminPanelViewModel<'a> {
     pub csrf_token: &'a str,
     pub boards: &'a [Board],
     pub current_theme: Option<&'a str>,
+    pub dashboard: AdminPanelDashboardView<'a>,
     pub moderation: AdminPanelModerationView<'a>,
     pub appearance: AdminPanelAppearanceView<'a>,
     pub site_health: AdminPanelSiteHealthView<'a>,
@@ -91,6 +92,51 @@ pub struct AdminPanelViewModel<'a> {
     pub tor_address: Option<&'a str>,
     pub flash: Option<AdminPanelFlash<'a>>,
     pub open_section: Option<&'a str>,
+}
+
+pub struct AdminPanelDashboardView<'a> {
+    pub version: &'a str,
+    pub build: &'a str,
+    pub setup_status: &'a str,
+    pub setup_detail: &'a str,
+    pub setup_state: AdminDashboardState,
+    pub site_title: &'a str,
+    pub public_url: &'a str,
+    pub db_status: &'a str,
+    pub db_detail: &'a str,
+    pub db_state: AdminDashboardState,
+    pub backup_status: &'a str,
+    pub backup_detail: &'a str,
+    pub backup_state: AdminDashboardState,
+    pub storage_status: &'a str,
+    pub storage_detail: &'a str,
+    pub storage_state: AdminDashboardState,
+    pub tor_status: &'a str,
+    pub tor_detail: &'a str,
+    pub tor_state: AdminDashboardState,
+    pub dependency_status: &'a str,
+    pub dependency_detail: &'a str,
+    pub dependency_state: AdminDashboardState,
+    pub job_status: &'a str,
+    pub job_detail: &'a str,
+    pub job_state: AdminDashboardState,
+    pub board_count: &'a str,
+    pub thread_count: &'a str,
+    pub post_count: &'a str,
+    pub recent_activity: &'a str,
+    pub media_summary: &'a str,
+    pub report_status: &'a str,
+    pub report_detail: &'a str,
+    pub report_state: AdminDashboardState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdminDashboardState {
+    Ok,
+    Warning,
+    ActionNeeded,
+    Disabled,
+    Unknown,
 }
 
 pub struct AdminPanelModerationView<'a> {
@@ -132,6 +178,7 @@ pub struct AdminPanelBackupsView<'a> {
 pub struct AdminPanelSiteHealthView<'a> {
     pub server_status: &'a str,
     pub rustchan_version: &'a str,
+    pub database_schema_status: &'a str,
     pub database_integrity_status: &'a str,
     pub last_successful_backup: &'a str,
     pub next_scheduled_backup: &'a str,
@@ -139,6 +186,10 @@ pub struct AdminPanelSiteHealthView<'a> {
     pub upload_dir_size: &'a str,
     pub tor_status: &'a str,
     pub tor_onion_address: Option<&'a str>,
+    pub tor_service_status: &'a str,
+    pub tor_mode: &'a str,
+    pub tor_config_summary: &'a str,
+    pub tor_detail: &'a str,
     pub dependency_summary: AdminSiteHealthDependencySummary,
     pub running_jobs: i64,
     pub queued_jobs: i64,
@@ -161,10 +212,19 @@ pub struct AdminSiteHealthDependencySummary {
 pub struct AdminPanelMaintenanceView {
     pub db_size_bytes: i64,
     pub db_size_warning: bool,
+    pub setup_status: AdminPanelSetupStatus,
     pub ffmpeg_timeout_secs: u64,
     pub media_auto_prune_enabled: bool,
     pub media_max_active_content_size_bytes: u64,
     pub media_detection: AdminMediaDetectionView,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum AdminPanelSetupStatus {
+    Available,
+    Complete,
+    Reopened,
+    Initialized,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -670,8 +730,11 @@ fn render_board_settings_card(
     <label title="Per-board audio upload size cap in MiB.">
       Audio size limit (MiB)<input type="number" name="max_audio_size_mb" value="{max_audio_size_mb}" min="1">
     </label>
+    <label title="Per-board PDF upload size cap in MiB.">
+      PDF size limit (MiB)<input type="number" name="max_pdf_size_mb" value="{max_pdf_size_mb}" min="1">
+    </label>
   </div>
-  <p class="admin-meta-note">PDF and any-file uploads still use the largest enabled cap for this board.</p>
+  <p class="admin-meta-note">PDF uploads use the PDF cap. Any-file uploads use the largest configured cap for this board.</p>
   <div class="board-settings-checks">
     <label><input type="checkbox" name="allow_images" value="1"{images_checked}> Allow images</label>
     <label><input type="checkbox" name="allow_video" value="1"{video_checked}> Allow video</label>
@@ -792,6 +855,7 @@ fn render_board_settings_card(
             bytes_to_mib(board.max_video_size, crate::config::CONFIG.max_video_size),
         max_audio_size_mb =
             bytes_to_mib(board.max_audio_size, crate::config::CONFIG.max_audio_size),
+        max_pdf_size_mb = bytes_to_mib(board.max_pdf_size, crate::config::CONFIG.max_image_size),
         pdf_checked = checked(board.allow_pdf),
         tripcodes_checked = checked(board.allow_tripcodes),
         video_embeds_checked = checked(board.allow_video_embeds),
@@ -1419,7 +1483,8 @@ pub fn admin_db_repair_failed_page(
 
 fn render_db_health_snapshot(snapshot: &crate::db::DbHealthSnapshot) -> String {
     format!(
-        "{integrity}{foreign_keys}",
+        "{schema}{integrity}{foreign_keys}",
+        schema = render_db_check_result("schema baseline", &snapshot.schema),
         integrity = render_db_check_result("integrity check", &snapshot.integrity),
         foreign_keys = render_db_check_result("foreign key check", &snapshot.foreign_keys),
     )
@@ -1698,9 +1763,10 @@ pub fn admin_ip_history_page(
 mod tests {
     use super::{
         admin_db_health_result_page, admin_db_repair_idle_page, admin_login_page, admin_panel_page,
-        render_board_appearance_card, render_board_settings_card, AdminDetectionStatus,
-        AdminMediaDetectionView, AdminPanelAppearanceView, AdminPanelBackupsView,
-        AdminPanelMaintenanceView, AdminPanelModerationView, AdminPanelSiteHealthView,
+        render_board_appearance_card, render_board_settings_card, AdminDashboardState,
+        AdminDetectionStatus, AdminMediaDetectionView, AdminPanelAppearanceView,
+        AdminPanelBackupsView, AdminPanelDashboardView, AdminPanelMaintenanceView,
+        AdminPanelModerationView, AdminPanelSetupStatus, AdminPanelSiteHealthView,
         AdminPanelViewModel, AdminSiteHealthDependencySummary,
     };
     use crate::db::{DbCheckResult, DbHealthReport, DbHealthSnapshot};
@@ -1727,6 +1793,7 @@ mod tests {
             max_image_size: 8 * 1024 * 1024,
             max_video_size: 50 * 1024 * 1024,
             max_audio_size: 150 * 1024 * 1024,
+            max_pdf_size: 8 * 1024 * 1024,
             allow_pdf: false,
             allow_any_files: false,
             allow_tripcodes: true,
@@ -1893,14 +1960,19 @@ mod tests {
     fn sample_site_health() -> AdminPanelSiteHealthView<'static> {
         AdminPanelSiteHealthView {
             server_status: "ready",
-            rustchan_version: "1.2.2",
+            rustchan_version: "1.3.0",
+            database_schema_status: "1.3.0 baseline verified",
             database_integrity_status: "not checked",
             last_successful_backup: "none saved",
             next_scheduled_backup: "not scheduled",
             data_dir_usage: "unknown",
             upload_dir_size: "unknown",
-            tor_status: "disabled",
+            tor_status: "disabled; set enable_tor_support = true in settings.toml, then restart",
             tor_onion_address: None,
+            tor_service_status: "not started; enable Tor support in settings.toml and restart",
+            tor_mode: "clearnet only",
+            tor_config_summary: "bootstrap timeout 30s; max streams 64",
+            tor_detail: "Set enable_tor_support = true in settings.toml, then restart RustChan.",
             dependency_summary: AdminSiteHealthDependencySummary {
                 ffmpeg: AdminDetectionStatus::Detected,
                 ffprobe: AdminDetectionStatus::Detected,
@@ -1914,7 +1986,46 @@ mod tests {
             failed_jobs: 0,
             backup_jobs: "idle",
             restore_jobs: "not available",
-            diagnostics_text: "RustChan version: 1.2.2\nRecent warnings:\n  none",
+            diagnostics_text:
+                "RustChan version: 1.3.0\nDatabase schema: 1.3.0 baseline verified\nRecent warnings:\n  none",
+        }
+    }
+
+    fn sample_dashboard() -> AdminPanelDashboardView<'static> {
+        AdminPanelDashboardView {
+            version: "1.3.0",
+            build: "test/test",
+            setup_status: "complete",
+            setup_detail: "Public setup routes are blocked.",
+            setup_state: AdminDashboardState::Ok,
+            site_title: "RustChan",
+            public_url: "not configured",
+            db_status: "ready",
+            db_detail: "Integrity: not checked.",
+            db_state: AdminDashboardState::Unknown,
+            backup_status: "current",
+            backup_detail: "All saved backups verified.",
+            backup_state: AdminDashboardState::Ok,
+            storage_status: "uploads unknown",
+            storage_detail: "Data directory unknown; active media unknown.",
+            storage_state: AdminDashboardState::Unknown,
+            tor_status: "disabled",
+            tor_detail: "Set enable_tor_support = true in settings.toml, then restart RustChan.",
+            tor_state: AdminDashboardState::Disabled,
+            dependency_status: "ready",
+            dependency_detail: "ffmpeg found; ffprobe found; WebP found; VP9 found; Opus found.",
+            dependency_state: AdminDashboardState::Ok,
+            job_status: "idle",
+            job_detail: "Recently completed 0; backup job idle; restore jobs not available.",
+            job_state: AdminDashboardState::Ok,
+            board_count: "1 board",
+            thread_count: "0 active / 0 total",
+            post_count: "0 posts",
+            recent_activity: "0 posts in 24h; 0 in 7d",
+            media_summary: "0 upload posts; 0 images, 0 video, 0 audio; 0 B active",
+            report_status: "no open reports",
+            report_detail: "0 reports in 7d; 0 open appeals.",
+            report_state: AdminDashboardState::Ok,
         }
     }
 
@@ -1950,6 +2061,7 @@ mod tests {
             csrf_token: "csrf",
             boards,
             current_theme: None,
+            dashboard: sample_dashboard(),
             moderation: AdminPanelModerationView {
                 bans: &[],
                 filters: &[],
@@ -1986,6 +2098,7 @@ mod tests {
             maintenance: AdminPanelMaintenanceView {
                 db_size_bytes: 4096,
                 db_size_warning: false,
+                setup_status: AdminPanelSetupStatus::Complete,
                 ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
                 media_auto_prune_enabled: false,
                 media_max_active_content_size_bytes: 0,
@@ -2129,6 +2242,7 @@ mod tests {
             max_image_size: 25 * 1024 * 1024,
             max_video_size: 500 * 1024 * 1024,
             max_audio_size: 300 * 1024 * 1024,
+            max_pdf_size: 12 * 1024 * 1024,
             ..sample_board()
         };
         let html = render_board_settings_card(
@@ -2144,14 +2258,16 @@ mod tests {
         assert!(html.contains(r#"name="max_image_size_mb""#));
         assert!(html.contains(r#"name="max_video_size_mb""#));
         assert!(html.contains(r#"name="max_audio_size_mb""#));
+        assert!(html.contains(r#"name="max_pdf_size_mb""#));
         assert!(html.contains(r#"value="25""#));
         assert!(html.contains(r#"value="500""#));
         assert!(html.contains(r#"value="300""#));
+        assert!(html.contains(r#"value="12""#));
         assert!(!html.contains("Cannot exceed the site-wide"));
         assert!(!html.contains(r#"max="8""#));
         assert!(!html.contains(r#"max="50""#));
         assert!(!html.contains(r#"max="150""#));
-        assert!(html.contains("PDF and any-file uploads still use the largest enabled cap"));
+        assert!(html.contains("PDF uploads use the PDF cap"));
     }
 
     #[test]
@@ -2246,14 +2362,23 @@ mod tests {
         assert!(html.contains("Database integrity status"));
         assert!(html.contains("open media panel"));
         assert!(html.contains("copy diagnostics"));
-        assert!(html.contains("RustChan version: 1.2.2"));
+        assert!(html.contains("RustChan version: 1.3.0"));
+        assert!(html.contains("Database schema"));
+        assert!(html.contains("1.3.0 baseline verified"));
         assert!(html.contains(r#"data-admin-health-jobs-url="/admin/site-health/jobs""#));
         assert!(html.contains(r#"data-admin-health-job="running_jobs""#));
         assert!(html.contains(r#"data-admin-health-job="queued_jobs""#));
         assert!(html.contains(r#"data-admin-health-toggle="failed""#));
         assert!(html.contains(r#"data-admin-health-job-list="failed""#));
+        assert!(html.contains(r#"action="/admin/site-health/jobs/dismiss""#));
+        assert!(html.contains(r#"name="_csrf" value="csrf""#));
+        assert!(html.contains("dismiss counter"));
         assert!(html.contains(r"data-admin-health-close"));
-        assert!(!html.contains("Tor bootstrap state"));
+        assert!(html.contains(r#"id="tor-status""#));
+        assert!(html.contains("// Tor diagnostics"));
+        assert!(html.contains("Onion service"));
+        assert!(html.contains("Runtime config"));
+        assert!(html.contains("Set enable_tor_support = true in settings.toml"));
         assert!(!html.contains("Thumbnail/transcode jobs"));
         assert!(!html.contains("Repair/VACUUM jobs"));
     }
@@ -2271,6 +2396,41 @@ mod tests {
 
         assert!(html.contains(
             r#"<details class="admin-dropdown" data-admin-dropdown-key="site-health" open>"#
+        ));
+    }
+
+    #[test]
+    fn admin_panel_control_center_uses_persistent_dropdown_pattern() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+        let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
+
+        assert!(html.contains(
+            r#"<section class="admin-section admin-section-collapsible" id="control-center""#
+        ));
+        assert!(html.contains(r#"data-admin-dropdown-key="control-center""#));
+        assert!(!html.contains(
+            r#"<details class="admin-dropdown" data-admin-dropdown-key="control-center" open>"#
+        ));
+        assert!(html.contains(r##"href="#public-url-settings""##));
+        assert!(html.contains(r##"href="#tor-status""##));
+        assert!(html.contains(r#"id="public-url-settings""#));
+        assert!(html.contains("settings.toml public_hosts"));
+    }
+
+    #[test]
+    fn admin_panel_control_center_honors_open_target() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+        let html = render_admin_panel_for_test(
+            std::slice::from_ref(&board),
+            &[],
+            &themes,
+            Some("control-center"),
+        );
+
+        assert!(html.contains(
+            r#"<details class="admin-dropdown" data-admin-dropdown-key="control-center" open>"#
         ));
     }
 
@@ -2353,6 +2513,10 @@ mod tests {
     fn admin_db_result_pages_use_shared_status_surfaces() {
         let report = DbHealthReport {
             before: DbHealthSnapshot {
+                schema: DbCheckResult {
+                    ok: true,
+                    messages: vec!["1.3.0 baseline verified".into()],
+                },
                 integrity: DbCheckResult {
                     ok: false,
                     messages: vec!["row 1".into(), "row 2".into()],
@@ -2586,6 +2750,7 @@ mod tests {
             csrf_token: "csrf",
             boards: std::slice::from_ref(&board),
             current_theme: Some("blue-sky"),
+            dashboard: sample_dashboard(),
             moderation: AdminPanelModerationView {
                 bans: &[],
                 filters: &[],
@@ -2622,6 +2787,7 @@ mod tests {
             maintenance: AdminPanelMaintenanceView {
                 db_size_bytes: 4096,
                 db_size_warning: false,
+                setup_status: AdminPanelSetupStatus::Complete,
                 ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
                 media_auto_prune_enabled: false,
                 media_max_active_content_size_bytes: 0,
@@ -2675,6 +2841,7 @@ mod tests {
             csrf_token: "csrf",
             boards: std::slice::from_ref(&board),
             current_theme: Some("blue-sky"),
+            dashboard: sample_dashboard(),
             moderation: AdminPanelModerationView {
                 bans: &[],
                 filters: &[],
@@ -2711,6 +2878,7 @@ mod tests {
             maintenance: AdminPanelMaintenanceView {
                 db_size_bytes: 0,
                 db_size_warning: false,
+                setup_status: AdminPanelSetupStatus::Complete,
                 ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
                 media_auto_prune_enabled: false,
                 media_max_active_content_size_bytes: 0,
@@ -2755,6 +2923,7 @@ mod tests {
             csrf_token: "csrf",
             boards: std::slice::from_ref(&board),
             current_theme: Some("blue-sky"),
+            dashboard: sample_dashboard(),
             moderation: AdminPanelModerationView {
                 bans: &[],
                 filters: &[],
@@ -2791,6 +2960,7 @@ mod tests {
             maintenance: AdminPanelMaintenanceView {
                 db_size_bytes: 0,
                 db_size_warning: false,
+                setup_status: AdminPanelSetupStatus::Complete,
                 ffmpeg_timeout_secs: crate::config::DEFAULT_FFMPEG_TIMEOUT_SECS,
                 media_auto_prune_enabled: false,
                 media_max_active_content_size_bytes: 0,

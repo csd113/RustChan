@@ -39,27 +39,17 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     }
 
     if header.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
-        let scan = data.get(..data.len().min(64)).unwrap_or(data);
-        if let Some(pos) = scan.windows(2).position(|w| w == [0x42, 0x82]) {
-            let size_idx = pos + 2;
-            if let Some(&sz) = scan.get(size_idx) {
-                let len = usize::from(sz & 0x7F);
-                let start = size_idx + 1;
-                let end = start.saturating_add(len);
-                if let Some(dt) = scan.get(start..end) {
-                    if dt.eq_ignore_ascii_case(b"webm") {
-                        return Ok("video/webm");
-                    }
-                    if dt.eq_ignore_ascii_case(b"matroska") {
-                        return Err(anyhow::anyhow!(
-                            "File type not allowed. Matroska/MKV is not accepted; use WebM."
-                        ));
-                    }
-                }
+        let scan = data.get(..data.len().min(512)).unwrap_or(data);
+        if let Some(doc_type) = ebml_doc_type(scan) {
+            if doc_type.eq_ignore_ascii_case(b"webm") {
+                return Ok("video/webm");
+            }
+            if doc_type.eq_ignore_ascii_case(b"matroska") {
+                return Ok("video/x-matroska");
             }
         }
         return Err(anyhow::anyhow!(
-            "File type not allowed. EBML container is not a valid WebM."
+            "File type not allowed. EBML container is not valid WebM or Matroska/MKV media."
         ));
     }
 
@@ -82,6 +72,12 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
         return Ok("audio/aac");
     }
     if header.starts_with(b"OggS") {
+        if data
+            .get(..data.len().min(512))
+            .is_some_and(|scan| scan.windows(b"OpusHead".len()).any(|w| w == b"OpusHead"))
+        {
+            return Ok("audio/opus");
+        }
         return Ok("audio/ogg");
     }
     if header.starts_with(b"fLaC") {
@@ -118,6 +114,19 @@ fn has_ftyp_brand(data: &[u8], accepted: &[&[u8; 4]]) -> bool {
                 .any(|candidate| brand == candidate.as_slice())
         })
     })
+}
+
+fn ebml_doc_type(scan: &[u8]) -> Option<&[u8]> {
+    let pos = scan.windows(2).position(|w| w == [0x42, 0x82])?;
+    let size_idx = pos.checked_add(2)?;
+    let size = *scan.get(size_idx)?;
+    let len = usize::from(size & 0x7F);
+    if len == 0 || len > 32 {
+        return None;
+    }
+    let start = size_idx.checked_add(1)?;
+    let end = start.checked_add(len)?;
+    scan.get(start..end)
 }
 
 #[must_use]

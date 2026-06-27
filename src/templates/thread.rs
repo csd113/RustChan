@@ -194,16 +194,22 @@ fn render_thread_nav(board: &Board, reply_count: i64, is_bottom: bool) -> String
     };
     format!(
         r#"<div class="{nav_class}">
-  <a href="/{board_short}">[ Return ]</a>
-  <a href="/{board_short}/catalog">[ Catalog ]</a>
-  <a href="{jump_link}">[ {jump_label} ]</a>
-  <button class="thread-nav-btn" type="button" data-action="fetch-updates" data-busy-label="[ Updating… ]">[ Update ]</button>
-  <label class="autoupdate-label">
-    <input type="checkbox" data-role="autoupdate-toggle" data-action="autoupdate-toggle">
-    Auto
-  </label>
-  <span class="autoupdate-status" data-role="autoupdate-status" role="status" aria-live="polite"></span>
-  <span class="thread-reply-stat">R: <span data-role="thread-reply-count">{reply_count}</span></span>
+  <div class="thread-nav-group thread-nav-links">
+    <a href="/{board_short}">[ Return ]</a>
+    <a href="/{board_short}/catalog">[ Catalog ]</a>
+    <a href="{jump_link}">[ {jump_label} ]</a>
+  </div>
+  <div class="thread-nav-group thread-nav-refresh">
+    <button class="thread-nav-btn" type="button" data-action="fetch-updates" data-busy-label="[ Updating… ]">[ Update now ]</button>
+    <label class="autoupdate-label">
+      <input type="checkbox" data-role="autoupdate-toggle" data-action="autoupdate-toggle">
+      <span>Auto refresh</span>
+    </label>
+  </div>
+  <div class="thread-nav-group thread-nav-state">
+    <span class="autoupdate-status" data-role="autoupdate-status" role="status" aria-live="polite"></span>
+    <span class="thread-reply-stat" title="Reply count"><span class="thread-reply-stat-label">Replies</span>: <span data-role="thread-reply-count">{reply_count}</span></span>
+  </div>
 </div>
 "#,
         nav_class = nav_class,
@@ -442,8 +448,6 @@ pub fn thread_page(
         board,
         thread.id,
         csrf_token,
-        posts,
-        owned_post_controls,
         edit_overlay_state,
     ));
     if is_admin {
@@ -1040,9 +1044,9 @@ pub fn render_post(
                     r#"<div class="file-container video-container">
 <div class="file-info">
   File: {file_link} ({sz})
-  <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
+  <button type="button" class="media-close-btn" data-action="collapse-media" style="display:none" aria-label="Collapse media">&#x2715; close</button>
 </div>
-<a class="media-preview video-preview" data-action="expand-media" href="/boards/{f}" title="click to play">
+<a class="media-preview video-preview" data-action="expand-media" href="/boards/{f}" title="click to play" aria-expanded="false">
   {thumb_html}
   <div class="media-expand-overlay">&#9654;</div>
 </a>
@@ -1070,9 +1074,9 @@ pub fn render_post(
                     r#"<div class="file-container pdf-container">
 <div class="file-info">
   File: {file_link} ({sz})
-  <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
+  <button type="button" class="media-close-btn" data-action="collapse-media" style="display:none" aria-label="Collapse media">&#x2715; close</button>
 </div>
-<a class="media-preview pdf-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
+<a class="media-preview pdf-preview" data-action="expand-media" href="/boards/{f}" title="click to expand" aria-expanded="false">
   {thumb_html}
   <div class="media-expand-overlay">&#x2922;</div>
 </a>
@@ -1101,9 +1105,9 @@ pub fn render_post(
                     r#"<div class="file-container{combo_class}">
 <div class="file-info">
   File: {file_link} ({sz})
-  <button class="media-close-btn" data-action="collapse-media" style="display:none">&#x2715; close</button>
+  <button type="button" class="media-close-btn" data-action="collapse-media" style="display:none" aria-label="Collapse media">&#x2715; close</button>
 </div>
-<a class="media-preview image-preview" data-action="expand-media" href="/boards/{f}" title="click to expand">
+<a class="media-preview image-preview" data-action="expand-media" href="/boards/{f}" title="click to expand" aria-expanded="false">
   {thumb_html}
   <div class="media-expand-overlay">&#x2922;</div>
 </a>
@@ -1346,8 +1350,6 @@ fn render_edit_overlay(
     board: &Board,
     thread_id: i64,
     csrf_token: &str,
-    posts: &[Post],
-    owned_post_controls: &BTreeMap<i64, OwnedPostControls>,
     edit_overlay_state: Option<&EditOverlayState>,
 ) -> String {
     let (post_id, current_body, error_html, modal_class) = edit_overlay_state.map_or_else(
@@ -1379,22 +1381,15 @@ fn render_edit_overlay(
             )
         },
     );
-    let can_edit_any = posts.iter().any(|post| {
-        owned_post_controls.contains_key(&post.id)
-            && chrono::Utc::now()
-                .timestamp()
-                .saturating_sub(post.created_at)
-                <= SELF_ACTION_WINDOW_SECS
-    });
     let aria_hidden = if edit_overlay_state.is_some() {
         "false"
     } else {
         "true"
     };
-    let hidden_attr = if can_edit_any || edit_overlay_state.is_some() {
+    let hidden_attr = if edit_overlay_state.is_some() {
         ""
     } else {
-        " hidden"
+        " hidden inert"
     };
 
     format!(

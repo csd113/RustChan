@@ -233,7 +233,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn health_endpoints_emit_request_id_and_metrics() {
+    async fn public_health_endpoints_emit_request_id_without_observability_details() {
         let router = build_router(crate::test_support::app_state(), false);
 
         let health = router
@@ -248,6 +248,19 @@ mod tests {
             .expect("health response");
         assert_eq!(health.status(), StatusCode::OK);
         assert!(health.headers().contains_key("x-request-id"));
+        let health_body = to_bytes(health.into_body(), usize::MAX)
+            .await
+            .expect("health body");
+        let health_body: serde_json::Value =
+            serde_json::from_slice(&health_body).expect("health json");
+        assert_eq!(
+            health_body
+                .get("status")
+                .and_then(serde_json::Value::as_str),
+            Some("ok")
+        );
+        assert!(health_body.get("request_count").is_none());
+        assert!(health_body.get("uptime_seconds").is_none());
 
         let ready = router
             .clone()
@@ -260,6 +273,18 @@ mod tests {
             .await
             .expect("ready response");
         assert_eq!(ready.status(), StatusCode::OK);
+        let ready_body = to_bytes(ready.into_body(), usize::MAX)
+            .await
+            .expect("ready body");
+        let ready_body: serde_json::Value =
+            serde_json::from_slice(&ready_body).expect("ready json");
+        assert_eq!(
+            ready_body.get("status").and_then(serde_json::Value::as_str),
+            Some("ready")
+        );
+        assert!(ready_body.get("database_schema_version").is_none());
+        assert!(ready_body.get("tor_enabled").is_none());
+        assert!(ready_body.get("latest_full_backup_age_hours").is_none());
 
         let metrics = router
             .oneshot(
@@ -270,13 +295,7 @@ mod tests {
             )
             .await
             .expect("metrics response");
-        assert_eq!(metrics.status(), StatusCode::OK);
-        let body = to_bytes(metrics.into_body(), usize::MAX)
-            .await
-            .expect("metrics body");
-        let body = String::from_utf8(body.to_vec()).expect("utf8 metrics");
-        assert!(body.contains("rustchan_requests_total"));
-        assert!(body.contains("rustchan_job_queue_pending"));
+        assert_eq!(metrics.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

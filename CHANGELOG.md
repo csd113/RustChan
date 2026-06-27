@@ -2,14 +2,17 @@
 
 All notable changes to RustChan will be documented in this file.
 
-## RustChan 1.2.2
+## RustChan 1.3.0
 
 - Replaced browser proof-of-work posting CAPTCHA with server-generated image CAPTCHA challenges.
 - Improved secure-cookie handling across HTTP, HTTPS, trusted-proxy HTTPS, admin sessions, board access cookies, CSRF cookies, and owned-post cookies.
 - Added no-JS fallbacks and accessibility polish for posting, reporting, catalog actions, board preferences, moderation controls, and own-post edit/delete flows.
 - Hardened upload handling for empty file controls, zero-byte named uploads, empty thumbnail payloads, invalid media, and cross-board media deduplication.
+- Tightened post upload validation so rejected media now returns semantic HTTP statuses for JS and no-JS submissions, exact-limit PDFs are accepted while cap + 1 PDFs are rejected, and malformed ADTS AAC is rejected before storage or background job creation.
+- Fixed late-cycle no-JS and pending-media regressions: Firefox no-JS theme changes persist through safe local redirects, and thread update controls expose a stable `data-action="fetch-updates"` hook for pending-media refreshes.
 - Improved activity badge cache behavior, especially on mobile WebKit and browser back/forward navigation.
 - Hardened settings validation so invalid config values fail closed instead of silently falling back.
+- Squashed the pre-release internal database migration ladder into a clean `1.3.0` baseline schema. Fresh databases now install that baseline directly, structurally matching in-development databases are stamped as schema version `1.3.0`, and partial or unknown schemas fail closed with diagnostics instead of blind migration attempts.
 - Polished responsive layout, long-content wrapping, modal focus behavior, ESC handling, touch targets, and light-theme error contrast.
 - Updated backup UI metadata handling and dynamic split-part options.
 - Refreshed README screenshots and release documentation.
@@ -126,7 +129,8 @@ All notable changes to RustChan will be documented in this file.
 - Theme CSS internals are cleaner and safer to maintain: the fixed footer now uses one shared height variable with safe-area-aware body padding, Frutiger Aero and NeonCubicle now share one glass-pill navigation implementation, and the Forest theme now centralizes repeated surface, link, button, and input colors behind theme-scoped variables.
 - Mobile header polish is tighter on board pages: the search bar now stretches to the same visual rails as the Home and Boards controls instead of ending short on narrow screens.
 - The theme picker now lives in a footer-docked control bar on both desktop and mobile, giving theme switching one consistent home and keeping it from floating over page content.
-- Backup and media-processing observability are stronger: posts now expose pending and failed async media state, `/readyz` and `/metrics` report media backlog, backup freshness, and maintenance activity, and the admin panel surfaces backup verification health instead of assuming saved ZIPs are restorable.
+- Backup and media-processing observability are stronger: posts now expose pending and failed async media state, opt-in detailed `/readyz` and `/metrics` report media backlog, backup freshness, and maintenance activity, and the admin panel surfaces backup verification health instead of assuming saved ZIPs are restorable.
+- Public observability is safer by default for internet and onion deployments: `/healthz` remains public, `/readyz` exposes only readiness status unless `public_readiness_details = true`, and `/metrics` is disabled unless `public_metrics_enabled = true`.
 - Heavy admin maintenance now coordinates through a shared maintenance gate and less aggressive background scheduling, so backups, restores, integrity checks, repair, and scheduled `VACUUM`/WAL work are less likely to pile onto live request traffic or each other.
 - Full backup recovery is now more flexible without adding scheduler clutter: new full backups record the boards they contain, and the admin panel can derive a single-board restore or downloadable board backup directly from a saved full-site archive.
 - Long media filenames now keep post layouts tidier without hiding the real upload name: thread and reply views truncate only the displayed stem, preserve the extension in the visible link text, and still expose the full original filename through the link tooltip.

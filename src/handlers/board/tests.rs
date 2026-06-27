@@ -932,7 +932,7 @@ async fn create_thread_xhr_validation_failure_returns_json_error() {
         .await
         .expect("response");
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(
         response
             .headers()
@@ -956,6 +956,97 @@ async fn create_thread_xhr_validation_failure_returns_json_error() {
     )
     .expect("utf8 body");
     assert!(body.contains("\"error\""));
+}
+
+#[tokio::test]
+async fn create_thread_rejects_mime_mismatch_with_415_inline_error() {
+    let state = crate::test_support::app_state();
+    {
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+    }
+
+    let router = Router::new()
+        .route("/{board}", post(super::create_thread))
+        .with_state(state);
+    let (boundary, body) = crate::test_support::multipart_body(
+        &[("_csrf", "csrf123"), ("body", "bad media")],
+        Some(("file", "fake.png", b"plain text", "image/png")),
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .extension(crate::test_support::connect_info())
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body")
+            .to_vec(),
+    )
+    .expect("utf8 body");
+    assert!(body.contains("post-error-banner"));
+    assert!(body.contains("File type not allowed"));
+}
+
+#[tokio::test]
+async fn create_thread_rejects_truncated_png_with_422_inline_error() {
+    let state = crate::test_support::app_state();
+    {
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+    }
+
+    let router = Router::new()
+        .route("/{board}", post(super::create_thread))
+        .with_state(state);
+    let truncated_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
+    let (boundary, body) = crate::test_support::multipart_body(
+        &[("_csrf", "csrf123"), ("body", "bad png")],
+        Some(("file", "truncated.png", truncated_png, "image/png")),
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .extension(crate::test_support::connect_info())
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body")
+            .to_vec(),
+    )
+    .expect("utf8 body");
+    assert!(body.contains("post-error-banner"));
+    assert!(body.contains("image header is malformed"));
 }
 
 #[tokio::test]
@@ -2513,7 +2604,7 @@ async fn create_thread_xhr_captcha_failure_returns_inline_json_error() {
         .await
         .expect("response");
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(
         response
             .headers()
@@ -2645,6 +2736,7 @@ async fn create_thread_rejects_uploads_on_upload_disabled_board() {
             i64::try_from(crate::config::CONFIG.max_image_size).expect("image size fits in i64"),
             i64::try_from(crate::config::CONFIG.max_video_size).expect("video size fits in i64"),
             i64::try_from(crate::config::CONFIG.max_audio_size).expect("audio size fits in i64"),
+            i64::try_from(crate::config::CONFIG.max_image_size).expect("pdf size fits in i64"),
             false,
             false,
             true,
@@ -2907,7 +2999,7 @@ async fn changing_board_password_invalidates_existing_unlock_cookie() {
 }
 
 #[tokio::test]
-async fn theme_redirect_rejects_external_referer_fallback() {
+async fn theme_redirect_ignores_external_referer_fallback() {
     let router = Router::new()
         .route("/theme/{theme}", get(crate::handlers::board::set_theme))
         .with_state(crate::test_support::app_state());
@@ -2917,6 +3009,7 @@ async fn theme_redirect_rejects_external_referer_fallback() {
             Request::builder()
                 .method("GET")
                 .uri("/theme/forest")
+                .header(header::COOKIE, "csrf_token=csrf123")
                 .header(header::REFERER, "https://evil.example/secret/catalog")
                 .body(Body::empty())
                 .expect("request"),
@@ -2932,6 +3025,83 @@ async fn theme_redirect_rejects_external_referer_fallback() {
             .and_then(|value| value.to_str().ok()),
         Some("/")
     );
+}
+
+#[tokio::test]
+async fn theme_redirect_persists_no_js_theme_without_csrf() {
+    let router = Router::new()
+        .route("/theme/{theme}", get(crate::handlers::board::set_theme))
+        .with_state(crate::test_support::app_state());
+
+    let accepted = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/theme/blue-sky?return_to=%2Fsecret%2Fcatalog")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("accepted response");
+
+    assert_eq!(accepted.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        accepted
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/secret/catalog")
+    );
+    assert!(accepted
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| value.starts_with("rustchan_theme=blue-sky;")));
+
+    let rejected = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/theme/forest?return_to=%2Fsecret%2Fcatalog&_csrf=wrong")
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("rejected response");
+
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    assert!(rejected.headers().get(header::SET_COOKIE).is_none());
+
+    let accepted = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/theme/forest?return_to=%2Fsecret%2Fcatalog&_csrf=csrf123")
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("accepted response");
+
+    assert_eq!(accepted.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        accepted
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/secret/catalog")
+    );
+    assert!(accepted
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| value.starts_with("rustchan_theme=forest;")));
 }
 
 #[test]

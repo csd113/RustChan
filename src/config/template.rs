@@ -48,14 +48,20 @@ trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
 # Usually only needed when binding to 0.0.0.0/:: with a manual certificate.
 # public_hosts = ["example.com", "www.example.com"]
 
+# Public observability defaults are intentionally quiet for internet and onion exposure.
+# /healthz remains public and minimal. Set these only for a trusted scrape path,
+# typically behind a reverse-proxy allowlist or private network.
+public_readiness_details = false
+public_metrics_enabled = false
+
 # ── Upload limits ─────────────────────────────────────────────────────────────
 # Maximum size for image uploads in MiB (jpg, png, gif, webp, heic).
 max_image_size_mb = 8
 
-# Maximum size for video uploads in MiB (mp4, webm).
+# Maximum size for video uploads in MiB (mp4, webm, mkv).
 max_video_size_mb = 50
 
-# Maximum size for audio uploads in MiB (mp3, ogg, flac, wav, m4a, aac).
+# Maximum size for audio uploads in MiB (mp3, ogg/oga, opus, flac, wav, m4a, aac, webm audio).
 max_audio_size_mb = 150
 
 # Master switch for arbitrary file uploads.

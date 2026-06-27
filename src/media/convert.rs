@@ -11,7 +11,7 @@
 //   png        → WebP  ONLY if the WebP output is smaller; otherwise keep PNG
 //   svg        → keep as-is (no conversion)
 //   webp       → keep as-is
-//   webm       → keep as-is
+//   webm/mkv   → keep as-is
 //   all audio  → keep as-is
 //   mp4        → keep as-is (background worker handles MP4→WebM separately)
 //
@@ -212,7 +212,13 @@ fn copy_as_is(
     file_stem: &str,
 ) -> Result<ConversionResult> {
     let ext = crate::utils::files::mime_to_ext_pub(mime);
-    copy_as_is_with_ext(input, output_dir, file_stem, ext)
+    copy_as_is_with_mime(
+        input,
+        output_dir,
+        file_stem,
+        ext,
+        upload_mime_to_static(mime),
+    )
 }
 
 /// Copy `input` to `output_dir/{file_stem}.{ext}`, returning a `ConversionResult`.
@@ -222,18 +228,53 @@ fn copy_as_is_with_ext(
     file_stem: &str,
     ext: &str,
 ) -> Result<ConversionResult> {
+    copy_as_is_with_mime(input, output_dir, file_stem, ext, ext_to_static_mime(ext))
+}
+
+fn copy_as_is_with_mime(
+    input: &Path,
+    output_dir: &Path,
+    file_stem: &str,
+    ext: &str,
+    final_mime: &'static str,
+) -> Result<ConversionResult> {
     let output = output_dir.join(format!("{file_stem}.{ext}"));
     std::fs::copy(input, &output)
         .with_context(|| format!("failed to copy upload to {}", output.display()))?;
     let final_size = file_size(&output)?;
-    // Determine MIME from extension for reporting
-    let final_mime = ext_to_static_mime(ext);
     Ok(ConversionResult {
         final_path: output,
         final_mime,
         was_converted: false,
         final_size,
     })
+}
+
+fn upload_mime_to_static(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "image/jpeg",
+        "image/png" => "image/png",
+        "image/gif" => "image/gif",
+        "image/heic" => "image/heic",
+        "image/heif" => "image/heif",
+        "image/bmp" => "image/bmp",
+        "image/tiff" => "image/tiff",
+        "image/webp" => "image/webp",
+        "image/svg+xml" => "image/svg+xml",
+        "application/pdf" => "application/pdf",
+        "video/webm" => "video/webm",
+        "video/mp4" => "video/mp4",
+        "video/x-matroska" | "video/matroska" => "video/x-matroska",
+        "audio/webm" => "audio/webm",
+        "audio/mpeg" | "audio/mp3" => "audio/mpeg",
+        "audio/ogg" | "application/ogg" | "audio/oga" => "audio/ogg",
+        "audio/opus" => "audio/opus",
+        "audio/flac" | "audio/x-flac" => "audio/flac",
+        "audio/wav" | "audio/wave" | "audio/x-wav" | "audio/vnd.wave" => "audio/wav",
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => "audio/mp4",
+        "audio/aac" | "audio/x-aac" => "audio/aac",
+        _ => "application/octet-stream",
+    }
 }
 
 // ─── Path and size utilities ──────────────────────────────────────────────────
@@ -281,8 +322,10 @@ fn ext_for_original_mime(path: &Path) -> &'static str {
         Some("tiff" | "tif") => "tiff",
         Some("webp") => "webp",
         Some("webm") => "webm",
+        Some("mkv") => "mkv",
         Some("svg") => "svg",
         Some("pdf") => "pdf",
+        Some("opus") => "opus",
         _ => "bin",
     }
 }
@@ -301,9 +344,11 @@ fn ext_to_static_mime(ext: &str) -> &'static str {
         "svg" => "image/svg+xml",
         "pdf" => "application/pdf",
         "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
         "mp4" => "video/mp4",
         "mp3" => "audio/mpeg",
         "ogg" => "audio/ogg",
+        "opus" => "audio/opus",
         "flac" => "audio/flac",
         "wav" => "audio/wav",
         "m4a" => "audio/mp4",

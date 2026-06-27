@@ -184,11 +184,11 @@ fn copy_board_upload_entries_from_full_backup<R: std::io::Read + std::io::Seek, 
 fn write_v4_file_to_legacy_zip<W: Write + Seek>(
     zip: &mut zip::ZipWriter<W>,
     zip_path: &str,
-    source: &v4::VerifiedSavedV4File,
+    source: &saved_backup::VerifiedSavedV4File,
 ) -> Result<()> {
     zip.start_file(zip_path, zip_file_options_for_path(Path::new(zip_path)))
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip {zip_path}: {error}")))?;
-    v4::copy_verified_file_to_writer(source, zip)
+    saved_backup::copy_verified_file_to_writer(source, zip)
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy {zip_path}: {error}")))
 }
 
@@ -197,7 +197,8 @@ fn temp_legacy_zip_path(prefix: &str) -> PathBuf {
 }
 
 pub(super) fn create_temp_legacy_full_backup_from_v4_path(root_dir: &Path) -> Result<PathBuf> {
-    let verified = v4::verify_saved_v4_root(root_dir, &[v4::BackupScope::FullSite])?;
+    let verified =
+        saved_backup::verify_saved_v4_root(root_dir, &[saved_backup::BackupScope::FullSite])?;
     create_temp_legacy_full_backup_from_verified_v4(&verified)
 }
 
@@ -228,13 +229,13 @@ pub(super) fn create_temp_legacy_full_backup_from_v4_transfer_zip<R: std::io::Re
             db_index = Some(index);
             db_bytes = entry.size();
         } else if name.starts_with("boards/") {
-            if let Ok((runtime_path, kind)) = v4::logical_upload_path_to_runtime(&name) {
+            if let Ok((runtime_path, kind)) = saved_backup::logical_upload_path_to_runtime(&name) {
                 mapped_files.push((index, format!("uploads/{runtime_path}")));
                 match kind {
-                    v4::BackupFileKind::OriginalMedia
-                    | v4::BackupFileKind::Thumbnail
-                    | v4::BackupFileKind::Banner
-                    | v4::BackupFileKind::Favicon => {
+                    saved_backup::BackupFileKind::OriginalMedia
+                    | saved_backup::BackupFileKind::Thumbnail
+                    | saved_backup::BackupFileKind::Banner
+                    | saved_backup::BackupFileKind::Favicon => {
                         upload_file_count = upload_file_count.saturating_add(1);
                     }
                     _ => {}
@@ -320,7 +321,7 @@ pub(super) fn create_temp_legacy_full_backup_from_v4_transfer_zip<R: std::io::Re
 }
 
 fn create_temp_legacy_full_backup_from_verified_v4(
-    verified: &v4::VerifiedSavedV4Root,
+    verified: &saved_backup::VerifiedSavedV4Root,
 ) -> Result<PathBuf> {
     debug_assert_eq!(
         verified.metadata.backup_id, verified.manifest.backup_id,
@@ -347,27 +348,29 @@ fn create_temp_legacy_full_backup_from_verified_v4(
         .filter(|entry| {
             matches!(
                 entry.kind,
-                v4::BackupFileKind::OriginalMedia
-                    | v4::BackupFileKind::Thumbnail
-                    | v4::BackupFileKind::Banner
-                    | v4::BackupFileKind::Favicon
+                saved_backup::BackupFileKind::OriginalMedia
+                    | saved_backup::BackupFileKind::Thumbnail
+                    | saved_backup::BackupFileKind::Banner
+                    | saved_backup::BackupFileKind::Favicon
             ) && entry.board.is_some()
         })
         .count() as u64;
     let favicon_file_count = manifest
         .files
         .iter()
-        .filter(|entry| entry.kind == v4::BackupFileKind::Favicon && entry.board.is_none())
+        .filter(|entry| {
+            entry.kind == saved_backup::BackupFileKind::Favicon && entry.board.is_none()
+        })
         .count() as u64;
     let banner_file_count = manifest
         .files
         .iter()
-        .filter(|entry| entry.kind == v4::BackupFileKind::Banner && entry.board.is_none())
+        .filter(|entry| entry.kind == saved_backup::BackupFileKind::Banner && entry.board.is_none())
         .count() as u64;
     let tor_hidden_service_key_file_count = manifest
         .files
         .iter()
-        .filter(|entry| entry.kind == v4::BackupFileKind::TorKey)
+        .filter(|entry| entry.kind == saved_backup::BackupFileKind::TorKey)
         .count() as u64;
     let db_bytes = manifest
         .db_snapshot
@@ -413,12 +416,12 @@ fn create_temp_legacy_full_backup_from_verified_v4(
     for (_, board) in boards {
         for entry in &board.upload_files {
             match entry.kind {
-                v4::BackupFileKind::OriginalMedia
-                | v4::BackupFileKind::Thumbnail
-                | v4::BackupFileKind::Banner
-                | v4::BackupFileKind::Favicon => {
+                saved_backup::BackupFileKind::OriginalMedia
+                | saved_backup::BackupFileKind::Thumbnail
+                | saved_backup::BackupFileKind::Banner
+                | saved_backup::BackupFileKind::Favicon => {
                     let (runtime_path, _) =
-                        v4::logical_upload_path_to_runtime(&entry.logical_path)?;
+                        saved_backup::logical_upload_path_to_runtime(&entry.logical_path)?;
                     write_v4_file_to_legacy_zip(
                         &mut zip,
                         &format!("uploads/{runtime_path}"),
@@ -483,15 +486,18 @@ pub(super) fn create_temp_legacy_board_backup_from_v4_path(
     root_dir: &Path,
     board_short: Option<&str>,
 ) -> Result<(PathBuf, String)> {
-    let verified = v4::verify_saved_v4_root(
+    let verified = saved_backup::verify_saved_v4_root(
         root_dir,
-        &[v4::BackupScope::Board, v4::BackupScope::SelectedBoards],
+        &[
+            saved_backup::BackupScope::Board,
+            saved_backup::BackupScope::SelectedBoards,
+        ],
     )?;
     create_temp_legacy_board_backup_from_verified_v4(&verified, board_short)
 }
 
 fn create_temp_legacy_board_backup_from_verified_v4(
-    verified: &v4::VerifiedSavedV4Root,
+    verified: &saved_backup::VerifiedSavedV4Root,
     board_short: Option<&str>,
 ) -> Result<(PathBuf, String)> {
     let board_short = match board_short {
@@ -510,7 +516,7 @@ fn create_temp_legacy_board_backup_from_verified_v4(
     let board_layout = verified.boards.get(&board_short).ok_or_else(|| {
         AppError::NotFound(format!("Board /{board_short}/ not found in this backup."))
     })?;
-    let board_json = v4::read_verified_file(&board_layout.board_json)?;
+    let board_json = saved_backup::read_verified_file(&board_layout.board_json)?;
 
     let temp_zip = temp_legacy_zip_path("rustchan_v4_board_restore");
     let filename = format!(
@@ -529,7 +535,7 @@ fn create_temp_legacy_board_backup_from_verified_v4(
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Write board.json: {error}")))?;
 
     for entry in &board_layout.upload_files {
-        let (runtime_path, _) = v4::logical_upload_path_to_runtime(&entry.logical_path)?;
+        let (runtime_path, _) = saved_backup::logical_upload_path_to_runtime(&entry.logical_path)?;
         write_v4_file_to_legacy_zip(&mut zip, &format!("uploads/{runtime_path}"), entry)?;
     }
 
@@ -543,7 +549,8 @@ pub(super) fn create_temp_legacy_board_backup_from_saved_full_v4_path(
     root_dir: &Path,
     board_short: &str,
 ) -> Result<(PathBuf, String)> {
-    let verified = v4::verify_saved_v4_root(root_dir, &[v4::BackupScope::FullSite])?;
+    let verified =
+        saved_backup::verify_saved_v4_root(root_dir, &[saved_backup::BackupScope::FullSite])?;
     create_temp_legacy_board_backup_from_verified_v4(&verified, Some(board_short))
 }
 
@@ -619,11 +626,11 @@ mod tests {
     fn full_fixture_root(label: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join(label);
-        v4::write_saved_v4_fixture_for_test(
+        saved_backup::write_saved_v4_fixture_for_test(
             &root,
-            v4::BackupScope::FullSite,
-            v4::board_fixture_files_for_test(),
-            Some(b"sqlite".to_vec()),
+            saved_backup::BackupScope::FullSite,
+            saved_backup::board_fixture_files_for_test(),
+            Some(saved_backup::valid_db_snapshot_for_test()),
             1_715_010_000_i64,
         );
         (dir, root)
@@ -632,10 +639,10 @@ mod tests {
     fn board_fixture_root(label: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join(label);
-        v4::write_saved_v4_fixture_for_test(
+        saved_backup::write_saved_v4_fixture_for_test(
             &root,
-            v4::BackupScope::Board,
-            v4::board_fixture_files_for_test(),
+            saved_backup::BackupScope::Board,
+            saved_backup::board_fixture_files_for_test(),
             None,
             1_715_020_000_i64,
         );
@@ -645,9 +652,12 @@ mod tests {
     #[test]
     fn saved_full_v4_restore_rejects_db_snapshot_escape() {
         let (_dir, root) = full_fixture_root("2026-05-06_full-site_db-escape");
-        let mut manifest = v4::load_manifest(&root.join(v4::MANIFEST_FILE_NAME)).expect("manifest");
+        let mut manifest =
+            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))
+                .expect("manifest");
         manifest.db_snapshot.as_mut().expect("db snapshot").path = "../escape.db".to_owned();
-        v4::write_json_pretty(&root.join(v4::MANIFEST_FILE_NAME), &manifest).expect("manifest");
+        saved_backup::write_json_pretty(&root.join(saved_backup::MANIFEST_FILE_NAME), &manifest)
+            .expect("manifest");
 
         let error = create_temp_legacy_full_backup_from_v4_path(&root)
             .expect_err("db snapshot escape should fail");
@@ -663,14 +673,17 @@ mod tests {
             &favicon_bytes,
         )
         .expect("outside favicon");
-        let mut manifest = v4::load_manifest(&root.join(v4::MANIFEST_FILE_NAME)).expect("manifest");
-        manifest.files.push(v4::test_file_entry_for_test(
+        let mut manifest =
+            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))
+                .expect("manifest");
+        manifest.files.push(saved_backup::test_file_entry_for_test(
             "../escape.ico",
             None,
-            v4::BackupFileKind::Favicon,
+            saved_backup::BackupFileKind::Favicon,
             &favicon_bytes,
         ));
-        v4::write_json_pretty(&root.join(v4::MANIFEST_FILE_NAME), &manifest).expect("manifest");
+        saved_backup::write_json_pretty(&root.join(saved_backup::MANIFEST_FILE_NAME), &manifest)
+            .expect("manifest");
 
         let error = create_temp_legacy_full_backup_from_v4_path(&root)
             .expect_err("favicon escape should fail");
@@ -686,20 +699,27 @@ mod tests {
             &tor_bytes,
         )
         .expect("outside key");
-        let mut manifest = v4::load_manifest(&root.join(v4::MANIFEST_FILE_NAME)).expect("manifest");
+        let mut manifest =
+            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))
+                .expect("manifest");
         manifest.includes.tor_keys = true;
-        manifest.files.push(v4::test_file_entry_for_test(
+        manifest.files.push(saved_backup::test_file_entry_for_test(
             "../outside.key",
             None,
-            v4::BackupFileKind::TorKey,
+            saved_backup::BackupFileKind::TorKey,
             &tor_bytes,
         ));
         let mut metadata =
-            v4::load_metadata(&root.join(v4::BACKUP_METADATA_FILE_NAME)).expect("metadata");
+            saved_backup::load_metadata(&root.join(saved_backup::BACKUP_METADATA_FILE_NAME))
+                .expect("metadata");
         metadata.includes_tor_keys = true;
-        v4::write_json_pretty(&root.join(v4::MANIFEST_FILE_NAME), &manifest).expect("manifest");
-        v4::write_json_pretty(&root.join(v4::BACKUP_METADATA_FILE_NAME), &metadata)
-            .expect("metadata");
+        saved_backup::write_json_pretty(&root.join(saved_backup::MANIFEST_FILE_NAME), &manifest)
+            .expect("manifest");
+        saved_backup::write_json_pretty(
+            &root.join(saved_backup::BACKUP_METADATA_FILE_NAME),
+            &metadata,
+        )
+        .expect("metadata");
 
         let error = create_temp_legacy_full_backup_from_v4_path(&root)
             .expect_err("tor key escape should fail");
@@ -709,15 +729,18 @@ mod tests {
     #[test]
     fn saved_board_v4_restore_rejects_escaping_manifest_path() {
         let (_dir, root) = board_fixture_root("2026-05-06_board-escape");
-        let mut manifest = v4::load_manifest(&root.join(v4::MANIFEST_FILE_NAME)).expect("manifest");
+        let mut manifest =
+            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))
+                .expect("manifest");
         if let Some(entry) = manifest
             .files
             .iter_mut()
-            .find(|entry| entry.kind == v4::BackupFileKind::BoardJson)
+            .find(|entry| entry.kind == saved_backup::BackupFileKind::BoardJson)
         {
             entry.logical_path = "../board.json".to_owned();
         }
-        v4::write_json_pretty(&root.join(v4::MANIFEST_FILE_NAME), &manifest).expect("manifest");
+        saved_backup::write_json_pretty(&root.join(saved_backup::MANIFEST_FILE_NAME), &manifest)
+            .expect("manifest");
 
         let error = create_temp_legacy_board_backup_from_v4_path(&root, None)
             .expect_err("board restore strict verify should fail");
@@ -727,15 +750,18 @@ mod tests {
     #[test]
     fn selected_board_extraction_from_saved_full_rejects_escaping_manifest_path() {
         let (_dir, root) = full_fixture_root("2026-05-06_full-site-board-escape");
-        let mut manifest = v4::load_manifest(&root.join(v4::MANIFEST_FILE_NAME)).expect("manifest");
+        let mut manifest =
+            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))
+                .expect("manifest");
         if let Some(entry) = manifest
             .files
             .iter_mut()
-            .find(|entry| entry.kind == v4::BackupFileKind::BoardJson)
+            .find(|entry| entry.kind == saved_backup::BackupFileKind::BoardJson)
         {
             entry.logical_path = "../board.json".to_owned();
         }
-        v4::write_json_pretty(&root.join(v4::MANIFEST_FILE_NAME), &manifest).expect("manifest");
+        saved_backup::write_json_pretty(&root.join(saved_backup::MANIFEST_FILE_NAME), &manifest)
+            .expect("manifest");
 
         let error = create_temp_legacy_board_backup_from_saved_full_v4_path(&root, "tech")
             .expect_err("selected-board extraction strict verify should fail");
@@ -750,7 +776,9 @@ mod tests {
             .expect("create cross-board parent");
         std::fs::write(&cross_board_path, b"media").expect("write cross-board file");
 
-        let mut manifest = v4::load_manifest(&root.join(v4::MANIFEST_FILE_NAME)).expect("manifest");
+        let mut manifest =
+            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))
+                .expect("manifest");
         if let Some(entry) = manifest
             .files
             .iter_mut()
@@ -758,7 +786,8 @@ mod tests {
         {
             entry.logical_path = "boards/other/media/src/example.txt".to_owned();
         }
-        v4::write_json_pretty(&root.join(v4::MANIFEST_FILE_NAME), &manifest).expect("manifest");
+        saved_backup::write_json_pretty(&root.join(saved_backup::MANIFEST_FILE_NAME), &manifest)
+            .expect("manifest");
 
         let error = create_temp_legacy_board_backup_from_saved_full_v4_path(&root, "tech")
             .expect_err("selected-board extraction cross-board file should fail");

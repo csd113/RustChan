@@ -1,6 +1,28 @@
 // admin.js - RustChan admin-panel-only client-side logic
 'use strict';
 
+function setAdminElementInert(element, inert) {
+  if (!element) return;
+  if (inert) {
+    element.setAttribute('inert', '');
+  } else {
+    element.removeAttribute('inert');
+  }
+}
+
+function setAdminElementAriaHidden(element, hidden) {
+  if (!element) return;
+  element.setAttribute('aria-hidden', hidden ? 'true' : 'false');
+}
+
+function setAdminModalOpen(modal, open, displayValue) {
+  if (!modal) return;
+  modal.hidden = !open;
+  modal.style.display = open ? (displayValue || 'flex') : 'none';
+  setAdminElementAriaHidden(modal, !open);
+  setAdminElementInert(modal, !open);
+}
+
 (function () {
   var ADMIN_DROPDOWN_STORAGE_PREFIX = 'rustchan_admin_dropdown:';
 
@@ -18,6 +40,27 @@
     } catch (e) {}
   }
 
+  function adminDropdownPanelId(key) {
+    return 'admin-dropdown-panel-' + String(key || 'section').replace(/[^A-Za-z0-9_-]/g, '-');
+  }
+
+  function syncAdminDropdownState(details) {
+    if (!details) return;
+    var key = details.dataset.adminDropdownKey || '';
+    var summary = details.querySelector('summary');
+    var panel = details.querySelector('.admin-dropdown-content');
+    var open = details.open;
+    if (panel) {
+      if (!panel.id) panel.id = adminDropdownPanelId(key);
+      setAdminElementAriaHidden(panel, !open);
+      setAdminElementInert(panel, !open);
+    }
+    if (summary) {
+      summary.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (panel && panel.id) summary.setAttribute('aria-controls', panel.id);
+    }
+  }
+
   function initPersistentAdminDropdowns() {
     document.querySelectorAll('details.admin-dropdown[data-admin-dropdown-key]').forEach(function (details) {
       var key = details.dataset.adminDropdownKey;
@@ -33,8 +76,10 @@
         }
       }
 
+      syncAdminDropdownState(details);
       details.addEventListener('toggle', function () {
         writeAdminDropdownState(key, details.open);
+        syncAdminDropdownState(details);
       });
     });
   }
@@ -107,17 +152,98 @@
     });
   }
 
+  function copyTextWithTextareaFallback(text) {
+    return new Promise(function (resolve, reject) {
+      var textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.top = '0';
+      textarea.style.left = '0';
+      textarea.style.width = '1px';
+      textarea.style.height = '1px';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      textarea.setSelectionRange(0, textarea.value.length);
+
+      var copied = false;
+      try {
+        copied = document.execCommand('copy');
+      } catch (e) {
+        copied = false;
+      }
+      textarea.remove();
+
+      if (copied) {
+        resolve();
+      } else {
+        reject(new Error('copy command failed'));
+      }
+    });
+  }
+
+  function copyTextToClipboard(text) {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      return navigator.clipboard.writeText(text).catch(function () {
+        return copyTextWithTextareaFallback(text);
+      });
+    }
+    return copyTextWithTextareaFallback(text);
+  }
+
+  function setCopyFeedback(button, message, resetText, delayMs) {
+    button.textContent = message;
+    window.setTimeout(function () {
+      button.textContent = resetText;
+    }, delayMs);
+  }
+
+  function initAdminCopyButtons(root) {
+    (root || document).querySelectorAll('[data-admin-copy-text]').forEach(function (button) {
+      var text = button.getAttribute('data-admin-copy-text') || '';
+      if (!text) return;
+      var defaultText = button.textContent || 'Copy';
+      button.hidden = false;
+      button.addEventListener('click', function () {
+        copyTextToClipboard(text).then(function () {
+          setCopyFeedback(button, 'Copied', defaultText, 1500);
+        }).catch(function () {
+          setCopyFeedback(button, 'Copy failed', defaultText, 2200);
+        });
+      });
+    });
+  }
+
   function initDiagnosticsDialog() {
     document.querySelectorAll('[data-admin-diagnostics]').forEach(function (details) {
       var summary = details.querySelector('summary');
+      var panel = details.querySelector('.admin-diagnostics-panel');
       var closeButton = details.querySelector('[data-admin-diagnostics-close]');
       var copyButton = details.querySelector('[data-admin-diagnostics-copy]');
       var text = details.querySelector('[data-admin-diagnostics-text]');
+
+      function syncDiagnosticsState() {
+        if (panel && !panel.id) panel.id = 'admin-diagnostics-panel';
+        if (summary) {
+          summary.setAttribute('aria-expanded', details.open ? 'true' : 'false');
+          if (panel && panel.id) summary.setAttribute('aria-controls', panel.id);
+        }
+        if (panel) {
+          setAdminElementAriaHidden(panel, !details.open);
+          setAdminElementInert(panel, !details.open);
+        }
+      }
+
+      syncDiagnosticsState();
+      details.addEventListener('toggle', syncDiagnosticsState);
 
       if (summary) {
         summary.addEventListener('click', function (event) {
           event.preventDefault();
           details.open = true;
+          syncDiagnosticsState();
           if (copyButton && typeof copyButton.focus === 'function') {
             copyButton.focus();
           }
@@ -127,6 +253,7 @@
       if (closeButton) {
         closeButton.addEventListener('click', function () {
           details.open = false;
+          syncDiagnosticsState();
           if (summary && typeof summary.focus === 'function') {
             summary.focus();
           }
@@ -136,22 +263,22 @@
       if (copyButton && text) {
         copyButton.addEventListener('click', function () {
           var value = text.textContent || '';
-          if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(value).then(function () {
-              copyButton.textContent = 'copied';
-              window.setTimeout(function () {
-                copyButton.textContent = 'copy';
-              }, 1500);
-            }).catch(function () {
-              copyButton.textContent = 'copy failed';
-            });
-          }
+          copyTextToClipboard(value).then(function () {
+            setCopyFeedback(copyButton, 'Copied', 'Copy', 1500);
+          }).catch(function () {
+            setCopyFeedback(copyButton, 'Copy failed', 'Copy', 2200);
+          });
         });
       }
 
       document.addEventListener('keydown', function (event) {
         if (event.key === 'Escape' && details.open) {
+          var hadFocus = details.contains(document.activeElement);
           details.open = false;
+          syncDiagnosticsState();
+          if (hadFocus && summary && typeof summary.focus === 'function') {
+            summary.focus();
+          }
         }
       });
     });
@@ -159,6 +286,7 @@
 
   document.addEventListener('DOMContentLoaded', function () {
     initAdminSectionLinks();
+    initAdminCopyButtons(document);
     initDiagnosticsDialog();
   });
 })();
@@ -892,6 +1020,44 @@
       failed: container.querySelector('[data-admin-health-job-list="failed"]'),
       completed: container.querySelector('[data-admin-health-job-list="completed"]')
     };
+    var failedDismissButton = container.querySelector('[data-admin-health-failed-dismiss]');
+    var activeJobToggle = null;
+
+    function setJobPanelHidden(panel, hidden) {
+      if (!panel) return;
+      panel.hidden = hidden;
+      setAdminElementAriaHidden(panel, hidden);
+      setAdminElementInert(panel, hidden);
+    }
+
+    function setJobDetailsHidden(hidden) {
+      if (!details) return;
+      details.hidden = hidden;
+      setAdminElementAriaHidden(details, hidden);
+      setAdminElementInert(details, hidden);
+    }
+
+    function setJobTogglesExpanded(target) {
+      container.querySelectorAll('[data-admin-health-toggle]').forEach(function (button) {
+        button.setAttribute(
+          'aria-expanded',
+          button.getAttribute('data-admin-health-toggle') === target ? 'true' : 'false'
+        );
+      });
+    }
+
+    function closeJobDetails(opts) {
+      opts = opts || {};
+      Object.keys(panels).forEach(function (name) {
+        setJobPanelHidden(panels[name], true);
+      });
+      setJobDetailsHidden(true);
+      setJobTogglesExpanded('');
+      if (opts.restoreFocus && activeJobToggle && typeof activeJobToggle.focus === 'function') {
+        activeJobToggle.focus();
+      }
+      activeJobToggle = null;
+    }
 
     function appendJobMeta(row, label, value) {
       var item = document.createElement('span');
@@ -919,7 +1085,9 @@
       if (!Array.isArray(jobs) || jobs.length === 0) {
         var empty = document.createElement('p');
         empty.className = 'admin-copy';
-        empty.textContent = 'No recent jobs recorded.';
+        empty.textContent = name === 'failed'
+          ? 'No failed jobs recorded.'
+          : 'No completed jobs recorded yet.';
         list.appendChild(empty);
         return;
       }
@@ -952,11 +1120,19 @@
       });
     }
 
+    function updateFailedDismiss(count) {
+      if (!failedDismissButton) return;
+      var disabled = Number(count || 0) <= 0;
+      failedDismissButton.disabled = disabled;
+      failedDismissButton.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+    }
+
     function applyJobs(data) {
       fieldNames.forEach(function (name) {
         if (!fields[name] || data[name] === undefined || data[name] === null) return;
         fields[name].textContent = String(data[name]);
       });
+      updateFailedDismiss(data.failed_jobs);
       renderJobList('failed', data.recent_failed_job_details);
       renderJobList('completed', data.recent_completed_job_details);
     }
@@ -967,20 +1143,30 @@
         if (!details || !panels[target]) return;
         var isOpen = !panels[target].hidden;
         Object.keys(panels).forEach(function (name) {
-          if (panels[name]) panels[name].hidden = true;
+          setJobPanelHidden(panels[name], true);
         });
-        panels[target].hidden = isOpen;
-        details.hidden = isOpen;
+        if (isOpen) {
+          closeJobDetails();
+          return;
+        }
+        setJobPanelHidden(panels[target], false);
+        setJobDetailsHidden(false);
+        setJobTogglesExpanded(target);
+        activeJobToggle = button;
       });
     });
 
     container.querySelectorAll('[data-admin-health-close]').forEach(function (button) {
       button.addEventListener('click', function () {
-        Object.keys(panels).forEach(function (name) {
-          if (panels[name]) panels[name].hidden = true;
-        });
-        if (details) details.hidden = true;
+        closeJobDetails({ restoreFocus: true });
       });
+    });
+
+    container.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape' && details && !details.hidden) {
+        event.preventDefault();
+        closeJobDetails({ restoreFocus: true });
+      }
     });
 
     function poll() {
@@ -1220,19 +1406,25 @@
     var done = document.getElementById('backup-done-actions');
     if (!modal) return;
     if (titleEl) titleEl.textContent = title || '\uD83D\uDCBE Creating Backup\u2026';
-    if (done) done.style.display = 'none';
+    if (done) {
+      done.hidden = true;
+      done.style.display = 'none';
+    }
     _setBkProgress(0, 'Starting\u2026');
-    modal.style.display = 'flex';
+    setAdminModalOpen(modal, true);
   }
 
   function hideBackupModal() {
     var modal = document.getElementById('backup-modal');
-    if (modal) modal.style.display = 'none';
+    setAdminModalOpen(modal, false);
   }
 
   function showDoneButton() {
     var done = document.getElementById('backup-done-actions');
-    if (done) done.style.display = 'flex';
+    if (done) {
+      done.hidden = false;
+      done.style.display = 'flex';
+    }
   }
 
   function _setBkProgress(pct, text) {

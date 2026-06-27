@@ -261,6 +261,17 @@ pub(crate) fn xhr_post_error_response(error: AppError) -> Result<Response> {
     }
 }
 
+pub(crate) fn handled_post_error_status(
+    error: AppError,
+) -> std::result::Result<(StatusCode, String), AppError> {
+    match error {
+        AppError::BadRequest(message) => Ok((StatusCode::UNPROCESSABLE_ENTITY, message)),
+        AppError::UploadTooLarge(message) => Ok((StatusCode::PAYLOAD_TOO_LARGE, message)),
+        AppError::InvalidMediaType(message) => Ok((StatusCode::UNSUPPORTED_MEDIA_TYPE, message)),
+        other => Err(other),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct BannedPageQuery {
     pub reason: Option<String>,

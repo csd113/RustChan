@@ -430,7 +430,15 @@ pub(super) fn verify_full_backup_archive<R: std::io::Read + Seek>(
             "Invalid full backup: chan.db does not look like a SQLite database.".into(),
         ));
     }
+    if db_entry.size() != manifest.db_bytes {
+        return Err(AppError::BadRequest(format!(
+            "Invalid full backup: manifest database size {} does not match archive size {}.",
+            manifest.db_bytes,
+            db_entry.size()
+        )));
+    }
     drop(db_entry);
+    verify_full_backup_db_schema(archive, manifest.db_bytes)?;
 
     let mut upload_file_count = 0u64;
     let mut favicon_file_count = 0u64;
@@ -488,6 +496,45 @@ pub(super) fn verify_full_backup_archive<R: std::io::Read + Seek>(
     }
 
     Ok(manifest)
+}
+
+fn verify_full_backup_db_schema<R: std::io::Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    expected_db_bytes: u64,
+) -> Result<()> {
+    if expected_db_bytes > ZIP_ENTRY_MAX_BYTES {
+        return Err(AppError::BadRequest(
+            "Invalid full backup: chan.db exceeds the restore entry size limit.".into(),
+        ));
+    }
+    let mut db_entry = archive.by_name("chan.db").map_err(|_error| {
+        AppError::BadRequest("Invalid full backup: zip must contain 'chan.db' at the root.".into())
+    })?;
+    let mut temp_db = tempfile::NamedTempFile::new().map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Create temporary database validation file: {error}"
+        ))
+    })?;
+    let copied = std::io::copy(&mut db_entry, temp_db.as_file_mut()).map_err(|error| {
+        AppError::BadRequest(format!("Invalid full backup database entry: {error}"))
+    })?;
+    if copied != expected_db_bytes {
+        return Err(AppError::BadRequest(format!(
+            "Invalid full backup: copied database size {copied} does not match manifest size {expected_db_bytes}."
+        )));
+    }
+    let conn = rusqlite::Connection::open(temp_db.path()).map_err(|error| {
+        AppError::BadRequest(format!(
+            "Invalid full backup: chan.db could not be opened as SQLite: {error}"
+        ))
+    })?;
+    crate::db::normalize_database_schema_version(&conn).map_err(|error| {
+        AppError::BadRequest(format!(
+            "Invalid full backup: chan.db does not match the RustChan {} database baseline: {error}",
+            crate::db::baseline_schema_version()
+        ))
+    })?;
+    Ok(())
 }
 
 pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> {
@@ -561,6 +608,16 @@ mod tests {
             zip.write_all(bytes).expect("write zip entry");
         }
         zip.finish().expect("finish zip");
+    }
+
+    fn partial_sqlite_db_bytes_for_test() -> Vec<u8> {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("partial.sqlite3");
+        let conn = rusqlite::Connection::open(&db_path).expect("open sqlite");
+        conn.execute("CREATE TABLE boards (id INTEGER PRIMARY KEY)", [])
+            .expect("create partial table");
+        drop(conn);
+        std::fs::read(db_path).expect("read partial db")
     }
 
     #[test]
@@ -720,11 +777,12 @@ mod tests {
     fn verify_full_backup_zip_accepts_manifest_backed_archive() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let zip_path = temp_dir.path().join("full.zip");
+        let db_bytes = super::super::saved_backup::valid_db_snapshot_for_test();
         let manifest = FullBackupManifest {
             version: 1,
             generated_at: 1_700_000_000,
             rustchan_version: "1.1.3".into(),
-            db_bytes: 4096,
+            db_bytes: u64::try_from(db_bytes.len()).expect("db size"),
             upload_file_count: 1,
             favicon_file_count: 1,
             banner_file_count: 0,
@@ -740,7 +798,7 @@ mod tests {
             &zip_path,
             &[
                 (FULL_BACKUP_MANIFEST_NAME, &manifest_json),
-                ("chan.db", b"SQLite format 3\0rest of db"),
+                ("chan.db", db_bytes.as_slice()),
                 ("uploads/b/test.webp", b"img"),
                 ("favicon/favicon-32x32.png", b"icon"),
             ],
@@ -750,6 +808,41 @@ mod tests {
         assert_eq!(verified.upload_file_count, 1);
         assert_eq!(verified.favicon_file_count, 1);
         assert_eq!(verified.boards.len(), 1);
+    }
+
+    #[test]
+    fn verify_full_backup_zip_rejects_structurally_invalid_database() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let zip_path = temp_dir.path().join("invalid-db.zip");
+        let db_bytes = partial_sqlite_db_bytes_for_test();
+        let manifest = FullBackupManifest {
+            version: 3,
+            generated_at: 1_700_000_000,
+            rustchan_version: "1.3.0".into(),
+            db_bytes: u64::try_from(db_bytes.len()).expect("db size"),
+            upload_file_count: 0,
+            favicon_file_count: 0,
+            banner_file_count: 0,
+            tor_hidden_service_keys_included: false,
+            tor_hidden_service_key_file_count: 0,
+            boards: Vec::new(),
+        };
+        let manifest_json = serde_json::to_vec(&manifest).expect("manifest json");
+        write_zip(
+            &zip_path,
+            &[
+                (FULL_BACKUP_MANIFEST_NAME, &manifest_json),
+                ("chan.db", db_bytes.as_slice()),
+            ],
+        );
+
+        let error = verify_full_backup_zip(&zip_path).expect_err("invalid db rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match the RustChan 1.3.0 database baseline"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]
@@ -767,11 +860,12 @@ mod tests {
     fn verify_full_backup_zip_defaults_legacy_tor_metadata_to_not_included() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let zip_path = temp_dir.path().join("legacy-full.zip");
+        let db_bytes = super::super::saved_backup::valid_db_snapshot_for_test();
         let manifest = json!({
             "version": 2,
             "generated_at": 1_700_000_000_i64,
             "rustchan_version": "1.1.3",
-            "db_bytes": 4096_u64,
+            "db_bytes": u64::try_from(db_bytes.len()).expect("db size"),
             "upload_file_count": 1_u64,
             "favicon_file_count": 0_u64,
             "banner_file_count": 0_u64,
@@ -782,7 +876,7 @@ mod tests {
             &zip_path,
             &[
                 (FULL_BACKUP_MANIFEST_NAME, &manifest_bytes),
-                ("chan.db", b"SQLite format 3\0db"),
+                ("chan.db", db_bytes.as_slice()),
                 ("uploads/tech/file.txt", b"ok"),
             ],
         );
@@ -796,11 +890,12 @@ mod tests {
     fn verify_full_backup_zip_rejects_tor_manifest_mismatch() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let zip_path = temp_dir.path().join("tor-mismatch.zip");
+        let db_bytes = super::super::saved_backup::valid_db_snapshot_for_test();
         let manifest = FullBackupManifest {
             version: 3,
             generated_at: 1_700_000_000,
             rustchan_version: "1.1.3".into(),
-            db_bytes: 4096,
+            db_bytes: u64::try_from(db_bytes.len()).expect("db size"),
             upload_file_count: 0,
             favicon_file_count: 0,
             banner_file_count: 0,
@@ -813,7 +908,7 @@ mod tests {
             &zip_path,
             &[
                 (FULL_BACKUP_MANIFEST_NAME, &manifest_bytes),
-                ("chan.db", b"SQLite format 3\0db"),
+                ("chan.db", db_bytes.as_slice()),
             ],
         );
 

@@ -14,6 +14,10 @@ struct MaintenanceSectionView<'a> {
     media_detection_cards: &'a str,
     media_settings_open_attr: &'a str,
     database_maintenance_open_attr: &'a str,
+    setup_status: &'a str,
+    setup_status_detail: &'a str,
+    setup_reopen_warning: &'a str,
+    setup_close_control: &'a str,
 }
 
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
@@ -59,6 +63,37 @@ old boards to prevent query performance degradation.
     let (media_max_value, media_max_unit) =
         media_size_input_parts(view.maintenance.media_max_active_content_size_bytes);
     let media_detection_cards = render_media_detection_cards(view);
+    let (setup_status, setup_status_detail) = match view.maintenance.setup_status {
+        super::AdminPanelSetupStatus::Reopened => (
+            "reopened",
+            "The setup wizard has been reopened by an admin and is available only to authenticated admins.",
+        ),
+        super::AdminPanelSetupStatus::Complete => (
+            "complete",
+            "The setup wizard has completed and public setup routes are blocked.",
+        ),
+        super::AdminPanelSetupStatus::Available => (
+            "available",
+            "This instance still appears to be in first-run setup.",
+        ),
+        super::AdminPanelSetupStatus::Initialized => (
+            "initialized",
+            "This instance has existing durable runtime state, so first-run setup routes are blocked.",
+        ),
+    };
+    let setup_reopen_warning = "Reopening setup exposes live settings for editing. It does not replace existing admin credentials and still requires an authenticated admin session.";
+    let setup_close_control = if matches!(
+        view.maintenance.setup_status,
+        super::AdminPanelSetupStatus::Reopened
+    ) {
+        r#"<form method="POST" action="/admin/setup/close" class="admin-inline-actions">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <button type="submit"
+            data-confirm="Close the setup wizard without changing live settings?">close setup wizard</button>
+  </form>"#
+    } else {
+        ""
+    };
     let section_view = MaintenanceSectionView {
         csrf_token: view.csrf_token,
         db_warn_banner: &db_warn_banner,
@@ -72,6 +107,10 @@ old boards to prevent query performance degradation.
         media_detection_cards: &media_detection_cards,
         media_settings_open_attr,
         database_maintenance_open_attr,
+        setup_status,
+        setup_status_detail,
+        setup_reopen_warning,
+        setup_close_control,
     };
     render_admin_maintenance_section(&section_view)
 }
@@ -260,6 +299,22 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
           data-confirm="Run VACUUM? This will briefly block the database while it rebuilds. Continue?">&#x1F9F9; run VACUUM</button>
 </form>
 </div>
+<div class="admin-subsection admin-subsection-tight">
+  <div class="admin-card-header">
+    <h3>// setup status</h3>
+    <p>First-run setup route state and controlled maintenance reopen.</p>
+  </div>
+  <p class="admin-copy">
+    Setup status: <strong>{setup_status}</strong>. {setup_status_detail}
+  </p>
+  <p class="admin-meta-note admin-meta-note-spaced">{setup_reopen_warning}</p>
+  <form method="POST" action="/admin/setup/reopen" class="admin-inline-actions">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <button type="submit"
+            data-confirm="Reopen the setup wizard? This edits live settings and remains admin-only. Continue?">reopen setup wizard</button>
+  </form>
+  {setup_close_control}
+</div>
 </div>
 </details>
 </section>
@@ -300,6 +355,12 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
         ffmpeg_timeout_max = crate::config::MAX_FFMPEG_TIMEOUT_SECS,
         media_settings_open_attr = view.media_settings_open_attr,
         database_maintenance_open_attr = view.database_maintenance_open_attr,
+        setup_status = escape_html(view.setup_status),
+        setup_status_detail = escape_html(view.setup_status_detail),
+        setup_reopen_warning = escape_html(view.setup_reopen_warning),
+        setup_close_control = view
+            .setup_close_control
+            .replace("{csrf}", &escape_html(view.csrf_token)),
         tor_section = view.tor_section,
     )
 }

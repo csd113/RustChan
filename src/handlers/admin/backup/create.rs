@@ -8,7 +8,7 @@ pub(crate) fn create_full_backup_to_server(
     progress: &std::sync::Arc<crate::middleware::BackupProgress>,
     copies_to_keep: u64,
     include_tor_hidden_service_keys: bool,
-    storage_mode: v4::BackupStorageMode,
+    storage_mode: saved_backup::BackupStorageMode,
     split_zip_part_size: u64,
 ) -> Result<String> {
     let conn = pool.get()?;
@@ -74,8 +74,8 @@ pub(crate) fn create_full_backup_to_server(
         .saturating_add(favicon_file_count)
         .saturating_add(banner_file_count)
         .saturating_add(tor_hidden_service_key_file_count);
-    let backup_id = v4::build_backup_id(v4::BackupScope::FullSite, "full-site");
-    let root_dir = v4::create_backup_root(&backup_id)?;
+    let backup_id = saved_backup::build_backup_id(saved_backup::BackupScope::FullSite, "full-site");
+    let root_dir = saved_backup::create_backup_root(&backup_id)?;
     let db_dir = root_dir.join("db");
     let config_dir = root_dir.join("config");
     std::fs::create_dir_all(&db_dir).map_err(|error| {
@@ -97,7 +97,7 @@ pub(crate) fn create_full_backup_to_server(
     let db_snapshot_size = std::fs::metadata(&db_snapshot_path)
         .map(|metadata| metadata.len())
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {error}")))?;
-    let db_snapshot_sha = v4::sha256_hex_for_file(&db_snapshot_path)?;
+    let db_snapshot_sha = saved_backup::sha256_hex_for_file(&db_snapshot_path)?;
 
     let mut files = Vec::new();
     push_v4_file_entry(
@@ -105,7 +105,7 @@ pub(crate) fn create_full_backup_to_server(
         "db/rustchan.sqlite3".to_owned(),
         None,
         None,
-        v4::BackupFileKind::Db,
+        saved_backup::BackupFileKind::Db,
         db_snapshot_size,
         db_snapshot_sha.clone(),
     );
@@ -120,7 +120,7 @@ pub(crate) fn create_full_backup_to_server(
             "config/settings.toml".to_owned(),
             None,
             None,
-            v4::BackupFileKind::Settings,
+            saved_backup::BackupFileKind::Settings,
             size,
             sha256,
         );
@@ -148,7 +148,7 @@ pub(crate) fn create_full_backup_to_server(
             })?;
             super::common::validate_board_short_name(board_short)?;
             let (logical_path, kind) =
-                v4::runtime_upload_path_to_logical(board_short, runtime_rel)?;
+                saved_backup::runtime_upload_path_to_logical(board_short, runtime_rel)?;
             Ok((
                 logical_path,
                 Some(runtime_rel.to_owned()),
@@ -169,7 +169,7 @@ pub(crate) fn create_full_backup_to_server(
                 logical_path,
                 Some(format!("favicon/{runtime_rel}")),
                 None,
-                v4::BackupFileKind::Favicon,
+                saved_backup::BackupFileKind::Favicon,
             ))
         },
         Some(progress),
@@ -185,7 +185,7 @@ pub(crate) fn create_full_backup_to_server(
                 logical_path,
                 Some(format!("banner/{runtime_rel}")),
                 None,
-                v4::BackupFileKind::Banner,
+                saved_backup::BackupFileKind::Banner,
             ))
         },
         Some(progress),
@@ -202,24 +202,24 @@ pub(crate) fn create_full_backup_to_server(
                     logical_path,
                     Some(runtime_rel.to_owned()),
                     None,
-                    v4::BackupFileKind::TorKey,
+                    saved_backup::BackupFileKind::TorKey,
                 ))
             },
             Some(progress),
         )?;
     }
 
-    let mut manifest = v4::BackupManifest {
-        format: v4::BACKUP_V4_FORMAT.to_owned(),
-        archive_container: v4::BACKUP_V4_ARCHIVE_CONTAINER.to_owned(),
+    let mut manifest = saved_backup::BackupManifest {
+        format: saved_backup::BACKUP_V4_FORMAT.to_owned(),
+        archive_container: saved_backup::BACKUP_V4_ARCHIVE_CONTAINER.to_owned(),
         backup_id,
         created_at: Utc::now().timestamp(),
         completed_at: None,
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
-        scope: v4::BackupScope::FullSite,
+        scope: saved_backup::BackupScope::FullSite,
         storage_mode,
         included_boards: boards,
-        includes: v4::BackupIncludeFlags {
+        includes: saved_backup::BackupIncludeFlags {
             database: true,
             settings: settings_path.is_file(),
             uploads: true,
@@ -228,7 +228,7 @@ pub(crate) fn create_full_backup_to_server(
             board_exports: true,
             file_inventory: true,
         },
-        db_snapshot: Some(v4::DbSnapshotInfo {
+        db_snapshot: Some(saved_backup::DbSnapshotInfo {
             path: "db/rustchan.sqlite3".to_owned(),
             size: db_snapshot_size,
             sha256: db_snapshot_sha,
@@ -239,7 +239,7 @@ pub(crate) fn create_full_backup_to_server(
         parts: Vec::new(),
         maintenance: None,
     };
-    if storage_mode == v4::BackupStorageMode::SplitZip {
+    if storage_mode == saved_backup::BackupStorageMode::SplitZip {
         materialize_split_zip_parts(&root_dir, &mut manifest, split_zip_part_size)?;
     }
     drop(conn);
@@ -267,7 +267,7 @@ pub(crate) fn create_full_backup_to_server(
         }
     }
 
-    let size = v4::scan_dir_stats(&root_dir).bytes;
+    let size = saved_backup::scan_dir_stats(&root_dir).bytes;
     tracing::info!(
         target: "admin",
         backup_id = %backup_ref,
@@ -292,8 +292,9 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
     reason: &str,
 ) -> Result<String> {
     let conn = pool.get()?;
-    let backup_id = v4::build_backup_id(v4::BackupScope::PreMaintenance, "pre-repair-db");
-    let root_dir = v4::create_backup_root(&backup_id)?;
+    let backup_id =
+        saved_backup::build_backup_id(saved_backup::BackupScope::PreMaintenance, "pre-repair-db");
+    let root_dir = saved_backup::create_backup_root(&backup_id)?;
     let db_dir = root_dir.join("db");
     let config_dir = root_dir.join("config");
     let maintenance_dir = root_dir.join("maintenance");
@@ -323,7 +324,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
     let db_snapshot_size = std::fs::metadata(&db_snapshot_path)
         .map(|metadata| metadata.len())
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {error}")))?;
-    let db_snapshot_sha = v4::sha256_hex_for_file(&db_snapshot_path)?;
+    let db_snapshot_sha = saved_backup::sha256_hex_for_file(&db_snapshot_path)?;
 
     let mut files = Vec::new();
     push_v4_file_entry(
@@ -331,7 +332,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
         "db/rustchan.sqlite3".to_owned(),
         None,
         None,
-        v4::BackupFileKind::Db,
+        saved_backup::BackupFileKind::Db,
         db_snapshot_size,
         db_snapshot_sha.clone(),
     );
@@ -345,7 +346,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
             "config/settings.toml".to_owned(),
             None,
             None,
-            v4::BackupFileKind::Settings,
+            saved_backup::BackupFileKind::Settings,
             size,
             sha256,
         );
@@ -369,7 +370,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
         "maintenance/repair-request.json".to_owned(),
         None,
         None,
-        v4::BackupFileKind::Maintenance,
+        saved_backup::BackupFileKind::Maintenance,
         request_size,
         request_sha,
     );
@@ -386,9 +387,9 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
         "maintenance/pre-integrity-check.txt".to_owned(),
         None,
         None,
-        v4::BackupFileKind::Maintenance,
+        saved_backup::BackupFileKind::Maintenance,
         u64::try_from(pre_integrity.len()).unwrap_or(u64::MAX),
-        v4::sha256_hex_for_bytes(pre_integrity.as_bytes()),
+        saved_backup::sha256_hex_for_bytes(pre_integrity.as_bytes()),
     );
 
     let foreign_key_path = maintenance_dir.join("pre-foreign-key-check.txt");
@@ -403,9 +404,9 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
         "maintenance/pre-foreign-key-check.txt".to_owned(),
         None,
         None,
-        v4::BackupFileKind::Maintenance,
+        saved_backup::BackupFileKind::Maintenance,
         u64::try_from(pre_foreign_key.len()).unwrap_or(u64::MAX),
-        v4::sha256_hex_for_bytes(pre_foreign_key.as_bytes()),
+        saved_backup::sha256_hex_for_bytes(pre_foreign_key.as_bytes()),
     );
 
     let schema_dump = {
@@ -438,9 +439,9 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
         "maintenance/pre-schema.sql".to_owned(),
         None,
         None,
-        v4::BackupFileKind::Maintenance,
+        saved_backup::BackupFileKind::Maintenance,
         u64::try_from(schema_dump.len()).unwrap_or(u64::MAX),
-        v4::sha256_hex_for_bytes(schema_dump.as_bytes()),
+        saved_backup::sha256_hex_for_bytes(schema_dump.as_bytes()),
     );
 
     let pending_fs_ops = crate::db::list_pending_fs_ops(&conn)
@@ -463,7 +464,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
             "maintenance/pending-fs-ops.json".to_owned(),
             None,
             None,
-            v4::BackupFileKind::PendingFsOps,
+            saved_backup::BackupFileKind::PendingFsOps,
             size,
             sha256,
         );
@@ -472,17 +473,17 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
     progress.reset(crate::middleware::backup_phase::DONE);
     log_backup_phase(crate::middleware::backup_phase::DONE);
 
-    let manifest = v4::BackupManifest {
-        format: v4::BACKUP_V4_FORMAT.to_owned(),
-        archive_container: v4::BACKUP_V4_ARCHIVE_CONTAINER.to_owned(),
+    let manifest = saved_backup::BackupManifest {
+        format: saved_backup::BACKUP_V4_FORMAT.to_owned(),
+        archive_container: saved_backup::BACKUP_V4_ARCHIVE_CONTAINER.to_owned(),
         backup_id,
         created_at: Utc::now().timestamp(),
         completed_at: None,
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
-        scope: v4::BackupScope::PreMaintenance,
-        storage_mode: v4::BackupStorageMode::Directory,
+        scope: saved_backup::BackupScope::PreMaintenance,
+        storage_mode: saved_backup::BackupStorageMode::Directory,
         included_boards: Vec::new(),
-        includes: v4::BackupIncludeFlags {
+        includes: saved_backup::BackupIncludeFlags {
             database: true,
             settings: settings_path.is_file(),
             uploads: false,
@@ -491,7 +492,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
             board_exports: false,
             file_inventory: false,
         },
-        db_snapshot: Some(v4::DbSnapshotInfo {
+        db_snapshot: Some(saved_backup::DbSnapshotInfo {
             path: "db/rustchan.sqlite3".to_owned(),
             size: db_snapshot_size,
             sha256: db_snapshot_sha,
@@ -500,7 +501,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
         }),
         files,
         parts: Vec::new(),
-        maintenance: Some(v4::MaintenanceMetadata {
+        maintenance: Some(saved_backup::MaintenanceMetadata {
             operation: Some(operation.to_owned()),
             job_id: Some(job_id),
             requested_at: Some(Utc::now().timestamp()),
@@ -591,7 +592,7 @@ fn write_pretty_json_file<T: serde::Serialize>(path: &Path, value: &T) -> Result
     })?;
     Ok((
         u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-        v4::sha256_hex_for_bytes(&bytes),
+        saved_backup::sha256_hex_for_bytes(&bytes),
     ))
 }
 
@@ -615,7 +616,7 @@ fn copy_regular_file_to_backup(source: &Path, destination: &Path) -> Result<(u64
     let mut output = std::fs::File::create(destination).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create {}: {error}", destination.display()))
     })?;
-    v4::copy_file_and_hash(source, &mut output)
+    saved_backup::copy_file_and_hash(source, &mut output)
 }
 
 fn snapshot_db_health_output(conn: &rusqlite::Connection, pragma: &str) -> Option<String> {
@@ -649,10 +650,10 @@ const MAX_SPLIT_ZIP_PART_SIZE: u64 = 64 * 1024 * 1024 * 1024;
 
 pub(crate) fn parse_backup_storage_mode_value(
     value: Option<&str>,
-) -> Result<v4::BackupStorageMode> {
+) -> Result<saved_backup::BackupStorageMode> {
     match value.unwrap_or("directory") {
-        "directory" => Ok(v4::BackupStorageMode::Directory),
-        "split_zip" => Ok(v4::BackupStorageMode::SplitZip),
+        "directory" => Ok(saved_backup::BackupStorageMode::Directory),
+        "split_zip" => Ok(saved_backup::BackupStorageMode::SplitZip),
         _ => Err(AppError::BadRequest("Unknown backup storage mode.".into())),
     }
 }
@@ -674,7 +675,9 @@ pub(crate) const fn split_zip_part_size_gib(bytes: u64) -> u64 {
     bytes / (1024 * 1024 * 1024)
 }
 
-fn parse_full_backup_storage_mode(form: &FullBackupCreateForm) -> Result<v4::BackupStorageMode> {
+fn parse_full_backup_storage_mode(
+    form: &FullBackupCreateForm,
+) -> Result<saved_backup::BackupStorageMode> {
     parse_backup_storage_mode_value(form.storage_mode.as_deref())
 }
 
@@ -704,7 +707,7 @@ pub async fn create_full_backup(
     let copies_to_keep = state.auto_full_backup_settings.snapshot().copies_to_keep;
     let include_tor_hidden_service_keys = form.include_tor_hidden_service_keys;
     let storage_mode = parse_full_backup_storage_mode(&form)?;
-    let split_zip_part_size = if storage_mode == v4::BackupStorageMode::SplitZip {
+    let split_zip_part_size = if storage_mode == saved_backup::BackupStorageMode::SplitZip {
         parse_split_zip_part_size(&form)?
     } else {
         DEFAULT_SPLIT_ZIP_PART_SIZE
@@ -881,9 +884,11 @@ pub async fn create_board_backup(
                 .files_total
                 .store(file_count.saturating_add(1), Ordering::Relaxed);
 
-            let backup_id =
-                v4::build_backup_id(v4::BackupScope::Board, &format!("board-{board_short}"));
-            let root_dir = v4::create_backup_root(&backup_id)?;
+            let backup_id = saved_backup::build_backup_id(
+                saved_backup::BackupScope::Board,
+                &format!("board-{board_short}"),
+            );
+            let root_dir = saved_backup::create_backup_root(&backup_id)?;
             let boards = vec![crate::models::BackupBoardSummary {
                 short_name: manifest.board.short_name.clone(),
                 name: manifest.board.name.clone(),
@@ -899,7 +904,7 @@ pub async fn create_board_backup(
                 |_path, runtime_rel| {
                     let runtime_rel = format!("{board_short}/{runtime_rel}");
                     let (logical_path, kind) =
-                        v4::runtime_upload_path_to_logical(&board_short, &runtime_rel)?;
+                        saved_backup::runtime_upload_path_to_logical(&board_short, &runtime_rel)?;
                     Ok((
                         logical_path,
                         Some(runtime_rel),
@@ -910,17 +915,17 @@ pub async fn create_board_backup(
                 Some(&progress),
             )?;
 
-            let manifest_v4 = v4::BackupManifest {
-                format: v4::BACKUP_V4_FORMAT.to_owned(),
-                archive_container: v4::BACKUP_V4_ARCHIVE_CONTAINER.to_owned(),
+            let manifest_v4 = saved_backup::BackupManifest {
+                format: saved_backup::BACKUP_V4_FORMAT.to_owned(),
+                archive_container: saved_backup::BACKUP_V4_ARCHIVE_CONTAINER.to_owned(),
                 backup_id,
                 created_at: Utc::now().timestamp(),
                 completed_at: None,
                 rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
-                scope: v4::BackupScope::Board,
-                storage_mode: v4::BackupStorageMode::Directory,
+                scope: saved_backup::BackupScope::Board,
+                storage_mode: saved_backup::BackupStorageMode::Directory,
                 included_boards: boards,
-                includes: v4::BackupIncludeFlags {
+                includes: saved_backup::BackupIncludeFlags {
                     database: false,
                     settings: false,
                     uploads: true,
@@ -941,7 +946,7 @@ pub async fn create_board_backup(
                 super::BackupListKind::Board,
             );
 
-            let size = v4::scan_dir_stats(&root_dir).bytes;
+            let size = saved_backup::scan_dir_stats(&root_dir).bytes;
             tracing::info!(
                 target: "admin",
                 board = %board_short,
@@ -1365,15 +1370,15 @@ fn collect_backup_board_summaries(
 }
 
 fn push_v4_file_entry(
-    entries: &mut Vec<v4::BackupFileEntry>,
+    entries: &mut Vec<saved_backup::BackupFileEntry>,
     logical_path: String,
     runtime_logical_path: Option<String>,
     board: Option<String>,
-    kind: v4::BackupFileKind,
+    kind: saved_backup::BackupFileKind,
     size: u64,
     sha256: String,
 ) {
-    entries.push(v4::BackupFileEntry {
+    entries.push(saved_backup::BackupFileEntry {
         logical_path,
         runtime_logical_path,
         board,
@@ -1394,13 +1399,13 @@ struct SplitZipPlannedPart {
 }
 
 fn plan_split_zip_parts(
-    files: &[v4::BackupFileEntry],
+    files: &[saved_backup::BackupFileEntry],
     target_part_size: u64,
 ) -> Vec<SplitZipPlannedPart> {
     let mut ordered = files
         .iter()
         .enumerate()
-        .collect::<Vec<(usize, &v4::BackupFileEntry)>>();
+        .collect::<Vec<(usize, &saved_backup::BackupFileEntry)>>();
     ordered.sort_by(|left, right| left.1.logical_path.cmp(&right.1.logical_path));
 
     let mut parts = Vec::new();
@@ -1438,10 +1443,10 @@ fn plan_split_zip_parts(
 
 fn materialize_split_zip_parts(
     root_dir: &Path,
-    manifest: &mut v4::BackupManifest,
+    manifest: &mut saved_backup::BackupManifest,
     target_part_size: u64,
 ) -> Result<()> {
-    let parts_dir = root_dir.join(v4::PARTS_DIR_NAME);
+    let parts_dir = root_dir.join(saved_backup::PARTS_DIR_NAME);
     std::fs::create_dir_all(&parts_dir).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create {}: {error}", parts_dir.display()))
     })?;
@@ -1515,7 +1520,7 @@ fn materialize_split_zip_parts(
             .map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Inspect {}: {error}", part_path.display()))
             })?;
-        let part_sha = v4::sha256_hex_for_file(&part_path)?;
+        let part_sha = saved_backup::sha256_hex_for_file(&part_path)?;
         for file_index in &planned.files {
             let entry = manifest.files.get_mut(*file_index).ok_or_else(|| {
                 AppError::Internal(anyhow::anyhow!("Invalid split ZIP planner index"))
@@ -1524,7 +1529,7 @@ fn materialize_split_zip_parts(
             entry.zip_entry_path = Some(entry.logical_path.clone());
             entry.compression_method = Some("zip".to_owned());
         }
-        part_infos.push(v4::BackupPartInfo {
+        part_infos.push(saved_backup::BackupPartInfo {
             filename: part_filename,
             part_index,
             total_parts,
@@ -1557,18 +1562,26 @@ fn materialize_split_zip_parts(
 fn copy_runtime_tree_into_v4_dir<F>(
     source_root: &Path,
     destination_root: &Path,
-    entries: &mut Vec<v4::BackupFileEntry>,
+    entries: &mut Vec<saved_backup::BackupFileEntry>,
     mut map_entry: F,
     progress: Option<&crate::middleware::BackupProgress>,
 ) -> Result<()>
 where
-    F: FnMut(&Path, &str) -> Result<(String, Option<String>, Option<String>, v4::BackupFileKind)>,
+    F: FnMut(
+        &Path,
+        &str,
+    ) -> Result<(
+        String,
+        Option<String>,
+        Option<String>,
+        saved_backup::BackupFileKind,
+    )>,
 {
     fn visit<F>(
         current: &Path,
         source_root: &Path,
         destination_root: &Path,
-        entries: &mut Vec<v4::BackupFileEntry>,
+        entries: &mut Vec<saved_backup::BackupFileEntry>,
         map_entry: &mut F,
         progress: Option<&crate::middleware::BackupProgress>,
     ) -> Result<()>
@@ -1576,7 +1589,12 @@ where
         F: FnMut(
             &Path,
             &str,
-        ) -> Result<(String, Option<String>, Option<String>, v4::BackupFileKind)>,
+        ) -> Result<(
+            String,
+            Option<String>,
+            Option<String>,
+            saved_backup::BackupFileKind,
+        )>,
     {
         let dir_entries = std::fs::read_dir(current).map_err(|error| {
             AppError::Internal(anyhow::anyhow!("Read {}: {error}", current.display()))
@@ -1613,7 +1631,7 @@ where
             }
             let runtime_rel = relative_path_string(&path, source_root)?;
             let (logical_path, runtime_logical_path, board, kind) = map_entry(&path, &runtime_rel)?;
-            v4::sanitize_logical_path(&logical_path)?;
+            saved_backup::sanitize_logical_path(&logical_path)?;
             let destination = destination_root.join(&logical_path);
             let (size, sha256) = copy_regular_file_to_backup(&path, &destination)?;
             push_v4_file_entry(
@@ -1650,7 +1668,7 @@ where
 fn write_board_exports_to_v4_dir(
     destination_root: &Path,
     manifest: &board_backup_types::BoardBackupManifest,
-    entries: &mut Vec<v4::BackupFileEntry>,
+    entries: &mut Vec<saved_backup::BackupFileEntry>,
 ) -> Result<()> {
     super::common::validate_board_short_name(&manifest.board.short_name)?;
     let board_root = destination_root
@@ -1667,7 +1685,7 @@ fn write_board_exports_to_v4_dir(
         format!("boards/{}/board.json", manifest.board.short_name),
         None,
         Some(manifest.board.short_name.clone()),
-        v4::BackupFileKind::BoardJson,
+        saved_backup::BackupFileKind::BoardJson,
         board_json_size,
         board_json_sha,
     );
@@ -1679,7 +1697,7 @@ fn write_board_exports_to_v4_dir(
         format!("boards/{}/threads.jsonl", manifest.board.short_name),
         None,
         Some(manifest.board.short_name.clone()),
-        v4::BackupFileKind::ThreadExport,
+        saved_backup::BackupFileKind::ThreadExport,
         threads_size,
         threads_sha,
     );
@@ -1691,7 +1709,7 @@ fn write_board_exports_to_v4_dir(
         format!("boards/{}/posts.jsonl", manifest.board.short_name),
         None,
         Some(manifest.board.short_name.clone()),
-        v4::BackupFileKind::PostExport,
+        saved_backup::BackupFileKind::PostExport,
         posts_size,
         posts_sha,
     );
@@ -1703,18 +1721,21 @@ fn write_board_exports_to_v4_dir(
         format!("boards/{}/files.jsonl", manifest.board.short_name),
         None,
         Some(manifest.board.short_name.clone()),
-        v4::BackupFileKind::FileInventoryExport,
+        saved_backup::BackupFileKind::FileInventoryExport,
         files_size,
         files_sha,
     );
     Ok(())
 }
 
-fn finalize_v4_backup_root(root_dir: &Path, mut manifest: v4::BackupManifest) -> Result<String> {
+fn finalize_v4_backup_root(
+    root_dir: &Path,
+    mut manifest: saved_backup::BackupManifest,
+) -> Result<String> {
     manifest.completed_at = Some(Utc::now().timestamp());
 
-    let mut metadata = v4::BackupMetadata {
-        format: v4::BACKUP_V4_FORMAT.to_owned(),
+    let mut metadata = saved_backup::BackupMetadata {
+        format: saved_backup::BACKUP_V4_FORMAT.to_owned(),
         backup_id: manifest.backup_id.clone(),
         scope: manifest.scope,
         storage_mode: manifest.storage_mode,
@@ -1725,17 +1746,22 @@ fn finalize_v4_backup_root(root_dir: &Path, mut manifest: v4::BackupManifest) ->
         part_count: u32::try_from(manifest.parts.len()).unwrap_or(u32::MAX),
         includes_tor_keys: manifest.includes.tor_keys,
         included_boards: manifest.included_boards.clone(),
-        manifest_path: Some(root_dir.join(v4::MANIFEST_FILE_NAME).display().to_string()),
+        manifest_path: Some(
+            root_dir
+                .join(saved_backup::MANIFEST_FILE_NAME)
+                .display()
+                .to_string(),
+        ),
     };
 
-    let manifest_path = root_dir.join(v4::MANIFEST_FILE_NAME);
-    let metadata_path = root_dir.join(v4::BACKUP_METADATA_FILE_NAME);
-    let readme_path = root_dir.join(v4::README_FILE_NAME);
+    let manifest_path = root_dir.join(saved_backup::MANIFEST_FILE_NAME);
+    let metadata_path = root_dir.join(saved_backup::BACKUP_METADATA_FILE_NAME);
+    let readme_path = root_dir.join(saved_backup::README_FILE_NAME);
 
-    v4::write_json_pretty(&manifest_path, &manifest)?;
-    v4::write_json_pretty(&metadata_path, &metadata)?;
-    let readme = v4::build_readme(&manifest, &metadata, manifest.includes.tor_keys);
-    v4::write_text(&readme_path, &readme)?;
+    saved_backup::write_json_pretty(&manifest_path, &manifest)?;
+    saved_backup::write_json_pretty(&metadata_path, &metadata)?;
+    let readme = saved_backup::build_readme(&manifest, &metadata, manifest.includes.tor_keys);
+    saved_backup::write_text(&readme_path, &readme)?;
 
     let part_paths = manifest
         .parts
@@ -1743,10 +1769,10 @@ fn finalize_v4_backup_root(root_dir: &Path, mut manifest: v4::BackupManifest) ->
         .map(|part| root_dir.join(&part.filename))
         .collect::<Vec<_>>();
     let part_path_refs = part_paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-    v4::write_root_checksums(root_dir, &part_path_refs)?;
-    metadata.total_size_bytes = v4::scan_dir_stats(root_dir).bytes;
-    v4::write_json_pretty(&metadata_path, &metadata)?;
-    v4::write_root_checksums(root_dir, &part_path_refs)?;
+    saved_backup::write_root_checksums(root_dir, &part_path_refs)?;
+    metadata.total_size_bytes = saved_backup::scan_dir_stats(root_dir).bytes;
+    saved_backup::write_json_pretty(&metadata_path, &metadata)?;
+    saved_backup::write_root_checksums(root_dir, &part_path_refs)?;
     Ok(manifest.backup_id)
 }
 
@@ -1758,7 +1784,7 @@ mod tests {
         TorHiddenServiceKeysAvailability, FULL_BACKUP_MANIFEST_NAME,
         FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX,
     };
-    use crate::handlers::admin::backup::v4;
+    use crate::handlers::admin::backup::saved_backup;
     use axum::{
         body::{to_bytes, Body},
         extract::Form,
@@ -1957,22 +1983,22 @@ mod tests {
     #[test]
     fn split_zip_part_planner_does_not_create_empty_parts() {
         let files = vec![
-            v4::BackupFileEntry {
+            saved_backup::BackupFileEntry {
                 logical_path: "b.txt".to_owned(),
                 runtime_logical_path: None,
                 board: None,
-                kind: v4::BackupFileKind::Settings,
+                kind: saved_backup::BackupFileKind::Settings,
                 size: 6,
                 sha256: "b".to_owned(),
                 zip_part: None,
                 zip_entry_path: None,
                 compression_method: None,
             },
-            v4::BackupFileEntry {
+            saved_backup::BackupFileEntry {
                 logical_path: "a.txt".to_owned(),
                 runtime_logical_path: None,
                 board: None,
-                kind: v4::BackupFileKind::Settings,
+                kind: saved_backup::BackupFileKind::Settings,
                 size: 6,
                 sha256: "a".to_owned(),
                 zip_part: None,
@@ -1989,11 +2015,11 @@ mod tests {
 
     #[test]
     fn split_zip_part_planner_marks_oversized_single_file_part() {
-        let files = vec![v4::BackupFileEntry {
+        let files = vec![saved_backup::BackupFileEntry {
             logical_path: "huge.bin".to_owned(),
             runtime_logical_path: None,
             board: None,
-            kind: v4::BackupFileKind::OriginalMedia,
+            kind: saved_backup::BackupFileKind::OriginalMedia,
             size: 128,
             sha256: "huge".to_owned(),
             zip_part: None,

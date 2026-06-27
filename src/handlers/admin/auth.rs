@@ -428,6 +428,9 @@ mod tests {
 
     const TEST_CSRF_COOKIE: &str = "csrf123";
     const TEST_ADMIN_ORIGIN: &str = "http://localhost";
+    const TEST_ONION_HOST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion";
+    const TEST_ONION_ORIGIN: &str =
+        "http://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion";
 
     fn signed_admin_csrf() -> String {
         make_scoped_csrf_form_token(
@@ -827,6 +830,56 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("location header");
+        assert!(location.starts_with("/admin/panel?bootstrap="));
+    }
+
+    #[tokio::test]
+    async fn admin_login_over_onion_http_sets_insecure_session_cookie() {
+        let state = crate::test_support::app_state();
+        {
+            let conn = state.db.get().expect("db connection");
+            let password_hash =
+                crate::utils::crypto::hash_password("hunter2").expect("hash password");
+            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        }
+
+        let router = Router::new()
+            .route("/admin/login", post(super::admin_login))
+            .with_state(state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, TEST_ONION_HOST)
+                    .header(header::ORIGIN, TEST_ONION_ORIGIN)
+                    .header(header::COOKIE, "csrf_token=csrf123")
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(format!(
+                        "username=admin&password=hunter2&_csrf={}",
+                        signed_admin_csrf()
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let session_cookie = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|value| value.contains(super::super::SESSION_COOKIE))
+            .expect("session cookie");
+        assert!(!session_cookie.contains("; Secure"));
         let location = response
             .headers()
             .get(header::LOCATION)

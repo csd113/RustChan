@@ -69,6 +69,9 @@ pub(super) fn public_routes() -> Router<AppState> {
             "/banner/external/{id}/continue",
             get(crate::handlers::banner::external_banner_continue),
         )
+        .route("/setup", get(crate::handlers::setup::setup_get))
+        .route("/setup/review", post(crate::handlers::setup::setup_review))
+        .route("/setup/finish", post(crate::handlers::setup::setup_finish))
         .route("/", get(crate::handlers::board::index))
         .route("/{board}", get(crate::handlers::board::board_index))
         .route(
@@ -169,6 +172,10 @@ fn admin_auth_routes() -> Router<AppState> {
         .route(
             "/admin/site-health/jobs",
             get(crate::handlers::admin::admin_site_health_jobs),
+        )
+        .route(
+            "/admin/site-health/jobs/dismiss",
+            post(crate::handlers::admin::dismiss_failed_site_health_jobs),
         )
         .route(
             "/admin/log/live",
@@ -296,6 +303,14 @@ fn admin_moderation_routes() -> Router<AppState> {
         .route(
             "/admin/media/settings",
             post(crate::handlers::admin::update_media_settings),
+        )
+        .route(
+            "/admin/setup/reopen",
+            post(crate::handlers::setup::admin_reopen_setup),
+        )
+        .route(
+            "/admin/setup/close",
+            post(crate::handlers::setup::admin_close_setup),
         )
         .route(
             "/admin/db/repair",

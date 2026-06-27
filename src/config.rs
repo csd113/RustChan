@@ -1,4 +1,5 @@
 // Runtime configuration and settings-file loading.
+use anyhow::Context as _;
 use serde::Deserialize;
 use std::env;
 use std::io::Write as _;
@@ -7,6 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 
 mod template;
+
+#[cfg(test)]
+pub static RUNTIME_LAYOUT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Absolute path to the directory the running binary lives in.
 fn binary_dir() -> PathBuf {
@@ -210,6 +214,13 @@ struct SettingsFile {
     max_video_size_mb: Option<u32>,
     max_audio_size_mb: Option<u32>,
     cookie_secret: Option<String>,
+    behind_proxy: Option<bool>,
+    https_cookies: Option<bool>,
+    /// Expose detailed `/readyz` internals such as schema, backup, media queue,
+    /// maintenance, and Tor readiness to unauthenticated clients. Default: false.
+    public_readiness_details: Option<bool>,
+    /// Expose unauthenticated Prometheus metrics at `/metrics`. Default: false.
+    public_metrics_enabled: Option<bool>,
     enable_tor_support: Option<bool>,
     /// When true, the HTTP server binds exclusively to 127.0.0.1 so it is
     /// reachable only through the Tor hidden service. Overrides the host
@@ -318,6 +329,10 @@ fn load_settings_file() -> SettingsFile {
     parse_settings_file_str(&raw).unwrap_or_else(|_| settings_file_parse_error(&path))
 }
 
+#[expect(
+    clippy::exit,
+    reason = "invalid configuration must terminate with the standard EX_CONFIG status"
+)]
 fn settings_file_parse_error(path: &Path) -> ! {
     let _ = writeln!(
         std::io::stderr().lock(),
@@ -556,6 +571,10 @@ pub struct Config {
     /// Trusted proxy CIDR allowlist for forwarding headers.
     pub trusted_proxy_cidrs: Vec<String>,
     pub https_cookies: bool,
+    /// When true, `/readyz` includes detailed operational internals for public clients.
+    pub public_readiness_details: bool,
+    /// When true, `/metrics` exposes Prometheus metrics to unauthenticated clients.
+    pub public_metrics_enabled: bool,
     /// Public hostnames accepted by the HTTP→HTTPS redirect listener.
     pub public_hosts: Vec<String>,
     /// Interval in seconds between WAL checkpoint runs. 0 = disabled.
@@ -694,7 +713,7 @@ impl Config {
         } else {
             bind_addr
         };
-        let behind_proxy = env_bool("CHAN_BEHIND_PROXY", false);
+        let behind_proxy = env_bool("CHAN_BEHIND_PROXY", s.behind_proxy.unwrap_or(false));
         let https_cookies_default = behind_proxy || tls.enabled;
         let trusted_proxy_cidrs = env_list(
             "CHAN_TRUSTED_PROXY_CIDRS",
@@ -802,7 +821,18 @@ impl Config {
             session_duration: env_parse("CHAN_SESSION_SECS", 8 * 3600),
             behind_proxy,
             trusted_proxy_cidrs,
-            https_cookies: env_bool("CHAN_HTTPS_COOKIES", https_cookies_default),
+            https_cookies: env_bool(
+                "CHAN_HTTPS_COOKIES",
+                s.https_cookies.unwrap_or(https_cookies_default),
+            ),
+            public_readiness_details: env_bool(
+                "CHAN_PUBLIC_READINESS_DETAILS",
+                s.public_readiness_details.unwrap_or(false),
+            ),
+            public_metrics_enabled: env_bool(
+                "CHAN_PUBLIC_METRICS_ENABLED",
+                s.public_metrics_enabled.unwrap_or(false),
+            ),
             public_hosts,
             wal_checkpoint_interval: env_parse(
                 "CHAN_WAL_CHECKPOINT_SECS",
@@ -1190,20 +1220,15 @@ fn rewrite_settings_file_lines(
     out
 }
 
-fn update_settings_file_entries(updates: &[(&str, String)], insert_missing_before: Option<&str>) {
+fn update_settings_file_entries_result(
+    updates: &[(&str, String)],
+    insert_missing_before: Option<&str>,
+) -> anyhow::Result<()> {
     // Escape backslash and double-quote, then wrap in double quotes.
     let path = settings_file_path();
     let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                target: "config",
-                path = %path.display(),
-                error = %e,
-                "Could not read settings.toml for update"
-            );
-            return;
-        }
+        Ok(content) => content,
+        Err(error) => anyhow::bail!("could not read {}: {error}", path.display()),
     };
     // Replace the value portion of `key = ...` lines while preserving file
     // order and unrelated comments.
@@ -1212,40 +1237,27 @@ fn update_settings_file_entries(updates: &[(&str, String)], insert_missing_befor
     // over the target. This prevents a partial write from corrupting settings.toml
     // if the process is killed mid-write (rename(2) is atomic on POSIX).
     let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    match tempfile::Builder::new()
+    let mut tmp = tempfile::Builder::new()
         .prefix(".settings_")
         .suffix(".tmp")
         .tempfile_in(dir)
-    {
-        Err(e) => {
-            tracing::warn!(
-                target: "config",
-                path = %path.display(),
-                error = %e,
-                "Could not create temp file for settings.toml update"
-            );
-        }
-        Ok(mut tmp) => {
-            use std::io::Write as _;
-            let write_result = tmp
-                .write_all(out.as_bytes())
-                .and_then(|()| tmp.as_file().sync_all());
-            if let Err(e) = write_result {
-                tracing::warn!(
-                    target: "config",
-                    path = %path.display(),
-                    error = %e,
-                    "Could not write settings.toml temp file"
-                );
-            } else if let Err(e) = tmp.persist(&path) {
-                tracing::warn!(
-                    target: "config",
-                    path = %path.display(),
-                    error = %e.error,
-                    "Could not atomically replace settings.toml"
-                );
-            }
-        }
+        .with_context(|| format!("could not create temp file for {}", path.display()))?;
+    tmp.write_all(out.as_bytes())
+        .and_then(|()| tmp.as_file().sync_all())
+        .with_context(|| format!("could not write temp settings file for {}", path.display()))?;
+    tmp.persist(&path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("could not atomically replace {}", path.display()))?;
+    Ok(())
+}
+
+fn update_settings_file_entries(updates: &[(&str, String)], insert_missing_before: Option<&str>) {
+    if let Err(error) = update_settings_file_entries_result(updates, insert_missing_before) {
+        tracing::warn!(
+            target: "config",
+            error = %error,
+            "Could not update settings.toml"
+        );
     }
 }
 
@@ -1308,6 +1320,108 @@ pub fn update_settings_file_auto_full_backup(
         ],
         Some("# ── Federation / ChanNet gateway"),
     );
+}
+
+#[derive(Clone, Copy)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "settings update mirrors independent runtime setup toggles"
+)]
+pub struct SetupRuntimeSettingsUpdate {
+    pub enable_tor_support: bool,
+    pub tor_only: bool,
+    pub behind_proxy: bool,
+    pub https_cookies: bool,
+    pub max_image_size_mb: u64,
+    pub max_video_size_mb: u64,
+    pub max_audio_size_mb: u64,
+}
+
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "settings update mirrors independent first-run setup toggles"
+)]
+pub struct SetupSettingsFileUpdate<'a> {
+    pub forum_name: &'a str,
+    pub site_subtitle: &'a str,
+    pub homepage_new_thread_badges_enabled: bool,
+    pub homepage_new_reply_badges_enabled: bool,
+    pub thread_new_reply_badges_enabled: bool,
+    pub default_theme: &'a str,
+    pub auto_full_backup_interval_hours: u64,
+    pub auto_full_backup_copies_to_keep: u64,
+    pub auto_full_backup_include_tor_hidden_service_keys: bool,
+    pub auto_full_backup_storage_mode: &'a str,
+    pub auto_full_backup_split_zip_part_size_gib: u64,
+    pub runtime: SetupRuntimeSettingsUpdate,
+}
+
+/// Persist all setup-owned runtime settings in one atomic settings.toml rewrite.
+///
+/// # Errors
+/// Returns an error if the settings file cannot be read or atomically replaced.
+pub fn update_settings_file_setup(update: &SetupSettingsFileUpdate<'_>) -> anyhow::Result<()> {
+    update_settings_file_entries_result(
+        &[
+            ("forum_name", toml_quote(update.forum_name)),
+            ("site_subtitle", toml_quote(update.site_subtitle)),
+            (
+                "homepage_new_thread_badges_enabled",
+                update.homepage_new_thread_badges_enabled.to_string(),
+            ),
+            (
+                "homepage_new_reply_badges_enabled",
+                update.homepage_new_reply_badges_enabled.to_string(),
+            ),
+            (
+                "thread_new_reply_badges_enabled",
+                update.thread_new_reply_badges_enabled.to_string(),
+            ),
+            ("default_theme", toml_quote(update.default_theme)),
+            (
+                "enable_tor_support",
+                update.runtime.enable_tor_support.to_string(),
+            ),
+            ("tor_only", update.runtime.tor_only.to_string()),
+            ("behind_proxy", update.runtime.behind_proxy.to_string()),
+            ("https_cookies", update.runtime.https_cookies.to_string()),
+            (
+                "max_image_size_mb",
+                update.runtime.max_image_size_mb.to_string(),
+            ),
+            (
+                "max_video_size_mb",
+                update.runtime.max_video_size_mb.to_string(),
+            ),
+            (
+                "max_audio_size_mb",
+                update.runtime.max_audio_size_mb.to_string(),
+            ),
+            (
+                "auto_full_backup_interval_hours",
+                update.auto_full_backup_interval_hours.to_string(),
+            ),
+            (
+                "auto_full_backup_copies_to_keep",
+                update.auto_full_backup_copies_to_keep.max(1).to_string(),
+            ),
+            (
+                "auto_full_backup_include_tor_hidden_service_keys",
+                update
+                    .auto_full_backup_include_tor_hidden_service_keys
+                    .to_string(),
+            ),
+            (
+                "auto_full_backup_storage_mode",
+                toml_quote(update.auto_full_backup_storage_mode),
+            ),
+            (
+                "auto_full_backup_split_zip_part_size_gib",
+                update.auto_full_backup_split_zip_part_size_gib.to_string(),
+            ),
+        ],
+        Some("# Optional explicit ffmpeg binary path."),
+    )
 }
 
 pub fn update_settings_file_ffmpeg_timeout(timeout_secs: u64) {
@@ -1520,6 +1634,8 @@ mod tests {
             behind_proxy: false,
             trusted_proxy_cidrs: vec!["127.0.0.1/32".to_owned(), "::1/128".to_owned()],
             https_cookies: false,
+            public_readiness_details: false,
+            public_metrics_enabled: false,
             public_hosts: Vec::new(),
             wal_checkpoint_interval: 3600,
             auto_vacuum_interval_hours: 24,
@@ -1914,6 +2030,8 @@ port = 8080
         assert!(template.contains("auto_full_backup_include_tor_hidden_service_keys = true"));
         assert!(template.contains(r#"auto_full_backup_storage_mode = "directory""#));
         assert!(template.contains("auto_full_backup_split_zip_part_size_gib = 4"));
+        assert!(template.contains("public_readiness_details = false"));
+        assert!(template.contains("public_metrics_enabled = false"));
         assert!(template.contains(
             r#"enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]"#
         ));
@@ -1946,14 +2064,28 @@ port = 8080
         let parsed = super::parse_settings_file_str(&template).expect("parse generated template");
         assert_eq!(parsed.cookie_secret.as_deref(), Some(secret.as_str()));
         assert_eq!(parsed.enable_tor_support, Some(true));
+        assert_eq!(parsed.tor_only, Some(false));
+        assert_eq!(parsed.public_readiness_details, Some(false));
+        assert_eq!(parsed.public_metrics_enabled, Some(false));
+        assert!(parsed.public_hosts.is_none());
         assert_eq!(parsed.tls.as_ref().map(|tls| tls.enabled), Some(false));
         assert_eq!(parsed.tls.as_ref().map(|tls| tls.port), Some(8443));
+        assert_eq!(
+            parsed.tls.as_ref().map(|tls| tls.redirect_http),
+            Some(false)
+        );
+        assert!(template.contains("runtime/tor/state/keystore/"));
 
         let reloaded = Config::from_env();
         assert_eq!(reloaded.cookie_secret, secret);
         assert!(reloaded.enable_tor_support);
+        assert!(!reloaded.tor_only);
+        assert!(!reloaded.public_readiness_details);
+        assert!(!reloaded.public_metrics_enabled);
+        assert!(reloaded.public_hosts.is_empty());
         assert!(!reloaded.tls.enabled);
         assert_eq!(reloaded.tls.port, 8443);
+        assert!(!reloaded.tls.redirect_http);
 
         match previous {
             Some(contents) => std::fs::write(&path, contents).expect("restore settings file"),

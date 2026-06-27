@@ -98,7 +98,10 @@ fn require_admin_session_with_name(
 /// Check CSRF using the cookie jar. Returns error on mismatch.
 /// Verify admin session from a session ID string.
 /// For use inside `spawn_blocking` closures where we have an open connection.
-fn require_admin_session_sid(conn: &rusqlite::Connection, session_id: Option<&str>) -> Result<i64> {
+pub(in crate::handlers) fn require_admin_session_sid(
+    conn: &rusqlite::Connection,
+    session_id: Option<&str>,
+) -> Result<i64> {
     let sid = session_id.ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
     let session = db::get_session(conn, sid)?
         .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
@@ -114,15 +117,7 @@ pub(super) fn require_same_origin_request(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
         .ok_or_else(|| AppError::Forbidden("Missing Host header.".into()))?;
-    let request_scheme =
-        if crate::middleware::forwarded_proto_is_https(headers, peer, CONFIG.behind_proxy)
-            || (CONFIG.tls.enabled && host_header_uses_https_port(headers))
-            || request_origin_uses_https(headers)
-        {
-            "https"
-        } else {
-            "http"
-        };
+    let request_scheme = request_scheme_for_same_origin(headers, peer, request_authority.host());
     let request_port = request_authority
         .port_u16()
         .unwrap_or(if request_scheme == "https" { 443 } else { 80 });
@@ -236,7 +231,7 @@ pub(super) fn admin_csrf_is_valid(jar: &CookieJar, form_token: Option<&str>) -> 
     validate_signed_csrf(csrf_cookie, session_id, form_token.unwrap_or(""))
 }
 
-pub(super) fn require_same_origin_or_valid_csrf(
+pub(in crate::handlers) fn require_same_origin_or_valid_csrf(
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
     csrf_valid: bool,
@@ -254,7 +249,7 @@ pub(super) fn require_same_origin_or_valid_csrf(
     }
 }
 
-pub(super) fn require_admin_post_origin_and_csrf(
+pub(in crate::handlers) fn require_admin_post_origin_and_csrf(
     jar: &CookieJar,
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
@@ -333,7 +328,42 @@ fn should_set_secure_cookie_with_config(
             || crate::middleware::forwarded_proto_is_https(headers, context.peer, behind_proxy))
 }
 
-fn host_header_uses_https_port(headers: &HeaderMap) -> bool {
+fn request_scheme_for_same_origin(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    request_host: &str,
+) -> &'static str {
+    request_scheme_for_same_origin_with_config(
+        headers,
+        peer,
+        request_host,
+        CONFIG.behind_proxy,
+        CONFIG.tls.enabled,
+        CONFIG.tls.port,
+    )
+}
+
+fn request_scheme_for_same_origin_with_config(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    request_host: &str,
+    behind_proxy: bool,
+    tls_enabled: bool,
+    tls_port: u16,
+) -> &'static str {
+    if crate::middleware::forwarded_proto_is_https(headers, peer, behind_proxy)
+        || request_origin_uses_https(headers)
+        || (tls_enabled
+            && !is_onion_host(request_host)
+            && host_header_uses_https_port_with_config(headers, tls_port))
+    {
+        "https"
+    } else {
+        "http"
+    }
+}
+
+fn host_header_uses_https_port_with_config(headers: &HeaderMap, tls_port: u16) -> bool {
     let Some(host) = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
@@ -346,8 +376,8 @@ fn host_header_uses_https_port(headers: &HeaderMap) -> bool {
     };
 
     match authority.port_u16() {
-        Some(port) => port == CONFIG.tls.port,
-        None => CONFIG.tls.port == 443,
+        Some(port) => port == tls_port,
+        None => tls_port == 443,
     }
 }
 
@@ -404,6 +434,15 @@ fn normalize_same_origin_host(host: &str) -> &str {
     } else {
         host
     }
+}
+
+fn is_onion_host(host: &str) -> bool {
+    let host = normalize_same_origin_host(host);
+    let Some((label, suffix)) = host.rsplit_once('.') else {
+        return false;
+    };
+
+    !label.is_empty() && suffix.eq_ignore_ascii_case("onion")
 }
 
 fn is_loopback_alias(host: &str) -> bool {
@@ -571,6 +610,7 @@ struct AdminPanelSnapshot {
     board_backups: Vec<crate::models::BackupInfo>,
     db_size_bytes: i64,
     db_size_warning: bool,
+    setup_status: crate::templates::AdminPanelSetupStatus,
     ffmpeg_timeout_secs: u64,
     media_auto_prune_enabled: bool,
     media_max_active_content_size_bytes: u64,
@@ -583,6 +623,7 @@ struct AdminPanelSnapshot {
     pdf_thumbnail_renderer: Option<String>,
     backup_summary: BackupSummary,
     site_health: SiteHealthSnapshot,
+    dashboard: AdminDashboardSummary,
 }
 
 #[derive(Clone)]
@@ -595,14 +636,88 @@ struct OverviewDomainData {
     backup_summary: BackupSummary,
 }
 
+#[derive(Clone)]
+struct AdminDashboardSummary {
+    version: String,
+    build: String,
+    setup_status: String,
+    setup_detail: String,
+    setup_state: crate::templates::AdminDashboardState,
+    site_title: String,
+    public_url: String,
+    db_status: String,
+    db_detail: String,
+    db_state: crate::templates::AdminDashboardState,
+    backup_status: String,
+    backup_detail: String,
+    backup_state: crate::templates::AdminDashboardState,
+    storage_status: String,
+    storage_detail: String,
+    storage_state: crate::templates::AdminDashboardState,
+    tor_status: String,
+    tor_detail: String,
+    tor_state: crate::templates::AdminDashboardState,
+    dependency_status: String,
+    dependency_detail: String,
+    dependency_state: crate::templates::AdminDashboardState,
+    job_status: String,
+    job_detail: String,
+    job_state: crate::templates::AdminDashboardState,
+    board_count: String,
+    thread_count: String,
+    post_count: String,
+    recent_activity: String,
+    media_summary: String,
+    report_status: String,
+    report_detail: String,
+    report_state: crate::templates::AdminDashboardState,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct DashboardActivitySnapshot {
+    board_count: usize,
+    active_threads: Option<i64>,
+    total_threads: Option<i64>,
+    total_posts: Option<i64>,
+    posts_24h: Option<i64>,
+    posts_7d: Option<i64>,
+    upload_posts: Option<i64>,
+    total_images: Option<i64>,
+    total_videos: Option<i64>,
+    total_audio: Option<i64>,
+    active_bytes: Option<i64>,
+    recent_reports_7d: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DashboardThreadCounts {
+    active: i64,
+    total: i64,
+}
+
+struct DashboardSummaryInputs<'a> {
+    activity: &'a DashboardActivitySnapshot,
+    moderation: &'a ModerationDomainData,
+    appearance: &'a AppearanceDomainData,
+    backup_summary: &'a BackupSummary,
+    maintenance: &'a MaintenanceDomainData,
+    setup_status: crate::templates::AdminPanelSetupStatus,
+    site_health: &'a SiteHealthSnapshot,
+    tor_address: Option<&'a str>,
+}
+
 struct SiteHealthSnapshot {
     server_status: String,
+    database_schema_status: String,
     database_integrity_status: String,
     last_successful_backup: String,
     next_scheduled_backup: String,
     data_dir_usage: String,
     upload_dir_size: String,
     tor_status: String,
+    tor_service_status: String,
+    tor_mode: String,
+    tor_config_summary: String,
     running_jobs: i64,
     queued_jobs: i64,
     recent_completed_jobs: i64,
@@ -706,7 +821,7 @@ fn load_site_health_snapshot(
     state: &AppState,
     full_backups: &[BackupInfo],
     auto_full_backup_settings: &crate::middleware::AutoFullBackupSettingsSnapshot,
-    _onion_address_val: Option<&str>,
+    onion_address_val: Option<&str>,
 ) -> SiteHealthSnapshot {
     let server_status = conn
         .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
@@ -714,6 +829,7 @@ fn load_site_health_snapshot(
         .filter(|value| *value == 1)
         .map_or_else(|| "degraded".to_owned(), |_| "ready".to_owned());
     let database_integrity_status = db_integrity_status(&state.db_maintenance_jobs.snapshot());
+    let database_schema_status = db::database_schema_status_label(conn);
     let last_successful_backup = full_backups
         .iter()
         .find(|backup| backup.verified)
@@ -724,9 +840,16 @@ fn load_site_health_snapshot(
     let upload_dir_size = safe_dir_size_label(Path::new(&CONFIG.upload_dir));
     let jobs = load_site_health_jobs_snapshot(conn, state);
     let recent_warnings = recent_warning_lines().unwrap_or_else(|| "not available".to_owned());
+    let tor_service_status = tor_service_status_label(onion_address_val);
+    let tor_mode = tor_mode_label();
+    let tor_config_summary = format!(
+        "bootstrap timeout {}s; max streams {}",
+        CONFIG.tor_bootstrap_timeout_secs, CONFIG.tor_max_concurrent_streams
+    );
 
     SiteHealthSnapshot {
         server_status,
+        database_schema_status,
         database_integrity_status,
         last_successful_backup,
         next_scheduled_backup,
@@ -735,8 +858,11 @@ fn load_site_health_snapshot(
         tor_status: if CONFIG.enable_tor_support {
             "enabled".to_owned()
         } else {
-            "disabled".to_owned()
+            "disabled; set enable_tor_support = true in settings.toml, then restart".to_owned()
         },
+        tor_service_status,
+        tor_mode,
+        tor_config_summary,
         running_jobs: jobs.running,
         queued_jobs: jobs.queued,
         recent_completed_jobs: jobs.recent_completed,
@@ -745,6 +871,90 @@ fn load_site_health_snapshot(
         restore_jobs: jobs.restore,
         recent_warnings,
     }
+}
+
+fn tor_service_status_label(onion_address: Option<&str>) -> String {
+    if !CONFIG.enable_tor_support {
+        "not started; enable Tor support in settings.toml and restart".to_owned()
+    } else if onion_address.is_some() {
+        "onion service ready".to_owned()
+    } else {
+        "starting or unavailable; check logs if bootstrap does not finish".to_owned()
+    }
+}
+
+fn tor_mode_label() -> String {
+    if !CONFIG.enable_tor_support {
+        "clearnet only".to_owned()
+    } else if CONFIG.tor_only {
+        "Tor only".to_owned()
+    } else {
+        "clearnet and Tor".to_owned()
+    }
+}
+
+fn load_dashboard_activity_snapshot(
+    conn: &rusqlite::Connection,
+    board_count: usize,
+) -> DashboardActivitySnapshot {
+    let site_stats = db::get_site_stats(conn).ok();
+    let thread_counts = dashboard_thread_counts(conn);
+
+    DashboardActivitySnapshot {
+        board_count,
+        active_threads: thread_counts.map(|counts| counts.active),
+        total_threads: thread_counts.map(|counts| counts.total),
+        total_posts: site_stats.as_ref().map(|stats| stats.total_posts),
+        posts_24h: dashboard_recent_count(conn, "posts", 24 * 60 * 60),
+        posts_7d: dashboard_recent_count(conn, "posts", 7 * 24 * 60 * 60),
+        upload_posts: optional_count_query(
+            conn,
+            "SELECT COUNT(*) FROM posts
+             WHERE file_path IS NOT NULL OR audio_file_path IS NOT NULL",
+        ),
+        total_images: site_stats.as_ref().map(|stats| stats.total_images),
+        total_videos: site_stats.as_ref().map(|stats| stats.total_videos),
+        total_audio: site_stats.as_ref().map(|stats| stats.total_audio),
+        active_bytes: site_stats.map(|stats| stats.active_bytes),
+        recent_reports_7d: dashboard_recent_count(conn, "reports", 7 * 24 * 60 * 60),
+    }
+}
+
+fn dashboard_thread_counts(conn: &rusqlite::Connection) -> Option<DashboardThreadCounts> {
+    conn.query_row(
+        "SELECT
+             COALESCE(SUM(CASE WHEN archived = 0 THEN 1 ELSE 0 END), 0),
+             COUNT(*)
+         FROM threads",
+        [],
+        |row| {
+            Ok(DashboardThreadCounts {
+                active: row.get(0)?,
+                total: row.get(1)?,
+            })
+        },
+    )
+    .ok()
+}
+
+fn dashboard_recent_count(
+    conn: &rusqlite::Connection,
+    table_name: &str,
+    window_secs: i64,
+) -> Option<i64> {
+    if !matches!(table_name, "posts" | "reports") {
+        return None;
+    }
+    conn.query_row(
+        &format!("SELECT COUNT(*) FROM {table_name} WHERE created_at >= unixepoch() - ?1"),
+        rusqlite::params![window_secs.max(0)],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+fn optional_count_query(conn: &rusqlite::Connection, query: &str) -> Option<i64> {
+    conn.query_row(query, [], |row| row.get(0)).ok()
 }
 
 fn load_site_health_jobs_snapshot(
@@ -1096,6 +1306,8 @@ fn load_admin_panel_snapshot(
     let backups_domain = load_backups_domain_data();
     let overview_domain = load_overview_domain_data(&backups_domain.full_backups);
     let maintenance_domain = load_maintenance_domain_data(conn, state);
+    let setup_state = db::setup_state(conn)?;
+    let setup_status = admin_panel_setup_status(setup_state);
     let site_health = load_site_health_snapshot(
         conn,
         state,
@@ -1103,6 +1315,17 @@ fn load_admin_panel_snapshot(
         &auto_full_backup_settings,
         onion_address_val.as_deref(),
     );
+    let dashboard_activity = load_dashboard_activity_snapshot(conn, boards_domain.boards.len());
+    let dashboard = build_admin_dashboard_summary(DashboardSummaryInputs {
+        activity: &dashboard_activity,
+        moderation: &moderation_domain,
+        appearance: &appearance_domain,
+        backup_summary: &overview_domain.backup_summary,
+        maintenance: &maintenance_domain,
+        setup_status,
+        site_health: &site_health,
+        tor_address: onion_address_val.as_deref(),
+    });
     Ok((
         AdminPanelSnapshot {
             boards: boards_domain.boards,
@@ -1134,6 +1357,7 @@ fn load_admin_panel_snapshot(
             board_backups: backups_domain.board_backups,
             db_size_bytes: maintenance_domain.db_size_bytes,
             db_size_warning: maintenance_domain.db_size_warning,
+            setup_status,
             ffmpeg_timeout_secs: maintenance_domain.ffmpeg_timeout_secs,
             media_auto_prune_enabled: maintenance_domain.media_auto_prune_enabled,
             media_max_active_content_size_bytes: maintenance_domain
@@ -1147,9 +1371,24 @@ fn load_admin_panel_snapshot(
             pdf_thumbnail_renderer: maintenance_domain.pdf_thumbnail_renderer,
             backup_summary: overview_domain.backup_summary,
             site_health,
+            dashboard,
         },
         onion_address_val,
     ))
+}
+
+const fn admin_panel_setup_status(
+    setup_state: db::SetupState,
+) -> crate::templates::AdminPanelSetupStatus {
+    if setup_state.reopened {
+        crate::templates::AdminPanelSetupStatus::Reopened
+    } else if setup_state.completed {
+        crate::templates::AdminPanelSetupStatus::Complete
+    } else if setup_state.is_available() {
+        crate::templates::AdminPanelSetupStatus::Available
+    } else {
+        crate::templates::AdminPanelSetupStatus::Initialized
+    }
 }
 
 fn build_backup_summary(full_backups: &[BackupInfo]) -> BackupSummary {
@@ -1196,6 +1435,354 @@ fn build_backup_summary(full_backups: &[BackupInfo]) -> BackupSummary {
     }
 }
 
+fn build_admin_dashboard_summary(inputs: DashboardSummaryInputs<'_>) -> AdminDashboardSummary {
+    let (setup_status, setup_detail, setup_state) = dashboard_setup_status(inputs.setup_status);
+    let (db_status, db_detail, db_state) = dashboard_database_status(inputs.site_health);
+    let (backup_status, backup_detail, backup_state) =
+        dashboard_backup_status(inputs.backup_summary);
+    let (storage_status, storage_detail, storage_state) =
+        dashboard_storage_status(inputs.activity, inputs.maintenance, inputs.site_health);
+    let (tor_status, tor_detail, tor_state) = dashboard_tor_status(inputs.tor_address);
+    let (dependency_status, dependency_detail, dependency_state) =
+        dashboard_dependency_status(inputs.maintenance);
+    let (job_status, job_detail, job_state) = dashboard_job_status(inputs.site_health);
+    let (report_status, report_detail, report_state) =
+        dashboard_report_status(inputs.activity, inputs.moderation);
+
+    AdminDashboardSummary {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        build: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+        setup_status,
+        setup_detail,
+        setup_state,
+        site_title: inputs.appearance.site_name.clone(),
+        public_url: public_url_label(),
+        db_status,
+        db_detail,
+        db_state,
+        backup_status,
+        backup_detail,
+        backup_state,
+        storage_status,
+        storage_detail,
+        storage_state,
+        tor_status,
+        tor_detail,
+        tor_state,
+        dependency_status,
+        dependency_detail,
+        dependency_state,
+        job_status,
+        job_detail,
+        job_state,
+        board_count: count_label(inputs.activity.board_count, "board", "boards"),
+        thread_count: thread_count_label(inputs.activity),
+        post_count: optional_count_label(inputs.activity.total_posts, "post", "posts"),
+        recent_activity: recent_activity_label(inputs.activity),
+        media_summary: media_summary_label(inputs.activity),
+        report_status,
+        report_detail,
+        report_state,
+    }
+}
+
+fn dashboard_setup_status(
+    status: crate::templates::AdminPanelSetupStatus,
+) -> (String, String, crate::templates::AdminDashboardState) {
+    match status {
+        crate::templates::AdminPanelSetupStatus::Reopened => (
+            "reopened".to_owned(),
+            "Setup wizard is admin-only and currently reopened.".to_owned(),
+            crate::templates::AdminDashboardState::Warning,
+        ),
+        crate::templates::AdminPanelSetupStatus::Complete => (
+            "complete".to_owned(),
+            "Public setup routes are blocked.".to_owned(),
+            crate::templates::AdminDashboardState::Ok,
+        ),
+        crate::templates::AdminPanelSetupStatus::Available => (
+            "available".to_owned(),
+            "First-run setup still needs to be completed.".to_owned(),
+            crate::templates::AdminDashboardState::ActionNeeded,
+        ),
+        crate::templates::AdminPanelSetupStatus::Initialized => (
+            "initialized".to_owned(),
+            "Durable runtime state exists and public setup is blocked.".to_owned(),
+            crate::templates::AdminDashboardState::Ok,
+        ),
+    }
+}
+
+fn dashboard_database_status(
+    site_health: &SiteHealthSnapshot,
+) -> (String, String, crate::templates::AdminDashboardState) {
+    let state = if site_health.server_status != "ready"
+        || site_health.database_schema_status.contains("mismatch")
+        || site_health.database_integrity_status.contains("failed")
+    {
+        crate::templates::AdminDashboardState::ActionNeeded
+    } else if site_health.database_integrity_status.contains("running") {
+        crate::templates::AdminDashboardState::Warning
+    } else if site_health.database_integrity_status == "not checked" {
+        crate::templates::AdminDashboardState::Unknown
+    } else {
+        crate::templates::AdminDashboardState::Ok
+    };
+    (
+        site_health.server_status.clone(),
+        format!(
+            "Schema: {}; integrity: {}.",
+            site_health.database_schema_status, site_health.database_integrity_status
+        ),
+        state,
+    )
+}
+
+fn dashboard_backup_status(
+    backup_summary: &BackupSummary,
+) -> (String, String, crate::templates::AdminDashboardState) {
+    let Some(warning) = backup_summary.warning.as_deref() else {
+        return (
+            "current".to_owned(),
+            backup_summary.status_line.clone(),
+            crate::templates::AdminDashboardState::Ok,
+        );
+    };
+
+    let (status, state) = if warning.starts_with("No saved full backup") {
+        (
+            "no full backup",
+            crate::templates::AdminDashboardState::ActionNeeded,
+        )
+    } else if warning.contains("failed verification") {
+        (
+            "verification failed",
+            crate::templates::AdminDashboardState::ActionNeeded,
+        )
+    } else {
+        (
+            "stale backup",
+            crate::templates::AdminDashboardState::Warning,
+        )
+    };
+    (status.to_owned(), warning.to_owned(), state)
+}
+
+fn dashboard_storage_status(
+    activity: &DashboardActivitySnapshot,
+    maintenance: &MaintenanceDomainData,
+    site_health: &SiteHealthSnapshot,
+) -> (String, String, crate::templates::AdminDashboardState) {
+    let active_media = activity.active_bytes.map_or_else(
+        || "unknown".to_owned(),
+        crate::utils::files::format_file_size,
+    );
+    let storage_known =
+        site_health.data_dir_usage != "unknown" && site_health.upload_dir_size != "unknown";
+    let over_prune_limit = activity.active_bytes.is_some_and(|bytes| {
+        maintenance.media_max_active_content_size_bytes > 0
+            && u64::try_from(bytes)
+                .is_ok_and(|bytes| bytes >= maintenance.media_max_active_content_size_bytes)
+    });
+    let state = if over_prune_limit {
+        crate::templates::AdminDashboardState::Warning
+    } else if storage_known {
+        crate::templates::AdminDashboardState::Ok
+    } else {
+        crate::templates::AdminDashboardState::Unknown
+    };
+    let status = if over_prune_limit {
+        "above prune threshold".to_owned()
+    } else {
+        format!("uploads {}", site_health.upload_dir_size)
+    };
+    (
+        status,
+        format!(
+            "Data directory {}; active media {}.",
+            site_health.data_dir_usage, active_media
+        ),
+        state,
+    )
+}
+
+fn dashboard_tor_status(
+    tor_address: Option<&str>,
+) -> (String, String, crate::templates::AdminDashboardState) {
+    if !CONFIG.enable_tor_support {
+        return (
+            "disabled".to_owned(),
+            "Set enable_tor_support = true in settings.toml, then restart RustChan.".to_owned(),
+            crate::templates::AdminDashboardState::Disabled,
+        );
+    }
+    if tor_address.is_some() {
+        (
+            "onion ready".to_owned(),
+            "Tor support is enabled and an onion address is available.".to_owned(),
+            crate::templates::AdminDashboardState::Ok,
+        )
+    } else {
+        (
+            "enabled, address pending".to_owned(),
+            "Wait for bootstrap, or check Site Health Tor diagnostics if no onion appears."
+                .to_owned(),
+            crate::templates::AdminDashboardState::Warning,
+        )
+    }
+}
+
+fn dashboard_dependency_status(
+    maintenance: &MaintenanceDomainData,
+) -> (String, String, crate::templates::AdminDashboardState) {
+    let ffmpeg = detection_word(maintenance.ffmpeg_available);
+    let ffprobe = detection_word(maintenance.ffprobe_available);
+    let state = if maintenance.ffmpeg_available && maintenance.ffprobe_available {
+        crate::templates::AdminDashboardState::Ok
+    } else if CONFIG.require_ffmpeg {
+        crate::templates::AdminDashboardState::ActionNeeded
+    } else {
+        crate::templates::AdminDashboardState::Warning
+    };
+    let status = if maintenance.ffmpeg_available && maintenance.ffprobe_available {
+        "ready"
+    } else if CONFIG.require_ffmpeg {
+        "required tool missing"
+    } else {
+        "limited"
+    };
+    (
+        status.to_owned(),
+        format!(
+            "ffmpeg {ffmpeg}; ffprobe {ffprobe}; WebP {}; VP9 {}; Opus {}.",
+            detection_word(maintenance.ffmpeg_webp_available),
+            detection_word(maintenance.ffmpeg_vp9_encoder_available),
+            detection_word(maintenance.ffmpeg_opus_available)
+        ),
+        state,
+    )
+}
+
+fn dashboard_job_status(
+    site_health: &SiteHealthSnapshot,
+) -> (String, String, crate::templates::AdminDashboardState) {
+    let state = if site_health.failed_jobs > 0 {
+        crate::templates::AdminDashboardState::ActionNeeded
+    } else if site_health.running_jobs > 0
+        || site_health.queued_jobs > 0
+        || site_health.backup_jobs != "idle"
+    {
+        crate::templates::AdminDashboardState::Warning
+    } else if site_health.backup_jobs == "unknown" {
+        crate::templates::AdminDashboardState::Unknown
+    } else {
+        crate::templates::AdminDashboardState::Ok
+    };
+    let status = if site_health.failed_jobs > 0 {
+        format!("{} failed", site_health.failed_jobs)
+    } else if site_health.running_jobs > 0 || site_health.queued_jobs > 0 {
+        format!(
+            "{} running / {} queued",
+            site_health.running_jobs, site_health.queued_jobs
+        )
+    } else {
+        "idle".to_owned()
+    };
+    (
+        status,
+        format!(
+            "Recently completed {}; backup job {}; restore jobs {}.",
+            site_health.recent_completed_jobs, site_health.backup_jobs, site_health.restore_jobs
+        ),
+        state,
+    )
+}
+
+fn dashboard_report_status(
+    activity: &DashboardActivitySnapshot,
+    moderation: &ModerationDomainData,
+) -> (String, String, crate::templates::AdminDashboardState) {
+    let open_reports = moderation.reports.len();
+    let open_appeals = moderation.appeals.len();
+    let recent_reports = activity.recent_reports_7d;
+    let state = if open_reports > 0 || open_appeals > 0 {
+        crate::templates::AdminDashboardState::ActionNeeded
+    } else if recent_reports.is_some_and(|count| count > 0) {
+        crate::templates::AdminDashboardState::Warning
+    } else if recent_reports.is_some() {
+        crate::templates::AdminDashboardState::Ok
+    } else {
+        crate::templates::AdminDashboardState::Unknown
+    };
+    let status = if open_reports == 0 {
+        "no open reports".to_owned()
+    } else {
+        count_label(open_reports, "open report", "open reports")
+    };
+    let recent = recent_reports.map_or_else(|| "unknown".to_owned(), |count| count.to_string());
+    (
+        status,
+        format!("{recent} reports in 7d; {open_appeals} open appeals."),
+        state,
+    )
+}
+
+fn public_url_label() -> String {
+    let Some(host) = CONFIG.public_hosts.first().filter(|host| !host.is_empty()) else {
+        return "not configured".to_owned();
+    };
+    let scheme = if CONFIG.tls.enabled { "https" } else { "http" };
+    format!("{scheme}://{host}")
+}
+
+fn count_label(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {plural}")
+    }
+}
+
+fn optional_count_label(count: Option<i64>, singular: &str, plural: &str) -> String {
+    match count {
+        Some(1) => format!("1 {singular}"),
+        Some(count) => format!("{count} {plural}"),
+        None => "unknown".to_owned(),
+    }
+}
+
+fn thread_count_label(activity: &DashboardActivitySnapshot) -> String {
+    match (activity.active_threads, activity.total_threads) {
+        (Some(active), Some(total)) => format!("{active} active / {total} total"),
+        _ => "unknown".to_owned(),
+    }
+}
+
+fn recent_activity_label(activity: &DashboardActivitySnapshot) -> String {
+    match (activity.posts_24h, activity.posts_7d) {
+        (Some(day), Some(week)) => format!("{day} posts in 24h; {week} in 7d"),
+        _ => "recent post activity unknown".to_owned(),
+    }
+}
+
+fn media_summary_label(activity: &DashboardActivitySnapshot) -> String {
+    match (
+        activity.upload_posts,
+        activity.total_images,
+        activity.total_videos,
+        activity.total_audio,
+        activity.active_bytes,
+    ) {
+        (Some(upload_posts), Some(images), Some(videos), Some(audio), Some(active_bytes)) => {
+            let active = crate::utils::files::format_file_size(active_bytes);
+            format!(
+                "{upload_posts} upload posts; {images} images, {videos} video, {audio} audio; {active} active"
+            )
+        }
+        _ => "media summary unknown".to_owned(),
+    }
+}
+
 fn render_admin_panel_from_snapshot(
     snapshot: AdminPanelSnapshot,
     csrf_token: &str,
@@ -1215,6 +1802,7 @@ fn render_admin_panel_from_snapshot(
         csrf_token,
         boards: &snapshot.boards,
         current_theme,
+        dashboard: build_dashboard_view(&snapshot.dashboard),
         moderation: crate::templates::AdminPanelModerationView {
             bans: &snapshot.bans,
             filters: &snapshot.filters,
@@ -1256,6 +1844,7 @@ fn render_admin_panel_from_snapshot(
         maintenance: crate::templates::AdminPanelMaintenanceView {
             db_size_bytes: snapshot.db_size_bytes,
             db_size_warning: snapshot.db_size_warning,
+            setup_status: snapshot.setup_status,
             ffmpeg_timeout_secs: snapshot.ffmpeg_timeout_secs,
             media_auto_prune_enabled: snapshot.media_auto_prune_enabled,
             media_max_active_content_size_bytes: snapshot.media_max_active_content_size_bytes,
@@ -1290,6 +1879,46 @@ fn render_admin_panel_from_snapshot(
     crate::templates::admin_panel_page(&view)
 }
 
+fn build_dashboard_view(
+    dashboard: &AdminDashboardSummary,
+) -> crate::templates::AdminPanelDashboardView<'_> {
+    crate::templates::AdminPanelDashboardView {
+        version: &dashboard.version,
+        build: &dashboard.build,
+        setup_status: &dashboard.setup_status,
+        setup_detail: &dashboard.setup_detail,
+        setup_state: dashboard.setup_state,
+        site_title: &dashboard.site_title,
+        public_url: &dashboard.public_url,
+        db_status: &dashboard.db_status,
+        db_detail: &dashboard.db_detail,
+        db_state: dashboard.db_state,
+        backup_status: &dashboard.backup_status,
+        backup_detail: &dashboard.backup_detail,
+        backup_state: dashboard.backup_state,
+        storage_status: &dashboard.storage_status,
+        storage_detail: &dashboard.storage_detail,
+        storage_state: dashboard.storage_state,
+        tor_status: &dashboard.tor_status,
+        tor_detail: &dashboard.tor_detail,
+        tor_state: dashboard.tor_state,
+        dependency_status: &dashboard.dependency_status,
+        dependency_detail: &dashboard.dependency_detail,
+        dependency_state: dashboard.dependency_state,
+        job_status: &dashboard.job_status,
+        job_detail: &dashboard.job_detail,
+        job_state: dashboard.job_state,
+        board_count: &dashboard.board_count,
+        thread_count: &dashboard.thread_count,
+        post_count: &dashboard.post_count,
+        recent_activity: &dashboard.recent_activity,
+        media_summary: &dashboard.media_summary,
+        report_status: &dashboard.report_status,
+        report_detail: &dashboard.report_detail,
+        report_state: dashboard.report_state,
+    }
+}
+
 fn build_site_health_view<'a>(
     snapshot: &'a AdminPanelSnapshot,
     tor_address: Option<&'a str>,
@@ -1298,6 +1927,7 @@ fn build_site_health_view<'a>(
     crate::templates::AdminPanelSiteHealthView {
         server_status: &snapshot.site_health.server_status,
         rustchan_version: env!("CARGO_PKG_VERSION"),
+        database_schema_status: &snapshot.site_health.database_schema_status,
         database_integrity_status: &snapshot.site_health.database_integrity_status,
         last_successful_backup: &snapshot.site_health.last_successful_backup,
         next_scheduled_backup: &snapshot.site_health.next_scheduled_backup,
@@ -1305,6 +1935,10 @@ fn build_site_health_view<'a>(
         upload_dir_size: &snapshot.site_health.upload_dir_size,
         tor_status: &snapshot.site_health.tor_status,
         tor_onion_address: tor_address,
+        tor_service_status: &snapshot.site_health.tor_service_status,
+        tor_mode: &snapshot.site_health.tor_mode,
+        tor_config_summary: &snapshot.site_health.tor_config_summary,
+        tor_detail: &snapshot.dashboard.tor_detail,
         dependency_summary: crate::templates::AdminSiteHealthDependencySummary {
             ffmpeg: detection_status(snapshot.ffmpeg_available),
             ffprobe: detection_status(snapshot.ffprobe_available),
@@ -1349,6 +1983,7 @@ fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&st
     let tor_detail = tor_address.unwrap_or("not available");
     format!(
         "RustChan version: {version}\n\
+         Database schema: {schema}\n\
          OS: {os}-{arch}\n\
          SQLite: {sqlite}\n\
          ffmpeg: {ffmpeg}\n\
@@ -1356,19 +1991,17 @@ fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&st
          Tor enabled: {tor_enabled} ({tor_detail})\n\
          TLS enabled: {tls_enabled}\n\
          Reverse proxy: {reverse_proxy}\n\
-         Data path: {data_path}\n\
-         Main log directory: {main_log_dir}\n\
-         Dependency log: {dependency_log}\n\
+         Data directory: configured\n\
+         Main log directory: configured\n\
+         Dependency log: configured\n\
          Recent warnings:\n{warnings}\n",
         version = env!("CARGO_PKG_VERSION"),
+        schema = snapshot.site_health.database_schema_status.as_str(),
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
         sqlite = rusqlite::version(),
         ffmpeg = detection_word(snapshot.ffmpeg_available),
         ffprobe = detection_word(snapshot.ffprobe_available),
-        data_path = crate::config::data_dir().display(),
-        main_log_dir = crate::config::logs_dir().display(),
-        dependency_log = crate::logging::dependency_log_path(&crate::config::logs_dir()).display(),
         warnings = indent_diagnostics_block(&snapshot.site_health.recent_warnings),
     )
 }
@@ -1514,6 +2147,54 @@ pub async fn admin_site_health_jobs(
         .into_response())
 }
 
+#[derive(Deserialize)]
+pub struct DismissFailedJobsForm {
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
+}
+
+pub async fn dismiss_failed_site_health_jobs(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    axum::extract::Form(form): axum::extract::Form<DismissFailedJobsForm>,
+) -> Result<Response> {
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+
+    let failed_before = tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || -> Result<i64> {
+            let conn = pool.get()?;
+            let (admin_id, admin_name) =
+                require_admin_session_with_name(&conn, session_id.as_deref())?;
+            let failed_before = db::background_job_summary(&conn)?.failed;
+            let acknowledged_through = db::acknowledge_failed_background_jobs(&conn)?;
+            db::log_mod_action(
+                &conn,
+                admin_id,
+                &admin_name,
+                "dismiss_failed_jobs",
+                "background_jobs",
+                None,
+                "",
+                &format!("acknowledged failed background jobs through id {acknowledged_through}"),
+            )?;
+            Ok(failed_before)
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+
+    let message = if failed_before == 0 {
+        "Failed job counter was already clear."
+    } else {
+        "Failed job counter dismissed."
+    };
+    Ok(admin_panel_redirect_anchor_open(message, "site-health", "site-health").into_response())
+}
+
 pub async fn admin_live_log(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1653,19 +2334,150 @@ pub(super) fn consume_admin_session_bootstrap(token: &str) -> Option<String> {
 mod tests {
     use super::{
         admin_live_log, admin_site_health_jobs, consume_admin_session_bootstrap,
-        create_admin_session_bootstrap, host_header_uses_https_port, hosts_match_for_same_origin,
-        latest_log_file, read_log_tail, request_origin_uses_https,
+        create_admin_session_bootstrap, dashboard_backup_status, dashboard_recent_count,
+        dashboard_thread_counts, dismiss_failed_site_health_jobs,
+        host_header_uses_https_port_with_config, hosts_match_for_same_origin, latest_log_file,
+        load_dashboard_activity_snapshot, optional_count_query, read_log_tail,
+        request_origin_uses_https, request_scheme_for_same_origin_with_config,
         require_same_origin_or_valid_csrf, require_same_origin_request,
-        should_set_secure_cookie_with_config, LiveLogQuery, SESSION_COOKIE,
+        should_set_secure_cookie_with_config, BackupSummary, DismissFailedJobsForm, LiveLogQuery,
+        SESSION_COOKIE,
     };
     use crate::error::AppError;
     use crate::middleware::SecureCookieContext;
     use axum::{
         body::to_bytes,
-        extract::{Query, State},
+        extract::{ConnectInfo, Form, Query, State},
         http::{header, HeaderMap, HeaderValue, StatusCode},
     };
     use axum_extra::extract::cookie::{Cookie, CookieJar};
+
+    const TEST_ONION_HOST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion";
+    const TEST_ONION_ORIGIN: &str =
+        "http://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion";
+    const TEST_ONION_HTTPS_ORIGIN: &str =
+        "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion";
+
+    #[test]
+    fn dashboard_count_helpers_fail_closed_when_schema_is_missing() {
+        let conn = rusqlite::Connection::open_in_memory().expect("memory db");
+
+        assert_eq!(
+            optional_count_query(&conn, "SELECT COUNT(*) FROM posts"),
+            None
+        );
+        assert_eq!(dashboard_thread_counts(&conn), None);
+        assert_eq!(dashboard_recent_count(&conn, "posts", 24 * 60 * 60), None);
+        assert_eq!(
+            dashboard_recent_count(&conn, "sqlite_master", 24 * 60 * 60),
+            None
+        );
+    }
+
+    #[test]
+    fn dashboard_activity_snapshot_counts_existing_systems() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("db connection");
+        let board_id =
+            crate::db::create_board(&conn, "dash", "Dashboard", "", false).expect("board");
+        let now = chrono::Utc::now().timestamp();
+
+        conn.execute(
+            "INSERT INTO threads (board_id, subject, created_at, bumped_at, archived)
+             VALUES (?1, 'active', ?2, ?2, 0)",
+            rusqlite::params![board_id, now],
+        )
+        .expect("active thread");
+        let active_thread_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO posts
+             (thread_id, board_id, body, body_html, file_path, file_name, file_size,
+              thumb_path, mime_type, media_type, audio_file_path, audio_file_name,
+              audio_file_size, audio_mime_type, created_at, deletion_token, is_op)
+             VALUES
+             (?1, ?2, 'active body', 'active body', 'dash/image.webp', 'image.webp', 11,
+              'dash/thumb.webp', 'image/webp', 'image', 'dash/audio.ogg', 'audio.ogg',
+              7, 'audio/ogg', ?3, 'delete-active', 1)",
+            rusqlite::params![active_thread_id, board_id, now],
+        )
+        .expect("active post");
+        let active_post_id = conn.last_insert_rowid();
+
+        conn.execute(
+            "INSERT INTO threads (board_id, subject, created_at, bumped_at, archived)
+             VALUES (?1, 'archived', ?2, ?2, 1)",
+            rusqlite::params![board_id, now - (8 * 24 * 60 * 60)],
+        )
+        .expect("archived thread");
+        let archived_thread_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO posts
+             (thread_id, board_id, body, body_html, file_path, file_name, file_size,
+              thumb_path, mime_type, media_type, created_at, deletion_token, is_op)
+             VALUES
+             (?1, ?2, 'archived body', 'archived body', 'dash/video.webm', 'video.webm',
+              1000, 'dash/video-thumb.webp', 'video/webm', 'video', ?3, 'delete-archived', 1)",
+            rusqlite::params![archived_thread_id, board_id, now - (8 * 24 * 60 * 60)],
+        )
+        .expect("archived post");
+
+        conn.execute(
+            "INSERT INTO reports (post_id, thread_id, board_id, reason, reporter_hash, created_at)
+             VALUES (?1, ?2, ?3, 'needs review', 'reporter', ?4)",
+            rusqlite::params![active_post_id, active_thread_id, board_id, now],
+        )
+        .expect("report");
+
+        let activity = load_dashboard_activity_snapshot(&conn, 1);
+
+        assert_eq!(activity.board_count, 1);
+        assert_eq!(activity.active_threads, Some(1));
+        assert_eq!(activity.total_threads, Some(2));
+        assert_eq!(activity.total_posts, Some(2));
+        assert_eq!(activity.posts_24h, Some(1));
+        assert_eq!(activity.posts_7d, Some(1));
+        assert_eq!(activity.upload_posts, Some(2));
+        assert_eq!(activity.total_images, Some(1));
+        assert_eq!(activity.total_videos, Some(1));
+        assert_eq!(activity.total_audio, Some(1));
+        assert_eq!(activity.active_bytes, Some(18));
+        assert_eq!(activity.recent_reports_7d, Some(1));
+    }
+
+    #[test]
+    fn dashboard_backup_status_classifies_warning_and_ok_states() {
+        let missing = BackupSummary {
+            warning: Some(
+                "No saved full backup found. Create and download a verified full backup before relying on this node."
+                    .to_owned(),
+            ),
+            status_line: "Latest full backup: none saved.".to_owned(),
+        };
+        let stale = BackupSummary {
+            warning: Some(
+                "Latest verified full backup 'backup.zip' is older than 72 hours (96h ago)."
+                    .to_owned(),
+            ),
+            status_line: "Latest full backup: backup.zip (96h ago) - verified.".to_owned(),
+        };
+        let ok = BackupSummary {
+            warning: None,
+            status_line: "Latest full backup: backup.zip (1h ago) - verified.".to_owned(),
+        };
+
+        assert_eq!(
+            dashboard_backup_status(&missing).2,
+            crate::templates::AdminDashboardState::ActionNeeded
+        );
+        assert_eq!(
+            dashboard_backup_status(&stale).2,
+            crate::templates::AdminDashboardState::Warning
+        );
+        assert_eq!(
+            dashboard_backup_status(&ok).2,
+            crate::templates::AdminDashboardState::Ok
+        );
+    }
 
     fn same_origin_headers(host: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -1735,6 +2547,77 @@ mod tests {
             HeaderValue::from_static("http://127.0.0.1:8080/admin"),
         );
         assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_accepts_valid_onion_http_origin() {
+        let mut headers = same_origin_headers(TEST_ONION_HOST);
+        headers.insert(header::ORIGIN, HeaderValue::from_static(TEST_ONION_ORIGIN));
+
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_accepts_valid_onion_http_referer() {
+        let mut headers = same_origin_headers(TEST_ONION_HOST);
+        headers.insert(
+            header::REFERER,
+            HeaderValue::from_static(concat!(
+                "http://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion",
+                "/admin/panel"
+            )),
+        );
+
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_rejects_spoofed_onion_origin() {
+        let mut headers = same_origin_headers(TEST_ONION_HOST);
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static(
+                "http://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbm2dqd.onion",
+            ),
+        );
+
+        assert!(require_same_origin_request(&headers, None).is_err());
+    }
+
+    #[test]
+    fn same_origin_request_keeps_onion_http_when_tls_uses_default_https_port() {
+        let mut headers = same_origin_headers(TEST_ONION_HOST);
+        headers.insert(header::ORIGIN, HeaderValue::from_static(TEST_ONION_ORIGIN));
+
+        assert_eq!(
+            request_scheme_for_same_origin_with_config(
+                &headers,
+                None,
+                TEST_ONION_HOST,
+                false,
+                true,
+                443,
+            ),
+            "http"
+        );
+        assert!(require_same_origin_request(&headers, None).is_ok());
+    }
+
+    #[test]
+    fn same_origin_request_preserves_default_https_port_for_clearnet_hosts() {
+        let headers = same_origin_headers("example.test");
+
+        assert_eq!(
+            request_scheme_for_same_origin_with_config(
+                &headers,
+                None,
+                "example.test",
+                false,
+                true,
+                443,
+            ),
+            "https"
+        );
     }
 
     #[test]
@@ -1928,14 +2811,20 @@ mod tests {
             header::HOST,
             HeaderValue::from_str(&host).expect("host header"),
         );
-        assert!(host_header_uses_https_port(&headers));
+        assert!(host_header_uses_https_port_with_config(
+            &headers,
+            crate::config::CONFIG.tls.port
+        ));
     }
 
     #[test]
     fn http_host_port_does_not_mark_request_secure() {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, HeaderValue::from_static("example.test:8080"));
-        assert!(!host_header_uses_https_port(&headers));
+        assert!(!host_header_uses_https_port_with_config(
+            &headers,
+            crate::config::CONFIG.tls.port
+        ));
     }
 
     #[test]
@@ -1988,6 +2877,33 @@ mod tests {
             SecureCookieContext::new(Some("127.0.0.1:41000".parse().expect("peer")), false);
 
         assert!(!should_set_secure_cookie_with_config(
+            &headers, context, true, false,
+        ));
+    }
+
+    #[test]
+    fn secure_cookie_decision_keeps_onion_plain_http_cookie_insecure() {
+        let mut headers = same_origin_headers(TEST_ONION_HOST);
+        headers.insert(header::ORIGIN, HeaderValue::from_static(TEST_ONION_ORIGIN));
+        let context =
+            SecureCookieContext::new(Some("127.0.0.1:41000".parse().expect("peer")), false);
+
+        assert!(!should_set_secure_cookie_with_config(
+            &headers, context, true, false,
+        ));
+    }
+
+    #[test]
+    fn secure_cookie_decision_marks_direct_onion_https_cookie_secure() {
+        let mut headers = same_origin_headers(TEST_ONION_HOST);
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static(TEST_ONION_HTTPS_ORIGIN),
+        );
+        let context =
+            SecureCookieContext::new(Some("127.0.0.1:41000".parse().expect("peer")), true);
+
+        assert!(should_set_secure_cookie_with_config(
             &headers, context, true, false,
         ));
     }
@@ -2075,6 +2991,14 @@ mod tests {
             chrono::Utc::now().timestamp() + 3600,
         )
         .expect("create session");
+    }
+
+    fn admin_signed_csrf() -> String {
+        crate::utils::crypto::make_scoped_csrf_form_token(
+            "csrf123",
+            &crate::config::CONFIG.cookie_secret,
+            "session123",
+        )
     }
 
     #[tokio::test]
@@ -2207,6 +3131,65 @@ mod tests {
         assert!(!error.contains("/Users/example"));
         assert!(!error.contains("abc123"));
         assert!(error.chars().count() <= 183);
+    }
+
+    #[tokio::test]
+    async fn dismiss_failed_site_health_jobs_resets_counter_without_deleting_history() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+        {
+            let conn = state.db.get().expect("db connection");
+            conn.execute(
+                "INSERT INTO background_jobs
+                 (job_type, payload, status, attempts, last_error, updated_at)
+                 VALUES
+                 ('video_transcode', '{}', 'failed', 3, 'ffmpeg failed', unixepoch())",
+                [],
+            )
+            .expect("insert failed job");
+            assert_eq!(
+                crate::db::background_job_summary(&conn)
+                    .expect("summary before dismiss")
+                    .failed,
+                1
+            );
+        }
+        let mut headers = same_origin_headers("localhost");
+        headers.insert(header::ORIGIN, HeaderValue::from_static("http://localhost"));
+        let response = dismiss_failed_site_health_jobs(
+            State(state.clone()),
+            CookieJar::new()
+                .add(Cookie::new("csrf_token", "csrf123"))
+                .add(Cookie::new(SESSION_COOKIE, "session123")),
+            headers,
+            ConnectInfo("127.0.0.1:3000".parse().expect("peer address")),
+            Form(DismissFailedJobsForm {
+                csrf: Some(admin_signed_csrf()),
+            }),
+        )
+        .await
+        .expect("dismiss response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(header::LOCATION),
+            Some(&HeaderValue::from_static(
+                "/admin/panel?flash=Failed%20job%20counter%20dismissed.&open=site-health#site-health"
+            ))
+        );
+        let conn = state.db.get().expect("db connection");
+        assert_eq!(
+            crate::db::background_job_summary(&conn)
+                .expect("summary after dismiss")
+                .failed,
+            0
+        );
+        assert_eq!(
+            crate::db::recent_background_jobs(&conn, "failed", 10)
+                .expect("recent failed history")
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

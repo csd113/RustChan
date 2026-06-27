@@ -2,7 +2,7 @@
 
 Current setup and deployment guide for Linux, macOS, and Windows.
 
-Current development version: `1.2.2`.
+Current development version: `1.3.0`.
 
 This guide reflects the current RustChan architecture:
 
@@ -265,7 +265,7 @@ rustchan-data/
 
 ## Banner Artwork Requirements
 
-RustChan `1.2.2` includes board banners plus a separate home-page announcement banner.
+RustChan `1.3.0` includes board banners plus a separate home-page announcement banner.
 
 Banner upload requirements:
 
@@ -413,6 +413,19 @@ This means:
 - HTTPS support is configured but disabled until you turn it on
 - when enabled, RustChan can generate a local self-signed development certificate
 
+## Observability Endpoints
+
+`/healthz` is public and intentionally minimal. `/readyz` returns only a readiness status by default, and `/metrics` returns `404` unless explicitly enabled.
+
+Only enable detailed readiness or metrics for a trusted scrape path:
+
+```toml
+public_readiness_details = true
+public_metrics_enabled = true
+```
+
+Detailed readiness and metrics include operational state such as database schema health, backup freshness, media backlog, maintenance state, and Tor readiness. If you expose them, use a reverse-proxy allowlist, private network, or equivalent network boundary. Tor-facing deployments should keep the defaults unless you intentionally monitor those endpoints externally.
+
 ## Default Settings
 
 | # | Setting | Scope | Default | Enabled by default? | Admin? | Config? | Notes |
@@ -442,6 +455,8 @@ This means:
 | 51 | ACME staging | TLS | `true` | true | No | Yes | Applies if the ACME section is enabled and the field is omitted. |
 | 53 | Built-in Tor support | Tor | `true` | true | No | Yes | Generated config enables Tor support by default. |
 | 54 | Tor-only mode | Tor | `false` | false | No | Yes | Keeps clearnet access on unless you explicitly disable it. |
+| 55 | Public detailed readiness | observability | `false` | false | No | Yes | Keep off unless `/readyz` is behind a trusted scrape path. |
+| 56 | Public metrics | observability | `false` | false | No | Yes | Keep off unless `/metrics` is behind a trusted scrape path. |
 | 60 | Include Tor hidden-service keys in automatic full backups | backup / Tor | `true` | true | Yes | Yes | Admin saves rewrite `settings.toml`; existing installs keep their current configured value until changed. |
 | 66 | Archive before prune | maintenance / archive | `true` | true | No | Yes | Global override: prune archives instead of hard-deletes. |
 | 72 | ChanNet API key set | ChanNet | `""` | false | No | Yes | Empty disables the protected ChanNet endpoints. |
@@ -598,6 +613,13 @@ Before major updates, back up:
 - `rustchan-data/settings.toml`
 
 Or use the built-in backup tools from the admin panel.
+
+RustChan `1.3.0` resets the database baseline: fresh installs create the
+current `1.3.0` schema directly instead of replaying pre-release internal
+migrations. Existing in-development databases that structurally match that
+schema are marked as database schema version `1.3.0`; partial, unknown, or
+corrupt schemas are rejected without deleting data. Future released schema
+changes should add normal forward migrations tied to RustChan release versions.
 
 ## Troubleshooting
 

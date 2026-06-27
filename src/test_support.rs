@@ -1,6 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 pub fn app_state() -> crate::middleware::AppState {
+    crate::config::generate_settings_file_if_missing();
     std::fs::create_dir_all(&crate::config::CONFIG.upload_dir).expect("create test upload dir");
     std::fs::create_dir_all(crate::config::full_backups_dir())
         .expect("create test full backup dir");

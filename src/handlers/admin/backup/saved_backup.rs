@@ -1,3 +1,5 @@
+//! Saved Backup v4 format definitions, filesystem layout helpers, and strict verification.
+
 use crate::error::{AppError, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -1543,6 +1545,9 @@ pub(crate) fn verify_saved_v4_root(
         }
         None => None,
     };
+    if let Some(snapshot) = &db_snapshot {
+        verify_db_snapshot_schema(snapshot)?;
+    }
 
     match manifest.scope {
         BackupScope::FullSite | BackupScope::PreMaintenance => {
@@ -1800,6 +1805,38 @@ pub(crate) fn verify_saved_v4_root(
     })
 }
 
+fn verify_db_snapshot_schema(snapshot: &VerifiedSavedV4DbSnapshot) -> Result<()> {
+    let mut temp_db = tempfile::NamedTempFile::new().map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Create temporary Backup v4 DB validation file: {error}"
+        ))
+    })?;
+    copy_verified_file_to_writer(&snapshot.file, temp_db.as_file_mut())?;
+    let conn = rusqlite::Connection::open(temp_db.path()).map_err(|error| {
+        AppError::BadRequest(format!(
+            "Backup v4 DB snapshot could not be opened as SQLite: {error}"
+        ))
+    })?;
+    crate::db::normalize_database_schema_version(&conn).map_err(|error| {
+        AppError::BadRequest(format!(
+            "Backup v4 DB snapshot does not match the RustChan {} database baseline: {error}",
+            crate::db::baseline_schema_version()
+        ))
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn valid_db_snapshot_for_test() -> Vec<u8> {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let db_path = temp_dir.path().join("snapshot.sqlite3");
+    let pool = crate::db::init_test_pool().expect("test pool");
+    let conn = pool.get().expect("db conn");
+    let db_path_sql = db_path.to_str().expect("db path").replace('\'', "''");
+    conn.execute_batch(&format!("VACUUM INTO '{db_path_sql}'"))
+        .expect("vacuum snapshot");
+    std::fs::read(db_path).expect("read db snapshot")
+}
+
 #[cfg(test)]
 pub(crate) fn write_saved_v4_fixture_for_test(
     root_dir: &Path,
@@ -1980,7 +2017,7 @@ mod tests {
             &root,
             BackupScope::FullSite,
             board_fixture_files_for_test(),
-            Some(b"sqlite".to_vec()),
+            Some(valid_db_snapshot_for_test()),
             1_715_000_000_i64,
         );
         (dir, root, manifest)
@@ -2144,7 +2181,7 @@ mod tests {
             &root,
             BackupScope::FullSite,
             board_fixture_files_for_test(),
-            Some(b"sqlite".to_vec()),
+            Some(valid_db_snapshot_for_test()),
             1_715_000_000_i64,
         );
 
@@ -2253,7 +2290,7 @@ mod tests {
             &root,
             BackupScope::FullSite,
             board_fixture_files_for_test(),
-            Some(b"sqlite".to_vec()),
+            Some(valid_db_snapshot_for_test()),
             1_715_000_100_i64,
         );
         std::fs::write(root.join("boards/tech/media/src/example.txt"), b"other")
@@ -2273,7 +2310,7 @@ mod tests {
             &root,
             BackupScope::FullSite,
             board_fixture_files_for_test(),
-            Some(b"sqlite".to_vec()),
+            Some(valid_db_snapshot_for_test()),
             1_715_000_200_i64,
         );
         std::fs::remove_file(root.join("boards/tech/media/src/example.txt")).expect("remove file");
@@ -2291,7 +2328,7 @@ mod tests {
             &root,
             BackupScope::FullSite,
             board_fixture_files_for_test(),
-            Some(b"sqlite".to_vec()),
+            Some(valid_db_snapshot_for_test()),
             1_715_000_250_i64,
         );
         convert_fixture_to_split(&root, 16);
@@ -2529,7 +2566,7 @@ mod tests {
             &root,
             BackupScope::FullSite,
             board_fixture_files_for_test(),
-            Some(b"sqlite".to_vec()),
+            Some(valid_db_snapshot_for_test()),
             1_715_000_300_i64,
         );
         manifest.files.push(
@@ -2558,7 +2595,7 @@ mod tests {
             &root,
             BackupScope::FullSite,
             board_fixture_files_for_test(),
-            Some(b"sqlite".to_vec()),
+            Some(valid_db_snapshot_for_test()),
             1_715_000_400_i64,
         );
         let outside_dir = dir.path().join("outside");

@@ -12,7 +12,7 @@ One binary. One data folder. SQLite only. The rest is features.
 
 RustChan is built in Rust, ships with bundled SQLite, and is designed to be understandable, movable, and fun to run.
 
-Current development version: `1.2.2`.
+Current development version: `1.3.0`.
 
 [What is RustChan?](#what-is-rustchan) ·
 [Why it exists](#why-it-exists) ·
@@ -163,6 +163,12 @@ rustchan-data/
 
 That folder is the thing to back up if you want to move the site or keep it safe.
 
+For RustChan `1.3.0`, fresh databases are created directly from the `1.3.0`
+baseline schema. Earlier internal development migrations were squashed before
+release; a database that already matches the baseline is marked as schema
+version `1.3.0`, while partial or unknown schemas fail closed without deleting
+data.
+
 `settings.toml` is generated automatically on first run and documents the available options inline. A few of the more important ones:
 
 ```toml
@@ -214,8 +220,22 @@ CLI admin commands include:
 - `rustchan-cli admin ban`
 - `rustchan-cli admin unban`
 - `rustchan-cli admin list-bans`
+- `rustchan-cli admin db-status`
 
 Run `rustchan-cli admin --help` for the full command list and flags.
+
+## Observability Endpoints
+
+`/healthz` is intentionally public and minimal for liveness checks. `/readyz` returns only readiness status by default, and `/metrics` returns `404` unless explicitly enabled.
+
+If a trusted Prometheus scraper or private load balancer needs detailed internals, enable the public surface in `settings.toml` and restrict access at your reverse proxy or network boundary:
+
+```toml
+public_readiness_details = true
+public_metrics_enabled = true
+```
+
+The detailed readiness and metrics output includes operational state such as database schema health, backup freshness, media backlog, maintenance state, and Tor readiness. Do not expose those endpoints directly to the public internet or onion visitors.
 
 ## Tor And ChanNet
 

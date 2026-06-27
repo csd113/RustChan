@@ -67,6 +67,7 @@ pub struct UploadConfig<'a> {
     pub max_image_size: usize,
     pub max_video_size: usize,
     pub max_audio_size: usize,
+    pub max_pdf_size: usize,
     pub ffmpeg_available: bool,
     pub ffprobe_available: bool,
     pub ffmpeg_webp_available: bool,
@@ -315,6 +316,7 @@ pub fn process_uploads(
         config.max_image_size,
         config.max_video_size,
         config.max_audio_size,
+        config.max_pdf_size,
         config.ffmpeg_available,
         config.ffprobe_available,
         config.ffmpeg_webp_available,
@@ -424,6 +426,7 @@ pub fn submit_post(
     let effective_max_image_size = board.max_image_size_bytes();
     let effective_max_video_size = board.max_video_size_bytes();
     let effective_max_audio_size = board.max_audio_size_bytes();
+    let effective_max_pdf_size = board.max_pdf_size_bytes();
 
     let reply_context = match &mode {
         SubmitPostMode::Reply { thread_id, sage } => {
@@ -517,6 +520,7 @@ pub fn submit_post(
             max_image_size: effective_max_image_size,
             max_video_size: effective_max_video_size,
             max_audio_size: effective_max_audio_size,
+            max_pdf_size: effective_max_pdf_size,
             ffmpeg_available,
             ffprobe_available,
             ffmpeg_webp_available,
@@ -556,18 +560,23 @@ pub fn submit_post(
                 None
             } else {
                 if q.is_empty() {
+                    uploads.rollback_new_files(conn, &upload_dir)?;
                     return Err(AppError::BadRequest(
                         "Polls need a question and at least two options.".into(),
                     ));
                 }
                 if valid_opts.len() < 2 {
+                    uploads.rollback_new_files(conn, &upload_dir)?;
                     return Err(AppError::BadRequest(
                         "Polls need a question and at least two options.".into(),
                     ));
                 }
-                let secs = poll_duration_secs.ok_or_else(|| {
-                    AppError::BadRequest("A duration is required when creating a poll.".into())
-                })?;
+                let Some(secs) = poll_duration_secs else {
+                    uploads.rollback_new_files(conn, &upload_dir)?;
+                    return Err(AppError::BadRequest(
+                        "A duration is required when creating a poll.".into(),
+                    ));
+                };
                 let secs = secs.clamp(60, 30 * 24 * 3600);
                 let expires_at = chrono::Utc::now().timestamp().saturating_add(secs);
                 Some(db::threads::PollInsert {
@@ -864,6 +873,26 @@ mod tests {
         bytes
     }
 
+    fn flac_header_bytes() -> Vec<u8> {
+        b"fLaC\x00\x00\x00\x22tiny test flac bytes".to_vec()
+    }
+
+    fn malformed_aac_bytes() -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(2_048);
+        bytes.extend_from_slice(&[0xFF, 0xF1, 0x50, 0x80]);
+        bytes.resize(2_048, 0);
+        let mut state = 4_u32;
+        for byte in bytes.iter_mut().skip(4) {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *byte = u8::try_from(state & 0xFF).expect("masked byte fits in u8");
+        }
+        bytes
+    }
+
+    fn webm_header_bytes() -> Vec<u8> {
+        b"\x1a\x45\xdf\xa3\x00\x00\x00\x00\x00\x00\x42\x82\x84webm\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec()
+    }
+
     fn pending_upload_stage_count(upload_dir: &std::path::Path) -> usize {
         let pending = upload_dir.join(".pending");
         if !pending.exists() {
@@ -872,6 +901,17 @@ mod tests {
         std::fs::read_dir(pending)
             .expect("read pending dir")
             .count()
+    }
+
+    fn assert_no_partial_post_rows(conn: &rusqlite::Connection) {
+        let thread_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))
+            .expect("thread count");
+        let post_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))
+            .expect("post count");
+        assert_eq!(thread_count, 0);
+        assert_eq!(post_count, 0);
     }
 
     #[test]
@@ -1146,6 +1186,7 @@ mod tests {
                 max_image_size: 1024 * 1024,
                 max_video_size: 1024 * 1024,
                 max_audio_size: 1024 * 1024,
+                max_pdf_size: 1024 * 1024,
                 ffmpeg_available: false,
                 ffprobe_available: false,
                 ffmpeg_webp_available: false,
@@ -1185,10 +1226,238 @@ mod tests {
 
         match error {
             AppError::UploadTooLarge(message) => {
-                assert!(message.contains("Maximum image size is 0 MiB."));
+                assert!(message.contains("Maximum image upload size is 64 B."));
             }
             other => panic!("expected UploadTooLarge, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn submit_post_rejects_disabled_audio_without_stale_uploads_or_rows() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let mut command = thread_command(
+            TEST_BOARD,
+            "audio-disabled",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+        );
+        command.file_data = Some(temp_upload("tiny.flac", &flac_header_bytes()));
+
+        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+            Ok(result) => panic!(
+                "audio-disabled board should reject, got {}",
+                result.redirect_url
+            ),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::BadRequest(message) => {
+                assert!(message.contains("Audio uploads are disabled"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert!(!upload_dir.path().join(TEST_BOARD).exists());
+        assert_no_partial_post_rows(&conn);
+    }
+
+    #[test]
+    fn submit_post_rejects_malformed_aac_without_jobs_or_rows() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET allow_audio = 1 WHERE short_name = ?1",
+            rusqlite::params![TEST_BOARD],
+        )
+        .expect("enable audio");
+        let mut command = thread_command(
+            TEST_BOARD,
+            "malformed-aac",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+        );
+        command.file_data = Some(temp_upload("broken.aac", &malformed_aac_bytes()));
+        command.ffmpeg_available = true;
+
+        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+            Ok(result) => panic!("malformed AAC should reject, got {}", result.redirect_url),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::BadRequest(message) => {
+                assert!(message.contains("ADTS stream is malformed"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert!(!upload_dir.path().join(TEST_BOARD).exists());
+        assert_no_partial_post_rows(&conn);
+        let job_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row.get(0))
+            .expect("job count");
+        assert_eq!(job_count, 0);
+    }
+
+    #[test]
+    fn submit_post_rejects_disabled_video_without_stale_uploads_or_rows() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET allow_video = 0 WHERE short_name = ?1",
+            rusqlite::params![TEST_BOARD],
+        )
+        .expect("disable video");
+        let mut command = thread_command(
+            TEST_BOARD,
+            "video-disabled",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+        );
+        command.file_data = Some(temp_upload("tiny.webm", &webm_header_bytes()));
+
+        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+            Ok(result) => panic!(
+                "video-disabled board should reject, got {}",
+                result.redirect_url
+            ),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::BadRequest(message) => {
+                assert!(message.contains("Video uploads are disabled"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert!(!upload_dir.path().join(TEST_BOARD).exists());
+        assert_no_partial_post_rows(&conn);
+    }
+
+    #[test]
+    fn submit_post_rejects_overlimit_audio_without_stale_uploads_or_rows() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET allow_audio = 1, max_audio_size = 8 WHERE short_name = ?1",
+            rusqlite::params![TEST_BOARD],
+        )
+        .expect("shrink audio limit");
+        let mut command = thread_command(
+            TEST_BOARD,
+            "audio-overlimit",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+        );
+        command.file_data = Some(temp_upload("tiny.flac", &flac_header_bytes()));
+
+        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+            Ok(result) => panic!(
+                "over-limit audio should reject, got {}",
+                result.redirect_url
+            ),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::UploadTooLarge(message) => {
+                assert!(message.contains("Maximum audio upload size is 8 B."));
+            }
+            other => panic!("expected UploadTooLarge, got {other:?}"),
+        }
+        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert!(!upload_dir.path().join(TEST_BOARD).exists());
+        assert_no_partial_post_rows(&conn);
+    }
+
+    #[test]
+    fn submit_post_rejects_overlimit_video_without_stale_uploads_or_rows() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        conn.execute(
+            "UPDATE boards SET max_video_size = 8 WHERE short_name = ?1",
+            rusqlite::params![TEST_BOARD],
+        )
+        .expect("shrink video limit");
+        let mut command = thread_command(
+            TEST_BOARD,
+            "video-overlimit",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+        );
+        command.file_data = Some(temp_upload("tiny.webm", &webm_header_bytes()));
+
+        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+            Ok(result) => panic!(
+                "over-limit video should reject, got {}",
+                result.redirect_url
+            ),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::UploadTooLarge(message) => {
+                assert!(message.contains("Maximum video upload size is 8 B."));
+            }
+            other => panic!("expected UploadTooLarge, got {other:?}"),
+        }
+        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert!(!upload_dir.path().join(TEST_BOARD).exists());
+        assert_no_partial_post_rows(&conn);
+    }
+
+    #[test]
+    fn submit_post_cleans_staged_upload_when_poll_validation_fails() {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let conn = state.db.get().expect("db connection");
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+
+        let mut command = thread_command_with_poll(
+            TEST_BOARD,
+            "poll-upload-token",
+            "thread body",
+            upload_dir.path().to_str().expect("upload dir"),
+            "pick one",
+            vec!["only option"],
+            Some(3600),
+        );
+        command.file_data = Some(temp_upload("cover.png", &one_pixel_png()));
+
+        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+            Ok(result) => panic!(
+                "poll validation should reject submission, got {}",
+                result.redirect_url
+            ),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::BadRequest(message) => {
+                assert_eq!(message, "Polls need a question and at least two options.");
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+
+        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert!(!upload_dir.path().join(TEST_BOARD).exists());
+        let post_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))
+            .expect("post count");
+        assert_eq!(post_count, 0);
     }
 
     #[test]
@@ -1254,6 +1523,7 @@ mod tests {
                 max_image_size: 1024 * 1024,
                 max_video_size: 1024 * 1024,
                 max_audio_size: 1024 * 1024,
+                max_pdf_size: 1024 * 1024,
                 ffmpeg_available: false,
                 ffprobe_available: false,
                 ffmpeg_webp_available: false,

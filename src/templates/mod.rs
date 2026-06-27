@@ -214,6 +214,14 @@ pub fn normalize_theme_slug(theme: &str) -> Option<String> {
         .map(|candidate| candidate.slug.clone())
 }
 
+fn normalize_configured_default_theme(theme: &str) -> Option<String> {
+    let theme = theme.trim();
+    if theme.eq_ignore_ascii_case("terminal") {
+        return Some("terminal".to_owned());
+    }
+    normalize_theme_slug(theme)
+}
+
 fn fallback_theme_slug() -> String {
     let themes = live_themes();
     normalize_theme_slug(crate::theme::HARD_DEFAULT_THEME)
@@ -228,8 +236,8 @@ fn fallback_theme_slug() -> String {
 
 fn resolve_page_default_theme(board_default_theme: Option<&str>) -> String {
     board_default_theme
-        .and_then(normalize_theme_slug)
-        .or_else(|| normalize_theme_slug(&live_default_theme()))
+        .and_then(normalize_configured_default_theme)
+        .or_else(|| normalize_configured_default_theme(&live_default_theme()))
         .unwrap_or_else(fallback_theme_slug)
 }
 
@@ -370,7 +378,7 @@ pub fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usize) -> 
     format!(
         r#"
 <!-- Auto-compress modal — shared by new-thread and reply forms on this page -->
-<div id="compress-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="compress-modal-title"
+<div id="compress-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="compress-modal-title" aria-hidden="true" hidden inert
      data-max-image="{max_image_bytes}" data-max-video="{max_video_bytes}">
   <div class="compress-modal-box">
     <div class="compress-modal-title" id="compress-modal-title">&#9888; File Too Large</div>
@@ -394,7 +402,7 @@ pub fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usize) -> 
 #[must_use]
 pub const fn confirmation_modal_script() -> &'static str {
     r#"
-<div id="confirm-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
+<div id="confirm-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title" aria-hidden="true" hidden inert>
   <div class="compress-modal-box confirm-modal-box">
     <div class="compress-modal-title" id="confirm-modal-title">Confirm action</div>
     <div class="compress-modal-info confirm-modal-info" id="confirm-modal-message"></div>
@@ -409,7 +417,7 @@ pub const fn confirmation_modal_script() -> &'static str {
 #[must_use]
 pub const fn admin_ban_delete_modal_script() -> &'static str {
     r#"
-<div id="ban-delete-modal" class="compress-modal ban-delete-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="ban-delete-modal-title" aria-describedby="ban-delete-modal-info" aria-hidden="true">
+<div id="ban-delete-modal" class="compress-modal ban-delete-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="ban-delete-modal-title" aria-describedby="ban-delete-modal-info" aria-hidden="true" hidden inert>
   <div class="compress-modal-box ban-delete-modal-box">
     <div class="compress-modal-title ban-delete-modal-title" id="ban-delete-modal-title">Ban IP + delete post</div>
     <form id="ban-delete-modal-form" novalidate>
@@ -444,7 +452,7 @@ pub const fn admin_ban_delete_modal_script() -> &'static str {
 #[must_use]
 pub const fn report_modal_script() -> &'static str {
     r#"
-<div id="report-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="report-modal-title">
+<div id="report-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="report-modal-title" aria-describedby="report-info" aria-hidden="true" hidden inert>
   <div class="compress-modal-box">
     <div class="compress-modal-title" id="report-modal-title">Report Thread/Post</div>
     <form method="POST" action="/report" id="report-form">
@@ -454,7 +462,8 @@ pub const fn report_modal_script() -> &'static str {
       <input type="hidden" name="board"     id="report-board">
       <input type="hidden" name="ip_hash"   id="report-ip-hash">
       <div class="compress-modal-info confirm-modal-info" id="report-info"></div>
-      <input type="text" name="reason" id="report-reason" aria-label="report reason"
+      <label class="modal-field-label" for="report-reason">reason</label>
+      <input type="text" name="reason" id="report-reason"
              placeholder="reason (optional)" maxlength="256"
              style="width:100%;background:var(--bg-input);border:1px solid var(--border);
                     color:var(--text);padding:8px 10px;font-family:var(--font);font-size:16px;
@@ -649,8 +658,8 @@ pub fn base_layout_with_preferences(
         );
         format!(
             r#"<details class="mobile-board-menu">
-  <summary class="mobile-board-menu-btn">Boards</summary>
-  <nav class="mobile-board-menu-panel">{items}</nav>
+  <summary class="mobile-board-menu-btn" aria-label="Open board menu" aria-controls="mobile-board-menu-panel"><span class="mobile-board-menu-label">Boards</span></summary>
+  <nav class="mobile-board-menu-panel" id="mobile-board-menu-panel">{items}</nav>
 </details>"#
         )
     };
@@ -690,9 +699,10 @@ pub fn base_layout_with_preferences(
     let active_theme_value_attr = format!(r#" data-active-theme="{}""#, escape_html(&active_theme));
     let theme_href = |theme: &str| {
         format!(
-            "/theme/{}?return_to={}",
+            "/theme/{}?return_to={}&_csrf={}",
             escape_html(theme),
-            urlencoding_simple(current_path)
+            urlencoding_simple(current_path),
+            urlencoding_simple(csrf_token)
         )
     };
     let stylesheet_href = static_asset_url("/static/style.css");
@@ -826,8 +836,8 @@ pub fn base_layout_with_preferences(
       {theme_picker_fallback}
     </nav>
     <details class="user-preferences-panel">
-      <summary id="theme-picker-btn" class="user-preferences-summary">&#9881; User Preferences</summary>
-      <form class="user-preferences-form" method="POST" action="/preferences">
+      <summary id="theme-picker-btn" class="user-preferences-summary" aria-controls="user-preferences-form">&#9881; User Preferences</summary>
+      <form class="user-preferences-form" id="user-preferences-form" method="POST" action="/preferences">
         <button type="button" class="user-preferences-mobile-close" aria-label="Close preferences">&times;</button>
         <input type="hidden" name="preferences_form" value="1">
         <input type="hidden" name="_csrf" value="{csrf_token}">
@@ -852,7 +862,7 @@ pub fn base_layout_with_preferences(
         <button type="submit">save preferences</button>
       </form>
     </details>
-    <div id="theme-picker-panel">
+    <div id="theme-picker-panel" hidden inert aria-hidden="true">
       <div class="tp-title">// SELECT THEME</div>
       {theme_picker_panel}
     </div>
@@ -961,7 +971,7 @@ appeals are reviewed by site staff. one appeal per 24 hours.</p>
 <input type="hidden" name="_csrf" id="appeal-csrf-field" value="{csrf}">
 <textarea name="reason" rows="4" maxlength="512"
   placeholder="Briefly explain why you believe this ban should be lifted…"
-  style="width:100%;box-sizing:border-box;margin:0.75rem 0;background:var(--bg-post);color:var(--text);border:1px solid var(--border);padding:0.5rem;resize:vertical"></textarea>
+  style="width:100%;box-sizing:border-box;margin:0.75rem 0;background:var(--bg-post);color:var(--text);border:1px solid var(--border);padding:0.5rem;resize:none"></textarea>
 <button type="submit" style="margin-top:0.25rem">submit appeal</button>
 </form>
 <p style="margin-top:1.5rem"><a href="/">return home</a></p>
