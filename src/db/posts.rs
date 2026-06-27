@@ -149,18 +149,22 @@ pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Resu
 /// Returns an error if the database operation fails.
 pub fn get_new_posts_since(
     conn: &rusqlite::Connection,
+    board_id: i64,
     thread_id: i64,
     since_id: i64,
     max_results: i64,
 ) -> Result<Vec<Post>> {
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT {POST_SELECT_COLUMNS}
-         FROM posts WHERE thread_id = ?1 AND id > ?2
+         FROM posts WHERE board_id = ?1 AND thread_id = ?2 AND id > ?3
          ORDER BY id ASC
-         LIMIT ?3"
+         LIMIT ?4"
     ))?;
     let posts = stmt
-        .query_map(params![thread_id, since_id, max_results], map_post)?
+        .query_map(
+            params![board_id, thread_id, since_id, max_results],
+            map_post,
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(posts)
 }
@@ -171,6 +175,7 @@ pub fn get_new_posts_since(
 /// Returns an error if the database operation fails.
 pub fn get_posts_by_ids_in_thread(
     conn: &rusqlite::Connection,
+    board_id: i64,
     thread_id: i64,
     post_ids: &[i64],
 ) -> Result<Vec<Post>> {
@@ -181,18 +186,21 @@ pub fn get_posts_by_ids_in_thread(
     let placeholders = post_ids
         .iter()
         .enumerate()
-        .map(|(index, _)| format!("?{}", index + 2))
+        .map(|(index, _)| format!("?{}", index + 3))
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
         "SELECT {POST_SELECT_COLUMNS}
          FROM posts
-         WHERE thread_id = ?1 AND id IN ({placeholders})
+         WHERE board_id = ?1 AND thread_id = ?2 AND id IN ({placeholders})
          ORDER BY created_at ASC, id ASC"
     );
     let mut stmt = conn.prepare_cached(&sql)?;
-    let params =
-        rusqlite::params_from_iter(std::iter::once(thread_id).chain(post_ids.iter().copied()));
+    let params = rusqlite::params_from_iter(
+        [board_id, thread_id]
+            .into_iter()
+            .chain(post_ids.iter().copied()),
+    );
     let posts = stmt
         .query_map(params, map_post)?
         .collect::<rusqlite::Result<Vec<_>>>()?;

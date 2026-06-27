@@ -73,6 +73,12 @@ pub(super) fn extract_sqlite_db_from_full_backup_archive<R: std::io::Read + std:
     })?;
     let mut out = std::fs::File::create(temp_db)
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Create temp DB: {error}")))?;
+    crate::config::restrict_private_file_permissions(temp_db).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Set private permissions on {}: {error}",
+            temp_db.display()
+        ))
+    })?;
     copy_limited(&mut db_entry, &mut out, ZIP_ENTRY_MAX_BYTES)
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Write temp DB: {error}")))?;
     drop(out);
@@ -268,6 +274,12 @@ pub(super) fn create_temp_legacy_full_backup_from_v4_transfer_zip<R: std::io::Re
     let output = std::fs::File::create(&temp_zip).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create {}: {error}", temp_zip.display()))
     })?;
+    crate::config::restrict_private_file_permissions(&temp_zip).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Set private permissions on {}: {error}",
+            temp_zip.display()
+        ))
+    })?;
     let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(output));
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
@@ -337,6 +349,12 @@ fn create_temp_legacy_full_backup_from_verified_v4(
     let temp_zip = temp_legacy_zip_path("rustchan_v4_full_restore");
     let output = std::fs::File::create(&temp_zip).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create {}: {error}", temp_zip.display()))
+    })?;
+    crate::config::restrict_private_file_permissions(&temp_zip).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Set private permissions on {}: {error}",
+            temp_zip.display()
+        ))
     })?;
     let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(output));
     let options = zip::write::SimpleFileOptions::default()
@@ -526,6 +544,12 @@ fn create_temp_legacy_board_backup_from_verified_v4(
     let output = std::fs::File::create(&temp_zip).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create {}: {error}", temp_zip.display()))
     })?;
+    crate::config::restrict_private_file_permissions(&temp_zip).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Set private permissions on {}: {error}",
+            temp_zip.display()
+        ))
+    })?;
     let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(output));
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
@@ -559,7 +583,7 @@ pub(super) fn create_temp_board_backup_from_full_backup_path(
     board_short: &str,
 ) -> Result<(PathBuf, String)> {
     prune_stale_temp_board_downloads();
-    std::fs::create_dir_all(temp_board_download_dir()).map_err(|error| {
+    crate::config::ensure_private_dir(&temp_board_download_dir()).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create temp board backup dir: {error}"))
     })?;
 
@@ -614,6 +638,12 @@ pub(super) fn create_temp_board_backup_from_full_backup_path(
     std::fs::rename(&tmp_path, &final_path).map_err(|error| {
         let _ = std::fs::remove_file(&tmp_path);
         AppError::Internal(anyhow::anyhow!("Rename extracted board backup: {error}"))
+    })?;
+    crate::config::restrict_private_file_permissions(&final_path).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Set private permissions on {}: {error}",
+            final_path.display()
+        ))
     })?;
 
     Ok((final_path, filename))

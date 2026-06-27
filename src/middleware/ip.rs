@@ -47,11 +47,13 @@ pub(crate) fn forwarded_proto_is_https(
         })
 }
 
-fn forwarded_ip_from_headers(
+fn forwarded_ip_from_headers_with(
     headers: &axum::http::HeaderMap,
     peer: Option<SocketAddr>,
+    behind_proxy: bool,
+    trusted_proxy_cidrs: &[String],
 ) -> Option<String> {
-    if !CONFIG.behind_proxy || !trusted_proxy_peer(peer) {
+    if !behind_proxy || !trusted_proxy_peer_with(peer, trusted_proxy_cidrs) {
         return None;
     }
 
@@ -71,27 +73,39 @@ fn forwarded_ip_from_headers(
         .map(str::to_owned)
 }
 
+fn resolved_client_ip(
+    headers: &axum::http::HeaderMap,
+    peer: Option<SocketAddr>,
+    behind_proxy: bool,
+    trusted_proxy_cidrs: &[String],
+    enable_tor_support: bool,
+) -> String {
+    if let Some(token) = crate::detect::tor_stream_token_identity(peer, enable_tor_support) {
+        return token;
+    }
+
+    if let Some(ip) =
+        forwarded_ip_from_headers_with(headers, peer, behind_proxy, trusted_proxy_cidrs)
+    {
+        return ip;
+    }
+
+    peer.map_or_else(|| "unknown".to_owned(), |addr| addr.ip().to_string())
+}
+
 pub fn extract_ip(req: &Request) -> String {
     let peer = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|connect_info| connect_info.0);
 
-    if let Some(ip) = forwarded_ip_from_headers(req.headers(), peer) {
-        return ip;
-    }
-
-    if CONFIG.enable_tor_support {
-        if let Some(addr) = peer {
-            if addr.ip().is_loopback() {
-                if let Some(token) = crate::detect::TOR_STREAM_TOKENS.get(&addr.port()) {
-                    return token.value().to_string();
-                }
-            }
-        }
-    }
-
-    peer.map_or_else(|| "unknown".to_owned(), |addr| addr.ip().to_string())
+    resolved_client_ip(
+        req.headers(),
+        peer,
+        CONFIG.behind_proxy,
+        &CONFIG.trusted_proxy_cidrs,
+        CONFIG.enable_tor_support,
+    )
 }
 
 pub struct ClientIp(pub String);
@@ -111,31 +125,22 @@ where
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
             .map(|connect_info| connect_info.0);
 
-        if let Some(ip) = forwarded_ip_from_headers(&parts.headers, peer) {
-            return Ok(Self(ip));
-        }
-
-        if CONFIG.enable_tor_support {
-            if let Some(addr) = peer {
-                if addr.ip().is_loopback() {
-                    if let Some(token) = crate::detect::TOR_STREAM_TOKENS.get(&addr.port()) {
-                        return Ok(Self(token.value().to_string()));
-                    }
-                }
-            }
-        }
-
-        Ok(Self(peer.map_or_else(
-            || "unknown".to_owned(),
-            |addr| addr.ip().to_string(),
+        Ok(Self(resolved_client_ip(
+            &parts.headers,
+            peer,
+            CONFIG.behind_proxy,
+            &CONFIG.trusted_proxy_cidrs,
+            CONFIG.enable_tor_support,
         )))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{forwarded_client_ip, trusted_proxy_peer_with};
+    use super::{forwarded_client_ip, resolved_client_ip, trusted_proxy_peer_with};
+    use axum::http::{HeaderMap, HeaderValue};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::sync::Arc;
 
     #[test]
     fn forwarded_ip_prefers_leftmost_hop() {
@@ -200,5 +205,37 @@ mod tests {
             )),
             &trusted
         ));
+    }
+
+    #[test]
+    fn tor_stream_token_precedes_spoofed_forwarded_headers_for_loopback_peer() {
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 49_152);
+        crate::detect::TOR_STREAM_TOKENS.insert(peer.port(), Arc::from("tor:test-stream"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.10"));
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.7, 127.0.0.1"),
+        );
+        let trusted = vec!["127.0.0.1/32".to_owned(), "::1/128".to_owned()];
+
+        let resolved = resolved_client_ip(&headers, Some(peer), true, &trusted, true);
+
+        crate::detect::TOR_STREAM_TOKENS.remove(&peer.port());
+        assert_eq!(resolved, "tor:test-stream");
+    }
+
+    #[test]
+    fn forwarded_headers_still_apply_for_non_tor_trusted_proxy_peer() {
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 49_153);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.10"));
+        let trusted = vec!["127.0.0.1/32".to_owned(), "::1/128".to_owned()];
+
+        assert_eq!(
+            resolved_client_ip(&headers, Some(peer), true, &trusted, true),
+            "198.51.100.10"
+        );
     }
 }

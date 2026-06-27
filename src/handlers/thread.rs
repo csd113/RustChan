@@ -1341,6 +1341,11 @@ pub async fn thread_updates(
                 .ok_or_else(|| crate::error::AppError::NotFound("Board not found.".into()))?;
             let thread = db::get_thread(&conn, thread_id)?
                 .ok_or_else(|| crate::error::AppError::NotFound("Thread not found.".into()))?;
+            if thread.board_id != board.id {
+                return Err(crate::error::AppError::NotFound(
+                    "Thread not found in this board.".into(),
+                ));
+            }
             let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
             let homepage_thread_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
             let homepage_reply_badges_enabled = db::get_homepage_new_reply_badges_enabled(&conn);
@@ -1357,7 +1362,7 @@ pub async fn thread_updates(
 
             // Fetch posts newer than `since`, ordered oldest-first so they
             // render in the correct chronological order when appended.
-            let posts = db::get_new_posts_since(&conn, thread_id, since, 100)?;
+            let posts = db::get_new_posts_since(&conn, board.id, thread_id, since, 100)?;
             let last_id = posts.iter().map(|p| p.id).max().unwrap_or(since);
             let count = posts.len();
 
@@ -1388,7 +1393,7 @@ pub async fn thread_updates(
             }
 
             let refreshed_posts =
-                db::get_posts_by_ids_in_thread(&conn, thread_id, &refresh_post_ids)?
+                db::get_posts_by_ids_in_thread(&conn, board.id, thread_id, &refresh_post_ids)?
                     .into_iter()
                     .map(|post| RefreshedPostPayload {
                         id: post.id,

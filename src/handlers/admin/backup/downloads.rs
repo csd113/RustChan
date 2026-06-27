@@ -8,12 +8,12 @@ pub(super) fn temp_board_download_token_path(filename: &str) -> PathBuf {
 }
 
 pub fn write_temp_board_download_token(filename: &str, token: &str) -> Result<()> {
-    std::fs::create_dir_all(temp_board_download_dir()).map_err(|error| {
+    crate::config::ensure_private_dir(&temp_board_download_dir()).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create temp board backup dir: {error}"))
     })?;
-    std::fs::write(temp_board_download_token_path(filename), token).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("Write temp board download token: {error}"))
-    })?;
+    crate::config::write_private_file(&temp_board_download_token_path(filename), token).map_err(
+        |error| AppError::Internal(anyhow::anyhow!("Write temp board download token: {error}")),
+    )?;
     Ok(())
 }
 

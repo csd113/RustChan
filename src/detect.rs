@@ -1,5 +1,6 @@
 // Startup detection for optional external tools.
 
+use std::net::SocketAddr;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -338,6 +339,23 @@ use tor_hsservice::{config::OnionServiceConfigBuilder, handle_rend_requests, HsI
 // cooldowns, and bans — one Tor user's actions no longer affect all others.
 // The token is random per-stream so it cannot track users across reconnections.
 pub static TOR_STREAM_TOKENS: LazyLock<DashMap<u16, Arc<str>>> = LazyLock::new(DashMap::new);
+
+#[must_use]
+pub fn tor_stream_token_identity(
+    peer: Option<SocketAddr>,
+    enable_tor_support: bool,
+) -> Option<String> {
+    if !enable_tor_support {
+        return None;
+    }
+    let addr = peer?;
+    if !addr.ip().is_loopback() {
+        return None;
+    }
+    TOR_STREAM_TOKENS
+        .get(&addr.port())
+        .map(|token| token.value().to_string())
+}
 
 /// Removes a port→token entry from `TOR_STREAM_TOKENS` when dropped.
 struct TokenGuard(u16);

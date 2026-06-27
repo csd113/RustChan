@@ -78,12 +78,8 @@ pub(crate) fn create_full_backup_to_server(
     let root_dir = saved_backup::create_backup_root(&backup_id)?;
     let db_dir = root_dir.join("db");
     let config_dir = root_dir.join("config");
-    std::fs::create_dir_all(&db_dir).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("Create {}: {error}", db_dir.display()))
-    })?;
-    std::fs::create_dir_all(&config_dir).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("Create {}: {error}", config_dir.display()))
-    })?;
+    ensure_backup_dir(&db_dir)?;
+    ensure_backup_dir(&config_dir)?;
 
     progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
     log_backup_phase(crate::middleware::backup_phase::SNAPSHOT_DB);
@@ -94,6 +90,7 @@ pub(crate) fn create_full_backup_to_server(
         .replace('\'', "''");
     conn.execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
         .map_err(|error| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {error}")))?;
+    restrict_backup_file(&db_snapshot_path)?;
     let db_snapshot_size = std::fs::metadata(&db_snapshot_path)
         .map(|metadata| metadata.len())
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {error}")))?;
@@ -298,18 +295,9 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
     let db_dir = root_dir.join("db");
     let config_dir = root_dir.join("config");
     let maintenance_dir = root_dir.join("maintenance");
-    std::fs::create_dir_all(&db_dir).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("Create {}: {error}", db_dir.display()))
-    })?;
-    std::fs::create_dir_all(&config_dir).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("Create {}: {error}", config_dir.display()))
-    })?;
-    std::fs::create_dir_all(&maintenance_dir).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!(
-            "Create {}: {error}",
-            maintenance_dir.display()
-        ))
-    })?;
+    ensure_backup_dir(&db_dir)?;
+    ensure_backup_dir(&config_dir)?;
+    ensure_backup_dir(&maintenance_dir)?;
 
     progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
     log_backup_phase(crate::middleware::backup_phase::SNAPSHOT_DB);
@@ -321,6 +309,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
         .replace('\'', "''");
     conn.execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
         .map_err(|error| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {error}")))?;
+    restrict_backup_file(&db_snapshot_path)?;
     let db_snapshot_size = std::fs::metadata(&db_snapshot_path)
         .map(|metadata| metadata.len())
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {error}")))?;
@@ -376,12 +365,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
     );
 
     let integrity_path = maintenance_dir.join("pre-integrity-check.txt");
-    std::fs::write(&integrity_path, pre_integrity.as_bytes()).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!(
-            "Write {}: {error}",
-            integrity_path.display()
-        ))
-    })?;
+    write_backup_bytes(&integrity_path, pre_integrity.as_bytes())?;
     push_v4_file_entry(
         &mut files,
         "maintenance/pre-integrity-check.txt".to_owned(),
@@ -393,12 +377,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
     );
 
     let foreign_key_path = maintenance_dir.join("pre-foreign-key-check.txt");
-    std::fs::write(&foreign_key_path, pre_foreign_key.as_bytes()).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!(
-            "Write {}: {error}",
-            foreign_key_path.display()
-        ))
-    })?;
+    write_backup_bytes(&foreign_key_path, pre_foreign_key.as_bytes())?;
     push_v4_file_entry(
         &mut files,
         "maintenance/pre-foreign-key-check.txt".to_owned(),
@@ -431,9 +410,7 @@ pub(crate) fn create_pre_maintenance_backup_to_server(
         sql
     };
     let schema_path = maintenance_dir.join("pre-schema.sql");
-    std::fs::write(&schema_path, schema_dump.as_bytes()).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("Write {}: {error}", schema_path.display()))
-    })?;
+    write_backup_bytes(&schema_path, schema_dump.as_bytes())?;
     push_v4_file_entry(
         &mut files,
         "maintenance/pre-schema.sql".to_owned(),
@@ -562,12 +539,35 @@ fn count_required_private_files(dir: &Path, missing_message: &str) -> Result<u64
     Ok(count)
 }
 
+fn ensure_backup_dir(path: &Path) -> Result<()> {
+    crate::config::ensure_private_dir(path)
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Create {}: {error}", path.display())))
+}
+
+fn restrict_backup_file(path: &Path) -> Result<()> {
+    crate::config::restrict_private_file_permissions(path).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Set private permissions on {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn write_backup_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    crate::config::write_private_file(path, bytes)
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Write {}: {error}", path.display())))
+}
+
 fn write_jsonl_file<T: serde::Serialize>(path: &Path, rows: &[T]) -> Result<(u64, String)> {
     use sha2::Digest as _;
 
+    if let Some(parent) = path.parent() {
+        ensure_backup_dir(parent)?;
+    }
     let mut file = std::fs::File::create(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create {}: {error}", path.display()))
     })?;
+    restrict_backup_file(path)?;
     let mut hasher = sha2::Sha256::new();
     let mut written = 0u64;
     for row in rows {
@@ -587,9 +587,7 @@ fn write_pretty_json_file<T: serde::Serialize>(path: &Path, value: &T) -> Result
     let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Serialize {}: {error}", path.display()))
     })?;
-    std::fs::write(path, &bytes).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("Write {}: {error}", path.display()))
-    })?;
+    write_backup_bytes(path, &bytes)?;
     Ok((
         u64::try_from(bytes.len()).unwrap_or(u64::MAX),
         saved_backup::sha256_hex_for_bytes(&bytes),
@@ -609,13 +607,12 @@ fn relative_path_string(path: &Path, root: &Path) -> Result<String> {
 
 fn copy_regular_file_to_backup(source: &Path, destination: &Path) -> Result<(u64, String)> {
     if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            AppError::Internal(anyhow::anyhow!("Create {}: {error}", parent.display()))
-        })?;
+        ensure_backup_dir(parent)?;
     }
     let mut output = std::fs::File::create(destination).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create {}: {error}", destination.display()))
     })?;
+    restrict_backup_file(destination)?;
     saved_backup::copy_file_and_hash(source, &mut output)
 }
 
@@ -807,9 +804,7 @@ pub async fn create_board_backup(
                     super::prune_stale_temp_board_downloads();
                     super::temp_board_download_dir()
                 };
-                std::fs::create_dir_all(&backup_dir).map_err(|error| {
-                    AppError::Internal(anyhow::anyhow!("Create board backup dir: {error}"))
-                })?;
+                ensure_backup_dir(&backup_dir)?;
                 let ts = super::local_backup_timestamp_label();
                 let filename = super::unique_backup_filename(
                     &backup_dir,
@@ -856,6 +851,7 @@ pub async fn create_board_backup(
                     let _ = std::fs::remove_file(&tmp_path);
                     AppError::Internal(anyhow::anyhow!("Rename board backup: {error}"))
                 })?;
+                restrict_backup_file(&final_path)?;
 
                 let size = std::fs::metadata(&final_path)
                     .map(|metadata| metadata.len())
@@ -1282,10 +1278,13 @@ pub(super) fn write_board_backup_archive<F>(
 where
     F: FnMut(&mut zip::ZipWriter<std::io::BufWriter<std::fs::File>>) -> Result<()>,
 {
-    let out_file = std::io::BufWriter::new(
-        std::fs::File::create(output_path)
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Create zip tmp: {error}")))?,
-    );
+    if let Some(parent) = output_path.parent() {
+        ensure_backup_dir(parent)?;
+    }
+    let file = std::fs::File::create(output_path)
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Create zip tmp: {error}")))?;
+    restrict_backup_file(output_path)?;
+    let out_file = std::io::BufWriter::new(file);
     let mut zip = zip::ZipWriter::new(out_file);
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
@@ -1447,9 +1446,7 @@ fn materialize_split_zip_parts(
     target_part_size: u64,
 ) -> Result<()> {
     let parts_dir = root_dir.join(saved_backup::PARTS_DIR_NAME);
-    std::fs::create_dir_all(&parts_dir).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("Create {}: {error}", parts_dir.display()))
-    })?;
+    ensure_backup_dir(&parts_dir)?;
     let planned_parts = plan_split_zip_parts(&manifest.files, target_part_size);
     let total_parts = u32::try_from(planned_parts.len()).unwrap_or(u32::MAX);
     let mut part_infos = Vec::with_capacity(planned_parts.len());
@@ -1460,15 +1457,14 @@ fn materialize_split_zip_parts(
         let part_path = root_dir.join(&part_filename);
         let tmp_path = root_dir.join(format!("{part_filename}.tmp"));
         if let Some(parent) = tmp_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                AppError::Internal(anyhow::anyhow!("Create {}: {error}", parent.display()))
-            })?;
+            ensure_backup_dir(parent)?;
         }
 
         let write_result = (|| -> Result<()> {
             let output = std::fs::File::create(&tmp_path).map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Create {}: {error}", tmp_path.display()))
             })?;
+            restrict_backup_file(&tmp_path)?;
             let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(output));
             for file_index in &planned.files {
                 let entry = manifest.files.get(*file_index).ok_or_else(|| {
@@ -1498,9 +1494,15 @@ fn materialize_split_zip_parts(
             let writer = zip.finish().map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Finalize {}: {error}", tmp_path.display()))
             })?;
-            writer.into_inner().map_err(|error| {
-                AppError::Internal(anyhow::anyhow!("Flush {}: {error}", tmp_path.display()))
-            })?;
+            writer
+                .into_inner()
+                .map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!("Flush {}: {error}", tmp_path.display()))
+                })?
+                .sync_all()
+                .map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!("Sync {}: {error}", tmp_path.display()))
+                })?;
             Ok(())
         })();
         if let Err(error) = write_result {
@@ -1514,6 +1516,7 @@ fn materialize_split_zip_parts(
                 part_path.display()
             ))
         })?;
+        restrict_backup_file(&part_path)?;
 
         let part_size = std::fs::metadata(&part_path)
             .map(|metadata| metadata.len())
@@ -1674,9 +1677,7 @@ fn write_board_exports_to_v4_dir(
     let board_root = destination_root
         .join("boards")
         .join(&manifest.board.short_name);
-    std::fs::create_dir_all(&board_root).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("Create {}: {error}", board_root.display()))
-    })?;
+    ensure_backup_dir(&board_root)?;
 
     let board_json_path = board_root.join("board.json");
     let (board_json_size, board_json_sha) = write_pretty_json_file(&board_json_path, manifest)?;
@@ -1778,7 +1779,10 @@ fn finalize_v4_backup_root(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_full_backup_manifest, count_required_private_files, FullBackupCreateForm};
+    use super::{
+        build_full_backup_manifest, copy_regular_file_to_backup, count_required_private_files,
+        FullBackupCreateForm,
+    };
     use crate::handlers::admin::backup::common::{
         resolve_tor_hidden_service_keys_availability, verify_full_backup_zip,
         TorHiddenServiceKeysAvailability, FULL_BACKUP_MANIFEST_NAME,
@@ -1851,6 +1855,36 @@ mod tests {
             .await
             .expect("body");
         assert_eq!(&body[..], b"false");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_secret_file_copy_uses_private_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let source = temp_dir.path().join("settings.toml");
+        let destination = temp_dir.path().join("backup/config/settings.toml");
+        std::fs::write(&source, "cookie_secret = \"secret\"").expect("source");
+
+        copy_regular_file_to_backup(&source, &destination).expect("copy backup file");
+
+        assert_eq!(
+            std::fs::metadata(&destination)
+                .expect("destination metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(destination.parent().expect("destination parent"))
+                .expect("parent metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
     }
 
     fn write_test_full_backup_zip(zip_path: &std::path::Path, include_tor_keys: bool) {

@@ -123,6 +123,9 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // Validate critical configuration values immediately — fail fast with a
     // clear error rather than discovering misconfiguration at runtime (#8).
     CONFIG.validate()?;
+    if chan_net {
+        CONFIG.validate_chan_net_listener()?;
+    }
 
     let data_dir = super::parent_dir_or_current(std::path::Path::new(&CONFIG.database_path));
 

@@ -171,6 +171,12 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
 
             conn.execute_batch(&format!("VACUUM INTO '{temp_db_str}'"))
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("VACUUM INTO failed: {e}")))?;
+            crate::config::restrict_private_file_permissions(&temp_db).map_err(|error| {
+                AppError::Internal(anyhow::anyhow!(
+                    "Set private permissions on {}: {error}",
+                    temp_db.display()
+                ))
+            })?;
 
             // Count files for progress bar before compressing.
             progress.reset(crate::middleware::backup_phase::COUNT_FILES);
@@ -588,7 +594,7 @@ pub async fn board_backup(
         let download_token = new_session_id();
         write_temp_board_download_token(&temp_name, &download_token)?;
         let download_dir = temp_board_download_dir();
-        std::fs::create_dir_all(&download_dir).map_err(|error| {
+        crate::config::ensure_private_dir(&download_dir).map_err(|error| {
             AppError::Internal(anyhow::anyhow!(
                 "Create temp board download dir {}: {error}",
                 download_dir.display()
@@ -598,6 +604,12 @@ pub async fn board_backup(
         std::fs::rename(&temp_zip, &final_path).map_err(|error| {
             AppError::Internal(anyhow::anyhow!(
                 "Move temp board backup {}: {error}",
+                final_path.display()
+            ))
+        })?;
+        crate::config::restrict_private_file_permissions(&final_path).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Set private permissions on {}: {error}",
                 final_path.display()
             ))
         })?;
@@ -1215,6 +1227,19 @@ mod tests {
 
         let download_path = temp_board_download_dir().join(download_filename);
         assert!(download_path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            assert_eq!(
+                std::fs::metadata(&download_path)
+                    .expect("temp zip metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
         assert!(
             temp_board_download_token_path(download_filename).exists(),
             "download token should be written before the download"
@@ -1462,6 +1487,27 @@ mod tests {
         let _ = std::fs::remove_file(&token_path);
 
         write_temp_board_download_token(filename, token).expect("write token");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            assert_eq!(
+                std::fs::metadata(&token_path)
+                    .expect("token metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(temp_board_download_dir())
+                    .expect("download dir metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
         assert!(consume_temp_board_download_token(filename, token).expect("consume token"));
         assert!(!consume_temp_board_download_token(filename, token).expect("token removed"));
     }
