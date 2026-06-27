@@ -44,6 +44,9 @@ pub fn thread_page_etag_signature(data: &ThreadPageData) -> String {
     for post in &data.posts {
         update_post_signature(&mut hasher, post);
     }
+    if let Some(poll) = &data.poll {
+        update_poll_signature(&mut hasher, poll);
+    }
     hex::encode(hasher.finalize())
 }
 
@@ -73,6 +76,27 @@ fn update_post_signature(hasher: &mut Sha256, post: &crate::models::Post) {
     update_sig_field(hasher, post.audio_mime_type.as_deref().unwrap_or(""));
     update_sig_field(hasher, post.media_processing_state.as_deref().unwrap_or(""));
     update_sig_field(hasher, post.media_processing_error.as_deref().unwrap_or(""));
+}
+
+fn update_poll_signature(hasher: &mut Sha256, poll_data: &PollData) {
+    update_sig_field(hasher, &poll_data.poll.id.to_string());
+    update_sig_field(hasher, &poll_data.poll.thread_id.to_string());
+    update_sig_field(hasher, &poll_data.poll.question);
+    update_sig_field(hasher, &poll_data.poll.expires_at.to_string());
+    update_sig_field(hasher, &poll_data.poll.created_at.to_string());
+    update_sig_field(hasher, &poll_data.total_votes.to_string());
+    update_sig_field(
+        hasher,
+        &poll_data.user_voted_option.unwrap_or_default().to_string(),
+    );
+    update_sig_field(hasher, if poll_data.is_expired { "1" } else { "0" });
+    for option in &poll_data.options {
+        update_sig_field(hasher, &option.id.to_string());
+        update_sig_field(hasher, &option.poll_id.to_string());
+        update_sig_field(hasher, &option.text);
+        update_sig_field(hasher, &option.position.to_string());
+        update_sig_field(hasher, &option.vote_count.to_string());
+    }
 }
 
 pub fn load_board_page_data(
@@ -216,7 +240,9 @@ mod tests {
     use super::{
         board_page_etag_signature, thread_page_etag_signature, BoardPageData, ThreadPageData,
     };
-    use crate::models::{Board, Pagination, Post, Thread, ThreadSummary};
+    use crate::models::{
+        Board, Pagination, Poll, PollData, PollOption, Post, Thread, ThreadSummary,
+    };
 
     fn sample_board() -> Board {
         Board {
@@ -284,6 +310,37 @@ mod tests {
         }
     }
 
+    fn sample_poll_data(user_voted_option: Option<i64>, vote_counts: [i64; 2]) -> PollData {
+        PollData {
+            poll: Poll {
+                id: 7,
+                thread_id: 42,
+                question: "poll?".into(),
+                expires_at: 2000,
+                created_at: 100,
+            },
+            options: vec![
+                PollOption {
+                    id: 11,
+                    poll_id: 7,
+                    text: "yes".into(),
+                    position: 0,
+                    vote_count: vote_counts[0],
+                },
+                PollOption {
+                    id: 12,
+                    poll_id: 7,
+                    text: "no".into(),
+                    position: 1,
+                    vote_count: vote_counts[1],
+                },
+            ],
+            total_votes: vote_counts[0] + vote_counts[1],
+            user_voted_option,
+            is_expired: false,
+        }
+    }
+
     #[test]
     fn thread_page_etag_changes_when_reply_is_removed() {
         let board = sample_board();
@@ -337,6 +394,58 @@ mod tests {
             thread: sample_thread(1),
             posts: vec![sample_post(1), pending_post],
             poll: None,
+            is_admin: false,
+            owned_post_controls: std::collections::BTreeMap::new(),
+        };
+
+        assert_ne!(
+            thread_page_etag_signature(&before),
+            thread_page_etag_signature(&after)
+        );
+    }
+
+    #[test]
+    fn thread_page_etag_changes_when_poll_vote_count_changes() {
+        let board = sample_board();
+        let before = ThreadPageData {
+            board: board.clone(),
+            thread: sample_thread(0),
+            posts: vec![sample_post(1)],
+            poll: Some(sample_poll_data(None, [0, 0])),
+            is_admin: false,
+            owned_post_controls: std::collections::BTreeMap::new(),
+        };
+        let after = ThreadPageData {
+            board,
+            thread: sample_thread(0),
+            posts: vec![sample_post(1)],
+            poll: Some(sample_poll_data(Some(11), [1, 0])),
+            is_admin: false,
+            owned_post_controls: std::collections::BTreeMap::new(),
+        };
+
+        assert_ne!(
+            thread_page_etag_signature(&before),
+            thread_page_etag_signature(&after)
+        );
+    }
+
+    #[test]
+    fn thread_page_etag_changes_when_poll_viewer_vote_state_changes() {
+        let board = sample_board();
+        let before = ThreadPageData {
+            board: board.clone(),
+            thread: sample_thread(0),
+            posts: vec![sample_post(1)],
+            poll: Some(sample_poll_data(None, [1, 0])),
+            is_admin: false,
+            owned_post_controls: std::collections::BTreeMap::new(),
+        };
+        let after = ThreadPageData {
+            board,
+            thread: sample_thread(0),
+            posts: vec![sample_post(1)],
+            poll: Some(sample_poll_data(Some(11), [1, 0])),
             is_admin: false,
             owned_post_controls: std::collections::BTreeMap::new(),
         };
