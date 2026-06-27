@@ -4,15 +4,65 @@ All notable changes to RustChan will be documented in this file.
 
 ## RustChan 1.3.0
 
+### Added
+
+- Added a guided first-run setup wizard at `/setup` with public/private/local presets, CSRF protection, review-before-write confirmation, initial admin and board creation, Tor/proxy/Secure-cookie options, CAPTCHA and activity-badge toggles, media limits, and backup defaults.
+- Added admin maintenance controls to reopen or close the setup wizard later without replacing existing admin credentials.
+- Added per-board PDF upload limits, setup/admin controls for enabling PDF uploads, and upload-form hints that show PDF caps separately from image, video, audio, and generic file limits.
+- Added a clean `1.3.0` database baseline. Fresh databases now install the baseline directly, matching in-development databases are stamped as `1.3.0`, and partial or unknown schemas fail closed with diagnostics.
+- Added schema health checks to database/admin status paths, including structural verification, SQLite quick checks, foreign-key checks, and `rustchan-cli admin db-status`.
+- Added admin dashboard summaries for setup state, schema/database health, backups, storage, Tor, dependencies, background jobs, reports, and live/total thread counts.
+- Added a footer copy control for the active Tor onion address.
+
+### Improved
+
+- Hardened upload auto-compression so processed images and videos are re-statted and revalidated before a post is finalized, with better cleanup for failed compression, poll validation failures, stale staged files, thumbnails, and partial database rows.
+- Improved browser-side auto-compression reliability for extension-only or blank-MIME uploads, Chromium/WebKit video capture timeouts, submit-time guards, retry behavior, and inline compression status messages.
+- Improved media validation for PDFs, ADTS AAC, WebM audio, MKV/Matroska video, small FLAC/audio files, invalid thumbnail payloads, empty upload controls, zero-byte named uploads, and cross-board media deduplication.
+- Returned semantic post-upload error statuses for JS, no-JS, and XHR submissions, including `413`, `415`, and `422` where appropriate.
+- Improved admin and public UI accessibility with stronger labels, IDs, ARIA attributes, inert/hidden modal states, focus behavior, report and confirmation dialogs, catalog menus, NSFW dialog behavior, theme picker behavior, media controls, and mobile form hints.
+- Improved Tor/onion operation with Arti `0.43.0`, safer onion admin origin handling, clearer bootstrap/service logs, more accurate hidden-service key path reporting, and stabilized Tor restore tests.
+- Improved observability defaults and documentation so `/healthz` stays public and minimal, `/readyz` hides operational details unless `public_readiness_details = true`, and `/metrics` returns `404` unless `public_metrics_enabled = true`.
+- Improved upload, thread, admin, and setup tests around size limits, schema state, CSRF handling, setup reopen/close behavior, pending media refresh, and upload error classification.
+
+### Fixed
+
+- Fixed non-image media regressions that affected small supported audio files, valid `.mkv` uploads, `audio/webm` persistence, and audio/video MIME preservation.
+- Fixed malformed ADTS AAC acceptance so invalid AAC is rejected before storage or background media jobs are created.
+- Fixed PDF limit edge cases so files exactly at the configured cap are accepted while cap-plus-one uploads are rejected.
+- Fixed no-JS and pending-media regressions: Firefox no-JS theme changes persist through safe local redirects, and thread update controls expose a stable `data-action="fetch-updates"` hook for pending-media refreshes.
+- Fixed YouTube embed thumbnail sizing.
+- Fixed legacy `1.3.0` schema drift handling on startup for in-development databases.
+- Fixed unintended manual textarea resize handles on RustChan forms.
+- Updated admin login button copy.
+
+### Security
+
+- Required CSRF validation for theme changes and board backup actions.
+- Made detailed readiness data and unauthenticated Prometheus metrics opt-in to avoid exposing operational internals on internet or onion deployments by default.
+- Kept setup password handling from echoing raw admin passwords during review by using a short-lived pending hash token.
+- Pinned `rustls-webpki` to a patched release for RUSTSEC-2026-0049 and refreshed the dependency lockfile.
+
+### Documentation
+
+- Updated `README.md` and `SETUP.md` for RustChan `1.3.0`, the new schema baseline, `db-status`, PDF upload limits, setup behavior, and observability endpoint defaults.
+- Added a static ChanNet security audit record for future follow-up.
+- Refreshed release documentation and current-version references.
+
+### Internal
+
+- Updated Rust dependencies, including Arti/Tor crates, `sha3`, `zip`, `toml`, `tokio`, `axum`, `rustls`, and related lockfile entries.
+- Renamed the saved-backup implementation module for clearer ownership.
+- Cleaned focused Clippy warnings and kept strict lint coverage passing during the release cycle.
+
+## RustChan 1.2.2
+
 - Replaced browser proof-of-work posting CAPTCHA with server-generated image CAPTCHA challenges.
 - Improved secure-cookie handling across HTTP, HTTPS, trusted-proxy HTTPS, admin sessions, board access cookies, CSRF cookies, and owned-post cookies.
 - Added no-JS fallbacks and accessibility polish for posting, reporting, catalog actions, board preferences, moderation controls, and own-post edit/delete flows.
 - Hardened upload handling for empty file controls, zero-byte named uploads, empty thumbnail payloads, invalid media, and cross-board media deduplication.
-- Tightened post upload validation so rejected media now returns semantic HTTP statuses for JS and no-JS submissions, exact-limit PDFs are accepted while cap + 1 PDFs are rejected, and malformed ADTS AAC is rejected before storage or background job creation.
-- Fixed late-cycle no-JS and pending-media regressions: Firefox no-JS theme changes persist through safe local redirects, and thread update controls expose a stable `data-action="fetch-updates"` hook for pending-media refreshes.
 - Improved activity badge cache behavior, especially on mobile WebKit and browser back/forward navigation.
 - Hardened settings validation so invalid config values fail closed instead of silently falling back.
-- Squashed the pre-release internal database migration ladder into a clean `1.3.0` baseline schema. Fresh databases now install that baseline directly, structurally matching in-development databases are stamped as schema version `1.3.0`, and partial or unknown schemas fail closed with diagnostics instead of blind migration attempts.
 - Polished responsive layout, long-content wrapping, modal focus behavior, ESC handling, touch targets, and light-theme error contrast.
 - Updated backup UI metadata handling and dynamic split-part options.
 - Refreshed README screenshots and release documentation.
