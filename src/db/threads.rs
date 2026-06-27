@@ -285,19 +285,43 @@ pub fn create_reply_with_thread_update(
         .context("Failed to begin create_reply_with_thread_update transaction")?;
 
     let result: Result<i64> = (|| {
+        let flags = conn
+            .query_row(
+                "SELECT locked, archived
+                 FROM threads
+                 WHERE id = ?1 AND board_id = ?2",
+                params![post.thread_id, post.board_id],
+                |row| Ok((row.get::<_, i32>(0)? != 0, row.get::<_, i32>(1)? != 0)),
+            )
+            .optional()?;
+        let Some((locked, archived)) = flags else {
+            anyhow::bail!(
+                "Thread id {} not found while creating reply",
+                post.thread_id
+            );
+        };
+        if locked {
+            anyhow::bail!("This thread is locked.");
+        }
+        if archived {
+            anyhow::bail!("This thread is archived.");
+        }
+
         let post_id = super::posts::create_post_inner(conn, post)?;
         let updated = if should_bump {
             conn.execute(
                 "UPDATE threads
                  SET bumped_at = unixepoch(),
                      reply_count = reply_count + 1
-                 WHERE id = ?1",
-                params![post.thread_id],
+                 WHERE id = ?1 AND board_id = ?2 AND locked = 0 AND archived = 0",
+                params![post.thread_id, post.board_id],
             )?
         } else {
             conn.execute(
-                "UPDATE threads SET reply_count = reply_count + 1 WHERE id = ?1",
-                params![post.thread_id],
+                "UPDATE threads
+                 SET reply_count = reply_count + 1
+                 WHERE id = ?1 AND board_id = ?2 AND locked = 0 AND archived = 0",
+                params![post.thread_id, post.board_id],
             )?
         };
         if updated == 0 {
@@ -819,6 +843,62 @@ mod tests {
         thread_id
     }
 
+    fn plain_reply(board_id: i64, thread_id: i64) -> NewPost {
+        NewPost {
+            thread_id,
+            board_id,
+            name: "anon".to_owned(),
+            tripcode: None,
+            subject: None,
+            body: "reply".to_owned(),
+            body_html: "reply".to_owned(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_owned(),
+            is_op: false,
+        }
+    }
+
+    fn pending_upload_op(id: &str) -> crate::pending_fs::PendingFsOpInsert {
+        crate::pending_fs::PendingFsOpInsert {
+            id: id.to_owned(),
+            kind: crate::pending_fs::UPLOAD_FINALIZE_KIND,
+            payload_json: "{}".to_owned(),
+        }
+    }
+
+    fn thread_reply_count(conn: &Connection, thread_id: i64) -> i64 {
+        conn.query_row(
+            "SELECT reply_count FROM threads WHERE id = ?1",
+            params![thread_id],
+            |row| row.get(0),
+        )
+        .expect("thread reply count")
+    }
+
+    fn post_count(conn: &Connection, thread_id: i64) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
+            params![thread_id],
+            |row| row.get(0),
+        )
+        .expect("post count")
+    }
+
+    fn pending_fs_op_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM pending_fs_ops", [], |row| row.get(0))
+            .expect("pending fs op count")
+    }
+
     #[test]
     fn prune_old_threads_commits_even_when_no_files_are_safe() {
         let conn = test_conn();
@@ -927,6 +1007,50 @@ mod tests {
 
         assert!(!board_dir.join("reply.webp").exists());
         assert!(!thumb_dir.join("reply.webp").exists());
+    }
+
+    #[test]
+    fn create_reply_rejects_locked_thread_without_mutations() {
+        let conn = test_conn();
+        let board_id = create_board(&conn, "lock", "Lock", "", false).expect("create board");
+        let thread_id = create_plain_thread(&conn, board_id, "locked thread");
+        conn.execute(
+            "UPDATE threads SET locked = 1 WHERE id = ?1",
+            params![thread_id],
+        )
+        .expect("lock thread");
+        let reply = plain_reply(board_id, thread_id);
+        let pending_op = pending_upload_op("locked-reply-upload");
+
+        let error = create_reply_with_thread_update(&conn, &reply, "", true, Some(&pending_op))
+            .expect_err("locked thread should reject reply");
+
+        assert!(error.to_string().contains("This thread is locked."));
+        assert_eq!(post_count(&conn, thread_id), 1);
+        assert_eq!(thread_reply_count(&conn, thread_id), 0);
+        assert_eq!(pending_fs_op_count(&conn), 0);
+    }
+
+    #[test]
+    fn create_reply_rejects_archived_thread_without_mutations() {
+        let conn = test_conn();
+        let board_id = create_board(&conn, "arch", "Archive", "", false).expect("create board");
+        let thread_id = create_plain_thread(&conn, board_id, "archived thread");
+        conn.execute(
+            "UPDATE threads SET archived = 1 WHERE id = ?1",
+            params![thread_id],
+        )
+        .expect("archive thread");
+        let reply = plain_reply(board_id, thread_id);
+        let pending_op = pending_upload_op("archived-reply-upload");
+
+        let error = create_reply_with_thread_update(&conn, &reply, "", true, Some(&pending_op))
+            .expect_err("archived thread should reject reply");
+
+        assert!(error.to_string().contains("This thread is archived."));
+        assert_eq!(post_count(&conn, thread_id), 1);
+        assert_eq!(thread_reply_count(&conn, thread_id), 0);
+        assert_eq!(pending_fs_op_count(&conn), 0);
     }
 
     #[test]

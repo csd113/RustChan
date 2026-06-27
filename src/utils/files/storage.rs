@@ -371,8 +371,7 @@ fn save_generic_upload(
     plan: &UploadPlan,
     file_id: &str,
 ) -> Result<UploadedFile> {
-    let ext = arbitrary_file_ext(options.original_filename);
-    let filename = format!("{file_id}.{ext}");
+    let filename = format!("{file_id}.bin");
     let file_path_abs = plan.dest_dir.join(&filename);
     crate::utils::fs_security::canonical_parent_for_new_child(
         Path::new(options.boards_dir),
@@ -548,20 +547,6 @@ const fn media_label(media_type: crate::models::MediaType) -> &'static str {
         crate::models::MediaType::Pdf => "PDF",
         crate::models::MediaType::Other => "file",
     }
-}
-
-fn arbitrary_file_ext(original_filename: &str) -> String {
-    std::path::Path::new(original_filename)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| {
-            ext.chars()
-                .filter(char::is_ascii_alphanumeric)
-                .take(16)
-                .collect::<String>()
-        })
-        .filter(|ext| !ext.is_empty())
-        .map_or_else(|| "bin".to_owned(), |ext| ext.to_ascii_lowercase())
 }
 
 fn validate_decodable_image(input_path: &Path, mime_type: &str) -> Result<()> {
@@ -1597,11 +1582,37 @@ trailer << /Root 1 0 R >>
         assert_eq!(uploaded.media_type, crate::models::MediaType::Other);
         assert!(std::path::Path::new(&uploaded.file_path)
             .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("txt")));
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("bin")));
 
         let stored =
             std::fs::read(tempdir.path().join(&uploaded.file_path)).expect("read stored upload");
         assert_eq!(stored, contents);
+    }
+
+    #[test]
+    fn arbitrary_upload_uses_bin_extension_even_with_inline_media_names() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        for original_name in ["renamed.pdf", "renamed.png"] {
+            let input = tempfile::Builder::new()
+                .tempfile_in(tempdir.path())
+                .expect("temp file");
+            let contents = b"arbitrary non-media bytes";
+            std::fs::write(input.path(), contents).expect("write arbitrary upload");
+
+            let uploaded = save_upload_from_path(
+                input.path(),
+                contents,
+                contents.len(),
+                &arbitrary_upload_options(tempdir.path(), original_name),
+            )
+            .expect("save arbitrary upload");
+
+            assert_eq!(uploaded.mime_type, "application/octet-stream");
+            assert_eq!(uploaded.media_type, crate::models::MediaType::Other);
+            assert!(std::path::Path::new(&uploaded.file_path)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("bin")));
+        }
     }
 
     #[test]

@@ -1246,12 +1246,17 @@ mod tests {
         );
 
         let download_response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("GET")
                     .uri(format!(
                         "/admin/backup/download/temp-board/{download_filename}?cleanup=1&token={token}"
                     ))
+                    .header(
+                        header::COOKIE,
+                        "csrf_token=csrf123; chan_admin_session=session123",
+                    )
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -1278,6 +1283,75 @@ mod tests {
         assert!(
             !temp_board_download_token_path(download_filename).exists(),
             "temp-board download token should be consumed"
+        );
+
+        let replay_response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/admin/backup/download/temp-board/{download_filename}?cleanup=1&token={token}"
+                    ))
+                    .header(
+                        header::COOKIE,
+                        "csrf_token=csrf123; chan_admin_session=session123",
+                    )
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("replay response");
+
+        assert_eq!(replay_response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn temp_board_download_rejects_token_without_admin_session() {
+        let state = crate::test_support::app_state();
+        let filename = unique_zip_name("temp-token-only");
+        let token = "token-only-test";
+        let download_path = temp_board_download_dir().join(&filename);
+        let token_path = temp_board_download_token_path(&filename);
+        let _download_cleanup = PathCleanup(download_path.clone());
+        let _token_cleanup = PathCleanup(token_path.clone());
+        crate::config::write_private_file(&download_path, b"temporary board backup")
+            .expect("write temp download");
+        write_temp_board_download_token(&filename, token).expect("write token");
+        let kind_segment: String = ['{', 'k', 'i', 'n', 'd', '}'].into_iter().collect();
+        let filename_segment: String = ['{', 'f', 'i', 'l', 'e', 'n', 'a', 'm', 'e', '}']
+            .into_iter()
+            .collect();
+        let app = Router::new()
+            .route(
+                &[
+                    "/admin/backup/download/",
+                    &kind_segment,
+                    "/",
+                    &filename_segment,
+                ]
+                .concat(),
+                get(super::download_backup),
+            )
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/admin/backup/download/temp-board/{filename}?cleanup=1&token={token}"
+                    ))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("download response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(download_path.exists());
+        assert!(
+            token_path.exists(),
+            "unauthenticated token attempts must not consume the one-time token"
         );
     }
 
