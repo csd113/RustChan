@@ -1,4 +1,4 @@
-// Shared HTML rendering helpers and page fragments.
+//! Shared HTML rendering helpers and page fragments.
 
 use crate::config::CONFIG;
 use crate::models::{Board, Pagination, Theme, SEARCH_QUERY_MAX_CHARS};
@@ -11,33 +11,46 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::UNIX_EPOCH;
 
+/// Administrative page templates.
 pub mod admin;
+/// Board index, catalog, search, and archive templates.
 pub mod board;
+/// New-thread and reply form fragments.
 pub mod forms;
+/// Thread, post, poll, and self-service action templates.
 pub mod thread;
 
 pub use admin::*;
 pub use board::*;
 pub use thread::*;
 
+/// Selects the default page used by links to a board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreferredBoardView {
+    /// Link directly to the board catalog.
     Catalog,
+    /// Link directly to the paginated board index.
     Index,
 }
 
 impl PreferredBoardView {
+    /// Returns whether board links should open the catalog.
     #[must_use]
     pub const fn is_catalog(self) -> bool {
         matches!(self, Self::Catalog)
     }
 }
 
+/// Rendering preferences stored for an individual visitor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UserPreferences {
+    /// Whether navigation omits boards marked not safe for work.
     pub hide_nsfw_boards: bool,
+    /// Whether video and audio start muted.
     pub video_audio_muted: bool,
+    /// The page opened by links to a board.
     pub preferred_board_view: PreferredBoardView,
+    /// Whether new-thread and new-reply badges are rendered.
     pub show_activity_badges: bool,
 }
 
@@ -53,6 +66,7 @@ impl Default for UserPreferences {
 }
 
 impl UserPreferences {
+    /// Encodes the preferences into a stable fragment for page `ETag` values.
     #[must_use]
     pub fn etag_fragment(self) -> String {
         format!(
@@ -76,8 +90,10 @@ impl UserPreferences {
 //  2. Arc<str> reduces the per-read allocation to a single atomic increment
 //     instead of a full String::clone(), which matters under high concurrency.
 
+/// Latest site name used by renderers that do not query the database.
 static LIVE_SITE_NAME: LazyLock<RwLock<Arc<str>>> =
     LazyLock::new(|| RwLock::new(Arc::from(CONFIG.forum_name.as_str())));
+/// Latest site subtitle used by renderers that do not query the database.
 static LIVE_SITE_SUBTITLE: LazyLock<RwLock<Arc<str>>> =
     LazyLock::new(|| RwLock::new(Arc::from("select board to proceed")));
 
@@ -86,6 +102,11 @@ static LIVE_SITE_SUBTITLE: LazyLock<RwLock<Arc<str>>> =
 /// change without requiring a server restart or extra DB round-trip per request.
 static LIVE_DEFAULT_THEME: LazyLock<RwLock<Arc<str>>> =
     LazyLock::new(|| RwLock::new(Arc::from("")));
+/// Snapshot of themes currently available to page renderers.
+#[expect(
+    clippy::rc_buffer,
+    reason = "the public live_themes API retains Arc<Vec<Theme>> for compatibility"
+)]
 static LIVE_THEMES: LazyLock<RwLock<Arc<Vec<Theme>>>> =
     LazyLock::new(|| RwLock::new(Arc::new(Vec::new())));
 
@@ -95,20 +116,26 @@ static LIVE_THEMES: LazyLock<RwLock<Arc<Vec<Theme>>>> =
 ///
 /// Stores a snapshot; stale for at most one request after a board change, but
 /// that one request is itself the mutating POST which redirects anyway.
-static LIVE_BOARDS: LazyLock<RwLock<Arc<Vec<crate::models::Board>>>> =
+#[expect(
+    clippy::rc_buffer,
+    reason = "the public live_boards APIs retain Arc<Vec<Board>> for compatibility"
+)]
+static LIVE_BOARDS: LazyLock<RwLock<Arc<Vec<Board>>>> =
     LazyLock::new(|| RwLock::new(Arc::new(Vec::new())));
 
 /// Monotonically-increasing counter incremented every time the board list
 /// changes.  Included in thread-page `ETags` so that adding or deleting a board
 /// correctly invalidates cached thread pages (fixing stale nav bars).
 static LIVE_BOARDS_VERSION: AtomicU64 = AtomicU64::new(0);
+/// Cached default board navigation paired with its board-list version.
 static LIVE_BOARD_NAV: LazyLock<RwLock<(u64, Arc<str>)>> =
     LazyLock::new(|| RwLock::new((0, Arc::from(""))));
+/// Cache-busting version derived from the running executable.
 static STATIC_ASSET_VERSION: LazyLock<String> = LazyLock::new(compute_static_asset_version);
 
 /// Replace the in-memory board list.  Call after any board create / delete /
 /// restore operation so that `error_page()` renders the correct top-bar links.
-pub fn set_live_boards(boards: Vec<crate::models::Board>) {
+pub fn set_live_boards(boards: Vec<Board>) {
     *LIVE_BOARDS.write() = Arc::new(boards);
     // Bump the version so thread-page ETags incorporate board-list changes.
     // This ensures adding/deleting a board invalidates cached thread pages,
@@ -118,7 +145,8 @@ pub fn set_live_boards(boards: Vec<crate::models::Board>) {
     rebuild_live_board_nav();
 }
 
-pub fn live_boards() -> Arc<Vec<crate::models::Board>> {
+/// Returns a shared snapshot of the live board list.
+pub fn live_boards() -> Arc<Vec<Board>> {
     Arc::clone(&*LIVE_BOARDS.read())
 }
 
@@ -127,7 +155,7 @@ pub fn live_boards() -> Arc<Vec<crate::models::Board>> {
 /// Used by the thread-updates handler to include current nav HTML in polling
 /// responses so the JS can refresh the nav bar when boards change while a
 /// thread is open.
-pub fn live_boards_snapshot() -> Arc<Vec<crate::models::Board>> {
+pub fn live_boards_snapshot() -> Arc<Vec<Board>> {
     Arc::clone(&*LIVE_BOARDS.read())
 }
 
@@ -137,6 +165,7 @@ pub fn live_boards_version() -> u64 {
     LIVE_BOARDS_VERSION.load(Ordering::Relaxed)
 }
 
+/// Computes the cache-busting version for static asset URLs.
 fn compute_static_asset_version() -> String {
     std::env::current_exe()
         .ok()
@@ -150,11 +179,13 @@ fn compute_static_asset_version() -> String {
 }
 
 #[must_use]
+/// Appends the current cache-busting version to a static asset path.
 pub fn static_asset_url(path: &str) -> String {
     format!("{path}?v={}", *STATIC_ASSET_VERSION)
 }
 
 #[must_use]
+/// Returns whether a supplied static asset version is current.
 pub fn static_asset_version_matches(version: &str) -> bool {
     version == STATIC_ASSET_VERSION.as_str()
 }
@@ -169,6 +200,7 @@ pub fn set_live_site_name(name: &str) {
     *LIVE_SITE_NAME.write() = val;
 }
 
+/// Updates the live subtitle, restoring its fallback when the value is blank.
 pub fn set_live_site_subtitle(subtitle: &str) {
     let val: Arc<str> = if subtitle.trim().is_empty() {
         Arc::from("select board to proceed")
@@ -189,10 +221,12 @@ pub fn live_default_theme() -> Arc<str> {
     Arc::clone(&*LIVE_DEFAULT_THEME.read())
 }
 
+/// Replaces the in-memory theme snapshot.
 pub fn set_live_themes(themes: Vec<Theme>) {
     *LIVE_THEMES.write() = Arc::new(themes);
 }
 
+/// Returns a shared snapshot of the live themes.
 pub fn live_themes() -> Arc<Vec<Theme>> {
     Arc::clone(&*LIVE_THEMES.read())
 }
@@ -202,11 +236,13 @@ pub fn live_site_name() -> Arc<str> {
     Arc::clone(&*LIVE_SITE_NAME.read())
 }
 
+/// Reads the current live site subtitle.
 pub fn live_site_subtitle() -> Arc<str> {
     Arc::clone(&*LIVE_SITE_SUBTITLE.read())
 }
 
 #[must_use]
+/// Resolves a case-insensitive theme slug to its enabled canonical spelling.
 pub fn normalize_theme_slug(theme: &str) -> Option<String> {
     live_themes()
         .iter()
@@ -214,6 +250,7 @@ pub fn normalize_theme_slug(theme: &str) -> Option<String> {
         .map(|candidate| candidate.slug.clone())
 }
 
+/// Resolves a configured default theme, including the built-in terminal theme.
 fn normalize_configured_default_theme(theme: &str) -> Option<String> {
     let theme = theme.trim();
     if theme.eq_ignore_ascii_case("terminal") {
@@ -222,6 +259,7 @@ fn normalize_configured_default_theme(theme: &str) -> Option<String> {
     normalize_theme_slug(theme)
 }
 
+/// Chooses an enabled fallback theme when no configured theme is valid.
 fn fallback_theme_slug() -> String {
     let themes = live_themes();
     normalize_theme_slug(crate::theme::HARD_DEFAULT_THEME)
@@ -234,6 +272,7 @@ fn fallback_theme_slug() -> String {
         .unwrap_or_else(|| crate::theme::HARD_DEFAULT_THEME.to_owned())
 }
 
+/// Resolves the effective default theme for a page.
 fn resolve_page_default_theme(board_default_theme: Option<&str>) -> String {
     board_default_theme
         .and_then(normalize_configured_default_theme)
@@ -242,6 +281,7 @@ fn resolve_page_default_theme(board_default_theme: Option<&str>) -> String {
 }
 
 #[must_use]
+/// Produces the theme-dependent fragment used in page `ETag` values.
 pub fn page_theme_etag_fragment(
     current_theme: Option<&str>,
     board_default_theme: Option<&str>,
@@ -256,6 +296,7 @@ pub fn page_theme_etag_fragment(
         .collect()
 }
 
+/// Builds the versioned stylesheet URL for a theme.
 fn theme_css_href(theme: &str) -> String {
     format!(
         "/theme-css/{}?v={}",
@@ -264,6 +305,7 @@ fn theme_css_href(theme: &str) -> String {
     )
 }
 
+/// Partitions boards into safe-for-work and not-safe-for-work navigation groups.
 fn board_nav_groups(boards: &[Board]) -> (Vec<&Board>, Vec<&Board>) {
     let sfw = boards
         .iter()
@@ -273,6 +315,7 @@ fn board_nav_groups(boards: &[Board]) -> (Vec<&Board>, Vec<&Board>) {
     (sfw, nsfw)
 }
 
+/// Builds a board link honoring the visitor's preferred board view.
 fn board_href(short_name: &str, preferences: UserPreferences) -> String {
     if preferences.preferred_board_view.is_catalog() {
         format!("/{}/catalog", escape_html(short_name))
@@ -281,6 +324,7 @@ fn board_href(short_name: &str, preferences: UserPreferences) -> String {
     }
 }
 
+/// Renders one desktop board-navigation group when it is nonempty.
 fn board_nav_group_html(
     boards: &[&Board],
     preferences: UserPreferences,
@@ -310,6 +354,7 @@ fn board_nav_group_html(
     ))
 }
 
+/// Renders one mobile board-navigation group.
 fn mobile_board_group_html(
     title: &str,
     boards: &[&Board],
@@ -338,6 +383,7 @@ fn mobile_board_group_html(
     )
 }
 
+/// Rebuilds the cached navigation for default visitor preferences.
 fn rebuild_live_board_nav() {
     let boards = live_boards_snapshot();
     let nav_html = board_nav_html_for_preferences(boards.as_slice(), UserPreferences::default());
@@ -351,6 +397,7 @@ fn rebuild_live_board_nav() {
 }
 
 #[must_use]
+/// Renders board navigation using the supplied visitor preferences.
 pub fn board_nav_html_for_preferences(boards: &[Board], preferences: UserPreferences) -> String {
     let (sfw_boards, nsfw_boards_all) = board_nav_groups(boards);
     let nsfw_boards = if preferences.hide_nsfw_boards {
@@ -400,6 +447,7 @@ pub fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usize) -> 
 }
 
 #[must_use]
+/// Renders the reusable confirmation dialog.
 pub const fn confirmation_modal_script() -> &'static str {
     r#"
 <div id="confirm-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title" aria-hidden="true" hidden inert>
@@ -415,6 +463,7 @@ pub const fn confirmation_modal_script() -> &'static str {
 }
 
 #[must_use]
+/// Renders the moderation dialog for banning an IP while deleting a post.
 pub const fn admin_ban_delete_modal_script() -> &'static str {
     r#"
 <div id="ban-delete-modal" class="compress-modal ban-delete-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="ban-delete-modal-title" aria-describedby="ban-delete-modal-info" aria-hidden="true" hidden inert>
@@ -479,6 +528,7 @@ pub const fn report_modal_script() -> &'static str {
 }
 
 #[must_use]
+/// Renders the no-JavaScript report form used by report controls.
 fn report_fallback_form(
     board_short: &str,
     post_id: i64,
@@ -513,6 +563,7 @@ fn report_fallback_form(
 
 // All auto-update logic lives in /static/main.js.
 #[must_use]
+/// Renders the thread auto-update status controls.
 pub const fn thread_autoupdate_script() -> &'static str {
     ""
 }
@@ -520,6 +571,7 @@ pub const fn thread_autoupdate_script() -> &'static str {
 // ─── Timestamp helpers ────────────────────────────────────────────────────────
 
 #[must_use]
+/// Formats a Unix timestamp in the server's local time.
 pub fn fmt_ts(ts: i64) -> String {
     match Local.timestamp_opt(ts, 0) {
         chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -528,6 +580,7 @@ pub fn fmt_ts(ts: i64) -> String {
 }
 
 #[must_use]
+/// Formats a Unix timestamp compactly in the server's local time.
 pub fn fmt_ts_short(ts: i64) -> String {
     match Local.timestamp_opt(ts, 0) {
         chrono::LocalResult::Single(dt) => dt.format("%m/%d/%y(%a)%H:%M:%S").to_string(),
@@ -540,6 +593,7 @@ pub fn fmt_ts_short(ts: i64) -> String {
 /// Scan raw post body text for a video embed URL and return its thumbnail URL.
 /// Used by catalog and board-index summaries when the OP has no uploaded file.
 #[must_use]
+/// Extracts the first supported embedded-media thumbnail URL from post text.
 pub fn embed_thumb_from_body(body: &str) -> Option<String> {
     for token in body.split_whitespace() {
         let clean = token.trim_end_matches(['.', ',', ')', ';', '\'']);
@@ -555,6 +609,7 @@ pub fn embed_thumb_from_body(body: &str) -> Option<String> {
 // ─── Pagination helper ────────────────────────────────────────────────────────
 
 #[must_use]
+/// Renders previous and next links for a paginated collection.
 pub fn render_pagination(p: &Pagination, base_url: &str) -> String {
     if p.total_pages() <= 1 {
         return String::new();
@@ -593,6 +648,7 @@ pub fn render_pagination(p: &Pagination, base_url: &str) -> String {
 // Encode each UTF-8 *byte*, not each Unicode codepoint.
 // RFC 3986 percent-encoding operates on bytes.
 #[must_use]
+/// Percent-encodes a string for use in a URL query component.
 pub fn urlencoding_simple(s: &str) -> String {
     crate::utils::redirect::encode_form_query_component(s)
 }
@@ -600,8 +656,12 @@ pub fn urlencoding_simple(s: &str) -> String {
 // ─── Base layout ─────────────────────────────────────────────────────────────
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the base layout accepts independent page metadata and rendering context"
+)]
 #[must_use]
+/// Renders the shared document layout with default visitor preferences.
 pub fn base_layout(
     title: &str,
     board_short: Option<&str>,
@@ -628,7 +688,12 @@ pub fn base_layout(
 }
 
 #[must_use]
-#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the shared layout keeps its HTML structure and page context together"
+)]
+/// Renders the shared document layout with explicit visitor preferences.
 pub fn base_layout_with_preferences(
     title: &str,
     board_short: Option<&str>,
@@ -918,6 +983,7 @@ pub fn base_layout_with_preferences(
 // Previously the field was always empty and every appeal was rejected by the
 // server's CSRF check, making the appeal feature completely non-functional.
 #[must_use]
+/// Renders the standalone ban notice and appeal form.
 pub fn ban_page(reason: &str, csrf_token: &str) -> String {
     let enabled_theme_slugs = live_themes()
         .iter()
@@ -994,6 +1060,7 @@ appeals are reviewed by site staff. one appeal per 24 hours.</p>
 }
 
 #[must_use]
+/// Renders a standalone error page using the shared site layout.
 pub fn error_page(code: u16, message: &str) -> String {
     // Use base_layout so the error page has the same header, theme picker,
     // and board navigation as every other page.  live_boards() is always
@@ -1057,12 +1124,20 @@ mod tests {
 
         assert!(html.contains(r#"data-default-theme="forest""#));
 
-        let forest_idx = html.find(">Forest</a>").expect("forest option");
-        let blue_sky_idx = html.find(">Blue Sky</a>").expect("blue sky option");
-        let deep_orbit_idx = html.find(">Deep Orbit</a>").expect("deep orbit option");
-        let terminal_idx = html.find(">Terminal</a>").expect("terminal option");
-        let dorfic_idx = html.find(">DORFic</a>").expect("dorfic option");
+        let forest_idx = html.find(">Forest</a>");
+        let blue_sky_idx = html.find(">Blue Sky</a>");
+        let deep_orbit_idx = html.find(">Deep Orbit</a>");
+        let terminal_idx = html.find(">Terminal</a>");
+        let dorfic_idx = html.find(">DORFic</a>");
 
+        assert!(forest_idx.is_some(), "forest option should be present");
+        assert!(blue_sky_idx.is_some(), "blue sky option should be present");
+        assert!(
+            deep_orbit_idx.is_some(),
+            "deep orbit option should be present"
+        );
+        assert!(terminal_idx.is_some(), "terminal option should be present");
+        assert!(dorfic_idx.is_some(), "DORFic option should be present");
         assert!(forest_idx < blue_sky_idx);
         assert!(blue_sky_idx < deep_orbit_idx);
         assert!(deep_orbit_idx < terminal_idx);

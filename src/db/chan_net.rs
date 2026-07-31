@@ -140,18 +140,23 @@ pub fn record_import_tx_id(conn: &Connection, tx_id: &Uuid) -> Result<()> {
 
 // ── insert_reply_into_thread ──────────────────────────────────────────────────
 
+/// Domain separator for deterministic legacy reply replay tokens.
 const REPLY_REPLAY_DOMAIN: &[u8] = b"rustchan-channet-reply-v1\0";
+/// Prefix distinguishing caller-provided message identifiers.
 const REPLY_MESSAGE_ID_PREFIX: &str = "channet-reply-id-v1:";
 
 #[derive(Debug, thiserror::Error)]
 #[error("ChanNet reply request was already processed")]
+/// Error returned when a federated reply has already been persisted.
 pub struct ReplyReplayError;
 
+/// Add one length-delimited field to a reply replay-token hash.
 fn hash_reply_field(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes.len().to_be_bytes());
     hasher.update(bytes);
 }
 
+/// Build the replay token for a federated reply request.
 fn reply_replay_token(
     board_short_name: &str,
     thread_id: i64,
@@ -316,15 +321,17 @@ pub fn insert_reply_into_thread(
 
     match result {
         Ok(post_id) => {
-            if let Err(error) = conn.execute_batch("COMMIT") {
-                let _ = conn.execute_batch("ROLLBACK");
-                Err(anyhow::Error::from(error))
-            } else {
-                Ok(post_id)
+            let commit_result = conn.execute_batch("COMMIT");
+            match commit_result {
+                Ok(()) => Ok(post_id),
+                Err(error) => {
+                    drop(conn.execute_batch("ROLLBACK"));
+                    Err(anyhow::Error::from(error))
+                }
             }
         }
         Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(error)
         }
     }
@@ -333,26 +340,29 @@ pub fn insert_reply_into_thread(
 #[cfg(test)]
 mod tests {
     use super::{insert_reply_into_thread, ReplyReplayError};
+    use anyhow::{Context as _, Result};
 
-    fn setup_conn() -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
-        super::super::schema::install_or_migrate_schema(&conn).expect("install schema");
+    fn setup_conn() -> Result<rusqlite::Connection> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        super::super::schema::install_or_migrate_schema(&conn)?;
         conn.execute(
             "INSERT INTO boards (id, name, short_name, description) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![1_i64, "Test", "test", "board"],
-        )
-        .expect("insert board");
+        )?;
         conn.execute(
             "INSERT INTO threads (id, board_id, subject, archived, reply_count) VALUES (?1, ?2, ?3, 0, 0)",
             rusqlite::params![1_i64, 1_i64, "thread"],
-        )
-        .expect("insert thread");
-        conn
+        )?;
+        Ok(conn)
     }
 
     #[test]
-    fn gateway_replies_escape_html_and_preserve_null_ip_hash() {
-        let conn = setup_conn();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn gateway_replies_escape_html_and_preserve_null_ip_hash() -> Result<()> {
+        let conn = setup_conn()?;
         let post_id = insert_reply_into_thread(
             &conn,
             "test",
@@ -361,62 +371,80 @@ mod tests {
             "<script>alert(1)</script>\n&gt;quoted",
             0,
             None,
-        )
-        .expect("insert gateway reply");
+        )?;
 
-        let (body, body_html, ip_hash): (String, String, Option<String>) = conn
-            .query_row(
-                "SELECT body, body_html, ip_hash FROM posts WHERE id = ?1",
-                rusqlite::params![post_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .expect("load post");
+        let (body, body_html, ip_hash): (String, String, Option<String>) = conn.query_row(
+            "SELECT body, body_html, ip_hash FROM posts WHERE id = ?1",
+            rusqlite::params![post_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
 
-        assert_eq!(body, "<script>alert(1)</script>\n&gt;quoted");
-        assert!(body_html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
-        assert!(!body_html.contains("<script>alert(1)</script>"));
-        assert_eq!(ip_hash, None);
+        assert_eq!(
+            body, "<script>alert(1)</script>\n&gt;quoted",
+            "plain body should be preserved"
+        );
+        assert!(
+            body_html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "rendered body should escape script tags"
+        );
+        assert!(
+            !body_html.contains("<script>alert(1)</script>"),
+            "rendered body must not contain executable script markup"
+        );
+        assert_eq!(
+            ip_hash, None,
+            "gateway replies should not fabricate a source IP hash"
+        );
+        Ok(())
     }
 
     #[test]
-    fn replayed_gateway_reply_is_rejected_without_duplicate_insert() {
-        let conn = setup_conn();
-        insert_reply_into_thread(&conn, "test", 1, "RustWave", "same request", 123, None)
-            .expect("first gateway reply");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn replayed_gateway_reply_is_rejected_without_duplicate_insert() -> Result<()> {
+        let conn = setup_conn()?;
+        insert_reply_into_thread(&conn, "test", 1, "RustWave", "same request", 123, None)?;
 
         let error =
             insert_reply_into_thread(&conn, "test", 1, "RustWave", "same request", 123, None)
-                .expect_err("replay must be rejected");
-        assert!(error.downcast_ref::<ReplyReplayError>().is_some());
+                .err()
+                .context("replay must be rejected")?;
+        assert!(
+            error.downcast_ref::<ReplyReplayError>().is_some(),
+            "replay should return the typed replay error"
+        );
 
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM posts WHERE thread_id = 1 AND body = 'same request'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("post count");
-        assert_eq!(count, 1);
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM posts WHERE thread_id = 1 AND body = 'same request'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 1, "replay should not create a duplicate row");
 
-        insert_reply_into_thread(&conn, "test", 1, "RustWave", "same request", 124, None)
-            .expect("nearby distinct request");
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM posts WHERE thread_id = 1 AND body = 'same request'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("post count after distinct request");
-        assert_eq!(count, 2);
+        insert_reply_into_thread(&conn, "test", 1, "RustWave", "same request", 124, None)?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM posts WHERE thread_id = 1 AND body = 'same request'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            count, 2,
+            "a nearby request with a different timestamp should be distinct"
+        );
+        Ok(())
     }
 
     #[test]
-    fn stable_message_ids_distinguish_identical_replies_and_reject_id_reuse() {
-        let conn = setup_conn();
-        let first_id = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001")
-            .expect("first message id");
-        let second_id = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000002")
-            .expect("second message id");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn stable_message_ids_distinguish_identical_replies_and_reject_id_reuse() -> Result<()> {
+        let conn = setup_conn()?;
+        let first_id = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001")?;
+        let second_id = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000002")?;
 
         insert_reply_into_thread(
             &conn,
@@ -426,8 +454,7 @@ mod tests {
             "identical legitimate reply",
             123,
             Some(&first_id),
-        )
-        .expect("first gateway reply");
+        )?;
         insert_reply_into_thread(
             &conn,
             "test",
@@ -436,8 +463,7 @@ mod tests {
             "identical legitimate reply",
             123,
             Some(&second_id),
-        )
-        .expect("distinct message id");
+        )?;
 
         let replay = insert_reply_into_thread(
             &conn,
@@ -448,57 +474,72 @@ mod tests {
             999,
             Some(&first_id),
         )
-        .expect_err("reused stable message id must be rejected");
-        assert!(replay.downcast_ref::<ReplyReplayError>().is_some());
+        .err()
+        .context("reused stable message id must be rejected")?;
+        assert!(
+            replay.downcast_ref::<ReplyReplayError>().is_some(),
+            "message-ID reuse should return the typed replay error"
+        );
 
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM posts WHERE thread_id = 1",
-                [],
-                |row| row.get(0),
-            )
-            .expect("post count");
-        assert_eq!(count, 2);
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM posts WHERE thread_id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            count, 2,
+            "distinct stable message IDs should preserve identical replies"
+        );
+        Ok(())
     }
 
     #[test]
-    fn gateway_reply_rejects_non_exportable_board_before_any_write() {
-        let conn = setup_conn();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn gateway_reply_rejects_non_exportable_board_before_any_write() -> Result<()> {
+        let conn = setup_conn()?;
         conn.execute(
             "INSERT INTO boards
              (id, name, short_name, description, access_mode, access_password_hash)
              VALUES (2, 'Protected', 'protected', '', 'view_password', 'hash')",
             [],
-        )
-        .expect("insert protected board");
+        )?;
         conn.execute(
             "INSERT INTO threads (id, board_id, subject, archived, reply_count)
              VALUES (2, 2, 'protected thread', 0, 0)",
             [],
-        )
-        .expect("insert protected thread");
+        )?;
 
         let error =
             insert_reply_into_thread(&conn, "protected", 2, "RustWave", "secret reply", 123, None)
-                .expect_err("protected board reply must be rejected");
-        assert!(error.to_string().contains("not exportable"));
+                .err()
+                .context("protected board reply must be rejected")?;
+        assert!(
+            error.to_string().contains("not exportable"),
+            "the rejection should identify board exportability"
+        );
 
-        let post_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM posts WHERE thread_id = 2",
-                [],
-                |row| row.get(0),
-            )
-            .expect("protected post count");
-        let replay_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM chan_net_import_ledger
+        let post_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM posts WHERE thread_id = 2",
+            [],
+            |row| row.get(0),
+        )?;
+        let replay_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chan_net_import_ledger
                  WHERE tx_id LIKE 'channet-reply-v1:%'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("protected reply ledger count");
-        assert_eq!(post_count, 0);
-        assert_eq!(replay_count, 0);
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            post_count, 0,
+            "protected-board rejection should insert no post"
+        );
+        assert_eq!(
+            replay_count, 0,
+            "protected-board rejection should insert no replay token"
+        );
+        Ok(())
     }
 }

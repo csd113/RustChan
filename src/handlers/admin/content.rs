@@ -18,6 +18,7 @@ use serde::Deserialize;
 #[cfg(test)]
 use std::path::{Path, PathBuf};
 
+/// Sanitizes board short value.
 fn sanitize_board_short_value(board_short: &str) -> String {
     board_short
         .chars()
@@ -26,6 +27,7 @@ fn sanitize_board_short_value(board_short: &str) -> String {
         .collect()
 }
 
+/// Validates new board short name.
 fn validate_new_board_short_name(raw_short_name: &str) -> Result<String> {
     let trimmed = raw_short_name.trim();
     if trimmed.is_empty() || trimmed.len() > 8 {
@@ -37,6 +39,7 @@ fn validate_new_board_short_name(raw_short_name: &str) -> Result<String> {
     Ok(trimmed.to_lowercase())
 }
 
+/// Resolves board short name.
 fn resolve_board_short_name(
     boards: Option<&[crate::models::Board]>,
     board_id: i64,
@@ -102,17 +105,25 @@ fn checked_board_upload_dir(upload_dir: &str, short: &str) -> Result<PathBuf> {
 // ─── POST /admin/board/create ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct CreateBoardForm {
+/// Form fields accepted by the create board request.
+pub(crate) struct CreateBoardForm {
+    /// The short name.
     short_name: String,
+    /// The name.
     name: String,
+    /// The description.
     description: String,
+    /// The optional NSFW.
     nsfw: Option<String>,
+    /// The optional allow audio.
     allow_audio: Option<String>,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-pub async fn create_board(
+/// Handles the create board request.
+pub(crate) async fn create_board(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -172,26 +183,36 @@ pub async fn create_board(
 // ─── POST /admin/board/delete ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct BoardIdForm {
+/// Form fields accepted by the board ID request.
+pub(crate) struct BoardIdForm {
+    /// The board identifier.
     board_id: i64,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub struct ReorderBoardForm {
+/// Form fields accepted by the reorder board request.
+pub(crate) struct ReorderBoardForm {
+    /// The board identifier.
     board_id: i64,
+    /// The direction.
     direction: String,
+    /// The optional return to.
     return_to: Option<String>,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
+/// Performs the safe return to handler operation.
 fn safe_return_to(path: Option<&str>) -> &str {
     crate::utils::redirect::safe_internal_path_or(path, "/admin/panel")
 }
 
-pub async fn delete_board(
+/// Handles the delete board request.
+pub(crate) async fn delete_board(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -235,7 +256,7 @@ pub async fn delete_board(
             let deleted = db::delete_board(&conn, form.board_id).map_err(|error| {
                 let chain = error
                     .chain()
-                    .map(std::string::ToString::to_string)
+                    .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(" | ");
                 if chain.contains("database disk image is malformed") {
@@ -280,7 +301,8 @@ pub async fn delete_board(
 
 // ─── POST /admin/board/reorder ───────────────────────────────────────────────
 
-pub async fn reorder_board(
+/// Handles the reorder board request.
+pub(crate) async fn reorder_board(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -321,15 +343,21 @@ pub async fn reorder_board(
 // ─── POST /admin/thread/action ────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct ThreadActionForm {
+/// Form fields accepted by the thread action request.
+pub(crate) struct ThreadActionForm {
+    /// The thread identifier.
     thread_id: i64,
+    /// The board.
     board: String,
+    /// The action.
     action: String, // "sticky", "unsticky", "lock", "unlock"
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-pub async fn thread_action(
+/// Handles the thread action request.
+pub(crate) async fn thread_action(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -425,18 +453,23 @@ pub async fn thread_action(
 // ─── POST /admin/post/delete ──────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct AdminDeletePostForm {
+/// Form fields accepted by the admin delete post request.
+pub(crate) struct AdminDeletePostForm {
+    /// The post identifier.
     post_id: i64,
+    /// The board.
     board: String,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-#[allow(
+#[expect(
     clippy::cognitive_complexity,
     reason = "post deletion keeps authorization, database mutation, file cleanup, and audit logging together"
 )]
-pub async fn admin_delete_post(
+/// Handles the admin delete post request.
+pub(crate) async fn admin_delete_post(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -532,14 +565,19 @@ pub async fn admin_delete_post(
 // ─── POST /admin/thread/delete ────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct AdminDeleteThreadForm {
+/// Form fields accepted by the admin delete thread request.
+pub(crate) struct AdminDeleteThreadForm {
+    /// The thread identifier.
     thread_id: i64,
+    /// The board.
     board: String,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-pub async fn admin_delete_thread(
+/// Handles the admin delete thread request.
+pub(crate) async fn admin_delete_thread(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -624,13 +662,14 @@ pub async fn admin_delete_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{bail, ensure, Context as _};
     use axum::http::{header, StatusCode};
     use axum_extra::extract::cookie::{Cookie, CookieJar};
 
     fn admin_signed_csrf() -> String {
         crate::utils::crypto::make_scoped_csrf_form_token(
             "csrf123",
-            &crate::config::CONFIG.cookie_secret,
+            &CONFIG.cookie_secret,
             "session123",
         )
     }
@@ -681,25 +720,25 @@ mod tests {
         headers
     }
 
-    fn seed_admin_data() -> (crate::middleware::AppState, i64, i64, i64) {
+    fn seed_admin_data() -> anyhow::Result<(AppState, i64, i64, i64)> {
         let state = crate::test_support::app_state();
-        let conn = state.db.get().expect("db connection");
-        let password_hash = crate::utils::crypto::hash_password("hunter2").expect("hash password");
-        let admin_id =
-            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
-        crate::db::create_session(
+        let conn = state.db.get().context("get database connection")?;
+        let password_hash =
+            crate::utils::crypto::hash_password("hunter2").context("hash admin password")?;
+        let admin_id = db::create_admin(&conn, "admin", &password_hash).context("create admin")?;
+        db::create_session(
             &conn,
             "session123",
             admin_id,
             chrono::Utc::now().timestamp() + 3600,
         )
-        .expect("create session");
-        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
-        let board = crate::db::get_board_by_short(&conn, "test")
-            .expect("load board")
-            .expect("board exists");
+        .context("create admin session")?;
+        db::create_board(&conn, "test", "Test", "", false).context("create board")?;
+        let board = db::get_board_by_short(&conn, "test")
+            .context("load board")?
+            .context("test board does not exist")?;
 
-        let op = crate::db::NewPost {
+        let op = db::NewPost {
             thread_id: 0,
             board_id: board.id,
             name: "anon".to_owned(),
@@ -722,10 +761,10 @@ mod tests {
             is_op: true,
         };
         let (thread_id, _, _) =
-            crate::db::create_thread_with_optional_poll(&conn, board.id, None, &op, "", None, None)
-                .expect("create thread");
+            db::create_thread_with_optional_poll(&conn, board.id, None, &op, "", None, None)
+                .context("create thread")?;
 
-        let reply = crate::db::NewPost {
+        let reply = db::NewPost {
             thread_id,
             board_id: board.id,
             name: "anon".to_owned(),
@@ -747,10 +786,11 @@ mod tests {
             deletion_token: "token-reply".to_owned(),
             is_op: false,
         };
-        let reply_id = crate::db::create_reply_with_thread_update(&conn, &reply, "", true, None)
-            .expect("create reply");
+        let reply_id = db::create_reply_with_thread_update(&conn, &reply, "", true, None)
+            .context("create reply")?;
 
-        (state, thread_id, reply_id, board.id)
+        drop(conn);
+        Ok((state, thread_id, reply_id, board.id))
     }
 
     #[test]
@@ -806,54 +846,64 @@ mod tests {
     }
 
     #[test]
-    fn checked_board_upload_dir_rejects_traversal_short_name_without_touching_sentinel() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn checked_board_upload_dir_rejects_traversal_short_name_without_touching_sentinel(
+    ) -> anyhow::Result<()> {
+        let temp_dir = tempfile::tempdir().context("create upload root")?;
         let upload_dir = temp_dir.path().join("uploads");
         let sentinel_dir = temp_dir.path().join("sentinel");
-        std::fs::create_dir_all(&upload_dir).expect("create uploads");
-        std::fs::create_dir_all(&sentinel_dir).expect("create sentinel");
-        std::fs::write(sentinel_dir.join("keep.txt"), "keep").expect("write sentinel");
+        std::fs::create_dir_all(&upload_dir).context("create uploads directory")?;
+        std::fs::create_dir_all(&sentinel_dir).context("create sentinel directory")?;
+        std::fs::write(sentinel_dir.join("keep.txt"), "keep").context("write sentinel")?;
 
-        let error =
-            checked_board_upload_dir(upload_dir.to_str().expect("utf8 upload dir"), "../sentinel")
-                .expect_err("traversal short name rejected");
-
-        assert!(error.to_string().contains("unsafe stored board short_name"));
-        assert_eq!(
-            std::fs::read_to_string(sentinel_dir.join("keep.txt")).expect("read sentinel"),
-            "keep"
+        let result = checked_board_upload_dir(
+            upload_dir.to_str().context("upload path is not UTF-8")?,
+            "../sentinel",
         );
+        let Err(error) = result else {
+            bail!("traversal short name was accepted");
+        };
+
+        ensure!(error.to_string().contains("unsafe stored board short_name"));
+        ensure!(
+            std::fs::read_to_string(sentinel_dir.join("keep.txt")).context("read sentinel")?
+                == "keep"
+        );
+        Ok(())
     }
 
     #[test]
-    fn checked_board_upload_dir_allows_valid_board_under_upload_root_only() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn checked_board_upload_dir_allows_valid_board_under_upload_root_only() -> anyhow::Result<()> {
+        let temp_dir = tempfile::tempdir().context("create upload root")?;
         let upload_dir = temp_dir.path().join("uploads");
         let board_dir = upload_dir.join("tech");
         let other_dir = upload_dir.join("other");
-        std::fs::create_dir_all(&board_dir).expect("create board dir");
-        std::fs::create_dir_all(&other_dir).expect("create other dir");
-        std::fs::write(board_dir.join("old.txt"), "old").expect("write board file");
-        std::fs::write(other_dir.join("keep.txt"), "keep").expect("write other file");
+        std::fs::create_dir_all(&board_dir).context("create board directory")?;
+        std::fs::create_dir_all(&other_dir).context("create other directory")?;
+        std::fs::write(board_dir.join("old.txt"), "old").context("write board file")?;
+        std::fs::write(other_dir.join("keep.txt"), "keep").context("write other file")?;
 
-        let checked =
-            checked_board_upload_dir(upload_dir.to_str().expect("utf8 upload dir"), "tech")
-                .expect("valid board path");
-        std::fs::remove_dir_all(&checked).expect("remove checked board dir");
+        let checked = checked_board_upload_dir(
+            upload_dir.to_str().context("upload path is not UTF-8")?,
+            "tech",
+        )
+        .context("validate board path")?;
+        std::fs::remove_dir_all(&checked).context("remove checked board directory")?;
 
-        assert!(!board_dir.exists());
-        assert_eq!(
-            std::fs::read_to_string(other_dir.join("keep.txt")).expect("read other file"),
-            "keep"
+        ensure!(!board_dir.exists());
+        ensure!(
+            std::fs::read_to_string(other_dir.join("keep.txt")).context("read other file")?
+                == "keep"
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn admin_delete_post_uses_fallback_board_when_lookup_breaks() {
-        let (state, thread_id, reply_id, _board_id) = seed_admin_data();
-        let conn = state.db.get().expect("db connection");
+    async fn admin_delete_post_uses_fallback_board_when_lookup_breaks() -> anyhow::Result<()> {
+        let (state, thread_id, reply_id, _board_id) = seed_admin_data()?;
+        let conn = state.db.get().context("get database connection")?;
         conn.execute_batch("ALTER TABLE boards RENAME COLUMN short_name TO short_name_broken")
-            .expect("break board lookup");
+            .context("break board lookup")?;
+        drop(conn);
 
         let response = admin_delete_post(
             State(state),
@@ -867,20 +917,22 @@ mod tests {
             }),
         )
         .await
-        .expect("handler response");
+        .context("delete post")?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        ensure!(response.status() == StatusCode::SEE_OTHER);
         let location = response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .expect("location header");
-        assert_eq!(location, format!("/fallback/thread/{thread_id}"));
+            .context("response omitted location header")?;
+        ensure!(location == format!("/fallback/thread/{thread_id}"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn admin_delete_post_accepts_session_scoped_csrf_over_https_tunnel() {
-        let (state, thread_id, reply_id, _board_id) = seed_admin_data();
+    async fn admin_delete_post_accepts_session_scoped_csrf_over_https_tunnel() -> anyhow::Result<()>
+    {
+        let (state, thread_id, reply_id, _board_id) = seed_admin_data()?;
 
         let response = admin_delete_post(
             State(state),
@@ -894,20 +946,22 @@ mod tests {
             }),
         )
         .await
-        .expect("handler response");
+        .context("delete post through HTTPS tunnel")?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        ensure!(response.status() == StatusCode::SEE_OTHER);
         let location = response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .expect("location header");
-        assert_eq!(location, format!("/test/thread/{thread_id}"));
+            .context("response omitted location header")?;
+        ensure!(location == format!("/test/thread/{thread_id}"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn admin_delete_thread_accepts_session_scoped_csrf_over_https_tunnel() {
-        let (state, thread_id, _reply_id, _board_id) = seed_admin_data();
+    async fn admin_delete_thread_accepts_session_scoped_csrf_over_https_tunnel(
+    ) -> anyhow::Result<()> {
+        let (state, thread_id, _reply_id, _board_id) = seed_admin_data()?;
 
         let response = admin_delete_thread(
             State(state),
@@ -921,26 +975,25 @@ mod tests {
             }),
         )
         .await
-        .expect("handler response");
+        .context("delete thread through HTTPS tunnel")?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        ensure!(response.status() == StatusCode::SEE_OTHER);
         let location = response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .expect("location header");
-        assert_eq!(location, "/test");
+            .context("response omitted location header")?;
+        ensure!(location == "/test");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn admin_delete_post_rejects_generic_public_csrf_token() {
-        let (state, _thread_id, reply_id, _board_id) = seed_admin_data();
-        let generic_csrf = crate::utils::crypto::make_csrf_form_token(
-            "csrf123",
-            &crate::config::CONFIG.cookie_secret,
-        );
+    async fn admin_delete_post_rejects_generic_public_csrf_token() -> anyhow::Result<()> {
+        let (state, _thread_id, reply_id, _board_id) = seed_admin_data()?;
+        let generic_csrf =
+            crate::utils::crypto::make_csrf_form_token("csrf123", &CONFIG.cookie_secret);
 
-        let error = admin_delete_post(
+        let result = admin_delete_post(
             State(state),
             build_admin_jar(),
             tunneled_admin_headers(),
@@ -951,17 +1004,20 @@ mod tests {
                 csrf: Some(generic_csrf),
             }),
         )
-        .await
-        .expect_err("generic token rejected");
+        .await;
+        let Err(error) = result else {
+            bail!("generic public CSRF token was accepted");
+        };
 
-        assert!(error.to_string().contains("CSRF token mismatch"));
+        ensure!(error.to_string().contains("CSRF token mismatch"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn admin_delete_thread_rejects_cross_origin_request() {
-        let (state, thread_id, _reply_id, _board_id) = seed_admin_data();
+    async fn admin_delete_thread_rejects_cross_origin_request() -> anyhow::Result<()> {
+        let (state, thread_id, _reply_id, _board_id) = seed_admin_data()?;
 
-        let error = admin_delete_thread(
+        let result = admin_delete_thread(
             State(state),
             build_admin_jar(),
             cross_origin_headers(),
@@ -972,18 +1028,22 @@ mod tests {
                 csrf: Some(admin_signed_csrf()),
             }),
         )
-        .await
-        .expect_err("cross-origin request rejected");
+        .await;
+        let Err(error) = result else {
+            bail!("cross-origin thread deletion was accepted");
+        };
 
-        assert!(error.to_string().contains("Origin/Referer origin mismatch"));
+        ensure!(error.to_string().contains("Origin/Referer origin mismatch"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn thread_action_uses_fallback_board_when_lookup_breaks() {
-        let (state, thread_id, _reply_id, _board_id) = seed_admin_data();
-        let conn = state.db.get().expect("db connection");
+    async fn thread_action_uses_fallback_board_when_lookup_breaks() -> anyhow::Result<()> {
+        let (state, thread_id, _reply_id, _board_id) = seed_admin_data()?;
+        let conn = state.db.get().context("get database connection")?;
         conn.execute_batch("ALTER TABLE boards RENAME COLUMN short_name TO short_name_broken")
-            .expect("break board lookup");
+            .context("break board lookup")?;
+        drop(conn);
 
         let response = thread_action(
             State(state),
@@ -998,14 +1058,15 @@ mod tests {
             }),
         )
         .await
-        .expect("handler response");
+        .context("run thread action")?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        ensure!(response.status() == StatusCode::SEE_OTHER);
         let location = response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .expect("location header");
-        assert_eq!(location, format!("/fallback/thread/{thread_id}"));
+            .context("response omitted location header")?;
+        ensure!(location == format!("/fallback/thread/{thread_id}"));
+        Ok(())
     }
 }

@@ -1,3 +1,5 @@
+//! Appearance, theme, favicon, and banner sections of the admin panel.
+
 use super::{
     escape_html, render_banner_asset_list, render_banner_upload_form, render_board_appearance_card,
     AdminPanelViewModel,
@@ -8,6 +10,7 @@ use crate::theme_builder::{
 };
 use std::fmt::Write as _;
 
+/// Renders the general site-identity settings section.
 pub(super) fn render_site_settings(view: &AdminPanelViewModel<'_>) -> String {
     let global_favicon_exists = crate::favicon::global_has_custom_favicon();
     let global_favicon_version =
@@ -58,6 +61,7 @@ pub(super) fn render_site_settings(view: &AdminPanelViewModel<'_>) -> String {
     )
 }
 
+/// Renders the complete appearance tab of the admin panel.
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let theme_catalog_open_attr = if view.open_section == Some("theme-catalog") {
         " open"
@@ -133,6 +137,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     )
 }
 
+/// Renders selectable options for every enabled theme.
 fn render_enabled_theme_options(view: &AdminPanelViewModel<'_>) -> String {
     let mut enabled_theme_options = String::new();
     for theme in view.appearance.themes.iter().filter(|theme| theme.enabled) {
@@ -151,6 +156,7 @@ fn render_enabled_theme_options(view: &AdminPanelViewModel<'_>) -> String {
     enabled_theme_options
 }
 
+/// Renders per-board appearance and banner settings cards.
 fn render_board_appearance_cards(view: &AdminPanelViewModel<'_>) -> String {
     let mut board_appearance_cards = String::new();
     for board in view.boards {
@@ -176,6 +182,7 @@ fn render_board_appearance_cards(view: &AdminPanelViewModel<'_>) -> String {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
+/// Renders theme-builder preset options and marks the selected preset.
 fn render_preset_options(selected_slug: &str) -> String {
     let mut out = String::new();
     for preset in BUILDER_PRESETS {
@@ -194,6 +201,7 @@ fn render_preset_options(selected_slug: &str) -> String {
     out
 }
 
+/// Renders a paired color picker and hexadecimal input.
 fn render_color_control(label: &str, name: &str, value: &str, help: &str) -> String {
     format!(
         r##"<div class="theme-builder-color-field">
@@ -211,6 +219,7 @@ fn render_color_control(label: &str, name: &str, value: &str, help: &str) -> Str
     )
 }
 
+/// Renders a labeled group of related theme color controls.
 fn render_color_group(title: &str, description: &str, controls: &str) -> String {
     format!(
         r#"<div class="theme-builder-color-group">
@@ -226,7 +235,11 @@ fn render_color_group(title: &str, description: &str, controls: &str) -> String 
     )
 }
 
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the builder controls mirror one cohesive theme-editing form"
+)]
+/// Renders all guided theme-builder control sections.
 fn render_builder_sections(config: &ThemeBuilderConfig) -> String {
     let basics = format!(
         r#"<details class="theme-builder-section" open>
@@ -513,6 +526,7 @@ fn render_builder_sections(config: &ThemeBuilderConfig) -> String {
     format!("{basics}{colors}{posts}{forms}{advanced}")
 }
 
+/// Renders a representative live preview for a guided theme.
 fn render_builder_preview(config: &ThemeBuilderConfig, slug: &str) -> String {
     format!(
         r##"<section class="theme-builder-preview-card">
@@ -560,6 +574,7 @@ fn render_builder_preview(config: &ThemeBuilderConfig, slug: &str) -> String {
     )
 }
 
+/// Renders the guided editor for a theme-builder configuration.
 fn render_builder_editor(theme_slug: &str, config: &ThemeBuilderConfig) -> String {
     format!(
         r#"<input type="hidden" name="theme_mode" value="builder">
@@ -574,6 +589,7 @@ fn render_builder_editor(theme_slug: &str, config: &ThemeBuilderConfig) -> Strin
     )
 }
 
+/// Renders the raw CSS editor retained for legacy themes.
 fn render_legacy_editor(theme_slug: &str, custom_css: &str) -> String {
     format!(
         r#"<input type="hidden" name="theme_mode" value="legacy">
@@ -593,6 +609,7 @@ fn render_legacy_editor(theme_slug: &str, custom_css: &str) -> String {
     )
 }
 
+/// Renders editable or read-only metadata fields for a theme.
 fn render_theme_metadata_fields(theme: &crate::models::Theme) -> String {
     if theme.is_builtin {
         format!(
@@ -629,6 +646,7 @@ fn render_theme_metadata_fields(theme: &crate::models::Theme) -> String {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
+/// Renders built-in and custom theme cards as separate HTML groups.
 fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
     let mut builtin_theme_cards = String::new();
     let mut custom_theme_cards = String::new();
@@ -715,6 +733,7 @@ fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
     (builtin_theme_cards, custom_theme_cards)
 }
 
+/// Renders a button for copying the configured public URL.
 fn render_public_url_copy_button(public_url: &str) -> String {
     if public_url == "not configured" {
         String::new()
@@ -727,7 +746,11 @@ fn render_public_url_copy_button(public_url: &str) -> String {
 }
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the section interpolates independent pre-rendered controls into fixed HTML"
+)]
+/// Renders the site identity and favicon settings section.
 fn render_admin_site_settings_section(
     csrf_token: &str,
     site_name_val: &str,
@@ -843,9 +866,16 @@ fn render_admin_site_settings_section(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the appearance section is one stable server-rendered HTML fragment"
+)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the section interpolates independent pre-rendered appearance controls"
+)]
+/// Renders the banner and theme-management sections.
 fn render_admin_appearance_section(
     csrf_token: &str,
     banner_rotation_interval_minutes: i64,

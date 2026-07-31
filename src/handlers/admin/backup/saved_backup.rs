@@ -8,25 +8,38 @@ use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+/// Backup v4 format used by this handler.
 pub(crate) const BACKUP_V4_FORMAT: &str = "rustchan-backup-v4";
+/// Backup v4 archive container used by this handler.
 pub(crate) const BACKUP_V4_ARCHIVE_CONTAINER: &str = "zip";
+/// Parts dir name used by this handler.
 pub(crate) const PARTS_DIR_NAME: &str = "parts";
+/// Manifest file name used by this handler.
 pub(crate) const MANIFEST_FILE_NAME: &str = "manifest.json";
+/// Backup metadata file name used by this handler.
 pub(crate) const BACKUP_METADATA_FILE_NAME: &str = "backup.json";
+/// Checksums file name used by this handler.
 pub(crate) const CHECKSUMS_FILE_NAME: &str = "checksums.sha256";
+/// Readme file name used by this handler.
 pub(crate) const README_FILE_NAME: &str = "README.txt";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// Variants supported by the backup scope workflow.
 pub(crate) enum BackupScope {
+    /// Represents the full site case.
     FullSite,
+    /// Represents the board case.
     Board,
+    /// Represents the selected boards case.
     SelectedBoards,
+    /// Represents the pre maintenance case.
     PreMaintenance,
 }
 
 impl BackupScope {
     #[must_use]
+    /// Performs the slug handler operation.
     pub(crate) const fn slug(self) -> &'static str {
         match self {
             Self::FullSite => "full-site",
@@ -39,15 +52,21 @@ impl BackupScope {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// Variants supported by the backup storage mode workflow.
 pub(crate) enum BackupStorageMode {
+    /// Represents the single ZIP case.
     SingleZip,
+    /// Represents the split ZIP case.
     SplitZip,
+    /// Represents the directory case.
     Directory,
+    /// Represents the legacy ZIP case.
     LegacyZip,
 }
 
 impl BackupStorageMode {
     #[must_use]
+    /// Performs the display name handler operation.
     pub(crate) const fn display_name(self) -> &'static str {
         match self {
             Self::SingleZip => "Single ZIP",
@@ -60,152 +79,248 @@ impl BackupStorageMode {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// Variants supported by the backup file kind workflow.
 pub(crate) enum BackupFileKind {
+    /// Represents the database case.
     Db,
+    /// Represents the settings case.
     Settings,
+    /// Represents the board JSON case.
     BoardJson,
+    /// Represents the thread export case.
     ThreadExport,
+    /// Represents the post export case.
     PostExport,
+    /// Represents the file inventory export case.
     FileInventoryExport,
+    /// Represents the original media case.
     OriginalMedia,
+    /// Represents the thumbnail case.
     Thumbnail,
+    /// Represents the audio case.
     Audio,
+    /// Represents the banner case.
     Banner,
+    /// Represents the favicon case.
     Favicon,
+    /// Represents the Tor key case.
     TorKey,
+    /// Represents the maintenance case.
     Maintenance,
+    /// Represents the pending fs ops case.
     PendingFsOps,
+    /// Represents the log case.
     Log,
 }
 
 // The serialized manifest intentionally exposes independent inclusion bits for admin readability and compatibility.
-#[expect(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flags are independent backup-content selections serialized in the manifest"
+)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+/// Data used by the backup include flags workflow.
 pub(crate) struct BackupIncludeFlags {
+    /// Whether the database setting is active.
     pub database: bool,
+    /// Whether the settings setting is active.
     pub settings: bool,
+    /// Whether the uploads setting is active.
     pub uploads: bool,
+    /// Whether the thumbnails setting is active.
     pub thumbnails: bool,
+    /// Whether the Tor keys setting is active.
     pub tor_keys: bool,
+    /// Whether the board exports setting is active.
     pub board_exports: bool,
+    /// Whether the file inventory setting is active.
     pub file_inventory: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Data used by the database snapshot info workflow.
 pub(crate) struct DbSnapshotInfo {
+    /// The path.
     pub path: String,
+    /// The size.
     pub size: u64,
+    /// The SHA-256.
     pub sha256: String,
+    /// The optional integrity check.
     pub integrity_check: Option<String>,
+    /// The optional foreign key check.
     pub foreign_key_check: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Data used by the backup file entry workflow.
 pub(crate) struct BackupFileEntry {
+    /// The logical path.
     pub logical_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The runtime logical path.
     pub runtime_logical_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The optional board.
     pub board: Option<String>,
+    /// The kind.
     pub kind: BackupFileKind,
+    /// The size.
     pub size: u64,
+    /// The SHA-256.
     pub sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The optional ZIP part.
     pub zip_part: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The ZIP entry path.
     pub zip_entry_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The optional compression method.
     pub compression_method: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Data used by the backup part info workflow.
 pub(crate) struct BackupPartInfo {
+    /// The filename.
     pub filename: String,
+    /// The part index.
     pub part_index: u32,
+    /// The total parts.
     pub total_parts: u32,
+    /// The backup identifier.
     pub backup_id: String,
+    /// The size.
     pub size: u64,
+    /// The SHA-256.
     pub sha256: String,
+    /// The target part size.
     pub target_part_size: u64,
+    /// Whether the oversized setting is active.
     pub oversized: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+/// Data used by the maintenance metadata workflow.
 pub(crate) struct MaintenanceMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The optional operation.
     pub operation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The job identifier.
     pub job_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The requested timestamp.
     pub requested_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The optional risk class.
     pub risk_class: Option<String>,
+    /// Whether the includes uploads setting is active.
     pub includes_uploads: bool,
+    /// Whether the includes file inventory setting is active.
     pub includes_file_inventory: bool,
+    /// Whether the includes Tor keys setting is active.
     pub includes_tor_keys: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The optional reason.
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The optional pre integrity check.
     pub pre_integrity_check: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The optional pre foreign key check.
     pub pre_foreign_key_check: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Manifest data for backup.
 pub(crate) struct BackupManifest {
+    /// The format.
     pub format: String,
+    /// The archive container.
     pub archive_container: String,
+    /// The backup identifier.
     pub backup_id: String,
+    /// The created timestamp.
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The completed timestamp.
     pub completed_at: Option<i64>,
+    /// The rustchan version.
     pub rustchan_version: String,
+    /// The scope.
     pub scope: BackupScope,
+    /// The storage mode.
     pub storage_mode: BackupStorageMode,
     #[serde(default)]
+    /// The included boards collection.
     pub included_boards: Vec<crate::models::BackupBoardSummary>,
+    /// The includes.
     pub includes: BackupIncludeFlags,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The optional database snapshot.
     pub db_snapshot: Option<DbSnapshotInfo>,
     #[serde(default)]
+    /// The files collection.
     pub files: Vec<BackupFileEntry>,
     #[serde(default)]
+    /// The parts collection.
     pub parts: Vec<BackupPartInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The optional maintenance.
     pub maintenance: Option<MaintenanceMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Data used by the backup metadata workflow.
 pub(crate) struct BackupMetadata {
+    /// The format.
     pub format: String,
+    /// The backup identifier.
     pub backup_id: String,
+    /// The scope.
     pub scope: BackupScope,
+    /// The storage mode.
     pub storage_mode: BackupStorageMode,
+    /// The created timestamp.
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The completed timestamp.
     pub completed_at: Option<i64>,
+    /// The total size size in bytes.
     pub total_size_bytes: u64,
+    /// Whether this item passed verification.
     pub verified: bool,
+    /// The number of parts.
     pub part_count: u32,
+    /// Whether the includes Tor keys setting is active.
     pub includes_tor_keys: bool,
     #[serde(default)]
+    /// The included boards collection.
     pub included_boards: Vec<crate::models::BackupBoardSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The manifest path.
     pub manifest_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Data used by the directory stats workflow.
 pub(crate) struct DirectoryStats {
+    /// The files.
     pub files: u64,
+    /// The bytes.
     pub bytes: u64,
 }
 
 impl DirectoryStats {
     #[must_use]
+    /// Performs the zero handler operation.
     pub(crate) const fn zero() -> Self {
         Self { files: 0, bytes: 0 }
     }
 
+    /// Performs the saturating add assign handler operation.
     pub(crate) const fn saturating_add_assign(&mut self, other: &Self) {
         self.files = self.files.saturating_add(other.files);
         self.bytes = self.bytes.saturating_add(other.bytes);
@@ -213,61 +328,94 @@ impl DirectoryStats {
 }
 
 #[derive(Debug, Clone)]
+/// Data used by the saved backup layout workflow.
 pub(crate) struct SavedBackupLayout {
+    /// The root directory.
     pub root_dir: PathBuf,
+    /// The backup ref.
     pub backup_ref: String,
+    /// The manifest path.
     pub manifest_path: PathBuf,
+    /// The metadata path.
     pub metadata_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
+/// Data used by the verified saved v4 file workflow.
 pub(crate) struct VerifiedSavedV4File {
+    /// The logical path.
     pub logical_path: String,
+    /// The optional board.
     pub board: Option<String>,
+    /// The kind.
     pub kind: BackupFileKind,
+    /// The size.
     pub size: u64,
+    /// The SHA-256.
     pub sha256: String,
+    /// The source.
     pub source: VerifiedSavedV4FileSource,
 }
 
 #[derive(Debug, Clone)]
+/// Variants supported by the verified saved v4 file source workflow.
 pub(crate) enum VerifiedSavedV4FileSource {
+    /// Represents the root file case.
     RootFile(PathBuf),
+    /// Represents the ZIP entry case.
     ZipEntry {
+        /// The part path.
         part_path: PathBuf,
+        /// The entry path.
         entry_path: String,
     },
 }
 
 #[derive(Debug, Clone)]
+/// Point-in-time data for verified saved v4 database.
 pub(crate) struct VerifiedSavedV4DbSnapshot {
+    /// The file.
     pub file: VerifiedSavedV4File,
 }
 
 #[derive(Debug, Clone)]
+/// Data used by the verified saved v4 board layout workflow.
 pub(crate) struct VerifiedSavedV4BoardLayout {
+    /// The board JSON.
     pub board_json: VerifiedSavedV4File,
+    /// The upload files collection.
     pub upload_files: Vec<VerifiedSavedV4File>,
 }
 
 #[derive(Debug, Clone)]
+/// Data used by the verified saved v4 root workflow.
 pub(crate) struct VerifiedSavedV4Root {
+    /// The metadata.
     pub metadata: BackupMetadata,
+    /// The manifest.
     pub manifest: BackupManifest,
+    /// The completed timestamp.
     pub completed_at: i64,
+    /// The optional database snapshot.
     pub db_snapshot: Option<VerifiedSavedV4DbSnapshot>,
+    /// The site favicon files collection.
     pub site_favicon_files: Vec<VerifiedSavedV4File>,
+    /// The site banner files collection.
     pub site_banner_files: Vec<VerifiedSavedV4File>,
+    /// The Tor key files collection.
     pub tor_key_files: Vec<VerifiedSavedV4File>,
+    /// The boards collection.
     pub boards: HashMap<String, VerifiedSavedV4BoardLayout>,
 }
 
 #[must_use]
+/// Performs the backups root dir handler operation.
 pub(crate) fn backups_root_dir() -> PathBuf {
     crate::config::backups_dir()
 }
 
 #[must_use]
+/// Builds backup ID.
 pub(crate) fn build_backup_id(_scope: BackupScope, scope_label: &str) -> String {
     let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M").to_string();
     let short = uuid::Uuid::new_v4().simple().to_string();
@@ -276,6 +424,7 @@ pub(crate) fn build_backup_id(_scope: BackupScope, scope_label: &str) -> String 
     format!("{timestamp}_{scope_label}_{short}").replace("__", "_")
 }
 
+/// Creates backup root.
 pub(crate) fn create_backup_root(backup_id: &str) -> Result<PathBuf> {
     let root = backups_root_dir().join(backup_id);
     crate::config::ensure_private_dir(&root).map_err(|error| {
@@ -287,6 +436,7 @@ pub(crate) fn create_backup_root(backup_id: &str) -> Result<PathBuf> {
     Ok(root)
 }
 
+/// Performs the detect saved backup layout handler operation.
 pub(crate) fn detect_saved_backup_layout(root: &Path) -> Option<SavedBackupLayout> {
     if !root.is_dir() {
         return None;
@@ -304,6 +454,7 @@ pub(crate) fn detect_saved_backup_layout(root: &Path) -> Option<SavedBackupLayou
     })
 }
 
+/// Performs the iter saved backup layouts handler operation.
 pub(crate) fn iter_saved_backup_layouts() -> Vec<SavedBackupLayout> {
     let mut layouts = Vec::new();
     let Ok(entries) = std::fs::read_dir(backups_root_dir()) else {
@@ -318,6 +469,7 @@ pub(crate) fn iter_saved_backup_layouts() -> Vec<SavedBackupLayout> {
     layouts
 }
 
+/// Loads manifest.
 pub(crate) fn load_manifest(path: &Path) -> Result<BackupManifest> {
     let bytes = std::fs::read(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Read manifest {}: {error}", path.display()))
@@ -330,6 +482,7 @@ pub(crate) fn load_manifest(path: &Path) -> Result<BackupManifest> {
     })
 }
 
+/// Loads metadata.
 pub(crate) fn load_metadata(path: &Path) -> Result<BackupMetadata> {
     let bytes = std::fs::read(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
@@ -345,6 +498,7 @@ pub(crate) fn load_metadata(path: &Path) -> Result<BackupMetadata> {
     })
 }
 
+/// Writes JSON pretty.
 pub(crate) fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Serialize {}: {error}", path.display()))
@@ -355,6 +509,7 @@ pub(crate) fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<
     Ok(())
 }
 
+/// Writes text.
 pub(crate) fn write_text(path: &Path, text: &str) -> Result<()> {
     crate::config::write_private_file(path, text.as_bytes()).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Write {}: {error}", path.display()))
@@ -362,12 +517,14 @@ pub(crate) fn write_text(path: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Performs the SHA-256 hex for bytes handler operation.
 pub(crate) fn sha256_hex_for_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
 }
 
+/// Performs the SHA-256 hex for file handler operation.
 pub(crate) fn sha256_hex_for_file(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
@@ -378,6 +535,7 @@ pub(crate) fn sha256_hex_for_file(path: &Path) -> Result<String> {
     sha256_hex_for_reader(&mut file)
 }
 
+/// Performs the SHA-256 hex for reader handler operation.
 pub(crate) fn sha256_hex_for_reader<R: Read>(reader: &mut R) -> Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024].into_boxed_slice();
@@ -398,6 +556,7 @@ pub(crate) fn sha256_hex_for_reader<R: Read>(reader: &mut R) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// Copies file and hash.
 pub(crate) fn copy_file_and_hash<W: Write>(
     source_path: &Path,
     writer: &mut W,
@@ -408,6 +567,7 @@ pub(crate) fn copy_file_and_hash<W: Write>(
     copy_reader_and_hash(&mut source, writer)
 }
 
+/// Copies reader and hash.
 pub(crate) fn copy_reader_and_hash<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -430,12 +590,18 @@ pub(crate) fn copy_reader_and_hash<R: Read, W: Write>(
         writer.write_all(chunk).map_err(|error| {
             AppError::Internal(anyhow::anyhow!("Write backup payload stream: {error}"))
         })?;
-        written = written.saturating_add(read as u64);
+        let read = u64::try_from(read).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Backup payload read size does not fit its byte counter: {error}"
+            ))
+        })?;
+        written = written.saturating_add(read);
         hasher.update(chunk);
     }
     Ok((written, hex::encode(hasher.finalize())))
 }
 
+/// Performs the scan dir stats handler operation.
 pub(crate) fn scan_dir_stats(dir: &Path) -> DirectoryStats {
     if crate::utils::fs_security::assert_dir_no_symlink(dir).is_err() {
         return DirectoryStats::zero();
@@ -466,6 +632,7 @@ pub(crate) fn scan_dir_stats(dir: &Path) -> DirectoryStats {
     stats
 }
 
+/// Validates backup ID matches parts.
 pub(crate) fn validate_backup_id_matches_parts(manifest: &BackupManifest) -> Result<()> {
     for part in &manifest.parts {
         if part.backup_id != manifest.backup_id {
@@ -478,6 +645,7 @@ pub(crate) fn validate_backup_id_matches_parts(manifest: &BackupManifest) -> Res
     Ok(())
 }
 
+/// Builds readme.
 pub(crate) fn build_readme(
     manifest: &BackupManifest,
     metadata: &BackupMetadata,
@@ -516,6 +684,7 @@ pub(crate) fn build_readme(
     out
 }
 
+/// Writes root checksums.
 pub(crate) fn write_root_checksums(root_dir: &Path, extra_paths: &[&Path]) -> Result<()> {
     let mut lines = String::new();
     for name in [
@@ -541,6 +710,7 @@ pub(crate) fn write_root_checksums(root_dir: &Path, extra_paths: &[&Path]) -> Re
     write_text(&root_dir.join(CHECKSUMS_FILE_NAME), &lines)
 }
 
+/// Sanitizes logical path.
 pub(crate) fn sanitize_logical_path(path: &str) -> Result<()> {
     const SLASH_LIKE_SEPARATORS: [char; 5] =
         ['\u{2044}', '\u{2215}', '\u{29f8}', '\u{29f9}', '\u{ff0f}'];
@@ -576,6 +746,7 @@ pub(crate) fn sanitize_logical_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Performs the runtime upload path to logical handler operation.
 pub(crate) fn runtime_upload_path_to_logical(
     board_short: &str,
     runtime_relative_path: &str,
@@ -620,6 +791,7 @@ pub(crate) fn runtime_upload_path_to_logical(
     ))
 }
 
+/// Performs the logical upload path to runtime handler operation.
 pub(crate) fn logical_upload_path_to_runtime(
     logical_path: &str,
 ) -> Result<(String, BackupFileKind)> {
@@ -678,6 +850,7 @@ pub(crate) fn logical_upload_path_to_runtime(
     }
 }
 
+/// Performs the scope label handler operation.
 const fn scope_label(scope: BackupScope) -> &'static str {
     match scope {
         BackupScope::FullSite => "full_site",
@@ -687,6 +860,7 @@ const fn scope_label(scope: BackupScope) -> &'static str {
     }
 }
 
+/// Performs the expected scope label handler operation.
 fn expected_scope_label(expected_scopes: &[BackupScope]) -> String {
     expected_scopes
         .iter()
@@ -695,6 +869,7 @@ fn expected_scope_label(expected_scopes: &[BackupScope]) -> String {
         .join(" or ")
 }
 
+/// Resolves saved v4 file.
 fn resolve_saved_v4_file(root_dir: &Path, declared_path: &str, context: &str) -> Result<PathBuf> {
     sanitize_logical_path(declared_path)?;
     let candidate = root_dir.join(declared_path);
@@ -717,6 +892,11 @@ fn resolve_saved_v4_file(root_dir: &Path, declared_path: &str, context: &str) ->
     Ok(resolved)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the checks jointly validate one declared file against its manifest and verified source"
+)]
+/// Validates declared file metadata.
 fn validate_declared_file_metadata(
     logical_path: &str,
     kind: BackupFileKind,
@@ -885,6 +1065,7 @@ fn validate_declared_file_metadata(
     })
 }
 
+/// Verifies root declared file.
 fn verify_root_declared_file(
     root_dir: &Path,
     logical_path: &str,
@@ -924,6 +1105,7 @@ fn verify_root_declared_file(
     )
 }
 
+/// Copies verified file to writer.
 pub(crate) fn copy_verified_file_to_writer<W: Write>(
     file: &VerifiedSavedV4File,
     writer: &mut W,
@@ -963,6 +1145,7 @@ pub(crate) fn copy_verified_file_to_writer<W: Write>(
     Ok(())
 }
 
+/// Reads verified file.
 pub(crate) fn read_verified_file(file: &VerifiedSavedV4File) -> Result<Vec<u8>> {
     let capacity = usize::try_from(file.size).unwrap_or(usize::MAX);
     let mut bytes = Vec::with_capacity(capacity.min(1024 * 1024));
@@ -970,10 +1153,12 @@ pub(crate) fn read_verified_file(file: &VerifiedSavedV4File) -> Result<Vec<u8>> 
     Ok(bytes)
 }
 
+/// Performs the verified file is root stored handler operation.
 const fn verified_file_is_root_stored(file: &VerifiedSavedV4File) -> bool {
     matches!(file.source, VerifiedSavedV4FileSource::RootFile(_))
 }
 
+/// Validates board JSON identity.
 fn validate_board_json_identity(
     board_json_file: &VerifiedSavedV4File,
     expected_short_name: &str,
@@ -1017,6 +1202,7 @@ fn validate_board_json_identity(
     Ok(())
 }
 
+/// Collects unexpected files.
 fn collect_unexpected_files(
     root_dir: &Path,
     current: &Path,
@@ -1070,6 +1256,7 @@ fn collect_unexpected_files(
     Ok(())
 }
 
+/// Verifies split part path.
 fn verify_split_part_path(root_dir: &Path, filename: &str) -> Result<PathBuf> {
     sanitize_logical_path(filename)?;
     let parts = filename.split('/').collect::<Vec<_>>();
@@ -1082,6 +1269,7 @@ fn verify_split_part_path(root_dir: &Path, filename: &str) -> Result<PathBuf> {
     resolve_saved_v4_file(root_dir, filename, "Backup v4 split ZIP part")
 }
 
+/// Parses split part index.
 fn parse_split_part_index(filename: &str) -> Result<u32> {
     let Some(name) = filename.strip_prefix("parts/") else {
         return Err(AppError::BadRequest(format!(
@@ -1120,6 +1308,7 @@ fn parse_split_part_index(filename: &str) -> Result<u32> {
     Ok(index)
 }
 
+/// Verifies ZIP entry name.
 fn verify_zip_entry_name(entry_name: &str) -> Result<()> {
     sanitize_logical_path(entry_name)?;
     if entry_name.starts_with("parts/")
@@ -1135,6 +1324,11 @@ fn verify_zip_entry_name(entry_name: &str) -> Result<()> {
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "split-part names, sizes, hashes, ZIP members, and aggregate limits are one trust boundary"
+)]
+/// Verifies split ZIP files.
 fn verify_split_zip_files(
     root_dir: &Path,
     manifest: &BackupManifest,
@@ -1334,6 +1528,11 @@ fn verify_split_zip_files(
     Ok((verified_files, allowed_files))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "root metadata, manifest, payload, path, and checksum checks form one fail-closed verifier"
+)]
+/// Verifies saved v4 root.
 pub(crate) fn verify_saved_v4_root(
     root_dir: &Path,
     expected_scopes: &[BackupScope],
@@ -1741,12 +1940,12 @@ pub(crate) fn verify_saved_v4_root(
                 upload_files: board_uploads.remove(board_short).unwrap_or_default(),
             },
         );
-        let _ = (
+        drop((
             threads_jsonl_file,
             posts_jsonl_file,
             files_jsonl_file,
             board_summary,
-        );
+        ));
     }
 
     if !board_json.is_empty()
@@ -1805,6 +2004,7 @@ pub(crate) fn verify_saved_v4_root(
     })
 }
 
+/// Verifies database snapshot schema.
 fn verify_db_snapshot_schema(snapshot: &VerifiedSavedV4DbSnapshot) -> Result<()> {
     let mut temp_db = tempfile::NamedTempFile::new().map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
@@ -1826,15 +2026,25 @@ fn verify_db_snapshot_schema(snapshot: &VerifiedSavedV4DbSnapshot) -> Result<()>
 }
 
 #[cfg(test)]
-pub(crate) fn valid_db_snapshot_for_test() -> Vec<u8> {
-    let temp_dir = tempfile::tempdir().expect("tempdir");
+pub(crate) fn valid_db_snapshot_for_test() -> anyhow::Result<Vec<u8>> {
+    valid_db_snapshot_for_test_result()
+}
+
+#[cfg(test)]
+fn valid_db_snapshot_for_test_result() -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context as _;
+
+    let temp_dir = tempfile::tempdir().context("create database snapshot fixture directory")?;
     let db_path = temp_dir.path().join("snapshot.sqlite3");
-    let pool = crate::db::init_test_pool().expect("test pool");
-    let conn = pool.get().expect("db conn");
-    let db_path_sql = db_path.to_str().expect("db path").replace('\'', "''");
+    let pool = crate::db::init_test_pool().context("create test database pool")?;
+    let conn = pool.get().context("get test database connection")?;
+    let db_path_sql = db_path
+        .to_str()
+        .context("database snapshot fixture path is not UTF-8")?
+        .replace('\'', "''");
     conn.execute_batch(&format!("VACUUM INTO '{db_path_sql}'"))
-        .expect("vacuum snapshot");
-    std::fs::read(db_path).expect("read db snapshot")
+        .context("create database snapshot fixture")?;
+    std::fs::read(db_path).context("read database snapshot fixture")
 }
 
 #[cfg(test)]
@@ -1844,34 +2054,58 @@ pub(crate) fn write_saved_v4_fixture_for_test(
     files: Vec<(BackupFileEntry, Vec<u8>)>,
     db_snapshot: Option<Vec<u8>>,
     completed_at: i64,
-) -> (BackupMetadata, BackupManifest) {
-    fn write_file(path: &Path, contents: &[u8]) {
+) -> anyhow::Result<(BackupMetadata, BackupManifest)> {
+    write_saved_v4_fixture_for_test_result(root_dir, scope, files, db_snapshot, completed_at)
+}
+
+#[cfg(test)]
+fn write_saved_v4_fixture_for_test_result(
+    root_dir: &Path,
+    scope: BackupScope,
+    files: Vec<(BackupFileEntry, Vec<u8>)>,
+    db_snapshot: Option<Vec<u8>>,
+    completed_at: i64,
+) -> anyhow::Result<(BackupMetadata, BackupManifest)> {
+    use anyhow::Context as _;
+
+    fn write_file(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("create parent");
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create fixture parent directory {}", parent.display()))?;
         }
-        std::fs::write(path, contents).expect("write file");
+        std::fs::write(path, contents)
+            .with_context(|| format!("write fixture file {}", path.display()))?;
+        Ok(())
     }
 
-    std::fs::create_dir_all(root_dir).expect("root");
+    std::fs::create_dir_all(root_dir).context("create saved-backup fixture root")?;
     let backup_id = root_dir
         .file_name()
         .and_then(|name| name.to_str())
-        .expect("backup id")
+        .context("saved-backup fixture root has no UTF-8 backup ID")?
         .to_owned();
     let created_at = completed_at - 60;
     let mut manifest_files = Vec::new();
-    if let Some(db_bytes) = db_snapshot.as_ref() {
+    let includes_database = db_snapshot.is_some();
+    let db_snapshot_info = db_snapshot.as_deref().map(|bytes| DbSnapshotInfo {
+        path: "db/rustchan.sqlite3".to_owned(),
+        size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        sha256: sha256_hex_for_bytes(bytes),
+        integrity_check: None,
+        foreign_key_check: None,
+    });
+    if let Some(db_bytes) = db_snapshot {
         let db_path = "db/rustchan.sqlite3";
-        write_file(&root_dir.join(db_path), db_bytes);
+        write_file(&root_dir.join(db_path), &db_bytes)?;
         manifest_files.push(test_file_entry_for_test(
             db_path,
             None,
             BackupFileKind::Db,
-            db_bytes,
+            &db_bytes,
         ));
     }
     for (entry, bytes) in files {
-        write_file(&root_dir.join(&entry.logical_path), &bytes);
+        write_file(&root_dir.join(&entry.logical_path), &bytes)?;
         manifest_files.push(entry);
     }
     let included_boards = match scope {
@@ -1894,7 +2128,7 @@ pub(crate) fn write_saved_v4_fixture_for_test(
         storage_mode: BackupStorageMode::Directory,
         included_boards: included_boards.clone(),
         includes: BackupIncludeFlags {
-            database: db_snapshot.is_some(),
+            database: includes_database,
             settings: false,
             uploads: true,
             thumbnails: true,
@@ -1902,13 +2136,7 @@ pub(crate) fn write_saved_v4_fixture_for_test(
             board_exports: scope != BackupScope::PreMaintenance,
             file_inventory: scope != BackupScope::PreMaintenance,
         },
-        db_snapshot: db_snapshot.as_ref().map(|bytes| DbSnapshotInfo {
-            path: "db/rustchan.sqlite3".to_owned(),
-            size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-            sha256: sha256_hex_for_bytes(bytes),
-            integrity_check: None,
-            foreign_key_check: None,
-        }),
+        db_snapshot: db_snapshot_info,
         files: manifest_files.clone(),
         parts: Vec::new(),
         maintenance: None,
@@ -1927,11 +2155,13 @@ pub(crate) fn write_saved_v4_fixture_for_test(
         included_boards,
         manifest_path: Some(root_dir.join(MANIFEST_FILE_NAME).display().to_string()),
     };
-    write_json_pretty(&root_dir.join(MANIFEST_FILE_NAME), &manifest).expect("manifest");
-    write_json_pretty(&root_dir.join(BACKUP_METADATA_FILE_NAME), &metadata).expect("metadata");
-    write_text(&root_dir.join(README_FILE_NAME), "test").expect("readme");
-    write_text(&root_dir.join(CHECKSUMS_FILE_NAME), "").expect("checksums");
-    (metadata, manifest)
+    write_json_pretty(&root_dir.join(MANIFEST_FILE_NAME), &manifest)
+        .context("write fixture manifest")?;
+    write_json_pretty(&root_dir.join(BACKUP_METADATA_FILE_NAME), &metadata)
+        .context("write fixture metadata")?;
+    write_text(&root_dir.join(README_FILE_NAME), "test").context("write fixture readme")?;
+    write_text(&root_dir.join(CHECKSUMS_FILE_NAME), "").context("write fixture checksums")?;
+    Ok((metadata, manifest))
 }
 
 #[cfg(test)]
@@ -2009,41 +2239,43 @@ pub(crate) fn board_fixture_files_for_test() -> Vec<(BackupFileEntry, Vec<u8>)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{ensure, Context as _, Result as TestResult};
 
-    fn saved_full_fixture(label: &str) -> (tempfile::TempDir, PathBuf, BackupManifest) {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn saved_full_fixture(label: &str) -> TestResult<(tempfile::TempDir, PathBuf, BackupManifest)> {
+        let dir = tempfile::tempdir().context("create saved-backup fixture directory")?;
         let root = dir.path().join(label);
         let (_metadata, manifest) = write_saved_v4_fixture_for_test(
             &root,
             BackupScope::FullSite,
             board_fixture_files_for_test(),
-            Some(valid_db_snapshot_for_test()),
+            Some(valid_db_snapshot_for_test()?),
             1_715_000_000_i64,
-        );
-        (dir, root, manifest)
+        )?;
+        Ok((dir, root, manifest))
     }
 
-    fn rewrite_manifest(root: &Path, manifest: &BackupManifest) {
-        write_json_pretty(&root.join(MANIFEST_FILE_NAME), manifest).expect("rewrite manifest");
+    fn rewrite_manifest(root: &Path, manifest: &BackupManifest) -> TestResult<()> {
+        write_json_pretty(&root.join(MANIFEST_FILE_NAME), manifest)
+            .context("rewrite fixture manifest")
     }
 
-    fn rewrite_metadata_part_count(root: &Path, part_count: u32) {
-        let mut metadata = load_metadata(&root.join(BACKUP_METADATA_FILE_NAME)).expect("metadata");
+    fn rewrite_metadata_part_count(root: &Path, part_count: u32) -> TestResult<()> {
+        let mut metadata = load_metadata(&root.join(BACKUP_METADATA_FILE_NAME))?;
         metadata.part_count = part_count;
         write_json_pretty(&root.join(BACKUP_METADATA_FILE_NAME), &metadata)
-            .expect("rewrite metadata");
+            .context("rewrite fixture metadata")
     }
 
-    fn media_entry_mut(manifest: &mut BackupManifest) -> &mut BackupFileEntry {
+    fn media_entry_mut(manifest: &mut BackupManifest) -> TestResult<&mut BackupFileEntry> {
         manifest
             .files
             .iter_mut()
             .find(|entry| entry.logical_path == "boards/tech/media/src/example.txt")
-            .expect("media entry")
+            .context("fixture manifest has no media entry")
     }
 
-    fn convert_fixture_to_split(root: &Path, target_part_size: u64) -> BackupManifest {
-        let mut manifest = load_manifest(&root.join(MANIFEST_FILE_NAME)).expect("manifest");
+    fn convert_fixture_to_split(root: &Path, target_part_size: u64) -> TestResult<BackupManifest> {
+        let mut manifest = load_manifest(&root.join(MANIFEST_FILE_NAME))?;
         let mut entries = manifest
             .files
             .iter()
@@ -2051,7 +2283,7 @@ mod tests {
             .collect::<Vec<(usize, &BackupFileEntry)>>();
         entries.sort_by(|left, right| left.1.logical_path.cmp(&right.1.logical_path));
         let parts_dir = root.join(PARTS_DIR_NAME);
-        std::fs::create_dir_all(&parts_dir).expect("parts dir");
+        std::fs::create_dir_all(&parts_dir).context("create split-backup parts directory")?;
         let mut part_infos = Vec::new();
         let mut current_files = Vec::new();
         let mut current_bytes = 0u64;
@@ -2074,52 +2306,63 @@ mod tests {
             groups.push((current_files, false));
         }
 
-        let total_parts = u32::try_from(groups.len()).expect("part count");
+        let total_parts = u32::try_from(groups.len()).context("split part count exceeds u32")?;
         for (offset, (file_indexes, oversized)) in groups.iter().enumerate() {
-            let part_index = u32::try_from(offset + 1).expect("part index");
+            let part_index = u32::try_from(offset + 1).context("split part index exceeds u32")?;
             let part_filename = format!("parts/part-{part_index:04}.zip");
             let part_path = root.join(&part_filename);
-            let file = std::fs::File::create(&part_path).expect("part file");
+            let file = std::fs::File::create(&part_path)
+                .with_context(|| format!("create split part {}", part_path.display()))?;
             let mut zip = zip::ZipWriter::new(file);
             for file_index in file_indexes {
-                let entry = manifest.files.get(*file_index).expect("entry");
+                let entry = manifest
+                    .files
+                    .get(*file_index)
+                    .context("split part references a missing manifest entry")?;
                 let source_path = root.join(&entry.logical_path);
                 zip.start_file(
                     &entry.logical_path,
                     zip::write::SimpleFileOptions::default(),
                 )
-                .expect("start entry");
-                let mut source = std::fs::File::open(&source_path).expect("source");
-                std::io::copy(&mut source, &mut zip).expect("copy entry");
+                .context("start split-part ZIP entry")?;
+                let mut source = std::fs::File::open(&source_path)
+                    .with_context(|| format!("open fixture file {}", source_path.display()))?;
+                std::io::copy(&mut source, &mut zip).context("copy split-part ZIP entry")?;
             }
-            zip.finish().expect("finish part");
+            zip.finish().context("finish split-part ZIP")?;
             for file_index in file_indexes {
-                let entry = manifest.files.get_mut(*file_index).expect("entry");
+                let entry = manifest
+                    .files
+                    .get_mut(*file_index)
+                    .context("split part references a missing mutable manifest entry")?;
                 entry.zip_part = Some(part_filename.clone());
                 entry.zip_entry_path = Some(entry.logical_path.clone());
                 entry.compression_method = Some("stored".to_owned());
-                std::fs::remove_file(root.join(&entry.logical_path)).expect("remove root file");
+                std::fs::remove_file(root.join(&entry.logical_path))
+                    .context("remove root copy of split-backed file")?;
             }
-            let metadata = std::fs::metadata(&part_path).expect("part metadata");
+            let metadata = std::fs::metadata(&part_path).context("read split-part metadata")?;
             part_infos.push(BackupPartInfo {
                 filename: part_filename,
                 part_index,
                 total_parts,
                 backup_id: manifest.backup_id.clone(),
                 size: metadata.len(),
-                sha256: sha256_hex_for_file(&part_path).expect("part sha"),
+                sha256: sha256_hex_for_file(&part_path)?,
                 target_part_size,
                 oversized: *oversized,
             });
         }
         manifest.storage_mode = BackupStorageMode::SplitZip;
         manifest.parts = part_infos;
-        write_json_pretty(&root.join(MANIFEST_FILE_NAME), &manifest).expect("manifest");
-        let mut metadata = load_metadata(&root.join(BACKUP_METADATA_FILE_NAME)).expect("metadata");
+        write_json_pretty(&root.join(MANIFEST_FILE_NAME), &manifest)
+            .context("write split fixture manifest")?;
+        let mut metadata = load_metadata(&root.join(BACKUP_METADATA_FILE_NAME))?;
         metadata.storage_mode = BackupStorageMode::SplitZip;
         metadata.part_count = total_parts;
-        write_json_pretty(&root.join(BACKUP_METADATA_FILE_NAME), &metadata).expect("metadata");
-        manifest
+        write_json_pretty(&root.join(BACKUP_METADATA_FILE_NAME), &metadata)
+            .context("write split fixture metadata")?;
+        Ok(manifest)
     }
 
     fn rewrite_split_entry(
@@ -2127,26 +2370,36 @@ mod tests {
         manifest: &mut BackupManifest,
         logical_path: &str,
         replacement: &[u8],
-    ) {
+    ) -> TestResult<()> {
         let entry = manifest
             .files
             .iter_mut()
             .find(|entry| entry.logical_path == logical_path)
-            .expect("entry");
-        let part_filename = entry.zip_part.clone().expect("zip part");
-        let entry_path = entry.zip_entry_path.clone().expect("zip entry");
-        entry.size = u64::try_from(replacement.len()).expect("replacement len");
+            .context("fixture manifest has no requested split entry")?;
+        let part_filename = entry
+            .zip_part
+            .clone()
+            .context("fixture entry has no split part")?;
+        let entry_path = entry
+            .zip_entry_path
+            .clone()
+            .context("fixture entry has no ZIP entry path")?;
+        entry.size = u64::try_from(replacement.len()).context("replacement exceeds u64")?;
         entry.sha256 = sha256_hex_for_bytes(replacement);
 
         let part_path = root.join(&part_filename);
-        let source = std::fs::File::open(&part_path).expect("open part");
-        let mut archive = zip::ZipArchive::new(source).expect("zip archive");
+        let source = std::fs::File::open(&part_path).context("open split part")?;
+        let mut archive = zip::ZipArchive::new(source).context("parse split part")?;
         let mut zip_entries = Vec::new();
         for index in 0..archive.len() {
-            let mut zip_entry = archive.by_index(index).expect("zip entry");
+            let mut zip_entry = archive
+                .by_index(index)
+                .context("read split-part ZIP entry")?;
             let name = zip_entry.name().to_owned();
             let mut bytes = Vec::new();
-            zip_entry.read_to_end(&mut bytes).expect("read zip entry");
+            zip_entry
+                .read_to_end(&mut bytes)
+                .context("read split-part ZIP entry contents")?;
             if name == entry_path {
                 bytes = replacement.to_vec();
             }
@@ -2154,42 +2407,45 @@ mod tests {
         }
         drop(archive);
 
-        let output = std::fs::File::create(&part_path).expect("rewrite part");
+        let output = std::fs::File::create(&part_path).context("rewrite split part")?;
         let mut zip = zip::ZipWriter::new(output);
         for (name, bytes) in zip_entries {
             zip.start_file(name, zip::write::SimpleFileOptions::default())
-                .expect("start entry");
-            zip.write_all(&bytes).expect("write entry");
+                .context("start rewritten split-part entry")?;
+            zip.write_all(&bytes)
+                .context("write rewritten split-part entry")?;
         }
-        zip.finish().expect("finish part");
+        zip.finish().context("finish rewritten split part")?;
 
         let part = manifest
             .parts
             .iter_mut()
             .find(|part| part.filename == part_filename)
-            .expect("part");
-        part.size = std::fs::metadata(&part_path).expect("part metadata").len();
-        part.sha256 = sha256_hex_for_file(&part_path).expect("part sha");
-        rewrite_manifest(root, manifest);
+            .context("fixture manifest has no rewritten split part")?;
+        part.size = std::fs::metadata(&part_path)
+            .context("read rewritten split-part metadata")?
+            .len();
+        part.sha256 = sha256_hex_for_file(&part_path)?;
+        rewrite_manifest(root, manifest)
     }
 
     #[test]
-    fn verify_saved_v4_root_accepts_valid_full_backup() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn verify_saved_v4_root_accepts_valid_full_backup() -> TestResult<()> {
+        let dir = tempfile::tempdir().context("create temporary directory")?;
         let root = dir.path().join("2026-05-06_full-site_abcd12");
         write_saved_v4_fixture_for_test(
             &root,
             BackupScope::FullSite,
             board_fixture_files_for_test(),
-            Some(valid_db_snapshot_for_test()),
+            Some(valid_db_snapshot_for_test()?),
             1_715_000_000_i64,
-        );
+        )?;
 
-        let verified = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect("verify saved full backup");
-        assert_eq!(verified.completed_at, 1_715_000_000_i64);
-        assert!(verified.db_snapshot.is_some());
-        assert!(verified.boards.contains_key("tech"));
+        let verified = verify_saved_v4_root(&root, &[BackupScope::FullSite])?;
+        ensure!(verified.completed_at == 1_715_000_000_i64);
+        ensure!(verified.db_snapshot.is_some());
+        ensure!(verified.boards.contains_key("tech"));
+        Ok(())
     }
 
     #[test]
@@ -2200,69 +2456,82 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_size_mismatch() {
-        let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_size");
-        media_entry_mut(&mut manifest).size = 999;
-        rewrite_manifest(&root, &manifest);
+    fn verify_saved_v4_root_rejects_size_mismatch() -> TestResult<()> {
+        let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_size")?;
+        media_entry_mut(&mut manifest)?.size = 999;
+        rewrite_manifest(&root, &manifest)?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("size mismatch should fail");
-        assert!(error.to_string().contains("size mismatch"));
+            .err()
+            .context("size mismatch was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("size mismatch"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_absolute_path() {
-        let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_absolute");
-        media_entry_mut(&mut manifest).logical_path = "/tmp/escape.txt".to_owned();
-        rewrite_manifest(&root, &manifest);
+    fn verify_saved_v4_root_rejects_absolute_path() -> TestResult<()> {
+        let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_absolute")?;
+        media_entry_mut(&mut manifest)?.logical_path = "/tmp/escape.txt".to_owned();
+        rewrite_manifest(&root, &manifest)?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("absolute path should fail");
-        assert!(error.to_string().contains("suspicious logical path"));
+            .err()
+            .context("absolute path was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("suspicious logical path"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_backslash_path() {
-        let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_backslash");
-        media_entry_mut(&mut manifest).logical_path =
+    fn verify_saved_v4_root_rejects_backslash_path() -> TestResult<()> {
+        let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_backslash")?;
+        media_entry_mut(&mut manifest)?.logical_path =
             "boards\\tech\\media\\src\\example.txt".to_owned();
-        rewrite_manifest(&root, &manifest);
+        rewrite_manifest(&root, &manifest)?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("backslash path should fail");
-        assert!(error.to_string().contains("suspicious logical path"));
+            .err()
+            .context("backslash path was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("suspicious logical path"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_windows_drive_path() {
-        let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_drive");
-        media_entry_mut(&mut manifest).logical_path = "C:/backup/example.txt".to_owned();
-        rewrite_manifest(&root, &manifest);
+    fn verify_saved_v4_root_rejects_windows_drive_path() -> TestResult<()> {
+        let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_drive")?;
+        media_entry_mut(&mut manifest)?.logical_path = "C:/backup/example.txt".to_owned();
+        rewrite_manifest(&root, &manifest)?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("Windows drive path should fail");
-        assert!(error.to_string().contains("suspicious logical path"));
+            .err()
+            .context("Windows drive path was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("suspicious logical path"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_non_regular_declared_file() {
-        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_nonregular");
+    fn verify_saved_v4_root_rejects_non_regular_declared_file() -> TestResult<()> {
+        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_nonregular")?;
         let media_path = root.join("boards/tech/media/src/example.txt");
-        std::fs::remove_file(&media_path).expect("remove media file");
-        std::fs::create_dir(&media_path).expect("replace media file with directory");
+        std::fs::remove_file(&media_path).context("remove media file")?;
+        std::fs::create_dir(&media_path).context("replace media file with directory")?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("non-regular file should fail");
-        assert!(error.to_string().contains("unsafe"));
+            .err()
+            .context("non-regular declared file was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("unsafe"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_tor_key_outside_tor_keys_scope() {
-        let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_tor-scope");
+    fn verify_saved_v4_root_rejects_tor_key_outside_tor_keys_scope() -> TestResult<()> {
+        let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_tor-scope")?;
         let tor_bytes = b"secret";
         let tor_path = root.join("config/hs_ed25519_secret_key");
-        std::fs::create_dir_all(tor_path.parent().expect("tor parent")).expect("create config dir");
-        std::fs::write(&tor_path, tor_bytes).expect("write tor key outside scope");
+        let tor_parent = tor_path
+            .parent()
+            .context("Tor fixture path has no parent")?;
+        std::fs::create_dir_all(tor_parent).context("create config directory")?;
+        std::fs::write(&tor_path, tor_bytes).context("write Tor key outside scope")?;
         manifest.includes.tor_keys = true;
         manifest.files.push(test_file_entry_for_test(
             "config/hs_ed25519_secret_key",
@@ -2270,352 +2539,474 @@ mod tests {
             BackupFileKind::TorKey,
             tor_bytes,
         ));
-        rewrite_manifest(&root, &manifest);
+        rewrite_manifest(&root, &manifest)?;
 
-        let mut metadata = load_metadata(&root.join(BACKUP_METADATA_FILE_NAME)).expect("metadata");
+        let mut metadata = load_metadata(&root.join(BACKUP_METADATA_FILE_NAME))?;
         metadata.includes_tor_keys = true;
         write_json_pretty(&root.join(BACKUP_METADATA_FILE_NAME), &metadata)
-            .expect("rewrite metadata");
+            .context("rewrite fixture metadata")?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("tor key outside tor-keys scope should fail");
-        assert!(error.to_string().contains("escapes the tor-keys/ scope"));
+            .err()
+            .context("Tor key outside tor-keys scope was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("escapes the tor-keys/ scope"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_checksum_mismatch() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn verify_saved_v4_root_rejects_checksum_mismatch() -> TestResult<()> {
+        let dir = tempfile::tempdir().context("create temporary directory")?;
         let root = dir.path().join("2026-05-06_full-site_checksum");
         write_saved_v4_fixture_for_test(
             &root,
             BackupScope::FullSite,
             board_fixture_files_for_test(),
-            Some(valid_db_snapshot_for_test()),
+            Some(valid_db_snapshot_for_test()?),
             1_715_000_100_i64,
-        );
+        )?;
         std::fs::write(root.join("boards/tech/media/src/example.txt"), b"other")
-            .expect("tamper file");
+            .context("tamper fixture file")?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("checksum mismatch should fail");
+            .err()
+            .context("checksum mismatch was unexpectedly accepted")?;
         let message = error.to_string();
-        assert!(message.contains("checksum mismatch") || message.contains("size mismatch"));
+        ensure!(message.contains("checksum mismatch") || message.contains("size mismatch"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_missing_declared_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn verify_saved_v4_root_rejects_missing_declared_file() -> TestResult<()> {
+        let dir = tempfile::tempdir().context("create temporary directory")?;
         let root = dir.path().join("2026-05-06_full-site_missing");
         write_saved_v4_fixture_for_test(
             &root,
             BackupScope::FullSite,
             board_fixture_files_for_test(),
-            Some(valid_db_snapshot_for_test()),
+            Some(valid_db_snapshot_for_test()?),
             1_715_000_200_i64,
-        );
-        std::fs::remove_file(root.join("boards/tech/media/src/example.txt")).expect("remove file");
+        )?;
+        std::fs::remove_file(root.join("boards/tech/media/src/example.txt"))
+            .context("remove declared fixture file")?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("missing declared file should fail");
-        assert!(error.to_string().contains("missing declared file"));
+            .err()
+            .context("missing declared file was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("missing declared file"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_accepts_valid_split_zip_backup() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn verify_saved_v4_root_accepts_valid_split_zip_backup() -> TestResult<()> {
+        let dir = tempfile::tempdir().context("create temporary directory")?;
         let root = dir.path().join("2026-05-06_full-site_split");
         write_saved_v4_fixture_for_test(
             &root,
             BackupScope::FullSite,
             board_fixture_files_for_test(),
-            Some(valid_db_snapshot_for_test()),
+            Some(valid_db_snapshot_for_test()?),
             1_715_000_250_i64,
-        );
-        convert_fixture_to_split(&root, 16);
+        )?;
+        convert_fixture_to_split(&root, 16)?;
 
-        let verified =
-            verify_saved_v4_root(&root, &[BackupScope::FullSite]).expect("verify split backup");
-        assert_eq!(verified.metadata.storage_mode, BackupStorageMode::SplitZip);
-        assert!(!verified.manifest.parts.is_empty());
-        assert!(verified.boards.contains_key("tech"));
+        let verified = verify_saved_v4_root(&root, &[BackupScope::FullSite])?;
+        ensure!(verified.metadata.storage_mode == BackupStorageMode::SplitZip);
+        ensure!(!verified.manifest.parts.is_empty());
+        ensure!(verified.boards.contains_key("tech"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_split_board_json_identity_mismatch() {
-        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_board-json");
-        let mut manifest = convert_fixture_to_split(&root, 16);
+    fn verify_saved_v4_root_rejects_split_board_json_identity_mismatch() -> TestResult<()> {
+        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_board-json")?;
+        let mut manifest = convert_fixture_to_split(&root, 16)?;
         let mismatched_board_json = br#"{"version":1,"board":{"id":1,"short_name":"b","name":"Random","description":"","nsfw":false,"max_threads":100,"max_archived_threads":150,"bump_limit":300,"allow_images":true,"allow_video":true,"allow_audio":false,"allow_any_files":false,"allow_tripcodes":true,"edit_window_secs":300,"allow_editing":false,"allow_self_delete":false,"allow_archive":true,"allow_video_embeds":false,"allow_captcha":false,"show_poster_ids":false,"collapse_greentext":false,"post_cooldown_secs":0,"banner_mode":"inherit","access_mode":"public","access_password_hash":"","created_at":1},"threads":[],"posts":[],"polls":[],"poll_options":[],"poll_votes":[],"file_hashes":[],"banners":[]}"#;
         rewrite_split_entry(
             &root,
             &mut manifest,
             "boards/tech/board.json",
             mismatched_board_json,
+        )?;
+
+        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+            .err()
+            .context("mismatched board.json identity was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("board.json identity mismatch"));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_saved_v4_root_rejects_missing_split_part() -> TestResult<()> {
+        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_missing-part")?;
+        let manifest = convert_fixture_to_split(&root, 16)?;
+        let part = root.join(
+            &manifest
+                .parts
+                .first()
+                .context("fixture manifest has no split part")?
+                .filename,
         );
+        std::fs::remove_file(part).context("remove split part")?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("mismatched board.json should fail");
-        assert!(error.to_string().contains("board.json identity mismatch"));
+            .err()
+            .context("missing split part was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("missing declared file"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_missing_split_part() {
-        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_missing-part");
-        let manifest = convert_fixture_to_split(&root, 16);
-        let part = root.join(&manifest.parts.first().expect("split part").filename);
-        std::fs::remove_file(part).expect("remove part");
+    fn verify_saved_v4_root_rejects_corrupt_split_part_hash() -> TestResult<()> {
+        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_corrupt-part")?;
+        let manifest = convert_fixture_to_split(&root, 16)?;
+        let part = root.join(
+            &manifest
+                .parts
+                .first()
+                .context("fixture manifest has no split part")?
+                .filename,
+        );
+        std::fs::write(part, b"not a zip").context("corrupt split part")?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("missing part should fail");
-        assert!(error.to_string().contains("missing declared file"));
-    }
-
-    #[test]
-    fn verify_saved_v4_root_rejects_corrupt_split_part_hash() {
-        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_corrupt-part");
-        let manifest = convert_fixture_to_split(&root, 16);
-        let part = root.join(&manifest.parts.first().expect("split part").filename);
-        std::fs::write(part, b"not a zip").expect("corrupt part");
-
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("corrupt part hash should fail");
+            .err()
+            .context("corrupt split-part hash was unexpectedly accepted")?;
         let message = error.to_string();
-        assert!(message.contains("checksum mismatch") || message.contains("size mismatch"));
+        ensure!(message.contains("checksum mismatch") || message.contains("size mismatch"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_zip_backed_file_duplicate_at_root() {
-        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_duplicate-root");
-        convert_fixture_to_split(&root, 16);
+    fn verify_saved_v4_root_rejects_zip_backed_file_duplicate_at_root() -> TestResult<()> {
+        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_duplicate-root")?;
+        convert_fixture_to_split(&root, 16)?;
         let duplicate = root.join("boards/tech/media/src/example.txt");
-        std::fs::create_dir_all(duplicate.parent().expect("duplicate parent"))
-            .expect("create duplicate parent");
-        std::fs::write(duplicate, b"media").expect("write duplicate root payload");
+        let duplicate_parent = duplicate
+            .parent()
+            .context("duplicate fixture path has no parent")?;
+        std::fs::create_dir_all(duplicate_parent).context("create duplicate parent")?;
+        std::fs::write(duplicate, b"media").context("write duplicate root payload")?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("duplicate root payload should fail");
-        assert!(error.to_string().contains("unexpected files"));
+            .err()
+            .context("duplicate root payload was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("unexpected files"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_nested_split_part_path() {
-        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_nested-part");
-        let mut manifest = convert_fixture_to_split(&root, 16);
-        manifest.parts.first_mut().expect("part").filename =
-            "parts/nested/part-0001.zip".to_owned();
-        rewrite_manifest(&root, &manifest);
+    fn verify_saved_v4_root_rejects_nested_split_part_path() -> TestResult<()> {
+        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_nested-part")?;
+        let mut manifest = convert_fixture_to_split(&root, 16)?;
+        manifest
+            .parts
+            .first_mut()
+            .context("fixture manifest has no split part")?
+            .filename = "parts/nested/part-0001.zip".to_owned();
+        rewrite_manifest(&root, &manifest)?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("nested split part path should fail");
-        assert!(error.to_string().contains("part-0001.zip"));
+            .err()
+            .context("nested split-part path was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("part-0001.zip"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_bad_split_part_name() {
-        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_bad-part-name");
-        let mut manifest = convert_fixture_to_split(&root, 16);
-        manifest.parts.first_mut().expect("part").filename = "parts/foo.zip".to_owned();
-        rewrite_manifest(&root, &manifest);
+    fn verify_saved_v4_root_rejects_bad_split_part_name() -> TestResult<()> {
+        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_bad-part-name")?;
+        let mut manifest = convert_fixture_to_split(&root, 16)?;
+        manifest
+            .parts
+            .first_mut()
+            .context("fixture manifest has no split part")?
+            .filename = "parts/foo.zip".to_owned();
+        rewrite_manifest(&root, &manifest)?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("bad split part name should fail");
-        assert!(error.to_string().contains("part-0001.zip"));
+            .err()
+            .context("bad split-part name was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("part-0001.zip"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_duplicate_split_part_filename() {
+    fn verify_saved_v4_root_rejects_duplicate_split_part_filename() -> TestResult<()> {
         let (_dir, root, _manifest) =
-            saved_full_fixture("2026-05-06_full-site_duplicate-part-file");
-        let mut manifest = convert_fixture_to_split(&root, 16);
-        let duplicate_filename = manifest.parts.first().expect("first part").filename.clone();
-        manifest.parts.get_mut(1).expect("second part").filename = duplicate_filename;
-        rewrite_manifest(&root, &manifest);
+            saved_full_fixture("2026-05-06_full-site_duplicate-part-file")?;
+        let mut manifest = convert_fixture_to_split(&root, 16)?;
+        let duplicate_filename = manifest
+            .parts
+            .first()
+            .context("fixture manifest has no first split part")?
+            .filename
+            .clone();
+        manifest
+            .parts
+            .get_mut(1)
+            .context("fixture manifest has no second split part")?
+            .filename = duplicate_filename;
+        rewrite_manifest(&root, &manifest)?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("duplicate split part filename should fail");
-        assert!(error
+            .err()
+            .context("duplicate split-part filename was unexpectedly accepted")?;
+        ensure!(error
             .to_string()
             .contains("duplicate split ZIP part filename"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_duplicate_split_part_index() {
+    fn verify_saved_v4_root_rejects_duplicate_split_part_index() -> TestResult<()> {
         let (_dir, root, _manifest) =
-            saved_full_fixture("2026-05-06_full-site_duplicate-part-index");
-        let mut manifest = convert_fixture_to_split(&root, 16);
-        let duplicate_index = manifest.parts.first().expect("first part").part_index;
-        manifest.parts.get_mut(1).expect("second part").part_index = duplicate_index;
-        rewrite_manifest(&root, &manifest);
+            saved_full_fixture("2026-05-06_full-site_duplicate-part-index")?;
+        let mut manifest = convert_fixture_to_split(&root, 16)?;
+        let duplicate_index = manifest
+            .parts
+            .first()
+            .context("fixture manifest has no first split part")?
+            .part_index;
+        manifest
+            .parts
+            .get_mut(1)
+            .context("fixture manifest has no second split part")?
+            .part_index = duplicate_index;
+        rewrite_manifest(&root, &manifest)?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("duplicate split part index should fail");
-        assert!(error.to_string().contains("duplicate split ZIP part index"));
+            .err()
+            .context("duplicate split-part index was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("duplicate split ZIP part index"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_split_part_total_mismatch() {
-        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_part-total");
-        let mut manifest = convert_fixture_to_split(&root, 16);
+    fn verify_saved_v4_root_rejects_split_part_total_mismatch() -> TestResult<()> {
+        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_part-total")?;
+        let mut manifest = convert_fixture_to_split(&root, 16)?;
         let wrong_total = manifest
             .parts
             .first()
-            .expect("part")
+            .context("fixture manifest has no split part")?
             .total_parts
             .saturating_add(1);
-        manifest.parts.first_mut().expect("part").total_parts = wrong_total;
-        rewrite_manifest(&root, &manifest);
+        manifest
+            .parts
+            .first_mut()
+            .context("fixture manifest has no mutable split part")?
+            .total_parts = wrong_total;
+        rewrite_manifest(&root, &manifest)?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("split part total mismatch should fail");
-        assert!(error.to_string().contains("total_parts"));
+            .err()
+            .context("split-part total mismatch was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("total_parts"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_non_contiguous_split_part_index() {
-        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_part-gap");
-        let mut manifest = convert_fixture_to_split(&root, 16);
+    fn verify_saved_v4_root_rejects_non_contiguous_split_part_index() -> TestResult<()> {
+        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_part-gap")?;
+        let mut manifest = convert_fixture_to_split(&root, 16)?;
         manifest.parts.remove(0);
-        let new_total = u32::try_from(manifest.parts.len()).expect("part count");
+        let new_total = u32::try_from(manifest.parts.len()).context("part count exceeds u32")?;
         for part in &mut manifest.parts {
             part.total_parts = new_total;
         }
-        rewrite_manifest(&root, &manifest);
-        rewrite_metadata_part_count(&root, new_total);
+        rewrite_manifest(&root, &manifest)?;
+        rewrite_metadata_part_count(&root, new_total)?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("non-contiguous split part index should fail");
+            .err()
+            .context("non-contiguous split-part index was unexpectedly accepted")?;
         let message = error.to_string();
-        assert!(message.contains("outside 1..=") || message.contains("missing split ZIP part"));
+        ensure!(message.contains("outside 1..=") || message.contains("missing split ZIP part"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_split_part_filename_index_mismatch() {
-        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_part-name-index");
-        let mut manifest = convert_fixture_to_split(&root, 16);
-        let original_filename = manifest.parts.first().expect("part").filename.clone();
+    fn verify_saved_v4_root_rejects_split_part_filename_index_mismatch() -> TestResult<()> {
+        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_part-name-index")?;
+        let mut manifest = convert_fixture_to_split(&root, 16)?;
+        let original_filename = manifest
+            .parts
+            .first()
+            .context("fixture manifest has no split part")?
+            .filename
+            .clone();
         let original = root.join(original_filename);
         let replacement_filename = "parts/part-9999.zip".to_owned();
-        manifest.parts.first_mut().expect("part").filename = replacement_filename.clone();
-        std::fs::copy(original, root.join(replacement_filename)).expect("copy part");
-        rewrite_manifest(&root, &manifest);
+        manifest
+            .parts
+            .first_mut()
+            .context("fixture manifest has no mutable split part")?
+            .filename = replacement_filename.clone();
+        std::fs::copy(original, root.join(replacement_filename)).context("copy split part")?;
+        rewrite_manifest(&root, &manifest)?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("split part filename/index mismatch should fail");
-        assert!(error.to_string().contains("filename"));
+            .err()
+            .context("split-part filename/index mismatch was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("filename"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_zero_split_part_index() {
-        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_part-zero");
-        let mut manifest = convert_fixture_to_split(&root, 16);
-        manifest.parts.first_mut().expect("part").part_index = 0;
-        rewrite_manifest(&root, &manifest);
+    fn verify_saved_v4_root_rejects_zero_split_part_index() -> TestResult<()> {
+        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_part-zero")?;
+        let mut manifest = convert_fixture_to_split(&root, 16)?;
+        manifest
+            .parts
+            .first_mut()
+            .context("fixture manifest has no split part")?
+            .part_index = 0;
+        rewrite_manifest(&root, &manifest)?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("zero split part index should fail");
-        assert!(error.to_string().contains("outside 1..="));
+            .err()
+            .context("zero split-part index was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("outside 1..="));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_undeclared_split_zip_entry() {
-        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_extra-entry");
-        let mut manifest = convert_fixture_to_split(&root, 16);
-        let part_filename = manifest.parts.first().expect("split part").filename.clone();
+    fn verify_saved_v4_root_rejects_undeclared_split_zip_entry() -> TestResult<()> {
+        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_extra-entry")?;
+        let mut manifest = convert_fixture_to_split(&root, 16)?;
+        let part_filename = manifest
+            .parts
+            .first()
+            .context("fixture manifest has no split part")?
+            .filename
+            .clone();
         let part_path = root.join(&part_filename);
-        let file = std::fs::File::create(&part_path).expect("rewrite part");
+        let file = std::fs::File::create(&part_path).context("rewrite split part")?;
         let mut zip = zip::ZipWriter::new(file);
         zip.start_file("undeclared.txt", zip::write::SimpleFileOptions::default())
-            .expect("start extra");
-        zip.write_all(b"extra").expect("write extra");
-        zip.finish().expect("finish extra");
-        let first_part = manifest.parts.first_mut().expect("split part");
-        first_part.size = std::fs::metadata(&part_path).expect("metadata").len();
-        first_part.sha256 = sha256_hex_for_file(&part_path).expect("sha");
-        write_json_pretty(&root.join(MANIFEST_FILE_NAME), &manifest).expect("manifest");
+            .context("start undeclared ZIP entry")?;
+        zip.write_all(b"extra")
+            .context("write undeclared ZIP entry")?;
+        zip.finish().context("finish split part")?;
+        let first_part = manifest
+            .parts
+            .first_mut()
+            .context("fixture manifest has no mutable split part")?;
+        first_part.size = std::fs::metadata(&part_path)
+            .context("read split-part metadata")?
+            .len();
+        first_part.sha256 = sha256_hex_for_file(&part_path)?;
+        write_json_pretty(&root.join(MANIFEST_FILE_NAME), &manifest)
+            .context("rewrite fixture manifest")?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("undeclared entry should fail");
-        assert!(error.to_string().contains("undeclared ZIP entry"));
+            .err()
+            .context("undeclared split ZIP entry was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("undeclared ZIP entry"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_unsafe_split_zip_entry_path() {
-        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_unsafe-entry");
-        let mut manifest = convert_fixture_to_split(&root, 16);
-        let part_path = root.join(&manifest.parts.first().expect("split part").filename);
-        let file = std::fs::File::create(&part_path).expect("rewrite part");
+    fn verify_saved_v4_root_rejects_unsafe_split_zip_entry_path() -> TestResult<()> {
+        let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_unsafe-entry")?;
+        let mut manifest = convert_fixture_to_split(&root, 16)?;
+        let part_path = root.join(
+            &manifest
+                .parts
+                .first()
+                .context("fixture manifest has no split part")?
+                .filename,
+        );
+        let file = std::fs::File::create(&part_path).context("rewrite split part")?;
         let mut zip = zip::ZipWriter::new(file);
         zip.start_file("../escape.txt", zip::write::SimpleFileOptions::default())
-            .expect("start unsafe");
-        zip.write_all(b"escape").expect("write unsafe");
-        zip.finish().expect("finish unsafe");
-        let first_part = manifest.parts.first_mut().expect("split part");
-        first_part.size = std::fs::metadata(&part_path).expect("metadata").len();
-        first_part.sha256 = sha256_hex_for_file(&part_path).expect("sha");
-        write_json_pretty(&root.join(MANIFEST_FILE_NAME), &manifest).expect("manifest");
+            .context("start unsafe ZIP entry")?;
+        zip.write_all(b"escape").context("write unsafe ZIP entry")?;
+        zip.finish().context("finish split part")?;
+        let first_part = manifest
+            .parts
+            .first_mut()
+            .context("fixture manifest has no mutable split part")?;
+        first_part.size = std::fs::metadata(&part_path)
+            .context("read split-part metadata")?
+            .len();
+        first_part.sha256 = sha256_hex_for_file(&part_path)?;
+        write_json_pretty(&root.join(MANIFEST_FILE_NAME), &manifest)
+            .context("rewrite fixture manifest")?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("unsafe entry should fail");
-        assert!(error.to_string().contains("suspicious logical path"));
+            .err()
+            .context("unsafe split ZIP entry path was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("suspicious logical path"));
+        Ok(())
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_duplicate_logical_paths() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn verify_saved_v4_root_rejects_duplicate_logical_paths() -> TestResult<()> {
+        let dir = tempfile::tempdir().context("create temporary directory")?;
         let root = dir.path().join("2026-05-06_full-site_duplicate");
         let (_metadata, mut manifest) = write_saved_v4_fixture_for_test(
             &root,
             BackupScope::FullSite,
             board_fixture_files_for_test(),
-            Some(valid_db_snapshot_for_test()),
+            Some(valid_db_snapshot_for_test()?),
             1_715_000_300_i64,
-        );
+        )?;
         manifest.files.push(
             manifest
                 .files
                 .iter()
                 .find(|entry| entry.logical_path == "boards/tech/media/src/example.txt")
                 .cloned()
-                .expect("existing media entry"),
+                .context("fixture manifest has no media entry")?,
         );
-        write_json_pretty(&root.join(MANIFEST_FILE_NAME), &manifest).expect("rewrite manifest");
+        write_json_pretty(&root.join(MANIFEST_FILE_NAME), &manifest)
+            .context("rewrite fixture manifest")?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("duplicate logical paths should fail");
-        assert!(error.to_string().contains("duplicate logical path"));
+            .err()
+            .context("duplicate logical paths were unexpectedly accepted")?;
+        ensure!(error.to_string().contains("duplicate logical path"));
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn verify_saved_v4_root_rejects_symlink_components() {
+    fn verify_saved_v4_root_rejects_symlink_components() -> TestResult<()> {
         use std::os::unix::fs as unix_fs;
 
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::tempdir().context("create temporary directory")?;
         let root = dir.path().join("2026-05-06_full-site_symlink");
         let (_metadata, mut manifest) = write_saved_v4_fixture_for_test(
             &root,
             BackupScope::FullSite,
             board_fixture_files_for_test(),
-            Some(valid_db_snapshot_for_test()),
+            Some(valid_db_snapshot_for_test()?),
             1_715_000_400_i64,
-        );
+        )?;
         let outside_dir = dir.path().join("outside");
-        std::fs::create_dir_all(&outside_dir).expect("outside dir");
-        std::fs::write(outside_dir.join("escape.txt"), b"secret").expect("outside file");
-        std::fs::create_dir_all(root.join("boards/tech/media/src")).expect("media dir");
-        unix_fs::symlink(&outside_dir, root.join("boards/tech/media/src/link")).expect("symlink");
-        if let Some(entry) = manifest
+        std::fs::create_dir_all(&outside_dir).context("create outside fixture directory")?;
+        std::fs::write(outside_dir.join("escape.txt"), b"secret")
+            .context("write outside fixture file")?;
+        std::fs::create_dir_all(root.join("boards/tech/media/src"))
+            .context("create media fixture directory")?;
+        unix_fs::symlink(&outside_dir, root.join("boards/tech/media/src/link"))
+            .context("create fixture symlink")?;
+        let entry = manifest
             .files
             .iter_mut()
             .find(|entry| entry.logical_path == "boards/tech/media/src/example.txt")
-        {
-            entry.logical_path = "boards/tech/media/src/link/escape.txt".to_owned();
-            entry.sha256 = sha256_hex_for_bytes(b"secret");
-            entry.size = 6;
-        }
-        write_json_pretty(&root.join(MANIFEST_FILE_NAME), &manifest).expect("rewrite manifest");
+            .context("fixture manifest has no media entry")?;
+        entry.logical_path = "boards/tech/media/src/link/escape.txt".to_owned();
+        entry.sha256 = sha256_hex_for_bytes(b"secret");
+        entry.size = 6;
+        write_json_pretty(&root.join(MANIFEST_FILE_NAME), &manifest)
+            .context("rewrite fixture manifest")?;
 
         let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
-            .expect_err("symlink component should fail");
-        assert!(error.to_string().contains("unsafe"));
+            .err()
+            .context("symlink component was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("unsafe"));
+        Ok(())
     }
 }

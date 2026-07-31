@@ -1,6 +1,9 @@
+//! Report, appeal, ban, and word-filter sections of the admin panel.
+
 use super::{escape_html, fmt_ts, AdminPanelViewModel};
 use std::fmt::Write as _;
 
+/// Renders the complete moderation tab of the admin panel.
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let report_count = view.moderation.reports.len();
     let appeal_count = view.moderation.appeals.len();
@@ -35,6 +38,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     )
 }
 
+/// Renders active-ban table rows.
 fn render_ban_rows(view: &AdminPanelViewModel<'_>) -> String {
     let mut ban_rows = String::new();
     for ban in view.moderation.bans {
@@ -63,6 +67,7 @@ fn render_ban_rows(view: &AdminPanelViewModel<'_>) -> String {
     ban_rows
 }
 
+/// Renders word-filter table rows.
 fn render_filter_rows(view: &AdminPanelViewModel<'_>) -> String {
     let mut filter_rows = String::new();
     for f in view.moderation.filters {
@@ -87,6 +92,7 @@ fn render_filter_rows(view: &AdminPanelViewModel<'_>) -> String {
     filter_rows
 }
 
+/// Renders open-report table rows.
 fn render_report_rows(view: &AdminPanelViewModel<'_>) -> String {
     let mut report_rows = String::new();
     if view.moderation.reports.is_empty() {
@@ -139,6 +145,7 @@ fn render_report_rows(view: &AdminPanelViewModel<'_>) -> String {
     report_rows
 }
 
+/// Renders pending ban-appeal table rows.
 fn render_appeal_rows(csrf_token: &str, appeals: &[crate::models::BanAppeal]) -> String {
     let mut appeal_rows = String::new();
     if appeals.is_empty() {
@@ -184,9 +191,16 @@ fn render_appeal_rows(csrf_token: &str, appeals: &[crate::models::BanAppeal]) ->
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the moderation controls form one stable server-rendered HTML fragment"
+)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the section interpolates independent pre-rendered moderation tables"
+)]
+/// Renders all moderation subsections and their counters.
 fn render_admin_moderation_section(
     csrf_token: &str,
     report_rows: &str,

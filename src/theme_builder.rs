@@ -1,17 +1,26 @@
+//! Typed theme-builder configuration and deterministic CSS generation.
+
 use serde::{Deserialize, Serialize};
 
+/// Custom-property name containing the serialized builder configuration.
 const BUILDER_DATA_PROPERTY: &str = "--rustchan-builder-data";
+/// Delimiter immediately before the serialized builder payload.
 const BUILDER_DATA_PREFIX: &str = "\"";
+/// Delimiter immediately after the serialized builder payload.
 const BUILDER_DATA_SUFFIX: &str = "\"";
 
+/// Controls the amount of whitespace used by generated theme styles.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeDensity {
+    /// Comfortable spacing suitable for general use.
     Cozy,
+    /// Reduced spacing that places more content on screen.
     Compact,
 }
 
 impl ThemeDensity {
+    /// Parses a form value into a supported density.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -22,15 +31,20 @@ impl ThemeDensity {
     }
 }
 
+/// Selects the generic font stack used by a generated theme.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeFontFamily {
+    /// The platform's default sans-serif interface fonts.
     Sans,
+    /// A traditional serif text stack.
     Serif,
+    /// A fixed-width system font stack.
     Mono,
 }
 
 impl ThemeFontFamily {
+    /// Parses a form value into a supported font family.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -41,6 +55,7 @@ impl ThemeFontFamily {
         }
     }
 
+    /// Returns the complete CSS font-family value for this selection.
     #[must_use]
     pub const fn css_stack(self) -> &'static str {
         match self {
@@ -53,44 +68,77 @@ impl ThemeFontFamily {
     }
 }
 
+/// All administrator-editable values used to generate a custom theme.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThemeBuilderConfig {
+    /// Built-in preset used as the configuration's starting point.
     pub base_preset: String,
+    /// Page background color.
     pub background_color: String,
+    /// Panel background color.
     pub panel_color: String,
+    /// Reply-card background color.
     pub card_color: String,
+    /// Opening-post card background color.
     pub op_card_color: String,
+    /// Primary text color.
     pub text_color: String,
+    /// Secondary text color.
     pub muted_text_color: String,
+    /// Link color.
     pub link_color: String,
+    /// Link color while hovered.
     pub link_hover_color: String,
+    /// General border color.
     pub border_color: String,
+    /// Form-control background color.
     pub input_background_color: String,
+    /// Form-control text color.
     pub input_text_color: String,
+    /// Form-control border color.
     pub input_border_color: String,
+    /// Button background color.
     pub button_background_color: String,
+    /// Button text color.
     pub button_text_color: String,
+    /// Button border color.
     pub button_border_color: String,
+    /// Button background color while hovered.
     pub button_hover_color: String,
+    /// Site-header background color.
     pub header_background_color: String,
+    /// Site-header text color.
     pub header_text_color: String,
+    /// Site-header border color.
     pub header_border_color: String,
+    /// Greentext quote color.
     pub quote_color: String,
+    /// Post-metadata text color.
     pub meta_text_color: String,
+    /// Success-message color.
     pub success_color: String,
+    /// Error-message color.
     pub danger_color: String,
+    /// Border radius in pixels.
     pub border_radius_px: u8,
+    /// Spacing density.
     pub density: ThemeDensity,
+    /// Generic font-family selection.
     pub font_family: ThemeFontFamily,
+    /// Optional administrator-provided CSS appended to generated rules.
     pub advanced_css: String,
 }
 
+/// Identifier and display label for one selectable base preset.
 #[derive(Debug, Clone, Copy)]
 pub struct ThemeBuilderPreset {
+    /// Stable preset identifier.
     pub slug: &'static str,
+    /// Human-readable preset name.
     pub label: &'static str,
 }
 
+/// Presets offered as starting points in the theme builder.
 pub const BUILDER_PRESETS: &[ThemeBuilderPreset] = &[
     ThemeBuilderPreset {
         slug: "forest",
@@ -130,8 +178,14 @@ pub const BUILDER_PRESETS: &[ThemeBuilderPreset] = &[
     },
 ];
 
+/// Builds the default configuration for a named preset.
+///
+/// Unknown preset names fall back to `forest`.
 #[must_use]
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeping the complete preset palette table together makes visual values auditable"
+)]
 pub fn builder_defaults_for_preset(preset_slug: &str) -> ThemeBuilderConfig {
     match preset_slug {
         "blue-sky" => ThemeBuilderConfig {
@@ -407,26 +461,35 @@ pub fn builder_defaults_for_preset(preset_slug: &str) -> ThemeBuilderConfig {
     }
 }
 
+/// Serializes a builder configuration to the hexadecimal marker embedded in CSS.
+///
+/// Serialization failure produces an empty marker, preserving the historical
+/// best-effort behavior of theme generation.
 #[must_use]
 pub fn builder_marker_hex(config: &ThemeBuilderConfig) -> String {
     let json = serde_json::to_vec(config).unwrap_or_default();
     hex::encode(json)
 }
 
+/// Extracts a builder configuration from generated theme CSS.
+///
+/// Returns `None` when the marker is absent, truncated, invalid hexadecimal, or
+/// does not contain a valid serialized configuration.
 #[must_use]
 pub fn parse_builder_config(css: &str) -> Option<ThemeBuilderConfig> {
-    let marker_index = css.find(BUILDER_DATA_PROPERTY)?;
-    let after_marker = &css[marker_index + BUILDER_DATA_PROPERTY.len()..];
-    let start_quote = after_marker.find(BUILDER_DATA_PREFIX)?;
-    let rest = &after_marker[start_quote + BUILDER_DATA_PREFIX.len()..];
-    let end_quote = rest.find(BUILDER_DATA_SUFFIX)?;
-    let hex_payload = &rest[..end_quote];
+    let (_, after_marker) = css.split_once(BUILDER_DATA_PROPERTY)?;
+    let (_, rest) = after_marker.split_once(BUILDER_DATA_PREFIX)?;
+    let (hex_payload, _) = rest.split_once(BUILDER_DATA_SUFFIX)?;
     let bytes = hex::decode(hex_payload).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Generates a complete CSS theme and embeds its builder configuration.
 #[must_use]
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the generated stylesheet is intentionally kept as one contiguous template"
+)]
 pub fn build_theme_css(slug: &str, config: &ThemeBuilderConfig) -> String {
     let density_gap = match config.density {
         ThemeDensity::Cozy => "0.55rem",
@@ -660,9 +723,15 @@ mod tests {
         config.font_family = ThemeFontFamily::Mono;
 
         let css = build_theme_css("forest-copy", &config);
-        let parsed = parse_builder_config(&css).expect("builder config");
 
-        assert_eq!(parsed, config);
-        assert!(css.contains(&builder_marker_hex(&config)));
+        assert_eq!(
+            parse_builder_config(&css).as_ref(),
+            Some(&config),
+            "generated CSS must preserve the complete builder configuration"
+        );
+        assert!(
+            css.contains(&builder_marker_hex(&config)),
+            "generated CSS must contain its hexadecimal builder marker"
+        );
     }
 }

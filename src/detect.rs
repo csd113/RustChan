@@ -1,4 +1,4 @@
-// Startup detection for optional external tools.
+//! Startup detection for optional external tools.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -11,16 +11,21 @@ use std::time::{Duration, Instant};
 pub enum ToolStatus {
     /// Tool is ready for use immediately (e.g. ffmpeg).
     Available,
+    /// Tool is not available at its configured path.
     Missing,
 }
 
+/// Availability of the encoders required for `WebM` transcoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebmEncoderStatus {
+    /// Whether the `libvpx-vp9` video encoder is available.
     pub vp9: bool,
+    /// Whether the `libopus` audio encoder is available.
     pub opus: bool,
 }
 
 impl WebmEncoderStatus {
+    /// Returns whether both required `WebM` encoders are available.
     #[must_use]
     pub const fn is_available(self) -> bool {
         self.vp9 && self.opus
@@ -29,6 +34,7 @@ impl WebmEncoderStatus {
 
 // ─── ffmpeg ───────────────────────────────────────────────────────────────────
 
+/// Probes the configured `ffmpeg` executable and reports its status.
 pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
     let ok = probe_tool(&crate::config::CONFIG.ffmpeg_path);
 
@@ -113,6 +119,7 @@ pub fn detect_webp_encoder(ffmpeg_ok: bool) -> bool {
     has_webp
 }
 
+/// Detects the available external PDF thumbnail renderers in priority order.
 pub fn detect_pdf_thumbnail_renderers() -> Vec<crate::media::thumbnail::PdfRenderer> {
     let renderers = crate::media::thumbnail::detect_pdf_renderers();
 
@@ -148,6 +155,7 @@ pub fn detect_pdf_thumbnail_renderers() -> Vec<crate::media::thumbnail::PdfRende
     renderers
 }
 
+/// Builds the platform-specific `WebP` encoder installation hint.
 fn webp_install_hint() -> String {
     let mut s = String::new();
 
@@ -183,10 +191,12 @@ fn webp_install_hint() -> String {
     s
 }
 
+/// Probes an external tool using its conventional version argument.
 fn probe_tool(program: &str) -> bool {
     probe_tool_with_args(program, &["-version"])
 }
 
+/// Probes an external tool with explicit arguments and a bounded timeout.
 fn probe_tool_with_args(program: &str, args: &[&str]) -> bool {
     let mut command = Command::new(program);
     command
@@ -197,6 +207,7 @@ fn probe_tool_with_args(program: &str, args: &[&str]) -> bool {
         .is_some_and(|status| status.success())
 }
 
+/// Waits for a child command up to `timeout`, terminating it on expiry.
 fn status_with_timeout(
     command: &mut Command,
     timeout: Duration,
@@ -209,8 +220,8 @@ fn status_with_timeout(
             return Some(status);
         }
         if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
+            drop(child.kill());
+            drop(child.wait());
             return None;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -261,6 +272,7 @@ pub fn detect_webm_encoder(ffmpeg_ok: bool) -> WebmEncoderStatus {
     status
 }
 
+/// Builds a platform-specific installation hint for missing `WebM` encoders.
 fn webm_install_hint(has_vp9: bool, has_opus: bool) -> String {
     let mut s = String::new();
     if !has_vp9 {
@@ -339,8 +351,10 @@ use tor_hsservice::{config::OnionServiceConfigBuilder, handle_rend_requests, HsI
 // Result: every Tor stream gets its own isolated bucket for rate limiting, post
 // cooldowns, and bans — one Tor user's actions no longer affect all others.
 // The token is random per-stream so it cannot track users across reconnections.
+/// Active loopback proxy peers mapped to their ephemeral Tor identity token.
 pub static TOR_STREAM_TOKENS: LazyLock<DashMap<SocketAddr, Arc<str>>> = LazyLock::new(DashMap::new);
 
+/// Resolves an eligible loopback peer to its per-stream Tor identity token.
 #[must_use]
 pub fn tor_stream_token_identity(
     peer: Option<SocketAddr>,
@@ -402,7 +416,7 @@ pub fn detect_tor(
         // A short sleep lets the startup banner and any queued tracing events
         // flush to the terminal before Tor starts printing, preventing
         // interleaving with interactive prompts or the keyboard handler startup.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
         let mut attempt = 0u32;
         loop {
@@ -411,7 +425,7 @@ pub fn detect_tor(
                 attempt = attempt + 1,
                 "Starting Tor"
             );
-            let run_start = std::time::Instant::now();
+            let run_start = Instant::now();
             let result = tokio::select! {
                 r = run_arti(data_dir.clone(), bind_port, Arc::clone(&onion_address)) => r,
                 () = cancel.cancelled() => {
@@ -424,7 +438,7 @@ pub fn detect_tor(
             match result {
                 Ok(()) => {
                     // a crash — reset attempt so backoff stays short on reconnect.
-                    if run_start.elapsed() >= std::time::Duration::from_mins(1) {
+                    if run_start.elapsed() >= Duration::from_mins(1) {
                         attempt = 0;
                     }
                     tracing::warn!(target: "rustchan::detect", "Tor: Arti exited cleanly");
@@ -437,8 +451,7 @@ pub fn detect_tor(
             // Clear stale address so UI correctly shows Tor as offline.
             *onion_address.write().await = None;
 
-            let backoff =
-                std::time::Duration::from_secs(30_u64.saturating_mul(1 << attempt.min(4)));
+            let backoff = Duration::from_secs(30_u64.saturating_mul(1 << attempt.min(4)));
             tracing::warn!(target: "rustchan::detect", retry_in = ?backoff, "Tor: scheduling restart");
             tokio::select! {
                 () = tokio::time::sleep(backoff) => {}
@@ -460,10 +473,11 @@ pub fn detect_tor(
 
 // ─── Core Arti task ───────────────────────────────────────────────────────────
 
-#[allow(
+#[expect(
     clippy::cognitive_complexity,
     reason = "the Tor bootstrap and onion-service lifecycle is a single fail-closed state machine"
 )]
+/// Runs one complete Arti client and onion-service lifecycle.
 async fn run_arti(
     _data_dir: std::path::PathBuf,
     bind_port: u16,
@@ -482,19 +496,21 @@ async fn run_arti(
     )
     .build()?;
 
+    let cache_dir = crate::config::runtime_tor_cache_dir();
+    let state_dir = crate::config::runtime_tor_state_dir();
+    let key_dir = crate::config::runtime_tor_hidden_service_keys_dir();
     tracing::info!(
         target: "rustchan::detect",
-        cache_dir  = %crate::config::runtime_tor_cache_dir().display(),
-        state_dir  = %crate::config::runtime_tor_state_dir().display(),
-        key_dir    = %crate::config::runtime_tor_hidden_service_keys_dir().display(),
+        cache_dir  = %cache_dir.display(),
+        state_dir  = %state_dir.display(),
+        key_dir    = %key_dir.display(),
         "Tor: bootstrapping — first run downloads ~2 MB of directory data"
     );
 
     // F-01: Wrap bootstrap in a timeout. Without this, a captive portal,
     // strict firewall, or Tor directory downtime hangs this task forever.
     // so operators on censored networks can increase it via settings.toml.
-    let bootstrap_timeout =
-        std::time::Duration::from_secs(crate::config::CONFIG.tor_bootstrap_timeout_secs);
+    let bootstrap_timeout = Duration::from_secs(crate::config::CONFIG.tor_bootstrap_timeout_secs);
     // KEEP ALIVE: dropping the final Tor client handle closes all Tor circuits
     // and kills the onion service.
     let tor_client: Arc<TorClient<_>> =
@@ -518,10 +534,11 @@ async fn run_arti(
     //
     // "rustchan") so operators running multiple instances with a shared
     // runtime/tor/state/ directory can assign distinct names and avoid key collisions.
+    let key_dir = crate::config::runtime_tor_hidden_service_keys_dir();
     tracing::info!(
         target: "rustchan::detect",
         nickname = %crate::config::CONFIG.tor_service_nickname,
-        key_dir = %crate::config::runtime_tor_hidden_service_keys_dir().display(),
+        key_dir = %key_dir.display(),
         "Tor: launching onion service"
     );
     let svc_config = OnionServiceConfigBuilder::default()
@@ -544,7 +561,7 @@ async fn run_arti(
                 break;
             }
             tracing::debug!(target: "rustchan::detect", attempt = i, "Tor: waiting for HsId availability");
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
         found.ok_or("onion_address() still None after 5 s — service key unavailable")?
     };
@@ -555,7 +572,7 @@ async fn run_arti(
     // RELAY_END automatically when stream_req is dropped).
     // recompiling, e.g. to reduce FD pressure on resource-constrained hosts.
     let max_streams = crate::config::CONFIG.tor_max_concurrent_streams;
-    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_streams));
+    let sem = Arc::new(tokio::sync::Semaphore::new(max_streams));
 
     let local_addr: Arc<str> = Arc::from(
         crate::config::CONFIG
@@ -573,8 +590,13 @@ async fn run_arti(
 
     let mut stream_requests = handle_rend_requests(rend_requests);
 
-    while let Some(stream_req) = stream_requests.next().await {
-        match std::sync::Arc::clone(&sem).try_acquire_owned() {
+    loop {
+        let next_request = stream_requests.next().await;
+        let Some(stream_req) = next_request else {
+            break;
+        };
+        let permit_result = Arc::clone(&sem).try_acquire_owned();
+        match permit_result {
             Ok(permit) => {
                 spawn_tor_stream_proxy(stream_req, permit, Arc::clone(&local_addr));
             }
@@ -588,12 +610,10 @@ async fn run_arti(
             }
         }
     }
-    // drop at end of their enclosing scope (the function body), not at
-    // last-use — so tor_client and onion_service are already live here.
-    // These explicit borrows make the intent unambiguous to future readers
-    // and guard against any tooling that might warn about "unused" bindings.
-    let _ = &tor_client;
-    let _ = &onion_service;
+    // Explicitly drop both keep-alive handles only after the request stream
+    // ends; dropping either earlier would tear down the onion service.
+    drop(onion_service);
+    drop(tor_client);
 
     tracing::warn!(
         target: "rustchan::detect",
@@ -639,14 +659,16 @@ async fn publish_onion_address(onion_name: &str, onion_address: &RwLock<Option<S
     }
 }
 
+/// Spawns one bounded proxy task for an accepted Tor stream.
 fn spawn_tor_stream_proxy(
     stream_req: StreamRequest,
     permit: tokio::sync::OwnedSemaphorePermit,
     local_addr: Arc<str>,
 ) {
     tokio::spawn(async move {
-        let _permit = permit; // released on drop
-        if let Err(e) = proxy_tor_stream(stream_req, &local_addr).await {
+        let result = proxy_tor_stream(stream_req, &local_addr).await;
+        drop(permit);
+        if let Err(e) = result {
             let msg = e.to_string();
             if msg.contains("local TCP connect failed")
                 || msg.contains("timed out connecting to local HTTP server")
@@ -669,19 +691,17 @@ fn spawn_tor_stream_proxy(
 
 // ─── Connection proxy ─────────────────────────────────────────────────────────
 
+/// Proxies one accepted Tor stream to the local HTTP listener.
 async fn proxy_tor_stream(
     stream_req: StreamRequest,
     local_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut tor_stream = stream_req.accept(Connected::new_empty()).await?;
     // queue can fill and connect() can legitimately take several seconds.
-    let mut local = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        TcpStream::connect(local_addr),
-    )
-    .await
-    .map_err(|_error| "timed out connecting to local HTTP server")?
-    .map_err(|e| format!("local TCP connect failed: {e}"))?;
+    let mut local = tokio::time::timeout(Duration::from_secs(15), TcpStream::connect(local_addr))
+        .await
+        .map_err(|_error| "timed out connecting to local HTTP server")?
+        .map_err(|e| format!("local TCP connect failed: {e}"))?;
     // local address. axum's ConnectInfo sees this exact socket address as the
     // peer on the accepted connection, so a different loopback address cannot
     // impersonate the Tor proxy merely by reusing its source port.
@@ -725,12 +745,12 @@ fn hsid_to_onion_address(hsid: HsId) -> String {
     // unwrap_or(0). Sha3_256 always produces 32 bytes — the fallback was dead
     // code that masked potential logic errors if the digest size ever changed.
     let hash: [u8; 32] = hasher.finalize().into();
-    let checksum = [hash[0], hash[1]];
+    let [checksum_first, checksum_second, ..] = hash;
 
-    let mut address_bytes = [0u8; 35];
-    address_bytes[..32].copy_from_slice(pubkey);
-    address_bytes[32..34].copy_from_slice(&checksum);
-    address_bytes[34] = version;
+    let mut address_bytes = Vec::with_capacity(35);
+    address_bytes.extend_from_slice(pubkey);
+    address_bytes.extend_from_slice(&[checksum_first, checksum_second]);
+    address_bytes.push(version);
 
     let encoded = data_encoding::BASE32_NOPAD
         .encode(&address_bytes)
@@ -744,6 +764,7 @@ fn hsid_to_onion_address(hsid: HsId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{Context as _, Result};
 
     /// Verify the v3 onion address encoder against a Python-computed reference
     /// value for the all-zeros Ed25519 key.
@@ -758,7 +779,11 @@ mod tests {
     /// # → aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion
     /// ```
     #[test]
-    fn onion_address_format_is_56_chars_plus_dot_onion() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions intentionally report violations of the onion-address encoding contract"
+    )]
+    fn onion_address_format_is_56_chars_plus_dot_onion() -> Result<()> {
         let zeroed: [u8; 32] = [0u8; 32];
         let hsid = HsId::from(zeroed);
         let addr = hsid_to_onion_address(hsid);
@@ -770,12 +795,9 @@ mod tests {
         );
 
         assert_eq!(addr.len(), 62, "v3 onion address must be 62 chars total");
-        // Use index slicing instead of ends_with / trim_end_matches to avoid
-        // the clippy::case_sensitive_file_extension_comparisons lint.
-        // The encoder always produces lowercase output, and the length is
-        // already asserted above, so fixed-index slicing is safe here.
-        assert_eq!(&addr[56..], ".onion", "must end with .onion");
-        let base32_part = &addr[..56];
+        let base32_part = addr
+            .strip_suffix(".onion")
+            .context("encoded address must end with .onion")?;
         assert_eq!(base32_part.len(), 56, "base32 part must be 56 chars");
         assert!(
             base32_part
@@ -783,25 +805,35 @@ mod tests {
                 .all(|c| matches!(c, 'a'..='z' | '2'..='7')),
             "base32 part must be lowercase a-z2-7 only"
         );
+        Ok(())
     }
 
+    /// Confirms Arti keeps the configured state and cache directories distinct.
     #[test]
-    fn arti_config_preserves_explicit_state_and_cache_layout_offline() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions intentionally report violations of the Arti storage-layout contract"
+    )]
+    fn arti_config_preserves_explicit_state_and_cache_layout_offline() -> Result<()> {
+        let tempdir = tempfile::tempdir().context("create temporary directory")?;
         let state_dir = tempdir.path().join("state");
         let other_state_dir = tempdir.path().join("other-state");
         let cache_dir = tempdir.path().join("cache");
 
         let config = TorClientConfigBuilder::from_directories(&state_dir, &cache_dir)
             .build()
-            .expect("Arti config");
+            .context("build Arti configuration")?;
         let other_config = TorClientConfigBuilder::from_directories(&other_state_dir, &cache_dir)
             .build()
-            .expect("Arti config with other state");
+            .context("build Arti configuration with alternate state")?;
 
         assert_eq!(
-            config.dir_mgr_config().expect("directory config").cache_dir,
-            cache_dir
+            config
+                .dir_mgr_config()
+                .context("Arti configuration has no directory-manager configuration")?
+                .cache_dir,
+            cache_dir,
+            "Arti must retain the explicit cache directory"
         );
         assert!(
             config.keystore().is_enabled(),
@@ -811,18 +843,35 @@ mod tests {
             config, other_config,
             "the explicit state directory must remain part of the Arti configuration"
         );
+        Ok(())
     }
 
     #[cfg(unix)]
+    /// Confirms probing uses the exact configured executable path.
     #[test]
-    fn probe_tool_uses_the_explicit_binary_path() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions intentionally report violations of external-tool path selection"
+    )]
+    fn probe_tool_uses_the_explicit_binary_path() -> Result<()> {
         use std::os::unix::fs::symlink;
 
-        let tempdir = tempfile::tempdir().expect("tempdir");
+        let tempdir = tempfile::tempdir().context("create temporary directory")?;
         let script = tempdir.path().join("ffprobe");
-        symlink("/usr/bin/true", &script).expect("symlink true");
+        symlink("/usr/bin/true", &script).context("symlink true as the probe executable")?;
 
-        assert!(probe_tool(script.to_str().expect("utf8 path")));
-        assert!(!probe_tool("/definitely/not/a/real/ffprobe"));
+        assert!(
+            probe_tool(
+                script
+                    .to_str()
+                    .context("temporary executable path is not UTF-8")?
+            ),
+            "the explicit executable path must be probed"
+        );
+        assert!(
+            !probe_tool("/definitely/not/a/real/ffprobe"),
+            "a nonexistent executable path must fail the probe"
+        );
+        Ok(())
     }
 }

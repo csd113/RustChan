@@ -1,23 +1,37 @@
-// src/db/mod.rs
+//! Database access, schema management, and persistence helpers.
 
 use anyhow::{Context as _, Result};
 use rusqlite::params;
 use rusqlite::OptionalExtension as _;
 use std::collections::HashSet;
 
+/// Administrative users, sessions, moderation, and database health queries.
 pub mod admin;
+/// Banner asset persistence and ordering.
 pub mod banners;
+/// Board configuration, statistics, and deletion operations.
 pub mod boards;
+/// Federated `ChanNet` reply persistence.
 pub mod chan_net;
+/// Durable filesystem-operation records.
 mod fs_ops;
+/// Database schema-version bookkeeping.
 mod migrations;
+/// `SQLite` connection-pool creation and startup checks.
 mod pool;
+/// Post persistence, search, deletion, and background-job state.
 pub mod posts;
+/// Baseline schema installation, repair, and verification.
 mod schema;
+/// First-run setup state and completion markers.
 pub mod setup;
+/// Built-in and custom theme persistence.
 pub mod themes;
+/// Thread creation, mutation, pruning, and archive queries.
 pub mod threads;
+/// Shared database input and output types.
 mod types;
+/// Anonymous per-thread display preferences.
 mod user_thread_prefs;
 
 pub use pool::{first_run_check, has_no_admin, init_pool};
@@ -67,8 +81,11 @@ pub fn database_schema_status_label(conn: &rusqlite::Connection) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Filesystem paths made safe by a committed database deletion.
 pub struct DeletePathsResult {
+    /// Relative paths that are no longer referenced by database rows.
     pub paths: Vec<String>,
+    /// Identifier of the durable cleanup operation, when one was queued.
     pub pending_fs_op_id: Option<String>,
 }
 

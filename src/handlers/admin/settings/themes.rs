@@ -1,22 +1,31 @@
-// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
-#![allow(clippy::wildcard_imports)]
-
-use super::*;
+use super::{
+    admin_panel_error_redirect_anchor_open, admin_panel_redirect_anchor_open, db,
+    require_admin_post_origin_and_csrf, require_admin_session_sid, AppError, AppState, CookieJar,
+    Form, HeaderMap, Response, Result, State, SESSION_COOKIE,
+};
 use crate::theme_builder::{
     build_theme_css, builder_defaults_for_preset, parse_builder_config, ThemeBuilderConfig,
     ThemeDensity, ThemeFontFamily,
 };
+use axum::response::IntoResponse as _;
+use serde::Deserialize;
 
+/// Default theme workshop preset used by this handler.
 const DEFAULT_THEME_WORKSHOP_PRESET: &str = "forest";
+/// Maximum permitted advanced CSS len.
 const MAX_ADVANCED_CSS_LEN: usize = 12_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Variants supported by the theme editor mode workflow.
 enum ThemeEditorMode {
+    /// Represents the builder case.
     Builder,
+    /// Represents the legacy case.
     Legacy,
 }
 
 impl ThemeEditorMode {
+    /// Performs the from field handler operation.
     fn from_field(value: Option<&str>) -> Self {
         if value.is_some_and(|item| item.eq_ignore_ascii_case("legacy")) {
             Self::Legacy
@@ -27,68 +36,119 @@ impl ThemeEditorMode {
 }
 
 #[derive(Deserialize)]
-pub struct ThemeBuilderFields {
+/// Data used by the theme builder fields workflow.
+pub(crate) struct ThemeBuilderFields {
+    /// The optional base preset.
     pub base_preset: Option<String>,
+    /// The optional background color.
     pub background_color: Option<String>,
+    /// The optional panel color.
     pub panel_color: Option<String>,
+    /// The optional card color.
     pub card_color: Option<String>,
+    /// The optional op card color.
     pub op_card_color: Option<String>,
+    /// The optional text color.
     pub text_color: Option<String>,
+    /// The optional muted text color.
     pub muted_text_color: Option<String>,
+    /// The optional link color.
     pub link_color: Option<String>,
+    /// The optional link hover color.
     pub link_hover_color: Option<String>,
+    /// The optional border color.
     pub border_color: Option<String>,
+    /// The optional input background color.
     pub input_background_color: Option<String>,
+    /// The optional input text color.
     pub input_text_color: Option<String>,
+    /// The optional input border color.
     pub input_border_color: Option<String>,
+    /// The optional button background color.
     pub button_background_color: Option<String>,
+    /// The optional button text color.
     pub button_text_color: Option<String>,
+    /// The optional button border color.
     pub button_border_color: Option<String>,
+    /// The optional button hover color.
     pub button_hover_color: Option<String>,
+    /// The optional header background color.
     pub header_background_color: Option<String>,
+    /// The optional header text color.
     pub header_text_color: Option<String>,
+    /// The optional header border color.
     pub header_border_color: Option<String>,
+    /// The optional quote color.
     pub quote_color: Option<String>,
+    /// The optional meta text color.
     pub meta_text_color: Option<String>,
+    /// The optional success color.
     pub success_color: Option<String>,
+    /// The optional danger color.
     pub danger_color: Option<String>,
+    /// The optional border radius px.
     pub border_radius_px: Option<String>,
+    /// The optional density.
     pub density: Option<String>,
+    /// The optional font family.
     pub font_family: Option<String>,
+    /// The optional advanced CSS.
     pub advanced_css: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub struct CreateThemeForm {
+/// Form fields accepted by the create theme request.
+pub(crate) struct CreateThemeForm {
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
+    /// The slug.
     pub slug: String,
+    /// The display name.
     pub display_name: String,
+    /// The optional description.
     pub description: Option<String>,
+    /// The optional swatch hex.
     pub swatch_hex: Option<String>,
+    /// The optional theme mode.
     pub theme_mode: Option<String>,
+    /// The optional custom CSS.
     pub custom_css: Option<String>,
     #[serde(flatten)]
+    /// The builder.
     pub builder: ThemeBuilderFields,
+    /// Whether this item is enabled.
     pub enabled: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub struct UpdateThemeForm {
+/// Form fields accepted by the update theme request.
+pub(crate) struct UpdateThemeForm {
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
+    /// The existing slug.
     pub existing_slug: String,
+    /// The slug.
     pub slug: String,
+    /// The display name.
     pub display_name: String,
+    /// The optional description.
     pub description: Option<String>,
+    /// The optional swatch hex.
     pub swatch_hex: Option<String>,
+    /// The optional theme mode.
     pub theme_mode: Option<String>,
+    /// The optional custom CSS.
     pub custom_css: Option<String>,
     #[serde(flatten)]
+    /// The builder.
     pub builder: ThemeBuilderFields,
+    /// Whether this item is enabled.
     pub enabled: Option<String>,
 }
 
+/// Sanitizes builder color.
 fn sanitize_builder_color(label: &str, raw_value: Option<&str>, fallback: &str) -> Result<String> {
     let value = raw_value.unwrap_or(fallback).trim();
     if value.len() == 7
@@ -103,6 +163,7 @@ fn sanitize_builder_color(label: &str, raw_value: Option<&str>, fallback: &str) 
     }
 }
 
+/// Sanitizes builder advanced CSS.
 fn sanitize_builder_advanced_css(raw_value: Option<&str>) -> Result<String> {
     let trimmed = raw_value.unwrap_or("").trim();
     if trimmed.is_empty() {
@@ -133,6 +194,7 @@ fn sanitize_builder_advanced_css(raw_value: Option<&str>) -> Result<String> {
     Ok(trimmed.to_owned())
 }
 
+/// Resolves builder swatch.
 fn resolve_builder_swatch(raw_value: Option<&str>, fallback: &str) -> String {
     let trimmed = raw_value.unwrap_or("").trim();
     if trimmed.len() == 7
@@ -145,6 +207,7 @@ fn resolve_builder_swatch(raw_value: Option<&str>, fallback: &str) -> String {
     }
 }
 
+/// Parses radius.
 fn parse_radius(raw_value: Option<&str>, fallback: u8) -> Result<u8> {
     raw_value
         .unwrap_or("")
@@ -164,6 +227,7 @@ fn parse_radius(raw_value: Option<&str>, fallback: u8) -> Result<u8> {
         })
 }
 
+/// Parses density.
 fn parse_density(raw_value: Option<&str>, fallback: ThemeDensity) -> Result<ThemeDensity> {
     raw_value.map_or(Ok(fallback), |value| {
         ThemeDensity::parse(value.trim())
@@ -171,6 +235,7 @@ fn parse_density(raw_value: Option<&str>, fallback: ThemeDensity) -> Result<Them
     })
 }
 
+/// Parses font family.
 fn parse_font_family(
     raw_value: Option<&str>,
     fallback: ThemeFontFamily,
@@ -184,6 +249,11 @@ fn parse_font_family(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "builder defaults, submitted overrides, and range validation produce one coherent theme config"
+)]
+/// Resolves builder config.
 fn resolve_builder_config(
     fields: &ThemeBuilderFields,
     existing_theme: Option<&crate::models::Theme>,
@@ -331,6 +401,7 @@ fn resolve_builder_config(
     })
 }
 
+/// Performs the resolved theme CSS for create handler operation.
 fn resolved_theme_css_for_create(form: &CreateThemeForm, slug: &str) -> Result<(String, String)> {
     match ThemeEditorMode::from_field(form.theme_mode.as_deref()) {
         ThemeEditorMode::Builder => {
@@ -349,6 +420,7 @@ fn resolved_theme_css_for_create(form: &CreateThemeForm, slug: &str) -> Result<(
     }
 }
 
+/// Performs the resolved theme CSS for update handler operation.
 fn resolved_theme_css_for_update(
     form: &UpdateThemeForm,
     theme: &crate::models::Theme,
@@ -371,20 +443,21 @@ fn resolved_theme_css_for_update(
     }
 }
 
-pub async fn create_theme(
+/// Handles the create theme request.
+pub(crate) async fn create_theme(
     State(state): State<AppState>,
     jar: CookieJar,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<CreateThemeForm>,
 ) -> Result<Response> {
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             let slug = db::sanitize_theme_slug(&form.slug);
             if slug.is_empty() {
                 return Err(AppError::BadRequest("Theme slug is required.".into()));
@@ -411,40 +484,41 @@ pub async fn create_theme(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
     .map(|()| {
-        super::admin_panel_redirect_anchor_open("Theme created.", "theme-catalog", "theme-catalog")
+        admin_panel_redirect_anchor_open("Theme created.", "theme-catalog", "theme-catalog")
             .into_response()
     })
     .or_else(|error| match error {
-        AppError::BadRequest(message) => Ok(super::admin_panel_error_redirect_anchor_open(
-            &message,
-            "theme-catalog",
-            "theme-catalog",
-        )
-        .into_response()),
+        AppError::BadRequest(message) => {
+            Ok(
+                admin_panel_error_redirect_anchor_open(&message, "theme-catalog", "theme-catalog")
+                    .into_response(),
+            )
+        }
         other => Err(other),
     })
 }
 
-pub async fn update_theme(
+/// Handles the update theme request.
+pub(crate) async fn update_theme(
     State(state): State<AppState>,
     jar: CookieJar,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<UpdateThemeForm>,
 ) -> Result<Response> {
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let mut conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             let existing_slug = db::sanitize_theme_slug(&form.existing_slug);
             let theme = db::get_theme(&conn, &existing_slug)?
                 .ok_or_else(|| AppError::BadRequest("Theme not found.".into()))?;
             let mut new_slug = db::sanitize_theme_slug(&form.slug);
             if theme.is_builtin {
-                new_slug = existing_slug.clone();
+                new_slug.clone_from(&existing_slug);
             }
             if new_slug.is_empty() {
                 return Err(AppError::BadRequest("Theme slug is required.".into()));
@@ -484,41 +558,45 @@ pub async fn update_theme(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
     .map(|()| {
-        super::admin_panel_redirect_anchor_open("Theme updated.", "theme-catalog", "theme-catalog")
+        admin_panel_redirect_anchor_open("Theme updated.", "theme-catalog", "theme-catalog")
             .into_response()
     })
     .or_else(|error| match error {
-        AppError::BadRequest(message) => Ok(super::admin_panel_error_redirect_anchor_open(
-            &message,
-            "theme-catalog",
-            "theme-catalog",
-        )
-        .into_response()),
+        AppError::BadRequest(message) => {
+            Ok(
+                admin_panel_error_redirect_anchor_open(&message, "theme-catalog", "theme-catalog")
+                    .into_response(),
+            )
+        }
         other => Err(other),
     })
 }
 
 #[derive(Deserialize)]
-pub struct DeleteThemeForm {
+/// Form fields accepted by the delete theme request.
+pub(crate) struct DeleteThemeForm {
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
+    /// The slug.
     pub slug: String,
 }
 
-pub async fn delete_theme(
+/// Handles the delete theme request.
+pub(crate) async fn delete_theme(
     State(state): State<AppState>,
     jar: CookieJar,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<DeleteThemeForm>,
 ) -> Result<Response> {
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let mut conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             let slug = db::sanitize_theme_slug(&form.slug);
             db::delete_custom_theme(&mut conn, &slug)?;
             db::sync_live_theme_state(&conn)?;
@@ -528,7 +606,7 @@ pub async fn delete_theme(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
     Ok(
-        super::admin_panel_redirect_anchor_open("Theme deleted.", "theme-catalog", "theme-catalog")
+        admin_panel_redirect_anchor_open("Theme deleted.", "theme-catalog", "theme-catalog")
             .into_response(),
     )
 }
@@ -542,6 +620,7 @@ pub async fn delete_theme(
 mod tests {
     use crate::error::AppError;
     use crate::models::Theme;
+    use anyhow::{bail, ensure, Context as _};
 
     use super::{
         resolved_theme_css_for_create, resolved_theme_css_for_update,
@@ -585,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn builder_theme_form_generates_scoped_css_and_swatch() {
+    fn builder_theme_form_generates_scoped_css_and_swatch() -> anyhow::Result<()> {
         let form = CreateThemeForm {
             csrf: None,
             slug: "builder-test".into(),
@@ -598,16 +677,18 @@ mod tests {
             enabled: Some("1".into()),
         };
 
-        let (swatch, css) = resolved_theme_css_for_create(&form, "builder-test").expect("css");
+        let (swatch, css) =
+            resolved_theme_css_for_create(&form, "builder-test").context("resolve theme CSS")?;
 
-        assert_eq!(swatch, "#224466");
-        assert!(css.contains("html[data-theme=\"builder-test\"]"));
-        assert!(css.contains("--rustchan-builder-data:"));
-        assert!(css.contains(".subject { font-style: italic; }"));
+        ensure!(swatch == "#224466");
+        ensure!(css.contains("html[data-theme=\"builder-test\"]"));
+        ensure!(css.contains("--rustchan-builder-data:"));
+        ensure!(css.contains(".subject { font-style: italic; }"));
+        Ok(())
     }
 
     #[test]
-    fn builder_theme_form_falls_back_to_link_color_for_invalid_swatch() {
+    fn builder_theme_form_falls_back_to_link_color_for_invalid_swatch() -> anyhow::Result<()> {
         let form = CreateThemeForm {
             csrf: None,
             slug: "builder-test".into(),
@@ -620,13 +701,15 @@ mod tests {
             enabled: Some("1".into()),
         };
 
-        let (swatch, _) = resolved_theme_css_for_create(&form, "builder-test").expect("css");
+        let (swatch, _) =
+            resolved_theme_css_for_create(&form, "builder-test").context("resolve theme CSS")?;
 
-        assert_eq!(swatch, "#77aa55");
+        ensure!(swatch == "#77aa55");
+        Ok(())
     }
 
     #[test]
-    fn builder_theme_update_uses_explicit_swatch_instead_of_link_color() {
+    fn builder_theme_update_uses_explicit_swatch_instead_of_link_color() -> anyhow::Result<()> {
         let existing_theme = Theme {
             slug: "builder-test".into(),
             display_name: "Builder Test".into(),
@@ -650,17 +733,18 @@ mod tests {
             enabled: Some("1".into()),
         };
 
-        let (swatch, css) =
-            resolved_theme_css_for_update(&form, &existing_theme, "builder-test").expect("css");
+        let (swatch, css) = resolved_theme_css_for_update(&form, &existing_theme, "builder-test")
+            .context("resolve updated theme CSS")?;
 
-        assert_eq!(swatch, "#335577");
-        assert!(css
-            .expect("builder css")
+        ensure!(swatch == "#335577");
+        ensure!(css
+            .context("builder CSS was not generated")?
             .contains("--rustchan-builder-data:"));
+        Ok(())
     }
 
     #[test]
-    fn builder_theme_form_rejects_invalid_color_values() {
+    fn builder_theme_form_rejects_invalid_color_values() -> anyhow::Result<()> {
         let mut form = CreateThemeForm {
             csrf: None,
             slug: "builder-test".into(),
@@ -674,27 +758,23 @@ mod tests {
         };
         form.builder.link_color = Some("javascript:alert(1)".into());
 
-        let error =
-            resolved_theme_css_for_create(&form, "builder-test").expect_err("invalid color");
-        match error {
-            AppError::BadRequest(message) => {
-                assert!(message.contains("Link color"));
-            }
-            other => panic!("unexpected error: {other:?}"),
+        let result = resolved_theme_css_for_create(&form, "builder-test");
+        match result {
+            Err(AppError::BadRequest(message)) => ensure!(message.contains("Link color")),
+            other => bail!("expected invalid-color error, got {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn advanced_css_rejects_imports_and_scripty_constructs() {
-        let error =
-            sanitize_builder_advanced_css(Some("@import url(https://example.com/theme.css);"))
-                .expect_err("blocked css");
-        match error {
-            AppError::BadRequest(message) => {
-                assert!(message.contains("Advanced CSS"));
-            }
-            other => panic!("unexpected error: {other:?}"),
+    fn advanced_css_rejects_imports_and_scripty_constructs() -> anyhow::Result<()> {
+        let result =
+            sanitize_builder_advanced_css(Some("@import url(https://example.com/theme.css);"));
+        match result {
+            Err(AppError::BadRequest(message)) => ensure!(message.contains("Advanced CSS")),
+            other => bail!("expected blocked-CSS error, got {other:?}"),
         }
+        Ok(())
     }
 
     #[test]

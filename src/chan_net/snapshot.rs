@@ -1,7 +1,7 @@
-// chan_net/snapshot.rs — Federation snapshot builders.
-//
-// Build a full ZIP of all boards and active posts, and unpack snapshots with
-// a strict filename whitelist.
+//! Federation snapshot builders.
+//!
+//! Builds a full ZIP of all boards and active posts and unpacks snapshots with
+//! a strict filename whitelist.
 
 // Re-export so that all call-sites using `super::snapshot::SnapshotPost` etc.
 // continue to compile without any changes.
@@ -20,6 +20,10 @@ use zip::{write::SimpleFileOptions, ZipWriter};
 ///
 /// Returns ZIP bytes and the transaction UUID for this snapshot.
 /// Used by the federation layer (`/chan/export`, `/chan/refresh`).
+///
+/// # Errors
+///
+/// Returns an error when database reads, serialization, or ZIP construction fail.
 pub fn build_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
     // ── Boards ────────────────────────────────────────────────────────────
     // Column is `name` (display name), not `title` — verified against db/mod.rs.
@@ -72,7 +76,7 @@ pub fn build_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
     let metadata = SnapshotMetadata {
         generated_at: now,
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
-        post_count: posts.len() as u64,
+        post_count: u64::try_from(posts.len())?,
         tx_id,
         signature: None,
         since: None,
@@ -104,9 +108,14 @@ pub fn build_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
 ///
 /// Rejects any ZIP that contains files other than the three known names,
 /// guarding against path traversal and unexpected content.
+///
+/// # Errors
+///
+/// Returns an error for malformed ZIP data, unexpected entries, missing
+/// required entries, read failures, or invalid JSON.
 pub fn unpack_snapshot(
     bytes: &[u8],
-) -> anyhow::Result<(Vec<SnapshotBoard>, Vec<SnapshotPost>, SnapshotMetadata)> {
+) -> Result<(Vec<SnapshotBoard>, Vec<SnapshotPost>, SnapshotMetadata)> {
     use std::io::Read as _;
 
     let cursor = Cursor::new(bytes);

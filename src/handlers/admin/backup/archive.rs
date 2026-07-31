@@ -1,17 +1,25 @@
-// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
-#![allow(clippy::wildcard_imports)]
+use super::{
+    banner, board_backup_types, build_board_backup_manifest, common, copy_limited,
+    local_backup_timestamp_label, prune_stale_temp_board_downloads, read_limited_bytes,
+    saved_backup, temp_board_download_dir, unique_backup_filename,
+    validate_restore_safe_entry_name, write_board_backup_archive, zip_file_options_for_path,
+    AppError, Path, PathBuf, Result, Seek, Utc, Write, BANNER_RESTORE_TOTAL_MAX_BYTES,
+    BOARD_MANIFEST_MAX_BYTES, SQLITE_HEADER, ZIP_ENTRY_MAX_BYTES,
+};
 
-use super::*;
-
+/// Data used by the temp ZIP cleanup guard workflow.
 pub(super) struct TempZipCleanupGuard {
+    /// The optional path.
     path: Option<PathBuf>,
 }
 
 impl TempZipCleanupGuard {
+    /// Creates a new value.
     pub(super) const fn new(path: PathBuf) -> Self {
         Self { path: Some(path) }
     }
 
+    /// Performs the disarm handler operation.
     pub(super) fn disarm(&mut self) {
         self.path = None;
     }
@@ -20,12 +28,13 @@ impl TempZipCleanupGuard {
 impl Drop for TempZipCleanupGuard {
     fn drop(&mut self) {
         if let Some(path) = self.path.take() {
-            let _ = std::fs::remove_file(path);
+            drop(std::fs::remove_file(path));
         }
     }
 }
 
-pub(super) fn parse_board_backup_manifest_from_zip<R: std::io::Read + std::io::Seek>(
+/// Parses board backup manifest from ZIP.
+pub(super) fn parse_board_backup_manifest_from_zip<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<board_backup_types::BoardBackupManifest> {
     if !archive.file_names().any(|name| name == "board.json") {
@@ -44,7 +53,8 @@ pub(super) fn parse_board_backup_manifest_from_zip<R: std::io::Read + std::io::S
         .map_err(|error| AppError::BadRequest(format!("Invalid board.json: {error}")))
 }
 
-pub(super) fn validate_full_restore_archive_layout<R: std::io::Read + std::io::Seek>(
+/// Validates full restore archive layout.
+pub(super) fn validate_full_restore_archive_layout<R: std::io::Read + Seek>(
     archive: &zip::ZipArchive<R>,
 ) -> Result<()> {
     if archive.file_names().any(|name| name == "chan.db") {
@@ -64,7 +74,8 @@ pub(super) fn validate_full_restore_archive_layout<R: std::io::Read + std::io::S
     ))
 }
 
-pub(super) fn extract_sqlite_db_from_full_backup_archive<R: std::io::Read + std::io::Seek>(
+/// Extracts `SQLite` database from full backup archive.
+pub(super) fn extract_sqlite_db_from_full_backup_archive<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     temp_db: &Path,
 ) -> Result<()> {
@@ -97,11 +108,13 @@ pub(super) fn extract_sqlite_db_from_full_backup_archive<R: std::io::Read + std:
     Ok(())
 }
 
+/// Performs the canonicalize restored banner dir handler operation.
 pub(super) fn canonicalize_restored_banner_dir(root: &Path) -> Result<()> {
     let mut total_bytes = 0u64;
     canonicalize_restored_banner_dir_inner(root, root, &mut total_bytes)
 }
 
+/// Performs the canonicalize restored banner dir inner handler operation.
 fn canonicalize_restored_banner_dir_inner(
     root: &Path,
     current: &Path,
@@ -155,7 +168,8 @@ fn canonicalize_restored_banner_dir_inner(
     Ok(())
 }
 
-fn copy_board_upload_entries_from_full_backup<R: std::io::Read + std::io::Seek, W: Write + Seek>(
+/// Copies board upload entries from full backup.
+fn copy_board_upload_entries_from_full_backup<R: std::io::Read + Seek, W: Write + Seek>(
     archive: &mut zip::ZipArchive<R>,
     zip: &mut zip::ZipWriter<W>,
     board_short: &str,
@@ -166,7 +180,7 @@ fn copy_board_upload_entries_from_full_backup<R: std::io::Read + std::io::Seek, 
             .by_index(index)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip[{index}]: {error}")))?;
         let name = entry.name().to_owned();
-        common::validate_restore_safe_entry_name(&name)?;
+        validate_restore_safe_entry_name(&name)?;
         if !name.starts_with(&board_prefix) {
             continue;
         }
@@ -187,6 +201,7 @@ fn copy_board_upload_entries_from_full_backup<R: std::io::Read + std::io::Seek, 
     Ok(())
 }
 
+/// Writes v4 file to legacy ZIP.
 fn write_v4_file_to_legacy_zip<W: Write + Seek>(
     zip: &mut zip::ZipWriter<W>,
     zip_path: &str,
@@ -198,16 +213,23 @@ fn write_v4_file_to_legacy_zip<W: Write + Seek>(
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy {zip_path}: {error}")))
 }
 
+/// Performs the temp legacy ZIP path handler operation.
 fn temp_legacy_zip_path(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}_{}.zip", uuid::Uuid::new_v4().simple()))
 }
 
+/// Creates temp legacy full backup from v4 path.
 pub(super) fn create_temp_legacy_full_backup_from_v4_path(root_dir: &Path) -> Result<PathBuf> {
     let verified =
         saved_backup::verify_saved_v4_root(root_dir, &[saved_backup::BackupScope::FullSite])?;
     create_temp_legacy_full_backup_from_verified_v4(&verified)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "transfer validation, entry mapping, extraction limits, and archive finalization are one pipeline"
+)]
+/// Creates temp legacy full backup from v4 transfer ZIP.
 pub(super) fn create_temp_legacy_full_backup_from_v4_transfer_zip<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<PathBuf> {
@@ -226,7 +248,7 @@ pub(super) fn create_temp_legacy_full_backup_from_v4_transfer_zip<R: std::io::Re
             ))
         })?;
         let name = entry.name().to_owned();
-        super::common::validate_restore_safe_entry_name(&name)?;
+        validate_restore_safe_entry_name(&name)?;
         if entry.is_dir() {
             continue;
         }
@@ -235,7 +257,8 @@ pub(super) fn create_temp_legacy_full_backup_from_v4_transfer_zip<R: std::io::Re
             db_index = Some(index);
             db_bytes = entry.size();
         } else if name.starts_with("boards/") {
-            if let Ok((runtime_path, kind)) = saved_backup::logical_upload_path_to_runtime(&name) {
+            let runtime_mapping = saved_backup::logical_upload_path_to_runtime(&name);
+            if let Ok((runtime_path, kind)) = runtime_mapping {
                 mapped_files.push((index, format!("uploads/{runtime_path}")));
                 match kind {
                     saved_backup::BackupFileKind::OriginalMedia
@@ -248,18 +271,18 @@ pub(super) fn create_temp_legacy_full_backup_from_v4_transfer_zip<R: std::io::Re
                 }
             }
         } else if let Some(rel) = name.strip_prefix("site-assets/favicon/") {
-            super::common::validate_restore_safe_entry_name(rel)?;
+            validate_restore_safe_entry_name(rel)?;
             mapped_files.push((index, format!("favicon/{rel}")));
             favicon_file_count = favicon_file_count.saturating_add(1);
         } else if let Some(rel) = name.strip_prefix("site-assets/banner/") {
-            super::common::validate_restore_safe_entry_name(rel)?;
+            validate_restore_safe_entry_name(rel)?;
             mapped_files.push((index, format!("banner/{rel}")));
             banner_file_count = banner_file_count.saturating_add(1);
         } else if let Some(rel) = name.strip_prefix("tor-keys/") {
-            super::common::validate_restore_safe_entry_name(rel)?;
+            validate_restore_safe_entry_name(rel)?;
             mapped_files.push((
                 index,
-                format!("{}/{}", super::common::FULL_BACKUP_TOR_KEYS_PREFIX, rel),
+                format!("{}/{}", common::FULL_BACKUP_TOR_KEYS_PREFIX, rel),
             ));
             tor_hidden_service_key_file_count = tor_hidden_service_key_file_count.saturating_add(1);
         }
@@ -295,7 +318,7 @@ pub(super) fn create_temp_legacy_full_backup_from_v4_transfer_zip<R: std::io::Re
         "tor_hidden_service_key_file_count": tor_hidden_service_key_file_count,
         "boards": [],
     });
-    zip.start_file(super::common::FULL_BACKUP_MANIFEST_NAME, options)
+    zip.start_file(common::FULL_BACKUP_MANIFEST_NAME, options)
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip backup.json: {error}")))?;
     zip.write_all(
         &serde_json::to_vec_pretty(&manifest).map_err(|error| {
@@ -310,7 +333,7 @@ pub(super) fn create_temp_legacy_full_backup_from_v4_transfer_zip<R: std::io::Re
         let mut entry = archive.by_index(db_index).map_err(|error| {
             AppError::Internal(anyhow::anyhow!("Read Backup v4 DB entry: {error}"))
         })?;
-        super::common::copy_limited(&mut entry, &mut zip, super::common::ZIP_ENTRY_MAX_BYTES)
+        copy_limited(&mut entry, &mut zip, ZIP_ENTRY_MAX_BYTES)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy chan.db: {error}")))?;
     }
 
@@ -322,7 +345,7 @@ pub(super) fn create_temp_legacy_full_backup_from_v4_transfer_zip<R: std::io::Re
                 "Read Backup v4 transfer entry #{index}: {error}"
             ))
         })?;
-        super::common::copy_limited(&mut entry, &mut zip, super::common::ZIP_ENTRY_MAX_BYTES)
+        copy_limited(&mut entry, &mut zip, ZIP_ENTRY_MAX_BYTES)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy {zip_path}: {error}")))?;
     }
 
@@ -332,6 +355,11 @@ pub(super) fn create_temp_legacy_full_backup_from_v4_transfer_zip<R: std::io::Re
     Ok(temp_zip)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "verified manifest entries and legacy metadata must be emitted in one deterministic archive pass"
+)]
+/// Creates temp legacy full backup from verified v4.
 fn create_temp_legacy_full_backup_from_verified_v4(
     verified: &saved_backup::VerifiedSavedV4Root,
 ) -> Result<PathBuf> {
@@ -360,36 +388,54 @@ fn create_temp_legacy_full_backup_from_verified_v4(
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
-    let upload_file_count = manifest
-        .files
-        .iter()
-        .filter(|entry| {
-            matches!(
-                entry.kind,
-                saved_backup::BackupFileKind::OriginalMedia
-                    | saved_backup::BackupFileKind::Thumbnail
-                    | saved_backup::BackupFileKind::Banner
-                    | saved_backup::BackupFileKind::Favicon
-            ) && entry.board.is_some()
-        })
-        .count() as u64;
-    let favicon_file_count = manifest
-        .files
-        .iter()
-        .filter(|entry| {
-            entry.kind == saved_backup::BackupFileKind::Favicon && entry.board.is_none()
-        })
-        .count() as u64;
-    let banner_file_count = manifest
-        .files
-        .iter()
-        .filter(|entry| entry.kind == saved_backup::BackupFileKind::Banner && entry.board.is_none())
-        .count() as u64;
-    let tor_hidden_service_key_file_count = manifest
-        .files
-        .iter()
-        .filter(|entry| entry.kind == saved_backup::BackupFileKind::TorKey)
-        .count() as u64;
+    let upload_file_count = u64::try_from(
+        manifest
+            .files
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.kind,
+                    saved_backup::BackupFileKind::OriginalMedia
+                        | saved_backup::BackupFileKind::Thumbnail
+                        | saved_backup::BackupFileKind::Banner
+                        | saved_backup::BackupFileKind::Favicon
+                ) && entry.board.is_some()
+            })
+            .count(),
+    )
+    .map_err(|error| AppError::Internal(anyhow::anyhow!("Count uploaded files: {error}")))?;
+    let favicon_file_count = u64::try_from(
+        manifest
+            .files
+            .iter()
+            .filter(|entry| {
+                entry.kind == saved_backup::BackupFileKind::Favicon && entry.board.is_none()
+            })
+            .count(),
+    )
+    .map_err(|error| AppError::Internal(anyhow::anyhow!("Count favicon files: {error}")))?;
+    let banner_file_count = u64::try_from(
+        manifest
+            .files
+            .iter()
+            .filter(|entry| {
+                entry.kind == saved_backup::BackupFileKind::Banner && entry.board.is_none()
+            })
+            .count(),
+    )
+    .map_err(|error| AppError::Internal(anyhow::anyhow!("Count banner files: {error}")))?;
+    let tor_hidden_service_key_file_count = u64::try_from(
+        manifest
+            .files
+            .iter()
+            .filter(|entry| entry.kind == saved_backup::BackupFileKind::TorKey)
+            .count(),
+    )
+    .map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Count Tor hidden-service key files: {error}"
+        ))
+    })?;
     let db_bytes = manifest
         .db_snapshot
         .as_ref()
@@ -407,7 +453,7 @@ fn create_temp_legacy_full_backup_from_verified_v4(
         "tor_hidden_service_key_file_count": tor_hidden_service_key_file_count,
         "boards": manifest.included_boards,
     });
-    zip.start_file(super::common::FULL_BACKUP_MANIFEST_NAME, options)
+    zip.start_file(common::FULL_BACKUP_MANIFEST_NAME, options)
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip backup.json: {error}")))?;
     zip.write_all(
         &serde_json::to_vec_pretty(&legacy_manifest).map_err(|error| {
@@ -489,7 +535,7 @@ fn create_temp_legacy_full_backup_from_verified_v4(
             })?;
         write_v4_file_to_legacy_zip(
             &mut zip,
-            &format!("{}/{}", super::common::FULL_BACKUP_TOR_KEYS_PREFIX, rel),
+            &format!("{}/{}", common::FULL_BACKUP_TOR_KEYS_PREFIX, rel),
             entry,
         )?;
     }
@@ -500,6 +546,7 @@ fn create_temp_legacy_full_backup_from_verified_v4(
     Ok(temp_zip)
 }
 
+/// Creates temp legacy board backup from v4 path.
 pub(super) fn create_temp_legacy_board_backup_from_v4_path(
     root_dir: &Path,
     board_short: Option<&str>,
@@ -514,6 +561,7 @@ pub(super) fn create_temp_legacy_board_backup_from_v4_path(
     create_temp_legacy_board_backup_from_verified_v4(&verified, board_short)
 }
 
+/// Creates temp legacy board backup from verified v4.
 fn create_temp_legacy_board_backup_from_verified_v4(
     verified: &saved_backup::VerifiedSavedV4Root,
     board_short: Option<&str>,
@@ -569,6 +617,7 @@ fn create_temp_legacy_board_backup_from_verified_v4(
     Ok((temp_zip, filename))
 }
 
+/// Creates temp legacy board backup from saved full v4 path.
 pub(super) fn create_temp_legacy_board_backup_from_saved_full_v4_path(
     root_dir: &Path,
     board_short: &str,
@@ -578,6 +627,7 @@ pub(super) fn create_temp_legacy_board_backup_from_saved_full_v4_path(
     create_temp_legacy_board_backup_from_verified_v4(&verified, Some(board_short))
 }
 
+/// Creates temp board backup from full backup path.
 pub(super) fn create_temp_board_backup_from_full_backup_path(
     full_backup_path: &Path,
     board_short: &str,
@@ -592,7 +642,9 @@ pub(super) fn create_temp_board_backup_from_full_backup_path(
     let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
         .map_err(|error| AppError::BadRequest(format!("Invalid zip: {error}")))?;
     validate_full_restore_archive_layout(&archive)?;
-    let _ = common::read_full_backup_manifest_from_archive(&mut archive)?;
+    drop(common::read_full_backup_manifest_from_archive(
+        &mut archive,
+    )?);
 
     let temp_db = std::env::temp_dir().join(format!(
         "full_backup_extract_{}_{}.db",
@@ -604,9 +656,9 @@ pub(super) fn create_temp_board_backup_from_full_backup_path(
     let manifest_result = (|| -> Result<board_backup_types::BoardBackupManifest> {
         let conn = rusqlite::Connection::open(&temp_db)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Open temp DB: {error}")))?;
-        create::build_board_backup_manifest(&conn, board_short)
+        build_board_backup_manifest(&conn, board_short)
     })();
-    let _ = std::fs::remove_file(&temp_db);
+    drop(std::fs::remove_file(&temp_db));
     let manifest = manifest_result?;
     let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Serialize board manifest: {error}"))
@@ -622,21 +674,21 @@ pub(super) fn create_temp_board_backup_from_full_backup_path(
     let final_path = backup_dir.join(&filename);
     let tmp_path = backup_dir.join(format!("{filename}.tmp"));
 
-    let write_result = create::write_board_backup_archive(&tmp_path, &manifest_json, None, |zip| {
+    let write_result = write_board_backup_archive(&tmp_path, &manifest_json, None, |zip| {
         copy_board_upload_entries_from_full_backup(&mut archive, zip, board_short)
     });
     if let Err(error) = write_result {
-        let _ = std::fs::remove_file(&tmp_path);
+        drop(std::fs::remove_file(&tmp_path));
         return Err(error);
     }
 
     if let Err(error) = common::verify_board_backup_zip(&tmp_path) {
-        let _ = std::fs::remove_file(&tmp_path);
+        drop(std::fs::remove_file(&tmp_path));
         return Err(error);
     }
 
     std::fs::rename(&tmp_path, &final_path).map_err(|error| {
-        let _ = std::fs::remove_file(&tmp_path);
+        drop(std::fs::remove_file(&tmp_path));
         AppError::Internal(anyhow::anyhow!("Rename extracted board backup: {error}"))
     })?;
     crate::config::restrict_private_file_permissions(&final_path).map_err(|error| {
@@ -652,22 +704,23 @@ pub(super) fn create_temp_board_backup_from_full_backup_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{ensure, Context as _, Result as TestResult};
 
-    fn full_fixture_root(label: &str) -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn full_fixture_root(label: &str) -> TestResult<(tempfile::TempDir, PathBuf)> {
+        let dir = tempfile::tempdir().context("create full-backup fixture directory")?;
         let root = dir.path().join(label);
         saved_backup::write_saved_v4_fixture_for_test(
             &root,
             saved_backup::BackupScope::FullSite,
             saved_backup::board_fixture_files_for_test(),
-            Some(saved_backup::valid_db_snapshot_for_test()),
+            Some(saved_backup::valid_db_snapshot_for_test()?),
             1_715_010_000_i64,
-        );
-        (dir, root)
+        )?;
+        Ok((dir, root))
     }
 
-    fn board_fixture_root(label: &str) -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn board_fixture_root(label: &str) -> TestResult<(tempfile::TempDir, PathBuf)> {
+        let dir = tempfile::tempdir().context("create board-backup fixture directory")?;
         let root = dir.path().join(label);
         saved_backup::write_saved_v4_fixture_for_test(
             &root,
@@ -675,37 +728,39 @@ mod tests {
             saved_backup::board_fixture_files_for_test(),
             None,
             1_715_020_000_i64,
-        );
-        (dir, root)
+        )?;
+        Ok((dir, root))
     }
 
     #[test]
-    fn saved_full_v4_restore_rejects_db_snapshot_escape() {
-        let (_dir, root) = full_fixture_root("2026-05-06_full-site_db-escape");
+    fn saved_full_v4_restore_rejects_db_snapshot_escape() -> TestResult<()> {
+        let (_dir, root) = full_fixture_root("2026-05-06_full-site_db-escape")?;
         let mut manifest =
-            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))
-                .expect("manifest");
-        manifest.db_snapshot.as_mut().expect("db snapshot").path = "../escape.db".to_owned();
+            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))?;
+        manifest
+            .db_snapshot
+            .as_mut()
+            .context("fixture manifest has no database snapshot")?
+            .path = "../escape.db".to_owned();
         saved_backup::write_json_pretty(&root.join(saved_backup::MANIFEST_FILE_NAME), &manifest)
-            .expect("manifest");
+            .context("write modified manifest")?;
 
         let error = create_temp_legacy_full_backup_from_v4_path(&root)
-            .expect_err("db snapshot escape should fail");
-        assert!(error.to_string().contains("suspicious logical path"));
+            .err()
+            .context("database snapshot escape was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("suspicious logical path"));
+        Ok(())
     }
 
     #[test]
-    fn saved_full_v4_restore_rejects_manifest_controlled_site_asset_escape() {
-        let (_dir, root) = full_fixture_root("2026-05-06_full-site-favicon-escape");
+    fn saved_full_v4_restore_rejects_manifest_controlled_site_asset_escape() -> TestResult<()> {
+        let (_dir, root) = full_fixture_root("2026-05-06_full-site-favicon-escape")?;
         let favicon_bytes = b"icon".to_vec();
-        std::fs::write(
-            root.parent().expect("parent").join("escape.ico"),
-            &favicon_bytes,
-        )
-        .expect("outside favicon");
+        let root_parent = root.parent().context("fixture root has no parent")?;
+        std::fs::write(root_parent.join("escape.ico"), &favicon_bytes)
+            .context("write outside favicon")?;
         let mut manifest =
-            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))
-                .expect("manifest");
+            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))?;
         manifest.files.push(saved_backup::test_file_entry_for_test(
             "../escape.ico",
             None,
@@ -713,25 +768,24 @@ mod tests {
             &favicon_bytes,
         ));
         saved_backup::write_json_pretty(&root.join(saved_backup::MANIFEST_FILE_NAME), &manifest)
-            .expect("manifest");
+            .context("write modified manifest")?;
 
         let error = create_temp_legacy_full_backup_from_v4_path(&root)
-            .expect_err("favicon escape should fail");
-        assert!(error.to_string().contains("suspicious logical path"));
+            .err()
+            .context("favicon escape was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("suspicious logical path"));
+        Ok(())
     }
 
     #[test]
-    fn saved_full_v4_restore_rejects_tor_key_escape() {
-        let (_dir, root) = full_fixture_root("2026-05-06_full-site-tor-escape");
+    fn saved_full_v4_restore_rejects_tor_key_escape() -> TestResult<()> {
+        let (_dir, root) = full_fixture_root("2026-05-06_full-site-tor-escape")?;
         let tor_bytes = b"secret".to_vec();
-        std::fs::write(
-            root.parent().expect("parent").join("outside.key"),
-            &tor_bytes,
-        )
-        .expect("outside key");
+        let root_parent = root.parent().context("fixture root has no parent")?;
+        std::fs::write(root_parent.join("outside.key"), &tor_bytes)
+            .context("write outside Tor key")?;
         let mut manifest =
-            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))
-                .expect("manifest");
+            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))?;
         manifest.includes.tor_keys = true;
         manifest.files.push(saved_backup::test_file_entry_for_test(
             "../outside.key",
@@ -740,102 +794,108 @@ mod tests {
             &tor_bytes,
         ));
         let mut metadata =
-            saved_backup::load_metadata(&root.join(saved_backup::BACKUP_METADATA_FILE_NAME))
-                .expect("metadata");
+            saved_backup::load_metadata(&root.join(saved_backup::BACKUP_METADATA_FILE_NAME))?;
         metadata.includes_tor_keys = true;
         saved_backup::write_json_pretty(&root.join(saved_backup::MANIFEST_FILE_NAME), &manifest)
-            .expect("manifest");
+            .context("write modified manifest")?;
         saved_backup::write_json_pretty(
             &root.join(saved_backup::BACKUP_METADATA_FILE_NAME),
             &metadata,
         )
-        .expect("metadata");
+        .context("write modified metadata")?;
 
         let error = create_temp_legacy_full_backup_from_v4_path(&root)
-            .expect_err("tor key escape should fail");
-        assert!(error.to_string().contains("suspicious logical path"));
+            .err()
+            .context("Tor key escape was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("suspicious logical path"));
+        Ok(())
     }
 
     #[test]
-    fn saved_board_v4_restore_rejects_escaping_manifest_path() {
-        let (_dir, root) = board_fixture_root("2026-05-06_board-escape");
+    fn saved_board_v4_restore_rejects_escaping_manifest_path() -> TestResult<()> {
+        let (_dir, root) = board_fixture_root("2026-05-06_board-escape")?;
         let mut manifest =
-            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))
-                .expect("manifest");
-        if let Some(entry) = manifest
+            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))?;
+        let entry = manifest
             .files
             .iter_mut()
             .find(|entry| entry.kind == saved_backup::BackupFileKind::BoardJson)
-        {
-            entry.logical_path = "../board.json".to_owned();
-        }
+            .context("fixture manifest has no board JSON entry")?;
+        entry.logical_path = "../board.json".to_owned();
         saved_backup::write_json_pretty(&root.join(saved_backup::MANIFEST_FILE_NAME), &manifest)
-            .expect("manifest");
+            .context("write modified manifest")?;
 
         let error = create_temp_legacy_board_backup_from_v4_path(&root, None)
-            .expect_err("board restore strict verify should fail");
-        assert!(error.to_string().contains("suspicious logical path"));
+            .err()
+            .context("escaping board manifest path was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("suspicious logical path"));
+        Ok(())
     }
 
     #[test]
-    fn selected_board_extraction_from_saved_full_rejects_escaping_manifest_path() {
-        let (_dir, root) = full_fixture_root("2026-05-06_full-site-board-escape");
+    fn selected_board_extraction_from_saved_full_rejects_escaping_manifest_path() -> TestResult<()>
+    {
+        let (_dir, root) = full_fixture_root("2026-05-06_full-site-board-escape")?;
         let mut manifest =
-            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))
-                .expect("manifest");
-        if let Some(entry) = manifest
+            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))?;
+        let entry = manifest
             .files
             .iter_mut()
             .find(|entry| entry.kind == saved_backup::BackupFileKind::BoardJson)
-        {
-            entry.logical_path = "../board.json".to_owned();
-        }
+            .context("fixture manifest has no board JSON entry")?;
+        entry.logical_path = "../board.json".to_owned();
         saved_backup::write_json_pretty(&root.join(saved_backup::MANIFEST_FILE_NAME), &manifest)
-            .expect("manifest");
+            .context("write modified manifest")?;
 
         let error = create_temp_legacy_board_backup_from_saved_full_v4_path(&root, "tech")
-            .expect_err("selected-board extraction strict verify should fail");
-        assert!(error.to_string().contains("suspicious logical path"));
+            .err()
+            .context("escaping selected-board manifest path was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("suspicious logical path"));
+        Ok(())
     }
 
     #[test]
-    fn selected_board_extraction_from_saved_full_rejects_cross_board_file() {
-        let (_dir, root) = full_fixture_root("2026-05-06_full-site-cross-board");
+    fn selected_board_extraction_from_saved_full_rejects_cross_board_file() -> TestResult<()> {
+        let (_dir, root) = full_fixture_root("2026-05-06_full-site-cross-board")?;
         let cross_board_path = root.join("boards/other/media/src/example.txt");
-        std::fs::create_dir_all(cross_board_path.parent().expect("cross-board parent"))
-            .expect("create cross-board parent");
-        std::fs::write(&cross_board_path, b"media").expect("write cross-board file");
+        let cross_board_parent = cross_board_path
+            .parent()
+            .context("cross-board fixture path has no parent")?;
+        std::fs::create_dir_all(cross_board_parent)
+            .context("create cross-board parent directory")?;
+        std::fs::write(&cross_board_path, b"media").context("write cross-board file")?;
 
         let mut manifest =
-            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))
-                .expect("manifest");
-        if let Some(entry) = manifest
+            saved_backup::load_manifest(&root.join(saved_backup::MANIFEST_FILE_NAME))?;
+        let entry = manifest
             .files
             .iter_mut()
             .find(|entry| entry.logical_path == "boards/tech/media/src/example.txt")
-        {
-            entry.logical_path = "boards/other/media/src/example.txt".to_owned();
-        }
+            .context("fixture manifest has no selected-board media entry")?;
+        entry.logical_path = "boards/other/media/src/example.txt".to_owned();
         saved_backup::write_json_pretty(&root.join(saved_backup::MANIFEST_FILE_NAME), &manifest)
-            .expect("manifest");
+            .context("write modified manifest")?;
 
         let error = create_temp_legacy_board_backup_from_saved_full_v4_path(&root, "tech")
-            .expect_err("selected-board extraction cross-board file should fail");
-        assert!(error
+            .err()
+            .context("cross-board selected-board file was unexpectedly accepted")?;
+        ensure!(error
             .to_string()
             .contains("must stay within /tech/ uploads"));
+        Ok(())
     }
 
     #[test]
-    fn temp_zip_cleanup_guard_removes_conversion_file_on_early_failure() {
-        let (_dir, root) = full_fixture_root("2026-05-06_full-site-cleanup");
-        let temp_zip = create_temp_legacy_full_backup_from_v4_path(&root).expect("temp zip");
-        assert!(temp_zip.exists());
+    fn temp_zip_cleanup_guard_removes_conversion_file_on_early_failure() -> TestResult<()> {
+        let (_dir, root) = full_fixture_root("2026-05-06_full-site-cleanup")?;
+        let temp_zip = create_temp_legacy_full_backup_from_v4_path(&root)?;
+        ensure!(temp_zip.exists());
         {
             let _guard = TempZipCleanupGuard::new(temp_zip.clone());
             let _early_failure: Result<()> =
                 Err(AppError::BadRequest("synthetic early failure".into()));
         }
-        assert!(!temp_zip.exists());
+        ensure!(!temp_zip.exists());
+        Ok(())
     }
 }

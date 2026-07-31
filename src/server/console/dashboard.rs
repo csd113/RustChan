@@ -1,20 +1,7 @@
-// The string-pattern check here is intentional; the lint would only add noise to this console test.
-#![allow(clippy::single_char_pattern)]
-
-// server/console/dashboard.rs — Pure render functions for each ConsoleMode.
-//
-// Layout matches the RustHost reference style:
-//   Status section   — server running state, HTTPS, Tor (each labelled)
-//   Endpoints section — concrete URLs for HTTP / HTTPS / Onion
-//   Content section  — boards / threads / posts
-//   Storage section  — DB size / upload size / memory
-//   Boards section   — per-board breakdown
-//   Footer           — key bar
-//
-// Rule: pad plain text to the desired column width FIRST, then wrap in ANSI
-// colour helpers.  Escape bytes are invisible to the terminal's width
-// calculation but are counted by Rust's len() / format padding — doing it the
-// other way around produces misaligned columns.
+//! Pure render functions for each console mode.
+//!
+//! Plain text is padded before ANSI styling because escape bytes are invisible
+//! to the terminal but count toward Rust string widths.
 
 use super::ChanStats;
 use crate::config::CONFIG;
@@ -22,25 +9,32 @@ use std::path::{Path, PathBuf};
 
 // ─── ANSI helpers ─────────────────────────────────────────────────────────────
 
+/// Style text green when ANSI output is enabled.
 fn green(s: &str) -> String {
     colour("32", s)
 }
+/// Style text yellow when ANSI output is enabled.
 fn yellow(s: &str) -> String {
     colour("33", s)
 }
+/// Style text red when ANSI output is enabled.
 fn red(s: &str) -> String {
     colour("31", s)
 }
+/// Style text cyan when ANSI output is enabled.
 fn cyan(s: &str) -> String {
     colour("36", s)
 }
+/// Dim text when ANSI output is enabled.
 fn dim(s: &str) -> String {
     colour("2", s)
 }
+/// Bold text when ANSI output is enabled.
 fn bold(s: &str) -> String {
     colour("1", s)
 }
 
+/// Apply an ANSI Select Graphic Rendition code when supported.
 fn colour(code: &str, s: &str) -> String {
     if crate::logging::ansi_enabled() {
         format!("\x1b[{code}m{s}\x1b[0m")
@@ -49,63 +43,74 @@ fn colour(code: &str, s: &str) -> String {
     }
 }
 
+/// Render one dashboard separator.
 fn rule() -> String {
     dim(&rule_char().repeat(60))
 }
 
+/// Return the platform-appropriate separator character.
 #[cfg(windows)]
 const fn rule_char() -> &'static str {
     "-"
 }
 
+/// Return the platform-appropriate separator character.
 #[cfg(not(windows))]
 const fn rule_char() -> &'static str {
     "\u{2500}"
 }
 
+/// Return the platform-appropriate heading marker.
 #[cfg(windows)]
 const fn marker() -> &'static str {
     "*"
 }
 
+/// Return the platform-appropriate heading marker.
 #[cfg(not(windows))]
 const fn marker() -> &'static str {
     "\u{25c8}"
 }
 
+/// Return the platform-appropriate ellipsis.
 #[cfg(windows)]
 const fn ellipsis() -> &'static str {
     "..."
 }
 
+/// Return the platform-appropriate ellipsis.
 #[cfg(not(windows))]
 const fn ellipsis() -> &'static str {
     "\u{2026}"
 }
 
+/// Return the platform-appropriate inline bullet.
 #[cfg(windows)]
 const fn bullet() -> &'static str {
     "-"
 }
 
+/// Return the platform-appropriate inline bullet.
 #[cfg(not(windows))]
 const fn bullet() -> &'static str {
     "\u{00b7}"
 }
 
+/// Return one platform-appropriate spinner frame.
 #[cfg(windows)]
 fn spinner_frame(tick: u8) -> &'static str {
     const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
     FRAMES[usize::from(tick) % FRAMES.len()]
 }
 
+/// Return one platform-appropriate spinner frame.
 #[cfg(not(windows))]
 fn spinner_frame(tick: u8) -> &'static str {
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     FRAMES.get(usize::from(tick)).copied().unwrap_or("⠋")
 }
 
-// Left-column label width for aligned rows.
+/// Left-column label width for aligned rows.
 const LW: usize = 14;
 
 /// Print one aligned " Label : value" row.
@@ -117,7 +122,12 @@ fn row(out: &mut String, label: &str, value: &str) {
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
 
-#[expect(clippy::cast_precision_loss)]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "human-readable byte sizes intentionally trade integer precision for compact display"
+)]
+/// Format a byte count using binary units.
 fn fmt_bytes(b: i64) -> String {
     const KIB: i64 = 1024;
     const MIB: i64 = 1024 * 1024;
@@ -133,6 +143,7 @@ fn fmt_bytes(b: i64) -> String {
     }
 }
 
+/// Format uptime as hours, minutes, and seconds.
 fn fmt_uptime(secs: u64) -> String {
     let h = secs / 3600;
     let m = (secs % 3600) / 60;
@@ -142,6 +153,7 @@ fn fmt_uptime(secs: u64) -> String {
 
 // ─── TLS cert type label ──────────────────────────────────────────────────────
 
+/// Return the active HTTPS certificate-source label.
 fn https_cert_label() -> &'static str {
     if CONFIG.tls.acme.enabled {
         "Let's Encrypt"
@@ -154,7 +166,11 @@ fn https_cert_label() -> &'static str {
 
 // ─── render_dashboard() ───────────────────────────────────────────────────────
 
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the contiguous dashboard renderer keeps terminal row ordering auditable"
+)]
+/// Render the main server dashboard.
 pub fn render_dashboard(stats: &ChanStats) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(2048);
@@ -358,6 +374,7 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
 
 // ─── render_log_view() ────────────────────────────────────────────────────────
 
+/// Render the live-log view.
 pub fn render_log_view() -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(8192);
@@ -418,10 +435,12 @@ pub fn render_log_view() -> String {
     out
 }
 
+/// Return the number of terminal rows available for log content.
 fn log_body_height() -> usize {
     crossterm::terminal::size().map_or(24, |(_, rows)| usize::from(rows.saturating_sub(8)).max(6))
 }
 
+/// Find the newest main-process log file.
 fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
     let mut files = std::fs::read_dir(logs_dir)
         .ok()?
@@ -433,6 +452,7 @@ fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
     files.pop()
 }
 
+/// Read at most the newest `max_bytes` of a log file.
 fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool), String> {
     use std::io::{Seek as _, SeekFrom};
 
@@ -441,7 +461,7 @@ fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool), String
         .metadata()
         .map_err(|e| format!("Log metadata: {e}"))?
         .len();
-    let start = len.saturating_sub(max_bytes as u64);
+    let start = len.saturating_sub(u64::try_from(max_bytes).unwrap_or(u64::MAX));
     file.seek(SeekFrom::Start(start))
         .map_err(|e| format!("Seek log: {e}"))?;
 
@@ -451,7 +471,7 @@ fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool), String
     let truncated = start > 0;
     let content = if truncated {
         match text.find('\n') {
-            Some(pos) if pos + 1 < text.len() => text[pos + 1..].to_string(),
+            Some(pos) if pos + 1 < text.len() => text.get(pos + 1..).unwrap_or_default().to_owned(),
             _ => text,
         }
     } else {
@@ -462,6 +482,8 @@ fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool), String
 
 // ─── render_help() ────────────────────────────────────────────────────────────
 
+/// Render the console key reference.
+#[must_use]
 pub fn render_help() -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(1024);
@@ -495,6 +517,8 @@ pub fn render_help() -> String {
 
 // ─── render_board_list() ─────────────────────────────────────────────────────
 
+/// Render the per-board content summary.
+#[must_use]
 pub fn render_board_list(stats: &ChanStats) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(1024);
@@ -535,6 +559,8 @@ pub fn render_board_list(stats: &ChanStats) -> String {
 
 // ─── render_confirm_quit() ────────────────────────────────────────────────────
 
+/// Render the graceful-shutdown confirmation prompt.
+#[must_use]
 pub fn render_confirm_quit() -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(256);
@@ -561,11 +587,13 @@ pub fn render_confirm_quit() -> String {
 }
 
 #[cfg(test)]
+/// Dashboard and log-selection tests.
 mod tests {
     use super::{latest_log_file, render_dashboard};
     use crate::server::console::ChanStats;
 
     #[test]
+    /// Displays the active `FFmpeg` video count.
     fn dashboard_shows_active_ffmpeg_video_count() {
         let stats = ChanStats {
             active_ffmpeg_videos: 3,
@@ -574,26 +602,42 @@ mod tests {
 
         let rendered = render_dashboard(&stats);
 
-        assert!(rendered.contains("FFmpeg"));
-        assert!(rendered.contains("videos processing"));
-        assert!(rendered.contains("3"));
+        assert!(
+            rendered.contains("FFmpeg"),
+            "dashboard should contain the FFmpeg row"
+        );
+        assert!(
+            rendered.contains("videos processing"),
+            "dashboard should label active video processing"
+        );
+        assert!(
+            rendered.contains('3'),
+            "dashboard should display the active-video count"
+        );
     }
 
     #[test]
-    fn log_view_selects_main_log_not_dependency_log() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("rustchan.2026-04-01.log"), "main").expect("main log");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Selects the main log instead of the dependency log.
+    fn log_view_selects_main_log_not_dependency_log() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("rustchan.2026-04-01.log"), "main")?;
         std::fs::write(
             dir.path().join(crate::logging::DEPENDENCY_LOG_FILE_NAME),
             "deps",
-        )
-        .expect("dependency log");
+        )?;
 
-        let latest = latest_log_file(dir.path()).expect("latest log");
+        let latest =
+            latest_log_file(dir.path()).ok_or_else(|| anyhow::anyhow!("main log not found"))?;
 
         assert_eq!(
             latest.file_name().and_then(|name| name.to_str()),
-            Some("rustchan.2026-04-01.log")
+            Some("rustchan.2026-04-01.log"),
+            "main-process logs should win over dependency logs"
         );
+        Ok(())
     }
 }

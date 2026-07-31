@@ -66,20 +66,20 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
         .is_ok())
 }
 
-/// Generate a cryptographically secure random hex string.
-///
+/// Terminates the process when secure OS randomness is unavailable.
 #[expect(
     clippy::exit,
     reason = "fail-closed randomness failures must terminate before issuing weak tokens"
 )]
 fn fatal_randomness_error(context: &str, error: &impl std::fmt::Display) -> ! {
-    let _ = writeln!(
+    drop(writeln!(
         std::io::stderr().lock(),
         "Fatal: OS randomness unavailable while {context}: {error}"
-    );
+    ));
     std::process::exit(1);
 }
 
+/// Fills `bytes` from the OS CSPRNG or terminates without issuing weak data.
 pub fn fill_os_random_or_exit(bytes: &mut [u8], context: &str) {
     if let Err(error) = SysRng.try_fill_bytes(bytes) {
         fatal_randomness_error(context, &error);
@@ -87,6 +87,7 @@ pub fn fill_os_random_or_exit(bytes: &mut [u8], context: &str) {
 }
 
 #[must_use]
+/// Returns a random [`u32`] from the OS CSPRNG or terminates on failure.
 pub fn os_random_u32_or_exit(context: &str) -> u32 {
     match SysRng.try_next_u32() {
         Ok(value) => value,
@@ -103,7 +104,7 @@ pub fn random_hex(bytes: usize) -> String {
     hex::encode(buf)
 }
 
-/// Generate a session ID (32 random bytes → 64 hex chars).
+/// Generate a session ID from 32 random bytes, encoded as 64 hex characters.
 #[must_use]
 #[inline]
 pub fn new_session_id() -> String {
@@ -125,6 +126,7 @@ pub fn new_csrf_token() -> String {
 }
 
 #[must_use]
+/// Sign a raw CSRF token for the unscoped form-token format.
 pub fn sign_csrf_token(raw_token: &str, secret: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(secret.as_bytes());
@@ -134,6 +136,7 @@ pub fn sign_csrf_token(raw_token: &str, secret: &str) -> String {
 }
 
 #[must_use]
+/// Sign a raw CSRF token for a specific action scope.
 pub fn sign_scoped_csrf_token(raw_token: &str, secret: &str, scope: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(secret.as_bytes());
@@ -145,11 +148,13 @@ pub fn sign_scoped_csrf_token(raw_token: &str, secret: &str, scope: &str) -> Str
 }
 
 #[must_use]
+/// Combine a raw CSRF token with its unscoped signature.
 pub fn make_csrf_form_token(raw_token: &str, secret: &str) -> String {
     format!("{raw_token}.{}", sign_csrf_token(raw_token, secret))
 }
 
 #[must_use]
+/// Combine a raw CSRF token with its action-scoped signature.
 pub fn make_scoped_csrf_form_token(raw_token: &str, secret: &str, scope: &str) -> String {
     format!(
         "{raw_token}.{}",
@@ -189,7 +194,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
 ///
 /// # Errors
 /// Returns an error if the password does not meet the minimum requirements.
-pub fn validate_password(p: &str) -> anyhow::Result<()> {
+pub fn validate_password(p: &str) -> Result<()> {
     if p.len() < 8 {
         anyhow::bail!("Password must be at least 8 characters.");
     }
@@ -204,52 +209,93 @@ mod tests {
     // ── Password hashing ─────────────────────────────────────────────
 
     #[test]
-    fn hash_and_verify_password() {
-        let hash = hash_password("correct-horse-battery-staple").expect("hash_password failed");
-        assert!(verify_password("correct-horse-battery-staple", &hash).expect("verify failed"));
-        assert!(!verify_password("wrong-password", &hash).expect("verify failed"));
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn hash_and_verify_password() -> Result<()> {
+        let hash = hash_password("correct-horse-battery-staple")?;
+        assert!(
+            verify_password("correct-horse-battery-staple", &hash)?,
+            "the original password must verify"
+        );
+        assert!(
+            !verify_password("wrong-password", &hash)?,
+            "a different password must not verify"
+        );
+        Ok(())
     }
 
     #[test]
     fn verify_password_rejects_malformed_hash() {
-        assert!(verify_password("anything", "not-a-phc-string").is_err());
+        assert!(
+            verify_password("anything", "not-a-phc-string").is_err(),
+            "malformed PHC strings must be rejected"
+        );
     }
 
     // ── Random hex ───────────────────────────────────────────────────
 
     #[test]
     fn random_hex_length() {
-        assert_eq!(random_hex(16).len(), 32);
-        assert_eq!(random_hex(32).len(), 64);
+        assert_eq!(
+            random_hex(16).len(),
+            32,
+            "16 random bytes must encode to 32 hex characters"
+        );
+        assert_eq!(
+            random_hex(32).len(),
+            64,
+            "32 random bytes must encode to 64 hex characters"
+        );
     }
 
     #[test]
     fn random_hex_is_valid_hex() {
         let h = random_hex(32);
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(
+            h.chars().all(|c| c.is_ascii_hexdigit()),
+            "random token contained a non-hex character"
+        );
     }
 
     #[test]
     fn random_hex_is_not_constant() {
         // Vanishingly unlikely to collide for 32 bytes.
-        assert_ne!(random_hex(32), random_hex(32));
+        assert_ne!(
+            random_hex(32),
+            random_hex(32),
+            "independent random tokens unexpectedly matched"
+        );
     }
 
     // ── Token generators ─────────────────────────────────────────────
 
     #[test]
     fn session_id_length() {
-        assert_eq!(new_session_id().len(), 64);
+        assert_eq!(
+            new_session_id().len(),
+            64,
+            "session IDs must encode 32 random bytes"
+        );
     }
 
     #[test]
     fn deletion_token_length() {
-        assert_eq!(new_deletion_token().len(), 32);
+        assert_eq!(
+            new_deletion_token().len(),
+            32,
+            "deletion tokens must encode 16 random bytes"
+        );
     }
 
     #[test]
     fn csrf_token_length() {
-        assert_eq!(new_csrf_token().len(), 64);
+        assert_eq!(
+            new_csrf_token().len(),
+            64,
+            "CSRF tokens must encode 32 random bytes"
+        );
     }
 
     // ── IP hashing ───────────────────────────────────────────────────
@@ -258,26 +304,30 @@ mod tests {
     fn hash_ip_deterministic() {
         let a = hash_ip("127.0.0.1", "secret");
         let b = hash_ip("127.0.0.1", "secret");
-        assert_eq!(a, b);
+        assert_eq!(a, b, "IP hashing must be deterministic");
     }
 
     #[test]
     fn hash_ip_different_salt_differs() {
         let a = hash_ip("127.0.0.1", "salt-a");
         let b = hash_ip("127.0.0.1", "salt-b");
-        assert_ne!(a, b);
+        assert_ne!(a, b, "different salts must change the IP hash");
     }
 
     #[test]
     fn hash_ip_different_ip_differs() {
         let a = hash_ip("10.0.0.1", "salt");
         let b = hash_ip("10.0.0.2", "salt");
-        assert_ne!(a, b);
+        assert_ne!(a, b, "different IP addresses must produce different hashes");
     }
 
     #[test]
     fn hash_ip_length() {
-        assert_eq!(hash_ip("::1", "s").len(), 64); // SHA-256 → 32 bytes → 64 hex
+        assert_eq!(
+            hash_ip("::1", "s").len(),
+            64,
+            "SHA-256 IP hashes must contain 64 hex characters"
+        );
     }
 
     // ── sha256_hex ───────────────────────────────────────────────────
@@ -287,7 +337,8 @@ mod tests {
         // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         assert_eq!(
             sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "SHA-256 empty-input test vector changed"
         );
     }
 }

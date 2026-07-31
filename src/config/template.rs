@@ -1,5 +1,11 @@
+//! Default `settings.toml` rendering.
+
+/// Render the documented default settings file with the generated cookie secret.
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the generated settings file stays contiguous so its documented ordering remains obvious"
+)]
 pub(super) fn settings_template(secret: &str) -> String {
     format!(
         r#"# RustChan settings.toml

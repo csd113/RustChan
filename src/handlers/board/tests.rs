@@ -9,16 +9,52 @@ use axum_extra::extract::cookie::CookieJar;
 use std::collections::HashMap;
 use tower::ServiceExt as _;
 
-fn seed_post_password_board(state: &crate::middleware::AppState) -> (i64, i64, i64) {
-    let conn = state.db.get().expect("db connection");
+use anyhow::Context as _;
+
+macro_rules! ensure_eq {
+    ($left:expr_2021, $right:expr_2021 $(,)?) => {{
+        match (&$left, &$right) {
+            (left, right) => anyhow::ensure!(
+                *left == *right,
+                "assertion failed: `(left == right)`\n  left: `{left:?}`\n right: `{right:?}`"
+            ),
+        }
+    }};
+    ($left:expr_2021, $right:expr_2021, $($message:tt)+) => {{
+        match (&$left, &$right) {
+            (left, right) => anyhow::ensure!(
+                *left == *right,
+                "assertion failed: `(left == right)`\n  left: `{left:?}`\n right: `{right:?}`: {}",
+                format_args!($($message)+)
+            ),
+        }
+    }};
+}
+
+macro_rules! ensure_ne {
+    ($left:expr_2021, $right:expr_2021 $(,)?) => {{
+        match (&$left, &$right) {
+            (left, right) => anyhow::ensure!(
+                *left != *right,
+                "assertion failed: `(left != right)`\n  left: `{left:?}`\n right: `{right:?}`"
+            ),
+        }
+    }};
+}
+
+fn seed_post_password_board(
+    state: &crate::middleware::AppState,
+) -> anyhow::Result<(i64, i64, i64)> {
+    let conn = state.db.get().context("db connection")?;
     let board_id =
-        crate::db::create_board(&conn, "secret", "Secret", "", false).expect("create board");
-    let password_hash = crate::utils::crypto::hash_password("swordfish").expect("hash password");
+        crate::db::create_board(&conn, "secret", "Secret", "", false).context("create board")?;
+    let password_hash =
+        crate::utils::crypto::hash_password("swordfish").context("hash password")?;
     conn.execute(
         "UPDATE boards SET access_mode = ?1, access_password_hash = ?2, allow_editing = 1, allow_self_delete = 1 WHERE id = ?3",
         rusqlite::params!["post_password", password_hash, board_id],
     )
-    .expect("update board access");
+    .context("update board access")?;
     let post = crate::db::NewPost {
         thread_id: 0,
         board_id,
@@ -55,15 +91,15 @@ fn seed_post_password_board(state: &crate::middleware::AppState) -> (i64, i64, i
         Some(&poll),
         None,
     )
-    .expect("create thread");
+    .context("create thread")?;
     let option_id: i64 = conn
         .query_row(
             "SELECT id FROM poll_options WHERE poll_id = ?1 ORDER BY id LIMIT 1",
-            rusqlite::params![poll_id.expect("poll id")],
+            rusqlite::params![poll_id.context("poll id")?],
             |row| row.get(0),
         )
-        .expect("poll option id");
-    (thread_id, post_id, option_id)
+        .context("poll option id")?;
+    Ok((thread_id, post_id, option_id))
 }
 
 fn set_new_activity_settings(
@@ -71,26 +107,27 @@ fn set_new_activity_settings(
     homepage_thread_enabled: bool,
     homepage_reply_enabled: bool,
     thread_enabled: bool,
-) {
-    let conn = state.db.get().expect("db connection");
+) -> anyhow::Result<()> {
+    let conn = state.db.get().context("db connection")?;
     crate::db::set_site_setting(
         &conn,
         "homepage_new_thread_badges_enabled",
         if homepage_thread_enabled { "1" } else { "0" },
     )
-    .expect("set homepage activity setting");
+    .context("set homepage activity setting")?;
     crate::db::set_site_setting(
         &conn,
         "homepage_new_reply_badges_enabled",
         if homepage_reply_enabled { "1" } else { "0" },
     )
-    .expect("set homepage reply activity setting");
+    .context("set homepage reply activity setting")?;
     crate::db::set_site_setting(
         &conn,
         "thread_new_reply_badges_enabled",
         if thread_enabled { "1" } else { "0" },
     )
-    .expect("set thread activity setting");
+    .context("set thread activity setting")?;
+    Ok(())
 }
 
 fn install_preference_test_themes() {
@@ -123,11 +160,11 @@ fn seed_board_with_thread(
     state: &crate::middleware::AppState,
     short_name: &str,
     body: &str,
-) -> (i64, i64) {
-    let conn = state.db.get().expect("db connection");
+) -> anyhow::Result<(i64, i64)> {
+    let conn = state.db.get().context("db connection")?;
     let board_id =
-        crate::db::create_board(&conn, short_name, "Board", "", false).expect("create board");
-    crate::templates::set_live_boards(crate::db::get_all_boards(&conn).expect("load boards"));
+        crate::db::create_board(&conn, short_name, "Board", "", false).context("create board")?;
+    crate::templates::set_live_boards(crate::db::get_all_boards(&conn).context("load boards")?);
     let post = crate::db::NewPost {
         thread_id: 0,
         board_id,
@@ -152,12 +189,16 @@ fn seed_board_with_thread(
     };
     let (thread_id, _post_id, _) =
         crate::db::create_thread_with_optional_poll(&conn, board_id, None, &post, "", None, None)
-            .expect("create thread");
-    (board_id, thread_id)
+            .context("create thread")?;
+    Ok((board_id, thread_id))
 }
 
-fn create_thread_on_board(state: &crate::middleware::AppState, board_id: i64, body: &str) -> i64 {
-    let conn = state.db.get().expect("db connection");
+fn create_thread_on_board(
+    state: &crate::middleware::AppState,
+    board_id: i64,
+    body: &str,
+) -> anyhow::Result<i64> {
+    let conn = state.db.get().context("db connection")?;
     let post = crate::db::NewPost {
         thread_id: 0,
         board_id,
@@ -182,8 +223,8 @@ fn create_thread_on_board(state: &crate::middleware::AppState, board_id: i64, bo
     };
     let (thread_id, _post_id, _) =
         crate::db::create_thread_with_optional_poll(&conn, board_id, None, &post, "", None, None)
-            .expect("create thread");
-    thread_id
+            .context("create thread")?;
+    Ok(thread_id)
 }
 
 fn create_reply_on_thread(
@@ -191,8 +232,8 @@ fn create_reply_on_thread(
     board_id: i64,
     thread_id: i64,
     body: &str,
-) {
-    let conn = state.db.get().expect("db connection");
+) -> anyhow::Result<()> {
+    let conn = state.db.get().context("db connection")?;
     let reply = crate::db::NewPost {
         thread_id,
         board_id,
@@ -216,7 +257,8 @@ fn create_reply_on_thread(
         is_op: false,
     };
     crate::db::create_reply_with_thread_update(&conn, &reply, "", true, None)
-        .expect("create reply");
+        .context("create reply")?;
+    Ok(())
 }
 
 fn activity_router(state: crate::middleware::AppState) -> Router {
@@ -268,22 +310,23 @@ fn cookie_header(store: &HashMap<String, String>) -> Option<String> {
 }
 
 #[test]
-fn activity_restore_js_uses_explicit_page_markers() {
+fn activity_restore_js_uses_explicit_page_markers() -> anyhow::Result<()> {
     let js = include_str!("../../../static/main.js");
 
-    assert!(js.contains("document.querySelector('[data-activity-page]')"));
-    assert!(js.contains("pageHasActivityLifecycle()"));
-    assert!(!js.contains("document.querySelector('.board-index-header')"));
+    anyhow::ensure!(js.contains("document.querySelector('[data-activity-page]')"));
+    anyhow::ensure!(js.contains("pageHasActivityLifecycle()"));
+    anyhow::ensure!(!js.contains("document.querySelector('.board-index-header')"));
+    Ok(())
 }
 
 #[test]
-fn board_activity_cookie_removal_keeps_root_path_attributes() {
+fn board_activity_cookie_removal_keeps_root_path_attributes() -> anyhow::Result<()> {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::COOKIE,
         "rustchan_board_activity=v1|1.100.1.200"
             .parse()
-            .expect("cookie header"),
+            .context("cookie header")?,
     );
     let jar = CookieJar::from_headers(&headers);
     let jar = super::prune_board_activity_markers(jar, &std::collections::HashSet::new());
@@ -294,21 +337,22 @@ fn board_activity_cookie_removal_keeps_root_path_attributes() {
         .iter()
         .filter_map(|value| value.to_str().ok())
         .find(|value| value.starts_with("rustchan_board_activity="))
-        .expect("board activity removal cookie");
+        .context("board activity removal cookie")?;
 
-    assert!(set_cookie.contains("Path=/"));
-    assert!(set_cookie.contains("SameSite=Lax"));
-    assert!(set_cookie.contains("Max-Age=0"));
+    anyhow::ensure!(set_cookie.contains("Path=/"));
+    anyhow::ensure!(set_cookie.contains("SameSite=Lax"));
+    anyhow::ensure!(set_cookie.contains("Max-Age=0"));
+    Ok(())
 }
 
 #[test]
-fn thread_activity_cookie_removal_keeps_root_path_attributes() {
+fn thread_activity_cookie_removal_keeps_root_path_attributes() -> anyhow::Result<()> {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::COOKIE,
         "rustchan_thread_activity=v1|1.2.200"
             .parse()
-            .expect("cookie header"),
+            .context("cookie header")?,
     );
     let jar = CookieJar::from_headers(&headers);
     let jar = super::remember_visible_thread_activity(jar, std::iter::empty());
@@ -319,38 +363,40 @@ fn thread_activity_cookie_removal_keeps_root_path_attributes() {
         .iter()
         .filter_map(|value| value.to_str().ok())
         .find(|value| value.starts_with("rustchan_thread_activity="))
-        .expect("thread activity removal cookie");
+        .context("thread activity removal cookie")?;
 
-    assert!(set_cookie.contains("Path=/"));
-    assert!(set_cookie.contains("SameSite=Lax"));
-    assert!(set_cookie.contains("Max-Age=0"));
+    anyhow::ensure!(set_cookie.contains("Path=/"));
+    anyhow::ensure!(set_cookie.contains("SameSite=Lax"));
+    anyhow::ensure!(set_cookie.contains("Max-Age=0"));
+    Ok(())
 }
 
-async fn response_body_string(response: axum::response::Response) -> String {
+async fn response_body_string(response: axum::response::Response) -> anyhow::Result<String> {
     String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("response body")
+            .context("response body")?
             .to_vec(),
     )
-    .expect("utf8 body")
+    .context("utf8 body")
 }
 
 #[test]
-fn protected_board_without_password_hash_fails_closed() {
+fn protected_board_without_password_hash_fails_closed() -> anyhow::Result<()> {
     let board = crate::models::Board {
         access_mode: crate::models::BoardAccessMode::ViewPassword,
         access_password_hash: String::new(),
         ..crate::test_fixtures::sample_board()
     };
-    assert!(!super::can_view_board(&board, false, None));
-    assert!(!super::can_post_to_board(&board, false, None));
+    anyhow::ensure!(!super::can_view_board(&board, false, None));
+    anyhow::ensure!(!super::can_post_to_board(&board, false, None));
+    Ok(())
 }
 
 #[tokio::test]
-async fn post_password_board_remains_viewable_without_unlock() {
+async fn post_password_board_remains_viewable_without_unlock() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    let (thread_id, _, _) = seed_post_password_board(&state);
+    let (thread_id, _, _) = seed_post_password_board(&state)?;
 
     let router = Router::new()
         .route("/{board}", get(super::board_index))
@@ -374,18 +420,23 @@ async fn post_password_board_remains_viewable_without_unlock() {
                     .uri(uri)
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("request")?,
             )
             .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
+            .context("response")?;
+        ensure_eq!(response.status(), StatusCode::OK);
     }
+    Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the end-to-end test keeps its fixture setup and ordered assertions in one scenario"
+)]
 #[tokio::test]
-async fn post_password_board_write_actions_require_unlock() {
+async fn post_password_board_write_actions_require_unlock() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    let (thread_id, post_id, option_id) = seed_post_password_board(&state);
+    let (thread_id, post_id, option_id) = seed_post_password_board(&state)?;
     let router = Router::new()
         .route("/{board}", post(super::create_thread))
         .route(
@@ -426,12 +477,12 @@ async fn post_password_board_write_actions_require_unlock() {
                 .header(header::COOKIE, "csrf_token=csrf123")
                 .extension(crate::test_support::connect_info())
                 .body(Body::from(body))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("create response");
-    assert_eq!(create_response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
+        .context("create response")?;
+    ensure_eq!(create_response.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(
         create_response
             .headers()
             .get(header::LOCATION)
@@ -454,12 +505,12 @@ async fn post_password_board_write_actions_require_unlock() {
                 .header(header::COOKIE, "csrf_token=csrf123")
                 .extension(crate::test_support::connect_info())
                 .body(Body::from(body))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("reply response");
-    assert_eq!(reply_response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
+        .context("reply response")?;
+    ensure_eq!(reply_response.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(
         reply_response
             .headers()
             .get(header::LOCATION)
@@ -474,11 +525,11 @@ async fn post_password_board_write_actions_require_unlock() {
                 .method("GET")
                 .uri(format!("/secret/post/{post_id}/edit"))
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("edit get response");
-    assert_eq!(edit_get_response.status(), StatusCode::FORBIDDEN);
+        .context("edit get response")?;
+    ensure_eq!(edit_get_response.status(), StatusCode::FORBIDDEN);
 
     let edit_post_response = router
         .clone()
@@ -492,7 +543,7 @@ async fn post_password_board_write_actions_require_unlock() {
                     format!(
                         "csrf_token=csrf123; rustchan_owned_posts={}",
                         crate::handlers::board::remember_owned_post_until(
-                            axum_extra::extract::cookie::CookieJar::new(),
+                            CookieJar::new(),
                             "secret",
                             thread_id,
                             post_id,
@@ -501,18 +552,18 @@ async fn post_password_board_write_actions_require_unlock() {
                                 + crate::handlers::board::SELF_DELETE_WINDOW_SECS,
                         )
                         .get("rustchan_owned_posts")
-                        .expect("owned posts cookie")
+                        .context("owned posts cookie")?
                         .value()
                     ),
                 )
                 .extension(crate::test_support::connect_info())
                 .body(Body::from("body=changed&_csrf=csrf123"))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("edit post response");
-    assert_eq!(edit_post_response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
+        .context("edit post response")?;
+    ensure_eq!(edit_post_response.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(
         edit_post_response
             .headers()
             .get(header::LOCATION)
@@ -529,30 +580,36 @@ async fn post_password_board_write_actions_require_unlock() {
                 .header(header::COOKIE, "csrf_token=csrf123")
                 .extension(crate::test_support::connect_info())
                 .body(Body::from(format!("option_id={option_id}&_csrf=csrf123")))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("vote response");
-    assert_eq!(vote_response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
+        .context("vote response")?;
+    ensure_eq!(vote_response.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(
         vote_response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok()),
         Some(format!("/secret/unlock?return_to=%2Fsecret%2Fthread%2F{thread_id}%23poll").as_str())
     );
+    Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the end-to-end test keeps its fixture setup and ordered assertions in one scenario"
+)]
 #[tokio::test]
-async fn self_delete_requires_owned_post_cookie() {
+async fn self_delete_requires_owned_post_cookie() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    let conn = state.db.get().expect("db connection");
-    let board_id = crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+    let conn = state.db.get().context("db connection")?;
+    let board_id =
+        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
     conn.execute(
         "UPDATE boards SET allow_self_delete = 1 WHERE id = ?1",
         rusqlite::params![board_id],
     )
-    .expect("enable self delete");
+    .context("enable self delete")?;
     let op = crate::db::NewPost {
         thread_id: 0,
         board_id,
@@ -577,7 +634,7 @@ async fn self_delete_requires_owned_post_cookie() {
     };
     let (thread_id, _op_id, _) =
         crate::db::create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)
-            .expect("create thread");
+            .context("create thread")?;
     let reply = crate::db::NewPost {
         thread_id,
         board_id,
@@ -601,7 +658,7 @@ async fn self_delete_requires_owned_post_cookie() {
         is_op: false,
     };
     let reply_id = crate::db::create_reply_with_thread_update(&conn, &reply, "", false, None)
-        .expect("create reply");
+        .context("create reply")?;
     drop(conn);
 
     let router = Router::new()
@@ -620,14 +677,14 @@ async fn self_delete_requires_owned_post_cookie() {
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, "csrf_token=csrf123")
                 .body(Body::from("_csrf=csrf123"))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+        .context("response")?;
+    ensure_eq!(forbidden.status(), StatusCode::FORBIDDEN);
 
     let owned_cookie_jar = crate::handlers::board::remember_owned_post_until(
-        axum_extra::extract::cookie::CookieJar::new(),
+        CookieJar::new(),
         "test",
         thread_id,
         reply_id,
@@ -636,7 +693,7 @@ async fn self_delete_requires_owned_post_cookie() {
     );
     let owned_cookie = owned_cookie_jar
         .get("rustchan_owned_posts")
-        .expect("owned posts cookie");
+        .context("owned posts cookie")?;
     let allowed = router
         .oneshot(
             Request::builder()
@@ -651,27 +708,28 @@ async fn self_delete_requires_owned_post_cookie() {
                     ),
                 )
                 .body(Body::from("_csrf=csrf123"))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    assert_eq!(allowed.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
+        .context("response")?;
+    ensure_eq!(allowed.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(
         allowed
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok()),
         Some(format!("/test/thread/{thread_id}").as_str())
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn search_returns_results_without_500() {
+async fn search_returns_results_without_500() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
+        let conn = state.db.get().context("db connection")?;
         let board_id =
-            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+            crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
         let post = crate::db::NewPost {
             thread_id: 0,
             board_id,
@@ -695,7 +753,7 @@ async fn search_returns_results_without_500() {
             is_op: true,
         };
         crate::db::create_thread_with_optional_poll(&conn, board_id, None, &post, "", None, None)
-            .expect("create thread");
+            .context("create thread")?;
     }
 
     let router = Router::new()
@@ -708,28 +766,29 @@ async fn search_returns_results_without_500() {
                 .method("GET")
                 .uri("/test/search?q=rust")
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    ensure_eq!(response.status(), StatusCode::OK);
     let body = String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("response body")
+            .context("response body")?
             .to_vec(),
     )
-    .expect("utf8 body");
-    assert!(body.contains("rust search body"));
+    .context("utf8 body")?;
+    anyhow::ensure!(body.contains("rust search body"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn search_without_q_param_returns_empty_results_page() {
+async fn search_without_q_param_returns_empty_results_page() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        let conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
     }
 
     let router = Router::new()
@@ -742,35 +801,36 @@ async fn search_without_q_param_returns_empty_results_page() {
                 .method("GET")
                 .uri("/test/search")
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    ensure_eq!(response.status(), StatusCode::OK);
     let body = String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("response body")
+            .context("response body")?
             .to_vec(),
     )
-    .expect("utf8 body");
-    assert!(body.contains("no results found."));
+    .context("utf8 body")?;
+    anyhow::ensure!(body.contains("no results found."));
+    Ok(())
 }
 
 #[tokio::test]
-async fn locked_board_search_returns_forbidden_unlock_page() {
+async fn locked_board_search_returns_forbidden_unlock_page() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "slock", "Secret", "", false).expect("create board");
+        let conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "slock", "Secret", "", false).context("create board")?;
         let password_hash =
-            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+            crate::utils::crypto::hash_password("swordfish").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'slock'",
             rusqlite::params!["view_password", password_hash],
         )
-        .expect("update board access");
+        .context("update board access")?;
     }
 
     let router = Router::new()
@@ -783,13 +843,13 @@ async fn locked_board_search_returns_forbidden_unlock_page() {
                 .method("GET")
                 .uri("/slock/search?q=rust")
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert_eq!(
+    ensure_eq!(response.status(), StatusCode::FORBIDDEN);
+    ensure_eq!(
         response
             .headers()
             .get(header::CACHE_CONTROL)
@@ -799,19 +859,20 @@ async fn locked_board_search_returns_forbidden_unlock_page() {
     let body = String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("response body")
+            .context("response body")?
             .to_vec(),
     )
-    .expect("utf8 body");
-    assert!(body.contains("action=\"/slock/unlock\""));
+    .context("utf8 body")?;
+    anyhow::ensure!(body.contains("action=\"/slock/unlock\""));
+    Ok(())
 }
 
 #[tokio::test]
-async fn create_thread_accepts_valid_multipart_submission() {
+async fn create_thread_accepts_valid_multipart_submission() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        let conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
     }
 
     let router = Router::new()
@@ -832,26 +893,27 @@ async fn create_thread_accepts_valid_multipart_submission() {
                 .header(header::COOKIE, "csrf_token=csrf123")
                 .extension(crate::test_support::connect_info())
                 .body(Body::from(body))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(response.status(), StatusCode::SEE_OTHER);
     let location = response
         .headers()
         .get(header::LOCATION)
         .and_then(|value| value.to_str().ok())
-        .expect("location header");
-    assert!(location.starts_with("/test/thread/"));
+        .context("location header")?;
+    anyhow::ensure!(location.starts_with("/test/thread/"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn create_thread_xhr_returns_explicit_redirect_header() {
+async fn create_thread_xhr_returns_explicit_redirect_header() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        let conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
     }
 
     let router = Router::new()
@@ -873,39 +935,40 @@ async fn create_thread_xhr_returns_explicit_redirect_header() {
                 .header("X-Requested-With", "XMLHttpRequest")
                 .extension(crate::test_support::connect_info())
                 .body(Body::from(body))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    ensure_eq!(response.status(), StatusCode::NO_CONTENT);
     let redirect = response
         .headers()
         .get("x-rustchan-redirect")
         .and_then(|value| value.to_str().ok())
-        .expect("xhr redirect header");
-    assert!(redirect.starts_with("/test/thread/"));
+        .context("xhr redirect header")?;
+    anyhow::ensure!(redirect.starts_with("/test/thread/"));
     let owned_cookie = response
         .headers()
         .get_all(header::SET_COOKIE)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .find(|value| value.starts_with("rustchan_owned_posts="))
-        .expect("owned-post cookie");
-    assert!(owned_cookie.contains("HttpOnly"));
-    assert!(owned_cookie.contains("SameSite=Lax"));
-    assert!(
+        .context("owned-post cookie")?;
+    anyhow::ensure!(owned_cookie.contains("HttpOnly"));
+    anyhow::ensure!(owned_cookie.contains("SameSite=Lax"));
+    anyhow::ensure!(
         !owned_cookie.contains("Secure"),
         "plain HTTP localhost responses must not mark own-post cookies Secure"
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn create_thread_xhr_validation_failure_returns_json_error() {
+async fn create_thread_xhr_validation_failure_returns_json_error() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        let conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
     }
 
     let router = Router::new()
@@ -927,20 +990,20 @@ async fn create_thread_xhr_validation_failure_returns_json_error() {
                 .header("X-Requested-With", "XMLHttpRequest")
                 .extension(crate::test_support::connect_info())
                 .body(Body::from(body))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
+    ensure_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    ensure_eq!(
         response
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok()),
         Some("application/json; charset=utf-8")
     );
-    assert_eq!(
+    ensure_eq!(
         response
             .headers()
             .get("x-rustchan-error-status")
@@ -951,48 +1014,50 @@ async fn create_thread_xhr_validation_failure_returns_json_error() {
     let body = String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("response body")
+            .context("response body")?
             .to_vec(),
     )
-    .expect("utf8 body");
-    assert!(body.contains("\"error\""));
+    .context("utf8 body")?;
+    anyhow::ensure!(body.contains("\"error\""));
+    Ok(())
 }
 
 #[test]
-fn database_busy_xhr_error_includes_retry_contract() {
+fn database_busy_xhr_error_includes_retry_contract() -> anyhow::Result<()> {
     let response = super::xhr_post_error_response(crate::error::AppError::DbBusy)
-        .expect("database busy response");
+        .context("database busy response")?;
 
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
+    ensure_eq!(response.status(), StatusCode::OK);
+    ensure_eq!(
         response
             .headers()
             .get("x-rustchan-error-status")
             .and_then(|value| value.to_str().ok()),
         Some(StatusCode::SERVICE_UNAVAILABLE.as_str())
     );
-    assert_eq!(
+    ensure_eq!(
         response
             .headers()
             .get(header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok()),
         Some("1")
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn contended_reply_returns_bounded_503_with_retry_after() {
+async fn contended_reply_returns_bounded_503_with_retry_after() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    let (_board_id, thread_id) = seed_board_with_thread(&state, "busy", "original post");
+    let (_board_id, thread_id) = seed_board_with_thread(&state, "busy", "original post")?;
     let router = Router::new()
         .route(
             "/{board}/thread/{id}",
             post(crate::handlers::thread::post_reply),
         )
         .with_state(state.clone());
-    let lock = state.db.get().expect("write-lock connection");
+    let lock = state.db.get().context("write-lock connection")?;
     lock.execute_batch("BEGIN IMMEDIATE")
-        .expect("hold database write lock");
+        .context("hold database write lock")?;
     let submission_token = uuid::Uuid::new_v4().to_string();
     let (boundary, body) = crate::test_support::multipart_body(
         &[
@@ -1016,47 +1081,49 @@ async fn contended_reply_returns_bounded_503_with_retry_after() {
                 .header(header::COOKIE, "csrf_token=csrf123")
                 .extension(crate::test_support::connect_info())
                 .body(Body::from(body))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     let elapsed = started.elapsed();
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
+    ensure_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    ensure_eq!(
         response
             .headers()
             .get(header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok()),
         Some("1")
     );
-    assert!(
+    anyhow::ensure!(
         elapsed < std::time::Duration::from_secs(3),
         "busy response took {elapsed:?}"
     );
 
-    lock.execute_batch("ROLLBACK").expect("release write lock");
-    let conn = state.db.get().expect("verification connection");
+    lock.execute_batch("ROLLBACK")
+        .context("release write lock")?;
+    let conn = state.db.get().context("verification connection")?;
     let post_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
             rusqlite::params![thread_id],
             |row| row.get(0),
         )
-        .expect("post count");
+        .context("post count")?;
     let integrity: String = conn
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .expect("database integrity");
-    assert_eq!(post_count, 1);
-    assert_eq!(integrity, "ok");
+        .context("database integrity")?;
+    ensure_eq!(post_count, 1);
+    ensure_eq!(integrity, "ok");
+    Ok(())
 }
 
 #[tokio::test]
-async fn create_thread_rejects_mime_mismatch_with_415_inline_error() {
+async fn create_thread_rejects_mime_mismatch_with_415_inline_error() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        let conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
     }
 
     let router = Router::new()
@@ -1079,29 +1146,30 @@ async fn create_thread_rejects_mime_mismatch_with_415_inline_error() {
                 .header(header::COOKIE, "csrf_token=csrf123")
                 .extension(crate::test_support::connect_info())
                 .body(Body::from(body))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    ensure_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     let body = String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("response body")
+            .context("response body")?
             .to_vec(),
     )
-    .expect("utf8 body");
-    assert!(body.contains("post-error-banner"));
-    assert!(body.contains("File type not allowed"));
+    .context("utf8 body")?;
+    anyhow::ensure!(body.contains("post-error-banner"));
+    anyhow::ensure!(body.contains("File type not allowed"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn create_thread_rejects_truncated_png_with_422_inline_error() {
+async fn create_thread_rejects_truncated_png_with_422_inline_error() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        let conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
     }
 
     let router = Router::new()
@@ -1125,51 +1193,54 @@ async fn create_thread_rejects_truncated_png_with_422_inline_error() {
                 .header(header::COOKIE, "csrf_token=csrf123")
                 .extension(crate::test_support::connect_info())
                 .body(Body::from(body))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    ensure_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("response body")
+            .context("response body")?
             .to_vec(),
     )
-    .expect("utf8 body");
-    assert!(body.contains("post-error-banner"));
-    assert!(body.contains("image header is malformed"));
+    .context("utf8 body")?;
+    anyhow::ensure!(body.contains("post-error-banner"));
+    anyhow::ensure!(body.contains("image header is malformed"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn homepage_and_thread_badges_default_to_enabled() {
+async fn homepage_and_thread_badges_default_to_enabled() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    let conn = state.db.get().expect("db connection");
+    let conn = state.db.get().context("db connection")?;
 
-    assert!(crate::db::get_homepage_new_thread_badges_enabled(&conn));
-    assert!(crate::db::get_homepage_new_reply_badges_enabled(&conn));
-    assert!(crate::db::get_thread_new_reply_badges_enabled(&conn));
+    anyhow::ensure!(crate::db::get_homepage_new_thread_badges_enabled(&conn));
+    anyhow::ensure!(crate::db::get_homepage_new_reply_badges_enabled(&conn));
+    anyhow::ensure!(crate::db::get_thread_new_reply_badges_enabled(&conn));
+    Ok(())
 }
 
 #[tokio::test]
-async fn absent_homepage_reply_badge_setting_defaults_to_enabled() {
+async fn absent_homepage_reply_badge_setting_defaults_to_enabled() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    let conn = state.db.get().expect("db connection");
+    let conn = state.db.get().context("db connection")?;
     conn.execute(
         "DELETE FROM site_settings WHERE key = 'homepage_new_reply_badges_enabled'",
         [],
     )
-    .expect("delete setting");
+    .context("delete setting")?;
 
-    assert!(crate::db::get_homepage_new_reply_badges_enabled(&conn));
+    anyhow::ensure!(crate::db::get_homepage_new_reply_badges_enabled(&conn));
+    Ok(())
 }
 
 #[tokio::test]
-async fn homepage_reply_toggle_off_suppresses_only_homepage_reply_badges() {
+async fn homepage_reply_toggle_off_suppresses_only_homepage_reply_badges() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, false, true);
-    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, false, true)?;
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -1181,13 +1252,13 @@ async fn homepage_reply_toggle_off_suppresses_only_homepage_reply_badges() {
                 .uri("/tech")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
-    create_thread_on_board(&state, board_id, "new thread");
-    create_reply_on_thread(&state, board_id, thread_id, "reply");
+    create_thread_on_board(&state, board_id, "new thread")?;
+    create_reply_on_thread(&state, board_id, thread_id, "reply")?;
 
     let home_response = router
         .clone()
@@ -1197,16 +1268,16 @@ async fn homepage_reply_toggle_off_suppresses_only_homepage_reply_badges() {
                 .uri("/")
                 .header(
                     header::COOKIE,
-                    cookie_header(&cookies).expect("baseline cookies"),
+                    cookie_header(&cookies).context("baseline cookies")?,
                 )
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let home_body = response_body_string(home_response).await;
-    assert!(home_body.contains("board-card-new-thread-badge"));
-    assert!(!home_body.contains("board-card-new-reply-badge"));
+        .context("response")?;
+    let home_body = response_body_string(home_response).await?;
+    anyhow::ensure!(home_body.contains("board-card-new-thread-badge"));
+    anyhow::ensure!(!home_body.contains("board-card-new-reply-badge"));
 
     let catalog_response = router
         .oneshot(
@@ -1215,23 +1286,24 @@ async fn homepage_reply_toggle_off_suppresses_only_homepage_reply_badges() {
                 .uri("/tech/catalog")
                 .header(
                     header::COOKIE,
-                    cookie_header(&cookies).expect("baseline cookies"),
+                    cookie_header(&cookies).context("baseline cookies")?,
                 )
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let catalog_body = response_body_string(catalog_response).await;
-    assert!(catalog_body.contains("catalog-activity-badge"));
+        .context("response")?;
+    let catalog_body = response_body_string(catalog_response).await?;
+    anyhow::ensure!(catalog_body.contains("catalog-activity-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn thread_toggle_off_does_not_suppress_homepage_reply_badges() {
+async fn thread_toggle_off_does_not_suppress_homepage_reply_badges() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, false);
-    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, false)?;
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -1243,13 +1315,13 @@ async fn thread_toggle_off_does_not_suppress_homepage_reply_badges() {
                 .uri("/tech")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_reply_on_thread(&state, board_id, thread_id, "reply");
+    create_reply_on_thread(&state, board_id, thread_id, "reply")?;
 
     let home_response = router
         .clone()
@@ -1259,16 +1331,16 @@ async fn thread_toggle_off_does_not_suppress_homepage_reply_badges() {
                 .uri("/")
                 .header(
                     header::COOKIE,
-                    cookie_header(&cookies).expect("baseline cookies"),
+                    cookie_header(&cookies).context("baseline cookies")?,
                 )
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let home_body = response_body_string(home_response).await;
-    assert!(home_body.contains("board-card-new-reply-badge"));
-    assert!(!home_body.contains("board-card-new-thread-badge"));
+        .context("response")?;
+    let home_body = response_body_string(home_response).await?;
+    anyhow::ensure!(home_body.contains("board-card-new-reply-badge"));
+    anyhow::ensure!(!home_body.contains("board-card-new-thread-badge"));
 
     let catalog_response = router
         .oneshot(
@@ -1277,24 +1349,26 @@ async fn thread_toggle_off_does_not_suppress_homepage_reply_badges() {
                 .uri("/tech/catalog")
                 .header(
                     header::COOKIE,
-                    cookie_header(&cookies).expect("baseline cookies"),
+                    cookie_header(&cookies).context("baseline cookies")?,
                 )
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let catalog_body = response_body_string(catalog_response).await;
-    assert!(!catalog_body.contains("catalog-activity-badge"));
-    assert!(!catalog_body.contains("thread-summary-activity-badge"));
+        .context("response")?;
+    let catalog_body = response_body_string(catalog_response).await?;
+    anyhow::ensure!(!catalog_body.contains("catalog-activity-badge"));
+    anyhow::ensure!(!catalog_body.contains("thread-summary-activity-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn homepage_thread_toggle_off_does_not_suppress_homepage_reply_badges() {
+async fn homepage_thread_toggle_off_does_not_suppress_homepage_reply_badges() -> anyhow::Result<()>
+{
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, false, true, true);
-    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, false, true, true)?;
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -1306,14 +1380,14 @@ async fn homepage_thread_toggle_off_does_not_suppress_homepage_reply_badges() {
                 .uri("/tech")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_thread_on_board(&state, board_id, "new thread");
-    create_reply_on_thread(&state, board_id, thread_id, "reply");
+    create_thread_on_board(&state, board_id, "new thread")?;
+    create_reply_on_thread(&state, board_id, thread_id, "reply")?;
 
     let response = router
         .oneshot(
@@ -1322,23 +1396,24 @@ async fn homepage_thread_toggle_off_does_not_suppress_homepage_reply_badges() {
                 .uri("/")
                 .header(
                     header::COOKIE,
-                    cookie_header(&cookies).expect("baseline cookies"),
+                    cookie_header(&cookies).context("baseline cookies")?,
                 )
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let body = response_body_string(response).await;
-    assert!(body.contains("board-card-new-reply-badge"));
-    assert!(!body.contains("board-card-new-thread-badge"));
+        .context("response")?;
+    let body = response_body_string(response).await?;
+    anyhow::ensure!(body.contains("board-card-new-reply-badge"));
+    anyhow::ensure!(!body.contains("board-card-new-thread-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn thread_badge_markup_sits_between_catalog_info_and_counters() {
+async fn thread_badge_markup_sits_between_catalog_info_and_counters() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -1350,47 +1425,48 @@ async fn thread_badge_markup_sits_between_catalog_info_and_counters() {
                 .uri("/tech/catalog")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
-    create_reply_on_thread(&state, board_id, thread_id, "reply");
+    create_reply_on_thread(&state, board_id, thread_id, "reply")?;
 
     let response = router
         .oneshot(
             Request::builder()
                 .method("GET")
                 .uri("/tech/catalog")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let body = response_body_string(response).await;
+        .context("response")?;
+    let body = response_body_string(response).await?;
     let meta_idx = body
         .find("catalog-meta-row")
-        .expect("catalog meta row present");
-    let info_idx = body.find("catalog-info").expect("catalog info present");
+        .context("catalog meta row present")?;
+    let info_idx = body.find("catalog-info").context("catalog info present")?;
     let badge_row_idx = body
         .find("catalog-activity-row")
-        .expect("catalog badge row present");
+        .context("catalog badge row present")?;
     let badge_idx = body
         .find("catalog-activity-badge")
-        .expect("catalog badge present");
+        .context("catalog badge present")?;
 
-    assert!(meta_idx < info_idx);
-    assert!(info_idx < badge_row_idx);
-    assert!(badge_idx > info_idx);
+    anyhow::ensure!(meta_idx < info_idx);
+    anyhow::ensure!(info_idx < badge_row_idx);
+    anyhow::ensure!(badge_idx > info_idx);
+    Ok(())
 }
 
 #[tokio::test]
-async fn first_board_visit_establishes_quiet_activity_baseline() {
+async fn first_board_visit_establishes_quiet_activity_baseline() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (_board_id, _thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (_board_id, _thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state);
     let mut cookies = HashMap::new();
 
@@ -1402,13 +1478,13 @@ async fn first_board_visit_establishes_quiet_activity_baseline() {
                 .uri("/tech/catalog")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, response.headers());
-    let body = response_body_string(response).await;
-    assert!(!body.contains("catalog-activity-badge"));
+    let body = response_body_string(response).await?;
+    anyhow::ensure!(!body.contains("catalog-activity-badge"));
 
     let home_response = router
         .oneshot(
@@ -1417,22 +1493,23 @@ async fn first_board_visit_establishes_quiet_activity_baseline() {
                 .uri("/")
                 .header(
                     header::COOKIE,
-                    cookie_header(&cookies).expect("baseline cookies"),
+                    cookie_header(&cookies).context("baseline cookies")?,
                 )
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let home_body = response_body_string(home_response).await;
-    assert!(!home_body.contains("board-card-activity-badge"));
+        .context("response")?;
+    let home_body = response_body_string(home_response).await?;
+    anyhow::ensure!(!home_body.contains("board-card-activity-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn new_thread_after_board_baseline_shows_homepage_badge() {
+async fn new_thread_after_board_baseline_shows_homepage_badge() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, _thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, _thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -1444,13 +1521,13 @@ async fn new_thread_after_board_baseline_shows_homepage_badge() {
                 .uri("/tech")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_thread_on_board(&state, board_id, "new thread");
+    create_thread_on_board(&state, board_id, "new thread")?;
 
     let response = router
         .oneshot(
@@ -1459,23 +1536,24 @@ async fn new_thread_after_board_baseline_shows_homepage_badge() {
                 .uri("/")
                 .header(
                     header::COOKIE,
-                    cookie_header(&cookies).expect("baseline cookies"),
+                    cookie_header(&cookies).context("baseline cookies")?,
                 )
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let body = response_body_string(response).await;
-    assert!(body.contains("board-card-new-thread-badge"));
-    assert!(body.contains(">1 New Threads</span>"));
+        .context("response")?;
+    let body = response_body_string(response).await?;
+    anyhow::ensure!(body.contains("board-card-new-thread-badge"));
+    anyhow::ensure!(body.contains(">1 New Threads</span>"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn replies_alone_create_homepage_reply_badge() {
+async fn replies_alone_create_homepage_reply_badge() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -1487,13 +1565,13 @@ async fn replies_alone_create_homepage_reply_badge() {
                 .uri("/tech")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_reply_on_thread(&state, board_id, thread_id, "reply");
+    create_reply_on_thread(&state, board_id, thread_id, "reply")?;
 
     let response = router
         .oneshot(
@@ -1502,24 +1580,25 @@ async fn replies_alone_create_homepage_reply_badge() {
                 .uri("/")
                 .header(
                     header::COOKIE,
-                    cookie_header(&cookies).expect("baseline cookies"),
+                    cookie_header(&cookies).context("baseline cookies")?,
                 )
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let body = response_body_string(response).await;
-    assert!(body.contains("board-card-new-reply-badge"));
-    assert!(body.contains(">1 New Replies</span>"));
-    assert!(!body.contains("board-card-new-thread-badge"));
+        .context("response")?;
+    let body = response_body_string(response).await?;
+    anyhow::ensure!(body.contains("board-card-new-reply-badge"));
+    anyhow::ensure!(body.contains(">1 New Replies</span>"));
+    anyhow::ensure!(!body.contains("board-card-new-thread-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn homepage_thread_and_reply_badges_can_render_together() {
+async fn homepage_thread_and_reply_badges_can_render_together() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -1531,14 +1610,14 @@ async fn homepage_thread_and_reply_badges_can_render_together() {
                 .uri("/tech")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_thread_on_board(&state, board_id, "new thread");
-    create_reply_on_thread(&state, board_id, thread_id, "reply");
+    create_thread_on_board(&state, board_id, "new thread")?;
+    create_reply_on_thread(&state, board_id, thread_id, "reply")?;
 
     let response = router
         .oneshot(
@@ -1547,23 +1626,24 @@ async fn homepage_thread_and_reply_badges_can_render_together() {
                 .uri("/")
                 .header(
                     header::COOKIE,
-                    cookie_header(&cookies).expect("baseline cookies"),
+                    cookie_header(&cookies).context("baseline cookies")?,
                 )
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let body = response_body_string(response).await;
-    assert!(body.contains("board-card-new-thread-badge"));
-    assert!(body.contains("board-card-new-reply-badge"));
+        .context("response")?;
+    let body = response_body_string(response).await?;
+    anyhow::ensure!(body.contains("board-card-new-thread-badge"));
+    anyhow::ensure!(body.contains("board-card-new-reply-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn board_index_visit_clears_homepage_new_thread_badge() {
+async fn board_index_visit_clears_homepage_new_thread_badge() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, _thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, _thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -1575,12 +1655,12 @@ async fn board_index_visit_clears_homepage_new_thread_badge() {
                 .uri("/tech")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
-    create_thread_on_board(&state, board_id, "new thread");
+    create_thread_on_board(&state, board_id, "new thread")?;
 
     let clear_response = router
         .clone()
@@ -1588,13 +1668,13 @@ async fn board_index_visit_clears_homepage_new_thread_badge() {
             Request::builder()
                 .method("GET")
                 .uri("/tech")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, clear_response.headers());
 
     let home_response = router
@@ -1602,21 +1682,22 @@ async fn board_index_visit_clears_homepage_new_thread_badge() {
             Request::builder()
                 .method("GET")
                 .uri("/")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let body = response_body_string(home_response).await;
-    assert!(!body.contains("board-card-activity-badge"));
+        .context("response")?;
+    let body = response_body_string(home_response).await?;
+    anyhow::ensure!(!body.contains("board-card-activity-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn board_catalog_visit_clears_homepage_new_thread_badge() {
+async fn board_catalog_visit_clears_homepage_new_thread_badge() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, _thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, _thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -1628,12 +1709,12 @@ async fn board_catalog_visit_clears_homepage_new_thread_badge() {
                 .uri("/tech")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
-    create_thread_on_board(&state, board_id, "new thread");
+    create_thread_on_board(&state, board_id, "new thread")?;
 
     let clear_response = router
         .clone()
@@ -1641,13 +1722,13 @@ async fn board_catalog_visit_clears_homepage_new_thread_badge() {
             Request::builder()
                 .method("GET")
                 .uri("/tech/catalog")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, clear_response.headers());
 
     let home_response = router
@@ -1655,21 +1736,22 @@ async fn board_catalog_visit_clears_homepage_new_thread_badge() {
             Request::builder()
                 .method("GET")
                 .uri("/")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let body = response_body_string(home_response).await;
-    assert!(!body.contains("board-card-activity-badge"));
+        .context("response")?;
+    let body = response_body_string(home_response).await?;
+    anyhow::ensure!(!body.contains("board-card-activity-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn thread_visit_clears_homepage_new_thread_badge() {
+async fn thread_visit_clears_homepage_new_thread_badge() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -1681,12 +1763,12 @@ async fn thread_visit_clears_homepage_new_thread_badge() {
                 .uri("/tech")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
-    create_thread_on_board(&state, board_id, "new thread");
+    create_thread_on_board(&state, board_id, "new thread")?;
 
     let clear_response = router
         .clone()
@@ -1694,13 +1776,13 @@ async fn thread_visit_clears_homepage_new_thread_badge() {
             Request::builder()
                 .method("GET")
                 .uri(format!("/tech/thread/{thread_id}"))
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, clear_response.headers());
 
     let home_response = router
@@ -1708,21 +1790,23 @@ async fn thread_visit_clears_homepage_new_thread_badge() {
             Request::builder()
                 .method("GET")
                 .uri("/")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let body = response_body_string(home_response).await;
-    assert!(!body.contains("board-card-activity-badge"));
+        .context("response")?;
+    let body = response_body_string(home_response).await?;
+    anyhow::ensure!(!body.contains("board-card-activity-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn conditional_thread_visit_that_marks_activity_read_returns_full_response() {
+async fn conditional_thread_visit_that_marks_activity_read_returns_full_response(
+) -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -1734,19 +1818,19 @@ async fn conditional_thread_visit_that_marks_activity_read_returns_full_response
                 .uri(format!("/tech/thread/{thread_id}"))
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     let baseline_etag = baseline
         .headers()
         .get(header::ETAG)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
-        .expect("thread etag");
+        .context("thread etag")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_thread_on_board(&state, board_id, "new thread");
+    create_thread_on_board(&state, board_id, "new thread")?;
 
     let clear_response = router
         .clone()
@@ -1754,15 +1838,15 @@ async fn conditional_thread_visit_that_marks_activity_read_returns_full_response
             Request::builder()
                 .method("GET")
                 .uri(format!("/tech/thread/{thread_id}"))
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .header(header::IF_NONE_MATCH, baseline_etag)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    assert_eq!(clear_response.status(), StatusCode::OK);
+        .context("response")?;
+    ensure_eq!(clear_response.status(), StatusCode::OK);
     update_cookie_store(&mut cookies, clear_response.headers());
 
     let home_response = router
@@ -1770,21 +1854,23 @@ async fn conditional_thread_visit_that_marks_activity_read_returns_full_response
             Request::builder()
                 .method("GET")
                 .uri("/")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let body = response_body_string(home_response).await;
-    assert!(!body.contains("board-card-activity-badge"));
+        .context("response")?;
+    let body = response_body_string(home_response).await?;
+    anyhow::ensure!(!body.contains("board-card-activity-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn conditional_board_activity_pages_return_full_response_when_tracking_enabled() {
+async fn conditional_board_activity_pages_return_full_response_when_tracking_enabled(
+) -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state);
 
     for uri in ["/tech", "/tech/catalog"] {
@@ -1796,16 +1882,16 @@ async fn conditional_board_activity_pages_return_full_response_when_tracking_ena
                     .uri(uri)
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("request")?,
             )
             .await
-            .expect("response");
+            .context("response")?;
         let etag = baseline
             .headers()
             .get(header::ETAG)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned)
-            .expect("etag");
+            .context("etag")?;
 
         let conditional = router
             .clone()
@@ -1816,19 +1902,21 @@ async fn conditional_board_activity_pages_return_full_response_when_tracking_ena
                     .header(header::IF_NONE_MATCH, etag)
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("request")?,
             )
             .await
-            .expect("conditional response");
-        assert_eq!(conditional.status(), StatusCode::OK);
+            .context("conditional response")?;
+        ensure_eq!(conditional.status(), StatusCode::OK);
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn new_reply_after_thread_baseline_shows_thread_badge_until_visible_board_visit() {
+async fn new_reply_after_thread_baseline_shows_thread_badge_until_visible_board_visit(
+) -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -1840,13 +1928,13 @@ async fn new_reply_after_thread_baseline_shows_thread_badge_until_visible_board_
                 .uri("/tech/catalog")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_reply_on_thread(&state, board_id, thread_id, "reply");
+    create_reply_on_thread(&state, board_id, thread_id, "reply")?;
 
     let badge_response = router
         .clone()
@@ -1854,39 +1942,40 @@ async fn new_reply_after_thread_baseline_shows_thread_badge_until_visible_board_
             Request::builder()
                 .method("GET")
                 .uri("/tech/catalog")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, badge_response.headers());
-    let badge_body = response_body_string(badge_response).await;
-    assert!(badge_body.contains("catalog-activity-badge"));
-    assert!(badge_body.contains(">1 New</span>"));
+    let badge_body = response_body_string(badge_response).await?;
+    anyhow::ensure!(badge_body.contains("catalog-activity-badge"));
+    anyhow::ensure!(badge_body.contains(">1 New</span>"));
 
     let cleared_catalog = router
         .oneshot(
             Request::builder()
                 .method("GET")
                 .uri("/tech/catalog")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let cleared_body = response_body_string(cleared_catalog).await;
-    assert!(!cleared_body.contains("catalog-activity-badge"));
+        .context("response")?;
+    let cleared_body = response_body_string(cleared_catalog).await?;
+    anyhow::ensure!(!cleared_body.contains("catalog-activity-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn thread_visit_clears_thread_badge_after_unread_board_render() {
+async fn thread_visit_clears_thread_badge_after_unread_board_render() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -1898,13 +1987,13 @@ async fn thread_visit_clears_thread_badge_after_unread_board_render() {
                 .uri("/tech/catalog")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_reply_on_thread(&state, board_id, thread_id, "reply");
+    create_reply_on_thread(&state, board_id, thread_id, "reply")?;
 
     let badge_response = router
         .clone()
@@ -1912,15 +2001,15 @@ async fn thread_visit_clears_thread_badge_after_unread_board_render() {
             Request::builder()
                 .method("GET")
                 .uri("/tech/catalog")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let badge_body = response_body_string(badge_response).await;
-    assert!(badge_body.contains("catalog-activity-badge"));
+        .context("response")?;
+    let badge_body = response_body_string(badge_response).await?;
+    anyhow::ensure!(badge_body.contains("catalog-activity-badge"));
 
     let clear_response = router
         .clone()
@@ -1928,13 +2017,13 @@ async fn thread_visit_clears_thread_badge_after_unread_board_render() {
             Request::builder()
                 .method("GET")
                 .uri(format!("/tech/thread/{thread_id}"))
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, clear_response.headers());
 
     let cleared_catalog = router
@@ -1942,22 +2031,23 @@ async fn thread_visit_clears_thread_badge_after_unread_board_render() {
             Request::builder()
                 .method("GET")
                 .uri("/tech/catalog")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let cleared_body = response_body_string(cleared_catalog).await;
-    assert!(!cleared_body.contains("catalog-activity-badge"));
+        .context("response")?;
+    let cleared_body = response_body_string(cleared_catalog).await?;
+    anyhow::ensure!(!cleared_body.contains("catalog-activity-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn thread_visit_clears_homepage_and_board_reply_badges() {
+async fn thread_visit_clears_homepage_and_board_reply_badges() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -1969,13 +2059,13 @@ async fn thread_visit_clears_homepage_and_board_reply_badges() {
                 .uri("/tech")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_reply_on_thread(&state, board_id, thread_id, "reply");
+    create_reply_on_thread(&state, board_id, thread_id, "reply")?;
 
     let badge_home = router
         .clone()
@@ -1983,14 +2073,14 @@ async fn thread_visit_clears_homepage_and_board_reply_badges() {
             Request::builder()
                 .method("GET")
                 .uri("/")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let badge_home_body = response_body_string(badge_home).await;
-    assert!(badge_home_body.contains("board-card-new-reply-badge"));
+        .context("response")?;
+    let badge_home_body = response_body_string(badge_home).await?;
+    anyhow::ensure!(badge_home_body.contains("board-card-new-reply-badge"));
 
     let badge_board = router
         .clone()
@@ -1998,15 +2088,15 @@ async fn thread_visit_clears_homepage_and_board_reply_badges() {
             Request::builder()
                 .method("GET")
                 .uri("/tech")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let badge_board_body = response_body_string(badge_board).await;
-    assert!(badge_board_body.contains("thread-summary-activity-badge"));
+        .context("response")?;
+    let badge_board_body = response_body_string(badge_board).await?;
+    anyhow::ensure!(badge_board_body.contains("thread-summary-activity-badge"));
 
     let thread_response = router
         .clone()
@@ -2014,13 +2104,13 @@ async fn thread_visit_clears_homepage_and_board_reply_badges() {
             Request::builder()
                 .method("GET")
                 .uri(format!("/tech/thread/{thread_id}"))
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, thread_response.headers());
 
     let cleared_home = router
@@ -2029,37 +2119,38 @@ async fn thread_visit_clears_homepage_and_board_reply_badges() {
             Request::builder()
                 .method("GET")
                 .uri("/")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let cleared_home_body = response_body_string(cleared_home).await;
-    assert!(!cleared_home_body.contains("board-card-new-reply-badge"));
+        .context("response")?;
+    let cleared_home_body = response_body_string(cleared_home).await?;
+    anyhow::ensure!(!cleared_home_body.contains("board-card-new-reply-badge"));
 
     let cleared_board = router
         .oneshot(
             Request::builder()
                 .method("GET")
                 .uri("/tech")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let cleared_board_body = response_body_string(cleared_board).await;
-    assert!(!cleared_board_body.contains("thread-summary-activity-badge"));
+        .context("response")?;
+    let cleared_board_body = response_body_string(cleared_board).await?;
+    anyhow::ensure!(!cleared_board_body.contains("thread-summary-activity-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn board_visit_does_not_clear_unrelated_board_reply_activity() {
+async fn board_visit_does_not_clear_unrelated_board_reply_activity() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (tech_board_id, tech_thread_id) = seed_board_with_thread(&state, "tech", "op");
-    let (chat_board_id, chat_thread_id) = seed_board_with_thread(&state, "chat", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (tech_board_id, tech_thread_id) = seed_board_with_thread(&state, "tech", "op")?;
+    let (chat_board_id, chat_thread_id) = seed_board_with_thread(&state, "chat", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -2072,15 +2163,15 @@ async fn board_visit_does_not_clear_unrelated_board_reply_activity() {
                     .uri(uri)
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("request")?,
             )
             .await
-            .expect("response");
+            .context("response")?;
         update_cookie_store(&mut cookies, baseline.headers());
     }
 
-    create_reply_on_thread(&state, tech_board_id, tech_thread_id, "tech reply");
-    create_reply_on_thread(&state, chat_board_id, chat_thread_id, "chat reply");
+    create_reply_on_thread(&state, tech_board_id, tech_thread_id, "tech reply")?;
+    create_reply_on_thread(&state, chat_board_id, chat_thread_id, "chat reply")?;
 
     let tech_visit = router
         .clone()
@@ -2088,13 +2179,13 @@ async fn board_visit_does_not_clear_unrelated_board_reply_activity() {
             Request::builder()
                 .method("GET")
                 .uri("/tech/catalog")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, tech_visit.headers());
 
     let chat_response = router
@@ -2102,22 +2193,23 @@ async fn board_visit_does_not_clear_unrelated_board_reply_activity() {
             Request::builder()
                 .method("GET")
                 .uri("/chat/catalog")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let chat_body = response_body_string(chat_response).await;
-    assert!(chat_body.contains("catalog-activity-badge"));
+        .context("response")?;
+    let chat_body = response_body_string(chat_response).await?;
+    anyhow::ensure!(chat_body.contains("catalog-activity-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn thread_visit_invalidates_stale_catalog_activity_etag() {
+async fn thread_visit_invalidates_stale_catalog_activity_etag() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -2129,13 +2221,13 @@ async fn thread_visit_invalidates_stale_catalog_activity_etag() {
                 .uri("/tech/catalog")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_reply_on_thread(&state, board_id, thread_id, "reply");
+    create_reply_on_thread(&state, board_id, thread_id, "reply")?;
 
     let badge_response = router
         .clone()
@@ -2143,21 +2235,21 @@ async fn thread_visit_invalidates_stale_catalog_activity_etag() {
             Request::builder()
                 .method("GET")
                 .uri("/tech/catalog")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     let stale_badge_etag = badge_response
         .headers()
         .get(header::ETAG)
         .and_then(|value| value.to_str().ok())
-        .expect("badge catalog etag")
+        .context("badge catalog etag")?
         .to_owned();
-    let badge_body = response_body_string(badge_response).await;
-    assert!(badge_body.contains("catalog-activity-badge"));
+    let badge_body = response_body_string(badge_response).await?;
+    anyhow::ensure!(badge_body.contains("catalog-activity-badge"));
 
     let thread_response = router
         .clone()
@@ -2165,13 +2257,13 @@ async fn thread_visit_invalidates_stale_catalog_activity_etag() {
             Request::builder()
                 .method("GET")
                 .uri(format!("/tech/thread/{thread_id}"))
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, thread_response.headers());
 
     let restored_catalog_response = router
@@ -2179,25 +2271,26 @@ async fn thread_visit_invalidates_stale_catalog_activity_etag() {
             Request::builder()
                 .method("GET")
                 .uri("/tech/catalog")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .header(header::IF_NONE_MATCH, stale_badge_etag)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(restored_catalog_response.status(), StatusCode::OK);
-    let restored_body = response_body_string(restored_catalog_response).await;
-    assert!(!restored_body.contains("catalog-activity-badge"));
+    ensure_eq!(restored_catalog_response.status(), StatusCode::OK);
+    let restored_body = response_body_string(restored_catalog_response).await?;
+    anyhow::ensure!(!restored_body.contains("catalog-activity-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn board_visit_invalidates_stale_board_activity_etag() {
+async fn board_visit_invalidates_stale_board_activity_etag() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -2209,13 +2302,13 @@ async fn board_visit_invalidates_stale_board_activity_etag() {
                 .uri("/tech")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_reply_on_thread(&state, board_id, thread_id, "reply");
+    create_reply_on_thread(&state, board_id, thread_id, "reply")?;
 
     let badge_response = router
         .clone()
@@ -2223,47 +2316,48 @@ async fn board_visit_invalidates_stale_board_activity_etag() {
             Request::builder()
                 .method("GET")
                 .uri("/tech")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     let stale_badge_etag = badge_response
         .headers()
         .get(header::ETAG)
         .and_then(|value| value.to_str().ok())
-        .expect("badge board etag")
+        .context("badge board etag")?
         .to_owned();
     update_cookie_store(&mut cookies, badge_response.headers());
-    let badge_body = response_body_string(badge_response).await;
-    assert!(badge_body.contains("thread-summary-activity-badge"));
+    let badge_body = response_body_string(badge_response).await?;
+    anyhow::ensure!(badge_body.contains("thread-summary-activity-badge"));
 
     let restored_board_response = router
         .oneshot(
             Request::builder()
                 .method("GET")
                 .uri("/tech")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .header(header::IF_NONE_MATCH, stale_badge_etag)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(restored_board_response.status(), StatusCode::OK);
-    let restored_body = response_body_string(restored_board_response).await;
-    assert!(!restored_body.contains("thread-summary-activity-badge"));
+    ensure_eq!(restored_board_response.status(), StatusCode::OK);
+    let restored_body = response_body_string(restored_board_response).await?;
+    anyhow::ensure!(!restored_body.contains("thread-summary-activity-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn thread_updates_clear_thread_activity_badge_cookie() {
+async fn thread_updates_clear_thread_activity_badge_cookie() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -2275,13 +2369,13 @@ async fn thread_updates_clear_thread_activity_badge_cookie() {
                 .uri("/tech/catalog")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_reply_on_thread(&state, board_id, thread_id, "reply");
+    create_reply_on_thread(&state, board_id, thread_id, "reply")?;
 
     let updates = router
         .clone()
@@ -2289,13 +2383,13 @@ async fn thread_updates_clear_thread_activity_badge_cookie() {
             Request::builder()
                 .method("GET")
                 .uri(format!("/tech/thread/{thread_id}/updates?since=0"))
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    assert_eq!(updates.status(), StatusCode::OK);
+        .context("response")?;
+    ensure_eq!(updates.status(), StatusCode::OK);
     update_cookie_store(&mut cookies, updates.headers());
 
     let catalog = router
@@ -2303,22 +2397,23 @@ async fn thread_updates_clear_thread_activity_badge_cookie() {
             Request::builder()
                 .method("GET")
                 .uri("/tech/catalog")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let body = response_body_string(catalog).await;
-    assert!(!body.contains("catalog-activity-badge"));
+        .context("response")?;
+    let body = response_body_string(catalog).await?;
+    anyhow::ensure!(!body.contains("catalog-activity-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn thread_updates_clear_homepage_new_thread_badge_cookie() {
+async fn thread_updates_clear_homepage_new_thread_badge_cookie() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state.clone());
     let mut cookies = HashMap::new();
 
@@ -2330,13 +2425,13 @@ async fn thread_updates_clear_homepage_new_thread_badge_cookie() {
                 .uri(format!("/tech/thread/{thread_id}"))
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_thread_on_board(&state, board_id, "new thread");
+    create_thread_on_board(&state, board_id, "new thread")?;
 
     let badge_home = router
         .clone()
@@ -2344,14 +2439,14 @@ async fn thread_updates_clear_homepage_new_thread_badge_cookie() {
             Request::builder()
                 .method("GET")
                 .uri("/")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let badge_body = response_body_string(badge_home).await;
-    assert!(badge_body.contains("board-card-new-thread-badge"));
+        .context("response")?;
+    let badge_body = response_body_string(badge_home).await?;
+    anyhow::ensure!(badge_body.contains("board-card-new-thread-badge"));
 
     let updates = router
         .clone()
@@ -2359,13 +2454,13 @@ async fn thread_updates_clear_homepage_new_thread_badge_cookie() {
             Request::builder()
                 .method("GET")
                 .uri(format!("/tech/thread/{thread_id}/updates?since=0"))
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    assert_eq!(updates.status(), StatusCode::OK);
+        .context("response")?;
+    ensure_eq!(updates.status(), StatusCode::OK);
     update_cookie_store(&mut cookies, updates.headers());
 
     let cleared_home = router
@@ -2373,30 +2468,32 @@ async fn thread_updates_clear_homepage_new_thread_badge_cookie() {
             Request::builder()
                 .method("GET")
                 .uri("/")
-                .header(header::COOKIE, cookie_header(&cookies).expect("cookies"))
+                .header(header::COOKIE, cookie_header(&cookies).context("cookies")?)
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let cleared_body = response_body_string(cleared_home).await;
-    assert!(!cleared_body.contains("board-card-new-thread-badge"));
+        .context("response")?;
+    let cleared_body = response_body_string(cleared_home).await?;
+    anyhow::ensure!(!cleared_body.contains("board-card-new-thread-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn password_protected_board_does_not_leak_homepage_new_activity_badge() {
+async fn password_protected_board_does_not_leak_homepage_new_activity_badge() -> anyhow::Result<()>
+{
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, _thread_id) = seed_board_with_thread(&state, "secret", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, _thread_id) = seed_board_with_thread(&state, "secret", "op")?;
     {
-        let conn = state.db.get().expect("db connection");
+        let conn = state.db.get().context("db connection")?;
         let password_hash =
-            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+            crate::utils::crypto::hash_password("swordfish").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE id = ?3",
             rusqlite::params!["view_password", password_hash, board_id],
         )
-        .expect("update board access");
+        .context("update board access")?;
     }
     let router = activity_router(state);
     let cookie = format!(
@@ -2411,36 +2508,37 @@ async fn password_protected_board_does_not_leak_homepage_new_activity_badge() {
                 .uri("/")
                 .header(header::COOKIE, cookie)
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    let body = response_body_string(response).await;
-    assert!(!body.contains("board-card-activity-badge"));
+        .context("response")?;
+    let body = response_body_string(response).await?;
+    anyhow::ensure!(!body.contains("board-card-activity-badge"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn thread_updates_rejects_thread_id_from_other_board() {
+async fn thread_updates_rejects_thread_id_from_other_board() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    let (_public_board_id, _public_thread_id) = seed_board_with_thread(&state, "pub", "public op");
+    let (_public_board_id, _public_thread_id) = seed_board_with_thread(&state, "pub", "public op")?;
     let (secret_board_id, secret_thread_id) =
-        seed_board_with_thread(&state, "secret", "protected op");
+        seed_board_with_thread(&state, "secret", "protected op")?;
     {
-        let conn = state.db.get().expect("db connection");
+        let conn = state.db.get().context("db connection")?;
         let password_hash =
-            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+            crate::utils::crypto::hash_password("swordfish").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE id = ?3",
             rusqlite::params!["view_password", password_hash, secret_board_id],
         )
-        .expect("protect secret board");
+        .context("protect secret board")?;
     }
     create_reply_on_thread(
         &state,
         secret_board_id,
         secret_thread_id,
         "protected reply should not leak",
-    );
+    )?;
     let router = activity_router(state);
 
     let response = router
@@ -2449,22 +2547,23 @@ async fn thread_updates_rejects_thread_id_from_other_board() {
                 .method("GET")
                 .uri(format!("/pub/thread/{secret_thread_id}/updates?since=0"))
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let body = response_body_string(response).await;
-    assert!(!body.contains("protected op"));
-    assert!(!body.contains("protected reply should not leak"));
+    ensure_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = response_body_string(response).await?;
+    anyhow::ensure!(!body.contains("protected op"));
+    anyhow::ensure!(!body.contains("protected reply should not leak"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn new_activity_pages_keep_private_no_store_cache_headers() {
+async fn new_activity_pages_keep_private_no_store_cache_headers() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (_board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (_board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state);
 
     let home_response = router
@@ -2474,11 +2573,11 @@ async fn new_activity_pages_keep_private_no_store_cache_headers() {
                 .method("GET")
                 .uri("/")
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    assert_eq!(
+        .context("response")?;
+    ensure_eq!(
         home_response
             .headers()
             .get(header::CACHE_CONTROL)
@@ -2494,11 +2593,11 @@ async fn new_activity_pages_keep_private_no_store_cache_headers() {
                 .uri("/tech/catalog")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    assert_eq!(
+        .context("response")?;
+    ensure_eq!(
         catalog_response
             .headers()
             .get(header::CACHE_CONTROL)
@@ -2514,11 +2613,11 @@ async fn new_activity_pages_keep_private_no_store_cache_headers() {
                 .uri("/tech")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    assert_eq!(
+        .context("response")?;
+    ensure_eq!(
         board_response
             .headers()
             .get(header::CACHE_CONTROL)
@@ -2533,24 +2632,25 @@ async fn new_activity_pages_keep_private_no_store_cache_headers() {
                 .uri(format!("/tech/thread/{thread_id}"))
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
-    assert_eq!(
+        .context("response")?;
+    ensure_eq!(
         thread_response
             .headers()
             .get(header::CACHE_CONTROL)
             .and_then(|value| value.to_str().ok()),
         Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE)
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn activity_pages_keep_existing_cache_policy_when_tracking_disabled() {
+async fn activity_pages_keep_existing_cache_policy_when_tracking_disabled() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, false, false, false);
-    let (_board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, false, false, false)?;
+    let (_board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state);
     let thread_uri = format!("/tech/thread/{thread_id}");
 
@@ -2563,11 +2663,11 @@ async fn activity_pages_keep_existing_cache_policy_when_tracking_disabled() {
                     .uri(uri)
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("request")?,
             )
             .await
-            .expect("response");
-        assert_eq!(
+            .context("response")?;
+        ensure_eq!(
             response
                 .headers()
                 .get(header::CACHE_CONTROL)
@@ -2576,20 +2676,22 @@ async fn activity_pages_keep_existing_cache_policy_when_tracking_disabled() {
             "{uri} should keep no-cache when activity tracking is disabled"
         );
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn catalog_baseline_tracks_only_highest_priority_threads_within_cookie_limit() {
+async fn catalog_baseline_tracks_only_highest_priority_threads_within_cookie_limit(
+) -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    set_new_activity_settings(&state, true, true, true);
-    let (board_id, first_thread_id) = seed_board_with_thread(&state, "tech", "op");
+    set_new_activity_settings(&state, true, true, true)?;
+    let (board_id, first_thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let mut created_thread_ids = vec![first_thread_id];
     for index in 0..120 {
         created_thread_ids.push(create_thread_on_board(
             &state,
             board_id,
             &format!("thread {index}"),
-        ));
+        )?);
     }
     let router = activity_router(state);
 
@@ -2600,10 +2702,10 @@ async fn catalog_baseline_tracks_only_highest_priority_threads_within_cookie_lim
                 .uri("/tech/catalog")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
     let cookie_value = response
         .headers()
@@ -2617,18 +2719,18 @@ async fn catalog_baseline_tracks_only_highest_priority_threads_within_cookie_lim
                 .and_then(|pair| pair.split_once('='))?;
             (name == "rustchan_thread_activity").then(|| cookie_value.to_owned())
         })
-        .expect("thread activity cookie");
+        .context("thread activity cookie")?;
     let mut cookie_headers = HeaderMap::new();
     cookie_headers.insert(
         header::COOKIE,
         format!("rustchan_thread_activity={cookie_value}")
             .parse()
-            .expect("cookie header"),
+            .context("cookie header")?,
     );
     let jar = CookieJar::from_headers(&cookie_headers);
     let markers = super::thread_activity_markers_from_jar(&jar);
 
-    assert_eq!(markers.len(), super::THREAD_ACTIVITY_MARKER_LIMIT);
+    ensure_eq!(markers.len(), super::THREAD_ACTIVITY_MARKER_LIMIT);
 
     let expected_tracked = created_thread_ids
         .iter()
@@ -2637,30 +2739,31 @@ async fn catalog_baseline_tracks_only_highest_priority_threads_within_cookie_lim
         .copied()
         .collect::<Vec<_>>();
     for thread_id in expected_tracked {
-        assert!(
+        anyhow::ensure!(
             markers.contains_key(&thread_id),
             "expected tracked thread marker for {thread_id}"
         );
     }
-    assert!(
+    anyhow::ensure!(
         !markers.contains_key(&first_thread_id),
         "oldest catalog thread should not displace newer visible threads"
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn create_thread_xhr_banned_user_redirects_to_banned_page() {
+async fn create_thread_xhr_banned_user_redirects_to_banned_page() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        let conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
         crate::db::add_ban(
             &conn,
             &crate::utils::crypto::hash_ip("127.0.0.1", &crate::config::CONFIG.cookie_secret),
             "testing ban",
             None,
         )
-        .expect("add ban");
+        .context("add ban")?;
     }
 
     let router = Router::new()
@@ -2684,32 +2787,33 @@ async fn create_thread_xhr_banned_user_redirects_to_banned_page() {
                 .header("X-Requested-With", "XMLHttpRequest")
                 .extension(crate::test_support::connect_info())
                 .body(Body::from(body))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    assert_eq!(
+    ensure_eq!(response.status(), StatusCode::NO_CONTENT);
+    ensure_eq!(
         response
             .headers()
             .get("x-rustchan-redirect")
             .and_then(|value| value.to_str().ok()),
         Some(super::banned_page_redirect_url("testing ban").as_str())
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn create_thread_xhr_captcha_failure_returns_inline_json_error() {
+async fn create_thread_xhr_captcha_failure_returns_inline_json_error() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        let conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
         conn.execute(
             "UPDATE boards SET allow_captcha = 1 WHERE short_name = 'test'",
             [],
         )
-        .expect("enable captcha");
+        .context("enable captcha")?;
     }
 
     let router = Router::new()
@@ -2733,20 +2837,20 @@ async fn create_thread_xhr_captcha_failure_returns_inline_json_error() {
                 .header("X-Requested-With", "XMLHttpRequest")
                 .extension(crate::test_support::connect_info())
                 .body(Body::from(body))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
+    ensure_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    ensure_eq!(
         response
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok()),
         Some("application/json; charset=utf-8")
     );
-    assert_eq!(
+    ensure_eq!(
         response
             .headers()
             .get("x-rustchan-error-status")
@@ -2757,20 +2861,21 @@ async fn create_thread_xhr_captcha_failure_returns_inline_json_error() {
     let body = String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("response body")
+            .context("response body")?
             .to_vec(),
     )
-    .expect("utf8 body");
-    assert!(body.contains("CAPTCHA verification failed"));
+    .context("utf8 body")?;
+    anyhow::ensure!(body.contains("CAPTCHA verification failed"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn duplicate_report_redirects_back_without_500() {
+async fn duplicate_report_redirects_back_without_500() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     let (thread_id, post_id) = {
-        let conn = state.db.get().expect("db connection");
+        let conn = state.db.get().context("db connection")?;
         let board_id =
-            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+            crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
         let post = crate::db::NewPost {
             thread_id: 0,
             board_id,
@@ -2796,7 +2901,7 @@ async fn duplicate_report_redirects_back_without_500() {
         let (thread_id, post_id, _) = crate::db::create_thread_with_optional_poll(
             &conn, board_id, None, &post, "", None, None,
         )
-        .expect("create thread");
+        .context("create thread")?;
         (thread_id, post_id)
     };
 
@@ -2820,41 +2925,42 @@ async fn duplicate_report_redirects_back_without_500() {
                     .body(Body::from(format!(
                         "post_id={post_id}&thread_id={thread_id}&board=test&reason=spam&_csrf=csrf123"
                     )))
-                    .expect("request"),
+                    .context("request")?,
             )
             .await
-            .expect("response");
+            .context("response")?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        ensure_eq!(response.status(), StatusCode::SEE_OTHER);
         let location = response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .expect("location header");
-        assert_eq!(
+            .context("location header")?;
+        ensure_eq!(
             location,
             format!("/test/thread/{thread_id}?reported=1#p{post_id}")
         );
     }
 
     let open_reports = {
-        let conn = state.db.get().expect("db connection");
+        let conn = state.db.get().context("db connection")?;
         conn.query_row(
             "SELECT COUNT(*) FROM reports WHERE post_id = ?1 AND status = 'open'",
             rusqlite::params![post_id],
             |row| row.get::<_, i64>(0),
         )
-        .expect("open report count")
+        .context("open report count")?
     };
-    assert_eq!(open_reports, 1);
+    ensure_eq!(open_reports, 1);
+    Ok(())
 }
 
 #[tokio::test]
-async fn create_thread_rejects_uploads_on_upload_disabled_board() {
+async fn create_thread_rejects_uploads_on_upload_disabled_board() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let mut conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+        let mut conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
         crate::db::update_board_settings(
             &mut conn,
             1,
@@ -2867,10 +2973,13 @@ async fn create_thread_rejects_uploads_on_upload_disabled_board() {
             false,
             false,
             false,
-            i64::try_from(crate::config::CONFIG.max_image_size).expect("image size fits in i64"),
-            i64::try_from(crate::config::CONFIG.max_video_size).expect("video size fits in i64"),
-            i64::try_from(crate::config::CONFIG.max_audio_size).expect("audio size fits in i64"),
-            i64::try_from(crate::config::CONFIG.max_image_size).expect("pdf size fits in i64"),
+            i64::try_from(crate::config::CONFIG.max_image_size)
+                .context("image size fits in i64")?,
+            i64::try_from(crate::config::CONFIG.max_video_size)
+                .context("video size fits in i64")?,
+            i64::try_from(crate::config::CONFIG.max_audio_size)
+                .context("audio size fits in i64")?,
+            i64::try_from(crate::config::CONFIG.max_image_size).context("pdf size fits in i64")?,
             false,
             false,
             true,
@@ -2888,7 +2997,7 @@ async fn create_thread_rejects_uploads_on_upload_disabled_board() {
             crate::models::BoardAccessMode::Public,
             "",
         )
-        .expect("update board settings");
+        .context("update board settings")?;
     }
 
     let router = Router::new()
@@ -2911,27 +3020,28 @@ async fn create_thread_rejects_uploads_on_upload_disabled_board() {
                 .header(header::COOKIE, "csrf_token=csrf123")
                 .extension(crate::test_support::connect_info())
                 .body(Body::from(body))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    ensure_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    Ok(())
 }
 
 #[tokio::test]
-async fn view_locked_catalog_renders_unlock_page() {
+async fn view_locked_catalog_renders_unlock_page() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "secret", "Secret", "", false).expect("create board");
+        let conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "secret", "Secret", "", false).context("create board")?;
         let password_hash =
-            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+            crate::utils::crypto::hash_password("swordfish").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'secret'",
             rusqlite::params!["view_password", password_hash],
         )
-        .expect("update board access");
+        .context("update board access")?;
     }
 
     let router = Router::new()
@@ -2945,36 +3055,37 @@ async fn view_locked_catalog_renders_unlock_page() {
                 .uri("/secret/catalog")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    ensure_eq!(response.status(), StatusCode::FORBIDDEN);
     let body = String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("response body")
+            .context("response body")?
             .to_vec(),
     )
-    .expect("utf8 body");
-    assert!(body.contains("password protected board"));
-    assert!(body.contains("action=\"/secret/unlock\""));
+    .context("utf8 body")?;
+    anyhow::ensure!(body.contains("password protected board"));
+    anyhow::ensure!(body.contains("action=\"/secret/unlock\""));
+    Ok(())
 }
 
 #[tokio::test]
-async fn unlock_board_access_sets_cookie_and_redirects() {
+async fn unlock_board_access_sets_cookie_and_redirects() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "secret", "Secret", "", false).expect("create board");
+        let conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "secret", "Secret", "", false).context("create board")?;
         let password_hash =
-            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+            crate::utils::crypto::hash_password("swordfish").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'secret'",
             rusqlite::params!["view_password", password_hash],
         )
-        .expect("update board access");
+        .context("update board access")?;
     }
 
     let router = Router::new()
@@ -2992,13 +3103,13 @@ async fn unlock_board_access_sets_cookie_and_redirects() {
                 .body(Body::from(
                     "password=swordfish&return_to=%2Fsecret%2Fcatalog&_csrf=csrf123",
                 ))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
+    ensure_eq!(response.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(
         response
             .headers()
             .get(header::LOCATION)
@@ -3011,23 +3122,25 @@ async fn unlock_board_access_sets_cookie_and_redirects() {
         .iter()
         .filter_map(|value| value.to_str().ok())
         .find(|value| value.contains(&super::board_access_cookie_name("secret")))
-        .expect("board access cookie");
-    assert!(set_cookie.contains("HttpOnly"));
+        .context("board access cookie")?;
+    anyhow::ensure!(set_cookie.contains("HttpOnly"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn unlock_board_access_rejects_malformed_return_to_and_uses_board_default() {
+async fn unlock_board_access_rejects_malformed_return_to_and_uses_board_default(
+) -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "secret", "Secret", "", false).expect("create board");
+        let conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "secret", "Secret", "", false).context("create board")?;
         let password_hash =
-            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+            crate::utils::crypto::hash_password("swordfish").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'secret'",
             rusqlite::params!["view_password", password_hash],
         )
-        .expect("update board access");
+        .context("update board access")?;
     }
 
     let router = Router::new()
@@ -3045,34 +3158,35 @@ async fn unlock_board_access_rejects_malformed_return_to_and_uses_board_default(
                 .body(Body::from(
                     "password=swordfish&return_to=%2F%2Fevil.example%2Fcatalog&_csrf=csrf123",
                 ))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
+    ensure_eq!(response.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(
         response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok()),
         Some("/secret/catalog")
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn changing_board_password_invalidates_existing_unlock_cookie() {
+async fn changing_board_password_invalidates_existing_unlock_cookie() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "secret", "Secret", "", false).expect("create board");
+        let conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "secret", "Secret", "", false).context("create board")?;
         let password_hash =
-            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+            crate::utils::crypto::hash_password("swordfish").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'secret'",
             rusqlite::params!["view_password", password_hash],
         )
-        .expect("update board access");
+        .context("update board access")?;
     }
 
     let router = Router::new()
@@ -3092,10 +3206,10 @@ async fn changing_board_password_invalidates_existing_unlock_cookie() {
                 .body(Body::from(
                     "password=swordfish&return_to=%2Fsecret%2Fcatalog&_csrf=csrf123",
                 ))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("unlock response");
+        .context("unlock response")?;
     let access_cookie = response
         .headers()
         .get_all(header::SET_COOKIE)
@@ -3103,17 +3217,18 @@ async fn changing_board_password_invalidates_existing_unlock_cookie() {
         .filter_map(|value| value.to_str().ok())
         .find(|value| value.contains(&super::board_access_cookie_name("secret")))
         .and_then(|value| value.split(';').next())
-        .expect("board access cookie")
+        .context("board access cookie")?
         .to_owned();
 
     {
-        let conn = state.db.get().expect("db connection");
-        let password_hash = crate::utils::crypto::hash_password("newpass").expect("hash password");
+        let conn = state.db.get().context("db connection")?;
+        let password_hash =
+            crate::utils::crypto::hash_password("newpass").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_password_hash = ?1 WHERE short_name = 'secret'",
             rusqlite::params![password_hash],
         )
-        .expect("change board password");
+        .context("change board password")?;
     }
 
     let response = router
@@ -3124,16 +3239,17 @@ async fn changing_board_password_invalidates_existing_unlock_cookie() {
                 .header(header::COOKIE, access_cookie)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("catalog response");
+        .context("catalog response")?;
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    ensure_eq!(response.status(), StatusCode::FORBIDDEN);
+    Ok(())
 }
 
 #[tokio::test]
-async fn theme_redirect_ignores_external_referer_fallback() {
+async fn theme_redirect_ignores_external_referer_fallback() -> anyhow::Result<()> {
     let router = Router::new()
         .route("/theme/{theme}", get(crate::handlers::board::set_theme))
         .with_state(crate::test_support::app_state());
@@ -3146,23 +3262,24 @@ async fn theme_redirect_ignores_external_referer_fallback() {
                 .header(header::COOKIE, "csrf_token=csrf123")
                 .header(header::REFERER, "https://evil.example/secret/catalog")
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
+    ensure_eq!(response.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(
         response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok()),
         Some("/")
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn theme_redirect_persists_no_js_theme_without_csrf() {
+async fn theme_redirect_persists_no_js_theme_without_csrf() -> anyhow::Result<()> {
     let router = Router::new()
         .route("/theme/{theme}", get(crate::handlers::board::set_theme))
         .with_state(crate::test_support::app_state());
@@ -3174,20 +3291,20 @@ async fn theme_redirect_persists_no_js_theme_without_csrf() {
                 .method("GET")
                 .uri("/theme/blue-sky?return_to=%2Fsecret%2Fcatalog")
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("accepted response");
+        .context("accepted response")?;
 
-    assert_eq!(accepted.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
+    ensure_eq!(accepted.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(
         accepted
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok()),
         Some("/secret/catalog")
     );
-    assert!(accepted
+    anyhow::ensure!(accepted
         .headers()
         .get_all(header::SET_COOKIE)
         .iter()
@@ -3202,13 +3319,13 @@ async fn theme_redirect_persists_no_js_theme_without_csrf() {
                 .uri("/theme/forest?return_to=%2Fsecret%2Fcatalog&_csrf=wrong")
                 .header(header::COOKIE, "csrf_token=csrf123")
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("rejected response");
+        .context("rejected response")?;
 
-    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
-    assert!(rejected.headers().get(header::SET_COOKIE).is_none());
+    ensure_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    anyhow::ensure!(rejected.headers().get(header::SET_COOKIE).is_none());
 
     let accepted = router
         .oneshot(
@@ -3217,44 +3334,46 @@ async fn theme_redirect_persists_no_js_theme_without_csrf() {
                 .uri("/theme/forest?return_to=%2Fsecret%2Fcatalog&_csrf=csrf123")
                 .header(header::COOKIE, "csrf_token=csrf123")
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("accepted response");
+        .context("accepted response")?;
 
-    assert_eq!(accepted.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
+    ensure_eq!(accepted.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(
         accepted
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok()),
         Some("/secret/catalog")
     );
-    assert!(accepted
+    anyhow::ensure!(accepted
         .headers()
         .get_all(header::SET_COOKIE)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .any(|value| value.starts_with("rustchan_theme=forest;")));
+    Ok(())
 }
 
 #[test]
-fn user_preferences_from_jar_defaults_and_ignores_invalid_values() {
+fn user_preferences_from_jar_defaults_and_ignores_invalid_values() -> anyhow::Result<()> {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::COOKIE,
         "rustchan_hide_nsfw=maybe; rustchan_video_audio=loud; rustchan_preferred_view=grid; rustchan_activity_badges=maybe"
             .parse()
-            .expect("cookie header"),
+            .context("cookie header")?,
     );
     let jar = CookieJar::from_headers(&headers);
 
     let preferences = super::user_preferences_from_jar(&jar);
 
-    assert!(!preferences.hide_nsfw_boards);
-    assert!(!preferences.video_audio_muted);
-    assert!(preferences.preferred_board_view.is_catalog());
-    assert!(preferences.show_activity_badges);
+    anyhow::ensure!(!preferences.hide_nsfw_boards);
+    anyhow::ensure!(!preferences.video_audio_muted);
+    anyhow::ensure!(preferences.preferred_board_view.is_catalog());
+    anyhow::ensure!(preferences.show_activity_badges);
+    Ok(())
 }
 
 fn set_cookie_pairs(response: &axum::response::Response) -> String {
@@ -3269,7 +3388,7 @@ fn set_cookie_pairs(response: &axum::response::Response) -> String {
 }
 
 #[tokio::test]
-async fn set_user_preferences_requires_csrf_and_sets_bounded_cookies() {
+async fn set_user_preferences_requires_csrf_and_sets_bounded_cookies() -> anyhow::Result<()> {
     install_preference_test_themes();
     let router = Router::new().route("/preferences", post(super::set_user_preferences));
 
@@ -3282,11 +3401,11 @@ async fn set_user_preferences_requires_csrf_and_sets_bounded_cookies() {
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, "csrf_token=csrf123")
                 .body(Body::from("theme=forest"))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("rejected response");
-    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        .context("rejected response")?;
+    ensure_eq!(rejected.status(), StatusCode::FORBIDDEN);
 
     let accepted = router
         .oneshot(
@@ -3298,13 +3417,13 @@ async fn set_user_preferences_requires_csrf_and_sets_bounded_cookies() {
                 .body(Body::from(
                     "_csrf=csrf123&return_to=%2Ftech%2Fcatalog&theme=forest&hide_nsfw_boards=1&video_audio=mute&preferred_board_view=index",
                 ))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("accepted response");
+        .context("accepted response")?;
 
-    assert_eq!(accepted.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
+    ensure_eq!(accepted.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(
         accepted
             .headers()
             .get(header::LOCATION)
@@ -3318,17 +3437,18 @@ async fn set_user_preferences_requires_csrf_and_sets_bounded_cookies() {
         .filter_map(|value| value.to_str().ok())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(set_cookies.contains("rustchan_theme=forest"));
-    assert!(set_cookies.contains("rustchan_hide_nsfw=1"));
-    assert!(set_cookies.contains("rustchan_video_audio=mute"));
-    assert!(set_cookies.contains("rustchan_preferred_view=index"));
-    assert!(set_cookies.contains("rustchan_activity_badges=0"));
-    assert!(set_cookies.contains("SameSite=Lax"));
-    assert!(set_cookies.contains("Path=/"));
+    anyhow::ensure!(set_cookies.contains("rustchan_theme=forest"));
+    anyhow::ensure!(set_cookies.contains("rustchan_hide_nsfw=1"));
+    anyhow::ensure!(set_cookies.contains("rustchan_video_audio=mute"));
+    anyhow::ensure!(set_cookies.contains("rustchan_preferred_view=index"));
+    anyhow::ensure!(set_cookies.contains("rustchan_activity_badges=0"));
+    anyhow::ensure!(set_cookies.contains("SameSite=Lax"));
+    anyhow::ensure!(set_cookies.contains("Path=/"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn set_user_preferences_supports_background_cookie_updates() {
+async fn set_user_preferences_supports_background_cookie_updates() -> anyhow::Result<()> {
     install_preference_test_themes();
     let router = Router::new().route("/preferences", post(super::set_user_preferences));
 
@@ -3343,22 +3463,23 @@ async fn set_user_preferences_supports_background_cookie_updates() {
                 .body(Body::from(
                     "_csrf=csrf123&return_to=%2Ftech&preferences_form=1&theme=blue-sky&hide_nsfw_boards=1&video_audio=mute&preferred_board_view=index&show_activity_badges=1",
                 ))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    ensure_eq!(response.status(), StatusCode::NO_CONTENT);
     let set_cookies = set_cookie_pairs(&response);
-    assert!(set_cookies.contains("rustchan_theme=blue-sky"));
-    assert!(set_cookies.contains("rustchan_hide_nsfw=1"));
-    assert!(set_cookies.contains("rustchan_video_audio=mute"));
-    assert!(set_cookies.contains("rustchan_preferred_view=index"));
-    assert!(set_cookies.contains("rustchan_activity_badges=1"));
+    anyhow::ensure!(set_cookies.contains("rustchan_theme=blue-sky"));
+    anyhow::ensure!(set_cookies.contains("rustchan_hide_nsfw=1"));
+    anyhow::ensure!(set_cookies.contains("rustchan_video_audio=mute"));
+    anyhow::ensure!(set_cookies.contains("rustchan_preferred_view=index"));
+    anyhow::ensure!(set_cookies.contains("rustchan_activity_badges=1"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn set_user_preferences_accepts_admin_scoped_csrf_from_admin_panel() {
+async fn set_user_preferences_accepts_admin_scoped_csrf_from_admin_panel() -> anyhow::Result<()> {
     install_preference_test_themes();
     let router = Router::new().route("/preferences", post(super::set_user_preferences));
     let csrf = crate::utils::crypto::make_scoped_csrf_form_token(
@@ -3381,20 +3502,20 @@ async fn set_user_preferences_accepts_admin_scoped_csrf_from_admin_panel() {
                 .body(Body::from(format!(
                     "_csrf={csrf}&return_to=%2Fadmin%2Fpanel&preferences_form=1&theme=forest&video_audio=mute&preferred_board_view=index"
                 )))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("accepted response");
+        .context("accepted response")?;
 
-    assert_eq!(accepted.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
+    ensure_eq!(accepted.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(
         accepted
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok()),
         Some("/admin/panel")
     );
-    assert!(set_cookie_pairs(&accepted).contains("rustchan_theme=forest"));
+    anyhow::ensure!(set_cookie_pairs(&accepted).contains("rustchan_theme=forest"));
 
     let rejected = router
         .oneshot(
@@ -3409,19 +3530,20 @@ async fn set_user_preferences_accepts_admin_scoped_csrf_from_admin_panel() {
                 .body(Body::from(
                     "_csrf=csrf123.invalid&return_to=%2Fadmin%2Fpanel&preferences_form=1&theme=forest",
                 ))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("rejected response");
+        .context("rejected response")?;
 
-    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    ensure_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    Ok(())
 }
 
 #[tokio::test]
-async fn preferences_theme_cookie_drives_rendered_theme_after_reload() {
+async fn preferences_theme_cookie_drives_rendered_theme_after_reload() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     install_preference_test_themes();
-    seed_board_with_thread(&state, "tech", "op");
+    seed_board_with_thread(&state, "tech", "op")?;
     let router = Router::new()
         .route("/preferences", post(super::set_user_preferences))
         .route("/{board}", get(super::board_index))
@@ -3438,14 +3560,14 @@ async fn preferences_theme_cookie_drives_rendered_theme_after_reload() {
                 .body(Body::from(
                     "_csrf=csrf123&return_to=%2Ftech&preferences_form=1&theme=blue-sky&video_audio=on&preferred_board_view=catalog&show_activity_badges=1",
                 ))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("preference response");
+        .context("preference response")?;
 
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(response.status(), StatusCode::SEE_OTHER);
     let cookie_header = set_cookie_pairs(&response);
-    assert!(cookie_header.contains("rustchan_theme=blue-sky"));
+    anyhow::ensure!(cookie_header.contains("rustchan_theme=blue-sky"));
 
     let rendered = router
         .oneshot(
@@ -3455,25 +3577,26 @@ async fn preferences_theme_cookie_drives_rendered_theme_after_reload() {
                 .header(header::COOKIE, cookie_header)
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("rendered response");
-    assert_eq!(rendered.status(), StatusCode::OK);
+        .context("rendered response")?;
+    ensure_eq!(rendered.status(), StatusCode::OK);
     let body = String::from_utf8(
         to_bytes(rendered.into_body(), usize::MAX)
             .await
-            .expect("body bytes")
+            .context("body bytes")?
             .to_vec(),
     )
-    .expect("utf8 body");
-    assert!(body.contains(r#"data-active-theme="blue-sky""#));
-    assert!(body.contains(r#"data-theme="blue-sky""#));
-    assert!(body.contains(r#"<option value="blue-sky" selected>Blue Sky</option>"#));
+    .context("utf8 body")?;
+    anyhow::ensure!(body.contains(r#"data-active-theme="blue-sky""#));
+    anyhow::ensure!(body.contains(r#"data-theme="blue-sky""#));
+    anyhow::ensure!(body.contains(r#"<option value="blue-sky" selected>Blue Sky</option>"#));
+    Ok(())
 }
 
 #[tokio::test]
-async fn invalid_preferences_theme_falls_back_without_panic() {
+async fn invalid_preferences_theme_falls_back_without_panic() -> anyhow::Result<()> {
     install_preference_test_themes();
     let router = Router::new().route("/preferences", post(super::set_user_preferences));
 
@@ -3490,12 +3613,12 @@ async fn invalid_preferences_theme_falls_back_without_panic() {
                 .body(Body::from(
                     "_csrf=csrf123&return_to=%2F&theme=does-not-exist",
                 ))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(response.status(), StatusCode::SEE_OTHER);
     let set_cookies = response
         .headers()
         .get_all(header::SET_COOKIE)
@@ -3503,12 +3626,13 @@ async fn invalid_preferences_theme_falls_back_without_panic() {
         .filter_map(|value| value.to_str().ok())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(set_cookies.contains("rustchan_theme=blue-sky"));
-    assert!(set_cookies.contains("rustchan_hide_nsfw=1"));
+    anyhow::ensure!(set_cookies.contains("rustchan_theme=blue-sky"));
+    anyhow::ensure!(set_cookies.contains("rustchan_hide_nsfw=1"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn partial_preference_updates_preserve_unrelated_cookies() {
+async fn partial_preference_updates_preserve_unrelated_cookies() -> anyhow::Result<()> {
     install_preference_test_themes();
     let router = Router::new().route("/preferences", post(super::set_user_preferences));
 
@@ -3524,17 +3648,17 @@ async fn partial_preference_updates_preserve_unrelated_cookies() {
                     "csrf_token=csrf123; rustchan_hide_nsfw=1; rustchan_video_audio=mute; rustchan_preferred_view=index; rustchan_activity_badges=0",
                 )
                 .body(Body::from("_csrf=csrf123&return_to=%2F&theme=blue-sky"))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("theme-only response");
-    assert_eq!(theme_only.status(), StatusCode::SEE_OTHER);
+        .context("theme-only response")?;
+    ensure_eq!(theme_only.status(), StatusCode::SEE_OTHER);
     let theme_only_cookies = set_cookie_pairs(&theme_only);
-    assert!(theme_only_cookies.contains("rustchan_theme=blue-sky"));
-    assert!(theme_only_cookies.contains("rustchan_hide_nsfw=1"));
-    assert!(theme_only_cookies.contains("rustchan_video_audio=mute"));
-    assert!(theme_only_cookies.contains("rustchan_preferred_view=index"));
-    assert!(theme_only_cookies.contains("rustchan_activity_badges=0"));
+    anyhow::ensure!(theme_only_cookies.contains("rustchan_theme=blue-sky"));
+    anyhow::ensure!(theme_only_cookies.contains("rustchan_hide_nsfw=1"));
+    anyhow::ensure!(theme_only_cookies.contains("rustchan_video_audio=mute"));
+    anyhow::ensure!(theme_only_cookies.contains("rustchan_preferred_view=index"));
+    anyhow::ensure!(theme_only_cookies.contains("rustchan_activity_badges=0"));
 
     let unrelated_only = router
         .oneshot(
@@ -3546,22 +3670,23 @@ async fn partial_preference_updates_preserve_unrelated_cookies() {
                 .body(Body::from(
                     "_csrf=csrf123&return_to=%2F&preferences_form=1&video_audio=mute&preferred_board_view=index",
                 ))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("unrelated-only response");
-    assert_eq!(unrelated_only.status(), StatusCode::SEE_OTHER);
+        .context("unrelated-only response")?;
+    ensure_eq!(unrelated_only.status(), StatusCode::SEE_OTHER);
     let unrelated_cookies = set_cookie_pairs(&unrelated_only);
-    assert!(unrelated_cookies.contains("rustchan_theme=blue-sky"));
-    assert!(unrelated_cookies.contains("rustchan_video_audio=mute"));
-    assert!(unrelated_cookies.contains("rustchan_preferred_view=index"));
+    anyhow::ensure!(unrelated_cookies.contains("rustchan_theme=blue-sky"));
+    anyhow::ensure!(unrelated_cookies.contains("rustchan_video_audio=mute"));
+    anyhow::ensure!(unrelated_cookies.contains("rustchan_preferred_view=index"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn user_theme_overrides_configured_default_and_changes_etag() {
+async fn user_theme_overrides_configured_default_and_changes_etag() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     install_preference_test_themes();
-    seed_board_with_thread(&state, "tech", "op");
+    seed_board_with_thread(&state, "tech", "op")?;
     crate::templates::set_live_default_theme("forest");
     let router = activity_router(state);
 
@@ -3573,17 +3698,17 @@ async fn user_theme_overrides_configured_default_and_changes_etag() {
                 .uri("/tech")
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("default response");
-    assert_eq!(default_response.status(), StatusCode::OK);
+        .context("default response")?;
+    ensure_eq!(default_response.status(), StatusCode::OK);
     let default_etag = default_response
         .headers()
         .get(header::ETAG)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
-        .expect("default etag");
+        .context("default etag")?;
 
     let themed_response = router
         .oneshot(
@@ -3594,40 +3719,42 @@ async fn user_theme_overrides_configured_default_and_changes_etag() {
                 .header(header::IF_NONE_MATCH, default_etag.as_str())
                 .extension(crate::test_support::connect_info())
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("themed response");
-    assert_eq!(themed_response.status(), StatusCode::OK);
+        .context("themed response")?;
+    ensure_eq!(themed_response.status(), StatusCode::OK);
     let themed_etag = themed_response
         .headers()
         .get(header::ETAG)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
-        .expect("themed etag");
-    assert_ne!(default_etag, themed_etag);
+        .context("themed etag")?;
+    ensure_ne!(default_etag, themed_etag);
     let body = String::from_utf8(
         to_bytes(themed_response.into_body(), usize::MAX)
             .await
-            .expect("body bytes")
+            .context("body bytes")?
             .to_vec(),
     )
-    .expect("utf8 body");
-    assert!(body.contains(r#"data-default-theme="forest""#));
-    assert!(body.contains(r#"data-active-theme="blue-sky""#));
-    assert!(body.contains(r#"data-theme="blue-sky""#));
+    .context("utf8 body")?;
+    anyhow::ensure!(body.contains(r#"data-default-theme="forest""#));
+    anyhow::ensure!(body.contains(r#"data-active-theme="blue-sky""#));
+    anyhow::ensure!(body.contains(r#"data-theme="blue-sky""#));
+    Ok(())
 }
 
 #[test]
-fn theme_init_uses_server_active_theme_before_local_storage() {
+fn theme_init_uses_server_active_theme_before_local_storage() -> anyhow::Result<()> {
     let theme_init = include_str!("../../../static/theme-init.js");
 
-    assert!(theme_init.contains("data-active-theme"));
-    assert!(!theme_init.contains("localStorage.getItem('rustchan_theme')"));
+    anyhow::ensure!(theme_init.contains("data-active-theme"));
+    anyhow::ensure!(!theme_init.contains("localStorage.getItem('rustchan_theme')"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn set_user_preferences_rejects_open_redirect_return_to() {
+async fn set_user_preferences_rejects_open_redirect_return_to() -> anyhow::Result<()> {
     install_preference_test_themes();
     let router = Router::new().route("/preferences", post(super::set_user_preferences));
 
@@ -3641,24 +3768,25 @@ async fn set_user_preferences_rejects_open_redirect_return_to() {
                 .body(Body::from(
                     "_csrf=csrf123&return_to=%2F%2Fevil.example%2F&theme=forest",
                 ))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(
+    ensure_eq!(
         response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok()),
         Some("/")
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn preference_specific_html_responses_vary_on_cookie() {
+async fn preference_specific_html_responses_vary_on_cookie() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    let (_board_id, thread_id) = seed_board_with_thread(&state, "tech", "op");
+    let (_board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let router = activity_router(state);
 
     for uri in [
@@ -3676,13 +3804,13 @@ async fn preference_specific_html_responses_vary_on_cookie() {
                     .header(header::COOKIE, "rustchan_preferred_view=index")
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("request")?,
             )
             .await
-            .expect("response");
+            .context("response")?;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(
+        ensure_eq!(response.status(), StatusCode::OK);
+        anyhow::ensure!(
             response
                 .headers()
                 .get(header::VARY)
@@ -3693,20 +3821,21 @@ async fn preference_specific_html_responses_vary_on_cookie() {
             "missing Vary: Cookie for preference-specific response"
         );
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn thread_updates_nav_uses_cookie_preferences() {
+async fn thread_updates_nav_uses_cookie_preferences() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
-    let conn = state.db.get().expect("db connection");
-    crate::db::create_board(&conn, "tech", "Tech", "", false).expect("create sfw board");
-    crate::db::create_board(&conn, "x", "Adult", "", true).expect("create nsfw board");
+    let conn = state.db.get().context("db connection")?;
+    crate::db::create_board(&conn, "tech", "Tech", "", false).context("create sfw board")?;
+    crate::db::create_board(&conn, "x", "Adult", "", true).context("create nsfw board")?;
     drop(conn);
-    let (board_id, thread_id) = seed_board_with_thread(&state, "chat", "op");
-    create_reply_on_thread(&state, board_id, thread_id, "reply");
+    let (board_id, thread_id) = seed_board_with_thread(&state, "chat", "op")?;
+    create_reply_on_thread(&state, board_id, thread_id, "reply")?;
     {
-        let conn = state.db.get().expect("db connection");
-        crate::templates::set_live_boards(crate::db::get_all_boards(&conn).expect("load boards"));
+        let conn = state.db.get().context("db connection")?;
+        crate::templates::set_live_boards(crate::db::get_all_boards(&conn).context("load boards")?);
     }
     let router = activity_router(state);
 
@@ -3720,35 +3849,36 @@ async fn thread_updates_nav_uses_cookie_preferences() {
                     "rustchan_hide_nsfw=1; rustchan_preferred_view=index",
                 )
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(response
+    ensure_eq!(response.status(), StatusCode::OK);
+    anyhow::ensure!(response
         .headers()
         .get(header::VARY)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value
             .split(',')
             .any(|part| part.trim().eq_ignore_ascii_case("cookie"))));
-    let body = response_body_string(response).await;
-    assert!(!body.contains("/catalog"));
-    assert!(!body.contains(r">x</a>"));
+    let body = response_body_string(response).await?;
+    anyhow::ensure!(!body.contains("/catalog"));
+    anyhow::ensure!(!body.contains(r">x</a>"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn malformed_board_password_hash_renders_misconfiguration_message() {
+async fn malformed_board_password_hash_renders_misconfiguration_message() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "broken", "Broken", "", false).expect("create board");
+        let conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "broken", "Broken", "", false).context("create board")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'broken'",
             rusqlite::params!["view_password", "not-a-phc-string"],
         )
-        .expect("update board access");
+        .context("update board access")?;
     }
 
     let router = Router::new()
@@ -3766,35 +3896,38 @@ async fn malformed_board_password_hash_renders_misconfiguration_message() {
                 .body(Body::from(
                     "password=anything&return_to=%2Fbroken%2Fcatalog&_csrf=csrf123",
                 ))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("unlock response");
+        .context("unlock response")?;
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    ensure_eq!(response.status(), StatusCode::FORBIDDEN);
     let body = String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("response body")
+            .context("response body")?
             .to_vec(),
     )
-    .expect("utf8 body");
-    assert!(body.contains("This board password is misconfigured. Please contact an administrator."));
+    .context("utf8 body")?;
+    anyhow::ensure!(
+        body.contains("This board password is misconfigured. Please contact an administrator.")
+    );
+    Ok(())
 }
 
 #[tokio::test]
-async fn unlock_board_access_rate_limits_repeated_failures() {
+async fn unlock_board_access_rate_limits_repeated_failures() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "srate", "Secret", "", false).expect("create board");
+        let conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "srate", "Secret", "", false).context("create board")?;
         let password_hash =
-            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+            crate::utils::crypto::hash_password("swordfish").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'srate'",
             rusqlite::params!["view_password", password_hash],
         )
-        .expect("update board access");
+        .context("update board access")?;
     }
 
     let router = Router::new()
@@ -3814,11 +3947,11 @@ async fn unlock_board_access_rate_limits_repeated_failures() {
                     .body(Body::from(
                         "password=wrong&return_to=%2Fsrate%2Fcatalog&_csrf=csrf123",
                     ))
-                    .expect("request"),
+                    .context("request")?,
             )
             .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            .context("response")?;
+        ensure_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     let response = router
@@ -3832,39 +3965,40 @@ async fn unlock_board_access_rate_limits_repeated_failures() {
                 .body(Body::from(
                     "password=wrong&return_to=%2Fsrate%2Fcatalog&_csrf=csrf123",
                 ))
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert!(
+    ensure_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    anyhow::ensure!(
         response.headers().contains_key(header::RETRY_AFTER),
         "rate-limited unlock should advertise retry timing"
     );
     let body = String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("response body")
+            .context("response body")?
             .to_vec(),
     )
-    .expect("utf8 body");
-    assert!(body.contains("Too many incorrect board password attempts."));
+    .context("utf8 body")?;
+    anyhow::ensure!(body.contains("Too many incorrect board password attempts."));
+    Ok(())
 }
 
 #[tokio::test]
-async fn locked_board_media_requires_unlock() {
+async fn locked_board_media_requires_unlock() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "secret", "Secret", "", false).expect("create board");
+        let conn = state.db.get().context("db connection")?;
+        crate::db::create_board(&conn, "secret", "Secret", "", false).context("create board")?;
         let password_hash =
-            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+            crate::utils::crypto::hash_password("swordfish").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'secret'",
             rusqlite::params!["view_password", password_hash],
         )
-        .expect("update board access");
+        .context("update board access")?;
     }
 
     let router = Router::new()
@@ -3877,32 +4011,33 @@ async fn locked_board_media_requires_unlock() {
                 .method("GET")
                 .uri("/boards/secret/thumbs/example.webp")
                 .body(Body::empty())
-                .expect("request"),
+                .context("request")?,
         )
         .await
-        .expect("response");
+        .context("response")?;
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    ensure_eq!(response.status(), StatusCode::FORBIDDEN);
+    Ok(())
 }
 
 #[tokio::test]
-async fn submit_appeal_is_rate_limited_to_one_open_window() {
+async fn submit_appeal_is_rate_limited_to_one_open_window() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
-        let conn = state.db.get().expect("db connection");
+        let conn = state.db.get().context("db connection")?;
         crate::db::add_ban(
             &conn,
             &crate::utils::crypto::hash_ip("127.0.0.1", &crate::config::CONFIG.cookie_secret),
             "test ban",
             None,
         )
-        .expect("add ban");
+        .context("add ban")?;
     }
 
     let router = Router::new()
         .route("/appeal", post(super::submit_appeal))
         .with_state(state);
-    let request = || {
+    let request = || -> anyhow::Result<Request<Body>> {
         Request::builder()
             .method("POST")
             .uri("/appeal")
@@ -3910,30 +4045,31 @@ async fn submit_appeal_is_rate_limited_to_one_open_window() {
             .header(header::COOKIE, "csrf_token=csrf123")
             .extension(crate::test_support::connect_info())
             .body(Body::from("reason=please+unban&_csrf=csrf123"))
-            .expect("request")
+            .context("request")
     };
 
     let first = router
         .clone()
-        .oneshot(request())
+        .oneshot(request()?)
         .await
-        .expect("first appeal");
+        .context("first appeal")?;
     let first_body = String::from_utf8(
         to_bytes(first.into_body(), usize::MAX)
             .await
-            .expect("first body")
+            .context("first body")?
             .to_vec(),
     )
-    .expect("first body utf8");
-    assert!(first_body.contains("appeal has been submitted"));
+    .context("first body utf8")?;
+    anyhow::ensure!(first_body.contains("appeal has been submitted"));
 
-    let second = router.oneshot(request()).await.expect("second appeal");
+    let second = router.oneshot(request()?).await.context("second appeal")?;
     let second_body = String::from_utf8(
         to_bytes(second.into_body(), usize::MAX)
             .await
-            .expect("second body")
+            .context("second body")?
             .to_vec(),
     )
-    .expect("second body utf8");
-    assert!(second_body.contains("already filed an appeal"));
+    .context("second body utf8")?;
+    anyhow::ensure!(second_body.contains("already filed an appeal"));
+    Ok(())
 }

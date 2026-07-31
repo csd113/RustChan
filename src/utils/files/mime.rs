@@ -7,7 +7,7 @@ use anyhow::Result;
 /// # Errors
 /// Returns an error when the header is empty or the file type is not one of
 /// `RustChan`'s accepted upload formats.
-pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
+pub(super) fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     if data.is_empty() {
         return Err(anyhow::anyhow!("File is empty."));
     }
@@ -106,6 +106,7 @@ pub fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     ))
 }
 
+/// Return whether an ISO base-media header declares any accepted brand.
 fn has_ftyp_brand(data: &[u8], accepted: &[&[u8; 4]]) -> bool {
     data.get(8..data.len().min(64)).is_some_and(|brands| {
         brands.chunks_exact(4).any(|brand| {
@@ -116,6 +117,7 @@ fn has_ftyp_brand(data: &[u8], accepted: &[&[u8; 4]]) -> bool {
     })
 }
 
+/// Extract a bounded EBML document-type value from the sniff buffer.
 fn ebml_doc_type(scan: &[u8]) -> Option<&[u8]> {
     let pos = scan.windows(2).position(|w| w == [0x42, 0x82])?;
     let size_idx = pos.checked_add(2)?;
@@ -130,6 +132,7 @@ fn ebml_doc_type(scan: &[u8]) -> Option<&[u8]> {
 }
 
 #[must_use]
+/// Return the safe generic MIME type used for unrecognized downloads.
 pub const fn fallback_download_mime_type() -> &'static str {
     "application/octet-stream"
 }

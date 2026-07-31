@@ -11,69 +11,104 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+/// Width used when displaying banners in HTML.
 pub const DISPLAY_WIDTH: u32 = 468;
+/// Height used when displaying banners in HTML.
 pub const DISPLAY_HEIGHT: u32 = 60;
+/// Minimum accepted source-image width.
 pub const MIN_WIDTH: u32 = DISPLAY_WIDTH;
+/// Minimum accepted source-image height.
 pub const MIN_HEIGHT: u32 = DISPLAY_HEIGHT;
+/// Recommended high-density source-image width.
 pub const RECOMMENDED_WIDTH: u32 = DISPLAY_WIDTH * 2;
+/// Recommended high-density source-image height.
 pub const RECOMMENDED_HEIGHT: u32 = DISPLAY_HEIGHT * 2;
+/// Maximum accepted source-image width.
 pub const MAX_WIDTH: u32 = 4096;
+/// Maximum accepted source-image height.
 pub const MAX_HEIGHT: u32 = 1024;
+/// Maximum accepted decoded source-image area.
 pub const MAX_PIXELS: u64 = 4_194_304;
+/// Maximum accepted frame count for an animated GIF.
 pub const MAX_ANIMATED_GIF_FRAMES: usize = 60;
 
 #[derive(Debug, Clone, Copy)]
+/// Dimensions and animation metadata collected before banner decoding.
 pub struct BannerImagePreflight {
+    /// Source-image width in pixels.
     pub width: u32,
+    /// Source-image height in pixels.
     pub height: u32,
+    /// Frame count when the source is an animated GIF.
     pub animated_gif_frames: Option<usize>,
+    /// Whether the source is an animated WebP image.
     pub animated_webp: bool,
 }
 
 #[derive(Debug, Clone)]
+/// Target-form values derived from one stored banner target.
 pub struct BannerTargetDraft {
+    /// Internal-board form value.
     pub board_value: String,
+    /// Internal-path form value.
     pub thread_value: String,
+    /// External-URL form value.
     pub external_url: String,
 }
 
 #[derive(Debug, Clone)]
+/// Site-wide settings that influence banner resolution.
 pub struct BannerSiteSettings {
+    /// Whether banners may link to external HTTP(S) destinations.
     pub allow_external_links: bool,
+    /// Rotation interval, or zero for per-request random selection.
     pub rotation_interval_minutes: i64,
 }
 
 #[derive(Debug, Clone)]
+/// Banner asset with the URLs and alternative text needed for rendering.
 pub struct ResolvedBanner {
+    /// Persistent banner record.
     pub asset: BannerAsset,
+    /// Versioned local URL for the banner image.
     pub image_url: String,
+    /// Validated optional link destination.
     pub href: Option<String>,
+    /// Alternative text exposed to assistive technology.
     pub alt: String,
 }
 
 #[derive(Debug, Clone)]
+/// Result of selecting a banner for one response.
 pub struct BannerSelection {
+    /// Selected banner, or `None` when the placement has no candidates.
     pub banner: Option<ResolvedBanner>,
+    /// Stable fragment included in response `ETag` construction.
     pub etag_fragment: String,
+    /// Whether random selection prevents a `304 Not Modified` shortcut.
     pub disable_not_modified_short_circuit: bool,
 }
 
 #[must_use]
+/// Return the runtime directory that owns non-board banner assets.
 pub fn runtime_banner_dir() -> PathBuf {
     crate::config::runtime_dir().join("banner")
 }
 
 #[must_use]
+/// Return the directory containing global fallback banners.
 pub fn global_banner_dir() -> PathBuf {
     runtime_banner_dir().join("global")
 }
 
 #[must_use]
+/// Return the directory containing home-page banners.
 pub fn home_banner_dir() -> PathBuf {
     runtime_banner_dir().join("home")
 }
 
 #[must_use]
+/// Return the banner directory for a board short name.
 pub fn board_banner_dir(board_short: &str) -> PathBuf {
     PathBuf::from(&CONFIG.upload_dir)
         .join(board_short)
@@ -81,11 +116,13 @@ pub fn board_banner_dir(board_short: &str) -> PathBuf {
 }
 
 #[must_use]
+/// Return the banner directory included in full backups.
 pub fn backup_source_dir() -> PathBuf {
     runtime_banner_dir()
 }
 
 #[must_use]
+/// Map a banner form anchor to the containing collapsible settings section.
 pub fn banner_open_section(anchor: &str) -> &str {
     match anchor {
         "global-banners" | "home-banners" => "board-banners",
@@ -95,11 +132,13 @@ pub fn banner_open_section(anchor: &str) -> &str {
 }
 
 #[must_use]
+/// Build the admin-page anchor for a board's banner settings.
 pub fn board_appearance_anchor(board_short: &str) -> String {
     format!("board-appearance-{board_short}")
 }
 
 #[must_use]
+/// Build the admin-page anchor for a banner scope.
 pub fn banner_admin_anchor(scope: BannerScope, board_short: Option<&str>) -> String {
     match scope {
         BannerScope::Global => "global-banners".to_owned(),
@@ -127,6 +166,7 @@ pub fn banner_asset_path(asset: &BannerAsset) -> Result<PathBuf> {
 }
 
 #[must_use]
+/// Infer the HTTP content type of a stored banner path.
 pub fn banner_asset_content_type(path: &Path) -> &'static str {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some("gif") => "image/gif",
@@ -239,11 +279,13 @@ pub fn validate_banner_restore_entry_name(name: &str) -> Result<String> {
 }
 
 #[must_use]
+/// Build the versioned public image URL for a banner asset.
 pub fn banner_asset_url(asset: &BannerAsset) -> String {
     format!("/banner/assets/{}?v={}", asset.id, asset.created_at)
 }
 
 #[must_use]
+/// Split one stored target into the mutually exclusive admin form fields.
 pub fn banner_target_draft(target_type: BannerTargetType, target_value: &str) -> BannerTargetDraft {
     BannerTargetDraft {
         board_value: banner_target_value(
@@ -260,6 +302,7 @@ pub fn banner_target_draft(target_type: BannerTargetType, target_value: &str) ->
     }
 }
 
+/// Return `target_value` only when its field type is selected.
 fn banner_target_value(
     selected_type: BannerTargetType,
     field_type: BannerTargetType,
@@ -273,6 +316,7 @@ fn banner_target_value(
 }
 
 #[must_use]
+/// Select and normalize the submitted value for the chosen target type.
 pub fn select_banner_target_value(
     target_type_raw: &str,
     target_value_raw: Option<&str>,
@@ -433,11 +477,13 @@ pub fn resolve_banner_href(
 }
 
 #[must_use]
+/// Return an internal fallback path safe to place in `return_to`.
 pub fn safe_return_to(path: &str) -> String {
     crate::utils::redirect::safe_internal_path_or(Some(path), "/").to_owned()
 }
 
 #[must_use]
+/// Normalize a minimally safe absolute internal path.
 pub fn normalize_internal_path(path: &str) -> Option<String> {
     let trimmed = path.trim();
     if crate::utils::redirect::is_basic_safe_internal_path(trimmed) {
@@ -448,6 +494,7 @@ pub fn normalize_internal_path(path: &str) -> Option<String> {
 }
 
 #[must_use]
+/// Normalize a board short name into its canonical internal board path.
 pub fn normalize_internal_board_path(value: &str) -> Option<String> {
     let trimmed = value.trim().trim_matches('/');
     let valid = !trimmed.is_empty()
@@ -457,6 +504,7 @@ pub fn normalize_internal_board_path(value: &str) -> Option<String> {
 }
 
 #[must_use]
+/// Normalize an external HTTP(S) URL.
 pub fn normalize_external_url(value: &str) -> Option<String> {
     let trimmed = value.trim();
     let parsed = reqwest::Url::parse(trimmed).ok()?;
@@ -464,6 +512,7 @@ pub fn normalize_external_url(value: &str) -> Option<String> {
 }
 
 #[must_use]
+/// Return whether an asset is enabled for the requested page placement.
 pub const fn should_show_on_placement(asset: &BannerAsset, placement: BannerPlacement) -> bool {
     match placement {
         BannerPlacement::Index => asset.show_on_index,
@@ -472,6 +521,7 @@ pub const fn should_show_on_placement(asset: &BannerAsset, placement: BannerPlac
 }
 
 #[must_use]
+/// Choose an active asset and cache fragment from eligible candidates.
 pub fn choose_active_banner(
     candidates: &[BannerAsset],
     settings: &BannerSiteSettings,
@@ -516,6 +566,7 @@ pub fn choose_active_banner(
     (asset, fragment, true)
 }
 
+/// Load site-wide banner behavior settings from the database.
 pub fn load_site_banner_settings(conn: &rusqlite::Connection) -> BannerSiteSettings {
     BannerSiteSettings {
         allow_external_links: db::get_banner_external_links_enabled(conn),
@@ -573,6 +624,7 @@ pub fn resolve_board_banner(
 }
 
 #[must_use]
+/// Render a selected banner as an HTML fragment.
 pub fn render_banner_html(
     selection: &BannerSelection,
     wrapper_class: &str,
@@ -602,6 +654,7 @@ pub fn render_banner_html(
     format!(r#"<div class="{wrapper_class}">{inner}</div>"#)
 }
 
+/// Resolve one page's eligible banner candidates into render state.
 fn resolve_from_candidates(
     candidates: &[BannerAsset],
     settings: &BannerSiteSettings,
@@ -623,6 +676,7 @@ fn resolve_from_candidates(
     }
 }
 
+/// Store an animated GIF banner, using available runtime encoder capabilities.
 fn write_animated_gif_banner_asset_scaled(
     bytes: &[u8],
     target_path: &Path,
@@ -639,6 +693,7 @@ fn write_animated_gif_banner_asset_scaled(
     )
 }
 
+/// Store an animated GIF as scaled WebP or an unmodified GIF fallback.
 fn write_animated_gif_banner_asset_scaled_with_caps(
     bytes: &[u8],
     target_path: &Path,
@@ -665,12 +720,12 @@ fn write_animated_gif_banner_asset_scaled_with_caps(
         max_height,
     )
     .with_context(|| format!("convert animated gif banner {}", input_path.display()));
-    let _ = std::fs::remove_file(&input_path);
+    drop(std::fs::remove_file(&input_path));
     match conversion {
         Ok(()) => {
             let gif_path = banner_gif_fallback_path(&webp_path);
             if gif_path.exists() {
-                let _ = std::fs::remove_file(gif_path);
+                drop(std::fs::remove_file(gif_path));
             }
             Ok((max_width, max_height))
         }
@@ -682,6 +737,7 @@ fn write_animated_gif_banner_asset_scaled_with_caps(
     }
 }
 
+/// Store an animated WebP, scaling it when the external encoder is available.
 fn write_animated_webp_banner_asset(
     bytes: &[u8],
     target_path: &Path,
@@ -704,7 +760,7 @@ fn write_animated_webp_banner_asset(
             max_height,
         )
         .with_context(|| format!("scale animated webp banner {}", input_path.display()));
-        let _ = std::fs::remove_file(&input_path);
+        drop(std::fs::remove_file(&input_path));
         if conversion.is_ok() {
             return Ok((max_width, max_height));
         }
@@ -718,6 +774,7 @@ fn write_animated_webp_banner_asset(
     Ok((original_width, original_height))
 }
 
+/// Build a collision-resistant temporary path for GIF conversion input.
 fn animated_gif_temp_path(target_path: &Path) -> PathBuf {
     let parent = target_path
         .parent()
@@ -728,6 +785,7 @@ fn animated_gif_temp_path(target_path: &Path) -> PathBuf {
     ))
 }
 
+/// Build a collision-resistant temporary path for WebP scaling input.
 fn animated_webp_temp_path(target_path: &Path) -> PathBuf {
     let parent = target_path
         .parent()
@@ -738,16 +796,18 @@ fn animated_webp_temp_path(target_path: &Path) -> PathBuf {
     ))
 }
 
+/// Write an animated GIF fallback beside the canonical WebP location.
 fn write_gif_banner_fallback(bytes: &[u8], target_path: &Path) -> Result<()> {
     let webp_path = banner_webp_path(target_path);
     let gif_path = banner_gif_fallback_path(&webp_path);
     std::fs::write(&gif_path, bytes).with_context(|| format!("write {}", gif_path.display()))?;
     if webp_path.exists() {
-        let _ = std::fs::remove_file(webp_path);
+        drop(std::fs::remove_file(webp_path));
     }
     Ok(())
 }
 
+/// Normalize any banner path to its canonical WebP variant.
 fn banner_webp_path(path: &Path) -> PathBuf {
     if path.extension().and_then(|ext| ext.to_str()) == Some("webp") {
         path.to_path_buf()
@@ -756,10 +816,12 @@ fn banner_webp_path(path: &Path) -> PathBuf {
     }
 }
 
+/// Return the GIF fallback sibling of a canonical banner path.
 fn banner_gif_fallback_path(path: &Path) -> PathBuf {
     path.with_extension("gif")
 }
 
+/// Resolve the file variant that exists after a banner write.
 fn stored_banner_path_after_write(target_path: &Path) -> PathBuf {
     if target_path.exists() {
         return target_path.to_path_buf();
@@ -773,6 +835,7 @@ fn stored_banner_path_after_write(target_path: &Path) -> PathBuf {
     }
 }
 
+/// Inspect banner headers and animation metadata before full decoding.
 fn preflight_banner_bytes(bytes: &[u8]) -> Result<BannerImagePreflight> {
     let reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
@@ -805,6 +868,7 @@ fn preflight_banner_bytes(bytes: &[u8]) -> Result<BannerImagePreflight> {
     })
 }
 
+/// Enforce accepted banner dimensions and decoded-pixel bounds.
 fn validate_banner_dimensions(width: u32, height: u32) -> Result<()> {
     if width < MIN_WIDTH || height < MIN_HEIGHT {
         anyhow::bail!("Banner image must be at least {MIN_WIDTH}x{MIN_HEIGHT} pixels.");
@@ -828,6 +892,7 @@ fn validate_banner_dimensions(width: u32, height: u32) -> Result<()> {
     Ok(())
 }
 
+/// Decode a static banner after validating its preflight metadata.
 fn decode_uploaded_banner(bytes: &[u8], preflight: &BannerImagePreflight) -> Result<DynamicImage> {
     if preflight.animated_gif_frames.is_some() {
         anyhow::bail!("Animated GIF banners are handled separately.");
@@ -839,6 +904,7 @@ fn decode_uploaded_banner(bytes: &[u8], preflight: &BannerImagePreflight) -> Res
     Ok(img)
 }
 
+/// Convert a decoded banner to the canonical pixel representation.
 fn normalize_banner_image(img: &DynamicImage) -> DynamicImage {
     let (width, height) = img.dimensions();
     if width > RECOMMENDED_WIDTH || height > RECOMMENDED_HEIGHT {
@@ -848,6 +914,7 @@ fn normalize_banner_image(img: &DynamicImage) -> DynamicImage {
     }
 }
 
+/// Bound banner dimensions while preserving aspect ratio.
 const fn maybe_shrink_dimensions(width: u32, height: u32) -> (u32, u32) {
     if width > RECOMMENDED_WIDTH || height > RECOMMENDED_HEIGHT {
         (RECOMMENDED_WIDTH, RECOMMENDED_HEIGHT)
@@ -856,6 +923,7 @@ const fn maybe_shrink_dimensions(width: u32, height: u32) -> (u32, u32) {
     }
 }
 
+/// Count decodable frames in GIF input, stopping at the configured ceiling.
 fn count_gif_frames(bytes: &[u8]) -> usize {
     let mut frame_markers = 0usize;
     for window in bytes.windows(2) {
@@ -866,6 +934,7 @@ fn count_gif_frames(bytes: &[u8]) -> usize {
     frame_markers.max(1)
 }
 
+/// Return whether a RIFF WebP container advertises animation chunks.
 fn is_animated_webp(bytes: &[u8]) -> bool {
     if bytes.get(0..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"WEBP") {
         return false;
@@ -881,7 +950,9 @@ fn is_animated_webp(bytes: &[u8]) -> bool {
         let Ok(size_bytes) = <[u8; 4]>::try_from(size_bytes) else {
             return false;
         };
-        let chunk_size = u32::from_le_bytes(size_bytes) as usize;
+        let Ok(chunk_size) = usize::try_from(u32::from_le_bytes(size_bytes)) else {
+            return false;
+        };
         if chunk_type == b"ANIM" || chunk_type == b"ANMF" {
             return true;
         }
@@ -905,6 +976,7 @@ mod tests {
         DISPLAY_HEIGHT, DISPLAY_WIDTH, MAX_ANIMATED_GIF_FRAMES,
     };
     use crate::models::{BannerAsset, BannerScope, BannerTargetType};
+    use anyhow::Result;
     use image::{codecs::gif::GifEncoder, Delay, Frame, ImageBuffer, ImageFormat, Rgba};
     use std::io::Cursor;
 
@@ -1050,33 +1122,41 @@ mod tests {
     }
 
     #[test]
-    fn rejects_banner_gif_frame_bomb() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn rejects_banner_gif_frame_bomb() -> Result<()> {
         let mut bytes = Vec::new();
         {
             let mut encoder = GifEncoder::new(&mut bytes);
             for _ in 0..=MAX_ANIMATED_GIF_FRAMES {
                 let image = ImageBuffer::from_pixel(1, 1, Rgba([0, 0, 0, 255]));
                 let frame = Frame::from_parts(image, 0, 0, Delay::from_numer_denom_ms(1, 1));
-                encoder
-                    .encode_frame(frame)
-                    .expect("encoding tiny GIF frame should succeed");
+                encoder.encode_frame(frame)?;
             }
         }
         let target = std::env::temp_dir().join("banner-test.webp");
-        assert!(canonicalize_banner_bytes(&bytes, &target).is_err());
+        assert!(
+            canonicalize_banner_bytes(&bytes, &target).is_err(),
+            "a GIF over the frame limit must be rejected"
+        );
+        Ok(())
     }
 
     #[test]
-    fn animated_gif_banner_falls_back_to_gif_without_ffmpeg() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn animated_gif_banner_falls_back_to_gif_without_ffmpeg() -> Result<()> {
         let mut bytes = Vec::new();
         {
             let mut encoder = GifEncoder::new(&mut bytes);
             for color in [Rgba([0, 0, 0, 255]), Rgba([255, 255, 255, 255])] {
                 let image = ImageBuffer::from_pixel(DISPLAY_WIDTH, DISPLAY_HEIGHT, color);
                 let frame = Frame::from_parts(image, 0, 0, Delay::from_numer_denom_ms(10, 1));
-                encoder
-                    .encode_frame(frame)
-                    .expect("encoding banner GIF frame should succeed");
+                encoder.encode_frame(frame)?;
             }
         }
         let target = std::env::temp_dir().join(format!("{}.webp", uuid::Uuid::new_v4().simple()));
@@ -1088,17 +1168,36 @@ mod tests {
             DISPLAY_HEIGHT,
             false,
             false,
-        )
-        .expect("GIF fallback should be written when ffmpeg is unavailable");
-        assert_eq!(dimensions, (DISPLAY_WIDTH, DISPLAY_HEIGHT));
-        assert!(!target.exists());
-        assert_eq!(std::fs::read(&gif_path).expect("read fallback GIF"), bytes);
-        assert_eq!(banner_asset_content_type(&gif_path), "image/gif");
-        let _ = std::fs::remove_file(gif_path);
+        )?;
+        assert_eq!(
+            dimensions,
+            (DISPLAY_WIDTH, DISPLAY_HEIGHT),
+            "fallback must preserve source dimensions"
+        );
+        assert!(
+            !target.exists(),
+            "the unavailable WebP output must not be published"
+        );
+        assert_eq!(
+            std::fs::read(&gif_path)?,
+            bytes,
+            "the GIF fallback must preserve the source bytes"
+        );
+        assert_eq!(
+            banner_asset_content_type(&gif_path),
+            "image/gif",
+            "the fallback must be served as GIF"
+        );
+        drop(std::fs::remove_file(gif_path));
+        Ok(())
     }
 
     #[test]
-    fn deleting_banner_asset_removes_webp_and_gif_siblings() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn deleting_banner_asset_removes_webp_and_gif_siblings() -> Result<()> {
         let storage_key = uuid::Uuid::new_v4().simple().to_string();
         let asset = BannerAsset {
             id: 1,
@@ -1117,47 +1216,68 @@ mod tests {
             show_on_catalog: true,
             created_at: 1,
         };
-        let webp_path = banner_storage_path(asset.scope, None, &asset.storage_key)
-            .expect("global banner path should be valid");
+        let webp_path = banner_storage_path(asset.scope, None, &asset.storage_key)?;
         let gif_path = banner_gif_fallback_path(&webp_path);
         if let Some(parent) = webp_path.parent() {
-            std::fs::create_dir_all(parent).expect("create banner test directory");
+            std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&webp_path, b"webp").expect("write webp sibling");
-        std::fs::write(&gif_path, b"gif").expect("write gif sibling");
+        std::fs::write(&webp_path, b"webp")?;
+        std::fs::write(&gif_path, b"gif")?;
 
-        super::delete_banner_asset_file(&asset).expect("delete banner files");
+        super::delete_banner_asset_file(&asset)?;
 
-        assert!(!webp_path.exists());
-        assert!(!gif_path.exists());
+        assert!(!webp_path.exists(), "WebP sibling must be deleted");
+        assert!(!gif_path.exists(), "GIF sibling must be deleted");
+        Ok(())
     }
 
     #[test]
-    fn animated_webp_banner_is_preserved_without_static_decode() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn animated_webp_banner_is_preserved_without_static_decode() -> Result<()> {
         let bytes = b"RIFF\x18\x00\x00\x00WEBPVP8X\n\x00\x00\x00\x02\x00\x00\x00\xd3\x01\x00;\x00\x00ANIM\x00\x00\x00\x00";
-        assert!(is_animated_webp(bytes));
+        assert!(
+            is_animated_webp(bytes),
+            "fixture must be recognized as animated WebP"
+        );
 
         let target = std::env::temp_dir().join(format!("{}.webp", uuid::Uuid::new_v4().simple()));
         let dimensions =
-            write_animated_webp_banner_asset(bytes, &target, DISPLAY_WIDTH, DISPLAY_HEIGHT)
-                .expect("animated WebP should be written directly");
-        assert_eq!(dimensions, (DISPLAY_WIDTH, DISPLAY_HEIGHT));
-        assert_eq!(std::fs::read(&target).expect("read animated WebP"), bytes);
-        let _ = std::fs::remove_file(target);
+            write_animated_webp_banner_asset(bytes, &target, DISPLAY_WIDTH, DISPLAY_HEIGHT)?;
+        assert_eq!(
+            dimensions,
+            (DISPLAY_WIDTH, DISPLAY_HEIGHT),
+            "unscaled animation dimensions must be preserved"
+        );
+        assert_eq!(
+            std::fs::read(&target)?,
+            bytes,
+            "animated WebP bytes must be preserved"
+        );
+        drop(std::fs::remove_file(target));
+        Ok(())
     }
 
     #[test]
-    fn rejects_oversized_banner_dimensions() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn rejects_oversized_banner_dimensions() -> Result<()> {
         let image = ImageBuffer::from_pixel(4212, 540, Rgba([1, 2, 3, 255]));
         let mut cursor = Cursor::new(Vec::new());
         {
-            image::DynamicImage::ImageRgba8(image)
-                .write_to(&mut cursor, ImageFormat::Png)
-                .expect("writing PNG test image should succeed");
+            image::DynamicImage::ImageRgba8(image).write_to(&mut cursor, ImageFormat::Png)?;
         }
         let bytes = cursor.into_inner();
         let target = std::env::temp_dir().join("banner-test-large.webp");
-        assert!(canonicalize_banner_bytes(&bytes, &target).is_err());
+        assert!(
+            canonicalize_banner_bytes(&bytes, &target).is_err(),
+            "oversized decoded dimensions must be rejected"
+        );
+        Ok(())
     }
 
     #[test]

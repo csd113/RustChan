@@ -1,18 +1,4 @@
-// server/console/wizard.rs — Multi-step admin wizards.
-//
-// These wizards need read_line() for interactive input and cannot run inside
-// crossterm raw mode. Pattern:
-//
-//   1. Disable raw mode and clear the alternate screen for prompt mode
-//   2. Run the blocking wizard (prompts + read_line)
-//   3. Wait for Enter so the operator can read the result
-//   4. Re-enable raw mode and clear for a fresh dashboard frame
-//   5. Set ConsoleMode back to Dashboard so the render task resumes
-//
-// run_wizard() must be called from tokio::task::spawn_blocking so it does not
-// block the async runtime.
-//
-// kb_* functions are ported verbatim from the old console.rs.
+//! Multi-step administration wizards that temporarily leave terminal raw mode.
 
 use super::{ConsoleMode, SharedConsoleMode, WizardKind};
 use crate::db::DbPool;
@@ -21,17 +7,18 @@ use std::io::{stdout, BufRead, BufReader};
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
+/// Run one blocking wizard and restore the full-screen dashboard afterward.
 pub fn run_wizard(kind: &WizardKind, pool: &DbPool, mode: &SharedConsoleMode) {
     // 1. Exit raw mode and reuse the existing alternate screen. Staying in the
     // same full-screen buffer avoids terminal-specific redraw glitches where
     // the dashboard appears to overlap the wizard prompts on the primary screen.
-    let _ = terminal::disable_raw_mode();
-    let _ = execute!(
+    drop(terminal::disable_raw_mode());
+    drop(execute!(
         stdout(),
         terminal::Clear(terminal::ClearType::All),
         cursor::MoveTo(0, 0),
         cursor::Show,
-    );
+    ));
 
     // 2. Run the wizard, then consume the "press Enter" prompt — all within
     //    a single scope so the StdinLock (significant Drop) is released before
@@ -49,24 +36,24 @@ pub fn run_wizard(kind: &WizardKind, pool: &DbPool, mode: &SharedConsoleMode) {
         // 3. Hold so the operator can read the result.
         {
             use std::io::Write as _;
-            let _ = write!(
+            drop(write!(
                 stdout(),
                 "\n  Press Enter to return to the dashboard\u{2026}"
-            );
-            let _ = stdout().flush();
+            ));
+            drop(stdout().flush());
         }
         let mut buf = String::new();
-        let _ = reader.read_line(&mut buf);
+        drop(reader.read_line(&mut buf));
     } // StdinLock dropped here, before raw mode is re-entered.
 
     // 4. Re-enter raw mode and clear for a fresh dashboard frame.
-    let _ = terminal::enable_raw_mode();
-    let _ = execute!(
+    drop(terminal::enable_raw_mode());
+    drop(execute!(
         stdout(),
         terminal::Clear(terminal::ClearType::All),
         cursor::Hide,
         cursor::MoveTo(0, 0),
-    );
+    ));
 
     // 5. Reset mode so the render task resumes drawing.
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -78,6 +65,7 @@ pub fn run_wizard(kind: &WizardKind, pool: &DbPool, mode: &SharedConsoleMode) {
 
 // ─── ANSI / prompt helpers ────────────────────────────────────────────────────
 
+/// Return an ANSI code only when colored output is enabled.
 fn c(code: &'static str) -> &'static str {
     if crate::logging::ansi_enabled() {
         code
@@ -86,43 +74,56 @@ fn c(code: &'static str) -> &'static str {
     }
 }
 
+/// ANSI reset code.
 const RST: &str = "\x1b[0m";
+/// ANSI red foreground code.
 const RED: &str = "\x1b[31m";
+/// ANSI green foreground code.
 const GRN: &str = "\x1b[32m";
+/// ANSI yellow foreground code.
 const YLW: &str = "\x1b[33m";
+/// ANSI cyan foreground code.
 const CYN: &str = "\x1b[36m";
+/// ANSI bold code.
 const BLD: &str = "\x1b[1m";
 
+/// Return the platform-appropriate success marker.
 #[cfg(windows)]
 const fn ok_mark() -> &'static str {
     "OK"
 }
 
+/// Return the platform-appropriate success marker.
 #[cfg(not(windows))]
 const fn ok_mark() -> &'static str {
     "\u{2713}"
 }
 
+/// Return the platform-appropriate error marker.
 #[cfg(windows)]
 const fn err_mark() -> &'static str {
     "x"
 }
 
+/// Return the platform-appropriate error marker.
 #[cfg(not(windows))]
 const fn err_mark() -> &'static str {
     "\u{2717}"
 }
 
+/// Return the platform-appropriate administrator-section rule.
 #[cfg(windows)]
 const fn section_rule() -> &'static str {
     "-- Create Admin Account --------------------------------"
 }
 
+/// Return the platform-appropriate administrator-section rule.
 #[cfg(not(windows))]
 const fn section_rule() -> &'static str {
     "\u{2500}\u{2500} Create Admin Account \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}"
 }
 
+/// Prompt for and validate an administrator username.
 fn prompt_username(reader: &mut dyn BufRead) -> Option<String> {
     loop {
         crate::logging::console_prompt(&format!("  {}Username:{} ", c(CYN), c(RST)));
@@ -158,6 +159,7 @@ fn prompt_username(reader: &mut dyn BufRead) -> Option<String> {
     }
 }
 
+/// Prompt for and validate an administrator password.
 fn prompt_password(reader: &mut dyn BufRead) -> Option<String> {
     loop {
         crate::logging::console_prompt(&format!("  {}Password (min 8 chars):{} ", c(CYN), c(RST)));
@@ -196,6 +198,7 @@ fn prompt_password(reader: &mut dyn BufRead) -> Option<String> {
 
 // ─── kb_create_board ─────────────────────────────────────────────────────────
 
+/// Prompt for a board definition and create it.
 pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
     let prompt = |msg: &str, reader: &mut dyn BufRead| -> Option<String> {
         crate::logging::console_prompt(msg);
@@ -307,6 +310,7 @@ pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
 
 // ─── kb_create_admin ─────────────────────────────────────────────────────────
 
+/// Prompt for administrator credentials and create the account.
 pub fn kb_create_admin(pool: &DbPool, reader: &mut dyn BufRead) {
     crate::logging::console_print_raw(&format!("\n  {}{}{}\n\n", c(CYN), section_rule(), c(RST)));
 
@@ -364,6 +368,7 @@ pub fn kb_create_admin(pool: &DbPool, reader: &mut dyn BufRead) {
 
 // ─── kb_delete_thread ────────────────────────────────────────────────────────
 
+/// Prompt for a thread identifier and confirmed deletion.
 pub fn kb_delete_thread(pool: &DbPool, reader: &mut dyn BufRead) {
     crate::logging::console_prompt(&format!("  {}Thread ID to delete:{} ", c(CYN), c(RST)));
     let mut s = String::new();

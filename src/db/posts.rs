@@ -18,10 +18,12 @@ use std::fmt;
 /// Previously the magic number 3 appeared in both `claim_next_job` (WHERE attempts < 3)
 /// and `fail_job` (CASE WHEN attempts >= 3), with no guarantee they would stay in sync.
 const MAX_JOB_ATTEMPTS: i64 = 3;
+/// Shared projection used to decode a complete post.
 const POST_SELECT_COLUMNS: &str = "id, thread_id, board_id, name, tripcode, subject, body, \
     body_html, ip_hash, file_path, file_name, file_size, thumb_path, mime_type, created_at, \
     deletion_token, is_op, media_type, audio_file_path, audio_file_name, audio_file_size, \
     audio_mime_type, edited_at, media_processing_state, media_processing_error";
+/// Shared projection used to decode a complete post selected with alias `p`.
 const POST_SELECT_COLUMNS_WITH_P_ALIAS: &str =
     "p.id, p.thread_id, p.board_id, p.name, p.tripcode, p.subject, p.body, p.body_html, \
     p.ip_hash, p.file_path, p.file_name, p.file_size, p.thumb_path, p.mime_type, p.created_at, \
@@ -30,34 +32,54 @@ const POST_SELECT_COLUMNS_WITH_P_ALIAS: &str =
     p.media_processing_error";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// State assigned after recording a background-job failure.
 pub enum JobFailureState {
+    /// The job remains eligible for another attempt.
     Retrying,
+    /// The job exhausted its retry budget.
     PermanentlyFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Counts returned after recovering jobs interrupted by shutdown.
 pub struct InterruptedJobRecovery {
+    /// Interrupted jobs returned to the pending queue.
     pub jobs_reset: i64,
+    /// Interrupted jobs already reflected in persisted media state.
     pub jobs_resolved: i64,
+    /// Media posts whose processing state was cleared.
     pub media_posts_reset: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Aggregate status counts for the background-job dashboard.
 pub struct BackgroundJobSummary {
+    /// Jobs currently claimed by workers.
     pub running: i64,
+    /// Jobs waiting to be claimed.
     pub queued: i64,
+    /// Jobs completed during the recent reporting window.
     pub recent_completed: i64,
+    /// Unacknowledged permanently failed jobs.
     pub failed: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// One recent background-job record for operator diagnostics.
 pub struct RecentBackgroundJob {
+    /// Database row identifier.
     pub id: i64,
+    /// Worker job-kind discriminator.
     pub job_type: String,
+    /// Serialized worker payload.
     pub payload: String,
+    /// Current lifecycle status.
     pub status: String,
+    /// Number of claim attempts.
     pub attempts: i64,
+    /// Most recent worker error, when present.
     pub last_error: Option<String>,
+    /// Unix timestamp of the latest state transition.
     pub updated_at: i64,
 }
 
@@ -304,9 +326,13 @@ pub(super) fn create_post_inner(conn: &rusqlite::Connection, p: &super::NewPost)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Idempotency record for one accepted post submission.
 pub struct PostSubmissionRecord {
+    /// Thread associated with the accepted submission.
     pub thread_id: i64,
+    /// Post created by the accepted submission.
     pub post_id: i64,
+    /// Whether the submission created a new thread.
     pub is_thread: bool,
 }
 
@@ -480,12 +506,13 @@ pub fn delete_post(
             Ok(safe)
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(e)
         }
     }
 }
 
+/// Delete a non-opening post inside the caller's transaction.
 fn delete_post_reply_in_tx(
     conn: &rusqlite::Connection,
     post_id: i64,
@@ -573,13 +600,21 @@ fn delete_post_reply_in_tx(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Outcome of a self-service post deletion request.
 pub enum SelfDeleteOutcome {
+    /// A reply was deleted.
     DeletedReply,
+    /// An opening post and its thread were deleted.
     DeletedThread,
+    /// The requested post does not exist.
     NotFound,
+    /// The deletion token did not match.
     WrongToken,
+    /// The board's self-delete window has elapsed.
     WindowClosed,
+    /// The parent thread is locked or archived.
     ThreadClosed,
+    /// The opening post cannot be deleted after replies exist.
     ThreadHasReplies,
 }
 
@@ -685,7 +720,7 @@ pub fn self_delete_post(
             Ok(outcome)
         }
         Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(error)
         }
     }
@@ -782,7 +817,7 @@ pub fn edit_post(
             Ok(updated)
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(e)
         }
     }
@@ -1131,6 +1166,7 @@ pub fn cleanup_expired_poll_votes(
 // Jobs flow through: pending → running → done | failed
 // claim_next_job uses UPDATE … RETURNING for atomic claim with no TOCTOU race.
 
+/// Site-setting key containing the highest acknowledged failed-job identifier.
 const FAILED_BACKGROUND_JOBS_ACK_ID_KEY: &str = "failed_background_jobs_acknowledged_through_id";
 
 /// Persist a new job in the pending state. Returns the new row id.
@@ -1281,6 +1317,7 @@ pub fn background_job_summary(conn: &rusqlite::Connection) -> Result<BackgroundJ
     })
 }
 
+/// Read the highest background-job failure acknowledged by an administrator.
 fn acknowledged_failed_background_job_id(conn: &rusqlite::Connection) -> Result<i64> {
     let value = super::get_site_setting(conn, FAILED_BACKGROUND_JOBS_ACK_ID_KEY)?;
     Ok(value
@@ -1423,24 +1460,29 @@ pub fn recover_interrupted_background_jobs(
     match result {
         Ok(recovery) => {
             if let Err(error) = conn.execute_batch("COMMIT") {
-                let _ = conn.execute_batch("ROLLBACK");
+                drop(conn.execute_batch("ROLLBACK"));
                 return Err(error).context("Failed to commit interrupted-job recovery");
             }
             Ok(recovery)
         }
         Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(error)
         }
     }
 }
 
+/// Persisted fields required to classify an interrupted background job.
 struct InterruptedBackgroundJob {
+    /// Background-job row identifier.
     id: i64,
+    /// Worker job-kind discriminator.
     job_type: String,
+    /// Serialized worker payload.
     payload: String,
 }
 
+/// Load every job left in the running state.
 fn interrupted_background_jobs(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<InterruptedBackgroundJob>> {
@@ -1460,24 +1502,43 @@ fn interrupted_background_jobs(
         .map_err(Into::into)
 }
 
+/// Recovery action selected for an interrupted background job.
 enum InterruptedJobDisposition {
-    Requeue { media_post_id: Option<i64> },
-    Resolve { clear_media_post_id: Option<i64> },
+    /// Return the job to the queue and optionally restore its media marker.
+    Requeue {
+        /// Post whose media-processing marker should remain pending.
+        media_post_id: Option<i64>,
+    },
+    /// Mark the job complete because its side effect already happened.
+    Resolve {
+        /// Post whose now-complete media marker should be cleared.
+        clear_media_post_id: Option<i64>,
+    },
 }
 
+/// Media target parsed from an interrupted worker payload.
 enum InterruptedMediaTarget {
+    /// Video-transcode target.
     Video {
+        /// Target post identifier.
         post_id: i64,
+        /// Source media path captured by the job.
         source_path: String,
+        /// Deterministic transcoded output path.
         expected_output_path: Option<String>,
     },
+    /// Audio-waveform target.
     Audio {
+        /// Target post identifier.
         post_id: i64,
+        /// Source media path captured by the job.
         source_path: String,
+        /// Deterministic waveform thumbnail path.
         expected_thumb_path: Option<String>,
     },
 }
 
+/// Determine whether an interrupted job must be replayed or was already applied.
 fn interrupted_media_job_disposition(
     conn: &rusqlite::Connection,
     job: &InterruptedBackgroundJob,
@@ -1558,6 +1619,7 @@ fn interrupted_media_job_disposition(
     }
 }
 
+/// Parse a supported media target from a worker job payload.
 fn interrupted_media_target(job_type: &str, payload: &str) -> Option<InterruptedMediaTarget> {
     if !matches!(job_type, "video_transcode" | "audio_waveform") {
         return None;
@@ -1584,6 +1646,7 @@ fn interrupted_media_target(job_type: &str, payload: &str) -> Option<Interrupted
     }
 }
 
+/// Derive the deterministic transcode output path for a source video.
 fn expected_transcoded_path(source_path: &str, board_short: &str) -> Option<String> {
     let source = std::path::Path::new(source_path);
     let stem = source.file_stem()?.to_str()?;
@@ -1596,6 +1659,7 @@ fn expected_transcoded_path(source_path: &str, board_short: &str) -> Option<Stri
     Some(format!("{board_short}/{output_name}"))
 }
 
+/// Derive the deterministic waveform thumbnail path for a source audio file.
 fn expected_waveform_thumb_path(source_path: &str, board_short: &str) -> Option<String> {
     let stem = std::path::Path::new(source_path).file_stem()?.to_str()?;
     if stem.is_empty() {
@@ -1604,8 +1668,11 @@ fn expected_waveform_thumb_path(source_path: &str, board_short: &str) -> Option<
     Some(format!("{board_short}/thumbs/{stem}.png"))
 }
 
+/// Media-processing state assigned while work is queued or running.
 pub const MEDIA_PROCESSING_PENDING: &str = "pending";
+/// Media-processing state assigned after terminal worker failure.
 pub const MEDIA_PROCESSING_FAILED: &str = "failed";
+/// Media-processing state indicating that the original upload was pruned.
 pub const MEDIA_ORIGINAL_PRUNED: &str = "pruned";
 
 /// Update a post's async media-processing state.
@@ -1716,7 +1783,7 @@ pub fn replace_transcoded_media(
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin transcode media replacement transaction")?;
 
-    let result: anyhow::Result<()> = (|| {
+    let result: Result<()> = (|| {
         let target_exists = conn
             .query_row(
                 "SELECT 1 FROM posts WHERE id = ?1 AND file_path = ?2 LIMIT 1",
@@ -1755,15 +1822,18 @@ pub fn replace_transcoded_media(
             Ok(())
         }
         Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(error)
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Error raised when a media worker attempts to replace a stale post target.
 pub struct StaleMediaTargetError {
+    /// Post whose media target changed or disappeared.
     pub post_id: i64,
+    /// Source path the worker expected to replace.
     pub expected_path: String,
 }
 
@@ -1780,6 +1850,7 @@ impl fmt::Display for StaleMediaTargetError {
 impl std::error::Error for StaleMediaTargetError {}
 
 #[must_use]
+/// Return whether an application error represents a stale media target.
 pub fn is_stale_media_target_error(error: &anyhow::Error) -> bool {
     error.downcast_ref::<StaleMediaTargetError>().is_some()
 }
@@ -1812,19 +1883,19 @@ mod tests {
         get_board_by_short, get_thread, NewPost,
     };
     use crate::error::AppError;
+    use anyhow::{Context as _, Result};
     use rusqlite::Connection;
 
-    fn test_conn() -> Connection {
-        let conn = Connection::open_in_memory().expect("in-memory sqlite");
-        super::super::schema::install_or_migrate_schema(&conn).expect("install schema");
-        conn
+    fn test_conn() -> Result<Connection> {
+        let conn = Connection::open_in_memory()?;
+        super::super::schema::install_or_migrate_schema(&conn)?;
+        Ok(conn)
     }
 
-    fn seed_search_post(conn: &Connection, board_short: &str, body: &str) -> i64 {
-        create_board(conn, board_short, board_short, "", false).expect("create board");
-        let board = get_board_by_short(conn, board_short)
-            .expect("load board")
-            .expect("board exists");
+    fn seed_search_post(conn: &Connection, board_short: &str, body: &str) -> Result<i64> {
+        create_board(conn, board_short, board_short, "", false)?;
+        let board =
+            get_board_by_short(conn, board_short)?.context("seeded search board should exist")?;
         let post = NewPost {
             thread_id: 0,
             board_id: board.id,
@@ -1848,17 +1919,15 @@ mod tests {
             is_op: true,
         };
         let (thread_id, post_id, _) =
-            create_thread_with_optional_poll(conn, board.id, None, &post, "", None, None)
-                .expect("create thread");
-        assert!(thread_id > 0);
-        post_id
+            create_thread_with_optional_poll(conn, board.id, None, &post, "", None, None)?;
+        anyhow::ensure!(thread_id > 0, "seeded thread should have a positive ID");
+        Ok(post_id)
     }
 
-    fn seed_media_post(conn: &Connection, board_short: &str, file_path: &str) -> i64 {
-        create_board(conn, board_short, board_short, "", false).expect("create board");
-        let board = get_board_by_short(conn, board_short)
-            .expect("load board")
-            .expect("board exists");
+    fn seed_media_post(conn: &Connection, board_short: &str, file_path: &str) -> Result<i64> {
+        create_board(conn, board_short, board_short, "", false)?;
+        let board =
+            get_board_by_short(conn, board_short)?.context("seeded media board should exist")?;
         let post = NewPost {
             thread_id: 0,
             board_id: board.id,
@@ -1882,9 +1951,8 @@ mod tests {
             is_op: true,
         };
         let (_thread_id, post_id, _) =
-            create_thread_with_optional_poll(conn, board.id, None, &post, "", None, None)
-                .expect("create media thread");
-        post_id
+            create_thread_with_optional_poll(conn, board.id, None, &post, "", None, None)?;
+        Ok(post_id)
     }
 
     fn insert_background_job(
@@ -1894,77 +1962,94 @@ mod tests {
         status: &str,
         attempts: i64,
         last_error: Option<&str>,
-    ) -> i64 {
-        conn.query_row(
+    ) -> Result<i64> {
+        Ok(conn.query_row(
             "INSERT INTO background_jobs
              (job_type, payload, status, attempts, last_error, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())
              RETURNING id",
             rusqlite::params![job_type, payload, status, attempts, last_error],
             |row| row.get(0),
-        )
-        .expect("insert background job")
+        )?)
     }
 
-    fn background_job_status(conn: &Connection, id: i64) -> (String, i64, Option<String>) {
-        conn.query_row(
+    fn background_job_status(conn: &Connection, id: i64) -> Result<(String, i64, Option<String>)> {
+        Ok(conn.query_row(
             "SELECT status, attempts, last_error FROM background_jobs WHERE id = ?1",
             rusqlite::params![id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .expect("load background job")
+        )?)
     }
 
     #[test]
-    fn recent_background_jobs_are_bounded_and_terminal_only() {
-        let conn = test_conn();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn recent_background_jobs_are_bounded_and_terminal_only() -> Result<()> {
+        let conn = test_conn()?;
         let payload = r#"{"t":"SpamCheck","d":{"post_id":1,"ip_hash":"hash","body_len":5}}"#;
-        let older = insert_background_job(&conn, "spam_check", payload, "failed", 3, Some("older"));
+        let older =
+            insert_background_job(&conn, "spam_check", payload, "failed", 3, Some("older"))?;
         let newer =
-            insert_background_job(&conn, "thread_prune", payload, "failed", 2, Some("newer"));
-        insert_background_job(&conn, "spam_check", payload, "pending", 0, None);
+            insert_background_job(&conn, "thread_prune", payload, "failed", 2, Some("newer"))?;
+        insert_background_job(&conn, "spam_check", payload, "pending", 0, None)?;
 
-        let jobs = recent_background_jobs(&conn, "failed", 1).expect("recent jobs");
+        let jobs = recent_background_jobs(&conn, "failed", 1)?;
 
-        assert_eq!(jobs.len(), 1);
-        let job = jobs.first().expect("one recent job");
-        assert_eq!(job.id, newer);
-        assert_eq!(job.job_type, "thread_prune");
-        assert_eq!(job.status, "failed");
-        assert_eq!(job.attempts, 2);
-        assert_eq!(job.last_error.as_deref(), Some("newer"));
-        assert!(older < newer);
+        assert_eq!(
+            jobs.len(),
+            1,
+            "the requested result limit should be honored"
+        );
+        let job = jobs.first().context("one recent job should be returned")?;
+        assert_eq!(job.id, newer, "newest terminal job should be returned");
+        assert_eq!(job.job_type, "thread_prune", "job type should be decoded");
+        assert_eq!(job.status, "failed", "status should be decoded");
+        assert_eq!(job.attempts, 2, "attempt count should be decoded");
+        assert_eq!(
+            job.last_error.as_deref(),
+            Some("newer"),
+            "last error should be decoded"
+        );
+        assert!(
+            older < newer,
+            "database IDs should preserve insertion order"
+        );
+        Ok(())
     }
 
     #[test]
-    fn failed_background_job_acknowledgement_preserves_history() {
-        let conn = test_conn();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn failed_background_job_acknowledgement_preserves_history() -> Result<()> {
+        let conn = test_conn()?;
         let payload = r#"{"t":"SpamCheck","d":{"post_id":1,"ip_hash":"hash","body_len":5}}"#;
-        insert_background_job(&conn, "spam_check", payload, "failed", 3, Some("older"));
+        insert_background_job(&conn, "spam_check", payload, "failed", 3, Some("older"))?;
         let acknowledged =
-            insert_background_job(&conn, "thread_prune", payload, "failed", 3, Some("newer"));
+            insert_background_job(&conn, "thread_prune", payload, "failed", 3, Some("newer"))?;
 
         assert_eq!(
-            background_job_summary(&conn)
-                .expect("summary before ack")
-                .failed,
-            2
+            background_job_summary(&conn)?.failed,
+            2,
+            "both failures should initially require attention"
         );
         assert_eq!(
-            acknowledge_failed_background_jobs(&conn).expect("acknowledge failed jobs"),
-            acknowledged
+            acknowledge_failed_background_jobs(&conn)?,
+            acknowledged,
+            "acknowledgement should advance through the latest failure"
         );
         assert_eq!(
-            background_job_summary(&conn)
-                .expect("summary after ack")
-                .failed,
-            0
+            background_job_summary(&conn)?.failed,
+            0,
+            "acknowledged failures should leave the attention count"
         );
         assert_eq!(
-            recent_background_jobs(&conn, "failed", 10)
-                .expect("recent failed jobs")
-                .len(),
-            2
+            recent_background_jobs(&conn, "failed", 10)?.len(),
+            2,
+            "acknowledgement should preserve failure history"
         );
 
         insert_background_job(
@@ -1974,38 +2059,56 @@ mod tests {
             "failed",
             3,
             Some("new failure"),
-        );
+        )?;
         assert_eq!(
-            background_job_summary(&conn)
-                .expect("summary after new failure")
-                .failed,
-            1
+            background_job_summary(&conn)?.failed,
+            1,
+            "a newer failure should require attention"
         );
+        Ok(())
     }
 
     #[test]
     fn search_query_ignores_punctuation_only_input() {
-        assert_eq!(to_fts_query("'"), None);
-        assert_eq!(to_fts_query("\""), None);
-        assert_eq!(to_fts_query("... !!!"), None);
+        assert_eq!(to_fts_query("'"), None, "apostrophe alone has no term");
+        assert_eq!(to_fts_query("\""), None, "quotation mark alone has no term");
+        assert_eq!(
+            to_fts_query("... !!!"),
+            None,
+            "punctuation-only input has no term"
+        );
     }
 
     #[test]
     fn search_query_strips_chan_punctuation_without_crashing() {
-        assert_eq!(search_terms(">>1"), vec!["1"]);
-        assert_eq!(search_terms("💥💥💥   >>1 ' \" %"), vec!["1"]);
-        assert_eq!(to_fts_query(">>1"), Some("\"1\"*".to_owned()));
+        assert_eq!(
+            search_terms(">>1"),
+            vec!["1"],
+            "quote marker should be stripped"
+        );
+        assert_eq!(
+            search_terms("💥💥💥   >>1 ' \" %"),
+            vec!["1"],
+            "unsupported punctuation should be stripped"
+        );
+        assert_eq!(
+            to_fts_query(">>1"),
+            Some("\"1\"*".to_owned()),
+            "remaining numeric term should produce a prefix query"
+        );
     }
 
     #[test]
     fn search_query_keeps_text_terms_usable() {
         assert_eq!(
             search_terms("rock'n'roll C++ anime"),
-            vec!["rock", "n", "roll", "c", "anime"]
+            vec!["rock", "n", "roll", "c", "anime"],
+            "text separated by punctuation should remain searchable"
         );
         assert_eq!(
             to_fts_query("hello world"),
-            Some("\"hello\"* AND \"world\"*".to_owned())
+            Some("\"hello\"* AND \"world\"*".to_owned()),
+            "multiple terms should be combined with AND"
         );
     }
 
@@ -2013,135 +2116,187 @@ mod tests {
     fn search_query_lowercases_even_when_token_cap_is_hit() {
         assert_eq!(
             search_terms("A B C D E F G H I J K L M"),
-            vec!["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]
+            vec!["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"],
+            "all retained terms should be normalized before the cap"
         );
     }
 
     #[test]
-    fn search_posts_reads_joined_fts_rows_without_ambiguous_columns() {
-        let conn = test_conn();
-        seed_search_post(&conn, "tech", "rust search body");
-        let board = get_board_by_short(&conn, "tech")
-            .expect("load board")
-            .expect("board exists");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn search_posts_reads_joined_fts_rows_without_ambiguous_columns() -> Result<()> {
+        let conn = test_conn()?;
+        seed_search_post(&conn, "tech", "rust search body")?;
+        let board = get_board_by_short(&conn, "tech")?.context("tech board should exist")?;
 
-        let posts = search_posts(&conn, board.id, "rust", 20, 0).expect("search posts");
+        let posts = search_posts(&conn, board.id, "rust", 20, 0)?;
 
-        assert_eq!(posts.len(), 1);
+        assert_eq!(posts.len(), 1, "one matching post should be returned");
         assert_eq!(
             posts.first().map(|post| post.body.as_str()),
-            Some("rust search body")
+            Some("rust search body"),
+            "the joined row should decode the post body"
         );
+        Ok(())
     }
 
     #[test]
-    fn search_posts_stays_scoped_to_board() {
-        let conn = test_conn();
-        seed_search_post(&conn, "tech", "shared rust term");
-        seed_search_post(&conn, "meta", "shared rust term");
-        let tech = get_board_by_short(&conn, "tech")
-            .expect("load tech board")
-            .expect("tech board exists");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn search_posts_stays_scoped_to_board() -> Result<()> {
+        let conn = test_conn()?;
+        seed_search_post(&conn, "tech", "shared rust term")?;
+        seed_search_post(&conn, "meta", "shared rust term")?;
+        let tech = get_board_by_short(&conn, "tech")?.context("tech board should exist")?;
 
-        let posts = search_posts(&conn, tech.id, "rust", 20, 0).expect("search posts");
-        let total = count_search_results(&conn, tech.id, "rust").expect("count search results");
+        let posts = search_posts(&conn, tech.id, "rust", 20, 0)?;
+        let total = count_search_results(&conn, tech.id, "rust")?;
 
-        assert_eq!(posts.len(), 1);
-        assert_eq!(total, 1);
-        assert_eq!(posts.first().map(|post| post.board_id), Some(tech.id));
+        assert_eq!(
+            posts.len(),
+            1,
+            "only the requested board's post should be returned"
+        );
+        assert_eq!(total, 1, "count should use the same board scope");
+        assert_eq!(
+            posts.first().map(|post| post.board_id),
+            Some(tech.id),
+            "the result should belong to the requested board"
+        );
+        Ok(())
     }
 
     #[test]
-    fn search_posts_matches_case_insensitively() {
-        let conn = test_conn();
-        seed_search_post(&conn, "tech", "AI will find this");
-        let board = get_board_by_short(&conn, "tech")
-            .expect("load board")
-            .expect("board exists");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn search_posts_matches_case_insensitively() -> Result<()> {
+        let conn = test_conn()?;
+        seed_search_post(&conn, "tech", "AI will find this")?;
+        let board = get_board_by_short(&conn, "tech")?.context("tech board should exist")?;
 
-        let posts = search_posts(&conn, board.id, "ai", 20, 0).expect("search posts");
-        let total = count_search_results(&conn, board.id, "ai").expect("count search results");
+        let posts = search_posts(&conn, board.id, "ai", 20, 0)?;
+        let total = count_search_results(&conn, board.id, "ai")?;
 
-        assert_eq!(posts.len(), 1);
-        assert_eq!(total, 1);
+        assert_eq!(
+            posts.len(),
+            1,
+            "case-insensitive search should find the post"
+        );
+        assert_eq!(total, 1, "case-insensitive count should find the post");
         assert_eq!(
             posts.first().map(|post| post.body.as_str()),
-            Some("AI will find this")
+            Some("AI will find this"),
+            "the original body casing should be preserved"
         );
+        Ok(())
     }
 
     #[test]
-    fn search_posts_ignores_punctuation_only_queries_without_error() {
-        let conn = test_conn();
-        let total = count_search_results(&conn, 1, ">>1 ' \" %").expect("count search results");
-        let posts = search_posts(&conn, 1, ">>1 ' \" %", 20, 0).expect("search posts");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn search_posts_ignores_punctuation_only_queries_without_error() -> Result<()> {
+        let conn = test_conn()?;
+        let total = count_search_results(&conn, 1, ">>1 ' \" %")?;
+        let posts = search_posts(&conn, 1, ">>1 ' \" %", 20, 0)?;
 
-        assert_eq!(total, 0);
-        assert!(posts.is_empty());
+        assert_eq!(total, 0, "punctuation-only count should be zero");
+        assert!(
+            posts.is_empty(),
+            "punctuation-only search should return no rows"
+        );
+        Ok(())
     }
 
     #[test]
-    fn post_submission_token_resolves_existing_post() {
-        let conn = test_conn();
-        let post_id = seed_search_post(&conn, "dup", "hello");
-        let board = get_board_by_short(&conn, "dup")
-            .expect("load board")
-            .expect("board exists");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn post_submission_token_resolves_existing_post() -> Result<()> {
+        let conn = test_conn()?;
+        let post_id = seed_search_post(&conn, "dup", "hello")?;
+        let board = get_board_by_short(&conn, "dup")?.context("dup board should exist")?;
 
-        record_post_submission(&conn, "token-1", "iphash", board.id, 1, post_id, true)
-            .expect("record submission token");
+        record_post_submission(&conn, "token-1", "iphash", board.id, 1, post_id, true)?;
 
-        let record = get_post_submission(&conn, "token-1", "iphash", board.id)
-            .expect("lookup token")
-            .expect("record should exist");
-        assert_eq!(record.thread_id, 1);
-        assert_eq!(record.post_id, post_id);
-        assert!(record.is_thread);
+        let record = get_post_submission(&conn, "token-1", "iphash", board.id)?
+            .context("submission record should exist")?;
+        assert_eq!(
+            record.thread_id, 1,
+            "submission should retain the thread ID"
+        );
+        assert_eq!(
+            record.post_id, post_id,
+            "submission should retain the post ID"
+        );
+        assert!(
+            record.is_thread,
+            "submission should retain its new-thread classification"
+        );
+        Ok(())
     }
 
     #[test]
-    fn media_processing_state_round_trips_and_counts() {
-        let conn = test_conn();
-        let post_id = seed_search_post(&conn, "media", "hello");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn media_processing_state_round_trips_and_counts() -> Result<()> {
+        let conn = test_conn()?;
+        let post_id = seed_search_post(&conn, "media", "hello")?;
 
         set_post_media_processing_state(
             &conn,
             post_id,
             Some(MEDIA_PROCESSING_FAILED),
             Some("ffmpeg timed out"),
-        )
-        .expect("set failed state");
+        )?;
 
-        let posts = get_posts_for_thread(&conn, 1).expect("load posts");
+        let posts = get_posts_for_thread(&conn, 1)?;
         let post = posts
             .into_iter()
             .find(|post| post.id == post_id)
-            .expect("post exists");
+            .context("media post should exist")?;
         assert_eq!(
             post.media_processing_state.as_deref(),
-            Some(MEDIA_PROCESSING_FAILED)
+            Some(MEDIA_PROCESSING_FAILED),
+            "processing state should round-trip"
         );
         assert_eq!(
             post.media_processing_error.as_deref(),
-            Some("ffmpeg timed out")
+            Some("ffmpeg timed out"),
+            "processing error should round-trip"
         );
         assert_eq!(
-            count_posts_by_media_processing_state(&conn, MEDIA_PROCESSING_FAILED)
-                .expect("count failed"),
-            1
+            count_posts_by_media_processing_state(&conn, MEDIA_PROCESSING_FAILED)?,
+            1,
+            "failed-state count should include the post"
         );
 
-        set_post_media_processing_state(&conn, post_id, None, None).expect("clear state");
+        set_post_media_processing_state(&conn, post_id, None, None)?;
         assert_eq!(
-            count_posts_by_media_processing_state(&conn, MEDIA_PROCESSING_FAILED)
-                .expect("count failed after clear"),
-            0
+            count_posts_by_media_processing_state(&conn, MEDIA_PROCESSING_FAILED)?,
+            0,
+            "cleared state should leave the failed count"
         );
+        Ok(())
     }
 
     #[test]
-    fn startup_recovery_resets_running_background_job_to_pending() {
-        let conn = test_conn();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn startup_recovery_resets_running_background_job_to_pending() -> Result<()> {
+        let conn = test_conn()?;
         let payload = r#"{"t":"SpamCheck","d":{"post_id":1,"ip_hash":"hash","body_len":5}}"#;
         let job_id = insert_background_job(
             &conn,
@@ -2150,48 +2305,77 @@ mod tests {
             "running",
             1,
             Some("worker interrupted"),
-        );
+        )?;
 
-        let recovery =
-            recover_interrupted_background_jobs(&conn).expect("recover interrupted jobs");
+        let recovery = recover_interrupted_background_jobs(&conn)?;
 
-        assert_eq!(recovery.jobs_reset, 1);
-        assert_eq!(recovery.jobs_resolved, 0);
-        assert_eq!(recovery.media_posts_reset, 0);
+        assert_eq!(recovery.jobs_reset, 1, "running job should be requeued");
         assert_eq!(
-            background_job_status(&conn, job_id),
-            ("pending".to_owned(), 0, None)
+            recovery.jobs_resolved, 0,
+            "unapplied job should not be resolved"
         );
+        assert_eq!(
+            recovery.media_posts_reset, 0,
+            "non-media job should not affect post state"
+        );
+        assert_eq!(
+            background_job_status(&conn, job_id)?,
+            ("pending".to_owned(), 0, None),
+            "requeued job should reset status, attempts, and error"
+        );
+        Ok(())
     }
 
     #[test]
-    fn startup_recovery_leaves_non_running_jobs_unchanged() {
-        let conn = test_conn();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn startup_recovery_leaves_non_running_jobs_unchanged() -> Result<()> {
+        let conn = test_conn()?;
         let payload = r#"{"t":"SpamCheck","d":{"post_id":1,"ip_hash":"hash","body_len":5}}"#;
-        let pending_id = insert_background_job(&conn, "spam_check", payload, "pending", 0, None);
-        let done_id = insert_background_job(&conn, "spam_check", payload, "done", 1, None);
+        let pending_id = insert_background_job(&conn, "spam_check", payload, "pending", 0, None)?;
+        let done_id = insert_background_job(&conn, "spam_check", payload, "done", 1, None)?;
         let failed_id =
-            insert_background_job(&conn, "spam_check", payload, "failed", 3, Some("bad input"));
+            insert_background_job(&conn, "spam_check", payload, "failed", 3, Some("bad input"))?;
 
-        let recovery =
-            recover_interrupted_background_jobs(&conn).expect("recover interrupted jobs");
+        let recovery = recover_interrupted_background_jobs(&conn)?;
 
-        assert_eq!(recovery.jobs_reset, 0);
-        assert_eq!(recovery.jobs_resolved, 0);
-        assert_eq!(background_job_status(&conn, pending_id).0, "pending");
-        assert_eq!(background_job_status(&conn, done_id).0, "done");
         assert_eq!(
-            background_job_status(&conn, failed_id),
-            ("failed".to_owned(), 3, Some("bad input".to_owned()))
+            recovery.jobs_reset, 0,
+            "no non-running job should be requeued"
         );
+        assert_eq!(
+            recovery.jobs_resolved, 0,
+            "no non-running job should be resolved"
+        );
+        assert_eq!(
+            background_job_status(&conn, pending_id)?.0,
+            "pending",
+            "pending job should remain pending"
+        );
+        assert_eq!(
+            background_job_status(&conn, done_id)?.0,
+            "done",
+            "completed job should remain done"
+        );
+        assert_eq!(
+            background_job_status(&conn, failed_id)?,
+            ("failed".to_owned(), 3, Some("bad input".to_owned())),
+            "failed job should remain unchanged"
+        );
+        Ok(())
     }
 
     #[test]
-    fn startup_recovery_restores_media_post_processing_state_to_pending() {
-        let conn = test_conn();
-        let post_id = seed_media_post(&conn, "recover", "recover/video.mp4");
-        set_post_media_processing_state(&conn, post_id, Some("running"), Some("old error"))
-            .expect("set stale processing state");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn startup_recovery_restores_media_post_processing_state_to_pending() -> Result<()> {
+        let conn = test_conn()?;
+        let post_id = seed_media_post(&conn, "recover", "recover/video.mp4")?;
+        set_post_media_processing_state(&conn, post_id, Some("running"), Some("old error"))?;
         let payload = format!(
             r#"{{"t":"VideoTranscode","d":{{"post_id":{post_id},"file_path":"recover/video.mp4","board_short":"recover"}}}}"#
         );
@@ -2202,35 +2386,45 @@ mod tests {
             "running",
             1,
             Some("old error"),
+        )?;
+
+        let recovery = recover_interrupted_background_jobs(&conn)?;
+
+        assert_eq!(recovery.jobs_reset, 1, "media job should be requeued");
+        assert_eq!(
+            recovery.jobs_resolved, 0,
+            "unapplied media job should not be resolved"
         );
-
-        let recovery =
-            recover_interrupted_background_jobs(&conn).expect("recover interrupted jobs");
-
-        assert_eq!(recovery.jobs_reset, 1);
-        assert_eq!(recovery.jobs_resolved, 0);
-        assert_eq!(recovery.media_posts_reset, 1);
-        let post = get_post(&conn, post_id)
-            .expect("load post")
-            .expect("post exists");
+        assert_eq!(
+            recovery.media_posts_reset, 1,
+            "media post should return to pending"
+        );
+        let post = get_post(&conn, post_id)?.context("media post should exist")?;
         assert_eq!(
             post.media_processing_state.as_deref(),
-            Some(MEDIA_PROCESSING_PENDING)
+            Some(MEDIA_PROCESSING_PENDING),
+            "processing state should be pending"
         );
-        assert_eq!(post.media_processing_error, None);
+        assert_eq!(
+            post.media_processing_error, None,
+            "stale worker error should be cleared"
+        );
+        Ok(())
     }
 
     #[test]
-    fn startup_recovery_resolves_applied_transcode_without_replay() {
-        let conn = test_conn();
-        let post_id = seed_media_post(&conn, "applied", "applied/video.mp4");
-        set_post_media_processing_state(&conn, post_id, Some("running"), Some("old error"))
-            .expect("set interrupted processing state");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn startup_recovery_resolves_applied_transcode_without_replay() -> Result<()> {
+        let conn = test_conn()?;
+        let post_id = seed_media_post(&conn, "applied", "applied/video.mp4")?;
+        set_post_media_processing_state(&conn, post_id, Some("running"), Some("old error"))?;
         conn.execute(
             "UPDATE posts SET file_path = 'applied/video.webm' WHERE id = ?1",
             rusqlite::params![post_id],
-        )
-        .expect("simulate committed transcode path");
+        )?;
         let payload = format!(
             r#"{{"t":"VideoTranscode","d":{{"post_id":{post_id},"file_path":"applied/video.mp4","board_short":"applied"}}}}"#
         );
@@ -2241,41 +2435,59 @@ mod tests {
             "running",
             1,
             Some("worker interrupted"),
-        );
+        )?;
 
-        let recovery =
-            recover_interrupted_background_jobs(&conn).expect("recover applied transcode");
+        let recovery = recover_interrupted_background_jobs(&conn)?;
 
-        assert_eq!(recovery.jobs_reset, 0);
-        assert_eq!(recovery.jobs_resolved, 1);
-        assert_eq!(recovery.media_posts_reset, 0);
         assert_eq!(
-            background_job_status(&conn, job_id),
-            ("done".to_owned(), 1, None)
+            recovery.jobs_reset, 0,
+            "applied transcode should not be requeued"
         );
-        let post = get_post(&conn, post_id)
-            .expect("load post")
-            .expect("post exists");
-        assert_eq!(post.file_path.as_deref(), Some("applied/video.webm"));
-        assert_eq!(post.media_processing_state, None);
+        assert_eq!(
+            recovery.jobs_resolved, 1,
+            "applied transcode should be resolved"
+        );
+        assert_eq!(
+            recovery.media_posts_reset, 0,
+            "applied transcode should clear rather than reset state"
+        );
+        assert_eq!(
+            background_job_status(&conn, job_id)?,
+            ("done".to_owned(), 1, None),
+            "applied job should be marked done"
+        );
+        let post = get_post(&conn, post_id)?.context("media post should exist")?;
+        assert_eq!(
+            post.file_path.as_deref(),
+            Some("applied/video.webm"),
+            "transcoded path should remain installed"
+        );
+        assert_eq!(
+            post.media_processing_state, None,
+            "completed media state should be cleared"
+        );
         assert!(
-            claim_next_job(&conn).expect("query pending jobs").is_none(),
+            claim_next_job(&conn)?.is_none(),
             "already-applied transcode must not be replayed"
         );
+        Ok(())
     }
 
     #[test]
-    fn startup_recovery_resolves_stale_media_without_clearing_newer_state() {
-        let conn = test_conn();
-        let post_id = seed_media_post(&conn, "newer", "newer/old.mp4");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn startup_recovery_resolves_stale_media_without_clearing_newer_state() -> Result<()> {
+        let conn = test_conn()?;
+        let post_id = seed_media_post(&conn, "newer", "newer/old.mp4")?;
         conn.execute(
             "UPDATE posts
              SET file_path = 'newer/replacement.mp4',
                  media_processing_state = ?2
              WHERE id = ?1",
             rusqlite::params![post_id, MEDIA_PROCESSING_PENDING],
-        )
-        .expect("install newer media target");
+        )?;
         let payload = format!(
             r#"{{"t":"VideoTranscode","d":{{"post_id":{post_id},"file_path":"newer/old.mp4","board_short":"newer"}}}}"#
         );
@@ -2286,35 +2498,46 @@ mod tests {
             "running",
             1,
             Some("worker interrupted"),
+        )?;
+
+        let recovery = recover_interrupted_background_jobs(&conn)?;
+
+        assert_eq!(recovery.jobs_reset, 0, "stale job should not be requeued");
+        assert_eq!(recovery.jobs_resolved, 1, "stale job should be resolved");
+        let post = get_post(&conn, post_id)?.context("media post should exist")?;
+        assert_eq!(
+            post.file_path.as_deref(),
+            Some("newer/replacement.mp4"),
+            "newer media path should be preserved"
         );
-
-        let recovery = recover_interrupted_background_jobs(&conn).expect("recover stale transcode");
-
-        assert_eq!(recovery.jobs_reset, 0);
-        assert_eq!(recovery.jobs_resolved, 1);
-        let post = get_post(&conn, post_id)
-            .expect("load post")
-            .expect("post exists");
-        assert_eq!(post.file_path.as_deref(), Some("newer/replacement.mp4"));
         assert_eq!(
             post.media_processing_state.as_deref(),
-            Some(MEDIA_PROCESSING_PENDING)
+            Some(MEDIA_PROCESSING_PENDING),
+            "newer media-processing state should be preserved"
         );
-        assert_eq!(background_job_status(&conn, job_id).0, "done");
+        assert_eq!(
+            background_job_status(&conn, job_id)?.0,
+            "done",
+            "stale job should be marked done"
+        );
+        Ok(())
     }
 
     #[test]
-    fn startup_recovery_resolves_applied_waveform_without_replay() {
-        let conn = test_conn();
-        let post_id = seed_media_post(&conn, "audio", "audio/track.mp3");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn startup_recovery_resolves_applied_waveform_without_replay() -> Result<()> {
+        let conn = test_conn()?;
+        let post_id = seed_media_post(&conn, "audio", "audio/track.mp3")?;
         conn.execute(
             "UPDATE posts
              SET thumb_path = 'audio/thumbs/track.png',
                  media_processing_state = 'running'
              WHERE id = ?1",
             rusqlite::params![post_id],
-        )
-        .expect("simulate committed waveform path");
+        )?;
         let payload = format!(
             r#"{{"t":"AudioWaveform","d":{{"post_id":{post_id},"file_path":"audio/track.mp3","board_short":"audio"}}}}"#
         );
@@ -2325,44 +2548,74 @@ mod tests {
             "running",
             1,
             Some("worker interrupted"),
+        )?;
+
+        let recovery = recover_interrupted_background_jobs(&conn)?;
+
+        assert_eq!(
+            recovery.jobs_reset, 0,
+            "applied waveform should not be requeued"
         );
-
-        let recovery =
-            recover_interrupted_background_jobs(&conn).expect("recover applied waveform");
-
-        assert_eq!(recovery.jobs_reset, 0);
-        assert_eq!(recovery.jobs_resolved, 1);
-        assert_eq!(background_job_status(&conn, job_id).0, "done");
-        let post = get_post(&conn, post_id)
-            .expect("load post")
-            .expect("post exists");
-        assert_eq!(post.thumb_path.as_deref(), Some("audio/thumbs/track.png"));
-        assert_eq!(post.media_processing_state, None);
+        assert_eq!(
+            recovery.jobs_resolved, 1,
+            "applied waveform should be resolved"
+        );
+        assert_eq!(
+            background_job_status(&conn, job_id)?.0,
+            "done",
+            "applied waveform job should be marked done"
+        );
+        let post = get_post(&conn, post_id)?.context("audio post should exist")?;
+        assert_eq!(
+            post.thumb_path.as_deref(),
+            Some("audio/thumbs/track.png"),
+            "waveform thumbnail should remain installed"
+        );
+        assert_eq!(
+            post.media_processing_state, None,
+            "completed waveform state should be cleared"
+        );
         assert!(
-            claim_next_job(&conn).expect("query pending jobs").is_none(),
+            claim_next_job(&conn)?.is_none(),
             "already-applied waveform must not be replayed"
         );
+        Ok(())
     }
 
     #[test]
-    fn recovered_background_job_can_be_claimed_by_worker() {
-        let conn = test_conn();
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn recovered_background_job_can_be_claimed_by_worker() -> Result<()> {
+        let conn = test_conn()?;
         let payload = r#"{"t":"SpamCheck","d":{"post_id":42,"ip_hash":"hash","body_len":5}}"#;
-        let job_id = insert_background_job(&conn, "spam_check", payload, "running", 1, None);
+        let job_id = insert_background_job(&conn, "spam_check", payload, "running", 1, None)?;
 
-        recover_interrupted_background_jobs(&conn).expect("recover interrupted jobs");
-        let claimed = claim_next_job(&conn)
-            .expect("claim recovered job")
-            .expect("job should be claimable");
+        recover_interrupted_background_jobs(&conn)?;
+        let claimed = claim_next_job(&conn)?.context("recovered job should be claimable")?;
 
-        assert_eq!(claimed, (job_id, payload.to_owned()));
-        assert_eq!(background_job_status(&conn, job_id).0, "running");
+        assert_eq!(
+            claimed,
+            (job_id, payload.to_owned()),
+            "worker should claim the recovered job"
+        );
+        assert_eq!(
+            background_job_status(&conn, job_id)?.0,
+            "running",
+            "claim should return the job to running state"
+        );
+        Ok(())
     }
 
     #[test]
-    fn update_post_thumb_path_requires_matching_post_and_file_path() {
-        let conn = test_conn();
-        let post_id = seed_media_post(&conn, "thumbz", "thumbz/audio.mp3");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn update_post_thumb_path_requires_matching_post_and_file_path() -> Result<()> {
+        let conn = test_conn()?;
+        let post_id = seed_media_post(&conn, "thumbz", "thumbz/audio.mp3")?;
 
         let error = update_post_thumb_path(
             &conn,
@@ -2370,19 +2623,29 @@ mod tests {
             "thumbz/deleted-or-replaced.mp3",
             "thumbz/thumbs/audio.png",
         )
-        .expect_err("stale thumb update rejected");
+        .err()
+        .context("stale thumbnail update should be rejected")?;
 
-        assert!(is_stale_media_target_error(&error));
-        let post = get_post(&conn, post_id)
-            .expect("lookup post")
-            .expect("post exists");
-        assert!(post.thumb_path.is_none());
+        assert!(
+            is_stale_media_target_error(&error),
+            "rejection should use the typed stale-target error"
+        );
+        let post = get_post(&conn, post_id)?.context("media post should exist")?;
+        assert!(
+            post.thumb_path.is_none(),
+            "stale thumbnail update must not mutate the post"
+        );
+        Ok(())
     }
 
     #[test]
-    fn replace_transcoded_media_requires_matching_post_and_file_path() {
-        let conn = test_conn();
-        let post_id = seed_media_post(&conn, "trans", "trans/video.mp4");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn replace_transcoded_media_requires_matching_post_and_file_path() -> Result<()> {
+        let conn = test_conn()?;
+        let post_id = seed_media_post(&conn, "trans", "trans/video.mp4")?;
 
         let error = replace_transcoded_media(
             &conn,
@@ -2392,27 +2655,39 @@ mod tests {
             "video/webm",
             "deadbeef",
         )
-        .expect_err("stale transcode update rejected");
+        .err()
+        .context("stale transcode update should be rejected")?;
 
-        assert!(is_stale_media_target_error(&error));
-        let post = get_post(&conn, post_id)
-            .expect("lookup post")
-            .expect("post exists");
-        assert_eq!(post.file_path.as_deref(), Some("trans/video.mp4"));
-        let hash_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM file_hashes WHERE file_path = ?1",
-                rusqlite::params!["trans/video.webm"],
-                |row| row.get(0),
-            )
-            .expect("file hash count");
-        assert_eq!(hash_count, 0);
+        assert!(
+            is_stale_media_target_error(&error),
+            "rejection should use the typed stale-target error"
+        );
+        let post = get_post(&conn, post_id)?.context("media post should exist")?;
+        assert_eq!(
+            post.file_path.as_deref(),
+            Some("trans/video.mp4"),
+            "stale transcode must not replace the source path"
+        );
+        let hash_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM file_hashes WHERE file_path = ?1",
+            rusqlite::params!["trans/video.webm"],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            hash_count, 0,
+            "stale transcode must not insert a deduplication row"
+        );
+        Ok(())
     }
 
     #[test]
-    fn delete_post_returns_not_found_on_retry() {
-        let conn = test_conn();
-        let board_id = create_board(&conn, "delp", "Del Post", "", false).expect("create board");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn delete_post_returns_not_found_on_retry() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "delp", "Del Post", "", false)?;
         let op = NewPost {
             thread_id: 0,
             board_id,
@@ -2436,9 +2711,8 @@ mod tests {
             is_op: true,
         };
         let (thread_id, _post_id, _) =
-            create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)
-                .expect("create thread");
-        assert_eq!(thread_id, 1);
+            create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)?;
+        assert_eq!(thread_id, 1, "first seeded thread should receive ID 1");
 
         let reply = NewPost {
             thread_id,
@@ -2462,21 +2736,29 @@ mod tests {
             deletion_token: "token".to_owned(),
             is_op: false,
         };
-        let reply_id =
-            create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+        let reply_id = create_reply_with_thread_update(&conn, &reply, "", false, None)?;
 
-        let deleted = super::delete_post(&conn, reply_id).expect("delete post");
-        assert!(deleted.paths.is_empty());
-        match super::delete_post(&conn, reply_id) {
-            Err(AppError::NotFound(msg)) => assert!(msg.contains("Post id")),
-            other => panic!("expected not found on retry, got {other:?}"),
-        }
+        let deleted = super::delete_post(&conn, reply_id)?;
+        assert!(
+            deleted.paths.is_empty(),
+            "post without media should produce no cleanup paths"
+        );
+        let retry = super::delete_post(&conn, reply_id);
+        assert!(
+            matches!(retry, Err(AppError::NotFound(message)) if message.contains("Post id")),
+            "a repeated post deletion should return not found"
+        );
+        Ok(())
     }
 
     #[test]
-    fn delete_post_decrements_reply_count_for_the_thread() {
-        let conn = test_conn();
-        let board_id = create_board(&conn, "count", "Count", "", false).expect("create board");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn delete_post_decrements_reply_count_for_the_thread() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "count", "Count", "", false)?;
         let op = NewPost {
             thread_id: 0,
             board_id,
@@ -2500,8 +2782,7 @@ mod tests {
             is_op: true,
         };
         let (thread_id, _post_id, _) =
-            create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)
-                .expect("create thread");
+            create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)?;
 
         let reply = NewPost {
             thread_id,
@@ -2525,35 +2806,40 @@ mod tests {
             deletion_token: "token".to_owned(),
             is_op: false,
         };
-        let reply_id =
-            create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+        let reply_id = create_reply_with_thread_update(&conn, &reply, "", false, None)?;
 
-        let before_count: i64 = conn
-            .query_row(
-                "SELECT reply_count FROM threads WHERE id = ?1",
-                rusqlite::params![thread_id],
-                |row| row.get(0),
-            )
-            .expect("thread count before delete");
-        assert_eq!(before_count, 1);
+        let before_count: i64 = conn.query_row(
+            "SELECT reply_count FROM threads WHERE id = ?1",
+            rusqlite::params![thread_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            before_count, 1,
+            "reply creation should increment the thread count"
+        );
 
-        super::delete_post(&conn, reply_id).expect("delete reply");
+        super::delete_post(&conn, reply_id)?;
 
-        let after_count: i64 = conn
-            .query_row(
-                "SELECT reply_count FROM threads WHERE id = ?1",
-                rusqlite::params![thread_id],
-                |row| row.get(0),
-            )
-            .expect("thread count after delete");
-        assert_eq!(after_count, 0);
+        let after_count: i64 = conn.query_row(
+            "SELECT reply_count FROM threads WHERE id = ?1",
+            rusqlite::params![thread_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            after_count, 0,
+            "reply deletion should decrement the thread count"
+        );
+        Ok(())
     }
 
     #[test]
-    fn self_delete_post_deletes_reply_with_matching_token_inside_window() {
-        let conn = test_conn();
-        let board_id =
-            create_board(&conn, "selfdel", "Self Delete", "", false).expect("create board");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn self_delete_post_deletes_reply_with_matching_token_inside_window() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "selfdel", "Self Delete", "", false)?;
         let op = NewPost {
             thread_id: 0,
             board_id,
@@ -2577,8 +2863,7 @@ mod tests {
             is_op: true,
         };
         let (thread_id, _post_id, _) =
-            create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)
-                .expect("create thread");
+            create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)?;
 
         let reply = NewPost {
             thread_id,
@@ -2602,34 +2887,61 @@ mod tests {
             deletion_token: "reply-token".to_owned(),
             is_op: false,
         };
-        let reply_id =
-            create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+        let reply_id = create_reply_with_thread_update(&conn, &reply, "", false, None)?;
 
-        let (outcome, deleted) =
-            self_delete_post(&conn, reply_id, "reply-token", 60).expect("self delete reply");
+        let (outcome, deleted) = self_delete_post(&conn, reply_id, "reply-token", 60)?;
 
-        assert_eq!(outcome, SelfDeleteOutcome::DeletedReply);
-        assert!(deleted.is_some());
-        assert!(get_post(&conn, reply_id).expect("lookup reply").is_none());
+        assert_eq!(
+            outcome,
+            SelfDeleteOutcome::DeletedReply,
+            "matching token should delete the reply"
+        );
+        assert!(
+            deleted.is_some(),
+            "successful deletion should return cleanup information"
+        );
+        assert!(
+            get_post(&conn, reply_id)?.is_none(),
+            "deleted reply should no longer exist"
+        );
+        Ok(())
     }
 
     #[test]
-    fn self_delete_post_rejects_wrong_token() {
-        let conn = test_conn();
-        let post_id = seed_search_post(&conn, "wrongtok", "hello");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn self_delete_post_rejects_wrong_token() -> Result<()> {
+        let conn = test_conn()?;
+        let post_id = seed_search_post(&conn, "wrongtok", "hello")?;
 
-        let (outcome, deleted) =
-            self_delete_post(&conn, post_id, "nope", 60).expect("self delete result");
+        let (outcome, deleted) = self_delete_post(&conn, post_id, "nope", 60)?;
 
-        assert_eq!(outcome, SelfDeleteOutcome::WrongToken);
-        assert!(deleted.is_none());
-        assert!(get_post(&conn, post_id).expect("lookup post").is_some());
+        assert_eq!(
+            outcome,
+            SelfDeleteOutcome::WrongToken,
+            "wrong token should be rejected"
+        );
+        assert!(
+            deleted.is_none(),
+            "rejected deletion should have no cleanup information"
+        );
+        assert!(
+            get_post(&conn, post_id)?.is_some(),
+            "rejected deletion should preserve the post"
+        );
+        Ok(())
     }
 
     #[test]
-    fn self_delete_post_refuses_op_when_thread_has_replies() {
-        let conn = test_conn();
-        let board_id = create_board(&conn, "selfop", "Self OP", "", false).expect("create board");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn self_delete_post_refuses_op_when_thread_has_replies() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "selfop", "Self OP", "", false)?;
         let op = NewPost {
             thread_id: 0,
             board_id,
@@ -2653,8 +2965,7 @@ mod tests {
             is_op: true,
         };
         let (thread_id, op_id, _) =
-            create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)
-                .expect("create thread");
+            create_thread_with_optional_poll(&conn, board_id, None, &op, "", None, None)?;
 
         let reply = NewPost {
             thread_id,
@@ -2678,15 +2989,23 @@ mod tests {
             deletion_token: "reply-token".to_owned(),
             is_op: false,
         };
-        create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+        create_reply_with_thread_update(&conn, &reply, "", false, None)?;
 
-        let (outcome, deleted) =
-            self_delete_post(&conn, op_id, "op-token", 60).expect("self delete result");
+        let (outcome, deleted) = self_delete_post(&conn, op_id, "op-token", 60)?;
 
-        assert_eq!(outcome, SelfDeleteOutcome::ThreadHasReplies);
-        assert!(deleted.is_none());
-        assert!(get_thread(&conn, thread_id)
-            .expect("lookup thread")
-            .is_some());
+        assert_eq!(
+            outcome,
+            SelfDeleteOutcome::ThreadHasReplies,
+            "opening post with replies should not self-delete"
+        );
+        assert!(
+            deleted.is_none(),
+            "rejected opening-post deletion should have no cleanup information"
+        );
+        assert!(
+            get_thread(&conn, thread_id)?.is_some(),
+            "rejected deletion should preserve the thread"
+        );
+        Ok(())
     }
 }

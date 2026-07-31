@@ -1,8 +1,26 @@
-// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
-#![allow(clippy::wildcard_imports)]
+use super::{
+    admin_panel_redirect_anchor_open, archive, banner, board_backup_dir, board_backup_types,
+    common, create_staging_dir, create_temp_board_backup_from_full_backup_path,
+    create_temp_legacy_board_backup_from_saved_full_v4_path,
+    create_temp_legacy_board_backup_from_v4_path, db, extract_uploads_to_dir, full_backup_dir,
+    is_xml_http_request, log_restore_upload_started, new_session_id,
+    parse_board_backup_manifest_from_zip, read_limited_bytes, redirect_page_response,
+    remap_body_quotelinks, remove_path_if_exists, render_restored_body_html,
+    require_admin_post_origin_and_csrf, require_admin_session_sid, restore_auth_preflight,
+    restore_db_from_snapshot, restore_error_redirect_target, restore_failure_response,
+    restore_start_response, restore_success_redirect_target, restore_upload_parse_response,
+    sanitize_board_short_value, sanitize_saved_backup_ref, stream_restore_upload_to_tempfile,
+    temp_board_download_dir, validate_board_short_name, validate_streamed_restore_upload,
+    verify_password, write_temp_board_download_token, AppError, AppState, BoardAccessMode,
+    CookieJar, Form, HeaderMap, Multipart, Path, PathBuf, Redirect, Request, Response, RestoreKind,
+    RestoreSavedForm, Result, State, BOARD_BACKUP_RESTORE_SECTION, BOARD_MANIFEST_MAX_BYTES,
+    CONFIG, SESSION_COOKIE,
+};
+use axum::{extract::FromRequest as _, response::IntoResponse as _};
+use rusqlite::{params, OptionalExtension as _};
+use serde::Deserialize;
 
-use super::*;
-
+/// Validates board restore media metadata.
 fn validate_board_restore_media_metadata(
     manifest: &board_backup_types::BoardBackupManifest,
 ) -> Result<()> {
@@ -10,14 +28,14 @@ fn validate_board_restore_media_metadata(
 
     for post in &manifest.posts {
         if let Some(file_path) = post.file_path.as_deref() {
-            super::common::validate_restored_media_path_for_board(
+            common::validate_restored_media_path_for_board(
                 file_path,
                 board_short,
                 "Board backup post file_path",
             )?;
         }
         if let Some(thumb_path) = post.thumb_path.as_deref() {
-            super::common::validate_restored_media_path_for_board(
+            common::validate_restored_media_path_for_board(
                 thumb_path,
                 board_short,
                 "Board backup post thumb_path",
@@ -26,13 +44,13 @@ fn validate_board_restore_media_metadata(
     }
 
     for file_hash in &manifest.file_hashes {
-        super::common::validate_restored_media_path_for_board(
+        common::validate_restored_media_path_for_board(
             &file_hash.file_path,
             board_short,
             "Board backup file_hash file_path",
         )?;
         if !file_hash.thumb_path.is_empty() {
-            super::common::validate_restored_media_path_for_board(
+            common::validate_restored_media_path_for_board(
                 &file_hash.thumb_path,
                 board_short,
                 "Board backup file_hash thumb_path",
@@ -43,6 +61,7 @@ fn validate_board_restore_media_metadata(
     Ok(())
 }
 
+/// Validates board backup access settings.
 fn validate_board_backup_access_settings(
     manifest: &mut board_backup_types::BoardBackupManifest,
 ) -> Result<()> {
@@ -50,7 +69,9 @@ fn validate_board_backup_access_settings(
         BoardAccessMode::from_db_str(&manifest.board.access_mode).ok_or_else(|| {
             AppError::BadRequest("Board backup contains an invalid access mode.".into())
         })?;
-    manifest.board.access_mode = access_mode.as_str().to_owned();
+    access_mode
+        .as_str()
+        .clone_into(&mut manifest.board.access_mode);
 
     if access_mode.requires_post_password() && manifest.board.access_password_hash.is_empty() {
         return Err(AppError::BadRequest(
@@ -73,6 +94,7 @@ fn validate_board_backup_access_settings(
     Ok(())
 }
 
+/// Performs the run restore database quick check handler operation.
 fn run_restore_db_quick_check(
     conn: &rusqlite::Connection,
     restore_label: &str,
@@ -96,11 +118,12 @@ fn run_restore_db_quick_check(
     )))
 }
 
+/// Maps board restore `SQLite` error.
 fn map_board_restore_sqlite_error(
     restore_label: &str,
     board_short: &str,
     context: &str,
-    error: rusqlite::Error,
+    error: &rusqlite::Error,
 ) -> AppError {
     let message = error.to_string();
     if message.contains("database disk image is malformed")
@@ -120,6 +143,7 @@ fn map_board_restore_sqlite_error(
     }
 }
 
+/// Inserts returning ID.
 fn insert_returning_id<P>(
     conn: &rusqlite::Connection,
     sql: &str,
@@ -131,6 +155,7 @@ where
     conn.query_row(sql, params, |row| row.get(0))
 }
 
+/// Returns whether the requester can reuse row IDs.
 fn can_reuse_row_ids<I>(conn: &rusqlite::Connection, table: &'static str, ids: I) -> Result<bool>
 where
     I: IntoIterator<Item = i64>,
@@ -156,6 +181,7 @@ where
     Ok(true)
 }
 
+/// Performs the sync autoincrement sequence handler operation.
 fn sync_autoincrement_sequence(
     conn: &rusqlite::Connection,
     table: &'static str,
@@ -211,6 +237,7 @@ fn sync_autoincrement_sequence(
     }
 }
 
+/// Inserts or validate restored file hash.
 fn insert_or_validate_restored_file_hash(
     conn: &rusqlite::Connection,
     file_hash: &board_backup_types::FileHashRow,
@@ -274,14 +301,20 @@ fn insert_or_validate_restored_file_hash(
     }
 }
 
+/// Data used by the board restore workspace workflow.
 struct BoardRestoreWorkspace {
+    /// The staged upload root.
     staged_upload_root: PathBuf,
+    /// The pending restore identifier.
     pending_restore_id: String,
+    /// The pending restore payload.
     pending_restore_payload: crate::pending_fs::BoardRestoreSwapPayload,
+    /// The pending restore op.
     pending_restore_op: crate::pending_fs::PendingFsOpInsert,
 }
 
 impl BoardRestoreWorkspace {
+    /// Performs the prepare handler operation.
     fn prepare(upload_dir: &str, board_short: &str) -> Result<Self> {
         let upload_root = PathBuf::from(upload_dir);
         let staged_upload_root = create_staging_dir(&upload_root, "board-restore-stage")?;
@@ -320,7 +353,11 @@ impl BoardRestoreWorkspace {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "board replacement and media staging share one transaction and rollback boundary"
+)]
+/// Performs the execute board restore handler operation.
 pub(super) fn execute_board_restore<F>(
     conn: &mut rusqlite::Connection,
     upload_dir: &str,
@@ -372,7 +409,7 @@ where
                 params![existing_id],
             )
             .map_err(|error| {
-                map_board_restore_sqlite_error(restore_label, &board_short, "Clear threads", error)
+                map_board_restore_sqlite_error(restore_label, &board_short, "Clear threads", &error)
             })?;
             conn.execute(
                 "UPDATE boards SET name=?1, description=?2, nsfw=?3,
@@ -805,12 +842,12 @@ where
                 if let Err(restore_err) =
                     restore_db_from_snapshot(conn, &db_snapshot, restore_label)
                 {
-                    let _ = std::fs::remove_file(&db_snapshot);
+                    drop(std::fs::remove_file(&db_snapshot));
                     return Err(AppError::Internal(anyhow::anyhow!(
                         "{restore_label} filesystem swap failed: {error}; DB rollback error: {restore_err}"
                     )));
                 }
-                let _ = std::fs::remove_file(&db_snapshot);
+                drop(std::fs::remove_file(&db_snapshot));
                 return Err(AppError::Internal(anyhow::anyhow!(
                     "{restore_label} filesystem swap failed: {error}"
                 )));
@@ -818,15 +855,15 @@ where
             db::delete_pending_fs_op(conn, &workspace.pending_restore_id)?;
         }
         Err(error) => {
-            let _ = conn.execute("ROLLBACK", []);
-            let _ = remove_path_if_exists(&workspace.staged_upload_root);
-            let _ = std::fs::remove_file(&db_snapshot);
+            drop(conn.execute("ROLLBACK", []));
+            drop(remove_path_if_exists(&workspace.staged_upload_root));
+            drop(std::fs::remove_file(&db_snapshot));
             return Err(error);
         }
     }
 
-    let _ = std::fs::remove_file(&db_snapshot);
-    let _ = remove_path_if_exists(&workspace.staged_upload_root);
+    drop(std::fs::remove_file(&db_snapshot));
+    drop(remove_path_if_exists(&workspace.staged_upload_root));
 
     tracing::info!(target: "admin", board = %board_short, "{completion_log}");
     if let Ok(boards) = db::get_all_boards(conn) {
@@ -839,6 +876,7 @@ where
         .collect())
 }
 
+/// Formats magic bytes.
 fn format_magic_bytes(bytes: &[u8]) -> String {
     bytes
         .iter()
@@ -848,30 +886,48 @@ fn format_magic_bytes(bytes: &[u8]) -> String {
 }
 
 #[derive(Deserialize)]
-pub struct ExtractBoardFromFullBackupForm {
+/// Form fields accepted by the extract board from full backup request.
+pub(crate) struct ExtractBoardFromFullBackupForm {
+    /// The filename.
     filename: String,
+    /// The board short.
     board_short: String,
+    /// The action.
     action: String,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
+/// Variants supported by the extract board from full backup outcome workflow.
 enum ExtractBoardFromFullBackupOutcome {
-    Download { filename: String },
-    Restore { board_short: String },
+    /// Represents the download case.
+    Download {
+        /// The generated backup filename.
+        filename: String,
+    },
+    /// Represents the restore case.
+    Restore {
+        /// The restored board's short name.
+        board_short: String,
+    },
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[expect(clippy::too_many_lines)]
-pub async fn extract_board_from_full_backup(
+#[expect(
+    clippy::too_many_lines,
+    reason = "authentication, source verification, extraction, and download issuance form one request"
+)]
+/// Handles the extract board from full backup request.
+pub(crate) async fn extract_board_from_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<ExtractBoardFromFullBackupForm>,
 ) -> Result<Response> {
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let _maintenance_guard = if form.action == "restore" {
         Some(
             state
@@ -891,31 +947,31 @@ pub async fn extract_board_from_full_backup(
         let pool = state.db.clone();
         move || -> Result<ExtractBoardFromFullBackupOutcome> {
             let mut conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
 
             let full_backup_dir_path = crate::config::backups_dir().join(&safe_filename);
             let full_backup_path = full_backup_dir().join(&safe_filename);
-            let (temp_board_backup_path, temp_board_backup_filename) =
-                if full_backup_dir_path.is_dir() {
-                    let (temp_zip_path, filename) =
-                        create_temp_legacy_board_backup_from_saved_full_v4_path(
-                            &full_backup_dir_path,
-                            &safe_board,
-                        )?;
-                    let mut temp_zip_guard =
-                        super::archive::TempZipCleanupGuard::new(temp_zip_path.clone());
-                    let staged_path = temp_board_download_dir().join(&filename);
-                    std::fs::rename(&temp_zip_path, &staged_path).map_err(|error| {
-                        AppError::Internal(anyhow::anyhow!(
-                            "Stage extracted board backup {}: {error}",
-                            staged_path.display()
-                        ))
-                    })?;
-                    temp_zip_guard.disarm();
-                    (staged_path, filename)
-                } else {
-                    create_temp_board_backup_from_full_backup_path(&full_backup_path, &safe_board)?
-                };
+            let (temp_board_backup_path, temp_board_backup_filename) = if full_backup_dir_path
+                .is_dir()
+            {
+                let (temp_zip_path, filename) =
+                    create_temp_legacy_board_backup_from_saved_full_v4_path(
+                        &full_backup_dir_path,
+                        &safe_board,
+                    )?;
+                let mut temp_zip_guard = archive::TempZipCleanupGuard::new(temp_zip_path.clone());
+                let staged_path = temp_board_download_dir().join(&filename);
+                std::fs::rename(&temp_zip_path, &staged_path).map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!(
+                        "Stage extracted board backup {}: {error}",
+                        staged_path.display()
+                    ))
+                })?;
+                temp_zip_guard.disarm();
+                (staged_path, filename)
+            } else {
+                create_temp_board_backup_from_full_backup_path(&full_backup_path, &safe_board)?
+            };
 
             match action.as_str() {
                 "download" => Ok(ExtractBoardFromFullBackupOutcome::Download {
@@ -951,13 +1007,13 @@ pub async fn extract_board_from_full_backup(
                             "Board restore-from-full completed",
                         )
                     })();
-                    let _ = std::fs::remove_file(&temp_board_backup_path);
+                    drop(std::fs::remove_file(&temp_board_backup_path));
                     restore_result.map(|board_short| ExtractBoardFromFullBackupOutcome::Restore {
                         board_short,
                     })
                 }
                 _ => {
-                    let _ = std::fs::remove_file(&temp_board_backup_path);
+                    drop(std::fs::remove_file(&temp_board_backup_path));
                     Err(AppError::BadRequest(
                         "Unknown board extraction action.".into(),
                     ))
@@ -996,7 +1052,7 @@ pub async fn extract_board_from_full_backup(
             .into_response())
         }
         ExtractBoardFromFullBackupOutcome::Restore { board_short } => {
-            Ok(super::admin_panel_redirect_anchor_open(
+            Ok(admin_panel_redirect_anchor_open(
                 &format!("Board /{board_short}/ restored."),
                 &format!("board-backup-{board_short}"),
                 BOARD_BACKUP_RESTORE_SECTION,
@@ -1007,15 +1063,16 @@ pub async fn extract_board_from_full_backup(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-pub async fn restore_saved_board_backup(
+/// Handles the restore saved board backup request.
+pub(crate) async fn restore_saved_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let _maintenance_guard = state
         .maintenance_gate
         .try_begin(RestoreKind::Board.maintenance_label())?;
@@ -1028,7 +1085,7 @@ pub async fn restore_saved_board_backup(
         let pool = state.db.clone();
         move || -> Result<String> {
             let mut conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             let root_dir = crate::config::backups_dir().join(&safe_filename);
             let legacy_zip_path = board_backup_dir().join(&safe_filename);
             let temp_v4_zip = if root_dir.is_dir() {
@@ -1040,7 +1097,7 @@ pub async fn restore_saved_board_backup(
             };
             let _temp_v4_zip_guard = temp_v4_zip
                 .as_ref()
-                .map(|path| super::archive::TempZipCleanupGuard::new(path.clone()));
+                .map(|path| archive::TempZipCleanupGuard::new(path.clone()));
             let archive_path = temp_v4_zip.as_deref().unwrap_or(&legacy_zip_path);
 
             let zip_file = std::fs::File::open(archive_path)
@@ -1068,7 +1125,7 @@ pub async fn restore_saved_board_backup(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)));
 
     match board_short_result {
-        Ok(Ok(board_short)) => Ok(super::admin_panel_redirect_anchor_open(
+        Ok(Ok(board_short)) => Ok(admin_panel_redirect_anchor_open(
             &format!("Board /{board_short}/ restored."),
             &format!("board-backup-{board_short}"),
             BOARD_BACKUP_RESTORE_SECTION,
@@ -1088,12 +1145,16 @@ pub async fn restore_saved_board_backup(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(
+#[expect(
     clippy::cognitive_complexity,
     reason = "board restore validation, mutation, and rollback remain one guarded operation"
 )]
-#[expect(clippy::too_many_lines)]
-pub async fn board_restore(
+#[expect(
+    clippy::too_many_lines,
+    reason = "restore upload validation, mutation, rollback, and response handling form one guarded request"
+)]
+/// Handles the board restore request.
+pub(crate) async fn board_restore(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -1131,13 +1192,13 @@ pub async fn board_restore(
         let zip_tmp = upload.temp_file;
         let uploaded_filename = upload.uploaded_filename;
 
-        tokio::task::spawn_blocking({
+        let restore_result = tokio::task::spawn_blocking({
             let pool = state.db.clone();
             move || -> Result<String> {
                 use std::io::Read as _;
 
                 let mut conn = pool.get()?;
-                super::require_admin_session_sid(&conn, session_id.as_deref())?;
+                require_admin_session_sid(&conn, session_id.as_deref())?;
 
                 let mut magic = [0u8; 4];
                 let mut probe = zip_tmp
@@ -1268,7 +1329,8 @@ pub async fn board_restore(
             }
         })
         .await
-        .unwrap_or_else(|e| Err(AppError::Internal(anyhow::anyhow!("Task panicked: {e}"))))
+        .unwrap_or_else(|e| Err(AppError::Internal(anyhow::anyhow!("Task panicked: {e}"))));
+        restore_result
     }
     .await;
 
@@ -1278,7 +1340,7 @@ pub async fn board_restore(
                 restore_success_redirect_target(RestoreKind::Board, Some(&board_short));
             if xhr_request {
                 return crate::handlers::board::xhr_redirect_response(&redirect_url)
-                    .unwrap_or_else(|error| error.into_response());
+                    .unwrap_or_else(axum::response::IntoResponse::into_response);
             }
             redirect_page_response(&redirect_url, &format!("Board /{board_short}/ restored."))
         }
@@ -1302,6 +1364,7 @@ mod tests {
         BannerRow, BoardBackupManifest, BoardRow, FileHashRow, PollOptionRow, PollRow, PollVoteRow,
         PostRow, ThreadRow,
     };
+    use anyhow::{ensure, Context as _, Result as TestResult};
 
     fn sample_manifest() -> BoardBackupManifest {
         BoardBackupManifest {
@@ -1383,30 +1446,34 @@ mod tests {
     }
 
     #[test]
-    fn board_restore_rejects_cross_board_media_paths_in_manifest() {
+    fn board_restore_rejects_cross_board_media_paths_in_manifest() -> TestResult<()> {
         let mut manifest = sample_manifest();
-        let Some(post) = manifest.posts.get_mut(0) else {
-            panic!("sample manifest should include one post");
-        };
+        let post = manifest
+            .posts
+            .first_mut()
+            .context("sample manifest should include one post")?;
         post.file_path = Some("other/doc.pdf".into());
 
         let error = validate_board_restore_media_metadata(&manifest)
-            .expect_err("cross-board path rejected");
+            .err()
+            .context("cross-board media path was unexpectedly accepted")?;
 
-        assert!(error
+        ensure!(error
             .to_string()
             .contains("must stay within /tech/ uploads"));
+        Ok(())
     }
 
     #[test]
-    fn board_restore_allows_empty_file_hash_thumb_for_generic_uploads() {
+    fn board_restore_allows_empty_file_hash_thumb_for_generic_uploads() -> TestResult<()> {
         let mut manifest = sample_manifest();
-        let Some(file_hash) = manifest.file_hashes.get_mut(0) else {
-            panic!("sample manifest should include one file hash");
-        };
+        let file_hash = manifest
+            .file_hashes
+            .first_mut()
+            .context("sample manifest should include one file hash")?;
         file_hash.thumb_path.clear();
 
-        validate_board_restore_media_metadata(&manifest)
-            .expect("empty file-hash thumb path should remain allowed");
+        validate_board_restore_media_metadata(&manifest)?;
+        Ok(())
     }
 }

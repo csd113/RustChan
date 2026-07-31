@@ -1,23 +1,42 @@
-// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
-#![allow(clippy::wildcard_imports)]
-
-use super::*;
+use super::{
+    admin_panel_error_redirect_anchor_open, admin_panel_redirect_anchor_open, banner,
+    check_admin_csrf_jar, checkbox_is_on, db, format_banner_upload_error, read_checkbox_field,
+    read_limited_upload_bytes, read_text_field, require_admin_post_origin_and_csrf,
+    require_admin_session_sid, require_same_origin_request, AppError, AppState, BannerScope,
+    BannerTargetType, CookieJar, Form, HeaderMap, Multipart, Response, Result, State,
+    MAX_BANNER_UPLOAD_BYTES, SESSION_COOKIE,
+};
 use anyhow::Context as _;
+use axum::response::IntoResponse as _;
+use serde::Deserialize;
 
+/// Data used by the parsed banner upload workflow.
 struct ParsedBannerUpload {
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
+    /// The board identifier.
     board_id: Option<i64>,
+    /// The target type.
     target_type: String,
+    /// The optional target value.
     target_value: Option<String>,
+    /// The optional target board value.
     target_board_value: Option<String>,
+    /// The optional target thread value.
     target_thread_value: Option<String>,
+    /// The target external URL.
     target_external_url: Option<String>,
+    /// Whether to show on index.
     show_on_index: bool,
+    /// Whether to show on catalog.
     show_on_catalog: bool,
+    /// Whether this item is enabled.
     enabled: bool,
+    /// The banner size in bytes.
     banner_bytes: Vec<u8>,
 }
 
+/// Handles the parse banner upload request.
 async fn parse_banner_upload(mut multipart: Multipart) -> Result<ParsedBannerUpload> {
     let mut csrf = None;
     let mut board_id = None;
@@ -31,11 +50,14 @@ async fn parse_banner_upload(mut multipart: Multipart) -> Result<ParsedBannerUpl
     let mut enabled = true;
     let mut banner_bytes = None;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::BadRequest(e.to_string()))?
-    {
+    loop {
+        let next_field = multipart
+            .next_field()
+            .await
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        let Some(field) = next_field else {
+            break;
+        };
         match field.name() {
             Some("_csrf") => csrf = Some(read_text_field(field).await?),
             Some("board_id") => board_id = read_text_field(field).await?.trim().parse::<i64>().ok(),
@@ -43,10 +65,10 @@ async fn parse_banner_upload(mut multipart: Multipart) -> Result<ParsedBannerUpl
             Some("target_value") => target_value = Some(read_text_field(field).await?),
             Some("target_board_value") => target_board_value = Some(read_text_field(field).await?),
             Some("target_thread_value") => {
-                target_thread_value = Some(read_text_field(field).await?)
+                target_thread_value = Some(read_text_field(field).await?);
             }
             Some("target_external_url") => {
-                target_external_url = Some(read_text_field(field).await?)
+                target_external_url = Some(read_text_field(field).await?);
             }
             Some("show_on_index") => show_on_index = read_checkbox_field(field).await?,
             Some("show_on_catalog") => show_on_catalog = read_checkbox_field(field).await?,
@@ -78,42 +100,64 @@ async fn parse_banner_upload(mut multipart: Multipart) -> Result<ParsedBannerUpl
 }
 
 #[derive(Deserialize)]
-pub struct BannerMetaForm {
+/// Form fields accepted by the banner meta request.
+pub(crate) struct BannerMetaForm {
+    /// The banner identifier.
     pub banner_id: i64,
+    /// The target type.
     pub target_type: String,
+    /// The optional target value.
     pub target_value: Option<String>,
+    /// The optional target board value.
     pub target_board_value: Option<String>,
+    /// The optional target thread value.
     pub target_thread_value: Option<String>,
+    /// The target external URL.
     pub target_external_url: Option<String>,
+    /// Whether this item is enabled.
     pub enabled: Option<String>,
+    /// The optional show on index.
     pub show_on_index: Option<String>,
+    /// The optional show on catalog.
     pub show_on_catalog: Option<String>,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub struct DeleteBannerForm {
+/// Form fields accepted by the delete banner request.
+pub(crate) struct DeleteBannerForm {
+    /// The banner identifier.
     pub banner_id: i64,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub struct MoveBannerForm {
+/// Form fields accepted by the move banner request.
+pub(crate) struct MoveBannerForm {
+    /// The banner identifier.
     pub banner_id: i64,
+    /// The direction.
     pub direction: String,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub struct ClearBoardBannerForm {
+/// Form fields accepted by the clear board banner request.
+pub(crate) struct ClearBoardBannerForm {
+    /// The board identifier.
     pub board_id: i64,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
+/// Handles the board appearance anchor from ID request.
 async fn board_appearance_anchor_from_id(state: &AppState, board_id: i64) -> Result<String> {
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -131,6 +175,7 @@ async fn board_appearance_anchor_from_id(state: &AppState, board_id: i64) -> Res
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
 }
 
+/// Resolves banner target selection.
 fn resolve_banner_target_selection(
     target_type_raw: &str,
     target_value_raw: Option<&str>,
@@ -153,6 +198,7 @@ fn resolve_banner_target_selection(
     )
 }
 
+/// Restores board banner inheritance if empty.
 fn restore_board_banner_inheritance_if_empty(
     conn: &rusqlite::Connection,
     board_id: Option<i64>,
@@ -169,6 +215,7 @@ fn restore_board_banner_inheritance_if_empty(
     Ok(())
 }
 
+/// Performs the banner cleanup payload handler operation.
 fn banner_cleanup_payload(
     assets: &[crate::models::BannerAsset],
 ) -> Result<Option<crate::pending_fs::PendingFsOpInsert>> {
@@ -193,6 +240,7 @@ fn banner_cleanup_payload(
     }))
 }
 
+/// Deletes banner asset safely.
 fn delete_banner_asset_safely(
     conn: &rusqlite::Connection,
     banner_id: i64,
@@ -217,6 +265,7 @@ fn delete_banner_asset_safely(
     Ok(asset)
 }
 
+/// Clears board banner assets safely.
 fn clear_board_banner_assets_safely(
     conn: &rusqlite::Connection,
     board_id: i64,
@@ -246,6 +295,11 @@ fn clear_board_banner_assets_safely(
     Ok((board_short, assets))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "upload validation, image processing, draft cleanup, and database insertion form one operation"
+)]
+/// Handles the upload banner for scope request.
 async fn upload_banner_for_scope(
     state: AppState,
     session_id: Option<String>,
@@ -255,7 +309,7 @@ async fn upload_banner_for_scope(
 ) -> Result<String> {
     tokio::task::spawn_blocking(move || -> Result<String> {
         let mut conn = state.db.get()?;
-        super::require_admin_session_sid(&conn, session_id.as_deref())?;
+        require_admin_session_sid(&conn, session_id.as_deref())?;
         let (target_type, target_value) = resolve_banner_target_selection(
             &parsed.target_type,
             parsed.target_value.as_deref(),
@@ -350,7 +404,7 @@ async fn upload_banner_for_scope(
         })();
 
         if result.is_err() {
-            let _ = banner::delete_banner_asset_file(&draft_asset);
+            drop(banner::delete_banner_asset_file(&draft_asset));
         }
         result
     })
@@ -358,7 +412,8 @@ async fn upload_banner_for_scope(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
 }
 
-pub async fn upload_global_banner(
+/// Handles the upload global banner request.
+pub(crate) async fn upload_global_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -366,25 +421,25 @@ pub async fn upload_global_banner(
     multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar
-        .get(super::SESSION_COOKIE)
+        .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    super::require_same_origin_request(&headers, Some(peer))?;
+    require_same_origin_request(&headers, Some(peer))?;
     let parsed = parse_banner_upload(multipart).await?;
-    super::check_admin_csrf_jar(&jar, parsed.csrf.as_deref())?;
+    check_admin_csrf_jar(&jar, parsed.csrf.as_deref())?;
     match upload_banner_for_scope(state, session_id, BannerScope::Global, None, parsed).await {
-        Ok(anchor) => Ok(super::admin_panel_redirect_anchor_open(
+        Ok(anchor) => Ok(admin_panel_redirect_anchor_open(
             "Global banner uploaded.",
             &anchor,
             banner::banner_open_section(&anchor),
         )
         .into_response()),
-        Err(AppError::BadRequest(message)) => Ok(super::admin_panel_error_redirect_anchor_open(
-            &message,
-            "global-banners",
-            "board-banners",
-        )
-        .into_response()),
-        Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor_open(
+        Err(AppError::BadRequest(message)) => {
+            Ok(
+                admin_panel_error_redirect_anchor_open(&message, "global-banners", "board-banners")
+                    .into_response(),
+            )
+        }
+        Err(AppError::Internal(error)) => Ok(admin_panel_error_redirect_anchor_open(
             &format_banner_upload_error(&error),
             "global-banners",
             "board-banners",
@@ -394,7 +449,8 @@ pub async fn upload_global_banner(
     }
 }
 
-pub async fn upload_home_banner(
+/// Handles the upload home banner request.
+pub(crate) async fn upload_home_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -402,25 +458,25 @@ pub async fn upload_home_banner(
     multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar
-        .get(super::SESSION_COOKIE)
+        .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    super::require_same_origin_request(&headers, Some(peer))?;
+    require_same_origin_request(&headers, Some(peer))?;
     let parsed = parse_banner_upload(multipart).await?;
-    super::check_admin_csrf_jar(&jar, parsed.csrf.as_deref())?;
+    check_admin_csrf_jar(&jar, parsed.csrf.as_deref())?;
     match upload_banner_for_scope(state, session_id, BannerScope::Home, None, parsed).await {
-        Ok(anchor) => Ok(super::admin_panel_redirect_anchor_open(
+        Ok(anchor) => Ok(admin_panel_redirect_anchor_open(
             "Home page banner uploaded.",
             &anchor,
             banner::banner_open_section(&anchor),
         )
         .into_response()),
-        Err(AppError::BadRequest(message)) => Ok(super::admin_panel_error_redirect_anchor_open(
-            &message,
-            "home-banners",
-            "board-banners",
-        )
-        .into_response()),
-        Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor_open(
+        Err(AppError::BadRequest(message)) => {
+            Ok(
+                admin_panel_error_redirect_anchor_open(&message, "home-banners", "board-banners")
+                    .into_response(),
+            )
+        }
+        Err(AppError::Internal(error)) => Ok(admin_panel_error_redirect_anchor_open(
             &format_banner_upload_error(&error),
             "home-banners",
             "board-banners",
@@ -430,7 +486,8 @@ pub async fn upload_home_banner(
     }
 }
 
-pub async fn upload_board_banner(
+/// Handles the upload board banner request.
+pub(crate) async fn upload_board_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -438,11 +495,11 @@ pub async fn upload_board_banner(
     multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar
-        .get(super::SESSION_COOKIE)
+        .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    super::require_same_origin_request(&headers, Some(peer))?;
+    require_same_origin_request(&headers, Some(peer))?;
     let parsed = parse_banner_upload(multipart).await?;
-    super::check_admin_csrf_jar(&jar, parsed.csrf.as_deref())?;
+    check_admin_csrf_jar(&jar, parsed.csrf.as_deref())?;
     let board_id = parsed
         .board_id
         .ok_or_else(|| AppError::BadRequest("Missing board id.".into()))?;
@@ -456,19 +513,19 @@ pub async fn upload_board_banner(
     )
     .await
     {
-        Ok(anchor) => Ok(super::admin_panel_redirect_anchor_open(
+        Ok(anchor) => Ok(admin_panel_redirect_anchor_open(
             "Board banner saved.",
             &anchor,
             banner::banner_open_section(&anchor),
         )
         .into_response()),
-        Err(AppError::BadRequest(message)) => Ok(super::admin_panel_error_redirect_anchor_open(
-            &message,
-            &board_anchor,
-            "board-banners",
-        )
-        .into_response()),
-        Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor_open(
+        Err(AppError::BadRequest(message)) => {
+            Ok(
+                admin_panel_error_redirect_anchor_open(&message, &board_anchor, "board-banners")
+                    .into_response(),
+            )
+        }
+        Err(AppError::Internal(error)) => Ok(admin_panel_error_redirect_anchor_open(
             &format_banner_upload_error(&error),
             &board_anchor,
             "board-banners",
@@ -478,7 +535,8 @@ pub async fn upload_board_banner(
     }
 }
 
-pub async fn update_banner_meta(
+/// Handles the update banner meta request.
+pub(crate) async fn update_banner_meta(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -486,14 +544,14 @@ pub async fn update_banner_meta(
     Form(form): Form<BannerMetaForm>,
 ) -> Result<Response> {
     let session_id = jar
-        .get(super::SESSION_COOKIE)
+        .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             let asset = db::get_banner_asset(&conn, form.banner_id)?
                 .ok_or_else(|| AppError::BadRequest("Banner not found.".into()))?;
             let (target_type, target_value) = resolve_banner_target_selection(
@@ -530,23 +588,24 @@ pub async fn update_banner_meta(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
     match result {
-        Ok(anchor) => Ok(super::admin_panel_redirect_anchor_open(
+        Ok(anchor) => Ok(admin_panel_redirect_anchor_open(
             "Banner settings saved.",
             &anchor,
             banner::banner_open_section(&anchor),
         )
         .into_response()),
-        Err(AppError::BadRequest(message)) => Ok(super::admin_panel_error_redirect_anchor_open(
-            &message,
-            "board-banners",
-            "board-banners",
-        )
-        .into_response()),
+        Err(AppError::BadRequest(message)) => {
+            Ok(
+                admin_panel_error_redirect_anchor_open(&message, "board-banners", "board-banners")
+                    .into_response(),
+            )
+        }
         Err(error) => Err(error),
     }
 }
 
-pub async fn delete_banner(
+/// Handles the delete banner request.
+pub(crate) async fn delete_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -554,14 +613,14 @@ pub async fn delete_banner(
     Form(form): Form<DeleteBannerForm>,
 ) -> Result<Response> {
     let session_id = jar
-        .get(super::SESSION_COOKIE)
+        .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let anchor = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             let asset = delete_banner_asset_safely(&conn, form.banner_id)?;
             Ok(banner::banner_admin_anchor(
                 asset.scope,
@@ -571,7 +630,7 @@ pub async fn delete_banner(
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-    Ok(super::admin_panel_redirect_anchor_open(
+    Ok(admin_panel_redirect_anchor_open(
         "Banner deleted.",
         &anchor,
         banner::banner_open_section(&anchor),
@@ -579,7 +638,8 @@ pub async fn delete_banner(
     .into_response())
 }
 
-pub async fn move_banner(
+/// Handles the move banner request.
+pub(crate) async fn move_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -587,9 +647,9 @@ pub async fn move_banner(
     Form(form): Form<MoveBannerForm>,
 ) -> Result<Response> {
     let session_id = jar
-        .get(super::SESSION_COOKIE)
+        .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let move_up = match form.direction.as_str() {
         "up" => true,
         "down" => false,
@@ -603,7 +663,7 @@ pub async fn move_banner(
         let pool = state.db.clone();
         move || -> Result<String> {
             let mut conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             let asset = db::get_banner_asset(&conn, form.banner_id)?
                 .ok_or_else(|| AppError::BadRequest("Banner not found.".into()))?;
             db::move_banner_asset(&mut conn, form.banner_id, move_up)?;
@@ -615,7 +675,7 @@ pub async fn move_banner(
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-    Ok(super::admin_panel_redirect_anchor_open(
+    Ok(admin_panel_redirect_anchor_open(
         "Banner order updated.",
         &anchor,
         banner::banner_open_section(&anchor),
@@ -623,7 +683,8 @@ pub async fn move_banner(
     .into_response())
 }
 
-pub async fn clear_board_banner_override(
+/// Handles the clear board banner override request.
+pub(crate) async fn clear_board_banner_override(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -631,21 +692,21 @@ pub async fn clear_board_banner_override(
     Form(form): Form<ClearBoardBannerForm>,
 ) -> Result<Response> {
     let session_id = jar
-        .get(super::SESSION_COOKIE)
+        .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let board_short = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             let (board_short, _assets) = clear_board_banner_assets_safely(&conn, form.board_id)?;
             Ok(board_short)
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-    Ok(super::admin_panel_redirect_anchor_open(
+    Ok(admin_panel_redirect_anchor_open(
         &format!("Board /{board_short}/ banner override cleared."),
         &banner::board_appearance_anchor(&board_short),
         "board-banners",
@@ -659,45 +720,46 @@ mod tests {
         clear_board_banner_assets_safely, delete_banner_asset_safely,
         restore_board_banner_inheritance_if_empty,
     };
+    use anyhow::{bail, ensure, Context as _};
 
-    fn board_banner_mode(conn: &rusqlite::Connection, board_id: i64) -> String {
+    fn board_banner_mode(conn: &rusqlite::Connection, board_id: i64) -> anyhow::Result<String> {
         conn.query_row(
             "SELECT banner_mode FROM boards WHERE id = ?1",
             rusqlite::params![board_id],
             |row| row.get(0),
         )
-        .expect("board banner mode")
+        .context("load board banner mode")
     }
 
     #[test]
-    fn restores_inherit_when_board_banner_set_is_empty() {
+    fn restores_inherit_when_board_banner_set_is_empty() -> anyhow::Result<()> {
         let state = crate::test_support::app_state();
-        let conn = state.db.get().expect("db connection");
+        let conn = state.db.get().context("get database connection")?;
         let board_id =
-            crate::db::create_board(&conn, "b", "Random", "", false).expect("create board");
+            crate::db::create_board(&conn, "b", "Random", "", false).context("create board")?;
         conn.execute(
             "UPDATE boards SET banner_mode = 'override' WHERE id = ?1",
             rusqlite::params![board_id],
         )
-        .expect("set override mode");
+        .context("set override mode")?;
 
-        restore_board_banner_inheritance_if_empty(&conn, Some(board_id))
-            .expect("restore inheritance");
+        restore_board_banner_inheritance_if_empty(&conn, Some(board_id))?;
 
-        assert_eq!(board_banner_mode(&conn, board_id), "inherit");
+        ensure!(board_banner_mode(&conn, board_id)? == "inherit");
+        Ok(())
     }
 
     #[test]
-    fn keeps_override_when_board_banner_set_still_has_assets() {
+    fn keeps_override_when_board_banner_set_still_has_assets() -> anyhow::Result<()> {
         let state = crate::test_support::app_state();
-        let conn = state.db.get().expect("db connection");
+        let conn = state.db.get().context("get database connection")?;
         let board_id =
-            crate::db::create_board(&conn, "b", "Random", "", false).expect("create board");
+            crate::db::create_board(&conn, "b", "Random", "", false).context("create board")?;
         conn.execute(
             "UPDATE boards SET banner_mode = 'override' WHERE id = ?1",
             rusqlite::params![board_id],
         )
-        .expect("set override mode");
+        .context("set override mode")?;
         crate::db::insert_banner_asset(
             &conn,
             crate::models::BannerScope::Board,
@@ -713,32 +775,34 @@ mod tests {
             true,
             true,
         )
-        .expect("insert board banner");
+        .context("insert board banner")?;
 
-        restore_board_banner_inheritance_if_empty(&conn, Some(board_id)).expect("keep override");
+        restore_board_banner_inheritance_if_empty(&conn, Some(board_id))?;
 
-        assert_eq!(board_banner_mode(&conn, board_id), "override");
+        ensure!(board_banner_mode(&conn, board_id)? == "override");
+        Ok(())
     }
 
     fn banner_asset_path(
         scope: crate::models::BannerScope,
         board_short: Option<&str>,
         storage_key: &str,
-    ) -> std::path::PathBuf {
+    ) -> anyhow::Result<std::path::PathBuf> {
         crate::banner::banner_storage_path(scope, board_short, storage_key)
-            .expect("banner storage path")
+            .context("build banner storage path")
     }
 
     #[test]
-    fn failed_global_banner_file_delete_keeps_pending_cleanup_for_retry() {
+    fn failed_global_banner_file_delete_keeps_pending_cleanup_for_retry() -> anyhow::Result<()> {
         let state = crate::test_support::app_state();
-        let conn = state.db.get().expect("db connection");
+        let conn = state.db.get().context("get database connection")?;
         let storage_key = uuid::Uuid::new_v4().simple().to_string();
-        let path = banner_asset_path(crate::models::BannerScope::Global, None, &storage_key);
-        std::fs::create_dir_all(path.parent().expect("banner parent")).expect("create parent");
-        std::fs::write(&path, b"webp").expect("write webp");
+        let path = banner_asset_path(crate::models::BannerScope::Global, None, &storage_key)?;
+        std::fs::create_dir_all(path.parent().context("banner path has no parent")?)
+            .context("create banner parent")?;
+        std::fs::write(&path, b"webp").context("write WebP banner")?;
         let gif_path = path.with_extension("gif");
-        std::fs::create_dir_all(&gif_path).expect("create undeletable gif dir");
+        std::fs::create_dir_all(&gif_path).context("create undeletable GIF directory")?;
 
         let banner_id = crate::db::insert_banner_asset(
             &conn,
@@ -755,47 +819,49 @@ mod tests {
             true,
             true,
         )
-        .expect("insert banner");
+        .context("insert banner")?;
 
-        let error =
-            delete_banner_asset_safely(&conn, banner_id).expect_err("gif dir delete should fail");
-        assert!(error.to_string().contains("remove"));
-        assert!(crate::db::get_banner_asset(&conn, banner_id)
-            .expect("reload banner")
-            .is_none());
-        let pending = crate::db::list_pending_fs_ops(&conn).expect("list pending ops");
-        assert_eq!(pending.len(), 1);
-        let pending_op = pending.first().expect("pending op");
+        let result = delete_banner_asset_safely(&conn, banner_id);
+        let Err(error) = result else {
+            bail!("deleting the GIF directory unexpectedly succeeded");
+        };
+        ensure!(error.to_string().contains("remove"));
+        ensure!(crate::db::get_banner_asset(&conn, banner_id)?.is_none());
+        let pending = crate::db::list_pending_fs_ops(&conn)?;
+        ensure!(pending.len() == 1);
+        let pending_op = pending
+            .first()
+            .context("pending cleanup operation missing")?;
 
-        std::fs::remove_dir_all(&gif_path).expect("remove gif dir");
-        std::fs::write(&gif_path, b"gif").expect("write gif");
+        std::fs::remove_dir_all(&gif_path).context("remove GIF directory")?;
+        std::fs::write(&gif_path, b"gif").context("write GIF banner")?;
         let payload: crate::pending_fs::DeleteBannerAssetsPayload =
-            serde_json::from_str(&pending_op.payload_json).expect("pending payload");
+            serde_json::from_str(&pending_op.payload_json).context("parse pending payload")?;
         crate::pending_fs::finalize_delete_banner_assets_payload(
             &conn,
             Some(&pending_op.id),
             &payload,
         )
-        .expect("retry delete banner files");
-        assert!(!path.exists());
-        assert!(!gif_path.exists());
-        assert!(crate::db::list_pending_fs_ops(&conn)
-            .expect("list pending ops")
-            .is_empty());
+        .context("retry deleting banner files")?;
+        ensure!(!path.exists());
+        ensure!(!gif_path.exists());
+        ensure!(crate::db::list_pending_fs_ops(&conn)?.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn failed_board_banner_clear_keeps_pending_cleanup_for_retry() {
+    fn failed_board_banner_clear_keeps_pending_cleanup_for_retry() -> anyhow::Result<()> {
         let state = crate::test_support::app_state();
-        let conn = state.db.get().expect("db connection");
+        let conn = state.db.get().context("get database connection")?;
         let board_id =
-            crate::db::create_board(&conn, "bb", "Board", "", false).expect("create board");
+            crate::db::create_board(&conn, "bb", "Board", "", false).context("create board")?;
         let storage_key = uuid::Uuid::new_v4().simple().to_string();
-        let path = banner_asset_path(crate::models::BannerScope::Board, Some("bb"), &storage_key);
-        std::fs::create_dir_all(path.parent().expect("banner parent")).expect("create parent");
-        std::fs::write(&path, b"webp").expect("write webp");
+        let path = banner_asset_path(crate::models::BannerScope::Board, Some("bb"), &storage_key)?;
+        std::fs::create_dir_all(path.parent().context("banner path has no parent")?)
+            .context("create banner parent")?;
+        std::fs::write(&path, b"webp").context("write WebP banner")?;
         let gif_path = path.with_extension("gif");
-        std::fs::create_dir_all(&gif_path).expect("create undeletable gif dir");
+        std::fs::create_dir_all(&gif_path).context("create undeletable GIF directory")?;
 
         let banner_id = crate::db::insert_banner_asset(
             &conn,
@@ -812,31 +878,30 @@ mod tests {
             true,
             true,
         )
-        .expect("insert board banner");
+        .context("insert board banner")?;
 
-        clear_board_banner_assets_safely(&conn, board_id).expect_err("gif dir delete should fail");
-        assert!(crate::db::get_banner_asset(&conn, banner_id)
-            .expect("reload banner")
-            .is_none());
-        assert_eq!(board_banner_mode(&conn, board_id), "inherit");
-        let pending = crate::db::list_pending_fs_ops(&conn).expect("list pending ops");
-        assert_eq!(pending.len(), 1);
-        let pending_op = pending.first().expect("pending op");
+        ensure!(clear_board_banner_assets_safely(&conn, board_id).is_err());
+        ensure!(crate::db::get_banner_asset(&conn, banner_id)?.is_none());
+        ensure!(board_banner_mode(&conn, board_id)? == "inherit");
+        let pending = crate::db::list_pending_fs_ops(&conn)?;
+        ensure!(pending.len() == 1);
+        let pending_op = pending
+            .first()
+            .context("pending cleanup operation missing")?;
 
-        std::fs::remove_dir_all(&gif_path).expect("remove gif dir");
-        std::fs::write(&gif_path, b"gif").expect("write gif");
+        std::fs::remove_dir_all(&gif_path).context("remove GIF directory")?;
+        std::fs::write(&gif_path, b"gif").context("write GIF banner")?;
         let payload: crate::pending_fs::DeleteBannerAssetsPayload =
-            serde_json::from_str(&pending_op.payload_json).expect("pending payload");
+            serde_json::from_str(&pending_op.payload_json).context("parse pending payload")?;
         crate::pending_fs::finalize_delete_banner_assets_payload(
             &conn,
             Some(&pending_op.id),
             &payload,
         )
-        .expect("retry clear board banner files");
-        assert!(!path.exists());
-        assert!(!gif_path.exists());
-        assert!(crate::db::list_pending_fs_ops(&conn)
-            .expect("list pending ops")
-            .is_empty());
+        .context("retry clearing board banner files")?;
+        ensure!(!path.exists());
+        ensure!(!gif_path.exists());
+        ensure!(crate::db::list_pending_fs_ops(&conn)?.is_empty());
+        Ok(())
     }
 }

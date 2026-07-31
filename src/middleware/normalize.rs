@@ -7,6 +7,7 @@ use axum::{
     response::{IntoResponse as _, Response},
 };
 
+/// Redirects non-root paths with trailing slashes to their canonical form.
 pub async fn normalize_trailing_slash(req: Request, next: Next) -> Response {
     let uri = req.uri();
     let path = uri.path();

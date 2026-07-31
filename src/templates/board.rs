@@ -1,14 +1,4 @@
-// Public re-exports here match the module layout and keep paths stable for callers.
-#![allow(clippy::redundant_pub_crate)]
-
-// templates/board.rs
-//
-// Page templates for board-level views:
-//   index_page       — site home (list of all boards)
-//   board_page       — board thread index with pagination
-//   catalog_page     — grid catalog view
-//   archive_page     — archived threads list
-//   search_page      — search results
+//! Page templates for board-level views.
 
 use crate::models::{Board, Pagination, Post, Thread, ThreadSummary, SEARCH_QUERY_MAX_CHARS};
 use crate::utils::sanitize::escape_html;
@@ -23,6 +13,7 @@ use super::{
 
 // ─── Site index (board list) ──────────────────────────────────────────────────
 
+/// Renders administrator controls for moving a board within its content group.
 fn board_reorder_controls(
     board: &Board,
     csrf_token: &str,
@@ -59,6 +50,7 @@ fn board_reorder_controls(
     )
 }
 
+/// Renders a positive new-activity count or an empty fragment.
 fn render_new_activity_badge(count: i64, class_name: &str, label: &str) -> String {
     if count <= 0 {
         return String::new();
@@ -72,8 +64,16 @@ fn render_new_activity_badge(count: i64, class_name: &str, label: &str) -> Strin
 }
 
 // These flags map directly to render or DB inputs, so bundling them would make the call sites less clear.
-#[expect(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::fn_params_excessive_bools,
+    clippy::too_many_arguments,
+    reason = "the card consumes independent permissions, positions, and visitor preferences"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the board card keeps its navigation, badges, and reorder controls together"
+)]
+/// Renders one board directory card.
 fn render_board_card(
     stats: &crate::models::BoardStats,
     unread_thread_count: Option<i64>,
@@ -201,7 +201,8 @@ fn render_board_card(
     )
 }
 
-pub(crate) fn board_access_badge(board: &Board) -> String {
+/// Renders the access-policy badge for a board.
+pub(super) fn board_access_badge(board: &Board) -> String {
     match board.access_mode {
         crate::models::BoardAccessMode::Public => String::new(),
         crate::models::BoardAccessMode::ViewPassword => {
@@ -213,6 +214,7 @@ pub(crate) fn board_access_badge(board: &Board) -> String {
     }
 }
 
+/// Returns the heading, explanation, and action label for a board access policy.
 const fn board_access_copy(board: &Board) -> (&'static str, &'static str, &'static str) {
     match board.access_mode {
         crate::models::BoardAccessMode::Public => (
@@ -233,7 +235,8 @@ const fn board_access_copy(board: &Board) -> (&'static str, &'static str, &'stat
     }
 }
 
-pub(crate) fn render_post_access_gate(
+/// Renders the password gate shown in place of a post form.
+pub(super) fn render_post_access_gate(
     board: &Board,
     csrf_token: &str,
     return_to: &str,
@@ -265,6 +268,7 @@ pub(crate) fn render_post_access_gate(
 }
 
 #[must_use]
+/// Renders a standalone board-password prompt.
 pub fn board_access_page(
     board: &Board,
     csrf_token: &str,
@@ -330,6 +334,7 @@ pub fn board_access_page(
     )
 }
 
+/// Truncates display text at a Unicode scalar boundary and appends an ellipsis.
 fn preview_text(input: &str, max_chars: usize) -> String {
     let mut preview = String::new();
     let mut chars = input.chars();
@@ -345,6 +350,7 @@ fn preview_text(input: &str, max_chars: usize) -> String {
     preview
 }
 
+/// Renders a catalog thumbnail with a text fallback.
 fn render_catalog_media_thumb(
     class_name: &str,
     src: &str,
@@ -366,6 +372,7 @@ fn render_catalog_media_thumb(
     )
 }
 
+/// Renders the media area and state badges for one catalog thread.
 fn render_catalog_thumb(thread: &Thread) -> String {
     let badges = super::thread::render_thread_state_badges(thread.sticky, thread.locked);
     let media = thread.op_thumb.as_ref().map_or_else(
@@ -393,7 +400,11 @@ fn render_catalog_thumb(thread: &Thread) -> String {
 }
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the action menu accepts independent labels and form values for two actions"
+)]
+/// Renders report, pin, and hide controls for a catalog thread.
 fn render_catalog_actions(
     board_short: &str,
     thread: &Thread,
@@ -466,7 +477,11 @@ fn render_catalog_actions(
 }
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the card combines thread state with independent action labels and values"
+)]
+/// Renders one thread card in the catalog.
 fn render_catalog_card(
     board: &Board,
     thread: &Thread,
@@ -559,6 +574,7 @@ fn render_catalog_card(
     )
 }
 
+/// Renders one archived-thread table row.
 fn render_archive_row(board_short: &str, thread: &Thread) -> String {
     let preview: String = thread
         .op_body
@@ -602,7 +618,11 @@ fn render_archive_row(board_short: &str, thread: &Thread) -> String {
     )
 }
 
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the directory renderer consumes distinct badge, access, and admin contexts"
+)]
+/// Renders a sequence of board directory cards.
 fn board_cards<S: std::hash::BuildHasher>(
     list: &[&crate::models::BoardStats],
     board_new_thread_badges: &HashMap<i64, i64, S>,
@@ -633,9 +653,16 @@ fn board_cards<S: std::hash::BuildHasher>(
 
 #[must_use]
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the homepage keeps its board groups, statistics, and modals together"
+)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the homepage consumes distinct board, activity, consent, and admin contexts"
+)]
+/// Renders the site homepage and board directory.
 pub fn index_page<S: std::hash::BuildHasher>(
     board_stats: &[crate::models::BoardStats],
     site_stats: Option<&crate::models::SiteStats>,
@@ -690,9 +717,16 @@ pub fn index_page<S: std::hash::BuildHasher>(
 </div>"#.to_owned()
         },
         |site_stats| {
-// This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
-            #[expect(clippy::cast_precision_loss)]
-            let active_gb = site_stats.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            const GIB: i64 = 1024 * 1024 * 1024;
+            let active_gb_hundredths = site_stats
+                .active_bytes
+                .max(0)
+                .saturating_mul(100)
+                .saturating_add(GIB / 2)
+                .checked_div(GIB)
+                .unwrap_or(0);
+            let active_gb_whole = active_gb_hundredths / 100;
+            let active_gb_fraction = active_gb_hundredths % 100;
             format!(
                 r#"<div class="index-section index-stats-section">
 <h2 class="index-section-title">// Stats</h2>
@@ -701,14 +735,15 @@ pub fn index_page<S: std::hash::BuildHasher>(
   <div class="index-stat"><span class="index-stat-value">{ti}</span><span class="index-stat-label">images uploaded</span></div>
   <div class="index-stat"><span class="index-stat-value">{tv}</span><span class="index-stat-label">videos uploaded</span></div>
   <div class="index-stat"><span class="index-stat-value">{ta}</span><span class="index-stat-label">audio files uploaded</span></div>
-  <div class="index-stat"><span class="index-stat-value">{gb:.2} GB</span><span class="index-stat-label">active content</span></div>
+  <div class="index-stat"><span class="index-stat-value">{active_gb_whole}.{active_gb_fraction:02} GB</span><span class="index-stat-label">active content</span></div>
 </div>
 </div>"#,
                 tp = site_stats.total_posts,
                 ti = site_stats.total_images,
                 tv = site_stats.total_videos,
                 ta = site_stats.total_audio,
-                gb = active_gb,
+                active_gb_whole = active_gb_whole,
+                active_gb_fraction = active_gb_fraction,
             )
         },
     );
@@ -823,9 +858,17 @@ pub fn index_page<S: std::hash::BuildHasher>(
 
 #[must_use]
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[expect(clippy::too_many_lines, clippy::fn_params_excessive_bools)]
+#[expect(
+    clippy::too_many_lines,
+    clippy::fn_params_excessive_bools,
+    reason = "the board index keeps its forms, navigation, and thread list together"
+)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the board index consumes distinct paging, moderation, activity, and visitor contexts"
+)]
+/// Renders a board's paginated thread index.
 pub fn board_page<S: std::hash::BuildHasher>(
     board: &Board,
     summaries: &[ThreadSummary],
@@ -971,7 +1014,12 @@ pub fn board_page<S: std::hash::BuildHasher>(
 
 // ─── Thread summary (used by board_page) ─────────────────────────────────────
 
-#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "a summary combines thread metadata, preview posts, controls, and visitor state"
+)]
+/// Renders one thread summary on a board index.
 fn render_thread_summary(
     summary: &ThreadSummary,
     board_short: &str,
@@ -1195,9 +1243,17 @@ fn render_thread_summary(
 
 #[must_use]
 // These flags map directly to render or DB inputs, so bundling them would make the call sites less clear.
-#[expect(clippy::fn_params_excessive_bools, clippy::too_many_lines)]
+#[expect(
+    clippy::fn_params_excessive_bools,
+    clippy::too_many_lines,
+    reason = "the catalog keeps its card grid, forms, navigation, and hidden-view state together"
+)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the catalog consumes distinct filtering, moderation, activity, and visitor contexts"
+)]
+/// Renders a board's catalog or hidden-thread view.
 pub fn catalog_page<S: std::hash::BuildHasher>(
     board: &Board,
     threads: &[Thread],
@@ -1416,7 +1472,11 @@ pub fn catalog_page<S: std::hash::BuildHasher>(
 
 #[must_use]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "search rendering consumes distinct result, paging, theme, and visitor contexts"
+)]
+/// Renders paginated search results for a board.
 pub fn search_page(
     board: &Board,
     query: &str,
@@ -1515,6 +1575,7 @@ pub fn search_page(
 // ─── Archive page ─────────────────────────────────────────────────────────────
 
 #[must_use]
+/// Renders a board's paginated archived-thread list.
 pub fn archive_page(
     board: &Board,
     threads: &[Thread],
@@ -1709,16 +1770,16 @@ mod tests {
             crate::templates::UserPreferences::default(),
         );
 
-        let stats_idx = html
-            .find("board-card-stats")
-            .expect("board-card stats should render");
-        let badge_idx = html
-            .find("board-card-activity-badge")
-            .expect("activity badge should render");
-        let link_close_idx = html
-            .find("</a>")
-            .expect("card link should close after its content");
+        let stats_idx = html.find("board-card-stats");
+        let badge_idx = html.find("board-card-activity-badge");
+        let link_close_idx = html.find("</a>");
 
+        assert!(stats_idx.is_some(), "board-card stats should render");
+        assert!(badge_idx.is_some(), "activity badge should render");
+        assert!(
+            link_close_idx.is_some(),
+            "card link should close after its content"
+        );
         assert!(stats_idx < badge_idx && badge_idx < link_close_idx);
         assert!(html.contains(r#"<span class="board-card-slug">/test/</span>"#));
         assert!(html.contains("2 New Threads"));
@@ -1944,10 +2005,10 @@ mod tests {
             "/test/catalog",
         );
 
-        let actions_idx = html
-            .find("catalog-card-actions")
-            .expect("catalog actions should exist");
-        let link_close_idx = html.find("</a>").expect("catalog link should close");
+        let actions_idx = html.find("catalog-card-actions");
+        let link_close_idx = html.find("</a>");
+        assert!(actions_idx.is_some(), "catalog actions should exist");
+        assert!(link_close_idx.is_some(), "catalog link should close");
         assert!(
             actions_idx > link_close_idx,
             "interactive actions should render after the card link"
@@ -1972,26 +2033,23 @@ mod tests {
             "/test/catalog",
         );
 
-        let actions_start = html
-            .find(r#"<div class="catalog-card-actions">"#)
-            .expect("catalog actions wrapper should exist");
-        let menu_start = html[actions_start..]
-            .find(r#"class="catalog-thread-menu""#)
-            .map(|idx| actions_start + idx)
-            .expect("catalog thread menu should render inside actions wrapper");
-        let report_idx = html[menu_start..]
-            .find("Report thread")
-            .map(|idx| menu_start + idx)
-            .expect("report action should exist");
-        let pin_idx = html[menu_start..]
-            .find("Pin thread")
-            .map(|idx| menu_start + idx)
-            .expect("pin action should exist");
-        let hide_idx = html[menu_start..]
-            .find("Hide thread")
-            .map(|idx| menu_start + idx)
-            .expect("hide action should exist");
+        let actions_start = html.find(r#"<div class="catalog-card-actions">"#);
+        let menu_start = html.find(r#"class="catalog-thread-menu""#);
+        let report_idx = html.find("Report thread");
+        let pin_idx = html.find("Pin thread");
+        let hide_idx = html.find("Hide thread");
 
+        assert!(
+            actions_start.is_some(),
+            "catalog actions wrapper should exist"
+        );
+        assert!(
+            menu_start.is_some(),
+            "catalog thread menu should render inside actions wrapper"
+        );
+        assert!(report_idx.is_some(), "report action should exist");
+        assert!(pin_idx.is_some(), "pin action should exist");
+        assert!(hide_idx.is_some(), "hide action should exist");
         assert!(menu_start > actions_start);
         assert!(report_idx < pin_idx && pin_idx < hide_idx);
     }
@@ -2042,14 +2100,13 @@ mod tests {
             "/test/catalog",
         );
 
-        let thumb_idx = html
-            .find("catalog-card-media")
-            .expect("thumbnail should exist");
-        let info_idx = html.find("catalog-info").expect("body block should exist");
-        let meta_idx = html
-            .find("catalog-meta-row")
-            .expect("meta row should exist");
+        let thumb_idx = html.find("catalog-card-media");
+        let info_idx = html.find("catalog-info");
+        let meta_idx = html.find("catalog-meta-row");
 
+        assert!(thumb_idx.is_some(), "thumbnail should exist");
+        assert!(info_idx.is_some(), "body block should exist");
+        assert!(meta_idx.is_some(), "meta row should exist");
         assert!(
             thumb_idx < meta_idx && meta_idx < info_idx,
             "reply counter should render above the title/body block"
@@ -2074,18 +2131,17 @@ mod tests {
             "/test/catalog",
         );
 
-        let info_idx = html.find("catalog-info").expect("body block should exist");
-        let badge_row_idx = html
-            .find("catalog-activity-row")
-            .expect("badge row should exist");
-        let badge_idx = html
-            .find("catalog-activity-badge")
-            .expect("badge should exist");
-        let subject_idx = html.find("catalog-subject").expect("subject should exist");
-        let meta_idx = html
-            .find("catalog-meta-row")
-            .expect("reply counter container should exist");
+        let info_idx = html.find("catalog-info");
+        let badge_row_idx = html.find("catalog-activity-row");
+        let badge_idx = html.find("catalog-activity-badge");
+        let subject_idx = html.find("catalog-subject");
+        let meta_idx = html.find("catalog-meta-row");
 
+        assert!(info_idx.is_some(), "body block should exist");
+        assert!(badge_row_idx.is_some(), "badge row should exist");
+        assert!(badge_idx.is_some(), "badge should exist");
+        assert!(subject_idx.is_some(), "subject should exist");
+        assert!(meta_idx.is_some(), "reply counter container should exist");
         assert!(meta_idx < info_idx && info_idx < badge_row_idx);
         assert!(subject_idx < badge_idx);
         assert!(html.contains(r#"<div class="catalog-activity-row"><span class="new-activity-badge catalog-activity-badge">"#));
@@ -2108,19 +2164,15 @@ mod tests {
             crate::templates::UserPreferences::default(),
         );
 
-        let subject_idx = html
-            .find("class=\"subject\"")
-            .expect("subject should exist");
-        let badge_row_idx = html
-            .find("thread-summary-activity-row")
-            .expect("badge row should exist");
-        let badge_idx = html
-            .find("thread-summary-activity-badge")
-            .expect("badge should exist");
-        let footer_idx = html
-            .find("thread-footer")
-            .expect("reply counter/footer should exist");
+        let subject_idx = html.find("class=\"subject\"");
+        let badge_row_idx = html.find("thread-summary-activity-row");
+        let badge_idx = html.find("thread-summary-activity-badge");
+        let footer_idx = html.find("thread-footer");
 
+        assert!(subject_idx.is_some(), "subject should exist");
+        assert!(badge_row_idx.is_some(), "badge row should exist");
+        assert!(badge_idx.is_some(), "badge should exist");
+        assert!(footer_idx.is_some(), "reply counter/footer should exist");
         assert!(subject_idx < badge_row_idx && badge_row_idx < footer_idx);
         assert!(subject_idx < badge_idx && badge_idx < footer_idx);
         assert!(html.contains(r#"<div class="thread-summary-activity-row"><span class="new-activity-badge thread-summary-activity-badge">"#));

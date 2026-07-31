@@ -5,6 +5,8 @@ use crate::{
     utils::crypto::{sign_csrf_token, sign_scoped_csrf_token},
 };
 
+/// Validates a form CSRF token against either its cookie or its embedded signature.
+#[must_use]
 pub fn validate_csrf(cookie_token: Option<&str>, form_token: &str) -> bool {
     if form_token.is_empty() {
         return false;
@@ -27,6 +29,8 @@ pub fn validate_csrf(cookie_token: Option<&str>, form_token: &str) -> bool {
     constant_time_eq(expected.as_bytes(), sig.as_bytes())
 }
 
+/// Validates a signed CSRF token for the supplied session scope.
+#[must_use]
 pub fn validate_signed_csrf(
     cookie_token: Option<&str>,
     scope: Option<&str>,
@@ -52,6 +56,7 @@ pub fn validate_signed_csrf(
     constant_time_eq(expected.as_bytes(), sig.as_bytes())
 }
 
+/// Compares equal-length byte slices without data-dependent early exits.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -69,24 +74,36 @@ mod tests {
 
     #[test]
     fn csrf_matching_tokens_pass() {
-        assert!(validate_csrf(Some("abc123"), "abc123"));
+        assert!(
+            validate_csrf(Some("abc123"), "abc123"),
+            "matching cookie and form tokens should be accepted"
+        );
     }
 
     #[test]
     fn csrf_mismatched_tokens_fail() {
-        assert!(!validate_csrf(Some("abc123"), "abc124"));
+        assert!(
+            !validate_csrf(Some("abc123"), "abc124"),
+            "different cookie and form tokens should be rejected"
+        );
     }
 
     #[test]
     fn csrf_missing_cookie_fails() {
-        assert!(!validate_csrf(None, "abc123"));
+        assert!(
+            !validate_csrf(None, "abc123"),
+            "an unsigned token without a cookie should be rejected"
+        );
     }
 
     #[test]
     fn csrf_signed_form_token_passes_without_cookie() {
         let secret = &crate::config::CONFIG.cookie_secret;
         let signed = crate::utils::crypto::make_csrf_form_token("abc123", secret);
-        assert!(validate_csrf(None, &signed));
+        assert!(
+            validate_csrf(None, &signed),
+            "a correctly signed form token should not require a cookie"
+        );
     }
 
     #[test]
@@ -94,20 +111,18 @@ mod tests {
         let secret = &crate::config::CONFIG.cookie_secret;
         let signed =
             crate::utils::crypto::make_scoped_csrf_form_token("abc123", secret, "session-1");
-        assert!(validate_signed_csrf(
-            Some("abc123"),
-            Some("session-1"),
-            &signed
-        ));
+        assert!(
+            validate_signed_csrf(Some("abc123"), Some("session-1"), &signed),
+            "a correctly scoped signed token should be accepted"
+        );
     }
 
     #[test]
     fn scoped_csrf_token_rejects_raw_cookie_equality() {
-        assert!(!validate_signed_csrf(
-            Some("abc123"),
-            Some("session-1"),
-            "abc123",
-        ));
+        assert!(
+            !validate_signed_csrf(Some("abc123"), Some("session-1"), "abc123",),
+            "raw cookie equality must not bypass scoped signature validation"
+        );
     }
 
     #[test]
@@ -115,25 +130,33 @@ mod tests {
         let secret = &crate::config::CONFIG.cookie_secret;
         let signed =
             crate::utils::crypto::make_scoped_csrf_form_token("abc123", secret, "session-1");
-        assert!(!validate_signed_csrf(
-            Some("abc123"),
-            Some("session-2"),
-            &signed
-        ));
+        assert!(
+            !validate_signed_csrf(Some("abc123"), Some("session-2"), &signed),
+            "a token signed for another session scope should be rejected"
+        );
     }
 
     #[test]
     fn csrf_empty_cookie_fails() {
-        assert!(!validate_csrf(Some(""), "abc123"));
+        assert!(
+            !validate_csrf(Some(""), "abc123"),
+            "an empty cookie token should be rejected"
+        );
     }
 
     #[test]
     fn csrf_empty_form_token_fails() {
-        assert!(!validate_csrf(Some("abc123"), ""));
+        assert!(
+            !validate_csrf(Some("abc123"), ""),
+            "an empty form token should be rejected"
+        );
     }
 
     #[test]
     fn constant_time_eq_equal_slices() {
-        assert!(constant_time_eq(b"hello", b"hello"));
+        assert!(
+            constant_time_eq(b"hello", b"hello"),
+            "identical byte slices should compare equal"
+        );
     }
 }

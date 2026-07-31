@@ -86,16 +86,22 @@ static CONSOLE_MUTEX: LazyLock<parking_lot::Mutex<()>> =
 // Using a module-level OnceLock means the guard is stored here without
 // requiring callers to thread it through their own state, and without changing
 // the public `init_logging(&Path)` signature.
+/// Keeps the main log writer's background worker alive for the process lifetime.
 static MAIN_FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+/// Keeps the dependency log writer's background worker alive for the process lifetime.
 static DEPENDENCY_FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> =
     OnceLock::new();
 
+/// Fallback main-log filename used when daily rotation cannot be initialized.
 pub const MAIN_LOG_FALLBACK_FILE_NAME: &str = "rustchan.log";
+/// Filename used for third-party dependency logs.
 pub const DEPENDENCY_LOG_FILE_NAME: &str = "dep_log.log";
 
 // ─── TTY detection ────────────────────────────────────────────────────────────
 
+/// Whether standard output was an interactive terminal at startup.
 static IS_TTY: AtomicBool = AtomicBool::new(false);
+/// Whether terminal output may contain ANSI escape sequences.
 static ANSI_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Returns `true` when stdout was a real interactive terminal at startup.
@@ -124,6 +130,7 @@ fn detect_ansi_enabled(tty: bool) -> bool {
 }
 
 #[cfg(not(windows))]
+/// Returns terminal capability directly on platforms with native ANSI support.
 const fn detect_ansi_enabled(tty: bool) -> bool {
     tty
 }
@@ -134,7 +141,9 @@ const fn detect_ansi_enabled(tty: bool) -> bool {
 /// dashboard owns the screen and will display the information itself.
 static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Window used to coalesce repeated Tor descriptor-upload timeout warnings.
 const TOR_DESCRIPTOR_TIMEOUT_SUPPRESSION_WINDOW: Duration = Duration::from_mins(10);
+/// Process-wide limiter shared by the terminal and file formatters.
 static TOR_DESCRIPTOR_TIMEOUT_LIMITER: LazyLock<parking_lot::Mutex<TorDescriptorTimeoutLimiter>> =
     LazyLock::new(|| {
         parking_lot::Mutex::new(TorDescriptorTimeoutLimiter::new(
@@ -142,16 +151,19 @@ static TOR_DESCRIPTOR_TIMEOUT_LIMITER: LazyLock<parking_lot::Mutex<TorDescriptor
         ))
     });
 
-pub fn set_tui_active(v: bool) {
-    TUI_ACTIVE.store(v, Ordering::SeqCst);
+/// Records whether the full-screen terminal interface currently owns stdout.
+pub fn set_tui_active(active: bool) {
+    TUI_ACTIVE.store(active, Ordering::SeqCst);
 }
 
+/// Returns whether the full-screen terminal interface currently owns stdout.
 pub fn is_tui_active() -> bool {
     TUI_ACTIVE.load(Ordering::Relaxed)
 }
 
 // ─── Component name extraction ────────────────────────────────────────────────
 
+/// Namespace prefixes routed to `RustChan`'s main log.
 const APP_LOG_TARGETS: &[&str] = &[
     "admin",
     "board",
@@ -170,13 +182,16 @@ const APP_LOG_TARGETS: &[&str] = &[
     "workers",
 ];
 
+/// Exact non-namespaced targets routed to `RustChan`'s main log.
 const APP_LOG_EXACT_TARGETS: &[&str] = &["convert", "media_prune"];
 
+/// Returns the configured dependency-log path beneath a log directory.
 #[must_use]
 pub fn dependency_log_path(log_dir: &Path) -> PathBuf {
     log_dir.join(DEPENDENCY_LOG_FILE_NAME)
 }
 
+/// Returns whether a path names a current or rotated `RustChan` main log.
 #[must_use]
 pub fn is_main_log_file(path: &Path) -> bool {
     let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -188,6 +203,7 @@ pub fn is_main_log_file(path: &Path) -> bool {
             && path.extension().and_then(|ext| ext.to_str()) == Some("log"))
 }
 
+/// Returns whether a tracing target belongs to `RustChan` application code.
 fn is_app_log_target(target: &str) -> bool {
     APP_LOG_EXACT_TARGETS.contains(&target)
         || APP_LOG_TARGETS.iter().any(|app_target| {
@@ -198,6 +214,7 @@ fn is_app_log_target(target: &str) -> bool {
         })
 }
 
+/// Returns whether a tracing target belongs to `FFmpeg` integration code.
 fn is_ffmpeg_log_target(target: &str) -> bool {
     target == "ffmpeg"
         || target.starts_with("ffmpeg::")
@@ -207,10 +224,12 @@ fn is_ffmpeg_log_target(target: &str) -> bool {
         || target.contains("::ffmpeg::")
 }
 
+/// Returns whether a tracing target is routed to the main log.
 fn is_main_log_target(target: &str) -> bool {
     is_app_log_target(target) || is_ffmpeg_log_target(target)
 }
 
+/// Returns whether a tracing target is routed to the dependency log.
 fn is_dependency_log_target(target: &str) -> bool {
     !is_main_log_target(target)
 }
@@ -231,6 +250,7 @@ fn extract_component(target: &str) -> &str {
     }
 }
 
+/// Maps a tracing target to its compact display component.
 fn display_component(target: &str) -> String {
     if is_tor_target(target) {
         match extract_component(target) {
@@ -287,6 +307,7 @@ fn write_component_tag(writer: &mut Writer<'_>, target: &str, ansi: bool) -> fmt
     write!(writer, "{open}[{display:<8}]{close} ")
 }
 
+/// Removes ANSI control sequences from a captured field value.
 fn strip_ansi(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -307,6 +328,7 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
+/// Converts a structured field name into a human-readable label.
 fn humanize_field_name(name: &str) -> String {
     match name {
         "addr" => "address".to_owned(),
@@ -337,10 +359,12 @@ fn humanize_field_name(name: &str) -> String {
     }
 }
 
+/// Returns whether a source path belongs to a dependency or the Rust toolchain.
 fn is_external_source(file: &str) -> bool {
     file.contains("/.cargo/registry/src/") || file.contains("/rustc/")
 }
 
+/// Returns whether a display component belongs to the Tor stack.
 fn is_tor_component(component: &str) -> bool {
     matches!(
         component,
@@ -362,6 +386,7 @@ fn is_tor_component(component: &str) -> bool {
     )
 }
 
+/// Returns whether a tracing target belongs to Arti or another Tor crate.
 fn is_tor_target(target: &str) -> bool {
     target == "arti_client"
         || target.starts_with("arti_client::")
@@ -369,6 +394,7 @@ fn is_tor_target(target: &str) -> bool {
         || target.starts_with("tor-")
 }
 
+/// Uppercases an initial ASCII lowercase letter without changing other text.
 fn title_case_message(message: &str) -> String {
     let mut chars = message.chars();
     match chars.next() {
@@ -379,6 +405,7 @@ fn title_case_message(message: &str) -> String {
     }
 }
 
+/// Parses a debug-formatted duration into compact human-readable text.
 fn parse_formatted_duration(value: &str) -> Option<String> {
     let inner = value
         .strip_prefix("FormattedDuration(")?
@@ -387,7 +414,7 @@ fn parse_formatted_duration(value: &str) -> Option<String> {
     let seconds = inner.parse::<f64>().ok()?;
 
     if seconds >= 60.0 {
-        let total = std::time::Duration::from_secs_f64(seconds.round()).as_secs();
+        let total = Duration::from_secs_f64(seconds.round()).as_secs();
         let minutes = total / 60;
         let secs = total % 60;
         if secs == 0 {
@@ -398,13 +425,14 @@ fn parse_formatted_duration(value: &str) -> Option<String> {
     } else if seconds >= 10.0 {
         Some(format!(
             "{}s",
-            std::time::Duration::from_secs_f64(seconds.round()).as_secs()
+            Duration::from_secs_f64(seconds.round()).as_secs()
         ))
     } else {
         Some(format!("{seconds:.1}s"))
     }
 }
 
+/// Formats a duration represented as nanoseconds using compact units.
 fn format_duration_parts(total_nanos: u128) -> String {
     let total_millis = (total_nanos.saturating_add(500_000)) / 1_000_000;
     if total_millis == 0 {
@@ -431,6 +459,7 @@ fn format_duration_parts(total_nanos: u128) -> String {
     }
 }
 
+/// Parses whitespace-separated duration parts such as `29s 999ms`.
 fn parse_compound_duration(value: &str) -> Option<String> {
     let trimmed = value.trim().trim_end_matches('.');
     if !trimmed.contains(char::is_whitespace) {
@@ -461,31 +490,46 @@ fn parse_compound_duration(value: &str) -> Option<String> {
     saw_unit.then(|| format_duration_parts(total_nanos))
 }
 
+/// Normalizes either supported upstream duration representation.
 fn normalize_duration(value: &str) -> Option<String> {
     parse_formatted_duration(value).or_else(|| parse_compound_duration(value))
 }
 
+/// Redacts volatile Tor guard and circuit identifiers from a field value.
 fn scrub_tor_value(value: &str) -> String {
     let mut out = value.to_owned();
 
     while let Some(start) = out.find("GuardId(") {
-        let Some(end) = out[start..].find(')') else {
+        let Some(remainder) = out.get(start..) else {
             break;
         };
-        out.replace_range(start..=(start + end), "[scrubbed guard]");
+        let Some(relative_end) = remainder.find(')') else {
+            break;
+        };
+        let Some(end) = start.checked_add(relative_end) else {
+            break;
+        };
+        out.replace_range(start..=end, "[scrubbed guard]");
     }
 
     while let Some(start) = out.find(" via Circ ") {
-        let token_value_start = start + " via Circ ".len();
-        let end = out[token_value_start..]
+        let Some(token_value_start) = start.checked_add(" via Circ ".len()) else {
+            break;
+        };
+        let Some(remainder) = out.get(token_value_start..) else {
+            break;
+        };
+        let end = remainder
             .find(char::is_whitespace)
-            .map_or(out.len(), |offset| token_value_start + offset);
+            .and_then(|offset| token_value_start.checked_add(offset))
+            .unwrap_or(out.len());
         out.replace_range(start..end, "");
     }
 
     out
 }
 
+/// Normalizes one structured log field for human-readable output.
 fn normalize_field_value(name: &str, value: &str) -> String {
     if let Some(duration) = normalize_duration(value) {
         return duration;
@@ -502,6 +546,7 @@ fn normalize_field_value(name: &str, value: &str) -> String {
     scrub_tor_value(value)
 }
 
+/// Returns whether an empty or redundant structured field should be omitted.
 fn should_hide_field(name: &str, value: &str) -> bool {
     (matches!(value, "" | "<missing>")
         && matches!(name, "content_type" | "content_length" | "mime" | "path"))
@@ -509,12 +554,16 @@ fn should_hide_field(name: &str, value: &str) -> bool {
 }
 
 #[derive(Default)]
+/// Captured and normalized fields for one tracing event.
 struct LogEventFields {
+    /// Optional event message.
     message: Option<String>,
+    /// Remaining structured name/value pairs.
     fields: Vec<(String, String)>,
 }
 
 impl LogEventFields {
+    /// Normalizes and stores one recorded tracing field.
     fn push_field(&mut self, field: &Field, value: &str) {
         let clean = normalize_field_value(field.name(), &strip_ansi(value.trim()));
         if field.name() == "message" {
@@ -568,6 +617,7 @@ impl Visit for LogEventFields {
     }
 }
 
+/// Inserts or replaces a structured field by name.
 fn upsert_field(fields: &mut Vec<(String, String)>, name: &str, value: String) {
     if let Some((_, existing)) = fields.iter_mut().find(|(field_name, _)| field_name == name) {
         *existing = value;
@@ -576,6 +626,7 @@ fn upsert_field(fields: &mut Vec<(String, String)>, name: &str, value: String) {
     }
 }
 
+/// Removes a structured field by name and returns its value.
 fn remove_field(fields: &mut Vec<(String, String)>, name: &str) -> Option<String> {
     fields
         .iter()
@@ -583,14 +634,17 @@ fn remove_field(fields: &mut Vec<(String, String)>, name: &str) -> Option<String
         .map(|index| fields.remove(index).1)
 }
 
+/// Extracts the numeric token immediately preceding the first percent sign.
 fn extract_percent(message: &str) -> Option<String> {
     let percent_index = message.find('%')?;
-    let number = message[..percent_index]
+    let before_percent = message.get(..percent_index)?;
+    let number = before_percent
         .rsplit_once(' ')
-        .map_or(&message[..percent_index], |(_, value)| value);
+        .map_or(before_percent, |(_, value)| value);
     Some(format!("{number}%"))
 }
 
+/// Extracts a Tor bootstrap attempt count from its upstream message.
 fn extract_attempt_count(message: &str) -> Option<String> {
     let before = message
         .strip_prefix("We failed ")?
@@ -599,6 +653,7 @@ fn extract_attempt_count(message: &str) -> Option<String> {
     before.parse::<u64>().ok().map(|count| count.to_string())
 }
 
+/// Rewrites common verbose Tor errors into concise operator-facing text.
 fn short_tor_error(error: &str) -> String {
     let lower = error.to_ascii_lowercase();
     if lower.contains("invalid document from directory server") {
@@ -615,21 +670,36 @@ fn short_tor_error(error: &str) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Output action selected for a descriptor-upload timeout event.
 enum TorDescriptorTimeoutDecision {
+    /// Emit the original warning.
     EmitOriginal,
+    /// Suppress this repeated warning.
     Suppress,
-    EmitSummary { suppressed: u64, window: Duration },
+    /// Emit a summary of warnings suppressed during a completed window.
+    EmitSummary {
+        /// Number of repeated warnings suppressed.
+        suppressed: u64,
+        /// Suppression window represented by the summary.
+        window: Duration,
+    },
 }
 
 #[derive(Debug)]
+/// Coalesces repeated Tor descriptor-upload timeout warnings.
 struct TorDescriptorTimeoutLimiter {
+    /// Duration of one suppression window.
     window: Duration,
+    /// Start time of the active suppression window.
     window_started_at: Option<Instant>,
+    /// Number of repeated warnings suppressed in the active window.
     suppressed: u64,
+    /// Decision cached for the second formatter that observes the same event.
     duplicate_formatter_decision: Option<TorDescriptorTimeoutDecision>,
 }
 
 impl TorDescriptorTimeoutLimiter {
+    /// Creates an idle limiter with the supplied window.
     const fn new(window: Duration) -> Self {
         Self {
             window,
@@ -639,6 +709,7 @@ impl TorDescriptorTimeoutLimiter {
         }
     }
 
+    /// Selects one decision and reuses it for the second event formatter.
     fn decide(&mut self, now: Instant) -> TorDescriptorTimeoutDecision {
         // The terminal and file formatters both see the same tracing event.
         // Reuse one decision for the second formatter so the limiter counts
@@ -652,6 +723,7 @@ impl TorDescriptorTimeoutLimiter {
         decision
     }
 
+    /// Selects a rate-limit decision for one logical tracing event.
     fn decide_once(&mut self, now: Instant) -> TorDescriptorTimeoutDecision {
         let Some(window_started_at) = self.window_started_at else {
             self.window_started_at = Some(now);
@@ -677,6 +749,7 @@ impl TorDescriptorTimeoutLimiter {
     }
 }
 
+/// Detects Tor descriptor-upload timeout warnings eligible for coalescing.
 fn is_tor_descriptor_upload_timeout_event(target: &str, fields: &LogEventFields) -> bool {
     if !is_tor_target(target) {
         return false;
@@ -702,6 +775,7 @@ fn is_tor_descriptor_upload_timeout_event(target: &str, fields: &LogEventFields)
             || haystack.contains("network timeout"))
 }
 
+/// Applies descriptor-timeout coalescing and returns whether to emit the event.
 fn apply_tor_descriptor_timeout_rate_limit(fields: &mut LogEventFields) -> bool {
     let decision = TOR_DESCRIPTOR_TIMEOUT_LIMITER.lock().decide(Instant::now());
     match decision {
@@ -718,6 +792,7 @@ fn apply_tor_descriptor_timeout_rate_limit(fields: &mut LogEventFields) -> bool 
     }
 }
 
+/// Normalizes punctuation, whitespace, and capitalization in a log message.
 fn normalize_message_text(message: &str) -> String {
     let mut cleaned = message.trim().replace('—', "-").replace('…', "...");
     if cleaned.contains('→') {
@@ -729,12 +804,15 @@ fn normalize_message_text(message: &str) -> String {
     title_case_message(&cleaned)
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[allow(
+#[expect(
     clippy::cognitive_complexity,
     reason = "message rewriting intentionally centralizes the closed set of upstream log patterns"
 )]
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeping the closed message-rewrite table together makes overlapping upstream patterns auditable"
+)]
+/// Rewrites known upstream messages and fields into stable operator-facing text.
 fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields) {
     let Some(message) = fields.message.clone() else {
         return;
@@ -853,6 +931,7 @@ fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields
     }
 }
 
+/// Returns whether a noisy rewritten event should be omitted entirely.
 fn should_suppress_event(target: &str, fields: &LogEventFields) -> bool {
     matches!(
         (extract_component(target), fields.message.as_deref()),
@@ -863,6 +942,7 @@ fn should_suppress_event(target: &str, fields: &LogEventFields) -> bool {
     )
 }
 
+/// Records, normalizes, rewrites, and rate-limits fields for one event.
 fn prepare_event_fields(
     target: &str,
     file: Option<&str>,
@@ -880,6 +960,7 @@ fn prepare_event_fields(
     (!should_suppress_event(target, &fields)).then_some(fields)
 }
 
+/// Writes normalized event fields in the shared human-readable format.
 fn write_event_fields(writer: &mut Writer<'_>, fields: &LogEventFields) -> fmt::Result {
     let has_message = fields.message.is_some();
 
@@ -903,6 +984,7 @@ fn write_event_fields(writer: &mut Writer<'_>, fields: &LogEventFields) -> fmt::
     Ok(())
 }
 
+/// Builds the default INFO-level filter used when `RUST_LOG` is absent.
 fn default_env_filter() -> EnvFilter {
     EnvFilter::new(
         // Default to INFO for all enabled targets so third-party dependency
@@ -927,6 +1009,7 @@ fn default_env_filter() -> EnvFilter {
     )
 }
 
+/// Parses `RUST_LOG`, falling back to `RustChan`'s default filter.
 fn env_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| default_env_filter())
 }
@@ -952,7 +1035,7 @@ where
 {
     fn format_event(
         &self,
-        ctx: &FmtContext<'_, S, N>,
+        _ctx: &FmtContext<'_, S, N>,
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> fmt::Result {
@@ -980,7 +1063,6 @@ where
         // tracing_subscriber writes the `message` field first, then all other
         // key=value fields separated by spaces — e.g.:
         //   "Request received  method=GET path=/b/ latency_ms=4"
-        let _ = ctx;
         write_event_fields(&mut writer, &fields)?;
         writeln!(writer)
     }
@@ -1008,12 +1090,11 @@ where
 {
     fn format_event(
         &self,
-        ctx: &FmtContext<'_, S, N>,
+        _ctx: &FmtContext<'_, S, N>,
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> fmt::Result {
         let meta = event.metadata();
-        let _ = ctx;
         let Some(fields) = prepare_event_fields(meta.target(), meta.file(), event) else {
             return Ok(());
         };
@@ -1061,7 +1142,9 @@ where
 /// The `_guard` field is held solely for its `Drop` side-effect (releasing
 /// `CONSOLE_MUTEX`). It is never accessed directly.
 struct LockedWriter {
+    /// Guard that keeps the shared console mutex locked during the event write.
     _guard: parking_lot::MutexGuard<'static, ()>,
+    /// Whether output is discarded while the full-screen interface is active.
     suppress: bool,
 }
 
@@ -1149,10 +1232,10 @@ pub fn init_logging(log_dir: &Path) {
         .filename_suffix("log")
         .build(log_dir)
         .unwrap_or_else(|e| {
-            let _ = writeln!(
-                std::io::stderr().lock(),
+            drop(writeln!(
+                io::stderr().lock(),
                 "Warning: could not create log file appender: {e}"
-            );
+            ));
             tracing_appender::rolling::never(log_dir, "rustchan.log")
         });
 
@@ -1165,7 +1248,7 @@ pub fn init_logging(log_dir: &Path) {
     // The WorkerGuard is stored in MAIN_FILE_GUARD so it lives for the entire
     // process — see the comment on that static for why this matters.
     let (main_file_writer, main_guard) = tracing_appender::non_blocking(rolling);
-    let _ = MAIN_FILE_GUARD.set(main_guard);
+    drop(MAIN_FILE_GUARD.set(main_guard));
 
     let file_layer = tracing_subscriber::fmt::layer()
         .event_format(FileFormatter)
@@ -1175,7 +1258,7 @@ pub fn init_logging(log_dir: &Path) {
 
     let dependency_log = tracing_appender::rolling::never(log_dir, DEPENDENCY_LOG_FILE_NAME);
     let (dependency_file_writer, dependency_guard) = tracing_appender::non_blocking(dependency_log);
-    let _ = DEPENDENCY_FILE_GUARD.set(dependency_guard);
+    drop(DEPENDENCY_FILE_GUARD.set(dependency_guard));
 
     let dependency_file_layer = tracing_subscriber::fmt::layer()
         .event_format(FileFormatter)
@@ -1199,7 +1282,7 @@ pub fn init_logging(log_dir: &Path) {
 /// Print `msg` followed by a newline to stdout, under the console lock.
 pub fn console_println(msg: &str) {
     let _guard = CONSOLE_MUTEX.lock();
-    let _ = writeln!(io::stdout(), "{msg}");
+    drop(writeln!(io::stdout(), "{msg}"));
 }
 
 /// Write a raw pre-formatted block exactly as provided (no trailing newline added).
@@ -1208,8 +1291,8 @@ pub fn console_println(msg: &str) {
 /// fully formatted including their own newlines.
 pub fn console_print_raw(block: &str) {
     let _guard = CONSOLE_MUTEX.lock();
-    let _ = write!(io::stdout(), "{block}");
-    let _ = io::stdout().flush();
+    drop(write!(io::stdout(), "{block}"));
+    drop(io::stdout().flush());
 }
 
 /// Write a prompt string (no newline) and flush stdout, under the console lock.
@@ -1218,8 +1301,8 @@ pub fn console_print_raw(block: &str) {
 /// call does not prevent log events from being written while waiting for input.
 pub fn console_prompt(msg: &str) {
     let _guard = CONSOLE_MUTEX.lock();
-    let _ = write!(io::stdout(), "{msg}");
-    let _ = io::stdout().flush();
+    drop(write!(io::stdout(), "{msg}"));
+    drop(io::stdout().flush());
     // _guard dropped here — stdin read happens outside the lock
 }
 
@@ -1246,8 +1329,12 @@ mod tests {
 
     impl SharedBuffer {
         fn content(&self) -> String {
-            let bytes = self.inner.lock().expect("buffer lock").clone();
-            String::from_utf8(bytes).expect("utf-8 log output")
+            let bytes = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            String::from_utf8_lossy(&bytes).into_owned()
         }
     }
 
@@ -1394,22 +1481,32 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_main_and_dependency_log_paths() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        assert_eq!(
+    fn recognizes_main_and_dependency_log_paths() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        anyhow::ensure!(
             dependency_log_path(dir.path())
                 .file_name()
-                .and_then(|name| name.to_str()),
-            Some(DEPENDENCY_LOG_FILE_NAME)
+                .and_then(|name| name.to_str())
+                == Some(DEPENDENCY_LOG_FILE_NAME),
+            "dependency log path used an unexpected filename"
         );
-        assert!(is_main_log_file(
-            &dir.path().join("rustchan.2026-04-02.log")
-        ));
-        assert!(is_main_log_file(&dir.path().join("rustchan.log")));
-        assert!(!is_main_log_file(
-            &dir.path().join(DEPENDENCY_LOG_FILE_NAME)
-        ));
-        assert!(!is_main_log_file(&dir.path().join("tower_http.log")));
+        anyhow::ensure!(
+            is_main_log_file(&dir.path().join("rustchan.2026-04-02.log")),
+            "dated RustChan log was not recognized"
+        );
+        anyhow::ensure!(
+            is_main_log_file(&dir.path().join("rustchan.log")),
+            "undated RustChan log was not recognized"
+        );
+        anyhow::ensure!(
+            !is_main_log_file(&dir.path().join(DEPENDENCY_LOG_FILE_NAME)),
+            "dependency log was misclassified as a main log"
+        );
+        anyhow::ensure!(
+            !is_main_log_file(&dir.path().join("tower_http.log")),
+            "third-party log was misclassified as a main log"
+        );
+        Ok(())
     }
 
     #[test]

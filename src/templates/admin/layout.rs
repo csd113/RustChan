@@ -1,9 +1,12 @@
+//! Admin-panel shell, dashboard, and shared status components.
+
 use super::{
     appearance, backups, base_layout, boards, escape_html, maintenance, moderation, site_health,
 };
 use super::{AdminDashboardState, AdminPanelFlash, AdminPanelViewModel};
 use std::fmt::Write as _;
 
+/// Renders the complete admin panel page.
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let flash_html = render_flash(view.flash);
     let section_index = render_admin_section_index();
@@ -71,6 +74,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     )
 }
 
+/// Renders a success or error flash message when one is present.
 fn render_flash(flash: Option<AdminPanelFlash<'_>>) -> String {
     flash.map_or_else(String::new, |flash| {
         let cls = if flash.is_error {
@@ -86,6 +90,7 @@ fn render_flash(flash: Option<AdminPanelFlash<'_>>) -> String {
     })
 }
 
+/// Renders links to each major admin-panel section.
 const fn render_admin_section_index() -> &'static str {
     r##"<nav class="admin-section-index" aria-label="Admin panel sections">
   <span>jump to</span>
@@ -100,6 +105,7 @@ const fn render_admin_section_index() -> &'static str {
 </nav>"##
 }
 
+/// Renders the dashboard and live-log overview.
 fn render_admin_overview_section(view: &AdminPanelViewModel<'_>) -> String {
     let dashboard = render_admin_dashboard_section(view);
     format!(
@@ -131,6 +137,7 @@ fn render_admin_overview_section(view: &AdminPanelViewModel<'_>) -> String {
     )
 }
 
+/// Renders the operational control-center dashboard.
 fn render_admin_dashboard_section(view: &AdminPanelViewModel<'_>) -> String {
     let dashboard = &view.dashboard;
     let overview_cards = render_dashboard_overview_cards(view);
@@ -196,6 +203,7 @@ fn render_admin_dashboard_section(view: &AdminPanelViewModel<'_>) -> String {
     )
 }
 
+/// Renders the most severe state represented in the dashboard.
 fn render_dashboard_overall_status(dashboard: &super::AdminPanelDashboardView<'_>) -> String {
     let state = [
         dashboard.setup_state,
@@ -220,6 +228,7 @@ fn render_dashboard_overall_status(dashboard: &super::AdminPanelDashboardView<'_
     render_state_pill(state, label)
 }
 
+/// Returns the ordering weight used to select the most severe state.
 const fn state_severity(state: AdminDashboardState) -> u8 {
     match state {
         AdminDashboardState::ActionNeeded => 4,
@@ -230,6 +239,7 @@ const fn state_severity(state: AdminDashboardState) -> u8 {
     }
 }
 
+/// Renders instance identity and setup overview cards.
 fn render_dashboard_overview_cards(view: &AdminPanelViewModel<'_>) -> String {
     let dashboard = &view.dashboard;
     let mut out = String::new();
@@ -288,6 +298,7 @@ fn render_dashboard_overview_cards(view: &AdminPanelViewModel<'_>) -> String {
     out
 }
 
+/// Renders database, storage, Tor, dependency, and job health cards.
 fn render_dashboard_health_cards(view: &AdminPanelViewModel<'_>) -> String {
     let dashboard = &view.dashboard;
     let mut out = String::new();
@@ -360,6 +371,7 @@ fn render_dashboard_health_cards(view: &AdminPanelViewModel<'_>) -> String {
     out
 }
 
+/// Renders board, post, upload, and moderation activity cards.
 fn render_dashboard_activity_cards(view: &AdminPanelViewModel<'_>) -> String {
     let dashboard = &view.dashboard;
     let mut out = String::new();
@@ -421,6 +433,7 @@ fn render_dashboard_activity_cards(view: &AdminPanelViewModel<'_>) -> String {
     out
 }
 
+/// Renders shortcuts to common administrative actions.
 fn render_dashboard_quick_actions(view: &AdminPanelViewModel<'_>) -> String {
     let close_setup = if view.dashboard.setup_state == AdminDashboardState::Warning
         && view.dashboard.setup_status == "reopened"
@@ -464,16 +477,24 @@ fn render_dashboard_quick_actions(view: &AdminPanelViewModel<'_>) -> String {
     )
 }
 
+/// Values used to render one dashboard metric card.
 #[derive(Clone, Copy)]
 struct DashboardMetric<'a> {
+    /// Card heading.
     label: &'a str,
+    /// Primary metric value.
     value: &'a str,
+    /// Supporting explanation.
     detail: &'a str,
+    /// Operational state used for styling.
     state: AdminDashboardState,
+    /// Optional destination for the card action.
     href: Option<&'a str>,
+    /// Optional action label.
     action: Option<&'a str>,
 }
 
+/// Appends one escaped dashboard metric card.
 fn append_dashboard_metric(out: &mut String, metric: DashboardMetric<'_>) {
     let action = match (metric.href, metric.action) {
         (Some(href), Some(action)) => format!(
@@ -503,6 +524,7 @@ fn append_dashboard_metric(out: &mut String, metric: DashboardMetric<'_>) {
     );
 }
 
+/// Renders a compact status pill.
 fn render_state_pill(state: AdminDashboardState, label: &str) -> String {
     format!(
         r#"<span class="admin-state-pill admin-state-pill-{class}">{label}</span>"#,
@@ -511,6 +533,7 @@ fn render_state_pill(state: AdminDashboardState, label: &str) -> String {
     )
 }
 
+/// Returns the CSS suffix for a dashboard state.
 const fn state_class(state: AdminDashboardState) -> &'static str {
     match state {
         AdminDashboardState::Ok => "ok",
@@ -521,6 +544,7 @@ const fn state_class(state: AdminDashboardState) -> &'static str {
     }
 }
 
+/// Returns the compact label for a dashboard state.
 const fn state_label(state: AdminDashboardState) -> &'static str {
     match state {
         AdminDashboardState::Ok => "OK",

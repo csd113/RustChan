@@ -1,6 +1,3 @@
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#![allow(clippy::too_many_lines, clippy::option_if_let_else)]
-
 // handlers/thread.rs
 //
 // Handles:
@@ -30,6 +27,7 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 
+/// Composite value returned by thread view load result.
 type ThreadViewLoadResult = (
     String,
     render::ThreadPageData,
@@ -40,6 +38,7 @@ type ThreadViewLoadResult = (
     Option<(i64, i64)>,
 );
 
+/// Returns whether xml HTTP request.
 fn is_xml_http_request(headers: &HeaderMap) -> bool {
     headers
         .get("x-requested-with")
@@ -49,8 +48,12 @@ fn is_xml_http_request(headers: &HeaderMap) -> bool {
 
 // ─── GET /:board/thread/:id ───────────────────────────────────────────────────
 
-#[expect(clippy::too_many_lines)]
-pub async fn view_thread(
+#[expect(
+    clippy::too_many_lines,
+    reason = "access control, thread loading, unread-state calculation, and rendering form one request"
+)]
+/// Handles the view thread request.
+pub(crate) async fn view_thread(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
     Query(params): Query<ThreadPageQuery>,
@@ -106,7 +109,7 @@ pub async fn view_thread(
                 thread_id,
                 &identity_key,
                 admin_session_id.as_deref(),
-                &crate::config::CONFIG.cookie_secret,
+                &CONFIG.cookie_secret,
             )?;
             let is_admin = page_data.is_admin;
             let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
@@ -220,19 +223,18 @@ pub async fn view_thread(
         // StatusCode::NOT_MODIFIED and Body::empty() are always valid; this
         // builder call is infallible in practice.
         let mut resp = axum::http::Response::builder()
-            .status(axum::http::StatusCode::NOT_MODIFIED)
+            .status(StatusCode::NOT_MODIFIED)
             .body(axum::body::Body::empty())
             .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
         resp.headers_mut().insert(
             "etag",
-            axum::http::HeaderValue::from_str(&etag)
-                .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"0\"")),
+            HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("\"0\"")),
         );
         resp.headers_mut().insert(
-            axum::http::header::CACHE_CONTROL,
-            axum::http::HeaderValue::from_static(
-                crate::handlers::board::activity_html_cache_control(activity_markers_enabled),
-            ),
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(crate::handlers::board::activity_html_cache_control(
+                activity_markers_enabled,
+            )),
         );
         crate::cache::insert_vary_cookie(resp.headers_mut());
         return Ok((jar, resp).into_response());
@@ -256,12 +258,12 @@ pub async fn view_thread(
         user_preferences,
     );
     let mut resp = Html(html).into_response();
-    if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
+    if let Ok(v) = HeaderValue::from_str(&etag) {
         resp.headers_mut().insert("etag", v);
     }
     resp.headers_mut().insert(
-        axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static(crate::handlers::board::activity_html_cache_control(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(crate::handlers::board::activity_html_cache_control(
             activity_markers_enabled,
         )),
     );
@@ -271,8 +273,12 @@ pub async fn view_thread(
 
 // ─── POST /:board/thread/:id — post reply ────────────────────────────────────
 
-#[expect(clippy::too_many_lines)]
-pub async fn post_reply(
+#[expect(
+    clippy::too_many_lines,
+    reason = "access checks, multipart validation, transactional reply creation, and cookies form one request"
+)]
+/// Handles the post reply request.
+pub(crate) async fn post_reply(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
     secure_context: crate::middleware::SecureCookieContext,
@@ -440,7 +446,7 @@ pub async fn post_reply(
             .await
             .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-            let mut resp = axum::response::Html(html).into_response();
+            let mut resp = Html(html).into_response();
             *resp.status_mut() = status;
             return Ok(resp);
         }
@@ -468,18 +474,27 @@ pub async fn post_reply(
 }
 
 #[derive(Deserialize, Default)]
-pub struct ThreadPageQuery {
+/// Query parameters accepted by the thread page request.
+pub(crate) struct ThreadPageQuery {
+    /// The optional reported.
     pub reported: Option<String>,
 }
 
+/// Template data for self action post context.
 struct SelfActionPostContext {
+    /// The board.
     board: crate::models::Board,
+    /// The thread.
     thread: crate::models::Thread,
+    /// The post.
     post: crate::models::Post,
+    /// Whether the requester can post.
     can_post: bool,
+    /// Whether the thread allows self actions setting is active.
     thread_allows_self_actions: bool,
 }
 
+/// Handles the load self action post context request.
 async fn load_self_action_post_context(
     state: &AppState,
     board_short: &str,
@@ -525,16 +540,25 @@ async fn load_self_action_post_context(
     .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?
 }
 
+/// Data used by the edit post error page request workflow.
 struct EditPostErrorPageRequest<'a> {
+    /// The board short.
     board_short: &'a str,
+    /// The post identifier.
     post_id: i64,
+    /// The jar.
     jar: &'a CookieJar,
+    /// The admin session identifier.
     admin_session_id: Option<String>,
+    /// The body.
     body: &'a str,
+    /// The message.
     message: &'a str,
+    /// Whether the CSRF cookie secure setting is active.
     csrf_cookie_secure: bool,
 }
 
+/// Handles the render edit post error page request.
 async fn render_edit_post_error_page(
     state: &AppState,
     request: EditPostErrorPageRequest<'_>,
@@ -560,7 +584,7 @@ async fn render_edit_post_error_page(
         &context.thread,
         &post,
         &csrf_token,
-        boards.as_slice(),
+        boards.as_ref(),
         current_theme.as_deref(),
         Some(request.message),
     );
@@ -574,7 +598,8 @@ async fn render_edit_post_error_page(
     Ok((jar, response).into_response())
 }
 
-pub async fn edit_post_get(
+/// Handles the edit post get request.
+pub(crate) async fn edit_post_get(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
@@ -656,7 +681,7 @@ pub async fn edit_post_get(
         &context.thread,
         &context.post,
         &csrf,
-        boards.as_slice(),
+        boards.as_ref(),
         current_theme.as_deref(),
         None,
     );
@@ -671,19 +696,29 @@ pub async fn edit_post_get(
 // ─── POST /:board/post/:id/edit — submit edit ─────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct EditForm {
+/// Form fields accepted by the edit request.
+pub(crate) struct EditForm {
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
+    /// The body.
     pub body: String,
 }
 
 #[derive(Deserialize)]
-pub struct DeletePostForm {
+/// Form fields accepted by the delete post request.
+pub(crate) struct DeletePostForm {
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
-pub async fn edit_post_post(
+#[expect(
+    clippy::too_many_lines,
+    reason = "ownership checks, edit validation, transactional update, media cleanup, and jobs form one request"
+)]
+/// Handles the edit post post request.
+pub(crate) async fn edit_post_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
@@ -856,7 +891,8 @@ pub async fn edit_post_post(
     }
 }
 
-pub async fn delete_post_get(
+/// Handles the delete post get request.
+pub(crate) async fn delete_post_get(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
@@ -939,7 +975,7 @@ pub async fn delete_post_get(
         &context.thread,
         &context.post,
         &csrf,
-        boards.as_slice(),
+        boards.as_ref(),
         current_theme.as_deref(),
         None,
     );
@@ -951,7 +987,12 @@ pub async fn delete_post_get(
     Ok((jar, response).into_response())
 }
 
-pub async fn delete_own_post(
+#[expect(
+    clippy::too_many_lines,
+    reason = "ownership checks, deletion rules, transactional mutation, and media cleanup form one request"
+)]
+/// Handles the delete own post request.
+pub(crate) async fn delete_own_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
@@ -1004,7 +1045,7 @@ pub async fn delete_own_post(
     let board_short_for_delete = board_short.clone();
     let outcome = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<(i64, crate::db::posts::SelfDeleteOutcome)> {
+        move || -> Result<(i64, db::posts::SelfDeleteOutcome)> {
             let conn = pool.get()?;
             let post = db::get_post(&conn, post_id)?
                 .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
@@ -1038,7 +1079,7 @@ pub async fn delete_own_post(
             if let Some(deleted) = deleted.as_ref() {
                 if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
                     &conn,
-                    &crate::config::CONFIG.upload_dir,
+                    &CONFIG.upload_dir,
                     deleted.pending_fs_op_id.as_deref(),
                     &deleted.paths,
                 ) {
@@ -1060,7 +1101,7 @@ pub async fn delete_own_post(
     let cookie_secure =
         crate::handlers::board::should_set_public_secure_cookie(&req_headers, secure_context);
     match result {
-        crate::db::posts::SelfDeleteOutcome::DeletedReply => {
+        db::posts::SelfDeleteOutcome::DeletedReply => {
             let jar = crate::handlers::board::forget_owned_post_with_secure(
                 jar,
                 &board_short,
@@ -1070,7 +1111,7 @@ pub async fn delete_own_post(
             let redirect_url = format!("/{board_short}/thread/{thread_id}");
             Ok((jar, Redirect::to(&redirect_url)).into_response())
         }
-        crate::db::posts::SelfDeleteOutcome::DeletedThread => {
+        db::posts::SelfDeleteOutcome::DeletedThread => {
             let jar = crate::handlers::board::forget_owned_post_with_secure(
                 jar,
                 &board_short,
@@ -1080,19 +1121,17 @@ pub async fn delete_own_post(
             let redirect_url = format!("/{board_short}/catalog");
             Ok((jar, Redirect::to(&redirect_url)).into_response())
         }
-        crate::db::posts::SelfDeleteOutcome::NotFound => {
-            Err(AppError::NotFound("Post not found.".into()))
-        }
-        crate::db::posts::SelfDeleteOutcome::WrongToken => Err(AppError::Forbidden(
+        db::posts::SelfDeleteOutcome::NotFound => Err(AppError::NotFound("Post not found.".into())),
+        db::posts::SelfDeleteOutcome::WrongToken => Err(AppError::Forbidden(
             "Delete permission for this post is no longer available in this browser.".into(),
         )),
-        crate::db::posts::SelfDeleteOutcome::WindowClosed => Err(AppError::Forbidden(
+        db::posts::SelfDeleteOutcome::WindowClosed => Err(AppError::Forbidden(
             "The 60-second self-delete window for this post has closed.".into(),
         )),
-        crate::db::posts::SelfDeleteOutcome::ThreadClosed => Err(AppError::Forbidden(
+        db::posts::SelfDeleteOutcome::ThreadClosed => Err(AppError::Forbidden(
             "Self-actions are not available after a thread is locked or archived.".into(),
         )),
-        crate::db::posts::SelfDeleteOutcome::ThreadHasReplies => Err(AppError::Forbidden(
+        db::posts::SelfDeleteOutcome::ThreadHasReplies => Err(AppError::Forbidden(
             "You can only self-delete a thread starter before anyone replies.".into(),
         )),
     }
@@ -1101,13 +1140,17 @@ pub async fn delete_own_post(
 // ─── POST /vote — cast poll vote ──────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct VoteForm {
+/// Form fields accepted by the vote request.
+pub(crate) struct VoteForm {
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
+    /// The option identifier.
     pub option_id: i64,
 }
 
-pub async fn vote_handler(
+/// Handles the vote handler request.
+pub(crate) async fn vote_handler(
     State(state): State<AppState>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
@@ -1231,51 +1274,85 @@ pub async fn vote_handler(
 // controls so the response is auth-state-independent (safe to cache).
 
 #[derive(Deserialize)]
-pub struct UpdatesQuery {
+/// Query parameters accepted by the updates request.
+pub(crate) struct UpdatesQuery {
+    /// The since.
     since: i64,
+    /// The optional refresh.
     refresh: Option<String>,
 }
 
 #[derive(serde::Serialize)]
+/// Data used by the refreshed post payload workflow.
 struct RefreshedPostPayload {
+    /// The record identifier.
     id: i64,
+    /// The HTML.
     html: String,
 }
 
 #[derive(serde::Serialize)]
+/// Data used by the thread updates payload workflow.
 struct ThreadUpdatesPayload {
+    /// The HTML.
     html: String,
+    /// The last identifier.
     last_id: i64,
+    /// The count.
     count: usize,
+    /// The refreshed posts collection.
     refreshed_posts: Vec<RefreshedPostPayload>,
+    /// The number of replies.
     reply_count: i64,
+    /// The bump time.
     bump_time: i64,
+    /// Whether the locked setting is active.
     locked: bool,
+    /// Whether the sticky setting is active.
     sticky: bool,
+    /// The boards version.
     boards_version: u64,
+    /// The nav HTML.
     nav_html: String,
 }
 
+/// Data used by the activity badge settings workflow.
 struct ActivityBadgeSettings {
+    /// Whether thread badges is enabled.
     thread_badges_enabled: bool,
+    /// Whether homepage thread badges is enabled.
     homepage_thread_badges_enabled: bool,
+    /// Whether homepage reply badges is enabled.
     homepage_reply_badges_enabled: bool,
 }
 
+/// Data used by the thread updates render workflow.
 struct ThreadUpdatesRender {
+    /// The HTML.
     html: String,
+    /// The last identifier.
     last_id: i64,
+    /// The count.
     count: usize,
+    /// The refreshed posts collection.
     refreshed_posts: Vec<RefreshedPostPayload>,
+    /// The number of replies.
     reply_count: i64,
+    /// The bump time.
     bump_time: i64,
+    /// Whether the locked setting is active.
     locked: bool,
+    /// Whether the sticky setting is active.
     sticky: bool,
+    /// The board identifier.
     board_id: i64,
+    /// The activity badges.
     activity_badges: ActivityBadgeSettings,
+    /// The optional latest thread marker.
     latest_thread_marker: Option<(i64, i64)>,
 }
 
+/// Parses refresh post IDs.
 fn parse_refresh_post_ids(raw: Option<&str>) -> Vec<i64> {
     let mut ids = raw
         .unwrap_or("")
@@ -1289,7 +1366,12 @@ fn parse_refresh_post_ids(raw: Option<&str>) -> Vec<i64> {
     ids
 }
 
-pub async fn thread_updates(
+#[expect(
+    clippy::too_many_lines,
+    reason = "access checks, update filtering, unread state, and response rendering form one polling request"
+)]
+/// Handles the thread updates request.
+pub(crate) async fn thread_updates(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
     Query(params): Query<UpdatesQuery>,
@@ -1319,12 +1401,12 @@ pub async fn thread_updates(
         }
     })
     .await
-    .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!(e)))??;
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     if !can_view {
         return Ok((
-            axum::http::StatusCode::FORBIDDEN,
-            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "application/json")],
             r#"{"error":"forbidden"}"#.to_owned(),
         )
             .into_response());
@@ -1333,18 +1415,16 @@ pub async fn thread_updates(
     let updates = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let refresh_post_ids = refresh_post_ids.clone();
-        move || -> crate::error::Result<ThreadUpdatesRender> {
+        move || -> Result<ThreadUpdatesRender> {
             let conn = pool.get()?;
 
             // Validate board + thread exist (returns 404 for bad URLs).
             let board = db::get_board_by_short(&conn, &board_short)?
-                .ok_or_else(|| crate::error::AppError::NotFound("Board not found.".into()))?;
+                .ok_or_else(|| AppError::NotFound("Board not found.".into()))?;
             let thread = db::get_thread(&conn, thread_id)?
-                .ok_or_else(|| crate::error::AppError::NotFound("Thread not found.".into()))?;
+                .ok_or_else(|| AppError::NotFound("Thread not found.".into()))?;
             if thread.board_id != board.id {
-                return Err(crate::error::AppError::NotFound(
-                    "Thread not found in this board.".into(),
-                ));
+                return Err(AppError::NotFound("Thread not found in this board.".into()));
             }
             let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
             let homepage_thread_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
@@ -1437,7 +1517,7 @@ pub async fn thread_updates(
         }
     })
     .await
-    .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!(e)))??;
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
     let jar = if updates.activity_badges.thread_badges_enabled
         || updates.activity_badges.homepage_reply_badges_enabled
     {
@@ -1464,7 +1544,7 @@ pub async fn thread_updates(
     let boards_version = crate::templates::live_boards_version();
     let boards = crate::templates::live_boards_snapshot();
     let nav_html =
-        crate::templates::board_nav_html_for_preferences(boards.as_slice(), user_preferences);
+        crate::templates::board_nav_html_for_preferences(boards.as_ref(), user_preferences);
     let payload = ThreadUpdatesPayload {
         html: updates.html,
         last_id: updates.last_id,
@@ -1479,9 +1559,9 @@ pub async fn thread_updates(
     };
 
     let mut response = (
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&payload)
-            .map_err(|error| crate::error::AppError::Internal(anyhow::anyhow!(error)))?,
+            .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?,
     )
         .into_response();
     crate::cache::insert_vary_cookie(response.headers_mut());
@@ -1490,6 +1570,7 @@ pub async fn thread_updates(
 
 #[cfg(test)]
 mod tests {
+    use anyhow::{Context as _, Result};
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
@@ -1497,6 +1578,35 @@ mod tests {
         Router,
     };
     use tower::ServiceExt as _;
+
+    macro_rules! assert {
+        ($condition:expr_2021 $(,)?) => {
+            anyhow::ensure!(
+                $condition,
+                "assertion failed: {}",
+                stringify!($condition)
+            );
+        };
+        ($condition:expr_2021, $($message:tt)+) => {
+            anyhow::ensure!(
+                $condition,
+                "assertion failed: {}: {}",
+                stringify!($condition),
+                format_args!($($message)+)
+            );
+        };
+    }
+
+    macro_rules! assert_eq {
+        ($left:expr_2021, $right:expr_2021 $(,)?) => {{
+            match (&$left, &$right) {
+                (left, right) => anyhow::ensure!(
+                    left == right,
+                    "assertion failed: `(left == right)`\n  left: `{left:?}`\n right: `{right:?}`"
+                ),
+            }
+        }};
+    }
 
     fn flac_fixture(size: usize) -> Vec<u8> {
         let mut bytes = vec![0_u8; size.max(4)];
@@ -1506,21 +1616,25 @@ mod tests {
         bytes
     }
 
-    fn seed_audio_board(state: &crate::middleware::AppState, max_audio_size: i64) {
-        let conn = state.db.get().expect("db connection");
-        let board_id =
-            crate::db::create_board(&conn, "music", "Music", "", false).expect("create board");
+    fn seed_audio_board(state: &crate::middleware::AppState, max_audio_size: i64) -> Result<()> {
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        let board_id = crate::db::create_board(&conn, "music", "Music", "", false)
+            .context("failed to create audio board")?;
         conn.execute(
             "UPDATE boards SET allow_audio = 1, max_audio_size = ?1 WHERE id = ?2",
             rusqlite::params![max_audio_size, board_id],
         )
-        .expect("enable audio board");
+        .context("failed to enable audio board")?;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn create_thread_and_reply_accept_audio_within_board_limit() {
+    async fn create_thread_and_reply_accept_audio_within_board_limit() -> Result<()> {
         let state = crate::test_support::app_state();
-        seed_audio_board(&state, 5_000);
+        seed_audio_board(&state, 5_000)?;
 
         let router = Router::new()
             .route("/{board}", post(crate::handlers::board::create_thread))
@@ -1545,18 +1659,21 @@ mod tests {
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(create_body))
-                    .expect("create request"),
+                    .context("failed to build create-thread request")?,
             )
             .await
-            .expect("create response");
+            .context("failed to receive create-thread response")?;
         assert_eq!(create_response.status(), StatusCode::SEE_OTHER);
 
         let thread_id = {
-            let conn = state.db.get().expect("db connection");
+            let conn = state
+                .db
+                .get()
+                .context("failed to get database connection")?;
             conn.query_row("SELECT id FROM threads LIMIT 1", [], |row| {
                 row.get::<_, i64>(0)
             })
-            .expect("thread id")
+            .context("failed to load thread identifier")?
         };
 
         let reply_audio = flac_fixture(4_500);
@@ -1576,18 +1693,19 @@ mod tests {
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(reply_body))
-                    .expect("reply request"),
+                    .context("failed to build reply request")?,
             )
             .await
-            .expect("reply response");
+            .context("failed to receive reply response")?;
 
         assert_eq!(reply_response.status(), StatusCode::SEE_OTHER);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn create_thread_rejects_audio_over_board_limit_with_413() {
+    async fn create_thread_rejects_audio_over_board_limit_with_413() -> Result<()> {
         let state = crate::test_support::app_state();
-        seed_audio_board(&state, 5_000);
+        seed_audio_board(&state, 5_000)?;
 
         let router = Router::new()
             .route("/{board}", post(crate::handlers::board::create_thread))
@@ -1610,21 +1728,25 @@ mod tests {
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(body))
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn post_reply_rejects_mime_mismatch_with_415_inline_error() {
+    async fn post_reply_rejects_mime_mismatch_with_415_inline_error() -> Result<()> {
         let state = crate::test_support::app_state();
         let (board_id, thread_id) = {
-            let conn = state.db.get().expect("db connection");
-            let board_id =
-                crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+            let conn = state
+                .db
+                .get()
+                .context("failed to get database connection")?;
+            let board_id = crate::db::create_board(&conn, "test", "Test", "", false)
+                .context("failed to create board")?;
             let post = crate::db::NewPost {
                 thread_id: 0,
                 board_id,
@@ -1656,7 +1778,7 @@ mod tests {
                 None,
                 None,
             )
-            .expect("create thread");
+            .context("failed to create thread")?;
             (board_id, thread_id)
         };
         assert!(board_id > 0);
@@ -1680,21 +1802,22 @@ mod tests {
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(body))
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
         let body = String::from_utf8(
             to_bytes(response.into_body(), usize::MAX)
                 .await
-                .expect("response body")
+                .context("failed to read response body")?
                 .to_vec(),
         )
-        .expect("utf8 body");
+        .context("response body was not valid UTF-8")?;
         assert!(body.contains("post-error-banner"));
         assert!(body.contains("File type not allowed"));
+        Ok(())
     }
 
     fn seed_owned_post(
@@ -1702,10 +1825,13 @@ mod tests {
         allow_editing: bool,
         allow_self_delete: bool,
         age_secs: i64,
-    ) -> (i64, i64, String) {
-        let conn = state.db.get().expect("db connection");
-        let board_id =
-            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+    ) -> Result<(i64, i64, String)> {
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        let board_id = crate::db::create_board(&conn, "test", "Test", "", false)
+            .context("failed to create board")?;
         conn.execute(
             "UPDATE boards SET allow_editing = ?1, allow_self_delete = ?2 WHERE id = ?3",
             rusqlite::params![
@@ -1714,7 +1840,7 @@ mod tests {
                 board_id
             ],
         )
-        .expect("update board toggles");
+        .context("failed to update board toggles")?;
         let post = crate::db::NewPost {
             thread_id: 0,
             board_id,
@@ -1740,13 +1866,13 @@ mod tests {
         let (thread_id, post_id, _) = crate::db::create_thread_with_optional_poll(
             &conn, board_id, None, &post, "", None, None,
         )
-        .expect("create thread");
+        .context("failed to create thread")?;
         if age_secs > 0 {
             conn.execute(
                 "UPDATE posts SET created_at = ?1 WHERE id = ?2",
                 rusqlite::params![chrono::Utc::now().timestamp() - age_secs, post_id],
             )
-            .expect("age post");
+            .context("failed to age post")?;
         }
         drop(conn);
 
@@ -1760,10 +1886,10 @@ mod tests {
         );
         let cookie = jar
             .get("rustchan_owned_posts")
-            .expect("owned posts cookie")
+            .context("owned-posts cookie was not set")?
             .value()
             .to_owned();
-        (thread_id, post_id, cookie)
+        Ok((thread_id, post_id, cookie))
     }
 
     fn set_thread_state(
@@ -1771,21 +1897,29 @@ mod tests {
         thread_id: i64,
         locked: bool,
         archived: bool,
-    ) {
-        let conn = state.db.get().expect("db connection");
+    ) -> Result<()> {
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
         conn.execute(
             "UPDATE threads SET locked = ?1, archived = ?2 WHERE id = ?3",
             rusqlite::params![i64::from(locked), i64::from(archived), thread_id],
         )
-        .expect("update thread state");
+        .context("failed to update thread state")?;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn post_reply_persists_quote_markup() {
+    async fn post_reply_persists_quote_markup() -> Result<()> {
         let state = crate::test_support::app_state();
         {
-            let conn = state.db.get().expect("db connection");
-            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+            let conn = state
+                .db
+                .get()
+                .context("failed to get database connection")?;
+            crate::db::create_board(&conn, "test", "Test", "", false)
+                .context("failed to create board")?;
         }
 
         let router = Router::new()
@@ -1808,26 +1942,29 @@ mod tests {
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(create_body))
-                    .expect("create request"),
+                    .context("failed to build create-thread request")?,
             )
             .await
-            .expect("create response");
+            .context("failed to receive create-thread response")?;
         assert_eq!(create_response.status(), StatusCode::SEE_OTHER);
 
         let (thread_id, op_post_id) = {
-            let conn = state.db.get().expect("db connection");
+            let conn = state
+                .db
+                .get()
+                .context("failed to get database connection")?;
             let thread_id = conn
                 .query_row("SELECT id FROM threads LIMIT 1", [], |row| {
                     row.get::<_, i64>(0)
                 })
-                .expect("thread id");
+                .context("failed to load thread identifier")?;
             let op_post_id = conn
                 .query_row(
                     "SELECT id FROM posts WHERE thread_id = ?1 AND is_op = 1",
                     rusqlite::params![thread_id],
                     |row| row.get::<_, i64>(0),
                 )
-                .expect("op post id");
+                .context("failed to load opening-post identifier")?;
             (thread_id, op_post_id)
         };
 
@@ -1848,31 +1985,39 @@ mod tests {
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(reply_body))
-                    .expect("reply request"),
+                    .context("failed to build reply request")?,
             )
             .await
-            .expect("reply response");
+            .context("failed to receive reply response")?;
         assert_eq!(reply_response.status(), StatusCode::SEE_OTHER);
 
         let reply_html = {
-            let conn = state.db.get().expect("db connection");
+            let conn = state
+                .db
+                .get()
+                .context("failed to get database connection")?;
             conn.query_row(
                 "SELECT body_html FROM posts WHERE thread_id = ?1 AND is_op = 0 ORDER BY id DESC LIMIT 1",
                 rusqlite::params![thread_id],
                 |row| row.get::<_, String>(0),
             )
-            .expect("reply body html")
+            .context("failed to load reply body HTML")?
         };
         assert!(reply_html.contains("class=\"quotelink\""));
         assert!(reply_html.contains(&format!("data-pid=\"{op_post_id}\"")));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn xhr_reply_returns_explicit_redirect_header() {
+    async fn xhr_reply_returns_explicit_redirect_header() -> Result<()> {
         let state = crate::test_support::app_state();
         {
-            let conn = state.db.get().expect("db connection");
-            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+            let conn = state
+                .db
+                .get()
+                .context("failed to get database connection")?;
+            crate::db::create_board(&conn, "test", "Test", "", false)
+                .context("failed to create board")?;
         }
 
         let router = Router::new()
@@ -1895,18 +2040,21 @@ mod tests {
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(create_body))
-                    .expect("create request"),
+                    .context("failed to build create-thread request")?,
             )
             .await
-            .expect("create response");
+            .context("failed to receive create-thread response")?;
         assert_eq!(create_response.status(), StatusCode::SEE_OTHER);
 
         let thread_id = {
-            let conn = state.db.get().expect("db connection");
+            let conn = state
+                .db
+                .get()
+                .context("failed to get database connection")?;
             conn.query_row("SELECT id FROM threads LIMIT 1", [], |row| {
                 row.get::<_, i64>(0)
             })
-            .expect("thread id")
+            .context("failed to load thread identifier")?
         };
 
         let (reply_boundary, reply_body) = crate::test_support::multipart_body(
@@ -1926,10 +2074,10 @@ mod tests {
                     .header("X-Requested-With", "XMLHttpRequest")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(reply_body))
-                    .expect("reply request"),
+                    .context("failed to build reply request")?,
             )
             .await
-            .expect("reply response");
+            .context("failed to receive reply response")?;
 
         assert_eq!(reply_response.status(), StatusCode::NO_CONTENT);
 
@@ -1937,30 +2085,38 @@ mod tests {
             .headers()
             .get("x-rustchan-redirect")
             .and_then(|value| value.to_str().ok())
-            .expect("xhr redirect header");
+            .context("XHR redirect header was missing or invalid")?;
 
         let reply_post_id = {
-            let conn = state.db.get().expect("db connection");
+            let conn = state
+                .db
+                .get()
+                .context("failed to get database connection")?;
             conn.query_row(
                 "SELECT id FROM posts WHERE thread_id = ?1 AND is_op = 0 ORDER BY id DESC LIMIT 1",
                 rusqlite::params![thread_id],
                 |row| row.get::<_, i64>(0),
             )
-            .expect("reply post id")
+            .context("failed to load reply-post identifier")?
         };
 
         assert_eq!(
             redirect,
             format!("/test/thread/{thread_id}#p{reply_post_id}")
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn xhr_reply_validation_failure_returns_json_error() {
+    async fn xhr_reply_validation_failure_returns_json_error() -> Result<()> {
         let state = crate::test_support::app_state();
         {
-            let conn = state.db.get().expect("db connection");
-            crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+            let conn = state
+                .db
+                .get()
+                .context("failed to get database connection")?;
+            crate::db::create_board(&conn, "test", "Test", "", false)
+                .context("failed to create board")?;
         }
 
         let router = Router::new()
@@ -1983,18 +2139,21 @@ mod tests {
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(create_body))
-                    .expect("create request"),
+                    .context("failed to build create-thread request")?,
             )
             .await
-            .expect("create response");
+            .context("failed to receive create-thread response")?;
         assert_eq!(create_response.status(), StatusCode::SEE_OTHER);
 
         let thread_id = {
-            let conn = state.db.get().expect("db connection");
+            let conn = state
+                .db
+                .get()
+                .context("failed to get database connection")?;
             conn.query_row("SELECT id FROM threads LIMIT 1", [], |row| {
                 row.get::<_, i64>(0)
             })
-            .expect("thread id")
+            .context("failed to load thread identifier")?
         };
 
         let (reply_boundary, reply_body) =
@@ -2012,10 +2171,10 @@ mod tests {
                     .header("X-Requested-With", "XMLHttpRequest")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(reply_body))
-                    .expect("reply request"),
+                    .context("failed to build reply request")?,
             )
             .await
-            .expect("reply response");
+            .context("failed to receive reply response")?;
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
@@ -2036,25 +2195,29 @@ mod tests {
         let body = String::from_utf8(
             to_bytes(response.into_body(), usize::MAX)
                 .await
-                .expect("response body")
+                .context("failed to read response body")?
                 .to_vec(),
         )
-        .expect("utf8 body");
+        .context("response body was not valid UTF-8")?;
         assert!(body.contains("\"error\""));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn reply_cooldown_failure_rerenders_thread_inline() {
+    async fn reply_cooldown_failure_rerenders_thread_inline() -> Result<()> {
         let state = crate::test_support::app_state();
         let thread_id = {
-            let conn = state.db.get().expect("db connection");
-            let board_id =
-                crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+            let conn = state
+                .db
+                .get()
+                .context("failed to get database connection")?;
+            let board_id = crate::db::create_board(&conn, "test", "Test", "", false)
+                .context("failed to create board")?;
             conn.execute(
                 "UPDATE boards SET post_cooldown_secs = 60 WHERE short_name = 'test'",
                 [],
             )
-            .expect("enable cooldown");
+            .context("failed to enable cooldown")?;
 
             let ip_hash =
                 crate::utils::crypto::hash_ip("127.0.0.1", &crate::config::CONFIG.cookie_secret);
@@ -2089,7 +2252,7 @@ mod tests {
                 None,
                 None,
             )
-            .expect("create thread");
+            .context("failed to create thread")?;
             thread_id
         };
 
@@ -2113,10 +2276,10 @@ mod tests {
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(reply_body))
-                    .expect("reply request"),
+                    .context("failed to build reply request")?,
             )
             .await
-            .expect("reply response");
+            .context("failed to receive reply response")?;
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert!(
@@ -2127,29 +2290,33 @@ mod tests {
         let body = String::from_utf8(
             to_bytes(response.into_body(), usize::MAX)
                 .await
-                .expect("response body")
+                .context("failed to read response body")?
                 .to_vec(),
         )
-        .expect("utf8 body");
+        .context("response body was not valid UTF-8")?;
         assert!(body.contains("Please wait"));
         assert!(body.contains("before posting again."));
 
         let reply_count = {
-            let conn = state.db.get().expect("db connection");
+            let conn = state
+                .db
+                .get()
+                .context("failed to get database connection")?;
             conn.query_row(
                 "SELECT COUNT(*) FROM posts WHERE thread_id = ?1 AND is_op = 0",
                 rusqlite::params![thread_id],
                 |row| row.get::<_, i64>(0),
             )
-            .expect("reply count")
+            .context("failed to count replies")?
         };
         assert_eq!(reply_count, 0);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn edit_succeeds_with_owned_cookie_inside_grace_window() {
+    async fn edit_succeeds_with_owned_cookie_inside_grace_window() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0)?;
         let router = Router::new()
             .route("/{board}/post/{id}/edit", post(super::edit_post_post))
             .with_state(state.clone());
@@ -2166,10 +2333,10 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::from("body=edited+body&_csrf=csrf123"))
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(
@@ -2180,21 +2347,25 @@ mod tests {
             Some(format!("/test/thread/{thread_id}#p{post_id}").as_str())
         );
 
-        let conn = state.db.get().expect("db connection");
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
         let edited_body: String = conn
             .query_row(
                 "SELECT body FROM posts WHERE id = ?1",
                 rusqlite::params![post_id],
                 |row| row.get(0),
             )
-            .expect("edited body");
+            .context("failed to load edited body")?;
         assert_eq!(edited_body, "edited body");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn edit_get_renders_usable_form_for_owned_post() {
+    async fn edit_get_renders_usable_form_for_owned_post() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0)?;
         let router = Router::new()
             .route("/{board}/post/{id}/edit", get(super::edit_post_get))
             .with_state(state);
@@ -2210,10 +2381,10 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -2226,10 +2397,10 @@ mod tests {
         let body = String::from_utf8(
             to_bytes(response.into_body(), usize::MAX)
                 .await
-                .expect("response body")
+                .context("failed to read response body")?
                 .to_vec(),
         )
-        .expect("utf8 body");
+        .context("response body was not valid UTF-8")?;
         assert!(body.contains(&format!(r#"action="/test/post/{post_id}/edit""#)));
         assert!(body.contains(r#"name="_csrf""#));
         assert!(body.contains(
@@ -2237,12 +2408,13 @@ mod tests {
         ));
         assert!(body.contains("available for up to 60 seconds after posting"));
         assert!(body.contains(&format!(r#"href="/test/thread/{thread_id}#p{post_id}""#)));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn edit_get_fails_without_owned_cookie() {
+    async fn edit_get_fails_without_owned_cookie() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (_thread_id, post_id, _owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let (_thread_id, post_id, _owned_cookie) = seed_owned_post(&state, true, true, 0)?;
         let router = Router::new()
             .route("/{board}/post/{id}/edit", get(super::edit_post_get))
             .with_state(state);
@@ -2255,18 +2427,19 @@ mod tests {
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn edit_fails_without_owned_cookie() {
+    async fn edit_fails_without_owned_cookie() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (_thread_id, post_id, _owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let (_thread_id, post_id, _owned_cookie) = seed_owned_post(&state, true, true, 0)?;
         let router = Router::new()
             .route("/{board}/post/{id}/edit", post(super::edit_post_post))
             .with_state(state);
@@ -2280,23 +2453,24 @@ mod tests {
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from("body=edited+body&_csrf=csrf123"))
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn edit_get_fails_after_expiry() {
+    async fn edit_get_fails_after_expiry() -> Result<()> {
         let state = crate::test_support::app_state();
         let (_thread_id, post_id, owned_cookie) = seed_owned_post(
             &state,
             true,
             true,
             crate::handlers::board::SELF_DELETE_WINDOW_SECS + 1,
-        );
+        )?;
         let router = Router::new()
             .route("/{board}/post/{id}/edit", get(super::edit_post_get))
             .with_state(state);
@@ -2312,23 +2486,24 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn edit_fails_after_grace_window() {
+    async fn edit_fails_after_grace_window() -> Result<()> {
         let state = crate::test_support::app_state();
         let (_thread_id, post_id, owned_cookie) = seed_owned_post(
             &state,
             true,
             true,
             crate::handlers::board::SELF_DELETE_WINDOW_SECS + 1,
-        );
+        )?;
         let router = Router::new()
             .route("/{board}/post/{id}/edit", post(super::edit_post_post))
             .with_state(state);
@@ -2346,10 +2521,10 @@ mod tests {
                     .header("X-Requested-With", "XMLHttpRequest")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from("body=edited+body&_csrf=csrf123"))
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -2359,12 +2534,13 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some(StatusCode::FORBIDDEN.as_str())
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn edit_get_fails_when_board_editing_is_disabled() {
+    async fn edit_get_fails_when_board_editing_is_disabled() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (_thread_id, post_id, owned_cookie) = seed_owned_post(&state, false, true, 0);
+        let (_thread_id, post_id, owned_cookie) = seed_owned_post(&state, false, true, 0)?;
         let router = Router::new()
             .route("/{board}/post/{id}/edit", get(super::edit_post_get))
             .with_state(state);
@@ -2380,18 +2556,19 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn edit_fails_when_board_editing_is_disabled() {
+    async fn edit_fails_when_board_editing_is_disabled() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (_thread_id, post_id, owned_cookie) = seed_owned_post(&state, false, true, 0);
+        let (_thread_id, post_id, owned_cookie) = seed_owned_post(&state, false, true, 0)?;
         let router = Router::new()
             .route("/{board}/post/{id}/edit", post(super::edit_post_post))
             .with_state(state);
@@ -2409,10 +2586,10 @@ mod tests {
                     .header("X-Requested-With", "XMLHttpRequest")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from("body=edited+body&_csrf=csrf123"))
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -2422,13 +2599,14 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some(StatusCode::FORBIDDEN.as_str())
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn edit_get_fails_when_thread_is_locked() {
+    async fn edit_get_fails_when_thread_is_locked() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
-        set_thread_state(&state, thread_id, true, false);
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0)?;
+        set_thread_state(&state, thread_id, true, false)?;
         let router = Router::new()
             .route("/{board}/post/{id}/edit", get(super::edit_post_get))
             .with_state(state);
@@ -2444,19 +2622,20 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn edit_fails_when_thread_is_archived() {
+    async fn edit_fails_when_thread_is_archived() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
-        set_thread_state(&state, thread_id, false, true);
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0)?;
+        set_thread_state(&state, thread_id, false, true)?;
         let router = Router::new()
             .route("/{board}/post/{id}/edit", post(super::edit_post_post))
             .with_state(state);
@@ -2474,10 +2653,10 @@ mod tests {
                     .header("X-Requested-With", "XMLHttpRequest")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from("body=edited+body&_csrf=csrf123"))
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -2487,12 +2666,13 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some(StatusCode::FORBIDDEN.as_str())
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn edit_and_delete_toggles_are_independent() {
+    async fn edit_and_delete_toggles_are_independent() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, false, 0);
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, false, 0)?;
         let router = Router::new()
             .route("/{board}/post/{id}/edit", post(super::edit_post_post))
             .route("/{board}/post/{id}/delete", post(super::delete_own_post))
@@ -2511,10 +2691,10 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::from("body=edited+body&_csrf=csrf123"))
-                    .expect("request"),
+                    .context("failed to build edit request")?,
             )
             .await
-            .expect("edit response");
+            .context("failed to receive edit response")?;
         assert_eq!(edit_response.status(), StatusCode::SEE_OTHER);
 
         let delete_response = router
@@ -2528,27 +2708,31 @@ mod tests {
                         format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
                     )
                     .body(Body::from("_csrf=csrf123"))
-                    .expect("request"),
+                    .context("failed to build delete request")?,
             )
             .await
-            .expect("delete response");
+            .context("failed to receive delete response")?;
         assert_eq!(delete_response.status(), StatusCode::FORBIDDEN);
 
-        let conn = state.db.get().expect("db connection");
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
         let remaining_posts: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
                 rusqlite::params![thread_id],
                 |row| row.get(0),
             )
-            .expect("remaining posts");
+            .context("failed to count remaining posts")?;
         assert_eq!(remaining_posts, 1);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn delete_get_renders_usable_confirmation_form_for_owned_post() {
+    async fn delete_get_renders_usable_confirmation_form_for_owned_post() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0)?;
         let router = Router::new()
             .route("/{board}/post/{id}/delete", get(super::delete_post_get))
             .with_state(state);
@@ -2564,10 +2748,10 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -2580,21 +2764,22 @@ mod tests {
         let body = String::from_utf8(
             to_bytes(response.into_body(), usize::MAX)
                 .await
-                .expect("response body")
+                .context("failed to read response body")?
                 .to_vec(),
         )
-        .expect("utf8 body");
+        .context("response body was not valid UTF-8")?;
         assert!(body.contains(&format!(r#"action="/test/post/{post_id}/delete""#)));
         assert!(body.contains(r#"name="_csrf""#));
         assert!(body.contains("delete this post"));
         assert!(body.contains("available for up to 60 seconds after posting"));
         assert!(body.contains(&format!(r#"href="/test/thread/{thread_id}#p{post_id}""#)));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn delete_op_succeeds_with_owned_cookie_inside_grace_window() {
+    async fn delete_op_succeeds_with_owned_cookie_inside_grace_window() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0)?;
         let router = Router::new()
             .route("/{board}/post/{id}/delete", post(super::delete_own_post))
             .with_state(state.clone());
@@ -2610,10 +2795,10 @@ mod tests {
                         format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
                     )
                     .body(Body::from("_csrf=csrf123"))
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(
@@ -2624,21 +2809,25 @@ mod tests {
             Some("/test/catalog")
         );
 
-        let conn = state.db.get().expect("db connection");
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
         let remaining_posts: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
                 rusqlite::params![thread_id],
                 |row| row.get(0),
             )
-            .expect("remaining posts");
+            .context("failed to count remaining posts")?;
         assert_eq!(remaining_posts, 0);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn delete_fails_without_owned_cookie() {
+    async fn delete_fails_without_owned_cookie() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (_thread_id, post_id, _owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let (_thread_id, post_id, _owned_cookie) = seed_owned_post(&state, true, true, 0)?;
         let router = Router::new()
             .route("/{board}/post/{id}/delete", post(super::delete_own_post))
             .with_state(state);
@@ -2651,23 +2840,24 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .body(Body::from("_csrf=csrf123"))
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn delete_fails_after_grace_window() {
+    async fn delete_fails_after_grace_window() -> Result<()> {
         let state = crate::test_support::app_state();
         let (_thread_id, post_id, owned_cookie) = seed_owned_post(
             &state,
             true,
             true,
             crate::handlers::board::SELF_DELETE_WINDOW_SECS + 1,
-        );
+        )?;
         let router = Router::new()
             .route("/{board}/post/{id}/delete", post(super::delete_own_post))
             .with_state(state);
@@ -2683,18 +2873,19 @@ mod tests {
                         format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
                     )
                     .body(Body::from("_csrf=csrf123"))
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn delete_get_fails_without_owned_cookie() {
+    async fn delete_get_fails_without_owned_cookie() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (_thread_id, post_id, _owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let (_thread_id, post_id, _owned_cookie) = seed_owned_post(&state, true, true, 0)?;
         let router = Router::new()
             .route("/{board}/post/{id}/delete", get(super::delete_post_get))
             .with_state(state);
@@ -2707,23 +2898,24 @@ mod tests {
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn delete_get_fails_after_expiry() {
+    async fn delete_get_fails_after_expiry() -> Result<()> {
         let state = crate::test_support::app_state();
         let (_thread_id, post_id, owned_cookie) = seed_owned_post(
             &state,
             true,
             true,
             crate::handlers::board::SELF_DELETE_WINDOW_SECS + 1,
-        );
+        )?;
         let router = Router::new()
             .route("/{board}/post/{id}/delete", get(super::delete_post_get))
             .with_state(state);
@@ -2739,18 +2931,19 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn delete_get_fails_when_board_delete_is_disabled() {
+    async fn delete_get_fails_when_board_delete_is_disabled() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (_thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, false, 0);
+        let (_thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, false, 0)?;
         let router = Router::new()
             .route("/{board}/post/{id}/delete", get(super::delete_post_get))
             .with_state(state);
@@ -2766,19 +2959,20 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn delete_get_fails_when_thread_is_locked() {
+    async fn delete_get_fails_when_thread_is_locked() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
-        set_thread_state(&state, thread_id, true, false);
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0)?;
+        set_thread_state(&state, thread_id, true, false)?;
         let router = Router::new()
             .route("/{board}/post/{id}/delete", get(super::delete_post_get))
             .with_state(state);
@@ -2794,19 +2988,20 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn delete_fails_when_thread_is_archived() {
+    async fn delete_fails_when_thread_is_archived() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
-        set_thread_state(&state, thread_id, false, true);
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0)?;
+        set_thread_state(&state, thread_id, false, true)?;
         let router = Router::new()
             .route("/{board}/post/{id}/delete", post(super::delete_own_post))
             .with_state(state.clone());
@@ -2822,27 +3017,31 @@ mod tests {
                         format!("csrf_token=csrf123; rustchan_owned_posts={owned_cookie}"),
                     )
                     .body(Body::from("_csrf=csrf123"))
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let conn = state.db.get().expect("db connection");
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
         let remaining_posts: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
                 rusqlite::params![thread_id],
                 |row| row.get(0),
             )
-            .expect("remaining posts");
+            .context("failed to count remaining posts")?;
         assert_eq!(remaining_posts, 1);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn onion_host_thread_page_keeps_self_action_routes_internal() {
+    async fn onion_host_thread_page_keeps_self_action_routes_internal() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0)?;
         let router = Router::new()
             .route("/{board}/thread/{id}", get(super::view_thread))
             .with_state(state);
@@ -2859,20 +3058,20 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = String::from_utf8(
             to_bytes(response.into_body(), usize::MAX)
                 .await
-                .expect("response body")
+                .context("failed to read response body")?
                 .to_vec(),
         )
-        .expect("utf8 body");
+        .context("response body was not valid UTF-8")?;
 
         assert!(body.contains(&format!(r#"href="/test/post/{post_id}/edit""#)));
         assert!(body.contains(r#"id="edit-modal-form""#));
@@ -2887,12 +3086,13 @@ mod tests {
             !body.contains(r#"fetch("http"#),
             "inline feature JS should not hardcode an absolute host"
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn onion_host_edit_xhr_redirect_stays_relative() {
+    async fn onion_host_edit_xhr_redirect_stays_relative() -> Result<()> {
         let state = crate::test_support::app_state();
-        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0);
+        let (thread_id, post_id, owned_cookie) = seed_owned_post(&state, true, true, 0)?;
         let router = Router::new()
             .route("/{board}/post/{id}/edit", post(super::edit_post_post))
             .with_state(state);
@@ -2911,10 +3111,10 @@ mod tests {
                     .header("X-Requested-With", "XMLHttpRequest")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from("body=edited+body&_csrf=csrf123"))
-                    .expect("request"),
+                    .context("failed to build request")?,
             )
             .await
-            .expect("response");
+            .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(
@@ -2924,5 +3124,6 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some(format!("/test/thread/{thread_id}#p{post_id}").as_str())
         );
+        Ok(())
     }
 }

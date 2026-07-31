@@ -1,4 +1,9 @@
-// main.rs — Single-binary entry point.
+#![expect(
+    unused_crate_dependencies,
+    reason = "Cargo exposes the companion chan library and the transitive rustls-webpki security floor to this standalone binary target"
+)]
+
+//! Single-binary `RustChan` entry point.
 //
 // Run modes (via subcommands):
 //   rustchan-cli                               → start the web server (default)
@@ -23,36 +28,128 @@
 // ChanNet / RustWave gateway lives in chan_net/mod.rs (second listener, port 7070).
 
 use clap::Parser as _;
-use std::io::Write as _;
+use std::io::{self, Write as _};
 
-mod banner;
-mod cache;
-mod captcha;
-mod chan_net;
-mod config;
-mod db;
-mod detect;
-mod error;
-mod favicon;
-mod handlers;
-mod logging;
-mod media;
-mod middleware;
-mod models;
-mod pending_fs;
-mod server;
-mod templates;
+/// Banner validation, storage, selection, and rendering.
+pub mod banner;
+/// HTTP cache-control header helpers.
+pub mod cache;
+/// CAPTCHA challenge generation and validation.
+pub mod captcha;
+/// `ChanNet` federation and gateway endpoints.
+pub mod chan_net;
+/// Runtime configuration and persistent settings.
+pub mod config;
+/// SQLite persistence operations and models.
+pub mod db;
+/// Optional external-tool and in-process Tor detection.
+pub mod detect;
+/// Application error types and HTTP error responses.
+pub mod error;
+/// Favicon validation and storage.
+pub mod favicon;
+/// Browser-facing and administration HTTP handlers.
+pub mod handlers;
+/// Structured application, dependency, and console logging.
+pub mod logging;
+/// Uploaded-media inspection and conversion.
+pub mod media;
+/// Request middleware and shared application state.
+pub mod middleware;
+/// Shared application data models.
+pub mod models;
+/// Durable filesystem-operation journal and recovery.
+pub mod pending_fs;
+/// HTTP runtime, terminal console, and administration CLI.
+pub mod server;
+/// Server-rendered HTML templates.
+pub mod templates;
 #[cfg(test)]
-mod test_fixtures;
+/// Reusable fixtures for unit tests.
+pub mod test_fixtures;
 #[cfg(test)]
-mod test_support;
-mod theme;
-mod theme_builder;
-pub(crate) mod tls;
-mod utils;
-mod workers;
+/// Shared state and request builders for crate-local tests.
+pub(crate) mod test_support;
+/// Built-in theme metadata.
+pub mod theme;
+/// Custom theme configuration and CSS generation.
+pub mod theme_builder;
+/// TLS certificate loading and acceptor construction used by the server.
+pub mod tls;
+/// Cryptographic, filesystem, sanitization, and redirect helpers.
+pub mod utils;
+/// Background media and maintenance job processing.
+pub mod workers;
 
 use config::{generate_settings_file_if_missing, CONFIG};
+
+/// Relaunches a no-argument, non-interactive Linux or Windows invocation in a
+/// terminal when a supported terminal host is available.
+///
+/// # Errors
+///
+/// Returns an error when the current executable path cannot be resolved.
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "windows")),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the shared cross-platform call site is fallible only on Linux and Windows"
+    )
+)]
+fn relaunch_in_terminal_if_needed() -> anyhow::Result<bool> {
+    use std::io::IsTerminal as _;
+
+    let launched_without_arguments = std::env::args_os().nth(1).is_none();
+    if !launched_without_arguments
+        || io::stdout().is_terminal()
+        || std::env::var("RUSTCHAN_SPAWNED").is_ok()
+    {
+        return Ok(false);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let exe = std::env::current_exe()?;
+        let exe_str = exe.to_string_lossy();
+        // Command::new takes the binary name alone; the executable and child
+        // environment must remain separate exec arguments.
+        for terminal in [
+            "xterm",
+            "gnome-terminal",
+            "konsole",
+            "xfce4-terminal",
+            "x-terminal-emulator",
+        ] {
+            if std::process::Command::new(terminal)
+                .arg("-e")
+                .arg(exe_str.as_ref())
+                .env("RUSTCHAN_SPAWNED", "1")
+                .spawn()
+                .is_ok()
+            {
+                return Ok(true);
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let exe = std::env::current_exe()?;
+        // `start` creates a console; the empty argument is its required
+        // window-title slot when the executable path is quoted.
+        if std::process::Command::new("cmd.exe")
+            .args(["/C", "start", ""])
+            .arg(exe)
+            .env("RUSTCHAN_SPAWNED", "1")
+            .spawn()
+            .is_ok()
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 //
@@ -67,82 +164,37 @@ fn main() -> anyhow::Result<()> {
     // generation, or CONFIG access. Clap handles --help and --version here and
     // exits successfully without mutating runtime state.
     let cli = server::cli::Cli::parse();
-    crate::config::configure_data_dir(cli.data_dir.as_deref())?;
+    config::configure_data_dir(cli.data_dir.as_deref())?;
 
     // ── Double-click / no-TTY guard ───────────────────────────────────────────
     // When launched from a file manager (Linux) or Explorer (Windows), stdout
     // is not a TTY. Re-attach to a terminal so the banner, first-run wizard,
     // and keyboard console are visible to the user.
-    //
-    // RUSTCHAN_SPAWNED prevents the child from looping back here.
-    {
-        use std::io::IsTerminal as _;
-        let launched_without_arguments = std::env::args_os().nth(1).is_none();
-        if launched_without_arguments
-            && !std::io::stdout().is_terminal()
-            && std::env::var("RUSTCHAN_SPAWNED").is_err()
-        {
-            #[cfg(target_os = "linux")]
-            {
-                let exe = std::env::current_exe()?;
-                let exe_str = exe.to_string_lossy();
-                // Try terminal emulators in order of likelihood.
-                // CRITICAL: Command::new takes the *binary name only*.
-                // Passing "env RUSTCHAN_SPAWNED=1 /path/to/bin" as one string
-                // to Command::new is the execve bug — the Linux kernel does not
-                // tokenise it; it looks for a file literally named that string.
-                for term in [
-                    "xterm",
-                    "gnome-terminal",
-                    "konsole",
-                    "xfce4-terminal",
-                    "x-terminal-emulator",
-                ] {
-                    if std::process::Command::new(term) // ← binary name only
-                        .arg("-e")
-                        .arg(exe_str.as_ref()) // ← separate arg
-                        .env("RUSTCHAN_SPAWNED", "1") // ← env set on child, not in arg string
-                        .spawn()
-                        .is_ok()
-                    {
-                        return Ok(());
-                    }
-                }
-                // No terminal emulator found — fall through and run headless.
-            }
-            #[cfg(target_os = "windows")]
-            {
-                // On Windows, AllocConsole() attaches a new console window
-                // in-process. No re-exec needed; execution continues below
-                // with stdout now connected to the new window.
-                unsafe {
-                    windows_sys::Win32::System::Console::AllocConsole();
-                }
-            }
-        }
+    if relaunch_in_terminal_if_needed()? {
+        return Ok(());
     }
 
     // Create the runtime data directories before init_logging so the rolling
     // file appender can open the directory immediately on startup.
-    let data_dir = crate::config::data_dir();
+    let data_dir = config::data_dir();
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
-        let _ = writeln!(
-            std::io::stderr().lock(),
+        drop(writeln!(
+            io::stderr().lock(),
             "Warning: could not create rustchan-data directory: {e}"
-        );
+        ));
     }
-    if let Err(e) = crate::config::migrate_runtime_layout_if_needed() {
-        let _ = writeln!(
-            std::io::stderr().lock(),
+    if let Err(e) = config::migrate_runtime_layout_if_needed() {
+        drop(writeln!(
+            io::stderr().lock(),
             "Warning: could not migrate runtime layout: {e}"
-        );
+        ));
     }
-    let log_dir = crate::config::logs_dir();
+    let log_dir = config::logs_dir();
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
-        let _ = writeln!(
-            std::io::stderr().lock(),
+        drop(writeln!(
+            io::stderr().lock(),
             "Warning: could not create rustchan-data/logs directory: {e}"
-        );
+        ));
     }
     generate_settings_file_if_missing();
 
@@ -155,16 +207,17 @@ fn main() -> anyhow::Result<()> {
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             // cleanup() is a no-op if the TUI was never started or already cleaned up.
-            crate::server::cleanup();
+            server::cleanup();
             default_hook(info);
         }));
     }
 
+    let dependency_log_path = logging::dependency_log_path(&log_dir);
     tracing::info!(
         target: "startup",
         version = env!("CARGO_PKG_VERSION"),
         log_dir = %log_dir.display(),
-        dependency_log = %crate::logging::dependency_log_path(&log_dir).display(),
+        dependency_log = %dependency_log_path.display(),
         "rustchan starting",
     );
 
@@ -182,9 +235,7 @@ fn main() -> anyhow::Result<()> {
     rt.block_on(async move {
         // Install the ring crypto provider once before anything else accesses
         // rustls. ok() = harmless if already installed (tests, re-runs).
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
+        drop(rustls::crypto::ring::default_provider().install_default());
 
         match cli.command {
             // Default (no subcommand) or explicit `serve`: start the server.
@@ -192,7 +243,7 @@ fn main() -> anyhow::Result<()> {
                 let result = server::run_server(cli.port, cli.chan_net).await;
                 // Restore terminal unconditionally after the server exits
                 // (graceful shutdown, SIGTERM, etc.).  cleanup() is idempotent.
-                crate::server::cleanup();
+                server::cleanup();
                 result
             }
 

@@ -1,4 +1,4 @@
-// chan_net/status.rs — ChanNet health check handler.
+//! `ChanNet` health-check handler.
 //
 // GET /chan/status returns service name, version, board count, and post count
 // as JSON. Used by operators and RustWave to verify connectivity.
@@ -7,6 +7,12 @@ use crate::{error::AppError, middleware::AppState};
 use axum::{extract::State, response::IntoResponse, Json};
 use serde_json::json;
 
+/// Returns `ChanNet` service health and database object counts.
+///
+/// # Errors
+///
+/// Returns a [`super::ChanError`] when the database connection, count query,
+/// or blocking task fails.
 pub async fn chan_status(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, super::ChanError> {

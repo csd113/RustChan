@@ -2,28 +2,43 @@ use anyhow::{Context as _, Result};
 use rusqlite::params;
 use std::path::{Component, Path, PathBuf};
 
+/// Persisted explanation attached to posts whose originals were pruned.
 const PRUNED_REASON: &str = "original file removed by active media size pruning";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Aggregate result of one active-media pruning pass.
 pub struct PruneReport {
+    /// Eligible media bytes present before pruning.
     pub total_before_bytes: u64,
+    /// Eligible media bytes remaining after pruning.
     pub total_after_bytes: u64,
+    /// Number of original files successfully removed.
     pub removed_files: u64,
+    /// Total bytes successfully removed.
     pub removed_bytes: u64,
+    /// Number of candidates skipped after a filesystem failure.
     pub skipped_files: u64,
 }
 
 #[derive(Debug, Clone)]
+/// Active post and its original files considered by one pruning pass.
 struct Candidate {
+    /// Post that owns the eligible originals.
     post_id: i64,
+    /// Timestamp used for oldest-first ordering.
     created_at: i64,
+    /// Validated original-media paths belonging to the post.
     paths: Vec<CandidatePath>,
+    /// Total bytes across all eligible original paths.
     size: u64,
 }
 
 #[derive(Debug, Clone)]
+/// One validated upload-root-relative original-media path.
 struct CandidatePath {
+    /// Safe relative path stored in the database.
     path: String,
+    /// Current on-disk size in bytes.
     size: u64,
 }
 
@@ -75,7 +90,8 @@ pub fn prune_to_limit(
         if remaining <= max_bytes {
             break;
         }
-        match delete_candidate_files(upload_root, &candidate.paths) {
+        let deletion_result = delete_candidate_files(upload_root, &candidate.paths);
+        match deletion_result {
             Ok(()) => {
                 crate::db::set_post_media_processing_state(
                     conn,
@@ -115,6 +131,7 @@ pub fn prune_to_limit(
     Ok(report)
 }
 
+/// Load and validate all active original-media candidates.
 fn load_candidates(conn: &rusqlite::Connection, upload_root: &Path) -> Result<Vec<Candidate>> {
     let mut stmt = conn.prepare_cached(
         "SELECT p.id, p.created_at, p.file_path, p.file_size, b.short_name,
@@ -177,12 +194,17 @@ fn load_candidates(conn: &rusqlite::Connection, upload_root: &Path) -> Result<Ve
     Ok(candidates)
 }
 
+/// Result of validating one optional original-media path.
 enum CandidatePathLoad {
+    /// Path resolved to a safe file with a known size.
     Loaded(CandidatePath),
+    /// File was absent and its stored size was not usable.
     MissingSize,
+    /// Path failed structural or filesystem safety validation.
     Unsafe,
 }
 
+/// Validate one database media-path field into a pruning candidate.
 fn candidate_path(
     upload_root: &Path,
     post_id: i64,
@@ -232,6 +254,7 @@ fn candidate_path(
     }
 }
 
+/// Validate a post original as a board-owned, non-thumbnail relative path.
 fn validate_post_original_path(path: &str, board_short: &str) -> Option<PathBuf> {
     let rel = Path::new(path);
     if path.trim().is_empty() || rel.is_absolute() || path.contains('\\') {
@@ -257,6 +280,7 @@ fn validate_post_original_path(path: &str, board_short: &str) -> Option<PathBuf>
     Some(rel.to_path_buf())
 }
 
+/// Return the size of a safe regular file below `upload_root`.
 fn safe_file_size(upload_root: &Path, relative_path: &Path) -> Result<Option<u64>> {
     let canonical_root = upload_root
         .canonicalize()
@@ -283,6 +307,7 @@ fn safe_file_size(upload_root: &Path, relative_path: &Path) -> Result<Option<u64
     Ok(Some(metadata.len()))
 }
 
+/// Reject any symlink or unsafe component between the root and media file.
 fn reject_symlink_components(canonical_root: &Path, relative_path: &Path) -> Result<()> {
     let mut current = canonical_root.to_path_buf();
     for component in relative_path.components() {
@@ -305,6 +330,7 @@ fn reject_symlink_components(canonical_root: &Path, relative_path: &Path) -> Res
     Ok(())
 }
 
+/// Delete every still-safe original belonging to one pruning candidate.
 fn delete_candidate_files(upload_root: &Path, paths: &[CandidatePath]) -> Result<()> {
     for candidate_path in paths {
         let relative_path = Path::new(&candidate_path.path);
@@ -323,6 +349,7 @@ fn delete_candidate_files(upload_root: &Path, paths: &[CandidatePath]) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     struct MediaPostFixture<'a> {
         board_id: i64,
@@ -334,7 +361,10 @@ mod tests {
         file_size: i64,
     }
 
-    fn insert_post_with_media(conn: &rusqlite::Connection, fixture: &MediaPostFixture<'_>) {
+    fn insert_post_with_media(
+        conn: &rusqlite::Connection,
+        fixture: &MediaPostFixture<'_>,
+    ) -> Result<()> {
         conn.execute(
             "INSERT INTO posts (
                 id, thread_id, board_id, name, body, body_html, file_path,
@@ -354,24 +384,21 @@ mod tests {
                 format!("token-{}", fixture.post_id),
                 fixture.created_at,
             ],
-        )
-        .expect("insert post with media");
+        )?;
+        Ok(())
     }
 
-    fn test_db_with_board() -> (crate::db::DbPool, i64, i64) {
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("conn");
-        let board_id =
-            crate::db::create_board(&conn, "b", "Random", "", false).expect("create board");
-        let thread_id: i64 = conn
-            .query_row(
-                "INSERT INTO threads (board_id, subject) VALUES (?1, 'thread') RETURNING id",
-                [board_id],
-                |row| row.get(0),
-            )
-            .expect("create thread");
+    fn test_db_with_board() -> Result<(crate::db::DbPool, i64, i64)> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        let board_id = crate::db::create_board(&conn, "b", "Random", "", false)?;
+        let thread_id: i64 = conn.query_row(
+            "INSERT INTO threads (board_id, subject) VALUES (?1, 'thread') RETURNING id",
+            [board_id],
+            |row| row.get(0),
+        )?;
         drop(conn);
-        (pool, board_id, thread_id)
+        Ok((pool, board_id, thread_id))
     }
 
     #[test]
@@ -384,13 +411,17 @@ mod tests {
     }
 
     #[test]
-    fn configured_prune_disabled_removes_nothing() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(dir.path().join("b/thumbs")).expect("create dirs");
-        std::fs::write(dir.path().join("b/old.webp"), [0_u8; 8]).expect("write media");
-        std::fs::write(dir.path().join("b/thumbs/old.webp"), [1_u8; 2]).expect("write thumb");
-        let (pool, board_id, thread_id) = test_db_with_board();
-        let conn = pool.get().expect("conn");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn configured_prune_disabled_removes_nothing() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir_all(dir.path().join("b/thumbs"))?;
+        std::fs::write(dir.path().join("b/old.webp"), [0_u8; 8])?;
+        std::fs::write(dir.path().join("b/thumbs/old.webp"), [1_u8; 2])?;
+        let (pool, board_id, thread_id) = test_db_with_board()?;
+        let conn = pool.get()?;
         insert_post_with_media(
             &conn,
             &MediaPostFixture {
@@ -402,26 +433,37 @@ mod tests {
                 thumb_path: "b/thumbs/old.webp",
                 file_size: 8,
             },
+        )?;
+        crate::db::set_media_prune_settings(&conn, false, 1)?;
+
+        let upload_dir = dir
+            .path()
+            .to_str()
+            .context("temporary path must be UTF-8")?;
+        let report = run_configured_prune(&conn, upload_dir)?;
+
+        assert_eq!(report.removed_files, 0, "disabled pruning removes nothing");
+        assert!(
+            dir.path().join("b/old.webp").exists(),
+            "disabled pruning must preserve originals"
         );
-        crate::db::set_media_prune_settings(&conn, false, 1).expect("settings");
-
-        let report =
-            run_configured_prune(&conn, dir.path().to_str().expect("utf8")).expect("prune");
-
-        assert_eq!(report.removed_files, 0);
-        assert!(dir.path().join("b/old.webp").exists());
+        Ok(())
     }
 
     #[test]
-    fn pruning_removes_oldest_originals_and_keeps_thumbnails() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(dir.path().join("b/thumbs")).expect("create dirs");
-        std::fs::write(dir.path().join("b/old.webp"), [0_u8; 8]).expect("write old");
-        std::fs::write(dir.path().join("b/new.webp"), [0_u8; 8]).expect("write new");
-        std::fs::write(dir.path().join("b/thumbs/old.webp"), [1_u8; 2]).expect("write old thumb");
-        std::fs::write(dir.path().join("b/thumbs/new.webp"), [1_u8; 2]).expect("write new thumb");
-        let (pool, board_id, thread_id) = test_db_with_board();
-        let conn = pool.get().expect("conn");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn pruning_removes_oldest_originals_and_keeps_thumbnails() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir_all(dir.path().join("b/thumbs"))?;
+        std::fs::write(dir.path().join("b/old.webp"), [0_u8; 8])?;
+        std::fs::write(dir.path().join("b/new.webp"), [0_u8; 8])?;
+        std::fs::write(dir.path().join("b/thumbs/old.webp"), [1_u8; 2])?;
+        std::fs::write(dir.path().join("b/thumbs/new.webp"), [1_u8; 2])?;
+        let (pool, board_id, thread_id) = test_db_with_board()?;
+        let conn = pool.get()?;
         insert_post_with_media(
             &conn,
             &MediaPostFixture {
@@ -433,7 +475,7 @@ mod tests {
                 thumb_path: "b/thumbs/old.webp",
                 file_size: 8,
             },
-        );
+        )?;
         insert_post_with_media(
             &conn,
             &MediaPostFixture {
@@ -445,46 +487,60 @@ mod tests {
                 thumb_path: "b/thumbs/new.webp",
                 file_size: 8,
             },
+        )?;
+
+        let upload_dir = dir
+            .path()
+            .to_str()
+            .context("temporary path must be UTF-8")?;
+        let report = prune_to_limit(&conn, upload_dir, 8)?;
+
+        assert_eq!(report.removed_files, 1, "one original must be pruned");
+        assert!(
+            !dir.path().join("b/old.webp").exists(),
+            "oldest original must be removed"
         );
-
-        let report = prune_to_limit(&conn, dir.path().to_str().expect("utf8"), 8).expect("prune");
-
-        assert_eq!(report.removed_files, 1);
-        assert!(!dir.path().join("b/old.webp").exists());
-        assert!(dir.path().join("b/new.webp").exists());
-        assert!(dir.path().join("b/thumbs/old.webp").exists());
+        assert!(
+            dir.path().join("b/new.webp").exists(),
+            "newest original must remain"
+        );
+        assert!(
+            dir.path().join("b/thumbs/old.webp").exists(),
+            "thumbnail must remain after original pruning"
+        );
         assert_eq!(
             conn.query_row(
                 "SELECT media_processing_state FROM posts WHERE id = 101",
                 [],
                 |row| row.get::<_, String>(0),
-            )
-            .expect("state"),
-            crate::db::MEDIA_ORIGINAL_PRUNED
+            )?,
+            crate::db::MEDIA_ORIGINAL_PRUNED,
+            "database state must record original pruning"
         );
+        Ok(())
     }
 
     #[test]
-    fn pruning_ignores_archived_thread_media() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(dir.path().join("b/thumbs")).expect("create dirs");
-        std::fs::write(dir.path().join("b/archived.webp"), [0_u8; 8]).expect("write archived");
-        std::fs::write(dir.path().join("b/active.webp"), [0_u8; 8]).expect("write active");
-        std::fs::write(dir.path().join("b/thumbs/archived.webp"), [1_u8; 2])
-            .expect("write archived thumb");
-        std::fs::write(dir.path().join("b/thumbs/active.webp"), [1_u8; 2])
-            .expect("write active thumb");
-        let (pool, board_id, active_thread_id) = test_db_with_board();
-        let conn = pool.get().expect("conn");
-        let archived_thread_id: i64 = conn
-            .query_row(
-                "INSERT INTO threads (board_id, subject, archived)
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn pruning_ignores_archived_thread_media() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir_all(dir.path().join("b/thumbs"))?;
+        std::fs::write(dir.path().join("b/archived.webp"), [0_u8; 8])?;
+        std::fs::write(dir.path().join("b/active.webp"), [0_u8; 8])?;
+        std::fs::write(dir.path().join("b/thumbs/archived.webp"), [1_u8; 2])?;
+        std::fs::write(dir.path().join("b/thumbs/active.webp"), [1_u8; 2])?;
+        let (pool, board_id, active_thread_id) = test_db_with_board()?;
+        let conn = pool.get()?;
+        let archived_thread_id: i64 = conn.query_row(
+            "INSERT INTO threads (board_id, subject, archived)
                  VALUES (?1, 'archived', 1)
                  RETURNING id",
-                [board_id],
-                |row| row.get(0),
-            )
-            .expect("create archived thread");
+            [board_id],
+            |row| row.get(0),
+        )?;
         insert_post_with_media(
             &conn,
             &MediaPostFixture {
@@ -496,7 +552,7 @@ mod tests {
                 thumb_path: "b/thumbs/archived.webp",
                 file_size: 8,
             },
-        );
+        )?;
         insert_post_with_media(
             &conn,
             &MediaPostFixture {
@@ -508,25 +564,46 @@ mod tests {
                 thumb_path: "b/thumbs/active.webp",
                 file_size: 8,
             },
+        )?;
+
+        let upload_dir = dir
+            .path()
+            .to_str()
+            .context("temporary path must be UTF-8")?;
+        let report = prune_to_limit(&conn, upload_dir, 8)?;
+
+        assert_eq!(
+            report.total_before_bytes, 8,
+            "only active media is eligible"
         );
-
-        let report = prune_to_limit(&conn, dir.path().to_str().expect("utf8"), 8).expect("prune");
-
-        assert_eq!(report.total_before_bytes, 8);
-        assert_eq!(report.removed_files, 0);
-        assert!(dir.path().join("b/archived.webp").exists());
-        assert!(dir.path().join("b/active.webp").exists());
+        assert_eq!(
+            report.removed_files, 0,
+            "active media already fits the limit"
+        );
+        assert!(
+            dir.path().join("b/archived.webp").exists(),
+            "archived original must remain"
+        );
+        assert!(
+            dir.path().join("b/active.webp").exists(),
+            "eligible original must remain when within limit"
+        );
+        Ok(())
     }
 
     #[test]
-    fn pruning_removes_secondary_audio_original_with_combo_post() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(dir.path().join("b/thumbs")).expect("create dirs");
-        std::fs::write(dir.path().join("b/image.webp"), [0_u8; 4]).expect("write image");
-        std::fs::write(dir.path().join("b/track.flac"), [0_u8; 12]).expect("write audio");
-        std::fs::write(dir.path().join("b/thumbs/image.webp"), [1_u8; 2]).expect("write thumb");
-        let (pool, board_id, thread_id) = test_db_with_board();
-        let conn = pool.get().expect("conn");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn pruning_removes_secondary_audio_original_with_combo_post() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir_all(dir.path().join("b/thumbs"))?;
+        std::fs::write(dir.path().join("b/image.webp"), [0_u8; 4])?;
+        std::fs::write(dir.path().join("b/track.flac"), [0_u8; 12])?;
+        std::fs::write(dir.path().join("b/thumbs/image.webp"), [1_u8; 2])?;
+        let (pool, board_id, thread_id) = test_db_with_board()?;
+        let conn = pool.get()?;
         insert_post_with_media(
             &conn,
             &MediaPostFixture {
@@ -538,7 +615,7 @@ mod tests {
                 thumb_path: "b/thumbs/image.webp",
                 file_size: 4,
             },
-        );
+        )?;
         conn.execute(
             "UPDATE posts
              SET audio_file_path = 'b/track.flac',
@@ -547,35 +624,54 @@ mod tests {
                  audio_mime_type = 'audio/flac'
              WHERE id = 101",
             [],
-        )
-        .expect("attach combo audio");
+        )?;
 
-        let report = prune_to_limit(&conn, dir.path().to_str().expect("utf8"), 0).expect("prune");
+        let upload_dir = dir
+            .path()
+            .to_str()
+            .context("temporary path must be UTF-8")?;
+        let report = prune_to_limit(&conn, upload_dir, 0)?;
 
-        assert_eq!(report.total_before_bytes, 16);
-        assert_eq!(report.removed_files, 2);
-        assert!(!dir.path().join("b/image.webp").exists());
-        assert!(!dir.path().join("b/track.flac").exists());
-        assert!(dir.path().join("b/thumbs/image.webp").exists());
+        assert_eq!(
+            report.total_before_bytes, 16,
+            "both originals count toward the limit"
+        );
+        assert_eq!(report.removed_files, 2, "both originals must be removed");
+        assert!(
+            !dir.path().join("b/image.webp").exists(),
+            "primary original must be removed"
+        );
+        assert!(
+            !dir.path().join("b/track.flac").exists(),
+            "secondary original must be removed"
+        );
+        assert!(
+            dir.path().join("b/thumbs/image.webp").exists(),
+            "thumbnail must remain"
+        );
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn pruning_refuses_symlink_media_paths() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn pruning_refuses_symlink_media_paths() -> Result<()> {
         use std::os::unix::fs as unix_fs;
 
-        let dir = tempfile::tempdir().expect("tempdir");
-        let outside = tempfile::tempdir().expect("outside");
-        std::fs::create_dir_all(dir.path().join("b/thumbs")).expect("create dirs");
-        std::fs::write(outside.path().join("outside.webp"), [9_u8; 8]).expect("outside media");
+        let dir = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        std::fs::create_dir_all(dir.path().join("b/thumbs"))?;
+        std::fs::write(outside.path().join("outside.webp"), [9_u8; 8])?;
         unix_fs::symlink(
             outside.path().join("outside.webp"),
             dir.path().join("b/link.webp"),
-        )
-        .expect("symlink");
-        std::fs::write(dir.path().join("b/thumbs/link.webp"), [1_u8; 2]).expect("thumb");
-        let (pool, board_id, thread_id) = test_db_with_board();
-        let conn = pool.get().expect("conn");
+        )?;
+        std::fs::write(dir.path().join("b/thumbs/link.webp"), [1_u8; 2])?;
+        let (pool, board_id, thread_id) = test_db_with_board()?;
+        let conn = pool.get()?;
         insert_post_with_media(
             &conn,
             &MediaPostFixture {
@@ -587,29 +683,46 @@ mod tests {
                 thumb_path: "b/thumbs/link.webp",
                 file_size: 8,
             },
+        )?;
+
+        let upload_dir = dir
+            .path()
+            .to_str()
+            .context("temporary path must be UTF-8")?;
+        let report = prune_to_limit(&conn, upload_dir, 0)?;
+
+        assert_eq!(
+            report.removed_files, 0,
+            "symlink targets must not be removed"
         );
-
-        let report = prune_to_limit(&conn, dir.path().to_str().expect("utf8"), 0).expect("prune");
-
-        assert_eq!(report.removed_files, 0);
-        assert_eq!(report.skipped_files, 0);
-        assert!(outside.path().join("outside.webp").exists());
+        assert_eq!(
+            report.skipped_files, 0,
+            "unsafe paths are ineligible rather than failed"
+        );
+        assert!(
+            outside.path().join("outside.webp").exists(),
+            "file outside the upload root must remain"
+        );
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn pruning_refuses_symlink_parent_components() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn pruning_refuses_symlink_parent_components() -> Result<()> {
         use std::os::unix::fs as unix_fs;
 
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(dir.path().join("b/real")).expect("create real dir");
-        std::fs::create_dir_all(dir.path().join("b/thumbs")).expect("create thumbs");
-        std::fs::write(dir.path().join("b/real/file.webp"), [9_u8; 8]).expect("media");
-        unix_fs::symlink(dir.path().join("b/real"), dir.path().join("b/alias"))
-            .expect("symlink parent");
-        std::fs::write(dir.path().join("b/thumbs/file.webp"), [1_u8; 2]).expect("thumb");
-        let (pool, board_id, thread_id) = test_db_with_board();
-        let conn = pool.get().expect("conn");
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir_all(dir.path().join("b/real"))?;
+        std::fs::create_dir_all(dir.path().join("b/thumbs"))?;
+        std::fs::write(dir.path().join("b/real/file.webp"), [9_u8; 8])?;
+        unix_fs::symlink(dir.path().join("b/real"), dir.path().join("b/alias"))?;
+        std::fs::write(dir.path().join("b/thumbs/file.webp"), [1_u8; 2])?;
+        let (pool, board_id, thread_id) = test_db_with_board()?;
+        let conn = pool.get()?;
         insert_post_with_media(
             &conn,
             &MediaPostFixture {
@@ -621,11 +734,22 @@ mod tests {
                 thumb_path: "b/thumbs/file.webp",
                 file_size: 8,
             },
+        )?;
+
+        let upload_dir = dir
+            .path()
+            .to_str()
+            .context("temporary path must be UTF-8")?;
+        let report = prune_to_limit(&conn, upload_dir, 0)?;
+
+        assert_eq!(
+            report.removed_files, 0,
+            "symlinked parent paths must be ineligible"
         );
-
-        let report = prune_to_limit(&conn, dir.path().to_str().expect("utf8"), 0).expect("prune");
-
-        assert_eq!(report.removed_files, 0);
-        assert!(dir.path().join("b/real/file.webp").exists());
+        assert!(
+            dir.path().join("b/real/file.webp").exists(),
+            "file reached through a symlinked parent must remain"
+        );
+        Ok(())
     }
 }

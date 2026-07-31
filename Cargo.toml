@@ -4,7 +4,7 @@ version = "1.3.0"
 edition = "2021"
 # Arti 0.44 requires Rust 1.91; keep the package MSRV and cargo-msrv metadata
 # in sync with the current dependency set.
-rust-version = "1.91"
+rust-version.workspace = true
 license = "MIT"
 description = "Self-contained imageboard — single binary, zero runtime dependencies"
 repository = "https://github.com/csd113/RustChan"
@@ -14,6 +14,12 @@ categories = ["web-programming", "multimedia::images"]
 # Keep `cargo-msrv` metadata aligned with `rust-version`.
 [package.metadata]
 msrv = "1.91"
+
+[workspace]
+resolver = "2"
+
+[workspace.package]
+rust-version = "1.91"
 
 [profile.release]
 opt-level      = 3
@@ -77,7 +83,6 @@ chrono    = { version = "0.4.45", features = ["serde"] }
 dashmap      = "6.2.1"
 parking_lot  = "0.12.5"
 anyhow       = "1.0.104"
-once_cell    = "1.21.4"
 regex     = "1.13.1"
 ipnet     = "2.12.0"
 
@@ -96,9 +101,10 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 # Verify: cargo tree --edges features | grep -iE "openssl|native.tls"
 reqwest = { version = "0.13.4", default-features = false, features = ["multipart", "json", "rustls-no-provider"] }
 
-# Pin to patched version — fixes RUSTSEC-2026-0049 (CRL distribution point
-# matching bug). Transitive dep via reqwest / arti-client.
-rustls-webpki = "0.103.13"
+# Keep a direct lower bound on the RUSTSEC-2026-0049 CRL
+# distribution-point fix. The crate is consumed transitively through rustls;
+# this declaration intentionally constrains future lockfile regeneration.
+rustls-webpki = { version = "0.103.13", default-features = false }
 
 tracing            = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
@@ -106,7 +112,6 @@ tracing-appender   = "0.2.5"
 
 thiserror = "2.0.19"
 tempfile  = "3.27.0"
-libc      = "0.2.189"
 
 # ── Tor / onion-service stack ──────────────────────────────────────────────────
 # F-09: Use rustls throughout — native-tls would pull in OpenSSL as a
@@ -155,7 +160,7 @@ x509-cert      = { version = "0.3.0", optional = true }
 
 # HTTPS listen integration for Axum (handles Static cert path)
 axum-server    = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
-hyper          = { version = "1.11.0", features = ["http1", "http2", "server"] }
+hyper          = { version = "1.11.0", features = ["http1", "http2", "server"], optional = true }
 hyper-util     = { version = "0.1.20", features = ["tokio", "server"] }
 
 # ── Terminal UI ───────────────────────────────────────────────────────────────
@@ -163,15 +168,14 @@ hyper-util     = { version = "0.1.20", features = ["tokio", "server"] }
 # Provides cross-platform terminal control (cursor, events, raw mode).
 crossterm = "0.29.0"
 
+[target.'cfg(unix)'.dependencies]
+# Safe in-process filesystem-capacity queries for upload disk-space preflights.
+rustix = { version = "1.1.4", features = ["fs"] }
+
 [features]
 default         = ["tls-self-signed"]
 tls-self-signed = ["dep:rcgen", "dep:pem-rfc7468", "dep:x509-cert"]
-tls-acme        = ["dep:rustls-acme"]
-
-[target.'cfg(windows)'.dependencies]
-# AllocConsole — used by the double-click / no-TTY re-launch guard in main.rs
-# to attach a visible console window when the binary is started from Explorer.
-windows-sys = { version = "0.61.2", features = ["Win32_System_Console"] }
+tls-acme        = ["dep:hyper", "dep:rustls-acme"]
 
 # ── Safety net ────────────────────────────────────────────────────────────────
 # If a future dependency version change re-introduces openssl-sys as a
@@ -182,19 +186,90 @@ windows-sys = { version = "0.61.2", features = ["Win32_System_Console"] }
 # [patch.crates-io]
 # openssl-sys = { path = "patches/openssl-sys-stub" }
 
-# Crate-wide Clippy policy: keep the dangerous footguns visible, but relax the lints that are noisy for large route, template, and DB-mapping modules.
-# Individual exceptions are documented next to the code so maintainers can see why each one exists.
-[lints.clippy]
-too_many_arguments             = "allow"
-manual_pattern_char_comparison = "allow"
-# Keep panic-prone patterns visible while still allowing intentional, well-documented uses in tests and startup invariants.
-unwrap_used                    = "warn"   # keep panic-on-bug paths visible without blocking the build
-expect_used                    = "allow"  # intentional in tests and startup invariants where a panic would signal a bug
-indexing_slicing               = "warn"   # direct indexing is still visible for review, but only when intentional
-arithmetic_side_effects        = "allow"  # local math and display conversions are documented near the code
-missing_errors_doc             = "allow"  # public error docs are useful, but not every internal helper needs them
-doc_markdown                   = "allow"  # docs prioritize clarity over strict backtick style
-doc_lazy_continuation          = "allow"  # don't require strict indentation for doc lists
-items_after_statements         = "allow"  # some helpers stay inline for readability inside larger render/parse functions
-wildcard_imports               = "allow"  # route modules use broad imports to keep handler files compact
-uninlined_format_args          = "allow"  # older format strings are kept where they aid readability during staged cleanup
+[lints]
+workspace = true
+
+[workspace.lints.rust]
+warnings = { level = "deny", priority = -3 }
+future_incompatible = { level = "deny", priority = -2 }
+rust_2018_idioms = { level = "deny", priority = -2 }
+rust_2024_compatibility = { level = "deny", priority = -2 }
+unused = { level = "deny", priority = -2 }
+
+unsafe_code = "forbid"
+missing_docs = "deny"
+missing_debug_implementations = "deny"
+non_ascii_idents = "deny"
+unreachable_pub = "deny"
+unused_lifetimes = "deny"
+unused_qualifications = "deny"
+let_underscore_drop = "deny"
+
+# This rustc lint can report false positives for dependencies shared across
+# library, binary, example, test, benchmark, and feature-specific targets.
+# Keep it visible, but do not force fake imports or dependency distortions.
+unused_crate_dependencies = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -3 }
+pedantic = { level = "deny", priority = -2 }
+cargo = { level = "deny", priority = -2 }
+
+# This can represent unavoidable transitive version splits, especially in
+# a dependency graph as large as Arti's. Audit every report without making
+# unavoidable upstream duplication a hard failure.
+multiple_crate_versions = "warn"
+
+# Panic-driven control flow.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+panic_in_result_fn = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+exit = "deny"
+
+# Debugging output must not enter production code accidentally.
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+# Unsafe-code safeguards remain documented even though unsafe Rust is
+# forbidden globally.
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+missing_safety_doc = "deny"
+
+# Suppressions must be narrow, intentional, and documented.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+# Numeric conversions must be explicit and reviewed.
+as_conversions = "deny"
+cast_lossless = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_precision_loss = "deny"
+cast_ptr_alignment = "deny"
+cast_sign_loss = "deny"
+char_lit_as_u8 = "deny"
+fn_to_numeric_cast_any = "deny"
+lossy_float_literal = "deny"
+
+# Avoid unchecked indexing and UTF-8 string slicing.
+indexing_slicing = "deny"
+string_slice = "deny"
+
+# Ownership and resource-management restrictions.
+clone_on_ref_ptr = "deny"
+mem_forget = "deny"
+rc_buffer = "deny"
+rc_mutex = "deny"
+
+# Documentation, testing, and maintainability.
+missing_docs_in_private_items = "deny"
+missing_assert_message = "deny"
+large_include_file = "deny"
+verbose_file_reads = "deny"
+wildcard_dependencies = "deny"

@@ -7,6 +7,7 @@ use anyhow::{Context as _, Result};
 use rusqlite::{params, OptionalExtension as _};
 use std::collections::BTreeSet;
 
+/// Built-in themes enabled by installations predating featured themes.
 const LEGACY_DEFAULT_BUILTIN_THEMES: &[&str] = &[
     "terminal",
     "aero",
@@ -17,12 +18,9 @@ const LEGACY_DEFAULT_BUILTIN_THEMES: &[&str] = &[
     "fluorogrid",
 ];
 
+/// Return configured built-in theme slugs with legacy defaults upgraded.
 fn configured_enabled_builtin_slugs() -> Vec<String> {
-    let mut enabled_builtin_slugs = CONFIG
-        .initial_enabled_builtin_themes
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect::<Vec<_>>();
+    let mut enabled_builtin_slugs = CONFIG.initial_enabled_builtin_themes.clone();
 
     let configured = enabled_builtin_slugs
         .iter()
@@ -30,7 +28,8 @@ fn configured_enabled_builtin_slugs() -> Vec<String> {
         .collect::<BTreeSet<_>>();
     let legacy_default = LEGACY_DEFAULT_BUILTIN_THEMES
         .iter()
-        .map(std::string::ToString::to_string)
+        .copied()
+        .map(str::to_owned)
         .collect::<BTreeSet<_>>();
 
     if configured == legacy_default {
@@ -40,6 +39,7 @@ fn configured_enabled_builtin_slugs() -> Vec<String> {
     enabled_builtin_slugs
 }
 
+/// Decode a theme row from the standard theme projection.
 fn map_theme(row: &rusqlite::Row<'_>) -> rusqlite::Result<Theme> {
     Ok(Theme {
         slug: row.get(0)?,
@@ -163,7 +163,10 @@ pub fn create_custom_theme(
 ///
 /// # Errors
 /// Returns an error if the theme is missing or the update fails.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the arguments map directly to the editable columns of one theme row"
+)]
 pub fn update_theme(
     conn: &mut rusqlite::Connection,
     existing_slug: &str,
@@ -244,6 +247,7 @@ pub fn delete_custom_theme(conn: &mut rusqlite::Connection, slug: &str) -> Resul
 }
 
 #[must_use]
+/// Normalize a custom theme slug for safe persistence and routing.
 pub fn sanitize_theme_slug(slug: &str) -> String {
     slug.trim()
         .chars()
@@ -254,6 +258,7 @@ pub fn sanitize_theme_slug(slug: &str) -> String {
 }
 
 #[must_use]
+/// Normalize a custom theme display name.
 pub fn sanitize_theme_name(name: &str) -> String {
     let value = name.trim().chars().take(64).collect::<String>();
     if value.is_empty() {
@@ -264,16 +269,19 @@ pub fn sanitize_theme_name(name: &str) -> String {
 }
 
 #[must_use]
+/// Trim and bound a custom theme description.
 pub fn sanitize_theme_description(description: &str) -> String {
     description.trim().chars().take(256).collect()
 }
 
 #[must_use]
+/// Trim and bound a custom theme stylesheet.
 pub fn sanitize_theme_css(css: &str) -> String {
     css.trim().chars().take(32_000).collect()
 }
 
 #[must_use]
+/// Normalize a theme swatch or return the neutral fallback.
 pub fn sanitize_theme_swatch(swatch: &str) -> String {
     let trimmed = swatch.trim();
     if trimmed.len() == 7
@@ -312,6 +320,7 @@ pub fn theme_css_response(conn: &rusqlite::Connection, slug: &str) -> Result<Opt
 }
 
 #[must_use]
+/// Return whether a slug identifies a built-in theme.
 pub fn is_builtin_slug(slug: &str) -> bool {
     builtin_theme(slug).is_some()
 }
@@ -319,23 +328,34 @@ pub fn is_builtin_slug(slug: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::theme_builder::{build_theme_css, builder_defaults_for_preset};
+    use anyhow::{Context as _, Result};
     use rusqlite::params;
 
     #[test]
     fn legacy_default_builtin_list_is_upgraded_with_new_featured_themes() {
         let enabled_builtin_slugs = super::configured_enabled_builtin_slugs();
 
-        assert!(enabled_builtin_slugs.iter().any(|slug| slug == "blue-sky"));
-        assert!(enabled_builtin_slugs
-            .iter()
-            .any(|slug| slug == "deep-orbit"));
+        assert!(
+            enabled_builtin_slugs.iter().any(|slug| slug == "blue-sky"),
+            "legacy defaults should gain Blue Sky"
+        );
+        assert!(
+            enabled_builtin_slugs
+                .iter()
+                .any(|slug| slug == "deep-orbit"),
+            "legacy defaults should gain Deep Orbit"
+        );
     }
 
     #[test]
-    fn load_themes_keeps_featured_builtins_first() {
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("db connection");
-        let themes = super::load_themes(&conn).expect("load themes");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn load_themes_keeps_featured_builtins_first() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        let themes = super::load_themes(&conn)?;
         let builtins = themes
             .iter()
             .filter(|theme| theme.is_builtin && theme.enabled)
@@ -354,35 +374,52 @@ mod tests {
                 "aero",
                 "neoncubicle",
                 "fluorogrid",
-            ]
+            ],
+            "enabled built-ins should retain their configured featured order"
         );
+        Ok(())
     }
 
     #[test]
-    fn load_themes_includes_new_builtin_theme_metadata() {
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("db connection");
-        let themes = super::load_themes(&conn).expect("load themes");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn load_themes_includes_new_builtin_theme_metadata() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        let themes = super::load_themes(&conn)?;
 
         let blue_sky = themes
             .iter()
             .find(|theme| theme.slug == "blue-sky")
-            .expect("blue sky theme");
-        assert_eq!(blue_sky.display_name, "Blue Sky");
-        assert!(blue_sky.enabled);
+            .context("Blue Sky theme should exist")?;
+        assert_eq!(
+            blue_sky.display_name, "Blue Sky",
+            "Blue Sky display name should match"
+        );
+        assert!(blue_sky.enabled, "Blue Sky should be enabled");
 
         let deep_orbit = themes
             .iter()
             .find(|theme| theme.slug == "deep-orbit")
-            .expect("deep orbit theme");
-        assert_eq!(deep_orbit.display_name, "Deep Orbit");
-        assert!(deep_orbit.enabled);
+            .context("Deep Orbit theme should exist")?;
+        assert_eq!(
+            deep_orbit.display_name, "Deep Orbit",
+            "Deep Orbit display name should match"
+        );
+        assert!(deep_orbit.enabled, "Deep Orbit should be enabled");
+        Ok(())
     }
 
     #[test]
-    fn builder_theme_css_response_serves_saved_generated_css() {
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("db connection");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn builder_theme_css_response_serves_saved_generated_css() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
         let config = builder_defaults_for_preset("forest");
         let css = build_theme_css("guided-forest", &config);
 
@@ -394,24 +431,32 @@ mod tests {
             "#7ab84e",
             &css,
             true,
-        )
-        .expect("create theme");
+        )?;
 
-        let served = super::theme_css_response(&conn, "guided-forest")
-            .expect("theme response")
-            .expect("css body");
+        let served = super::theme_css_response(&conn, "guided-forest")?
+            .context("enabled theme should have a CSS response")?;
 
-        assert!(served.contains("html[data-theme=\"guided-forest\"]"));
-        assert!(served.contains("--rustchan-builder-data:"));
+        assert!(
+            served.contains("html[data-theme=\"guided-forest\"]"),
+            "served CSS should target the saved theme"
+        );
+        assert!(
+            served.contains("--rustchan-builder-data:"),
+            "served CSS should preserve builder metadata"
+        );
+        Ok(())
     }
 
     #[test]
-    fn update_theme_renames_board_and_site_default_references() {
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let mut conn = pool.get().expect("db connection");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn update_theme_renames_board_and_site_default_references() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let mut conn = pool.get()?;
         let board_short = "theme-update";
-        crate::db::boards::create_board(&conn, board_short, "Theme Update", "", false)
-            .expect("create board");
+        crate::db::boards::create_board(&conn, board_short, "Theme Update", "", false)?;
         super::create_custom_theme(
             &conn,
             "guided-forest",
@@ -420,15 +465,12 @@ mod tests {
             "#7ab84e",
             "html[data-theme=\"guided-forest\"] { --bg: #111; }",
             true,
-        )
-        .expect("create theme");
+        )?;
         conn.execute(
             "UPDATE boards SET default_theme = 'guided-forest' WHERE short_name = ?1",
             params![board_short],
-        )
-        .expect("set board default");
-        crate::db::set_site_setting(&conn, "default_theme", "guided-forest")
-            .expect("set site default");
+        )?;
+        crate::db::set_site_setting(&conn, "default_theme", "guided-forest")?;
 
         super::update_theme(
             &mut conn,
@@ -439,32 +481,35 @@ mod tests {
             "#6aa44c",
             true,
             Some("html[data-theme=\"guided-grove\"] { --bg: #222; }"),
-        )
-        .expect("rename theme");
+        )?;
 
-        let board_default: String = conn
-            .query_row(
-                "SELECT default_theme FROM boards WHERE short_name = ?1",
-                params![board_short],
-                |row| row.get(0),
-            )
-            .expect("read board default");
-        assert_eq!(board_default, "guided-grove");
+        let board_default: String = conn.query_row(
+            "SELECT default_theme FROM boards WHERE short_name = ?1",
+            params![board_short],
+            |row| row.get(0),
+        )?;
         assert_eq!(
-            crate::db::get_site_setting(&conn, "default_theme")
-                .expect("read site default")
-                .as_deref(),
-            Some("guided-grove")
+            board_default, "guided-grove",
+            "board default should follow the renamed theme"
         );
+        assert_eq!(
+            crate::db::get_site_setting(&conn, "default_theme")?.as_deref(),
+            Some("guided-grove"),
+            "site default should follow the renamed theme"
+        );
+        Ok(())
     }
 
     #[test]
-    fn delete_custom_theme_clears_dependent_references() {
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let mut conn = pool.get().expect("db connection");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn delete_custom_theme_clears_dependent_references() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let mut conn = pool.get()?;
         let board_short = "theme-delete";
-        crate::db::boards::create_board(&conn, board_short, "Theme Delete", "", false)
-            .expect("create board");
+        crate::db::boards::create_board(&conn, board_short, "Theme Delete", "", false)?;
         super::create_custom_theme(
             &conn,
             "guided-forest",
@@ -473,31 +518,29 @@ mod tests {
             "#7ab84e",
             "html[data-theme=\"guided-forest\"] { --bg: #111; }",
             true,
-        )
-        .expect("create theme");
+        )?;
         conn.execute(
             "UPDATE boards SET default_theme = 'guided-forest' WHERE short_name = ?1",
             params![board_short],
-        )
-        .expect("set board default");
-        crate::db::set_site_setting(&conn, "default_theme", "guided-forest")
-            .expect("set site default");
+        )?;
+        crate::db::set_site_setting(&conn, "default_theme", "guided-forest")?;
 
-        super::delete_custom_theme(&mut conn, "guided-forest").expect("delete theme");
+        super::delete_custom_theme(&mut conn, "guided-forest")?;
 
-        let board_default: String = conn
-            .query_row(
-                "SELECT default_theme FROM boards WHERE short_name = ?1",
-                params![board_short],
-                |row| row.get(0),
-            )
-            .expect("read board default");
-        assert!(board_default.is_empty());
-        assert_eq!(
-            crate::db::get_site_setting(&conn, "default_theme")
-                .expect("read site default")
-                .as_deref(),
-            Some(crate::theme::HARD_DEFAULT_THEME)
+        let board_default: String = conn.query_row(
+            "SELECT default_theme FROM boards WHERE short_name = ?1",
+            params![board_short],
+            |row| row.get(0),
+        )?;
+        assert!(
+            board_default.is_empty(),
+            "deleted board default should be cleared"
         );
+        assert_eq!(
+            crate::db::get_site_setting(&conn, "default_theme")?.as_deref(),
+            Some(crate::theme::HARD_DEFAULT_THEME),
+            "deleted site default should fall back to the hard default"
+        );
+        Ok(())
     }
 }

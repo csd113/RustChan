@@ -3,11 +3,15 @@ use rusqlite::{params, OptionalExtension as _};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, Default)]
+/// Saved display preferences for one thread.
 pub struct UserThreadPreference {
+    /// Whether the thread is pinned for the user.
     pub pinned: bool,
+    /// Whether the thread is hidden for the user.
     pub hidden: bool,
 }
 
+/// Insert or update a preference row.
 fn upsert_preference(
     conn: &rusqlite::Connection,
     user_hash: &str,
@@ -27,6 +31,7 @@ fn upsert_preference(
     Ok(())
 }
 
+/// Remove a preference row when both values are at their defaults.
 fn cleanup_if_default(conn: &rusqlite::Connection, user_hash: &str, thread_id: i64) -> Result<()> {
     conn.execute(
         "DELETE FROM user_thread_preferences

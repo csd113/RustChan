@@ -1,0 +1,381 @@
+path	line	attribute	lints	reason	scope
+src/banner.rs	1125	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn rejects_banner_gif_frame_bomb
+src/banner.rs	1148	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn animated_gif_banner_falls_back_to_gif_without_ffmpeg
+src/banner.rs	1196	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn deleting_banner_asset_removes_webp_and_gif_siblings
+src/banner.rs	1235	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn animated_webp_banner_is_preserved_without_static_decode
+src/banner.rs	1264	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn rejects_oversized_banner_dimensions
+src/chan_net/mod.rs	360	expect	clippy::panic_in_result_fn	assertions intentionally report violations of ChanNet authentication	fn protected_chan_routes_reject_missing_and_wrong_key
+src/chan_net/mod.rs	407	expect	clippy::panic_in_result_fn	assertions intentionally report violations of ChanNet authentication	fn protected_chan_routes_accept_correct_key
+src/chan_net/mod.rs	586	expect	clippy::panic_in_result_fn	assertions intentionally report violations of stable message-ID semantics	fn command_uses_stable_message_ids_without_merging_identical_replies
+src/chan_net/mod.rs	659	expect	clippy::panic_in_result_fn	assertions intentionally report violations of decoded-Unicode length validation	fn command_accepts_json_escaped_unicode_at_legal_limit
+src/chan_net/mod.rs	733	expect	clippy::panic_in_result_fn	assertions intentionally report violations of database contention handling	fn command_write_contention_is_bounded_and_returns_retry_contract
+src/chan_net/mod.rs	804	expect	clippy::panic_in_result_fn	assertions intentionally report violations of connection-pool exhaustion handling	fn command_pool_exhaustion_is_bounded_and_returns_retry_contract
+src/chan_net/mod.rs	865	expect	clippy::panic_in_result_fn	assertions intentionally report violations of exact transport-limit semantics	fn command_and_import_bodies_at_exact_limit_reach_semantic_validation
+src/chan_net/selective_snapshot.rs	631	expect	clippy::panic_in_result_fn	assertions intentionally enforce the protected-board export boundary	fn protected_boards_are_excluded_from_every_gateway_export
+src/chan_net/selective_snapshot.rs	725	expect	clippy::panic_in_result_fn	assertions intentionally enforce the protected-board federation boundary	fn protected_boards_are_excluded_from_federation_export
+src/config/template.rs	5	expect	clippy::too_many_lines	the generated settings file stays contiguous so its documented ordering remains obvious	fn settings_template
+src/config.rs	556	expect	clippy::exit	invalid configuration must terminate with the standard EX_CONFIG status	fn settings_file_parse_error
+src/config.rs	777	expect	clippy::struct_excessive_bools	runtime configuration intentionally models independent operator-controlled feature switches	struct Config
+src/config.rs	924	expect	clippy::too_many_lines	listing every configuration field keeps secret redaction and Debug completeness auditable	fn fmt
+src/config.rs	1044	expect	clippy::too_many_lines	configuration loading keeps precedence and defaults together for auditability	fn from_env
+src/config.rs	1347	expect	clippy::too_many_lines	startup validation keeps the complete fail-closed configuration audit in one routine	fn validate
+src/config.rs	1740	expect	clippy::struct_excessive_bools	settings update mirrors independent runtime setup toggles	struct SetupRuntimeSettingsUpdate
+src/config.rs	1763	expect	clippy::struct_excessive_bools	settings update mirrors independent first-run setup toggles	struct SetupSettingsFileUpdate
+src/config.rs	2162	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn data_dir_override_requires_a_scoped_absolute_path
+src/config.rs	2198	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn data_dir_override_rejects_symlink_to_root_without_mutation
+src/config.rs	2249	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn data_dir_override_resolves_existing_symlink_ancestor_before_new_components
+src/config.rs	2593	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn update_settings_file_ffmpeg_timeout_persists_and_reloads
+src/config.rs	2632	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn update_settings_file_site_settings_persists_homepage_reply_badge_toggle
+src/config.rs	2676	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn live_ffmpeg_timeout_setting_updates_and_formats_human_text
+src/config.rs	2840	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn private_file_helpers_set_owner_only_modes
+src/config.rs	2939	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn generated_settings_template_round_trips_root_and_tls_values
+src/db/admin.rs	503	expect	clippy::too_many_arguments	the audit-log row is intentionally written as one atomic record	fn log_mod_action
+src/db/admin.rs	1123	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn ban_appeal_submission_is_deduplicated_within_window
+src/db/admin.rs	1149	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn ban_appeal_submission_requires_active_ban
+src/db/admin.rs	1167	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn db_health_check_reports_ok_for_clean_test_db
+src/db/admin.rs	1202	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn db_health_repair_noops_when_db_is_already_clean
+src/db/admin.rs	1250	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn db_health_repair_aborts_when_backup_fails
+src/db/admin.rs	1281	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn db_health_check_reports_foreign_key_violations
+src/db/admin.rs	1327	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn get_posts_by_ip_hash_maps_posts_with_media_processing_columns
+src/db/banners.rs	129	expect	clippy::too_many_arguments	the arguments map directly to one validated banner-asset row	fn insert_banner_asset
+src/db/boards.rs	582	expect	clippy::fn_params_excessive_bools	the signature mirrors independent media toggles stored on a board	fn create_board_with_media_flags
+src/db/boards.rs	586	expect	clippy::too_many_arguments	the signature mirrors data passed between the existing route and CLI layers	fn create_board_with_media_flags
+src/db/boards.rs	700	expect	clippy::fn_params_excessive_bools	the signature mirrors independent boolean fields in the admin edit form	fn update_board_settings
+src/db/boards.rs	704	expect	clippy::too_many_arguments	the signature mirrors the existing admin form and persisted board columns	fn update_board_settings
+src/db/boards.rs	708	expect	clippy::too_many_lines	keeping the SQL branches together makes the reorder transaction auditable	fn update_board_settings
+src/db/boards.rs	1136	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn board_stats_use_live_thread_count_instead_of_board_timestamp
+src/db/boards.rs	1171	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn site_stats_count_audio_primary_and_combo_uploads
+src/db/boards.rs	1218	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn site_stats_active_bytes_exclude_archived_thread_media
+src/db/boards.rs	1255	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn site_stats_fall_back_when_audio_columns_are_missing
+src/db/boards.rs	1295	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn create_board_with_media_flags_persists_audio_toggle
+src/db/boards.rs	1344	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn create_board_uses_standardized_defaults
+src/db/boards.rs	1404	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn delete_board_records_durable_board_directory_cleanup
+src/db/chan_net.rs	360	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn gateway_replies_escape_html_and_preserve_null_ip_hash
+src/db/chan_net.rs	402	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn replayed_gateway_reply_is_rejected_without_duplicate_insert
+src/db/chan_net.rs	440	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn stable_message_ids_distinguish_identical_replies_and_reject_id_reuse
+src/db/chan_net.rs	497	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn gateway_reply_rejects_non_exportable_board_before_any_write
+src/db/fs_ops.rs	181	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn rebuild_pending_fs_ops_for_restore_discards_restored_rows_and_allows_restore_swap_insert
+src/db/fs_ops.rs	251	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn rebuild_pending_fs_ops_for_restore_fails_closed_on_unexpected_schema_object_type
+src/db/migrations.rs	76	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn missing_schema_version_reads_as_unversioned
+src/db/migrations.rs	92	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn stamp_replaces_existing_version_with_release_baseline
+src/db/pool.rs	121	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn sqlite_busy_wait_is_bounded_for_overload_responses
+src/db/posts.rs	1985	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn recent_background_jobs_are_bounded_and_terminal_only
+src/db/posts.rs	2023	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn failed_background_job_acknowledgement_preserves_history
+src/db/posts.rs	2125	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn search_posts_reads_joined_fts_rows_without_ambiguous_columns
+src/db/posts.rs	2146	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn search_posts_stays_scoped_to_board
+src/db/posts.rs	2174	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn search_posts_matches_case_insensitively
+src/db/posts.rs	2201	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn search_posts_ignores_punctuation_only_queries_without_error
+src/db/posts.rs	2219	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn post_submission_token_resolves_existing_post
+src/db/posts.rs	2248	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn media_processing_state_round_trips_and_counts
+src/db/posts.rs	2294	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn startup_recovery_resets_running_background_job_to_pending
+src/db/posts.rs	2330	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn startup_recovery_leaves_non_running_jobs_unchanged
+src/db/posts.rs	2371	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn startup_recovery_restores_media_post_processing_state_to_pending
+src/db/posts.rs	2416	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn startup_recovery_resolves_applied_transcode_without_replay
+src/db/posts.rs	2477	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn startup_recovery_resolves_stale_media_without_clearing_newer_state
+src/db/posts.rs	2527	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn startup_recovery_resolves_applied_waveform_without_replay
+src/db/posts.rs	2586	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn recovered_background_job_can_be_claimed_by_worker
+src/db/posts.rs	2612	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn update_post_thumb_path_requires_matching_post_and_file_path
+src/db/posts.rs	2642	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn replace_transcoded_media_requires_matching_post_and_file_path
+src/db/posts.rs	2684	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn delete_post_returns_not_found_on_retry
+src/db/posts.rs	2755	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn delete_post_decrements_reply_count_for_the_thread
+src/db/posts.rs	2836	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn self_delete_post_deletes_reply_with_matching_token_inside_window
+src/db/posts.rs	2911	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn self_delete_post_rejects_wrong_token
+src/db/posts.rs	2938	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn self_delete_post_refuses_op_when_thread_has_replies
+src/db/schema.rs	1445	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn fresh_database_installs_130_baseline_directly
+src/db/schema.rs	1500	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn existing_current_schema_is_adopted_as_130_without_data_loss
+src/db/schema.rs	1537	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn historical_v41_schema_drift_repairs_to_130_baseline_without_data_loss
+src/db/schema.rs	1622	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn partial_schema_fails_closed_without_creating_missing_tables
+src/db/schema.rs	1665	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn unknown_schema_object_fails_closed
+src/db/schema.rs	1687	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn fresh_schema_uses_new_board_feature_defaults
+src/db/schema.rs	1730	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn invalid_structural_change_does_not_stamp_130
+src/db/setup.rs	162	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn fresh_database_allows_setup
+src/db/setup.rs	189	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn admin_without_marker_blocks_setup_as_initialized
+src/db/setup.rs	217	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn admin_reopen_makes_setup_available_but_admin_authenticated
+src/db/setup.rs	243	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn completion_marker_blocks_setup_after_reopen_is_cleared
+src/db/setup.rs	266	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn close_reopened_setup_relocks_completed_instance_without_clearing_completion
+src/db/themes.rs	166	expect	clippy::too_many_arguments	the arguments map directly to the editable columns of one theme row	fn update_theme
+src/db/themes.rs	351	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn load_themes_keeps_featured_builtins_first
+src/db/themes.rs	384	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn load_themes_includes_new_builtin_theme_metadata
+src/db/themes.rs	416	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn builder_theme_css_response_serves_saved_generated_css
+src/db/themes.rs	451	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn update_theme_renames_board_and_site_default_references
+src/db/themes.rs	504	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn delete_custom_theme_clears_dependent_references
+src/db/threads.rs	905	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn prune_old_threads_commits_even_when_no_files_are_safe
+src/db/threads.rs	939	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn prune_old_archived_threads_commits_even_when_no_files_are_safe
+src/db/threads.rs	975	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn delete_thread_returns_pending_cleanup_for_media_reply
+src/db/threads.rs	1058	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn create_reply_rejects_locked_thread_without_mutations
+src/db/threads.rs	1100	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn create_reply_rejects_archived_thread_without_mutations
+src/db/threads.rs	1142	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn delete_thread_returns_not_found_on_retry
+src/db/threads.rs	1165	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn delete_thread_removes_replies_and_retries_cleanly
+src/detect.rs	476	expect	clippy::cognitive_complexity	the Tor bootstrap and onion-service lifecycle is a single fail-closed state machine	fn run_arti
+src/detect.rs	782	expect	clippy::panic_in_result_fn	assertions intentionally report violations of the onion-address encoding contract	fn onion_address_format_is_56_chars_plus_dot_onion
+src/detect.rs	813	expect	clippy::panic_in_result_fn	assertions intentionally report violations of the Arti storage-layout contract	fn arti_config_preserves_explicit_state_and_cache_layout_offline
+src/detect.rs	852	expect	clippy::panic_in_result_fn	assertions intentionally report violations of external-tool path selection	fn probe_tool_uses_the_explicit_binary_path
+src/error.rs	203	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn tls_errors_hide_internal_messages_from_users
+src/favicon.rs	402	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn favicon_stage_dir_is_removed_after_mid_write_failure
+src/favicon.rs	456	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn favicon_old_dir_cleanup_failure_is_reported
+src/favicon.rs	521	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn favicon_successful_replacement_leaves_no_stage_or_old_dirs
+src/handlers/admin/auth.rs	108	expect	clippy::significant_drop_tightening	the DashMap entry guard must remain held while its attempt count is updated	fn record_login_fail
+src/handlers/admin/auth.rs	262	expect	clippy::cognitive_complexity	the authentication, lockout, and session issuance branches share one security boundary	fn admin_login
+src/handlers/admin/auth.rs	266	expect	clippy::too_many_lines	authentication, lockout accounting, and session issuance form one security boundary	fn admin_login
+src/handlers/admin/backup/archive.rs	228	expect	clippy::too_many_lines	transfer validation, entry mapping, extraction limits, and archive finalization are one pipeline	fn create_temp_legacy_full_backup_from_v4_transfer_zip
+src/handlers/admin/backup/archive.rs	358	expect	clippy::too_many_lines	verified manifest entries and legacy metadata must be emitted in one deterministic archive pass	fn create_temp_legacy_full_backup_from_verified_v4
+src/handlers/admin/backup/create.rs	16	expect	clippy::cognitive_complexity	full backup stages and cleanup remain together to preserve a fail-closed operation	fn create_full_backup_to_server
+src/handlers/admin/backup/create.rs	20	expect	clippy::too_many_lines	snapshot, manifest, payload publication, and cleanup share one fail-closed backup operation	fn create_full_backup_to_server
+src/handlers/admin/backup/create.rs	304	expect	clippy::too_many_lines	maintenance snapshot, manifest publication, retention, and status updates form one operation	fn create_pre_maintenance_backup_to_server
+src/handlers/admin/backup/create.rs	786	expect	clippy::cognitive_complexity	board backup validation, snapshotting, and packaging form one guarded operation	fn create_board_backup
+src/handlers/admin/backup/create.rs	790	expect	clippy::too_many_lines	board validation, snapshotting, archive publication, and cleanup share one operation	fn create_board_backup
+src/handlers/admin/backup/create.rs	1081	expect	clippy::too_many_lines	the function maps the complete relational board snapshot into one versioned manifest	fn build_board_backup_manifest
+src/handlers/admin/backup/create.rs	1501	expect	clippy::too_many_lines	part sizing, hashing, manifest updates, and partial-output cleanup form one publication step	fn materialize_split_zip_parts
+src/handlers/admin/backup/downloads.rs	160	expect	clippy::too_many_lines	authentication, token validation, checksum verification, and streaming form one download request	fn download_backup
+src/handlers/admin/backup/http.rs	384	expect	clippy::cognitive_complexity	the multipart parser keeps all restore-field limits and duplicate checks at one boundary	fn stream_restore_upload_to_tempfile
+src/handlers/admin/backup/http.rs	388	expect	clippy::too_many_lines	multipart quotas, duplicate checks, temporary-file writes, and metadata parsing share one boundary	fn stream_restore_upload_to_tempfile
+src/handlers/admin/backup/restore_board.rs	356	expect	clippy::too_many_lines	board replacement and media staging share one transaction and rollback boundary	fn execute_board_restore
+src/handlers/admin/backup/restore_board.rs	917	expect	clippy::too_many_lines	authentication, source verification, extraction, and download issuance form one request	fn extract_board_from_full_backup
+src/handlers/admin/backup/restore_board.rs	1148	expect	clippy::cognitive_complexity	board restore validation, mutation, and rollback remain one guarded operation	fn board_restore
+src/handlers/admin/backup/restore_board.rs	1152	expect	clippy::too_many_lines	restore upload validation, mutation, rollback, and response handling form one guarded request	fn board_restore
+src/handlers/admin/backup/restore_full.rs	57	expect	clippy::too_many_lines	all restored-database trust checks remain contiguous before any live-state mutation	fn validate_full_restore_db_trust_boundary
+src/handlers/admin/backup/restore_full.rs	411	expect	clippy::cognitive_complexity	full restore validation, replacement, and rollback remain one fail-closed operation	fn execute_full_restore
+src/handlers/admin/backup/restore_full.rs	415	expect	clippy::too_many_arguments,clippy::too_many_lines	full restore inputs and ordered rollback phases must remain visible at one trust boundary	fn execute_full_restore
+src/handlers/admin/backup/restore_full.rs	941	expect	clippy::too_many_lines	authentication, upload validation, job execution, and failure responses form one restore request	fn admin_restore
+src/handlers/admin/backup/saved_backup.rs	117	expect	clippy::struct_excessive_bools	the flags are independent backup-content selections serialized in the manifest	struct BackupIncludeFlags
+src/handlers/admin/backup/saved_backup.rs	895	expect	clippy::too_many_lines	the checks jointly validate one declared file against its manifest and verified source	fn validate_declared_file_metadata
+src/handlers/admin/backup/saved_backup.rs	1327	expect	clippy::too_many_lines	split-part names, sizes, hashes, ZIP members, and aggregate limits are one trust boundary	fn verify_split_zip_files
+src/handlers/admin/backup/saved_backup.rs	1531	expect	clippy::too_many_lines	root metadata, manifest, payload, path, and checksum checks form one fail-closed verifier	fn verify_saved_v4_root
+src/handlers/admin/backup/types.rs	9	expect	clippy::struct_excessive_bools	the fields mirror independent persisted board settings in the backup schema	struct BoardRow
+src/handlers/admin/backup.rs	149	expect	clippy::too_many_lines	database snapshotting, archive creation, and temporary-file cleanup form one operation	fn admin_backup
+src/handlers/admin/backup.rs	1226	expect	clippy::too_many_lines	the end-to-end test keeps its fixture setup and ordered assertions in one scenario	fn saved_board_restore_success_redirects_back_to_restored_board_section
+src/handlers/admin/backup.rs	1443	expect	clippy::too_many_lines	the end-to-end test keeps its fixture setup and ordered assertions in one scenario	fn extract_board_from_full_backup_download_redirects_and_cleans_up_temp_file
+src/handlers/admin/backup.rs	2261	expect	clippy::too_many_lines	the ID-sequence regression keeps source padding, restore, and post-restore allocation checks in one scenario	fn board_restore_preserves_free_ids_above_target_sequence
+src/handlers/admin/backup.rs	2384	expect	clippy::too_many_lines	the end-to-end test keeps its fixture setup and ordered assertions in one scenario	fn board_restore_fallback_remaps_same_board_crosslinks_when_ids_collide
+src/handlers/admin/content.rs	467	expect	clippy::cognitive_complexity	post deletion keeps authorization, database mutation, file cleanup, and audit logging together	fn admin_delete_post
+src/handlers/admin/mod.rs	630	expect	clippy::struct_excessive_bools	the snapshot carries independent feature and health flags into the admin template	struct AdminPanelSnapshot
+src/handlers/admin/mod.rs	974	expect	clippy::struct_excessive_bools	the fields mirror independent appearance toggles stored in site settings	struct AppearanceDomainData
+src/handlers/admin/mod.rs	1014	expect	clippy::struct_excessive_bools	the fields are independent maintenance capability flags read from application state	struct MaintenanceDomainData
+src/handlers/admin/moderation.rs	156	expect	clippy::cognitive_complexity	ban-and-delete keeps its authorization, mutation, cleanup, and audit steps together	fn admin_ban_and_delete
+src/handlers/admin/moderation.rs	160	expect	clippy::too_many_lines	authorization, ban creation, post deletion, media cleanup, and audit logging are one action	fn admin_ban_and_delete
+src/handlers/admin/settings/banners.rs	298	expect	clippy::too_many_lines	upload validation, image processing, draft cleanup, and database insertion form one operation	fn upload_banner_for_scope
+src/handlers/admin/settings/board.rs	142	expect	clippy::too_many_lines	cross-field board validation and the atomic settings update share one request boundary	fn update_board_settings
+src/handlers/admin/settings/maintenance.rs	1084	expect	clippy::too_many_lines	the end-to-end test keeps its fixture setup and ordered assertions in one scenario	fn admin_db_repair_reports_problem_when_integrity_issue_remains_after_repair
+src/handlers/admin/settings/site.rs	51	expect	clippy::cognitive_complexity	site setting validation and persistence remain together to avoid partial updates	fn update_site_settings
+src/handlers/admin/settings/site.rs	55	expect	clippy::too_many_lines	cross-field site validation and the atomic settings update share one request boundary	fn update_site_settings
+src/handlers/admin/settings/themes.rs	252	expect	clippy::too_many_lines	builder defaults, submitted overrides, and range validation produce one coherent theme config	fn resolve_builder_config
+src/handlers/board/access_preferences.rs	959	expect	clippy::too_many_lines	rate limiting, credential checks, signed access grants, and redirect validation form one request	fn unlock_board_access
+src/handlers/board/catalog.rs	26	expect	clippy::too_many_lines	access control, catalog loading, unread-state calculation, and rendering form one request	fn catalog
+src/handlers/board/create_thread.rs	15	expect	clippy::too_many_lines	access checks, multipart validation, thread creation, and response cookies form one request	fn create_thread
+src/handlers/board/media.rs	91	expect	clippy::too_many_lines	path validation, access policy, legacy redirect handling, and file response form one request	fn serve_board_media
+src/handlers/board/pages.rs	37	expect	clippy::too_many_lines	home-page data loading, activity markers, banner selection, and rendering form one request	fn index
+src/handlers/board/pages.rs	226	expect	clippy::too_many_lines	board access, pagination, activity markers, banner selection, and rendering form one request	fn board_index
+src/handlers/board/tests.rs	432	expect	clippy::too_many_lines	the end-to-end test keeps its fixture setup and ordered assertions in one scenario	fn post_password_board_write_actions_require_unlock
+src/handlers/board/tests.rs	598	expect	clippy::too_many_lines	the end-to-end test keeps its fixture setup and ordered assertions in one scenario	fn self_delete_requires_owned_post_cookie
+src/handlers/mod.rs	349	expect	clippy::cognitive_complexity	the multipart parser keeps per-field size and duplicate checks at one input boundary	fn parse_post_multipart
+src/handlers/mod.rs	353	expect	clippy::too_many_lines	all multipart field limits and duplicate checks must remain at one input boundary	fn parse_post_multipart
+src/handlers/mod.rs	584	expect	clippy::too_many_arguments	the parameters mirror the validated upload, board policy, and destination records	fn process_primary_upload
+src/handlers/mod.rs	589	expect	clippy::too_many_lines	media validation, persistence, thumbnailing, and cleanup form one guarded operation	fn process_primary_upload
+src/handlers/mod.rs	833	expect	clippy::too_many_arguments	the parameters represent the three optional media inputs and their shared post context	fn process_audio_first_uploads
+src/handlers/mod.rs	942	expect	clippy::cognitive_complexity	job selection mirrors the closed media-type and follow-up job matrix	fn enqueue_post_jobs
+src/handlers/posting.rs	428	expect	clippy::too_many_arguments	the constructor mirrors the persisted post record assembled from validated form fields	fn build_new_post
+src/handlers/posting.rs	474	expect	clippy::cognitive_complexity	post validation and transactional creation share one consistency boundary	fn submit_post
+src/handlers/posting.rs	478	expect	clippy::too_many_lines	validation, transactional insertion, attachment updates, and job enqueueing share one boundary	fn submit_post
+src/handlers/render.rs	158	expect	clippy::too_many_arguments	the renderer accepts distinct request-scoped security, preference, and pagination inputs	fn render_board_page
+src/handlers/render.rs	227	expect	clippy::too_many_arguments	the renderer accepts distinct request-scoped security, preference, and thread-state inputs	fn render_thread_page
+src/handlers/setup.rs	61	expect	clippy::struct_excessive_bools	preset defaults mirror independent setup toggles shown in the form	struct PresetDefaults
+src/handlers/setup.rs	242	expect	clippy::struct_excessive_bools	parsed setup data carries independent persisted toggles from the review form	struct ParsedSetup
+src/handlers/setup.rs	457	expect	clippy::too_many_lines	the wizard's dependent fields must be validated together before any setup mutation	fn parse_setup_form_inner
+src/handlers/setup.rs	793	expect	clippy::too_many_lines	authorization, final validation, atomic setup writes, and session issuance form one request	fn setup_finish
+src/handlers/setup.rs	1125	expect	clippy::too_many_lines	the function renders one ordered wizard form whose field names and fallback values are coupled	fn setup_form_page
+src/handlers/thread.rs	51	expect	clippy::too_many_lines	access control, thread loading, unread-state calculation, and rendering form one request	fn view_thread
+src/handlers/thread.rs	276	expect	clippy::too_many_lines	access checks, multipart validation, transactional reply creation, and cookies form one request	fn post_reply
+src/handlers/thread.rs	716	expect	clippy::too_many_lines	ownership checks, edit validation, transactional update, media cleanup, and jobs form one request	fn edit_post_post
+src/handlers/thread.rs	990	expect	clippy::too_many_lines	ownership checks, deletion rules, transactional mutation, and media cleanup form one request	fn delete_own_post
+src/handlers/thread.rs	1369	expect	clippy::too_many_lines	access checks, update filtering, unread state, and response rendering form one polling request	fn thread_updates
+src/lib.rs	1	expect	unused_crate_dependencies	Cargo exposes binary-only dependencies to the library target, including the intentional rustls-webpki security floor for RUSTSEC-2026-0049	crate
+src/logging.rs	807	expect	clippy::cognitive_complexity	message rewriting intentionally centralizes the closed set of upstream log patterns	fn rewrite_message
+src/logging.rs	811	expect	clippy::too_many_lines	keeping the closed message-rewrite table together makes overlapping upstream patterns auditable	fn rewrite_message
+src/main.rs	1	expect	unused_crate_dependencies	Cargo exposes the companion chan library and the transitive rustls-webpki security floor to this standalone binary target	crate
+src/main.rs	92	cfg_attr(expect)	clippy::unnecessary_wraps	the shared cross-platform call site is fallible only on Linux and Windows	fn relaunch_in_terminal_if_needed
+src/media/ffmpeg.rs	620	expect	clippy::panic_in_result_fn	the assertion reports an invalid ordering invariant in generated ffmpeg arguments	fn output_arg_index
+src/media/ffmpeg.rs	659	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn vp9_transcode_args_normalise_yuv420p_color_metadata
+src/media/ffmpeg.rs	681	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn vp9_yuv420p_output_does_not_inherit_srgb_gbr_metadata
+src/media/prune.rs	414	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn configured_prune_disabled_removes_nothing
+src/media/prune.rs	454	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn pruning_removes_oldest_originals_and_keeps_thumbnails
+src/media/prune.rs	524	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn pruning_ignores_archived_thread_media
+src/media/prune.rs	595	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn pruning_removes_secondary_audio_original_with_combo_post
+src/media/prune.rs	657	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn pruning_refuses_symlink_media_paths
+src/media/prune.rs	711	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn pruning_refuses_symlink_parent_components
+src/media/thumbnail.rs	383	expect	clippy::cognitive_complexity	the renderer fallback and fail-closed validation sequence is intentionally linear	fn pdf_first_page_thumbnail
+src/media/thumbnail.rs	387	expect	clippy::too_many_lines	PDF rendering keeps subprocess validation, fallback, and cleanup in one auditable sequence	fn pdf_first_page_thumbnail
+src/media/thumbnail.rs	830	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn write_pdf_placeholder_outputs_svg
+src/media/thumbnail.rs	845	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn unsupported_image_thumbnail_falls_back_to_svg_placeholder_without_ffmpeg
+src/media/thumbnail.rs	868	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn mutool_command_caps_render_dimensions
+src/middleware/state.rs	342	expect	clippy::struct_excessive_bools	independent runtime capability flags are shared across handlers and workers	struct AppState
+src/middleware/state.rs	435	expect	clippy::panic_in_result_fn	assertions provide precise regression failures after fallible test-database setup	fn db_maintenance_jobs_assign_monotonic_job_ids_and_preserve_them_in_terminal_states
+src/middleware/state.rs	527	expect	clippy::panic_in_result_fn	assertions provide precise regression failures after fallible test-database setup	fn db_maintenance_jobs_finished_updates_only_matching_running_job
+src/models.rs	300	expect	clippy::struct_excessive_bools	the row model intentionally mirrors independent board feature flags	struct Board
+src/pending_fs.rs	1401	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn finalize_delete_files_payload_removes_files_and_clears_pending_op
+src/pending_fs.rs	1470	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn finalize_delete_files_and_dirs_removes_board_dir_and_rejects_nested_dir
+src/pending_fs.rs	1525	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn startup_temp_cleanup_removes_only_known_upload_temp_patterns
+src/pending_fs.rs	1566	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn banner_orphan_cleanup_removes_only_unreferenced_canonical_assets
+src/pending_fs.rs	1603	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn banner_orphan_cleanup_skips_symlinked_banner_dir
+src/pending_fs.rs	1638	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn banner_orphan_cleanup_skips_symlinked_banner_file
+src/pending_fs.rs	1667	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn banner_cleanup_rejects_malicious_board_short_before_deleting
+src/pending_fs.rs	1708	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn startup_temp_cleanup_does_not_follow_symlinked_directories
+src/pending_fs.rs	1734	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn finalize_upload_payload_rejects_traversal_relative_path_before_mutation
+src/pending_fs.rs	1781	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn finalize_upload_payload_rejects_stage_dir_outside_pending_root
+src/pending_fs.rs	1827	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn finalize_board_restore_payload_rejects_arbitrary_live_path_before_mutation
+src/pending_fs.rs	1870	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn finalize_board_restore_payload_recovers_interrupted_swap
+src/pending_fs.rs	1900	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn finalize_board_restore_payload_cleans_leftover_previous_path
+src/pending_fs.rs	1934	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn finalize_board_restore_payload_swaps_live_and_stage
+src/pending_fs.rs	1968	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn finalize_full_restore_payload_without_additional_swaps_still_succeeds
+src/pending_fs.rs	1999	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn finalize_full_restore_payload_with_valid_tor_swap_succeeds
+src/pending_fs.rs	2040	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn finalize_full_restore_rejects_tor_swap_without_private_permissions_flag
+src/pending_fs.rs	2077	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn finalize_full_restore_rejects_arbitrary_additional_live_before_mutation
+src/pending_fs.rs	2120	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn finalize_full_restore_rejects_parent_traversal_in_additional_swap
+src/pending_fs.rs	2161	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn finalize_full_restore_rejects_additional_swap_with_wrong_live_root
+src/pending_fs.rs	2195	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn finalize_full_restore_rejects_additional_staged_or_previous_outside_expected_area
+src/pending_fs.rs	2254	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn reconcile_rejects_malicious_additional_swap_and_keeps_pending_op
+src/pending_fs.rs	2319	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn old_full_restore_payload_without_additional_swaps_deserializes_and_finalizes
+src/pending_fs.rs	2352	expect	clippy::panic_in_result_fn	test assertions intentionally report violated filesystem invariants	fn reconcile_full_restore_recovers_global_favicon_and_banner_swaps_idempotently
+src/server/cli.rs	198	expect	clippy::too_many_lines	the command dispatch stays together so all CLI-side effects remain auditable	fn run_admin
+src/server/console/dashboard.rs	125	expect	clippy::as_conversions,clippy::cast_precision_loss	human-readable byte sizes intentionally trade integer precision for compact display	fn fmt_bytes
+src/server/console/dashboard.rs	169	expect	clippy::too_many_lines	the contiguous dashboard renderer keeps terminal row ordering auditable	fn render_dashboard
+src/server/console/dashboard.rs	620	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn log_view_selects_main_log_not_dependency_log
+src/server/console/mod.rs	267	expect	clippy::as_conversions,clippy::cast_precision_loss	request-rate display intentionally converts a monotonic counter delta to floating point	fn collect_stats
+src/server/console/mod.rs	273	expect	clippy::too_many_arguments	the collector receives the complete sampling state maintained by its caller	fn collect_stats
+src/server/mod.rs	8	expect	clippy::module_inception	the nested name preserves the established crate::server::server module path	mod server
+src/server/server/headers.rs	415	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn request_boundary_rejects_transfer_encoding_with_content_length
+src/server/server/headers.rs	443	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn request_boundary_rejects_transfer_encoding_without_content_length
+src/server/server/headers.rs	465	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn request_boundary_accepts_bounded_content_length_request
+src/server/server/headers.rs	487	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn request_boundary_rejects_oversized_single_header_value
+src/server/server/headers.rs	510	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn request_boundary_accepts_exact_value_and_aggregate_limits
+src/server/server/headers.rs	556	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn request_boundary_rejects_oversized_aggregate_headers
+src/server/server/headers.rs	679	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn admin_cache_middleware_no_store_for_sensitive_html_only
+src/server/server/headers.rs	725	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn cache_middleware_does_not_overwrite_route_cache_control
+src/server/server/headers.rs	761	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn served_templates_do_not_embed_inline_script_bodies
+src/server/server/headers.rs	853	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn hsts_is_not_added_for_loopback_direct_https_hosts
+src/server/server/headers.rs	879	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn hsts_is_not_added_for_public_nonstandard_https_ports
+src/server/server/headers.rs	898	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn hsts_is_not_added_for_unconfigured_proxy_tunnel_hosts
+src/server/server/headers.rs	919	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn hsts_ignores_spoofed_forwarded_proto_from_public_peer
+src/server/server/observability.rs	28	expect	clippy::struct_excessive_bools	the detailed readiness schema reports independent subsystem states	struct ReadyPayload
+src/server/server/observability.rs	78	expect	clippy::too_many_lines	readiness computes one coherent subsystem snapshot before serializing its response	fn readyz_response
+src/server/server/observability.rs	203	expect	clippy::too_many_lines	keeping metric declarations and values together prevents exposition-order drift	fn metrics_response
+src/server/server/observability.rs	352	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn public_readyz_response_hides_operational_details
+src/server/server/observability.rs	390	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn detailed_readyz_response_remains_available_when_enabled
+src/server/server/observability.rs	437	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn metrics_response_remains_available_for_enabled_scrapers
+src/server/server/router.rs	269	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn public_health_endpoints_emit_request_id_without_observability_details
+src/server/server/router.rs	349	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn built_in_static_assets_use_versioned_cache_policy
+src/server/server/router.rs	422	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn public_dynamic_html_revalidates_without_immutable_cache
+src/server/server/router.rs	450	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn admin_login_page_is_no_store
+src/server/server/router.rs	483	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn compression_only_applies_to_text_like_responses
+src/server/server/router.rs	551	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn compression_rejects_requests_that_refuse_every_content_coding
+src/server/server/router.rs	580	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn uploaded_pdf_route_allows_same_origin_embedding_only
+src/server/server/router.rs	640	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn uploaded_media_and_board_favicons_get_separate_cache_policies
+src/server/server/router.rs	710	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn protected_board_media_and_favicons_are_not_public_cacheable
+src/server/server/router.rs	765	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn generated_svg_thumbnails_are_inline_but_uploaded_svg_is_attachment
+src/server/server/router.rs	852	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn pages_keep_remote_framing_blocked
+src/server/server/router.rs	894	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn admin_login_redirect_target_resolves_on_tunneled_host
+src/server/server/routes.rs	14	expect	clippy::too_many_lines	keeping the public route table contiguous makes route precedence auditable	fn public_routes
+src/server/server/routes.rs	567	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn board_settings_accepts_upload_limits_above_defaults
+src/server/server/routes.rs	596	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn board_settings_rejects_invalid_upload_limits
+src/server/server/routes.rs	631	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn board_settings_protected_mode_with_new_password_saves_hash
+src/server/server/routes.rs	664	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn board_settings_blank_password_keeps_existing_hash
+src/server/server/routes.rs	707	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn board_settings_rejects_removing_password_from_protected_mode
+src/server/server/routes.rs	756	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn board_settings_remove_password_while_public_clears_hash
+src/server/server/routes.rs	799	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn board_settings_new_password_takes_precedence_over_remove_checkbox
+src/server/server/routes.rs	846	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn board_restore_route_accepts_large_multipart_body_without_global_media_limit
+src/server/server/routes.rs	891	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn board_restore_get_redirects_back_to_admin_panel
+src/server/server/routes.rs	925	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn full_restore_board_backup_upload_redirects_with_helpful_error
+src/server/server/routes.rs	1021	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn saved_full_restore_missing_backup_redirects_back_to_full_backup_section
+src/server/server/routes.rs	1079	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn saved_board_restore_missing_backup_redirects_back_to_board_backup_section
+src/server/server/routes.rs	1137	expect	clippy::panic_in_result_fn	assertion failures are the intended failure mechanism for this test	fn board_restore_invalid_upload_redirects_back_to_board_backup_section
+src/server/server.rs	204	expect	clippy::cognitive_complexity	startup, listener selection, and coordinated shutdown form one server lifecycle	fn run_server
+src/server/server.rs	208	expect	clippy::too_many_lines	startup ordering and shutdown ownership are one cohesive server lifecycle	fn run_server
+src/templates/admin/appearance.rs	238	expect	clippy::too_many_lines	the builder controls mirror one cohesive theme-editing form	fn render_builder_sections
+src/templates/admin/appearance.rs	749	expect	clippy::too_many_arguments	the section interpolates independent pre-rendered controls into fixed HTML	fn render_admin_site_settings_section
+src/templates/admin/appearance.rs	869	expect	clippy::too_many_lines	the appearance section is one stable server-rendered HTML fragment	fn render_admin_appearance_section
+src/templates/admin/appearance.rs	874	expect	clippy::too_many_arguments	the section interpolates independent pre-rendered appearance controls	fn render_admin_appearance_section
+src/templates/admin/backups.rs	65	expect	clippy::too_many_lines	each backup row keeps its related restore, download, and audit controls together	fn render_full_backup_rows
+src/templates/admin/backups.rs	428	expect	clippy::too_many_lines	the backup section is one stable server-rendered HTML fragment	fn render_admin_backups_section
+src/templates/admin/backups.rs	433	expect	clippy::too_many_arguments	the section interpolates independent pre-rendered backup controls	fn render_admin_backups_section
+src/templates/admin/maintenance.rs	221	expect	clippy::too_many_lines	the maintenance controls form one stable server-rendered HTML fragment	fn render_admin_maintenance_section
+src/templates/admin/moderation.rs	194	expect	clippy::too_many_lines	the moderation controls form one stable server-rendered HTML fragment	fn render_admin_moderation_section
+src/templates/admin/moderation.rs	199	expect	clippy::too_many_arguments	the section interpolates independent pre-rendered moderation tables	fn render_admin_moderation_section
+src/templates/admin.rs	213	expect	clippy::struct_excessive_bools	the view mirrors independent administrator appearance toggles	struct AdminPanelAppearanceView
+src/templates/admin.rs	770	expect	clippy::too_many_lines	the board settings card preserves one cohesive form and its stable field hooks	fn render_board_settings_card
+src/templates/admin.rs	1306	expect	clippy::too_many_lines	the health report keeps one cohesive diagnostic result document	fn admin_db_health_result_page
+src/templates/admin.rs	1702	expect	clippy::too_many_lines	the investigation page keeps its summary, results, and controls together	fn admin_ip_history_page
+src/templates/admin.rs	2533	expect	clippy::cognitive_complexity	the test intentionally checks a linear list of independent health-panel controls	fn admin_panel_site_health_renders_after_site_settings_closed_by_default
+src/templates/admin.rs	2750	expect	clippy::cognitive_complexity	the test intentionally checks a linear list of independent panel groupings	fn admin_panel_groups_board_and_backup_areas_by_task
+src/templates/admin.rs	2754	expect	clippy::too_many_lines	the test keeps the complete administrator section-order contract in one scenario	fn admin_panel_groups_board_and_backup_areas_by_task
+src/templates/board.rs	67	expect	clippy::fn_params_excessive_bools,clippy::too_many_arguments	the card consumes independent permissions, positions, and visitor preferences	fn render_board_card
+src/templates/board.rs	72	expect	clippy::too_many_lines	the board card keeps its navigation, badges, and reorder controls together	fn render_board_card
+src/templates/board.rs	403	expect	clippy::too_many_arguments	the action menu accepts independent labels and form values for two actions	fn render_catalog_actions
+src/templates/board.rs	480	expect	clippy::too_many_arguments	the card combines thread state with independent action labels and values	fn render_catalog_card
+src/templates/board.rs	621	expect	clippy::too_many_arguments	the directory renderer consumes distinct badge, access, and admin contexts	fn board_cards
+src/templates/board.rs	656	expect	clippy::too_many_lines	the homepage keeps its board groups, statistics, and modals together	fn index_page
+src/templates/board.rs	661	expect	clippy::too_many_arguments	the homepage consumes distinct board, activity, consent, and admin contexts	fn index_page
+src/templates/board.rs	861	expect	clippy::too_many_lines,clippy::fn_params_excessive_bools	the board index keeps its forms, navigation, and thread list together	fn board_page
+src/templates/board.rs	867	expect	clippy::too_many_arguments	the board index consumes distinct paging, moderation, activity, and visitor contexts	fn board_page
+src/templates/board.rs	1017	expect	clippy::too_many_arguments,clippy::too_many_lines	a summary combines thread metadata, preview posts, controls, and visitor state	fn render_thread_summary
+src/templates/board.rs	1246	expect	clippy::fn_params_excessive_bools,clippy::too_many_lines	the catalog keeps its card grid, forms, navigation, and hidden-view state together	fn catalog_page
+src/templates/board.rs	1252	expect	clippy::too_many_arguments	the catalog consumes distinct filtering, moderation, activity, and visitor contexts	fn catalog_page
+src/templates/board.rs	1475	expect	clippy::too_many_arguments	search rendering consumes distinct result, paging, theme, and visitor contexts	fn search_page
+src/templates/mod.rs	106	expect	clippy::rc_buffer	the public live_themes API retains Arc<Vec<Theme>> for compatibility	item LIVE_THEMES
+src/templates/mod.rs	119	expect	clippy::rc_buffer	the public live_boards APIs retain Arc<Vec<Board>> for compatibility	item LIVE_BOARDS
+src/templates/mod.rs	659	expect	clippy::too_many_arguments	the base layout accepts independent page metadata and rendering context	fn base_layout
+src/templates/mod.rs	691	expect	clippy::too_many_arguments,clippy::too_many_lines	the shared layout keeps its HTML structure and page context together	fn base_layout_with_preferences
+src/templates/thread.rs	287	expect	clippy::too_many_lines	the thread document keeps navigation, posts, poll, forms, and modals together	fn thread_page
+src/templates/thread.rs	292	expect	clippy::too_many_arguments	thread rendering consumes distinct moderation, poll, form, theme, and visitor contexts	fn thread_page
+src/templates/thread.rs	678	expect	clippy::struct_excessive_bools	each flag independently controls a post-rendering capability	struct RenderPostOpts
+src/templates/thread.rs	887	expect	clippy::cognitive_complexity	post rendering keeps its security-sensitive escaping and media branches together	fn render_post
+src/templates/thread.rs	891	expect	clippy::too_many_lines	post rendering keeps all media variants and security-sensitive escaping together	fn render_post
+src/test_support.rs	4	expect	clippy::expect_used	shared test fixture construction must fail immediately when its isolated filesystem or database cannot be initialized	fn app_state
+src/theme_builder.rs	185	expect	clippy::too_many_lines	keeping the complete preset palette table together makes visual values auditable	fn builder_defaults_for_preset
+src/theme_builder.rs	489	expect	clippy::too_many_lines	the generated stylesheet is intentionally kept as one contiguous template	fn build_theme_css
+src/tls/acme.rs	109	expect	deprecated	rustls-acme's low-level acceptor remains required by RustChan's manual server loop	let acme_acceptor
+src/tls/acme.rs	135	expect	clippy::cognitive_complexity	the ACME stream loop directly models all terminal and retryable event states	fn run_acme_event_loop
+src/tls/self_signed.rs	236	expect	clippy::panic_in_result_fn	assertions intentionally report violations of first-run certificate generation	fn generates_cert_on_first_call
+src/tls/self_signed.rs	257	expect	clippy::panic_in_result_fn	assertions intentionally report violations of certificate reuse	fn reuses_valid_cert_on_second_call
+src/tls/self_signed.rs	283	expect	clippy::panic_in_result_fn	assertions intentionally report violations of certificate validity bounds	fn generated_cert_validity_uses_current_utc_window
+src/tls/self_signed.rs	342	expect	clippy::panic_in_result_fn	assertions intentionally report violations of missing-key recovery	fn missing_key_triggers_regeneration_on_next_startup
+src/utils/crypto.rs	70	expect	clippy::exit	fail-closed randomness failures must terminate before issuing weak tokens	fn fatal_randomness_error
+src/utils/crypto.rs	212	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn hash_and_verify_password
+src/utils/files/storage.rs	34	expect	clippy::struct_excessive_bools	the booleans are independent upload-policy and media-capability flags	struct SaveUploadOptions
+src/utils/files/storage.rs	135	expect	clippy::too_many_arguments	the arguments mirror independent upload metadata and board limits at the handler boundary	fn save_audio_with_image_thumb_from_path
+src/utils/files/storage.rs	246	expect	clippy::as_conversions,clippy::cast_precision_loss	human-readable size display intentionally rounds integral byte counts to one decimal place	fn format_file_size
+src/utils/files/storage.rs	1499	expect	clippy::print_stderr	test skip diagnostics must remain visible when optional ffmpeg fixtures are unavailable	fn valid_audio_uploads_accept_common_formats_with_ffprobe
+src/utils/files/storage.rs	1554	expect	clippy::print_stderr	test skip diagnostics must remain visible when optional ffmpeg fixtures are unavailable	fn valid_mkv_uploads_save_as_video_with_probe
+src/utils/sanitize.rs	29	expect	clippy::expect_used	the reply-reference regex is a source literal covered by sanitizer tests	item RE_REPLY
+src/utils/sanitize.rs	37	expect	clippy::expect_used	the cross-board-link regex is a source literal covered by sanitizer tests	item RE_CROSSLINK
+src/utils/sanitize.rs	46	expect	clippy::expect_used	the URL regex is a source literal covered by sanitizer tests	item RE_URL
+src/utils/sanitize.rs	55	expect	clippy::expect_used	the bold-markup regex is a source literal covered by sanitizer tests	item RE_BOLD
+src/utils/sanitize.rs	63	expect	clippy::expect_used	the italic-markup regex is a source literal covered by sanitizer tests	item RE_ITALIC
+src/utils/sanitize.rs	71	expect	clippy::expect_used	the spoiler-markup regex is a source literal covered by sanitizer tests	item RE_SPOILER
+src/utils/sanitize.rs	80	expect	clippy::expect_used	the dice-expression regex is a source literal covered by sanitizer tests	item RE_DICE
+src/workers/mod.rs	699	expect	clippy::cognitive_complexity,clippy::too_many_lines	claim, execution, completion persistence, retry, and shutdown form one worker state machine	fn worker_loop
+src/workers/mod.rs	864	expect	clippy::cognitive_complexity	the dispatcher mirrors the closed set of background job variants	fn handle_job
+src/workers/mod.rs	996	expect	clippy::cognitive_complexity	transcode process control and fail-closed cleanup share one lifecycle	fn transcode_video
+src/workers/mod.rs	1111	expect	clippy::cognitive_complexity	source validation and codec-specific preparation share one preflight boundary	fn transcode_video_prepare
+src/workers/mod.rs	1660	expect	clippy::cognitive_complexity	archive, prune, and filesystem finalization remain one consistency operation	fn prune_threads
+src/workers/mod.rs	1850	expect	clippy::expect_used	test database queries stop locally with fixture-specific failure context	fn file_hash_count
+src/workers/mod.rs	1875	expect	clippy::expect_used	constructing the constrained test pool is a prerequisite for completion-retry tests	fn single_connection_test_pool
+src/workers/mod.rs	1905	expect	clippy::expect_used	claiming the seeded job is a prerequisite for each queue-state assertion	fn claim_job
+src/workers/mod.rs	1918	expect	clippy::expect_used	test fixture failures stop the individual queue accounting test with local context	fn retryable_failure_restores_queue_pending_count
+src/workers/mod.rs	1948	expect	clippy::expect_used	test fixture failures stop the individual queue accounting test with local context	fn permanent_failure_leaves_queue_pending_count_at_zero
+src/workers/mod.rs	1984	expect	clippy::expect_used	the async retry test requires every timed and database fixture step to succeed	fn completion_retries_the_same_job_after_pool_exhaustion
+src/workers/mod.rs	2037	expect	clippy::expect_used	the shutdown recovery test requires every timed and database fixture step to succeed	fn completion_stops_retrying_after_shutdown_grace_and_startup_can_recover
+src/workers/mod.rs	2077	expect	clippy::expect_used	the completion recovery fixture must resolve within its explicit test timeout	fn already_resolved_completion_error_does_not_wedge_worker
+src/workers/mod.rs	2113	expect	clippy::too_many_lines	the regression keeps job seeding, terminal persistence, and replay checks in one end-to-end scenario	fn non_transient_done_completion_is_terminal_and_never_replayed
+src/workers/mod.rs	2231	expect	clippy::expect_used	the injected retry-state fixture requires each database and timeout step to succeed	fn non_transient_failed_completion_preserves_bounded_attempt_count
+src/workers/mod.rs	2349	expect	clippy::expect_used	temporary-file and database fixture setup must succeed before cleanup assertions	fn stale_transcode_persist_removes_unattached_webm_and_writes_no_hash
+src/workers/mod.rs	2385	expect	clippy::expect_used	temporary-file fixture setup must succeed before transcode output assertions	fn transcode_finalise_skips_larger_output_and_cleans_temp_file
+src/workers/mod.rs	2429	expect	clippy::expect_used	temporary upload fixture setup must succeed before path validation assertions	fn transcode_source_validation_rejects_escape_paths
+src/workers/mod.rs	2448	expect	clippy::expect_used	Unix symlink fixture setup must succeed before containment assertions	fn thumb_cache_eviction_skips_symlinked_thumbs_dir
+src/workers/mod.rs	2475	expect	clippy::expect_used	Unix symlink fixture setup must succeed before containment assertions	fn thumb_cache_eviction_skips_symlinked_board_dir
+src/workers/mod.rs	2502	expect	clippy::expect_used	Unix symlink fixture setup must succeed before containment assertions	fn thumb_cache_eviction_skips_symlinked_thumb_file
+src/workers/mod.rs	2526	expect	clippy::expect_used	temporary-file and database fixture setup must succeed before cleanup assertions	fn stale_waveform_finalise_removes_unattached_png_and_writes_no_hash
+tests/cli_runtime.rs	1	expect	unused_crate_dependencies	Cargo exposes all package dependencies to this black-box integration target, which intentionally interacts only with the compiled CLI	crate
+tests/cli_runtime.rs	263	expect	clippy::panic_in_result_fn	assertions intentionally report violated CLI filesystem invariants	fn help_and_version_do_not_create_runtime_state
+tests/cli_runtime.rs	304	expect	clippy::panic_in_result_fn	assertions intentionally report violated CLI filesystem invariants	fn explicit_data_dir_owns_all_initialized_runtime_state
+tests/cli_runtime.rs	356	expect	clippy::panic_in_result_fn	assertions intentionally report violated CLI filesystem invariants	fn relative_data_dir_is_rejected_before_filesystem_mutation
+tests/cli_runtime.rs	396	expect	clippy::too_many_lines	one subprocess lifecycle verifies the complete direct-HTTPS topology and cookie contract	fn direct_https_process_exposes_only_https_and_redirect_with_secure_login_cookies
+tests/cli_runtime.rs	400	expect	clippy::panic_in_result_fn	assertions intentionally report violated TLS topology and cookie invariants	fn direct_https_process_exposes_only_https_and_redirect_with_secure_login_cookies

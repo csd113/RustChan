@@ -1,14 +1,23 @@
 // Request handlers.
 
-pub mod admin;
-pub mod banner;
-pub mod board;
-pub mod captcha;
-pub mod favicon;
-pub mod posting;
-pub mod render;
-pub mod setup;
-pub mod thread;
+/// Implements admin handler support.
+pub(crate) mod admin;
+/// Implements banner handler support.
+pub(crate) mod banner;
+/// Implements board handler support.
+pub(crate) mod board;
+/// Implements captcha handler support.
+pub(crate) mod captcha;
+/// Implements favicon handler support.
+pub(crate) mod favicon;
+/// Implements posting handler support.
+pub(crate) mod posting;
+/// Implements render handler support.
+pub(crate) mod render;
+/// Implements setup handler support.
+pub(crate) mod setup;
+/// Implements thread handler support.
+pub(crate) mod thread;
 
 // ─── Shared multipart form parsing ───────────────────────────────────────────
 //
@@ -23,20 +32,27 @@ use std::collections::HashSet;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt as _;
 
+/// MIME sniff bytes used by this handler.
 const MIME_SNIFF_BYTES: usize = 512;
+/// Text multipart field max bytes used by this handler.
 const TEXT_MULTIPART_FIELD_MAX_BYTES: usize = 64 * 1024;
+/// Unknown multipart field max bytes used by this handler.
 const UNKNOWN_MULTIPART_FIELD_MAX_BYTES: usize = 64 * 1024;
 // Public post uploads intentionally bypass Axum's global body cap so per-board
 // limits above old defaults still work. This aggregate budget bounds the whole
 // multipart stream after board settings are loaded.
+/// Public multipart aggregate max bytes used by this handler.
 const PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES: usize = 512 * 1024 * 1024;
 // Caps field spam and duplicate-slot churn before bodies are streamed.
+/// Public multipart max fields used by this handler.
 const PUBLIC_MULTIPART_MAX_FIELDS: usize = 64;
 // Conservative whole-request upload timeout. True min-rate enforcement would be
 // more precise, but this avoids indefinite request-slot pinning without breaking
 // normal large LAN uploads.
-pub const PUBLIC_UPLOAD_TIMEOUT: Duration = Duration::from_mins(10);
+/// Public upload timeout used by this handler.
+pub(crate) const PUBLIC_UPLOAD_TIMEOUT: Duration = Duration::from_mins(10);
 
+/// Performs the multipart read error handler operation.
 fn multipart_read_error(
     context: &'static str,
     error: &axum::extract::multipart::MultipartError,
@@ -57,12 +73,16 @@ fn multipart_read_error(
 }
 
 #[derive(Default)]
+/// Data used by the public multipart budget workflow.
 struct PublicMultipartBudget {
+    /// The fields seen.
     fields_seen: usize,
+    /// The bytes seen.
     bytes_seen: usize,
 }
 
 impl PublicMultipartBudget {
+    /// Performs the note field handler operation.
     fn note_field(&mut self) -> Result<()> {
         self.fields_seen = self.fields_seen.saturating_add(1);
         if self.fields_seen > PUBLIC_MULTIPART_MAX_FIELDS {
@@ -73,6 +93,7 @@ impl PublicMultipartBudget {
         Ok(())
     }
 
+    /// Performs the note chunk handler operation.
     fn note_chunk(&mut self, len: usize) -> Result<()> {
         self.bytes_seen = self.bytes_seen.saturating_add(len);
         if self.bytes_seen > PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES {
@@ -84,16 +105,20 @@ impl PublicMultipartBudget {
     }
 }
 
+/// Handles the read text field request.
 async fn read_text_field(
     mut field: axum::extract::multipart::Field<'_>,
     budget: &mut PublicMultipartBudget,
 ) -> Result<String> {
     let mut bytes = Vec::new();
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|e| multipart_read_error("text field", &e))?
-    {
+    loop {
+        let next_chunk = field
+            .chunk()
+            .await
+            .map_err(|e| multipart_read_error("text field", &e))?;
+        let Some(chunk) = next_chunk else {
+            break;
+        };
         budget.note_chunk(chunk.len())?;
         if bytes.len().saturating_add(chunk.len()) > TEXT_MULTIPART_FIELD_MAX_BYTES {
             tracing::warn!(
@@ -110,15 +135,19 @@ async fn read_text_field(
         .map_err(|_error| AppError::BadRequest("Multipart text field is not valid UTF-8.".into()))
 }
 
-pub async fn discard_unknown_multipart_field(
+/// Handles the discard unknown multipart field request.
+pub(crate) async fn discard_unknown_multipart_field(
     mut field: axum::extract::multipart::Field<'_>,
 ) -> Result<()> {
     let mut total = 0usize;
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|e| multipart_read_error("unknown field", &e))?
-    {
+    loop {
+        let next_chunk = field
+            .chunk()
+            .await
+            .map_err(|e| multipart_read_error("unknown field", &e))?;
+        let Some(chunk) = next_chunk else {
+            break;
+        };
         total = total.saturating_add(chunk.len());
         if total > UNKNOWN_MULTIPART_FIELD_MAX_BYTES {
             return Err(AppError::UploadTooLarge(
@@ -129,16 +158,20 @@ pub async fn discard_unknown_multipart_field(
     Ok(())
 }
 
+/// Handles the discard unknown public multipart field request.
 async fn discard_unknown_public_multipart_field(
     mut field: axum::extract::multipart::Field<'_>,
     budget: &mut PublicMultipartBudget,
 ) -> Result<()> {
     let mut total = 0usize;
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|e| multipart_read_error("unknown field", &e))?
-    {
+    loop {
+        let next_chunk = field
+            .chunk()
+            .await
+            .map_err(|e| multipart_read_error("unknown field", &e))?;
+        let Some(chunk) = next_chunk else {
+            break;
+        };
         budget.note_chunk(chunk.len())?;
         total = total.saturating_add(chunk.len());
         if total > UNKNOWN_MULTIPART_FIELD_MAX_BYTES {
@@ -164,6 +197,7 @@ async fn discard_unknown_public_multipart_field(
 // small fixed cap, so disabling Axum's route-level body limit for upload routes
 // does not leave text fields unbounded.
 
+/// Handles the stream field to temp file request.
 async fn stream_field_to_temp_file(
     mut field: axum::extract::multipart::Field<'_>,
     max_bytes: usize,
@@ -181,11 +215,14 @@ async fn stream_field_to_temp_file(
     let mut sniff_bytes = Vec::with_capacity(MIME_SNIFF_BYTES);
     let mut size_bytes = 0usize;
 
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|e| multipart_read_error(field_name, &e))?
-    {
+    loop {
+        let next_chunk = field
+            .chunk()
+            .await
+            .map_err(|e| multipart_read_error(field_name, &e))?;
+        let Some(chunk) = next_chunk else {
+            break;
+        };
         budget.note_chunk(chunk.len())?;
         if size_bytes.saturating_add(chunk.len()) > max_bytes {
             tracing::warn!(
@@ -230,10 +267,12 @@ async fn stream_field_to_temp_file(
     })
 }
 
+/// Formats upload limit.
 fn format_upload_limit(max_bytes: usize) -> String {
     crate::utils::files::format_file_size(i64::try_from(max_bytes).unwrap_or(i64::MAX))
 }
 
+/// Handles the read upload field request.
 async fn read_upload_field(
     field: axum::extract::multipart::Field<'_>,
     max_bytes: usize,
@@ -260,19 +299,29 @@ async fn read_upload_field(
     Ok(Some((upload, fname)))
 }
 
-pub struct TempUpload {
+/// Data used by the temp upload workflow.
+pub(crate) struct TempUpload {
+    /// The temp file.
     pub temp_file: tempfile::NamedTempFile,
+    /// The sniff size in bytes.
     pub sniff_bytes: Vec<u8>,
+    /// The size size in bytes.
     pub size_bytes: usize,
 }
 
 /// Parsed fields from a post/thread creation multipart form.
-pub struct PostFormData {
+pub(crate) struct PostFormData {
+    /// Whether the CSRF verified setting is active.
     pub csrf_verified: bool,
+    /// The submission token.
     pub submission_token: String,
+    /// The name.
     pub name: String,
+    /// The subject.
     pub subject: String,
+    /// The body.
     pub body: String,
+    /// The deletion token.
     pub deletion_token: String,
     /// Legacy/general upload slot (used for video or arbitrary files).
     pub file: Option<(TempUpload, String)>,
@@ -281,7 +330,9 @@ pub struct PostFormData {
     /// Optional cover-image slot shown second in the posting UI.
     pub image_file: Option<(TempUpload, String)>,
     // ── Poll fields (only used when creating a new thread) ────────────────
+    /// The poll question.
     pub poll_question: String,
+    /// The poll options collection.
     pub poll_options: Vec<String>,
     /// Duration in seconds (parsed from value + unit)
     pub poll_duration_secs: Option<i64>,
@@ -295,12 +346,15 @@ pub struct PostFormData {
 
 /// Drain all fields from a multipart form into [`PostFormData`].
 /// `csrf_cookie` is the value from the browser cookie for CSRF verification.
-#[allow(
+#[expect(
     clippy::cognitive_complexity,
     reason = "the multipart parser keeps per-field size and duplicate checks at one input boundary"
 )]
-#[expect(clippy::too_many_lines)]
-pub async fn parse_post_multipart(
+#[expect(
+    clippy::too_many_lines,
+    reason = "all multipart field limits and duplicate checks must remain at one input boundary"
+)]
+pub(crate) async fn parse_post_multipart(
     mut multipart: Multipart,
     csrf_cookie: Option<&str>,
     max_image_size: usize,
@@ -335,11 +389,14 @@ pub async fn parse_post_multipart(
     let mut budget = PublicMultipartBudget::default();
     let mut seen_upload_slots = HashSet::new();
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| multipart_read_error("multipart", &e))?
-    {
+    loop {
+        let next_field = multipart
+            .next_field()
+            .await
+            .map_err(|e| multipart_read_error("multipart", &e))?;
+        let Some(field) = next_field else {
+            break;
+        };
         budget.note_field()?;
         match field.name() {
             Some("_csrf") => {
@@ -491,7 +548,7 @@ pub async fn parse_post_multipart(
 ///   • "File type not allowed"   → 415 `InvalidMediaType`
 ///   • "Not an audio file"       → 415 `InvalidMediaType`
 ///   • anything else             → 400 `BadRequest`
-pub fn classify_upload_error(e: &anyhow::Error) -> AppError {
+pub(crate) fn classify_upload_error(e: &anyhow::Error) -> AppError {
     let msg = e.to_string();
     // Compare lower-cased so minor wording changes in save_upload don't silently
     // fall through to a generic 400 instead of the correct 413 / 415.
@@ -524,10 +581,16 @@ use crate::models::Board;
 ///
 /// Returns `Ok(None)` when `file_data` is `None` (no file attached).
 /// Must be called from inside a `spawn_blocking` closure.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters mirror the validated upload, board policy, and destination records"
+)]
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[expect(clippy::too_many_lines)]
-pub fn process_primary_upload(
+#[expect(
+    clippy::too_many_lines,
+    reason = "media validation, persistence, thumbnailing, and cleanup form one guarded operation"
+)]
+pub(crate) fn process_primary_upload(
     file_data: Option<(TempUpload, String)>,
     board: &Board,
     conn: &rusqlite::Connection,
@@ -688,16 +751,19 @@ pub fn process_primary_upload(
     Ok((Some(f), Some(hash)))
 }
 
+/// Performs the cached paths belong to board handler operation.
 fn cached_paths_belong_to_board(cached: &crate::db::CachedFile, board_short: &str) -> bool {
     upload_path_belongs_to_board(&cached.file_path, board_short)
         && (cached.thumb_path.is_empty()
             || upload_path_belongs_to_board(&cached.thumb_path, board_short))
 }
 
+/// Performs the upload path belongs to board handler operation.
 fn upload_path_belongs_to_board(path: &str, board_short: &str) -> bool {
     path.split('/').next() == Some(board_short)
 }
 
+/// Performs the temp upload MIME handler operation.
 fn temp_upload_mime(
     upload: &TempUpload,
     ffprobe_available: bool,
@@ -717,7 +783,7 @@ fn temp_upload_mime(
 ///
 /// Returns `Ok(None)` when `audio_file_data` is `None`.
 /// Must be called from inside a `spawn_blocking` closure.
-pub fn process_audio_combo(
+pub(crate) fn process_audio_combo(
     audio_file_data: Option<(TempUpload, String)>,
     primary_upload: Option<&crate::utils::files::UploadedFile>,
     board: &Board,
@@ -764,8 +830,12 @@ pub fn process_audio_combo(
 }
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
-pub fn process_audio_first_uploads(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters represent the three optional media inputs and their shared post context"
+)]
+/// Processes audio first uploads.
+pub(crate) fn process_audio_first_uploads(
     audio_file_data: Option<(TempUpload, String)>,
     image_file_data: Option<(TempUpload, String)>,
     fallback_file_data: Option<(TempUpload, String)>,
@@ -847,6 +917,7 @@ pub fn process_audio_first_uploads(
     Ok((primary, None, primary_hash))
 }
 
+/// Performs the SHA-256 file hex handler operation.
 fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
     use sha2::Digest as _;
     let mut file = std::fs::File::open(path)
@@ -868,11 +939,11 @@ fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
 
 /// Enqueue background media-processing and spam-check jobs for a newly created
 /// post.  Shared by `create_thread` and `post_reply`.
-#[allow(
+#[expect(
     clippy::cognitive_complexity,
     reason = "job selection mirrors the closed media-type and follow-up job matrix"
 )]
-pub fn enqueue_post_jobs(
+pub(crate) fn enqueue_post_jobs(
     job_queue: &JobQueue,
     conn: &rusqlite::Connection,
     post_id: i64,
@@ -952,16 +1023,17 @@ pub fn enqueue_post_jobs(
     }
 
     // 2. Spam analysis
-    let _ = job_queue.enqueue(&crate::workers::Job::SpamCheck {
+    drop(job_queue.enqueue(&crate::workers::Job::SpamCheck {
         post_id,
         ip_hash: ip_hash.to_owned(),
         body_len,
-    });
+    }));
 }
 
 #[cfg(test)]
 mod tests {
     use super::{parse_post_multipart, process_audio_first_uploads, TempUpload};
+    use anyhow::{bail, ensure, Context as _};
     use axum::{
         body::Body,
         http::{header, Request, StatusCode},
@@ -980,20 +1052,20 @@ mod tests {
         }
     }
 
-    fn temp_upload(name: &str, bytes: &[u8]) -> (TempUpload, String) {
+    fn temp_upload(name: &str, bytes: &[u8]) -> anyhow::Result<(TempUpload, String)> {
         let temp_file = tempfile::Builder::new()
             .prefix("rustchan-test-upload-")
             .tempfile()
-            .expect("temp upload");
-        std::fs::write(temp_file.path(), bytes).expect("write temp upload");
-        (
+            .context("create temporary upload")?;
+        std::fs::write(temp_file.path(), bytes).context("write temporary upload")?;
+        Ok((
             TempUpload {
                 temp_file,
                 sniff_bytes: bytes.to_vec(),
                 size_bytes: bytes.len(),
             },
             name.to_owned(),
-        )
+        ))
     }
 
     fn valid_pdf() -> &'static [u8] {
@@ -1009,7 +1081,7 @@ trailer << /Root 1 0 R >>
 "
     }
 
-    fn create_file_hash_table(conn: &rusqlite::Connection) {
+    fn create_file_hash_table(conn: &rusqlite::Connection) -> anyhow::Result<()> {
         conn.execute(
             "CREATE TABLE file_hashes (
                 sha256 TEXT PRIMARY KEY,
@@ -1019,7 +1091,8 @@ trailer << /Root 1 0 R >>
             )",
             [],
         )
-        .expect("create file_hashes");
+        .context("create file_hashes table")?;
+        Ok(())
     }
 
     async fn parse_scaled_audio_limit(
@@ -1027,8 +1100,15 @@ trailer << /Root 1 0 R >>
     ) -> crate::error::Result<&'static str> {
         let form =
             parse_post_multipart(multipart, Some("csrf123"), 1_024, 1_024, 5_000, 1_024).await?;
-        let (upload, _) = form.audio_file.expect("audio upload");
-        assert_eq!(upload.size_bytes, 4_500);
+        let (upload, _) = form.audio_file.ok_or_else(|| {
+            crate::error::AppError::Internal(anyhow::anyhow!("audio upload was not parsed"))
+        })?;
+        if upload.size_bytes != 4_500 {
+            return Err(crate::error::AppError::Internal(anyhow::anyhow!(
+                "parsed audio size was {}, expected 4500",
+                upload.size_bytes
+            )));
+        }
         Ok("ok")
     }
 
@@ -1056,7 +1136,7 @@ trailer << /Root 1 0 R >>
     }
 
     #[tokio::test]
-    async fn multipart_parser_accepts_audio_within_board_specific_limit() {
+    async fn multipart_parser_accepts_audio_within_board_specific_limit() -> anyhow::Result<()> {
         let router = Router::new().route("/parse", post(parse_scaled_audio_limit));
         let audio = vec![b'a'; 4_500];
         let (boundary, body) = crate::test_support::multipart_body(
@@ -1074,16 +1154,17 @@ trailer << /Root 1 0 R >>
                         format!("multipart/form-data; boundary={boundary}"),
                     )
                     .body(Body::from(body))
-                    .expect("request"),
+                    .context("build audio multipart request")?,
             )
             .await
-            .expect("response");
+            .context("receive audio multipart response")?;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        ensure!(response.status() == StatusCode::OK);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn multipart_parser_rejects_oversized_audio_cleanly() {
+    async fn multipart_parser_rejects_oversized_audio_cleanly() -> anyhow::Result<()> {
         let router = Router::new().route("/parse", post(parse_scaled_audio_oversize));
         let audio = vec![b'a'; 5_001];
         let (boundary, body) = crate::test_support::multipart_body(
@@ -1101,12 +1182,13 @@ trailer << /Root 1 0 R >>
                         format!("multipart/form-data; boundary={boundary}"),
                     )
                     .body(Body::from(body))
-                    .expect("request"),
+                    .context("build oversized audio multipart request")?,
             )
             .await
-            .expect("response");
+            .context("receive oversized audio multipart response")?;
 
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        ensure!(response.status() == StatusCode::PAYLOAD_TOO_LARGE);
+        Ok(())
     }
 
     async fn parse_default_limits(
@@ -1121,8 +1203,15 @@ trailer << /Root 1 0 R >>
     ) -> crate::error::Result<&'static str> {
         let form =
             parse_post_multipart(multipart, Some("csrf123"), 1_024, 1_024, 1_024, 2_048).await?;
-        let (upload, _) = form.file.expect("file upload");
-        assert_eq!(upload.size_bytes, 2_048);
+        let (upload, _) = form.file.ok_or_else(|| {
+            crate::error::AppError::Internal(anyhow::anyhow!("PDF upload was not parsed"))
+        })?;
+        if upload.size_bytes != 2_048 {
+            return Err(crate::error::AppError::Internal(anyhow::anyhow!(
+                "parsed PDF size was {}, expected 2048",
+                upload.size_bytes
+            )));
+        }
         Ok("ok")
     }
 
@@ -1160,7 +1249,8 @@ trailer << /Root 1 0 R >>
     }
 
     #[tokio::test]
-    async fn multipart_parser_rejects_duplicate_upload_slot_before_second_body() {
+    async fn multipart_parser_rejects_duplicate_upload_slot_before_second_body(
+    ) -> anyhow::Result<()> {
         let router = Router::new().route("/parse", post(parse_default_limits));
         let first = b"one";
         let second = vec![b'a'; 10_000];
@@ -1182,16 +1272,17 @@ trailer << /Root 1 0 R >>
                         format!("multipart/form-data; boundary={boundary}"),
                     )
                     .body(Body::from(body))
-                    .expect("request"),
+                    .context("build duplicate upload multipart request")?,
             )
             .await
-            .expect("response");
+            .context("receive duplicate upload multipart response")?;
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        ensure!(response.status() == StatusCode::BAD_REQUEST);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn multipart_parser_rejects_named_zero_byte_upload() {
+    async fn multipart_parser_rejects_named_zero_byte_upload() -> anyhow::Result<()> {
         let router = Router::new().route("/parse", post(parse_default_limits));
         let (boundary, body) = multipart_body_with_files(
             &[("_csrf", "csrf123"), ("body", "zero byte")],
@@ -1208,16 +1299,18 @@ trailer << /Root 1 0 R >>
                         format!("multipart/form-data; boundary={boundary}"),
                     )
                     .body(Body::from(body))
-                    .expect("request"),
+                    .context("build zero-byte multipart request")?,
             )
             .await
-            .expect("response");
+            .context("receive zero-byte multipart response")?;
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        ensure!(response.status() == StatusCode::BAD_REQUEST);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn multipart_parser_counts_file_payload_not_multipart_overhead_for_exact_limit() {
+    async fn multipart_parser_counts_file_payload_not_multipart_overhead_for_exact_limit(
+    ) -> anyhow::Result<()> {
         let router = Router::new().route("/parse", post(parse_pdf_limit));
         let pdf = vec![b'p'; 2_048];
         let (boundary, body) = multipart_body_with_files(
@@ -1236,12 +1329,12 @@ trailer << /Root 1 0 R >>
                         format!("multipart/form-data; boundary={boundary}"),
                     )
                     .body(Body::from(body))
-                    .expect("request"),
+                    .context("build exact-limit PDF multipart request")?,
             )
             .await
-            .expect("response");
+            .context("receive exact-limit PDF multipart response")?;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        ensure!(response.status() == StatusCode::OK);
 
         let over_pdf = vec![b'p'; 2_049];
         let (boundary, body) = multipart_body_with_files(
@@ -1258,16 +1351,17 @@ trailer << /Root 1 0 R >>
                         format!("multipart/form-data; boundary={boundary}"),
                     )
                     .body(Body::from(body))
-                    .expect("request"),
+                    .context("build over-limit PDF multipart request")?,
             )
             .await
-            .expect("response");
+            .context("receive over-limit PDF multipart response")?;
 
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        ensure!(response.status() == StatusCode::PAYLOAD_TOO_LARGE);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn multipart_parser_ignores_empty_unselected_file_control() {
+    async fn multipart_parser_ignores_empty_unselected_file_control() -> anyhow::Result<()> {
         let router = Router::new().route("/parse", post(parse_default_limits));
         let (boundary, body) = multipart_body_with_files(
             &[("_csrf", "csrf123"), ("body", "text only")],
@@ -1284,37 +1378,38 @@ trailer << /Root 1 0 R >>
                         format!("multipart/form-data; boundary={boundary}"),
                     )
                     .body(Body::from(body))
-                    .expect("request"),
+                    .context("build empty file-control multipart request")?,
             )
             .await
-            .expect("response");
+            .context("receive empty file-control multipart response")?;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        ensure!(response.status() == StatusCode::OK);
+        Ok(())
     }
 
     #[test]
-    fn public_multipart_budget_enforces_aggregate_bytes_and_field_count() {
+    fn public_multipart_budget_enforces_aggregate_bytes_and_field_count() -> anyhow::Result<()> {
         let mut budget = super::PublicMultipartBudget::default();
         for _ in 0..super::PUBLIC_MULTIPART_MAX_FIELDS {
-            budget.note_field().expect("field within limit");
+            budget.note_field()?;
         }
-        assert!(budget.note_field().is_err());
+        ensure!(budget.note_field().is_err());
 
         let mut budget = super::PublicMultipartBudget::default();
-        budget
-            .note_chunk(super::PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES)
-            .expect("aggregate limit inclusive");
-        assert!(budget.note_chunk(1).is_err());
+        budget.note_chunk(super::PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES)?;
+        ensure!(budget.note_chunk(1).is_err());
+        Ok(())
     }
 
     #[test]
-    fn audio_first_flow_rejects_mixing_other_slot_with_audio_or_image_slots() {
-        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+    fn audio_first_flow_rejects_mixing_other_slot_with_audio_or_image_slots() -> anyhow::Result<()>
+    {
+        let conn = rusqlite::Connection::open_in_memory().context("open in-memory SQLite")?;
         let board = sample_board();
-        let audio = temp_upload("track.flac", b"fLaC\x00\x00\x00\x22test");
-        let other = temp_upload("clip.webm", b"\x1a\x45\xdf\xa3webm");
-        let boards_dir = tempfile::tempdir().expect("boards dir");
-        let uploads_dir = tempfile::tempdir().expect("uploads dir");
+        let audio = temp_upload("track.flac", b"fLaC\x00\x00\x00\x22test")?;
+        let other = temp_upload("clip.webm", b"\x1a\x45\xdf\xa3webm")?;
+        let boards_dir = tempfile::tempdir().context("create boards directory")?;
+        let uploads_dir = tempfile::tempdir().context("create uploads directory")?;
 
         let result = process_audio_first_uploads(
             Some(audio),
@@ -1322,8 +1417,14 @@ trailer << /Root 1 0 R >>
             Some(other),
             &board,
             &conn,
-            boards_dir.path().to_str().expect("boards dir path"),
-            uploads_dir.path().to_str().expect("uploads dir path"),
+            boards_dir
+                .path()
+                .to_str()
+                .context("boards path is not UTF-8")?,
+            uploads_dir
+                .path()
+                .to_str()
+                .context("uploads path is not UTF-8")?,
             150,
             1024 * 1024,
             1024 * 1024,
@@ -1334,24 +1435,28 @@ trailer << /Root 1 0 R >>
             false,
         );
 
-        match result {
-            Ok(_) => panic!("mixed upload modes should be rejected"),
-            Err(error) => assert!(error
+        let Err(error) = result else {
+            bail!("mixed upload modes should be rejected");
+        };
+        ensure!(
+            error
                 .to_string()
-                .contains("Use either the audio/image upload flow or the other-file slot")),
-        }
+                .contains("Use either the audio/image upload flow or the other-file slot"),
+            "unexpected mixed-upload error: {error}"
+        );
+        Ok(())
     }
 
     #[test]
-    fn primary_upload_rejects_malformed_image_even_when_hash_is_cached() {
-        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
-        create_file_hash_table(&conn);
+    fn primary_upload_rejects_malformed_image_even_when_hash_is_cached() -> anyhow::Result<()> {
+        let conn = rusqlite::Connection::open_in_memory().context("open in-memory SQLite")?;
+        create_file_hash_table(&conn)?;
 
         let board = crate::test_fixtures::sample_board();
-        let uploads_dir = tempfile::tempdir().expect("uploads dir");
-        let save_root = tempfile::tempdir().expect("save root");
+        let uploads_dir = tempfile::tempdir().context("create uploads directory")?;
+        let save_root = tempfile::tempdir().context("create save root")?;
         let malformed = b"\x89PNG\r\n\x1a\nthis is not a complete png";
-        let upload = temp_upload("broken.png", malformed);
+        let upload = temp_upload("broken.png", malformed)?;
 
         let mut hasher = sha2::Sha256::new();
         hasher.update(malformed);
@@ -1359,9 +1464,10 @@ trailer << /Root 1 0 R >>
 
         let board_dir = uploads_dir.path().join(&board.short_name);
         let thumbs_dir = board_dir.join("thumbs");
-        std::fs::create_dir_all(&thumbs_dir).expect("create thumb dir");
-        std::fs::write(board_dir.join("cached.png"), malformed).expect("write cached file");
-        std::fs::write(thumbs_dir.join("cached.webp"), b"fake thumb").expect("write cached thumb");
+        std::fs::create_dir_all(&thumbs_dir).context("create thumbnail directory")?;
+        std::fs::write(board_dir.join("cached.png"), malformed).context("write cached image")?;
+        std::fs::write(thumbs_dir.join("cached.webp"), b"fake thumb")
+            .context("write cached thumbnail")?;
         crate::db::record_file_hash(
             &conn,
             &hash,
@@ -1369,14 +1475,20 @@ trailer << /Root 1 0 R >>
             &format!("{}/thumbs/cached.webp", board.short_name),
             "image/png",
         )
-        .expect("record hash");
+        .context("record cached file hash")?;
 
         let result = super::process_primary_upload(
             Some(upload),
             &board,
             &conn,
-            uploads_dir.path().to_str().expect("uploads dir path"),
-            save_root.path().to_str().expect("save root path"),
+            uploads_dir
+                .path()
+                .to_str()
+                .context("uploads path is not UTF-8")?,
+            save_root
+                .path()
+                .to_str()
+                .context("save path is not UTF-8")?,
             64,
             1024 * 1024,
             1024 * 1024,
@@ -1387,34 +1499,39 @@ trailer << /Root 1 0 R >>
             false,
         );
 
-        match result {
-            Ok(_) => panic!("malformed image should be rejected before dedup reuse"),
-            Err(error) => assert!(error.to_string().contains("image header is malformed")),
-        }
+        let Err(error) = result else {
+            bail!("malformed image should be rejected before dedup reuse");
+        };
+        ensure!(
+            error.to_string().contains("image header is malformed"),
+            "unexpected malformed-image error: {error}"
+        );
+        Ok(())
     }
 
     #[test]
-    fn primary_upload_does_not_reuse_dedup_cache_from_another_board() {
-        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
-        create_file_hash_table(&conn);
+    fn primary_upload_does_not_reuse_dedup_cache_from_another_board() -> anyhow::Result<()> {
+        let conn = rusqlite::Connection::open_in_memory().context("open in-memory SQLite")?;
+        create_file_hash_table(&conn)?;
 
         let board = crate::models::Board {
             short_name: "secret".to_owned(),
             allow_pdf: true,
             ..crate::test_fixtures::sample_board()
         };
-        let uploads_dir = tempfile::tempdir().expect("uploads dir");
-        let save_root = tempfile::tempdir().expect("save root");
+        let uploads_dir = tempfile::tempdir().context("create uploads directory")?;
+        let save_root = tempfile::tempdir().context("create save root")?;
         let pdf = valid_pdf();
         let mut hasher = sha2::Sha256::new();
         hasher.update(pdf);
         let hash = hex::encode(hasher.finalize());
 
         let public_thumb_dir = uploads_dir.path().join("img/thumbs");
-        std::fs::create_dir_all(&public_thumb_dir).expect("create public thumb dir");
-        std::fs::write(uploads_dir.path().join("img/cached.pdf"), pdf).expect("write public file");
+        std::fs::create_dir_all(&public_thumb_dir).context("create public thumbnail directory")?;
+        std::fs::write(uploads_dir.path().join("img/cached.pdf"), pdf)
+            .context("write public PDF")?;
         std::fs::write(public_thumb_dir.join("cached.svg"), b"<svg></svg>")
-            .expect("write public thumb");
+            .context("write public thumbnail")?;
         crate::db::record_file_hash(
             &conn,
             &hash,
@@ -1422,17 +1539,23 @@ trailer << /Root 1 0 R >>
             "img/thumbs/cached.svg",
             "application/pdf",
         )
-        .expect("record cross-board hash");
+        .context("record cross-board hash")?;
 
         let _override = crate::media::thumbnail::override_pdf_renderer_mode(
             crate::media::thumbnail::TestPdfRendererMode::Unavailable,
         );
         let (uploaded, primary_hash) = super::process_primary_upload(
-            Some(temp_upload("doc.pdf", pdf)),
+            Some(temp_upload("doc.pdf", pdf)?),
             &board,
             &conn,
-            uploads_dir.path().to_str().expect("uploads dir path"),
-            save_root.path().to_str().expect("save root path"),
+            uploads_dir
+                .path()
+                .to_str()
+                .context("uploads path is not UTF-8")?,
+            save_root
+                .path()
+                .to_str()
+                .context("save path is not UTF-8")?,
             64,
             1024 * 1024,
             1024 * 1024,
@@ -1442,32 +1565,39 @@ trailer << /Root 1 0 R >>
             false,
             false,
         )
-        .expect("PDF upload accepted");
-        let uploaded = uploaded.expect("uploaded PDF");
+        .context("accept PDF upload")?;
+        let uploaded = uploaded.context("PDF upload result was empty")?;
 
-        assert!(uploaded.file_path.starts_with("secret/"));
-        assert!(!uploaded.dedup_reused);
-        assert_eq!(primary_hash.as_deref(), Some(hash.as_str()));
-        assert!(save_root.path().join(&uploaded.file_path).exists());
+        ensure!(uploaded.file_path.starts_with("secret/"));
+        ensure!(!uploaded.dedup_reused);
+        ensure!(primary_hash.as_deref() == Some(hash.as_str()));
+        ensure!(save_root.path().join(&uploaded.file_path).exists());
+        Ok(())
     }
 
     #[test]
-    fn primary_upload_rejects_pdf_when_board_disables_pdf() {
-        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
-        create_file_hash_table(&conn);
+    fn primary_upload_rejects_pdf_when_board_disables_pdf() -> anyhow::Result<()> {
+        let conn = rusqlite::Connection::open_in_memory().context("open in-memory SQLite")?;
+        create_file_hash_table(&conn)?;
 
         let board = crate::models::Board {
             allow_pdf: false,
             ..crate::test_fixtures::sample_board()
         };
-        let uploads_dir = tempfile::tempdir().expect("uploads dir");
-        let save_root = tempfile::tempdir().expect("save root");
+        let uploads_dir = tempfile::tempdir().context("create uploads directory")?;
+        let save_root = tempfile::tempdir().context("create save root")?;
         let result = super::process_primary_upload(
-            Some(temp_upload("doc.pdf", valid_pdf())),
+            Some(temp_upload("doc.pdf", valid_pdf())?),
             &board,
             &conn,
-            uploads_dir.path().to_str().expect("uploads dir path"),
-            save_root.path().to_str().expect("save root path"),
+            uploads_dir
+                .path()
+                .to_str()
+                .context("uploads path is not UTF-8")?,
+            save_root
+                .path()
+                .to_str()
+                .context("save path is not UTF-8")?,
             64,
             1024 * 1024,
             1024 * 1024,
@@ -1478,17 +1608,18 @@ trailer << /Root 1 0 R >>
             false,
         );
 
-        match result {
-            Ok(_) => panic!("PDF upload should be rejected when disabled"),
-            Err(error) => assert!(error.to_string().contains("PDF uploads are disabled")),
-        }
-        assert!(!save_root.path().join(&board.short_name).exists());
+        let Err(error) = result else {
+            bail!("PDF upload should be rejected when disabled");
+        };
+        ensure!(error.to_string().contains("PDF uploads are disabled"));
+        ensure!(!save_root.path().join(&board.short_name).exists());
+        Ok(())
     }
 
     #[test]
-    fn primary_upload_rejects_pdf_over_pdf_size_limit() {
-        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
-        create_file_hash_table(&conn);
+    fn primary_upload_rejects_pdf_over_pdf_size_limit() -> anyhow::Result<()> {
+        let conn = rusqlite::Connection::open_in_memory().context("open in-memory SQLite")?;
+        create_file_hash_table(&conn)?;
 
         let board = crate::models::Board {
             allow_pdf: true,
@@ -1497,14 +1628,20 @@ trailer << /Root 1 0 R >>
             max_audio_size: 1024 * 1024,
             ..crate::test_fixtures::sample_board()
         };
-        let uploads_dir = tempfile::tempdir().expect("uploads dir");
-        let save_root = tempfile::tempdir().expect("save root");
+        let uploads_dir = tempfile::tempdir().context("create uploads directory")?;
+        let save_root = tempfile::tempdir().context("create save root")?;
         let result = super::process_primary_upload(
-            Some(temp_upload("doc.pdf", valid_pdf())),
+            Some(temp_upload("doc.pdf", valid_pdf())?),
             &board,
             &conn,
-            uploads_dir.path().to_str().expect("uploads dir path"),
-            save_root.path().to_str().expect("save root path"),
+            uploads_dir
+                .path()
+                .to_str()
+                .context("uploads path is not UTF-8")?,
+            save_root
+                .path()
+                .to_str()
+                .context("save path is not UTF-8")?,
             64,
             1024 * 1024,
             1024 * 1024,
@@ -1515,29 +1652,36 @@ trailer << /Root 1 0 R >>
             false,
         );
 
-        match result {
-            Ok(_) => panic!("oversized PDF should be rejected"),
-            Err(error) => assert!(error.to_string().contains("Maximum PDF upload size is 8 B")),
-        }
+        let Err(error) = result else {
+            bail!("oversized PDF should be rejected");
+        };
+        ensure!(error.to_string().contains("Maximum PDF upload size is 8 B"));
+        Ok(())
     }
 
     #[test]
-    fn primary_upload_rejects_renamed_non_pdf() {
-        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
-        create_file_hash_table(&conn);
+    fn primary_upload_rejects_renamed_non_pdf() -> anyhow::Result<()> {
+        let conn = rusqlite::Connection::open_in_memory().context("open in-memory SQLite")?;
+        create_file_hash_table(&conn)?;
 
         let board = crate::models::Board {
             allow_pdf: true,
             ..crate::test_fixtures::sample_board()
         };
-        let uploads_dir = tempfile::tempdir().expect("uploads dir");
-        let save_root = tempfile::tempdir().expect("save root");
+        let uploads_dir = tempfile::tempdir().context("create uploads directory")?;
+        let save_root = tempfile::tempdir().context("create save root")?;
         let result = super::process_primary_upload(
-            Some(temp_upload("not-really.pdf", b"plain text")),
+            Some(temp_upload("not-really.pdf", b"plain text")?),
             &board,
             &conn,
-            uploads_dir.path().to_str().expect("uploads dir path"),
-            save_root.path().to_str().expect("save root path"),
+            uploads_dir
+                .path()
+                .to_str()
+                .context("uploads path is not UTF-8")?,
+            save_root
+                .path()
+                .to_str()
+                .context("save path is not UTF-8")?,
             64,
             1024 * 1024,
             1024 * 1024,
@@ -1548,33 +1692,40 @@ trailer << /Root 1 0 R >>
             false,
         );
 
-        match result {
-            Ok(_) => panic!("renamed non-PDF should be rejected"),
-            Err(error) => assert!(error.to_string().contains("File type not allowed")),
-        }
-        assert!(!save_root.path().join(&board.short_name).exists());
+        let Err(error) = result else {
+            bail!("renamed non-PDF should be rejected");
+        };
+        ensure!(error.to_string().contains("File type not allowed"));
+        ensure!(!save_root.path().join(&board.short_name).exists());
+        Ok(())
     }
 
     #[test]
-    fn primary_upload_accepts_pdf_when_board_enables_pdf() {
-        let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
-        create_file_hash_table(&conn);
+    fn primary_upload_accepts_pdf_when_board_enables_pdf() -> anyhow::Result<()> {
+        let conn = rusqlite::Connection::open_in_memory().context("open in-memory SQLite")?;
+        create_file_hash_table(&conn)?;
 
         let board = crate::models::Board {
             allow_pdf: true,
             ..crate::test_fixtures::sample_board()
         };
-        let uploads_dir = tempfile::tempdir().expect("uploads dir");
-        let save_root = tempfile::tempdir().expect("save root");
+        let uploads_dir = tempfile::tempdir().context("create uploads directory")?;
+        let save_root = tempfile::tempdir().context("create save root")?;
         let _override = crate::media::thumbnail::override_pdf_renderer_mode(
             crate::media::thumbnail::TestPdfRendererMode::Unavailable,
         );
         let (uploaded, _) = super::process_primary_upload(
-            Some(temp_upload("doc.pdf", valid_pdf())),
+            Some(temp_upload("doc.pdf", valid_pdf())?),
             &board,
             &conn,
-            uploads_dir.path().to_str().expect("uploads dir path"),
-            save_root.path().to_str().expect("save root path"),
+            uploads_dir
+                .path()
+                .to_str()
+                .context("uploads path is not UTF-8")?,
+            save_root
+                .path()
+                .to_str()
+                .context("save path is not UTF-8")?,
             64,
             1024 * 1024,
             1024 * 1024,
@@ -1584,15 +1735,16 @@ trailer << /Root 1 0 R >>
             false,
             false,
         )
-        .expect("PDF upload accepted");
-        let uploaded = uploaded.expect("uploaded PDF");
+        .context("accept PDF upload")?;
+        let uploaded = uploaded.context("PDF upload result was empty")?;
 
-        assert_eq!(uploaded.mime_type, "application/pdf");
-        assert_eq!(uploaded.media_type, crate::models::MediaType::Pdf);
-        assert!(save_root.path().join(uploaded.file_path).exists());
-        assert!(std::path::Path::new(&uploaded.thumb_path)
+        ensure!(uploaded.mime_type == "application/pdf");
+        ensure!(uploaded.media_type == crate::models::MediaType::Pdf);
+        ensure!(save_root.path().join(uploaded.file_path).exists());
+        ensure!(std::path::Path::new(&uploaded.thumb_path)
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")));
-        assert!(save_root.path().join(&uploaded.thumb_path).exists());
+        ensure!(save_root.path().join(&uploaded.thumb_path).exists());
+        Ok(())
     }
 }

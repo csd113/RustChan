@@ -1,4 +1,4 @@
-// src/server/server/headers.rs
+//! Request-boundary, security-header, caching, timeout, and compression policy.
 
 use crate::config::CONFIG;
 use axum::{
@@ -7,9 +7,12 @@ use axum::{
 };
 use std::net::{IpAddr, SocketAddr};
 
+/// Maximum aggregate request-header bytes accepted by the service boundary.
 pub(super) const HTTP_MAX_HEADER_BYTES: usize = 64 * 1024;
+/// Maximum bytes accepted in one request-header value.
 pub(super) const HTTP_MAX_HEADER_VALUE_BYTES: usize = 32 * 1024;
 
+/// Content Security Policy applied to HTML responses.
 pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
      script-src 'self'; \
      script-src-elem 'self'; \
@@ -24,6 +27,7 @@ pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
      object-src 'none'; \
      base-uri 'self'";
 
+/// Reject ambiguous framing and oversized request headers.
 pub(super) async fn request_boundary_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -50,6 +54,7 @@ pub(super) async fn request_boundary_middleware(
     next.run(req).await
 }
 
+/// Return whether a header map exceeds per-value or aggregate limits.
 fn request_headers_exceed_limits(headers: &http::HeaderMap) -> bool {
     let mut total = 0usize;
     for (name, value) in headers {
@@ -73,6 +78,7 @@ fn request_headers_exceed_limits(headers: &http::HeaderMap) -> bool {
     false
 }
 
+/// Build a connection-closing request-boundary error.
 fn boundary_error_response(
     status: http::StatusCode,
     message: &'static str,
@@ -85,6 +91,7 @@ fn boundary_error_response(
     response
 }
 
+/// Add HSTS only for eligible public HTTPS origins.
 pub(super) async fn hsts_middleware_with_mode(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -107,6 +114,7 @@ pub(super) async fn hsts_middleware_with_mode(
     resp
 }
 
+/// Apply route-sensitive request timeouts.
 pub(super) async fn safe_timeout_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -145,6 +153,7 @@ pub(super) async fn safe_timeout_middleware(
         })
 }
 
+/// Apply public dynamic-page caching when a route did not set policy.
 pub(super) async fn public_cache_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -160,6 +169,7 @@ pub(super) async fn public_cache_middleware(
     resp
 }
 
+/// Apply private cache policy to administrator responses.
 pub(super) async fn admin_cache_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -177,6 +187,7 @@ pub(super) async fn admin_cache_middleware(
     resp
 }
 
+/// Return whether a response is safe and useful to compress.
 pub(super) fn text_response_compression_predicate(
     status: http::StatusCode,
     _version: http::Version,
@@ -191,6 +202,7 @@ pub(super) fn text_response_compression_predicate(
         && response_content_type_is_compressible(headers)
 }
 
+/// Return whether a path serves public dynamic HTML.
 fn public_dynamic_html_path(path: &str) -> bool {
     if path == "/" || path == "/banned" || path.starts_with("/banner/external/") {
         return true;
@@ -220,6 +232,7 @@ fn public_dynamic_html_path(path: &str) -> bool {
         )
 }
 
+/// Return whether an administrator path carries sensitive HTML.
 fn sensitive_admin_html_path(path: &str) -> bool {
     if matches!(
         path,
@@ -248,6 +261,7 @@ fn sensitive_admin_html_path(path: &str) -> bool {
         .is_some_and(|tail| !tail.is_empty())
 }
 
+/// Match a response Content-Type prefix after leading whitespace.
 fn response_content_type_starts_with(headers: &http::HeaderMap, prefix: &str) -> bool {
     headers
         .get(header::CONTENT_TYPE)
@@ -255,6 +269,7 @@ fn response_content_type_starts_with(headers: &http::HeaderMap, prefix: &str) ->
         .is_some_and(|value| value.trim_start().starts_with(prefix))
 }
 
+/// Return whether a response is an attachment download.
 fn has_attachment_disposition(headers: &http::HeaderMap) -> bool {
     headers
         .get(header::CONTENT_DISPOSITION)
@@ -262,6 +277,7 @@ fn has_attachment_disposition(headers: &http::HeaderMap) -> bool {
         .is_some_and(|value| value.to_ascii_lowercase().contains("attachment"))
 }
 
+/// Return whether a response media type is text-compressible.
 fn response_content_type_is_compressible(headers: &http::HeaderMap) -> bool {
     let Some(content_type) = headers
         .get(header::CONTENT_TYPE)
@@ -286,6 +302,7 @@ fn response_content_type_is_compressible(headers: &http::HeaderMap) -> bool {
     )
 }
 
+/// Return whether a path identifies a post-creation upload route.
 fn is_post_upload_path(path: &str) -> bool {
     let trimmed = path.trim_matches('/');
     if trimmed.is_empty() {
@@ -304,6 +321,7 @@ fn is_post_upload_path(path: &str) -> bool {
     )
 }
 
+/// Decide whether an HSTS header is safe for this request origin.
 fn should_emit_hsts(
     req: &axum::extract::Request,
     peer: Option<SocketAddr>,
@@ -333,6 +351,7 @@ fn should_emit_hsts(
     CONFIG.tls.port == 443
 }
 
+/// Parse the Host header into host and optional port.
 fn request_host_parts(headers: &http::HeaderMap) -> Option<(String, Option<u16>)> {
     headers
         .get(header::HOST)
@@ -341,6 +360,7 @@ fn request_host_parts(headers: &http::HeaderMap) -> Option<(String, Option<u16>)
         .map(|authority| (authority.host().to_owned(), authority.port_u16()))
 }
 
+/// Match a host against configured public and ACME names.
 fn host_is_configured_public_host(host: &str) -> bool {
     CONFIG
         .public_hosts
@@ -350,6 +370,7 @@ fn host_is_configured_public_host(host: &str) -> bool {
         .any(|candidate| candidate.eq_ignore_ascii_case(host))
 }
 
+/// Return whether a host is localhost or a loopback IP literal.
 fn is_loopback_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
         || host
@@ -358,6 +379,7 @@ fn is_loopback_host(host: &str) -> bool {
 }
 
 #[cfg(test)]
+/// HTTP boundary and response-header policy tests.
 mod tests {
     use super::{
         hsts_middleware_with_mode, public_dynamic_html_path, sensitive_admin_html_path,
@@ -379,188 +401,244 @@ mod tests {
     };
     use tower::ServiceExt as _;
 
+    /// Build a router protected by the shared request boundary.
     fn request_boundary_app() -> Router {
         Router::new()
             .route("/", post(|| async { StatusCode::NO_CONTENT }))
             .layer(from_fn(super::request_boundary_middleware))
     }
 
-    #[tokio::test]
-    async fn request_boundary_rejects_transfer_encoding_with_content_length() {
-        let response = request_boundary_app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header(header::TRANSFER_ENCODING, "chunked")
-                    .header(header::CONTENT_LENGTH, "4")
-                    .body(Body::from("test"))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            response.headers().get(header::CONNECTION),
-            Some(&HeaderValue::from_static("close"))
-        );
-    }
+    /// Standard fallible test result.
+    type TestResult = anyhow::Result<()>;
 
     #[tokio::test]
-    async fn request_boundary_rejects_transfer_encoding_without_content_length() {
-        let response = request_boundary_app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header(header::TRANSFER_ENCODING, "chunked")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn request_boundary_accepts_bounded_content_length_request() {
-        let response = request_boundary_app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header(header::CONTENT_LENGTH, "4")
-                    .body(Body::from("test"))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    }
-
-    #[tokio::test]
-    async fn request_boundary_rejects_oversized_single_header_value() {
-        let value =
-            HeaderValue::from_bytes(&vec![b'a'; HTTP_MAX_HEADER_VALUE_BYTES + 1]).expect("header");
-        let response = request_boundary_app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header("x-large", value)
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Rejects a request carrying both transfer encoding and content length.
+    async fn request_boundary_rejects_transfer_encoding_with_content_length() -> TestResult {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header(header::TRANSFER_ENCODING, "chunked")
+            .header(header::CONTENT_LENGTH, "4")
+            .body(Body::from("test"))?;
+        let response = request_boundary_app().oneshot(request).await?;
 
         assert_eq!(
             response.status(),
-            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+            StatusCode::BAD_REQUEST,
+            "ambiguous request framing should be rejected"
         );
+        assert_eq!(
+            response.headers().get(header::CONNECTION),
+            Some(&HeaderValue::from_static("close")),
+            "boundary errors should close the connection"
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn request_boundary_accepts_exact_value_and_aggregate_limits() {
-        let exact_value =
-            HeaderValue::from_bytes(&vec![b'a'; HTTP_MAX_HEADER_VALUE_BYTES]).expect("header");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Rejects transfer encoding even without content length.
+    async fn request_boundary_rejects_transfer_encoding_without_content_length() -> TestResult {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header(header::TRANSFER_ENCODING, "chunked")
+            .body(Body::empty())?;
+        let response = request_boundary_app().oneshot(request).await?;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "streaming transfer encoding should be rejected"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Accepts a bounded request with content length.
+    async fn request_boundary_accepts_bounded_content_length_request() -> TestResult {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header(header::CONTENT_LENGTH, "4")
+            .body(Body::from("test"))?;
+        let response = request_boundary_app().oneshot(request).await?;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::NO_CONTENT,
+            "a bounded content-length request should pass"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Rejects one header value above its byte limit.
+    async fn request_boundary_rejects_oversized_single_header_value() -> TestResult {
+        let value = HeaderValue::from_bytes(&vec![b'a'; HTTP_MAX_HEADER_VALUE_BYTES + 1])?;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("x-large", value)
+            .body(Body::empty())?;
+        let response = request_boundary_app().oneshot(request).await?;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "an oversized header value should be rejected"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Accepts exact per-value and aggregate header limits.
+    async fn request_boundary_accepts_exact_value_and_aggregate_limits() -> TestResult {
+        let exact_value = HeaderValue::from_bytes(&vec![b'a'; HTTP_MAX_HEADER_VALUE_BYTES])?;
+        let exact_value_request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("x-boundary", exact_value)
+            .body(Body::empty())?;
         let exact_value_response = request_boundary_app()
             .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header("x-boundary", exact_value)
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(exact_value_response.status(), StatusCode::NO_CONTENT);
+            .oneshot(exact_value_request)
+            .await?;
+        assert_eq!(
+            exact_value_response.status(),
+            StatusCode::NO_CONTENT,
+            "a header at the per-value limit should pass"
+        );
 
         // Header-list accounting is name + value + 32 bytes per field.
-        let first_value =
-            HeaderValue::from_bytes(&vec![b'a'; HTTP_MAX_HEADER_VALUE_BYTES]).expect("header");
+        let first_value = HeaderValue::from_bytes(&vec![b'a'; HTTP_MAX_HEADER_VALUE_BYTES])?;
         let aggregate_overhead = "x-a".len() + "x-b".len() + (2 * 32);
         let second_value_len =
             HTTP_MAX_HEADER_BYTES - HTTP_MAX_HEADER_VALUE_BYTES - aggregate_overhead;
-        let second_value = HeaderValue::from_bytes(&vec![b'b'; second_value_len]).expect("header");
+        let second_value = HeaderValue::from_bytes(&vec![b'b'; second_value_len])?;
+        let exact_aggregate_request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("x-a", first_value)
+            .header("x-b", second_value)
+            .body(Body::empty())?;
         let exact_aggregate_response = request_boundary_app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header("x-a", first_value)
-                    .header("x-b", second_value)
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(exact_aggregate_response.status(), StatusCode::NO_CONTENT);
+            .oneshot(exact_aggregate_request)
+            .await?;
+        assert_eq!(
+            exact_aggregate_response.status(),
+            StatusCode::NO_CONTENT,
+            "headers at the aggregate limit should pass"
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn request_boundary_rejects_oversized_aggregate_headers() {
-        let value =
-            HeaderValue::from_bytes(&vec![b'a'; HTTP_MAX_HEADER_VALUE_BYTES]).expect("header");
-        let response = request_boundary_app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/")
-                    .header("x-large-one", value.clone())
-                    .header("x-large-two", value)
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Rejects header maps above the aggregate byte limit.
+    async fn request_boundary_rejects_oversized_aggregate_headers() -> TestResult {
+        let value = HeaderValue::from_bytes(&vec![b'a'; HTTP_MAX_HEADER_VALUE_BYTES])?;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("x-large-one", value.clone())
+            .header("x-large-two", value)
+            .body(Body::empty())?;
+        let response = request_boundary_app().oneshot(request).await?;
 
         assert_eq!(
             response.status(),
-            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "headers above the aggregate limit should be rejected"
         );
-        assert_eq!(HTTP_MAX_HEADER_BYTES, 64 * 1024);
+        assert_eq!(
+            HTTP_MAX_HEADER_BYTES,
+            64 * 1024,
+            "aggregate header limit should remain 64 KiB"
+        );
+        Ok(())
     }
 
     #[test]
+    /// Allows scripts and end-user media required by core features.
     fn csp_allows_core_end_user_media_features() {
-        assert!(CONTENT_SECURITY_POLICY.contains("script-src 'self'"));
-        assert!(CONTENT_SECURITY_POLICY.contains("script-src-elem 'self'"));
-        assert!(CONTENT_SECURITY_POLICY.contains("script-src-attr 'none'"));
-        assert!(
-            CONTENT_SECURITY_POLICY.contains("img-src 'self' data: blob: https://img.youtube.com")
-        );
-        assert!(CONTENT_SECURITY_POLICY.contains("media-src 'self' blob:"));
-        assert!(CONTENT_SECURITY_POLICY.contains("connect-src 'self'"));
-        assert!(CONTENT_SECURITY_POLICY
-            .contains("frame-src 'self' https://www.youtube-nocookie.com https://streamable.com"));
+        for directive in [
+            "script-src 'self'",
+            "script-src-elem 'self'",
+            "script-src-attr 'none'",
+            "img-src 'self' data: blob: https://img.youtube.com",
+            "media-src 'self' blob:",
+            "connect-src 'self'",
+            "frame-src 'self' https://www.youtube-nocookie.com https://streamable.com",
+        ] {
+            assert!(
+                CONTENT_SECURITY_POLICY.contains(directive),
+                "CSP should contain {directive:?}"
+            );
+        }
     }
 
     #[test]
+    /// Keeps inline scripts, objects, and framing disabled.
     fn csp_keeps_inline_script_execution_disabled() {
-        assert!(!CONTENT_SECURITY_POLICY.contains("script-src 'unsafe-inline'"));
-        assert!(CONTENT_SECURITY_POLICY.contains("object-src 'none'"));
-        assert!(CONTENT_SECURITY_POLICY.contains("frame-ancestors 'none'"));
+        assert!(
+            !CONTENT_SECURITY_POLICY.contains("script-src 'unsafe-inline'"),
+            "CSP must not permit inline scripts"
+        );
+        for directive in ["object-src 'none'", "frame-ancestors 'none'"] {
+            assert!(
+                CONTENT_SECURITY_POLICY.contains(directive),
+                "CSP should contain {directive:?}"
+            );
+        }
     }
 
     #[test]
+    /// Limits public dynamic caching to HTML routes.
     fn public_dynamic_html_cache_middleware_scope_is_narrow() {
-        assert!(public_dynamic_html_path("/"));
-        assert!(public_dynamic_html_path("/b/catalog"));
-        assert!(public_dynamic_html_path("/b/thread/1"));
-        assert!(public_dynamic_html_path("/b/post/1/edit"));
-        assert!(!public_dynamic_html_path("/static/style.css"));
-        assert!(!public_dynamic_html_path("/boards/b/file.webp"));
-        assert!(!public_dynamic_html_path("/api/post/b/1"));
-        assert!(!public_dynamic_html_path("/banner/assets/1"));
+        for path in ["/", "/b/catalog", "/b/thread/1", "/b/post/1/edit"] {
+            assert!(
+                public_dynamic_html_path(path),
+                "{path} should receive dynamic public caching"
+            );
+        }
+        for path in [
+            "/static/style.css",
+            "/boards/b/file.webp",
+            "/api/post/b/1",
+            "/banner/assets/1",
+        ] {
+            assert!(
+                !public_dynamic_html_path(path),
+                "{path} should not receive dynamic public caching"
+            );
+        }
     }
 
     #[test]
+    /// Applies no-store only to sensitive administrator HTML.
     fn sensitive_admin_html_paths_get_no_store_policy() {
         for path in [
             "/admin",
@@ -585,15 +663,25 @@ mod tests {
             assert!(sensitive_admin_html_path(path), "{path} should be no-store");
         }
 
-        assert!(!sensitive_admin_html_path("/admin/backup/progress"));
-        assert!(!sensitive_admin_html_path(
-            "/admin/backup/download/full/site.zip"
-        ));
-        assert!(!sensitive_admin_html_path("/admin/ip/"));
+        for path in [
+            "/admin/backup/progress",
+            "/admin/backup/download/full/site.zip",
+            "/admin/ip/",
+        ] {
+            assert!(
+                !sensitive_admin_html_path(path),
+                "{path} should not receive no-store"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn admin_cache_middleware_no_store_for_sensitive_html_only() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Uses no-store for sensitive HTML and no-cache for JSON polling.
+    async fn admin_cache_middleware_no_store_for_sensitive_html_only() -> TestResult {
         let app = Router::new()
             .route(
                 "/admin/backup",
@@ -605,44 +693,41 @@ mod tests {
             )
             .layer(from_fn(super::admin_cache_middleware));
 
-        let html_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/admin/backup")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
+        let html_request = Request::builder()
+            .uri("/admin/backup")
+            .body(Body::empty())?;
+        let html_response = app.clone().oneshot(html_request).await?;
         assert_eq!(
             html_response
                 .headers()
                 .get(header::CACHE_CONTROL)
                 .and_then(|value| value.to_str().ok()),
-            Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE)
+            Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE),
+            "sensitive administrator HTML should be no-store"
         );
 
-        let json_response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/admin/backup/progress")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
+        let json_request = Request::builder()
+            .uri("/admin/backup/progress")
+            .body(Body::empty())?;
+        let json_response = app.oneshot(json_request).await?;
         assert_eq!(
             json_response
                 .headers()
                 .get(header::CACHE_CONTROL)
                 .and_then(|value| value.to_str().ok()),
-            Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE)
+            Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE),
+            "administrator JSON polling should be private no-cache"
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn cache_middleware_does_not_overwrite_route_cache_control() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Preserves a cache policy set by the route itself.
+    async fn cache_middleware_does_not_overwrite_route_cache_control() -> TestResult {
         let app = Router::new()
             .route(
                 "/",
@@ -658,142 +743,185 @@ mod tests {
             )
             .layer(from_fn(super::public_cache_middleware));
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
+        let request = Request::builder().uri("/").body(Body::empty())?;
+        let response = app.oneshot(request).await?;
 
         assert_eq!(
             response
                 .headers()
                 .get(header::CACHE_CONTROL)
                 .and_then(|value| value.to_str().ok()),
-            Some(crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA)
+            Some(crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA),
+            "middleware should preserve route-specific caching"
         );
+        Ok(())
     }
 
     #[test]
-    fn served_templates_do_not_embed_inline_script_bodies() {
-        for source_path in served_html_source_files() {
-            let source = fs::read_to_string(&source_path)
-                .unwrap_or_else(|error| panic!("read {}: {error}", source_path.display()));
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Rejects inline script bodies in all served HTML source files.
+    fn served_templates_do_not_embed_inline_script_bodies() -> TestResult {
+        for source_path in served_html_source_files()? {
+            let source = fs::read_to_string(&source_path)?;
             assert!(
                 !contains_inline_script_body(&source),
                 "served HTML source reintroduced an inline <script> body: {}",
                 source_path.display()
             );
         }
+        Ok(())
     }
 
-    fn served_html_source_files() -> Vec<PathBuf> {
+    /// Collect Rust sources that can render served HTML.
+    fn served_html_source_files() -> std::io::Result<Vec<PathBuf>> {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut files = Vec::new();
         for relative_dir in ["src/templates", "src/middleware", "src/handlers"] {
-            collect_rust_files(&repo_root.join(relative_dir), &mut files);
+            collect_rust_files(&repo_root.join(relative_dir), &mut files)?;
         }
         files.sort();
-        files
+        Ok(files)
     }
 
-    fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
-        let entries =
-            fs::read_dir(dir).unwrap_or_else(|error| panic!("read dir {}: {error}", dir.display()));
+    /// Recursively collect Rust files below one directory.
+    fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        let entries = fs::read_dir(dir)?;
         for entry in entries {
-            let entry =
-                entry.unwrap_or_else(|error| panic!("read entry under {}: {error}", dir.display()));
+            let entry = entry?;
             let path = entry.path();
             if path.is_dir() {
-                collect_rust_files(&path, files);
+                collect_rust_files(&path, files)?;
             } else if path.extension().is_some_and(|ext| ext == "rs") {
                 files.push(path);
             }
         }
+        Ok(())
     }
 
+    /// Return whether source contains a non-external script body.
     fn contains_inline_script_body(source: &str) -> bool {
         let mut search_from = 0;
         let script_open = "<script";
         let script_close = "</script>";
 
-        while let Some(relative_open) = source[search_from..].find(script_open) {
+        let Some(mut search_tail) = source.get(search_from..) else {
+            return false;
+        };
+        while let Some(relative_open) = search_tail.find(script_open) {
             let open = search_from + relative_open;
-            let after_open = &source[open..];
+            let Some(after_open) = source.get(open..) else {
+                break;
+            };
             let Some(tag_end_relative) = after_open.find('>') else {
                 break;
             };
             let tag_end = open + tag_end_relative;
-            let tag = &source[open..=tag_end];
+            let Some(tag) = source.get(open..=tag_end) else {
+                break;
+            };
             let body_start = tag_end + 1;
 
-            let Some(close_relative) = source[body_start..].find(script_close) else {
+            let Some(body_tail) = source.get(body_start..) else {
+                break;
+            };
+            let Some(close_relative) = body_tail.find(script_close) else {
                 break;
             };
             let body_end = body_start + close_relative;
-            let body = source[body_start..body_end].trim();
+            let Some(body) = source.get(body_start..body_end).map(str::trim) else {
+                break;
+            };
 
             if !tag.contains("src=") && !body.is_empty() {
                 return true;
             }
 
             search_from = body_end + script_close.len();
+            let Some(next_tail) = source.get(search_from..) else {
+                break;
+            };
+            search_tail = next_tail;
         }
 
         false
     }
 
     #[tokio::test]
-    async fn hsts_is_not_added_for_loopback_direct_https_hosts() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Does not add HSTS for a loopback direct-HTTPS host.
+    async fn hsts_is_not_added_for_loopback_direct_https_hosts() -> TestResult {
         let app = Router::new()
             .route("/", get(|| async { "ok".into_response() }))
             .layer(from_fn(|req, next| {
                 hsts_middleware_with_mode(req, next, true, false)
             }));
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/")
-                    .header("host", "localhost:8443")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
+        let request = Request::builder()
+            .uri("/")
+            .header("host", "localhost:8443")
+            .body(Body::empty())?;
+        let response = app.oneshot(request).await?;
 
-        assert!(!response.headers().contains_key("strict-transport-security"));
+        assert!(
+            !response.headers().contains_key("strict-transport-security"),
+            "loopback origins must not receive HSTS"
+        );
+        Ok(())
     }
 
     #[test]
-    fn hsts_is_not_added_for_public_nonstandard_https_ports() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Does not add HSTS for a public nonstandard HTTPS port.
+    fn hsts_is_not_added_for_public_nonstandard_https_ports() -> TestResult {
         let request = Request::builder()
             .uri("/")
             .header("host", "example.test:8443")
-            .body(Body::empty())
-            .expect("request");
+            .body(Body::empty())?;
 
-        assert!(!should_emit_hsts(&request, None, true, false));
+        assert!(
+            !should_emit_hsts(&request, None, true, false),
+            "nonstandard public HTTPS ports must not receive HSTS"
+        );
+        Ok(())
     }
 
     #[test]
-    fn hsts_is_not_added_for_unconfigured_proxy_tunnel_hosts() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Does not add HSTS for an unconfigured proxy tunnel host.
+    fn hsts_is_not_added_for_unconfigured_proxy_tunnel_hosts() -> TestResult {
         let request = Request::builder()
             .uri("/")
             .header("host", "demo.serveo.net")
             .header("x-forwarded-proto", "https")
-            .body(Body::empty())
-            .expect("request");
+            .body(Body::empty())?;
 
         let peer = Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080));
-        assert!(!should_emit_hsts(&request, peer, false, true));
+        assert!(
+            !should_emit_hsts(&request, peer, false, true),
+            "unconfigured proxy tunnel hosts must not receive HSTS"
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn hsts_ignores_spoofed_forwarded_proto_from_public_peer() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Ignores a spoofed forwarded protocol from a public peer.
+    async fn hsts_ignores_spoofed_forwarded_proto_from_public_peer() -> TestResult {
         use axum::extract::ConnectInfo;
 
         let app = Router::new()
@@ -805,14 +933,17 @@ mod tests {
         let mut request = Request::builder()
             .uri("/")
             .header("x-forwarded-proto", "https")
-            .body(Body::empty())
-            .expect("request");
+            .body(Body::empty())?;
         request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)),
             8080,
         )));
 
-        let response = app.oneshot(request).await.expect("response");
-        assert!(!response.headers().contains_key("strict-transport-security"));
+        let response = app.oneshot(request).await?;
+        assert!(
+            !response.headers().contains_key("strict-transport-security"),
+            "untrusted forwarded protocol must not trigger HSTS"
+        );
+        Ok(())
     }
 }

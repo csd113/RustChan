@@ -1,4 +1,4 @@
-// chan_net/import.rs — Federation import handler.
+//! Federation import handler.
 //
 // POST /chan/import receives a raw snapshot ZIP body, performs deduplication
 // via the in-memory TxLedger, validates the payload schema, writes boards and
@@ -27,6 +27,7 @@ use tokio_util::bytes;
 use super::snapshot::unpack_snapshot;
 use crate::{error::AppError, middleware::AppState};
 
+/// Constructs the fail-closed error used when the import ledger is unavailable.
 fn chan_ledger_not_initialised() -> AppError {
     AppError::Internal(anyhow::anyhow!("ChanNet ledger not initialised"))
 }
@@ -147,6 +148,11 @@ pub async fn do_import(state: &AppState, bytes: bytes::Bytes) -> Result<usize, A
 ///
 /// The request body limit is enforced by `DefaultBodyLimit::max(CONFIG.chan_net_max_body)`
 /// applied in `chan_router()`. This handler never reads more than that limit.
+///
+/// # Errors
+///
+/// Returns a [`super::ChanError`] when the snapshot fails validation, was
+/// already imported, or cannot be committed to the database.
 pub async fn chan_import(
     State(state): State<AppState>,
     body: axum::body::Bytes,

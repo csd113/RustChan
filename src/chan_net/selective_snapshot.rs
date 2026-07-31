@@ -1,4 +1,4 @@
-// chan_net/selective_snapshot.rs — RustWave gateway snapshot builders.
+//! `RustWave` gateway snapshot builders.
 //
 // Five scoped ZIP builders for the RustWave gateway layer.
 // These builders are entirely separate from snapshot.rs (federation layer)
@@ -38,40 +38,64 @@ use zip::{write::SimpleFileOptions, ZipWriter};
 // ── Public structs ────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+/// Public-board metadata included in a gateway snapshot.
 pub struct GwBoard {
+    /// Stable URL-facing board name.
     pub short_name: String,
+    /// Human-readable board title.
     pub title: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+/// Thread metadata included in a gateway snapshot.
 pub struct GwThread {
+    /// Local thread identifier.
     pub thread_id: i64,
+    /// URL-facing name of the owning board.
     pub board: String,
+    /// Thread subject, or an empty string when absent.
     pub subject: String,
+    /// Unix timestamp at which the thread was created.
     pub created_at: u64,
+    /// Number of posts included for the thread.
     pub post_count: u64,
+    /// Whether the thread is archived.
     pub archived: bool,
 }
 
 /// SECURITY: No media fields. Text content only.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GwPost {
+    /// Local post identifier.
     pub post_id: i64,
+    /// Local identifier of the owning thread.
     pub thread_id: i64,
+    /// URL-facing name of the owning board.
     pub board: String,
+    /// Displayed author name.
     pub author: String,
+    /// Plain post body.
     pub content: String,
+    /// Unix timestamp at which the post was created.
     pub timestamp: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+/// Metadata describing the contents and scope of a gateway snapshot.
 pub struct GwMetadata {
+    /// Unix timestamp at which the snapshot was generated.
     pub generated_at: u64,
+    /// `RustChan` version that generated the snapshot.
     pub rustchan_version: String,
+    /// Number of posts included in the snapshot.
     pub post_count: u64,
+    /// Unique identifier for this snapshot transaction.
     pub tx_id: Uuid,
+    /// Lower timestamp bound used for a delta snapshot, when present.
     pub since: Option<u64>,
+    /// Whether timestamp filtering produced a delta snapshot.
     pub is_delta: bool,
+    /// Whether archived threads are included.
     pub includes_archive: bool,
     /// One of: `"full"` | `"board"` | `"thread"` | `"archive"` | `"force_refresh"`
     pub scope: String,
@@ -79,6 +103,7 @@ pub struct GwMetadata {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+/// Returns the current Unix timestamp in whole seconds.
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -86,6 +111,7 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// Finalizes an in-memory ZIP writer and returns its bytes.
 fn finish_zip(zip: ZipWriter<Cursor<Vec<u8>>>) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
@@ -97,6 +123,10 @@ fn finish_zip(zip: ZipWriter<Cursor<Vec<u8>>>) -> Result<Vec<u8>> {
 /// If `since` is `Some(ts)`, only posts with `created_at > ts` are returned
 /// (delta mode). Thread metadata is always emitted in full regardless of `since`
 /// so that `RustWave` can maintain a complete thread index.
+///
+/// # Errors
+///
+/// Returns an error when database reads, serialization, or ZIP construction fail.
 pub fn build_full_snapshot(conn: &Connection, since: Option<u64>) -> Result<(Vec<u8>, Uuid)> {
     let boards = fetch_all_boards(conn)?;
     let threads = fetch_threads(conn, None, false)?;
@@ -106,7 +136,7 @@ pub fn build_full_snapshot(conn: &Connection, since: Option<u64>) -> Result<(Vec
     let metadata = GwMetadata {
         generated_at: now_secs(),
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
-        post_count: posts.len() as u64,
+        post_count: u64::try_from(posts.len())?,
         tx_id,
         since,
         is_delta: since.is_some(),
@@ -122,6 +152,10 @@ pub fn build_full_snapshot(conn: &Connection, since: Option<u64>) -> Result<(Vec
 ///
 /// If `since` is `Some(ts)`, only posts with `created_at > ts` are returned.
 /// Returns an error if `board_short_name` does not identify a known board.
+///
+/// # Errors
+///
+/// Returns an error for an unknown board or failed database/ZIP operation.
 pub fn build_board_snapshot(
     conn: &Connection,
     board_short_name: &str,
@@ -136,7 +170,7 @@ pub fn build_board_snapshot(
     let metadata = GwMetadata {
         generated_at: now_secs(),
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
-        post_count: posts.len() as u64,
+        post_count: u64::try_from(posts.len())?,
         tx_id,
         since,
         is_delta: since.is_some(),
@@ -152,6 +186,10 @@ pub fn build_board_snapshot(
 ///
 /// If `since` is `Some(ts)`, only posts with `created_at > ts` are returned.
 /// Returns an error if `thread_id` does not identify a known thread.
+///
+/// # Errors
+///
+/// Returns an error for an unknown thread or failed database/ZIP operation.
 pub fn build_thread_snapshot(
     conn: &Connection,
     thread_id: i64,
@@ -170,7 +208,7 @@ pub fn build_thread_snapshot(
     let metadata = GwMetadata {
         generated_at: now_secs(),
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
-        post_count: posts.len() as u64,
+        post_count: u64::try_from(posts.len())?,
         tx_id,
         since,
         is_delta: since.is_some(),
@@ -187,6 +225,10 @@ pub fn build_thread_snapshot(
 /// `since` is not supported for archive exports — archives are static by
 /// definition once a thread is archived. Always returns the full archive.
 /// Returns an error if `board_short_name` does not identify a known board.
+///
+/// # Errors
+///
+/// Returns an error for an unknown board or failed database/ZIP operation.
 pub fn build_archive_snapshot(
     conn: &Connection,
     board_short_name: &str,
@@ -200,7 +242,7 @@ pub fn build_archive_snapshot(
     let metadata = GwMetadata {
         generated_at: now_secs(),
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
-        post_count: posts.len() as u64,
+        post_count: u64::try_from(posts.len())?,
         tx_id,
         since: None,
         is_delta: false,
@@ -219,6 +261,10 @@ pub fn build_archive_snapshot(
 ///
 /// Emits a `tracing::warn!` to make force-refresh calls visible in the operator
 /// log — a full database dump over the gateway is a heavyweight operation.
+///
+/// # Errors
+///
+/// Returns an error when database reads, serialization, or ZIP construction fail.
 pub fn build_force_refresh_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
     tracing::warn!(
         "Force refresh snapshot requested — returning all exportable data including archives"
@@ -238,7 +284,7 @@ pub fn build_force_refresh_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)
     let metadata = GwMetadata {
         generated_at: now_secs(),
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
-        post_count: posts.len() as u64,
+        post_count: u64::try_from(posts.len())?,
         tx_id,
         since: None,
         is_delta: false,
@@ -252,6 +298,7 @@ pub fn build_force_refresh_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)
 
 // ── Private DB helpers ────────────────────────────────────────────────────────
 
+/// Resolves an exportable board's local identifier.
 fn board_id_by_short_name(conn: &Connection, short_name: &str) -> Result<i64> {
     conn.query_row(
         "SELECT id
@@ -361,7 +408,7 @@ fn fetch_threads(
 
     let mut stmt = conn.prepare(sql)?;
 
-    let map_row = |r: &rusqlite::Row| {
+    let map_row = |r: &rusqlite::Row<'_>| {
         Ok(GwThread {
             thread_id: r.get(0)?,
             board: r.get(1)?,
@@ -384,6 +431,7 @@ fn fetch_threads(
     Ok(rows)
 }
 
+/// Fetches one exportable thread by local identifier.
 fn fetch_thread_by_id(conn: &Connection, thread_id: i64) -> Result<Vec<GwThread>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, b.short_name, COALESCE(t.subject, ''), t.created_at,
@@ -458,7 +506,7 @@ fn fetch_posts(
 
     let mut stmt = conn.prepare(&sql)?;
 
-    let map_row = |r: &rusqlite::Row| {
+    let map_row = |r: &rusqlite::Row<'_>| {
         Ok(GwPost {
             post_id: r.get(0)?,
             thread_id: r.get(1)?,
@@ -520,16 +568,19 @@ fn pack_zip(
 }
 
 #[cfg(test)]
+/// Security-boundary tests for gateway and federation snapshot exports.
 mod tests {
     use super::{
         build_archive_snapshot, build_board_snapshot, build_force_refresh_snapshot,
         build_full_snapshot, build_thread_snapshot, GwBoard, GwPost, GwThread,
     };
+    use anyhow::{Context as _, Result};
     use std::io::{Cursor, Read as _};
 
-    fn setup_pool() -> crate::db::DbPool {
-        let pool = crate::db::init_test_pool().expect("test database");
-        let conn = pool.get().expect("database connection");
+    /// Builds a database containing public and protected board variants.
+    fn setup_pool() -> Result<crate::db::DbPool> {
+        let pool = crate::db::init_test_pool().context("initialize test database")?;
+        let conn = pool.get().context("get database connection")?;
         conn.execute(
             "INSERT INTO boards
              (id, short_name, name, description, access_mode, access_password_hash)
@@ -538,7 +589,7 @@ mod tests {
                     (3, 'posting', 'Posting', '', 'post_password', 'protected')",
             [],
         )
-        .expect("insert boards");
+        .context("insert boards")?;
         conn.execute(
             "INSERT INTO threads (id, board_id, subject, archived)
              VALUES (11, 1, 'public active', 0),
@@ -549,7 +600,7 @@ mod tests {
                     (32, 3, 'posting archive', 1)",
             [],
         )
-        .expect("insert threads");
+        .context("insert threads")?;
         conn.execute(
             "INSERT INTO posts
              (id, thread_id, board_id, name, body, body_html, deletion_token, is_op)
@@ -561,85 +612,143 @@ mod tests {
                     (302, 32, 3, 'posting', 'posting archive', 'posting archive', 'f', 1)",
             [],
         )
-        .expect("insert posts");
+        .context("insert posts")?;
         drop(conn);
-        pool
+        Ok(pool)
     }
 
-    fn zip_json<T: serde::de::DeserializeOwned>(bytes: &[u8], name: &str) -> T {
-        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("open zip");
-        let mut entry = archive.by_name(name).expect("zip entry");
+    /// Reads and deserializes one JSON entry from a snapshot ZIP.
+    fn zip_json<T: serde::de::DeserializeOwned>(bytes: &[u8], name: &str) -> Result<T> {
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).context("open ZIP")?;
+        let mut entry = archive.by_name(name).context("open ZIP entry")?;
         let mut json = Vec::new();
-        entry.read_to_end(&mut json).expect("read zip entry");
-        serde_json::from_slice(&json).expect("parse zip entry")
+        entry.read_to_end(&mut json).context("read ZIP entry")?;
+        serde_json::from_slice(&json).context("parse ZIP entry")
     }
 
+    /// Excludes view-password boards from every gateway export scope.
     #[test]
-    fn protected_boards_are_excluded_from_every_gateway_export() {
-        let pool = setup_pool();
-        let conn = pool.get().expect("database connection");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions intentionally enforce the protected-board export boundary"
+    )]
+    fn protected_boards_are_excluded_from_every_gateway_export() -> Result<()> {
+        let pool = setup_pool()?;
+        let conn = pool.get().context("get database connection")?;
 
-        let (full, _) = build_full_snapshot(&conn, None).expect("full snapshot");
-        let boards: Vec<GwBoard> = zip_json(&full, "boards.json");
-        let threads: Vec<GwThread> = zip_json(&full, "threads.json");
-        let posts: Vec<GwPost> = zip_json(&full, "posts.json");
+        let (full, _) = build_full_snapshot(&conn, None).context("build full snapshot")?;
+        let boards: Vec<GwBoard> = zip_json(&full, "boards.json")?;
+        let threads: Vec<GwThread> = zip_json(&full, "threads.json")?;
+        let posts: Vec<GwPost> = zip_json(&full, "posts.json")?;
         assert_eq!(
             boards
                 .iter()
                 .map(|board| board.short_name.as_str())
                 .collect::<Vec<_>>(),
-            ["public", "posting"]
+            ["public", "posting"],
+            "full export must contain only exportable boards"
         );
-        assert!(threads
-            .iter()
-            .all(|thread| matches!(thread.board.as_str(), "public" | "posting")));
-        assert!(posts
-            .iter()
-            .all(|post| matches!(post.board.as_str(), "public" | "posting")));
+        assert!(
+            threads
+                .iter()
+                .all(|thread| matches!(thread.board.as_str(), "public" | "posting")),
+            "full export must contain only threads from exportable boards"
+        );
+        assert!(
+            posts
+                .iter()
+                .all(|post| matches!(post.board.as_str(), "public" | "posting")),
+            "full export must contain only posts from exportable boards"
+        );
 
-        let (force, _) = build_force_refresh_snapshot(&conn).expect("force refresh");
-        let force_threads: Vec<GwThread> = zip_json(&force, "threads.json");
-        let force_posts: Vec<GwPost> = zip_json(&force, "posts.json");
-        assert_eq!(force_threads.len(), 4);
-        assert_eq!(force_posts.len(), 4);
-        assert!(force_threads
-            .iter()
-            .all(|thread| matches!(thread.board.as_str(), "public" | "posting")));
-        assert!(force_posts
-            .iter()
-            .all(|post| matches!(post.board.as_str(), "public" | "posting")));
+        let (force, _) =
+            build_force_refresh_snapshot(&conn).context("build force-refresh snapshot")?;
+        let force_threads: Vec<GwThread> = zip_json(&force, "threads.json")?;
+        let force_posts: Vec<GwPost> = zip_json(&force, "posts.json")?;
+        assert_eq!(force_threads.len(), 4, "force export thread count");
+        assert_eq!(force_posts.len(), 4, "force export post count");
+        assert!(
+            force_threads
+                .iter()
+                .all(|thread| matches!(thread.board.as_str(), "public" | "posting")),
+            "force export must exclude protected-board threads"
+        );
+        assert!(
+            force_posts
+                .iter()
+                .all(|post| matches!(post.board.as_str(), "public" | "posting")),
+            "force export must exclude protected-board posts"
+        );
 
-        assert!(build_board_snapshot(&conn, "secret", None).is_err());
-        assert!(build_thread_snapshot(&conn, 21, None).is_err());
-        assert!(build_archive_snapshot(&conn, "secret").is_err());
+        assert!(
+            build_board_snapshot(&conn, "secret", None).is_err(),
+            "protected board snapshot must fail"
+        );
+        assert!(
+            build_thread_snapshot(&conn, 21, None).is_err(),
+            "protected-board thread snapshot must fail"
+        );
+        assert!(
+            build_archive_snapshot(&conn, "secret").is_err(),
+            "protected board archive snapshot must fail"
+        );
 
-        assert!(build_board_snapshot(&conn, "public", None).is_ok());
-        assert!(build_thread_snapshot(&conn, 11, None).is_ok());
-        assert!(build_archive_snapshot(&conn, "public").is_ok());
-        assert!(build_board_snapshot(&conn, "posting", None).is_ok());
-        assert!(build_thread_snapshot(&conn, 31, None).is_ok());
-        assert!(build_archive_snapshot(&conn, "posting").is_ok());
+        assert!(
+            build_board_snapshot(&conn, "public", None).is_ok(),
+            "public board snapshot must succeed"
+        );
+        assert!(
+            build_thread_snapshot(&conn, 11, None).is_ok(),
+            "public thread snapshot must succeed"
+        );
+        assert!(
+            build_archive_snapshot(&conn, "public").is_ok(),
+            "public archive snapshot must succeed"
+        );
+        assert!(
+            build_board_snapshot(&conn, "posting", None).is_ok(),
+            "post-password board snapshot must succeed"
+        );
+        assert!(
+            build_thread_snapshot(&conn, 31, None).is_ok(),
+            "post-password thread snapshot must succeed"
+        );
+        assert!(
+            build_archive_snapshot(&conn, "posting").is_ok(),
+            "post-password archive snapshot must succeed"
+        );
+        Ok(())
     }
 
+    /// Excludes view-password boards from the federation export.
     #[test]
-    fn protected_boards_are_excluded_from_federation_export() {
-        let pool = setup_pool();
-        let conn = pool.get().expect("database connection");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions intentionally enforce the protected-board federation boundary"
+    )]
+    fn protected_boards_are_excluded_from_federation_export() -> Result<()> {
+        let pool = setup_pool()?;
+        let conn = pool.get().context("get database connection")?;
         let (snapshot, _) =
-            crate::chan_net::snapshot::build_snapshot(&conn).expect("federation snapshot");
+            crate::chan_net::snapshot::build_snapshot(&conn).context("build snapshot")?;
         let (boards, posts, _) =
-            crate::chan_net::snapshot::unpack_snapshot(&snapshot).expect("unpack snapshot");
+            crate::chan_net::snapshot::unpack_snapshot(&snapshot).context("unpack snapshot")?;
 
         assert_eq!(
             boards
                 .iter()
                 .map(|board| board.id.as_str())
                 .collect::<Vec<_>>(),
-            ["public", "posting"]
+            ["public", "posting"],
+            "federation export must contain only exportable boards"
         );
-        assert_eq!(posts.len(), 2);
-        assert!(posts
-            .iter()
-            .all(|post| matches!(post.board.as_str(), "public" | "posting")));
+        assert_eq!(posts.len(), 2, "federation export post count");
+        assert!(
+            posts
+                .iter()
+                .all(|post| matches!(post.board.as_str(), "public" | "posting")),
+            "federation export must exclude protected-board posts"
+        );
+        Ok(())
     }
 }

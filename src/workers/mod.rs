@@ -1,6 +1,3 @@
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#![allow(clippy::too_many_lines)]
-
 // workers/mod.rs — Background job queue and worker pool.
 //
 // Architecture:
@@ -45,11 +42,12 @@ use tokio::time::{sleep, timeout, Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
+/// Builds an `FFmpeg` command using the configured executable path.
 fn ffmpeg_command() -> TokioCommand {
     TokioCommand::new(&CONFIG.ffmpeg_path)
 }
 
-// How long a worker sleeps when the queue is empty.
+/// How long a worker sleeps when the queue is empty.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 // ─── Job definitions ──────────────────────────────────────────────────────────
@@ -61,36 +59,49 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub enum Job {
     /// Transcode an uploaded MP4/MKV to `WebM` (VP9 + Opus) via ffmpeg.
     VideoTranscode {
+        /// Database identifier of the post owning the upload.
         post_id: i64,
         /// Path relative to `CONFIG.upload_dir`, e.g. "b/abc123.mp4"
         file_path: String,
+        /// Short name of the board containing the post.
         board_short: String,
     },
     /// Generate a waveform PNG thumbnail for an audio upload via ffmpeg.
     AudioWaveform {
+        /// Database identifier of the post owning the upload.
         post_id: i64,
         /// Path relative to `CONFIG.upload_dir`
         file_path: String,
+        /// Short name of the board containing the post.
         board_short: String,
     },
     /// Delete overflow threads from a board (runs after a new thread is created).
     ThreadPrune {
+        /// Database identifier of the board to prune.
         board_id: i64,
+        /// Short name of the board to prune.
         board_short: String,
+        /// Maximum number of live threads retained by the board.
         max_threads: i64,
+        /// Maximum number of archived threads retained by the board.
         max_archived_threads: i64,
+        /// Whether overflow threads may be archived before deletion.
         allow_archive: bool,
     },
     /// Lightweight spam / abuse signal logging.
     SpamCheck {
+        /// Database identifier of the post to inspect.
         post_id: i64,
+        /// Privacy-preserving hash of the posting address.
         ip_hash: String,
+        /// Length of the submitted post body in bytes.
         body_len: usize,
     },
 }
 
 impl Job {
     /// Short identifier stored in `background_jobs.job_type` for diagnostics.
+    #[must_use]
     pub const fn type_str(&self) -> &'static str {
         match self {
             Self::VideoTranscode { .. } => "video_transcode",
@@ -101,9 +112,12 @@ impl Job {
     }
 }
 
+/// Result of attempting to add a background job to the bounded queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnqueueOutcome {
+    /// The job was persisted with the contained database identifier.
     Enqueued(i64),
+    /// Capacity back-pressure rejected the job before persistence.
     DroppedAtCapacity,
 }
 
@@ -111,9 +125,11 @@ pub enum EnqueueOutcome {
 
 /// Cheaply-cloneable handle to the shared job queue.
 /// Clone this into every handler that needs to enqueue work.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct JobQueue {
+    /// Database pool used to persist and claim background jobs.
     pub pool: DbPool,
+    /// Wakes an idle worker after a producer enqueues work.
     pub notify: Arc<Notify>,
     /// Token cancelled at shutdown; workers observe this to exit cleanly.
     pub cancel: CancellationToken,
@@ -122,12 +138,17 @@ pub struct JobQueue {
     /// and skip if the same path is already in flight, preventing redundant
     /// `FFmpeg` invocations on client retries or server-restart re-queues.
     pub in_progress: Arc<DashMap<String, bool>>,
+    /// In-memory count of persisted jobs that have not yet been claimed.
     pending_jobs: Arc<AtomicU64>,
+    /// Number of jobs rejected by capacity back-pressure.
     dropped_jobs: Arc<AtomicU64>,
+    /// Number of video transcodes currently executing.
     active_video_jobs: Arc<AtomicU64>,
 }
 
 impl JobQueue {
+    /// Creates a queue backed by `pool`, initializing its pending-job gauge.
+    #[must_use]
     pub fn new(pool: DbPool) -> Self {
         let pending_jobs = pool
             .get()
@@ -153,6 +174,11 @@ impl JobQueue {
     /// `CONFIG.job_queue_capacity`, the job is dropped with a warning log
     /// rather than accepted. This prevents the queue table growing without
     /// bound under a post flood.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when serializing the job, acquiring a database
+    /// connection, or persisting the job fails.
     pub fn enqueue(&self, job: &Job) -> Result<EnqueueOutcome> {
         let payload = serde_json::to_string(job)?;
 
@@ -165,7 +191,8 @@ impl JobQueue {
                     return Err(error.into());
                 }
             };
-            match crate::db::enqueue_job(&conn, job.type_str(), &payload) {
+            let enqueue_result = crate::db::enqueue_job(&conn, job.type_str(), &payload);
+            match enqueue_result {
                 Ok(id) => {
                     self.notify.notify_one();
                     Ok(EnqueueOutcome::Enqueued(id))
@@ -183,18 +210,24 @@ impl JobQueue {
 
     /// Number of jobs currently in "pending" state (not yet started).
     /// Used by the terminal stats display.
+    #[must_use]
     pub fn pending_count(&self) -> i64 {
         i64::try_from(self.pending_jobs.load(Ordering::Relaxed)).unwrap_or(i64::MAX)
     }
 
+    /// Returns the number of jobs rejected since this queue was created.
+    #[must_use]
     pub fn dropped_count(&self) -> u64 {
         self.dropped_jobs.load(Ordering::Relaxed)
     }
 
+    /// Returns the number of video transcodes currently executing.
+    #[must_use]
     pub fn active_video_count(&self) -> u64 {
         self.active_video_jobs.load(Ordering::Relaxed)
     }
 
+    /// Atomically reserves capacity for a job before it is persisted.
     fn reserve_pending_slot(&self, job_type: &str) -> bool {
         if CONFIG.job_queue_capacity == 0 {
             self.pending_jobs.fetch_add(1, Ordering::Relaxed);
@@ -225,6 +258,7 @@ impl JobQueue {
         }
     }
 
+    /// Decrements the pending-job gauge after a worker claims a job.
     fn mark_job_claimed(&self) {
         self.pending_jobs
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
@@ -233,6 +267,7 @@ impl JobQueue {
             .ok();
     }
 
+    /// Restores the pending-job gauge when a failed job is scheduled to retry.
     fn mark_job_failure_state(&self, failure_state: crate::db::JobFailureState) {
         if failure_state == crate::db::JobFailureState::Retrying {
             self.pending_jobs.fetch_add(1, Ordering::Relaxed);
@@ -270,7 +305,7 @@ pub fn start_worker_pool(
 
     (0..n)
         .map(|idx| {
-            let q = std::sync::Arc::clone(queue);
+            let q = Arc::clone(queue);
             tokio::spawn(async move {
                 worker_loop(
                     idx,
@@ -287,23 +322,33 @@ pub fn start_worker_pool(
 
 // ─── Worker loop ─────────────────────────────────────────────────────────────
 
+/// Outcome of executing a claimed job before its status is persisted.
 #[derive(Clone)]
 enum JobCompletion {
+    /// The job completed successfully.
     Done,
+    /// The job no longer targets the post's current media.
     Stale,
+    /// The job failed with the contained diagnostic message.
     Failed(String),
 }
 
+/// Resolution selected after completion persistence itself fails.
 enum CompletionRecovery {
+    /// The job reached a known database state.
     Resolved(Option<crate::db::JobFailureState>),
+    /// A transient recovery failure permits another persistence attempt.
     Retry,
 }
 
+/// Maximum time spent persisting completion after production shutdown begins.
 #[cfg(not(test))]
 const COMPLETION_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// Short shutdown grace used to keep worker tests bounded.
 #[cfg(test)]
 const COMPLETION_SHUTDOWN_GRACE: Duration = Duration::from_millis(200);
 
+/// Persists one job-completion attempt in an immediate transaction.
 fn persist_job_completion_once(
     pool: &DbPool,
     job_id: i64,
@@ -358,18 +403,19 @@ fn persist_job_completion_once(
     match result {
         Ok(failure_state) => {
             if let Err(error) = conn.execute_batch("COMMIT") {
-                let _ = conn.execute_batch("ROLLBACK");
+                drop(conn.execute_batch("ROLLBACK"));
                 return Err(error).context("Failed to commit background-job completion");
             }
             Ok(failure_state)
         }
         Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(error)
         }
     }
 }
 
+/// Returns whether a completion error is safe to retry without recovery.
 fn completion_error_is_transient(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
@@ -394,6 +440,7 @@ fn completion_error_is_transient(error: &anyhow::Error) -> bool {
     })
 }
 
+/// Attempts once to place a job in a safe state after completion persistence fails.
 fn recover_job_after_completion_error_once(
     pool: &DbPool,
     job_id: i64,
@@ -485,23 +532,25 @@ fn recover_job_after_completion_error_once(
     match result {
         Ok(failure_state) => {
             if let Err(error) = conn.execute_batch("COMMIT") {
-                let _ = conn.execute_batch("ROLLBACK");
+                drop(conn.execute_batch("ROLLBACK"));
                 return Err(error).context("Failed to commit background-job recovery");
             }
             Ok(failure_state)
         }
         Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(error)
         }
     }
 }
 
+/// Computes the bounded delay between completion-persistence attempts.
 fn completion_retry_delay(consecutive_errors: u32) -> Duration {
     let exponent = consecutive_errors.min(5);
     Duration::from_millis(50_u64.saturating_mul(1_u64 << exponent).min(1_000))
 }
 
+/// Maps a successful recovery query to the worker's next action.
 fn resolved_completion_recovery(
     worker_id: usize,
     job_id: i64,
@@ -525,6 +574,7 @@ fn resolved_completion_recovery(
     }
 }
 
+/// Classifies an unsuccessful recovery attempt as retryable or terminal.
 fn failed_completion_recovery(
     worker_id: usize,
     job_id: i64,
@@ -540,6 +590,7 @@ fn failed_completion_recovery(
     })
 }
 
+/// Recovers a job asynchronously after a non-transient completion error.
 async fn recover_non_transient_completion_error(
     worker_id: usize,
     pool: &DbPool,
@@ -577,6 +628,7 @@ async fn recover_non_transient_completion_error(
     }
 }
 
+/// Persists a job completion, retrying transient database failures until resolved.
 async fn persist_job_completion(
     worker_id: usize,
     pool: DbPool,
@@ -644,10 +696,12 @@ async fn persist_job_completion(
     }
 }
 
-#[allow(
+#[expect(
     clippy::cognitive_complexity,
+    clippy::too_many_lines,
     reason = "claim, execution, completion persistence, retry, and shutdown form one worker state machine"
 )]
+/// Claims and executes jobs until the queue's cancellation token is set.
 async fn worker_loop(
     id: usize,
     queue: Arc<JobQueue>,
@@ -715,8 +769,8 @@ async fn worker_loop(
                     ffprobe_available,
                     ffmpeg_vp9_available,
                     queue.pool.clone(),
-                    std::sync::Arc::clone(&queue.in_progress),
-                    std::sync::Arc::clone(&queue.active_video_jobs),
+                    Arc::clone(&queue.in_progress),
+                    Arc::clone(&queue.active_video_jobs),
                 )
                 .await;
                 let completion = match result {
@@ -730,7 +784,7 @@ async fn worker_loop(
                         JobCompletion::Failed(error.to_string())
                     }
                 };
-                match persist_job_completion(
+                let completion_result = persist_job_completion(
                     id,
                     queue.pool.clone(),
                     job_id,
@@ -738,8 +792,8 @@ async fn worker_loop(
                     completion,
                     queue.cancel.clone(),
                 )
-                .await
-                {
+                .await;
+                match completion_result {
                     Ok(Some(failure_state)) => {
                         queue.mark_job_failure_state(failure_state);
                     }
@@ -807,10 +861,11 @@ fn backoff_duration(consecutive_errors: u32) -> Duration {
 
 // ─── Job dispatch ─────────────────────────────────────────────────────────────
 
-#[allow(
+#[expect(
     clippy::cognitive_complexity,
     reason = "the dispatcher mirrors the closed set of background job variants"
 )]
+/// Dispatches a decoded job to the corresponding worker operation.
 async fn handle_job(
     job: Job,
     ffmpeg_available: bool,
@@ -908,6 +963,7 @@ async fn handle_job(
     }
 }
 
+/// Returns the post identifier whose media state follows this job, if any.
 const fn media_job_post_id(job: &Job) -> Option<i64> {
     match job {
         Job::VideoTranscode { post_id, .. } | Job::AudioWaveform { post_id, .. } => Some(*post_id),
@@ -937,7 +993,7 @@ const fn media_job_post_id(job: &Job) -> Option<i64> {
 /// immediately. No blocking thread is held during the wait.
 ///
 /// A hard timeout of the live `ffmpeg_timeout_secs` setting is applied.
-#[allow(
+#[expect(
     clippy::cognitive_complexity,
     reason = "transcode process control and fail-closed cleanup share one lifecycle"
 )]
@@ -1022,13 +1078,14 @@ async fn transcode_video(
     }
 
     // Phase 3: persist temp file + DB updates — blocking.
-    tokio::task::spawn_blocking(move || {
+    let finalise_result = tokio::task::spawn_blocking(move || {
         transcode_video_finalise(
             post_id, &file_path, &src_path, &webm_abs, &webm_rel, tmp, &pool,
         )
     })
     .await
-    .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in finalise: {e}"))?
+    .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in finalise: {e}"))?;
+    finalise_result
 }
 
 /// Prepare a video transcode: validate the source file, optionally probe the
@@ -1051,10 +1108,11 @@ type TranscodePrepareParts = (
     tempfile::NamedTempFile,
 );
 
-#[allow(
+#[expect(
     clippy::cognitive_complexity,
     reason = "source validation and codec-specific preparation share one preflight boundary"
 )]
+/// Validates and prepares all paths and arguments needed for a video transcode.
 fn transcode_video_prepare(
     post_id: i64,
     file_path: &str,
@@ -1136,6 +1194,7 @@ fn transcode_video_prepare(
     Ok(Some((args, src, webm_abs, webm_rel, webm_name, tmp)))
 }
 
+/// Resolves a board's media directory and rejects symlinks or traversal.
 fn validated_board_media_dir(upload_root: &std::path::Path, board_short: &str) -> Result<PathBuf> {
     let board_component = single_normal_component(board_short)
         .ok_or_else(|| anyhow::anyhow!("Transcode board name contains unsafe path components"))?;
@@ -1147,6 +1206,7 @@ fn validated_board_media_dir(upload_root: &std::path::Path, board_short: &str) -
     Ok(board_dir)
 }
 
+/// Resolves an immediate board media file and verifies it is a safe regular file.
 fn validated_board_media_file(
     upload_root: &std::path::Path,
     file_path: &str,
@@ -1193,6 +1253,7 @@ fn validated_board_media_file(
     Ok(src)
 }
 
+/// Returns `value` as one normal path component, rejecting all other forms.
 fn single_normal_component(value: &str) -> Option<&std::ffi::OsStr> {
     let mut components = std::path::Path::new(value).components();
     let component = match components.next()? {
@@ -1205,6 +1266,7 @@ fn single_normal_component(value: &str) -> Option<&std::ffi::OsStr> {
     components.next().is_none().then_some(component)
 }
 
+/// Builds a collision-free `WebM` filename for the transcoded output.
 fn transcoded_webm_name(stem: &str, source_ext: &str) -> String {
     if source_ext.eq_ignore_ascii_case("webm") {
         format!("{stem}.vp9.webm")
@@ -1256,11 +1318,12 @@ fn transcode_video_finalise(
 
     persist_transcoded_webm(post_id, file_path, src, webm_abs, webm_rel, tmp, pool)?;
     if ext != "webm" {
-        let _ = std::fs::remove_file(src);
+        drop(std::fs::remove_file(src));
     }
     Ok(())
 }
 
+/// Atomically installs a validated transcode and replaces the post media record.
 fn persist_transcoded_webm(
     post_id: i64,
     file_path: &str,
@@ -1303,11 +1366,18 @@ fn persist_transcoded_webm(
     Ok(())
 }
 
+/// Decision produced by post-transcode validation.
 enum TranscodeOutputDecision {
+    /// The output is valid and should replace the original media.
     Accept,
-    Skip { reason: &'static str },
+    /// The output is validly inspectable but should not replace the original.
+    Skip {
+        /// Stable diagnostic explaining why the original media is retained.
+        reason: &'static str,
+    },
 }
 
+/// Checks a transcode's size, stream kind, and codec before persistence.
 fn validate_transcoded_webm_output(
     source_path: &std::path::Path,
     output_path: &std::path::Path,
@@ -1367,6 +1437,7 @@ type WaveformPrepareParts = (
     tempfile::NamedTempFile,
 );
 
+/// Generates and persists an audio waveform thumbnail with bounded process time.
 async fn generate_waveform(
     post_id: i64,
     file_path: String,
@@ -1439,6 +1510,7 @@ async fn generate_waveform(
     .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in waveform finalise: {e}"))?
 }
 
+/// Formats the actionable warning emitted when video re-encoding times out.
 fn video_reencode_timeout_warning(post_id: i64, timeout_secs: u64) -> String {
     let human_timeout = crate::config::describe_timeout_secs(timeout_secs);
     format!(
@@ -1536,13 +1608,13 @@ fn waveform_finalise(
         match db_result {
             Ok(()) => {
                 if let Err(error) = conn.execute_batch("COMMIT") {
-                    let _ = conn.execute_batch("ROLLBACK");
+                    drop(conn.execute_batch("ROLLBACK"));
                     return Err(error).context("Failed to commit waveform persistence");
                 }
                 Ok(())
             }
             Err(error) => {
-                let _ = conn.execute_batch("ROLLBACK");
+                drop(conn.execute_batch("ROLLBACK"));
                 Err(error)
             }
         }
@@ -1562,6 +1634,7 @@ fn waveform_finalise(
     Ok(())
 }
 
+/// Streams a file into SHA-256 and returns its lowercase hexadecimal digest.
 fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
     use anyhow::Context as _;
     use sha2::Digest as _;
@@ -1584,10 +1657,11 @@ fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
 
 // ─── ThreadPrune ─────────────────────────────────────────────────────────────
 
-#[allow(
+#[expect(
     clippy::cognitive_complexity,
     reason = "archive, prune, and filesystem finalization remain one consistency operation"
 )]
+/// Applies one board's live and archived thread-retention limits.
 async fn prune_threads(
     board_id: i64,
     board_short: String,
@@ -1656,6 +1730,7 @@ async fn prune_threads(
 
 // ─── SpamCheck ────────────────────────────────────────────────────────────────
 
+/// Records lightweight abuse signals for later operational review.
 fn run_spam_check(post_id: i64, ip_hash: &str, body_len: usize) {
     if body_len > 3500 {
         debug!(
@@ -1677,7 +1752,7 @@ fn run_spam_check(post_id: i64, ip_hash: &str, body_len: usize) {
 /// are logged and skipped rather than aborting the whole pass.
 pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
     // Collect (mtime_secs, path, size) for every file inside any thumbs/ dir.
-    let mut files: Vec<(u64, std::path::PathBuf, u64)> = Vec::new();
+    let mut files: Vec<(u64, PathBuf, u64)> = Vec::new();
     let Ok(upload_root) = std::path::Path::new(upload_dir).canonicalize() else {
         return;
     };
@@ -1768,9 +1843,14 @@ mod tests {
         video_reencode_timeout_warning, waveform_finalise, EnqueueOutcome, Job, JobCompletion,
         JobQueue,
     };
+    use anyhow::{bail, ensure, Context as _};
     use std::io::Write as _;
     use std::time::Duration;
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test database queries stop locally with fixture-specific failure context"
+    )]
     fn file_hash_count(conn: &rusqlite::Connection, file_path: &str) -> i64 {
         conn.query_row(
             "SELECT COUNT(*) FROM file_hashes WHERE file_path = ?1",
@@ -1780,18 +1860,22 @@ mod tests {
         .expect("file hash count")
     }
 
-    fn enqueue_spam_job(queue: &JobQueue) -> i64 {
+    fn enqueue_spam_job(queue: &JobQueue) -> anyhow::Result<i64> {
         let job = Job::SpamCheck {
             post_id: 42,
             ip_hash: "hash".to_owned(),
             body_len: 5,
         };
-        match queue.enqueue(&job).expect("enqueue job") {
-            EnqueueOutcome::Enqueued(id) => id,
-            EnqueueOutcome::DroppedAtCapacity => panic!("test job should not be dropped"),
+        match queue.enqueue(&job).context("enqueue spam-check job")? {
+            EnqueueOutcome::Enqueued(id) => Ok(id),
+            EnqueueOutcome::DroppedAtCapacity => bail!("test job was dropped at capacity"),
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "constructing the constrained test pool is a prerequisite for completion-retry tests"
+    )]
     fn single_connection_test_pool(connection_timeout: Duration) -> crate::db::DbPool {
         let initialized_pool = crate::db::init_test_pool().expect("initial test pool");
         let database_path: String = {
@@ -1818,6 +1902,10 @@ mod tests {
             .expect("single-connection test pool")
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "claiming the seeded job is a prerequisite for each queue-state assertion"
+    )]
     fn claim_job(queue: &JobQueue, conn: &rusqlite::Connection, expected_id: i64) -> (i64, String) {
         let claimed = crate::db::claim_next_job(conn)
             .expect("claim job")
@@ -1827,11 +1915,15 @@ mod tests {
         claimed
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test fixture failures stop the individual queue accounting test with local context"
+    )]
     #[test]
     fn retryable_failure_restores_queue_pending_count() {
         let pool = crate::db::init_test_pool().expect("test pool");
         let queue = JobQueue::new(pool.clone());
-        let job_id = enqueue_spam_job(&queue);
+        let job_id = enqueue_spam_job(&queue).expect("enqueue spam-check fixture");
         let conn = pool.get().expect("db connection");
 
         claim_job(&queue, &conn, job_id);
@@ -1853,11 +1945,15 @@ mod tests {
         assert_eq!(queue.pending_count(), 1);
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test fixture failures stop the individual queue accounting test with local context"
+    )]
     #[test]
     fn permanent_failure_leaves_queue_pending_count_at_zero() {
         let pool = crate::db::init_test_pool().expect("test pool");
         let queue = JobQueue::new(pool.clone());
-        let job_id = enqueue_spam_job(&queue);
+        let job_id = enqueue_spam_job(&queue).expect("enqueue spam-check fixture");
         let conn = pool.get().expect("db connection");
         let mut saw_permanent_failure = false;
 
@@ -1885,11 +1981,15 @@ mod tests {
         assert_eq!(queue.pending_count(), 0);
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "the async retry test requires every timed and database fixture step to succeed"
+    )]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn completion_retries_the_same_job_after_pool_exhaustion() {
         let pool = single_connection_test_pool(Duration::from_millis(25));
         let queue = JobQueue::new(pool.clone());
-        let job_id = enqueue_spam_job(&queue);
+        let job_id = enqueue_spam_job(&queue).expect("enqueue spam-check fixture");
         {
             let conn = pool.get().expect("claim connection");
             claim_job(&queue, &conn, job_id);
@@ -1934,11 +2034,15 @@ mod tests {
         assert_eq!(status, "done");
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "the shutdown recovery test requires every timed and database fixture step to succeed"
+    )]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn completion_stops_retrying_after_shutdown_grace_and_startup_can_recover() {
         let pool = single_connection_test_pool(Duration::from_millis(25));
         let queue = JobQueue::new(pool.clone());
-        let job_id = enqueue_spam_job(&queue);
+        let job_id = enqueue_spam_job(&queue).expect("enqueue spam-check fixture");
         {
             let conn = pool.get().expect("claim connection");
             claim_job(&queue, &conn, job_id);
@@ -1970,11 +2074,15 @@ mod tests {
         assert_eq!(status, "pending");
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "the completion recovery fixture must resolve within its explicit test timeout"
+    )]
     #[tokio::test]
     async fn already_resolved_completion_error_does_not_wedge_worker() {
         let pool = crate::db::init_test_pool().expect("test pool");
         let queue = JobQueue::new(pool.clone());
-        let job_id = enqueue_spam_job(&queue);
+        let job_id = enqueue_spam_job(&queue).expect("enqueue spam-check fixture");
         {
             let conn = pool.get().expect("claim connection");
             claim_job(&queue, &conn, job_id);
@@ -2002,24 +2110,28 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the regression keeps job seeding, terminal persistence, and replay checks in one end-to-end scenario"
+    )]
     #[tokio::test]
-    async fn non_transient_done_completion_is_terminal_and_never_replayed() {
-        let pool = crate::db::init_test_pool().expect("test pool");
+    async fn non_transient_done_completion_is_terminal_and_never_replayed() -> anyhow::Result<()> {
+        let pool = crate::db::init_test_pool().context("create test pool")?;
         let queue = JobQueue::new(pool.clone());
         let post_id = {
-            let conn = pool.get().expect("seed connection");
+            let conn = pool.get().context("get seed connection")?;
             conn.execute(
                 "INSERT INTO boards (short_name, name, description)
                  VALUES ('finished', 'Finished', '')",
                 [],
             )
-            .expect("insert board");
+            .context("insert terminal-state board")?;
             let board_id = conn.last_insert_rowid();
             conn.execute(
                 "INSERT INTO threads (board_id, subject) VALUES (?1, 'finished thread')",
                 rusqlite::params![board_id],
             )
-            .expect("insert thread");
+            .context("insert terminal-state thread")?;
             let thread_id = conn.last_insert_rowid();
             conn.execute(
                 "INSERT INTO posts
@@ -2029,7 +2141,7 @@ mod tests {
                          'finished/final.webm', ?3)",
                 rusqlite::params![thread_id, board_id, crate::db::MEDIA_PROCESSING_PENDING],
             )
-            .expect("insert media post");
+            .context("insert terminal-state media post")?;
             conn.last_insert_rowid()
         };
         let job = Job::VideoTranscode {
@@ -2037,17 +2149,17 @@ mod tests {
             file_path: "finished/source.mp4".to_owned(),
             board_short: "finished".to_owned(),
         };
-        let job_id = match queue.enqueue(&job).expect("enqueue completed media job") {
+        let job_id = match queue.enqueue(&job).context("enqueue completed media job")? {
             EnqueueOutcome::Enqueued(id) => id,
-            EnqueueOutcome::DroppedAtCapacity => panic!("test job should not be dropped"),
+            EnqueueOutcome::DroppedAtCapacity => bail!("completed media job was dropped"),
         };
         {
-            let conn = pool.get().expect("claim connection");
+            let conn = pool.get().context("get claim connection")?;
             conn.execute(
                 "UPDATE background_jobs SET attempts = 2 WHERE id = ?1",
                 rusqlite::params![job_id],
             )
-            .expect("place job at final claimable attempt");
+            .context("place job at final claimable attempt")?;
             claim_job(&queue, &conn, job_id);
             conn.execute_batch(
                 "CREATE TRIGGER reject_done_completion
@@ -2057,7 +2169,7 @@ mod tests {
                      SELECT RAISE(ABORT, 'injected completion failure');
                  END;",
             )
-            .expect("install completion failure trigger");
+            .context("install completion failure trigger")?;
         }
 
         let result = tokio::time::timeout(
@@ -2072,11 +2184,11 @@ mod tests {
             ),
         )
         .await
-        .expect("recovery timed out")
-        .expect("job should transition to a safe terminal state");
-        assert_eq!(result, Some(crate::db::JobFailureState::PermanentlyFailed));
+        .context("completion recovery timed out")?
+        .context("transition job to a safe terminal state")?;
+        ensure!(result == Some(crate::db::JobFailureState::PermanentlyFailed));
 
-        let conn = pool.get().expect("verification connection");
+        let conn = pool.get().context("get verification connection")?;
         let (status, attempts, error, file_path, media_state): (
             String,
             i64,
@@ -2101,25 +2213,30 @@ mod tests {
                     ))
                 },
             )
-            .expect("terminal job state");
-        assert_eq!(status, "failed");
-        assert_eq!(attempts, 3);
-        assert!(error.contains("injected completion failure"));
-        assert_eq!(file_path, "finished/final.webm");
-        assert!(media_state.is_empty());
-        assert!(
+            .context("load terminal job state")?;
+        ensure!(status == "failed");
+        ensure!(attempts == 3);
+        ensure!(error.contains("injected completion failure"));
+        ensure!(file_path == "finished/final.webm");
+        ensure!(media_state.is_empty());
+        ensure!(
             crate::db::claim_next_job(&conn)
-                .expect("query pending jobs")
+                .context("query pending jobs")?
                 .is_none(),
             "successfully applied work must never be replayed"
         );
+        Ok(())
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "the injected retry-state fixture requires each database and timeout step to succeed"
+    )]
     #[tokio::test]
     async fn non_transient_failed_completion_preserves_bounded_attempt_count() {
         let pool = crate::db::init_test_pool().expect("test pool");
         let queue = JobQueue::new(pool.clone());
-        let job_id = enqueue_spam_job(&queue);
+        let job_id = enqueue_spam_job(&queue).expect("enqueue spam-check fixture");
         {
             let conn = pool.get().expect("claim connection");
             claim_job(&queue, &conn, job_id);
@@ -2167,23 +2284,23 @@ mod tests {
     }
 
     #[test]
-    fn stale_media_completion_preserves_newer_pending_state() {
-        let pool = crate::db::init_test_pool().expect("test pool");
+    fn stale_media_completion_preserves_newer_pending_state() -> anyhow::Result<()> {
+        let pool = crate::db::init_test_pool().context("create test pool")?;
         let queue = JobQueue::new(pool.clone());
         let post_id = {
-            let conn = pool.get().expect("seed connection");
+            let conn = pool.get().context("get seed connection")?;
             conn.execute(
                 "INSERT INTO boards (short_name, name, description)
                  VALUES ('media', 'Media', '')",
                 [],
             )
-            .expect("insert board");
+            .context("insert media board")?;
             let board_id = conn.last_insert_rowid();
             conn.execute(
                 "INSERT INTO threads (board_id, subject) VALUES (?1, 'media thread')",
                 rusqlite::params![board_id],
             )
-            .expect("insert thread");
+            .context("insert media thread")?;
             let thread_id = conn.last_insert_rowid();
             conn.execute(
                 "INSERT INTO posts
@@ -2193,7 +2310,7 @@ mod tests {
                          'media/new.mp4', ?3)",
                 rusqlite::params![thread_id, board_id, crate::db::MEDIA_PROCESSING_PENDING],
             )
-            .expect("insert media post");
+            .context("insert media post")?;
             conn.last_insert_rowid()
         };
         let job = Job::VideoTranscode {
@@ -2201,19 +2318,19 @@ mod tests {
             file_path: "media/old.mp4".to_owned(),
             board_short: "media".to_owned(),
         };
-        let job_id = match queue.enqueue(&job).expect("enqueue stale media job") {
+        let job_id = match queue.enqueue(&job).context("enqueue stale media job")? {
             EnqueueOutcome::Enqueued(id) => id,
-            EnqueueOutcome::DroppedAtCapacity => panic!("test job should not be dropped"),
+            EnqueueOutcome::DroppedAtCapacity => bail!("stale media job was dropped"),
         };
         {
-            let conn = pool.get().expect("claim connection");
+            let conn = pool.get().context("get claim connection")?;
             claim_job(&queue, &conn, job_id);
         }
 
         persist_job_completion_once(&pool, job_id, Some(post_id), &JobCompletion::Stale)
-            .expect("persist stale completion");
+            .context("persist stale completion")?;
 
-        let conn = pool.get().expect("verification connection");
+        let conn = pool.get().context("get verification connection")?;
         let (job_status, media_state): (String, String) = conn
             .query_row(
                 "SELECT j.status, p.media_processing_state
@@ -2223,11 +2340,16 @@ mod tests {
                 rusqlite::params![job_id, post_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .expect("completion state");
-        assert_eq!(job_status, "done");
-        assert_eq!(media_state, crate::db::MEDIA_PROCESSING_PENDING);
+            .context("load stale-completion state")?;
+        ensure!(job_status == "done");
+        ensure!(media_state == crate::db::MEDIA_PROCESSING_PENDING);
+        Ok(())
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "temporary-file and database fixture setup must succeed before cleanup assertions"
+    )]
     #[test]
     fn stale_transcode_persist_removes_unattached_webm_and_writes_no_hash() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -2260,6 +2382,10 @@ mod tests {
         assert_eq!(file_hash_count(&conn, "b/video.webm"), 0);
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "temporary-file fixture setup must succeed before transcode output assertions"
+    )]
     #[test]
     fn transcode_finalise_skips_larger_output_and_cleans_temp_file() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -2300,6 +2426,10 @@ mod tests {
         assert_eq!(transcoded_webm_name("clip", "webm"), "clip.vp9.webm");
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "temporary upload fixture setup must succeed before path validation assertions"
+    )]
     #[test]
     fn transcode_source_validation_rejects_escape_paths() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -2315,6 +2445,10 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[expect(
+        clippy::expect_used,
+        reason = "Unix symlink fixture setup must succeed before containment assertions"
+    )]
     #[test]
     fn thumb_cache_eviction_skips_symlinked_thumbs_dir() {
         use std::os::unix::fs as unix_fs;
@@ -2338,6 +2472,10 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[expect(
+        clippy::expect_used,
+        reason = "Unix symlink fixture setup must succeed before containment assertions"
+    )]
     #[test]
     fn thumb_cache_eviction_skips_symlinked_board_dir() {
         use std::os::unix::fs as unix_fs;
@@ -2361,6 +2499,10 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[expect(
+        clippy::expect_used,
+        reason = "Unix symlink fixture setup must succeed before containment assertions"
+    )]
     #[test]
     fn thumb_cache_eviction_skips_symlinked_thumb_file() {
         use std::os::unix::fs as unix_fs;
@@ -2381,6 +2523,10 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "temporary-file and database fixture setup must succeed before cleanup assertions"
+    )]
     #[test]
     fn stale_waveform_finalise_removes_unattached_png_and_writes_no_hash() {
         let temp_dir = tempfile::tempdir().expect("tempdir");

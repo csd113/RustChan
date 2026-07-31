@@ -1,15 +1,26 @@
+//! Registry of themes bundled with `RustChan`.
+
 use crate::models::Theme;
 
+/// Metadata for a theme shipped with `RustChan`.
+#[derive(Debug)]
 pub struct BuiltinTheme {
+    /// Stable identifier used in configuration and URLs.
     pub slug: &'static str,
+    /// Human-readable theme name.
     pub display_name: &'static str,
+    /// Short description shown in theme selectors.
     pub description: &'static str,
+    /// Representative CSS color for theme previews.
     pub swatch_hex: &'static str,
+    /// Display order relative to other built-in themes.
     pub sort_order: i64,
 }
 
+/// Theme used when no configured default can be resolved.
 pub const HARD_DEFAULT_THEME: &str = "forest";
 
+/// Metadata for every theme bundled with `RustChan`.
 pub const BUILTIN_THEMES: &[BuiltinTheme] = &[
     BuiltinTheme {
         slug: "forest",
@@ -79,6 +90,7 @@ pub const BUILTIN_THEMES: &[BuiltinTheme] = &[
 ];
 
 #[must_use]
+/// Find a built-in theme by slug, ignoring ASCII case and surrounding space.
 pub fn builtin_theme(slug: &str) -> Option<&'static BuiltinTheme> {
     BUILTIN_THEMES
         .iter()
@@ -86,11 +98,13 @@ pub fn builtin_theme(slug: &str) -> Option<&'static BuiltinTheme> {
 }
 
 #[must_use]
+/// Return the stable slugs of all built-in themes in display order.
 pub fn builtin_theme_slugs() -> Vec<&'static str> {
     BUILTIN_THEMES.iter().map(|theme| theme.slug).collect()
 }
 
 #[must_use]
+/// Build database-compatible theme rows with configured enablement state.
 pub fn builtin_theme_rows(enabled_slugs: &[String]) -> Vec<Theme> {
     BUILTIN_THEMES
         .iter()

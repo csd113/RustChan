@@ -1,9 +1,14 @@
 // Media processing pipeline helpers.
 
+/// Uploaded-image format conversion.
 pub mod convert;
+/// EXIF orientation extraction and correction.
 pub mod exif;
+/// Bounded `FFmpeg` and `FFprobe` subprocess helpers.
 pub mod ffmpeg;
+/// Active-media size pruning.
 pub mod prune;
+/// Image, video, audio, and PDF thumbnail generation.
 pub mod thumbnail;
 
 use anyhow::{Context as _, Result};

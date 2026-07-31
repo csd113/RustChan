@@ -1,4 +1,4 @@
-// chan_net/command.rs — RustWave gateway handler.
+//! `RustWave` gateway handler.
 //
 // POST /chan/command accepts a raw JSON body (Content-Type: application/json),
 // deserialises it into the `Command` enum (dispatched via
@@ -50,6 +50,8 @@ use crate::{error::AppError, middleware::AppState};
 // `IntoResponse` impl renders the correct status code and JSON shape:
 //   { "error": "<message>" }
 
+/// JSON extractor that maps Axum rejections into the `ChanNet` error contract.
+#[derive(Debug)]
 pub struct ChanJson<T>(T);
 
 impl<T, S> FromRequest<S> for ChanJson<T>
@@ -88,9 +90,12 @@ where
 
 // ── Command enum ──────────────────────────────────────────────────────────────
 
+/// Maximum number of Unicode scalar values accepted in a gateway reply body.
 const MAX_REPLY_CONTENT_CHARS: usize = 32_768;
+/// Maximum number of Unicode scalar values accepted in a gateway author name.
 const MAX_REPLY_AUTHOR_CHARS: usize = 255;
 
+/// Validates the semantic text limits for an incoming gateway reply.
 fn validate_reply_text(author: &str, content: &str) -> anyhow::Result<()> {
     if content.chars().count() > MAX_REPLY_CONTENT_CHARS {
         anyhow::bail!("Reply content exceeds maximum length of 32,768 characters");
@@ -101,6 +106,7 @@ fn validate_reply_text(author: &str, content: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Maps internal command errors onto the stable HTTP command contract.
 fn map_command_error(error: anyhow::Error) -> AppError {
     if error
         .downcast_ref::<crate::db::chan_net::ReplyReplayError>()
@@ -129,19 +135,35 @@ pub enum Command {
     /// Return all boards, all active (non-archived) threads, and all their
     /// posts. If `since` is provided, only posts newer than that Unix timestamp
     /// are included (delta mode). Thread metadata is always emitted in full.
-    FullExport { since: Option<u64> },
+    FullExport {
+        /// Optional exclusive lower bound for post creation timestamps.
+        since: Option<u64>,
+    },
 
     /// Return all active threads and posts for a single board.
     /// If `since` is provided, only newer posts are included.
-    BoardExport { board: String, since: Option<u64> },
+    BoardExport {
+        /// URL-facing name of the board to export.
+        board: String,
+        /// Optional exclusive lower bound for post creation timestamps.
+        since: Option<u64>,
+    },
 
     /// Return all posts for a single thread.
     /// If `since` is provided, only newer posts are included.
-    ThreadExport { thread_id: i64, since: Option<u64> },
+    ThreadExport {
+        /// Local identifier of the thread to export.
+        thread_id: i64,
+        /// Optional exclusive lower bound for post creation timestamps.
+        since: Option<u64>,
+    },
 
     /// Return all archived threads and their posts for a single board.
     /// `since` is not accepted — archives are static.
-    ArchiveExport { board: String },
+    ArchiveExport {
+        /// URL-facing name of the board whose archive is exported.
+        board: String,
+    },
 
     /// Return everything: all boards, all active threads, all archived threads,
     /// all posts. No timestamp filtering. Intended for initial sync and
@@ -169,11 +191,17 @@ pub enum Command {
     /// content-and-timestamp fingerprint and therefore cannot distinguish two
     /// identical replies created within the same timestamp second.
     ReplyPush {
+        /// URL-facing name of the destination board.
         board: String,
+        /// Local identifier of the destination thread.
         thread_id: i64,
+        /// Displayed author name.
         author: String,
+        /// Plain reply content.
         content: String,
+        /// Source Unix timestamp used by legacy idempotency.
         timestamp: u64,
+        /// Stable idempotency key supplied by modern gateways.
         message_id: Option<uuid::Uuid>,
     },
 }
@@ -201,6 +229,11 @@ pub enum Command {
 ///   Snapshot builder / DB errors → 400 Bad Request (anyhow errors from the
 ///   blocking task are mapped by `.map_err(|e| AppError::BadRequest(e.to_string()))`)
 ///   Tokio join errors            → 500 Internal Server Error
+///
+/// # Errors
+///
+/// Returns a [`super::ChanError`] when authentication-adjacent extraction,
+/// validation, database access, snapshot construction, or task execution fails.
 pub async fn chan_command(
     State(state): State<AppState>,
     ChanJson(cmd): ChanJson<Command>,

@@ -20,6 +20,7 @@ use thiserror::Error;
 use tracing::error;
 
 #[derive(Debug, Error)]
+/// Error returned by application operations and HTTP handlers.
 pub enum AppError {
     /// 404 — board or thread not found
     #[error("Not found: {0}")]
@@ -36,7 +37,12 @@ pub enum AppError {
     /// 403 — user is banned; carries the ban reason and CSRF token so the
     /// appeal form can be rendered with a valid token.
     #[error("You are banned. Reason: {reason}")]
-    BannedUser { reason: String, csrf_token: String },
+    BannedUser {
+        /// Moderation reason shown to the banned user.
+        reason: String,
+        /// Token used to protect the ban-appeal form.
+        csrf_token: String,
+    },
 
     /// 413 — upload body too large
     #[error("Upload too large: {0}")]
@@ -116,6 +122,7 @@ impl From<anyhow::Error> for AppError {
     }
 }
 
+/// Return whether a low-level `SQLite` error represents transient contention.
 const fn is_sqlite_busy(error: &rusqlite::Error) -> bool {
     matches!(
         error,
@@ -181,24 +188,32 @@ impl IntoResponse for AppError {
     }
 }
 
+/// Application result type using [`AppError`].
 pub type Result<T> = std::result::Result<T, AppError>;
 
 #[cfg(test)]
 mod tests {
     use super::AppError;
+    use anyhow::Result;
     use axum::body::to_bytes;
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse as _;
 
     #[test]
-    fn tls_errors_hide_internal_messages_from_users() {
-        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn tls_errors_hide_internal_messages_from_users() -> Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
         let response = AppError::Tls("secret cert path".to_owned()).into_response();
-        let body = runtime
-            .block_on(to_bytes(response.into_body(), usize::MAX))
-            .expect("body bytes");
-        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
-        assert!(!body.contains("secret cert path"));
+        let body = runtime.block_on(to_bytes(response.into_body(), usize::MAX))?;
+        let body = String::from_utf8(body.to_vec())?;
+        assert!(
+            !body.contains("secret cert path"),
+            "TLS internals must not be exposed in the HTTP response"
+        );
+        Ok(())
     }
 
     #[test]
@@ -217,7 +232,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             response.headers().get(header::RETRY_AFTER),
-            Some(&"1".parse().expect("header value"))
+            Some(&axum::http::HeaderValue::from_static("1"))
         );
     }
 }

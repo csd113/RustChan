@@ -1,7 +1,4 @@
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#![allow(clippy::too_many_lines)]
-
-// src/server/server/routes.rs
+//! Route-group composition for the HTTP server.
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -13,6 +10,11 @@ use axum::{
 use crate::middleware::AppState;
 use crate::server::server::observability;
 
+/// Compose public pages, APIs, and media routes.
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeping the public route table contiguous makes route precedence auditable"
+)]
 pub(super) fn public_routes() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(observability::healthz))
@@ -152,6 +154,7 @@ pub(super) fn public_routes() -> Router<AppState> {
         )
 }
 
+/// Compose all authenticated administration route groups.
 pub(super) fn admin_routes() -> Router<AppState> {
     Router::new()
         .merge(admin_auth_routes())
@@ -160,6 +163,7 @@ pub(super) fn admin_routes() -> Router<AppState> {
         .merge(admin_moderation_routes())
 }
 
+/// Compose administrator authentication and dashboard routes.
 fn admin_auth_routes() -> Router<AppState> {
     Router::new()
         .route("/admin", get(crate::handlers::admin::admin_index))
@@ -183,6 +187,7 @@ fn admin_auth_routes() -> Router<AppState> {
         )
 }
 
+/// Compose board and site asset management routes.
 fn admin_board_routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -248,6 +253,7 @@ fn admin_board_routes() -> Router<AppState> {
         )
 }
 
+/// Compose moderation, configuration, and database-maintenance routes.
 fn admin_moderation_routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -348,6 +354,7 @@ fn admin_moderation_routes() -> Router<AppState> {
         )
 }
 
+/// Compose full-site and per-board backup and restore routes.
 fn admin_backup_routes() -> Router<AppState> {
     Router::new()
         .route("/admin/backup", get(crate::handlers::admin::admin_backup))
@@ -409,8 +416,10 @@ fn admin_backup_routes() -> Router<AppState> {
 }
 
 #[cfg(test)]
+/// Route-table integration tests.
 mod tests {
     use super::admin_routes;
+    use anyhow::Context as _;
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
@@ -418,36 +427,44 @@ mod tests {
     use std::io::{Cursor, Write as _};
     use tower::ServiceExt as _;
 
-    fn board_backup_zip_bytes() -> Vec<u8> {
+    /// Standard fallible test result.
+    type TestResult = anyhow::Result<()>;
+
+    /// Build a valid minimal board-backup archive.
+    fn board_backup_zip_bytes() -> anyhow::Result<Vec<u8>> {
         let mut cursor = Cursor::new(Vec::new());
         {
             let mut writer = zip::ZipWriter::new(&mut cursor);
             let options = zip::write::SimpleFileOptions::default();
             writer
                 .start_file("board.json", options)
-                .expect("start board.json");
+                .context("start board.json archive entry")?;
             writer
                 .write_all(br#"{"version":1,"board":{"short_name":"b","name":"Random","description":"","nsfw":false,"thread_limit":100,"reply_limit":300,"bump_limit":300,"max_threads_per_ip":0,"require_thread_title":false,"enable_flags":false,"text_only":false,"forced_anon":false,"sage_without_cap":false,"max_file_size":0,"max_webm_size":0,"max_comment_chars":2000,"max_replies_per_thread":300,"max_subject_chars":100,"cooldown_seconds":0,"thread_cooldown_seconds":0,"show_thread_stats":false,"archive_threads":false,"public_logs":false,"allow_post_deletion":true,"allow_thread_deletion":true,"allow_media_uploads":true,"allow_polls":true,"default_name":"Anonymous","id":0},"threads":[],"posts":[],"polls":[],"file_hashes":[]}"#)
-                .expect("write board.json");
-            writer.finish().expect("finish zip");
+                .context("write board.json archive entry")?;
+            writer.finish().context("finish board backup archive")?;
         }
-        cursor.into_inner()
+        Ok(cursor.into_inner())
     }
 
-    fn install_admin_session(state: &crate::middleware::AppState) {
-        let conn = state.db.get().expect("db connection");
-        let password_hash = crate::utils::crypto::hash_password("hunter2").expect("hash password");
-        let admin_id =
-            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+    /// Install a known administrator and active session in the test database.
+    fn install_admin_session(state: &crate::middleware::AppState) -> TestResult {
+        let conn = state.db.get().context("get database connection")?;
+        let password_hash =
+            crate::utils::crypto::hash_password("hunter2").context("hash admin password")?;
+        let admin_id = crate::db::create_admin(&conn, "admin", &password_hash)
+            .context("create administrator")?;
         crate::db::create_session(
             &conn,
             "session123",
             admin_id,
             chrono::Utc::now().timestamp() + 3600,
         )
-        .expect("create session");
+        .context("create administrator session")?;
+        Ok(())
     }
 
+    /// Create the scoped CSRF token paired with the known test session.
     fn admin_signed_csrf() -> String {
         crate::utils::crypto::make_scoped_csrf_form_token(
             "csrf123",
@@ -456,10 +473,12 @@ mod tests {
         )
     }
 
+    /// Return the cookie header paired with the known test session.
     fn admin_cookie_header() -> &'static str {
         "csrf_token=csrf123; chan_admin_session=session123"
     }
 
+    /// Encode board access settings as a form body.
     fn board_settings_form_body(
         board_id: i64,
         access_mode: &str,
@@ -476,6 +495,7 @@ mod tests {
         body
     }
 
+    /// Encode board upload limit settings as a form body.
     fn board_settings_upload_form_body(
         board_id: i64,
         image_mib: &str,
@@ -488,249 +508,348 @@ mod tests {
         )
     }
 
+    /// Submit board settings to an authenticated administration router.
     async fn post_board_settings(
         state: crate::middleware::AppState,
         body: String,
-    ) -> axum::response::Response {
+    ) -> anyhow::Result<axum::response::Response> {
         let app = admin_routes().with_state(state);
-        app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/admin/board/settings")
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .header(header::HOST, "localhost")
-                .header(header::ORIGIN, "http://localhost")
-                .header(header::COOKIE, admin_cookie_header())
-                .extension(crate::test_support::connect_info())
-                .body(Body::from(body))
-                .expect("request"),
-        )
-        .await
-        .expect("response")
+        Ok(app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/board/settings")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://localhost")
+                    .header(header::COOKIE, admin_cookie_header())
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::from(body))?,
+            )
+            .await?)
     }
 
-    fn create_admin_settings_board(state: &crate::middleware::AppState) -> i64 {
-        install_admin_session(state);
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board")
+    /// Create an administrator session and the board used by settings tests.
+    fn create_admin_settings_board(state: &crate::middleware::AppState) -> anyhow::Result<i64> {
+        install_admin_session(state)?;
+        let conn = state.db.get().context("get database connection")?;
+        crate::db::create_board(&conn, "test", "Test", "", false)
+            .context("create settings test board")
     }
 
-    fn board_access_row(state: &crate::middleware::AppState, board_id: i64) -> (String, String) {
-        let conn = state.db.get().expect("db connection");
-        conn.query_row(
+    /// Load the access mode and password hash for a board.
+    fn board_access_row(
+        state: &crate::middleware::AppState,
+        board_id: i64,
+    ) -> anyhow::Result<(String, String)> {
+        let conn = state.db.get().context("get database connection")?;
+        Ok(conn.query_row(
             "SELECT access_mode, access_password_hash FROM boards WHERE id = ?1",
             rusqlite::params![board_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("board access row")
+        )?)
     }
 
+    /// Load the configured image, video, and audio upload limits for a board.
     fn board_upload_limits_row(
         state: &crate::middleware::AppState,
         board_id: i64,
-    ) -> (i64, i64, i64) {
-        let conn = state.db.get().expect("db connection");
-        conn.query_row(
+    ) -> anyhow::Result<(i64, i64, i64)> {
+        let conn = state.db.get().context("get database connection")?;
+        Ok(conn.query_row(
             "SELECT max_image_size, max_video_size, max_audio_size FROM boards WHERE id = ?1",
             rusqlite::params![board_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .expect("board upload limits row")
+        )?)
     }
 
     #[tokio::test]
-    async fn board_settings_accepts_upload_limits_above_defaults() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Accepts board upload limits above the global defaults.
+    async fn board_settings_accepts_upload_limits_above_defaults() -> TestResult {
         let state = crate::test_support::app_state();
-        let board_id = create_admin_settings_board(&state);
+        let board_id = create_admin_settings_board(&state)?;
 
         let response = post_board_settings(
             state.clone(),
             board_settings_upload_form_body(board_id, "25", "500", "300"),
         )
-        .await;
+        .await?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(
-            board_upload_limits_row(&state, board_id),
-            (25 * 1024 * 1024, 500 * 1024 * 1024, 300 * 1024 * 1024)
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "valid upload limits should redirect after saving"
         );
+        assert_eq!(
+            board_upload_limits_row(&state, board_id)?,
+            (25 * 1024 * 1024, 500 * 1024 * 1024, 300 * 1024 * 1024),
+            "saved upload limits should use byte values"
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn board_settings_rejects_invalid_upload_limits() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Rejects non-positive, malformed, and overflowing upload limits.
+    async fn board_settings_rejects_invalid_upload_limits() -> TestResult {
         for invalid in ["0", "-1", "nope", "9223372036854775808"] {
             let state = crate::test_support::app_state();
-            let board_id = create_admin_settings_board(&state);
+            let board_id = create_admin_settings_board(&state)?;
 
             let response = post_board_settings(
                 state.clone(),
                 board_settings_upload_form_body(board_id, invalid, "50", "150"),
             )
-            .await;
+            .await?;
 
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
             assert_eq!(
-                board_upload_limits_row(&state, board_id),
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "invalid upload limit {invalid} should be rejected"
+            );
+            assert_eq!(
+                board_upload_limits_row(&state, board_id)?,
                 (
-                    i64::try_from(crate::config::CONFIG.max_image_size)
-                        .expect("image default fits in i64"),
-                    i64::try_from(crate::config::CONFIG.max_video_size)
-                        .expect("video default fits in i64"),
-                    i64::try_from(crate::config::CONFIG.max_audio_size)
-                        .expect("audio default fits in i64")
-                )
+                    i64::try_from(crate::config::CONFIG.max_image_size)?,
+                    i64::try_from(crate::config::CONFIG.max_video_size)?,
+                    i64::try_from(crate::config::CONFIG.max_audio_size)?
+                ),
+                "invalid input should preserve default upload limits"
             );
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn board_settings_protected_mode_with_new_password_saves_hash() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Saves a new password hash when enabling protected board access.
+    async fn board_settings_protected_mode_with_new_password_saves_hash() -> TestResult {
         let state = crate::test_support::app_state();
-        let board_id = create_admin_settings_board(&state);
+        let board_id = create_admin_settings_board(&state)?;
 
         let response = post_board_settings(
             state.clone(),
             board_settings_form_body(board_id, "view_password", "swordfish", false),
         )
-        .await;
+        .await?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        let (access_mode, password_hash) = board_access_row(&state, board_id);
-        assert_eq!(access_mode, "view_password");
-        assert!(
-            crate::utils::crypto::verify_password("swordfish", &password_hash)
-                .expect("valid board password hash")
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "valid protected settings should redirect after saving"
         );
+        let (access_mode, password_hash) = board_access_row(&state, board_id)?;
+        assert_eq!(
+            access_mode, "view_password",
+            "board should enter password-protected mode"
+        );
+        assert!(
+            crate::utils::crypto::verify_password("swordfish", &password_hash)?,
+            "saved password hash should verify the supplied password"
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn board_settings_blank_password_keeps_existing_hash() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Preserves the saved password hash when the password field is blank.
+    async fn board_settings_blank_password_keeps_existing_hash() -> TestResult {
         let state = crate::test_support::app_state();
-        let board_id = create_admin_settings_board(&state);
-        let original_hash =
-            crate::utils::crypto::hash_password("oldpass").expect("hash board password");
+        let board_id = create_admin_settings_board(&state)?;
+        let original_hash = crate::utils::crypto::hash_password("oldpass")
+            .context("hash existing board password")?;
         {
-            let conn = state.db.get().expect("db connection");
+            let conn = state.db.get().context("get database connection")?;
             conn.execute(
                 "UPDATE boards SET access_mode = 'view_password', access_password_hash = ?1 WHERE id = ?2",
                 rusqlite::params![original_hash, board_id],
             )
-            .expect("seed board access");
+            .context("seed board access")?;
         }
 
         let response = post_board_settings(
             state.clone(),
             board_settings_form_body(board_id, "view_password", "", false),
         )
-        .await;
+        .await?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        let (access_mode, password_hash) = board_access_row(&state, board_id);
-        assert_eq!(access_mode, "view_password");
-        assert!(
-            crate::utils::crypto::verify_password("oldpass", &password_hash)
-                .expect("valid board password hash")
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "blank password should retain valid protected settings"
         );
+        let (access_mode, password_hash) = board_access_row(&state, board_id)?;
+        assert_eq!(
+            access_mode, "view_password",
+            "blank password should preserve protected mode"
+        );
+        assert!(
+            crate::utils::crypto::verify_password("oldpass", &password_hash)?,
+            "blank password should preserve the existing hash"
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn board_settings_rejects_removing_password_from_protected_mode() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Rejects clearing the only password while protected mode remains enabled.
+    async fn board_settings_rejects_removing_password_from_protected_mode() -> TestResult {
         let state = crate::test_support::app_state();
-        let board_id = create_admin_settings_board(&state);
-        let original_hash =
-            crate::utils::crypto::hash_password("oldpass").expect("hash board password");
+        let board_id = create_admin_settings_board(&state)?;
+        let original_hash = crate::utils::crypto::hash_password("oldpass")
+            .context("hash existing board password")?;
         {
-            let conn = state.db.get().expect("db connection");
+            let conn = state.db.get().context("get database connection")?;
             conn.execute(
                 "UPDATE boards SET access_mode = 'view_password', access_password_hash = ?1 WHERE id = ?2",
                 rusqlite::params![original_hash, board_id],
             )
-            .expect("seed board access");
+            .context("seed board access")?;
         }
 
         let response = post_board_settings(
             state.clone(),
             board_settings_form_body(board_id, "view_password", "", true),
         )
-        .await;
+        .await?;
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body bytes");
-        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
-        assert!(body.contains("Password-protected boards require a saved password."));
-        let (access_mode, password_hash) = board_access_row(&state, board_id);
-        assert_eq!(access_mode, "view_password");
-        assert!(
-            crate::utils::crypto::verify_password("oldpass", &password_hash)
-                .expect("valid board password hash")
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "protected mode without a password should be rejected"
         );
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let body = String::from_utf8(body.to_vec()).context("decode error response body")?;
+        assert!(
+            body.contains("Password-protected boards require a saved password."),
+            "response should explain why removing the password failed"
+        );
+        let (access_mode, password_hash) = board_access_row(&state, board_id)?;
+        assert_eq!(
+            access_mode, "view_password",
+            "failed update should preserve protected mode"
+        );
+        assert!(
+            crate::utils::crypto::verify_password("oldpass", &password_hash)?,
+            "failed update should preserve the existing password"
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn board_settings_remove_password_while_public_clears_hash() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Clears a saved password when the board remains public.
+    async fn board_settings_remove_password_while_public_clears_hash() -> TestResult {
         let state = crate::test_support::app_state();
-        let board_id = create_admin_settings_board(&state);
-        let original_hash =
-            crate::utils::crypto::hash_password("oldpass").expect("hash board password");
+        let board_id = create_admin_settings_board(&state)?;
+        let original_hash = crate::utils::crypto::hash_password("oldpass")
+            .context("hash existing board password")?;
         {
-            let conn = state.db.get().expect("db connection");
+            let conn = state.db.get().context("get database connection")?;
             conn.execute(
                 "UPDATE boards SET access_password_hash = ?1 WHERE id = ?2",
                 rusqlite::params![original_hash, board_id],
             )
-            .expect("seed board access");
+            .context("seed board access")?;
         }
 
         let response = post_board_settings(
             state.clone(),
             board_settings_form_body(board_id, "public", "", true),
         )
-        .await;
+        .await?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        let (access_mode, password_hash) = board_access_row(&state, board_id);
-        assert_eq!(access_mode, "public");
-        assert!(password_hash.is_empty());
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "public board password removal should redirect after saving"
+        );
+        let (access_mode, password_hash) = board_access_row(&state, board_id)?;
+        assert_eq!(
+            access_mode, "public",
+            "password removal should retain public access"
+        );
+        assert!(
+            password_hash.is_empty(),
+            "password removal should clear the saved hash"
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn board_settings_new_password_takes_precedence_over_remove_checkbox() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Gives a supplied new password precedence over the clear checkbox.
+    async fn board_settings_new_password_takes_precedence_over_remove_checkbox() -> TestResult {
         let state = crate::test_support::app_state();
-        let board_id = create_admin_settings_board(&state);
-        let original_hash =
-            crate::utils::crypto::hash_password("oldpass").expect("hash board password");
+        let board_id = create_admin_settings_board(&state)?;
+        let original_hash = crate::utils::crypto::hash_password("oldpass")
+            .context("hash existing board password")?;
         {
-            let conn = state.db.get().expect("db connection");
+            let conn = state.db.get().context("get database connection")?;
             conn.execute(
                 "UPDATE boards SET access_mode = 'view_password', access_password_hash = ?1 WHERE id = ?2",
                 rusqlite::params![original_hash, board_id],
             )
-            .expect("seed board access");
+            .context("seed board access")?;
         }
 
         let response = post_board_settings(
             state.clone(),
             board_settings_form_body(board_id, "view_password", "newpass", true),
         )
-        .await;
+        .await?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        let (access_mode, password_hash) = board_access_row(&state, board_id);
-        assert_eq!(access_mode, "view_password");
-        assert!(
-            crate::utils::crypto::verify_password("newpass", &password_hash)
-                .expect("valid board password hash")
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "new protected password should redirect after saving"
+        );
+        let (access_mode, password_hash) = board_access_row(&state, board_id)?;
+        assert_eq!(
+            access_mode, "view_password",
+            "new password should preserve protected mode"
         );
         assert!(
-            !crate::utils::crypto::verify_password("oldpass", &password_hash)
-                .expect("valid board password hash")
+            crate::utils::crypto::verify_password("newpass", &password_hash)?,
+            "new password should replace the saved hash"
         );
+        assert!(
+            !crate::utils::crypto::verify_password("oldpass", &password_hash)?,
+            "old password should stop verifying after replacement"
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn board_restore_route_accepts_large_multipart_body_without_global_media_limit() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Keeps board restore uploads independent of the global media body limit.
+    async fn board_restore_route_accepts_large_multipart_body_without_global_media_limit(
+    ) -> TestResult {
         let app = admin_routes().with_state(crate::test_support::app_state());
         let file_bytes = vec![b'a'; 60 * 1024 * 1024];
         let (boundary, body) = crate::test_support::multipart_body(
@@ -750,22 +869,31 @@ mod tests {
                     .header(header::HOST, "localhost")
                     .header(header::ORIGIN, "http://localhost")
                     .extension(crate::test_support::connect_info())
-                    .body(Body::from(body))
-                    .expect("request"),
+                    .body(Body::from(body))?,
             )
-            .await
-            .expect("response");
+            .await?;
 
-        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body bytes");
-        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
-        assert!(body.contains("Board restore"));
+        assert_ne!(
+            response.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "large backup should bypass the global media upload limit"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let body = String::from_utf8(body.to_vec()).context("decode restore response body")?;
+        assert!(
+            body.contains("Board restore"),
+            "restore response should identify the board restore flow"
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn board_restore_get_redirects_back_to_admin_panel() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Redirects GET requests for the restore endpoint to the panel.
+    async fn board_restore_get_redirects_back_to_admin_panel() -> TestResult {
         let app = admin_routes().with_state(crate::test_support::app_state());
 
         let response = app
@@ -773,43 +901,52 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri("/admin/board/restore")
-                    .body(Body::empty())
-                    .expect("request"),
+                    .body(Body::empty())?,
             )
-            .await
-            .expect("response");
+            .await?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "GET restore request should redirect"
+        );
         assert_eq!(
             response
                 .headers()
                 .get(header::LOCATION)
-                .expect("redirect location header"),
-            "/admin/panel"
+                .context("restore redirect omitted location")?,
+            "/admin/panel",
+            "restore redirect should return to the administrator panel"
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn full_restore_board_backup_upload_redirects_with_helpful_error() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Reports a helpful error when a board archive reaches the full restore flow.
+    async fn full_restore_board_backup_upload_redirects_with_helpful_error() -> TestResult {
         let state = crate::test_support::app_state();
         {
-            let conn = state.db.get().expect("db connection");
-            let password_hash =
-                crate::utils::crypto::hash_password("hunter2").expect("hash password");
-            let admin_id =
-                crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
-            crate::db::create_board(&conn, "b", "Random", "", false).expect("create board");
+            let conn = state.db.get().context("get database connection")?;
+            let password_hash = crate::utils::crypto::hash_password("hunter2")
+                .context("hash administrator password")?;
+            let admin_id = crate::db::create_admin(&conn, "admin", &password_hash)
+                .context("create administrator")?;
+            crate::db::create_board(&conn, "b", "Random", "", false).context("create board")?;
             crate::db::create_session(
                 &conn,
                 "session123",
                 admin_id,
                 chrono::Utc::now().timestamp() + 3600,
             )
-            .expect("create session");
+            .context("create administrator session")?;
         }
 
         let app = admin_routes().with_state(state);
-        let zip_bytes = board_backup_zip_bytes();
+        let zip_bytes = board_backup_zip_bytes()?;
         let (boundary, body) = crate::test_support::multipart_body(
             &[("_csrf", &admin_signed_csrf())],
             Some(("backup_file", "board.zip", &zip_bytes, "application/zip")),
@@ -828,37 +965,68 @@ mod tests {
                     .header(header::ORIGIN, "http://localhost")
                     .header(header::COOKIE, admin_cookie_header())
                     .extension(crate::test_support::connect_info())
-                    .body(Body::from(body))
-                    .expect("request"),
+                    .body(Body::from(body))?,
             )
-            .await
-            .expect("response");
+            .await?;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "restore error page should render successfully"
+        );
         let refresh = response
             .headers()
             .get("refresh")
             .and_then(|value| value.to_str().ok())
-            .expect("refresh header");
-        assert!(refresh.contains("/admin/panel?restore_error="));
-        assert!(refresh.contains("open=full-backup-restore"));
-        assert!(refresh.contains("#full-backup-restore"));
-        assert!(refresh.contains("board+backup"));
+            .context("restore error response omitted refresh header")?;
+        assert!(
+            refresh.contains("/admin/panel?restore_error="),
+            "refresh should carry the restore error"
+        );
+        assert!(
+            refresh.contains("open=full-backup-restore"),
+            "refresh should reopen the full restore panel"
+        );
+        assert!(
+            refresh.contains("#full-backup-restore"),
+            "refresh should target the full restore section"
+        );
+        assert!(
+            refresh.contains("board+backup"),
+            "refresh should explain that the archive is a board backup"
+        );
 
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body bytes");
-        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
-        assert!(body.contains("Restore failed."));
-        assert!(body.contains("/admin/panel?restore_error="));
-        assert!(body.contains("open=full-backup-restore"));
-        assert!(body.contains("#full-backup-restore"));
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let body = String::from_utf8(body.to_vec()).context("decode restore error body")?;
+        assert!(
+            body.contains("Restore failed."),
+            "response body should report the restore failure"
+        );
+        assert!(
+            body.contains("/admin/panel?restore_error="),
+            "response body should carry the panel redirect"
+        );
+        assert!(
+            body.contains("open=full-backup-restore"),
+            "response body should reopen the full restore panel"
+        );
+        assert!(
+            body.contains("#full-backup-restore"),
+            "response body should target the full restore section"
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn saved_full_restore_missing_backup_redirects_back_to_full_backup_section() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Returns a missing saved full backup to the full-backup panel section.
+    async fn saved_full_restore_missing_backup_redirects_back_to_full_backup_section() -> TestResult
+    {
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
         let app = admin_routes().with_state(state);
 
         let response = app
@@ -874,28 +1042,49 @@ mod tests {
                     .body(Body::from(format!(
                         "filename=missing.zip&_csrf={}",
                         admin_signed_csrf()
-                    )))
-                    .expect("request"),
+                    )))?,
             )
-            .await
-            .expect("response");
+            .await?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "missing saved backup should redirect"
+        );
         let location = response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .expect("redirect location");
-        assert!(location.contains("/admin/panel?restore_error="));
-        assert!(location.contains("Backup+file+not+found."));
-        assert!(location.contains("open=full-backup-restore"));
-        assert!(location.contains("#full-backup-restore"));
+            .context("missing-backup redirect omitted location")?;
+        assert!(
+            location.contains("/admin/panel?restore_error="),
+            "redirect should carry the restore error"
+        );
+        assert!(
+            location.contains("Backup+file+not+found."),
+            "redirect should explain that the backup was not found"
+        );
+        assert!(
+            location.contains("open=full-backup-restore"),
+            "redirect should reopen the full restore panel"
+        );
+        assert!(
+            location.contains("#full-backup-restore"),
+            "redirect should target the full restore section"
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn saved_board_restore_missing_backup_redirects_back_to_board_backup_section() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Returns a missing saved board backup to the board-backup panel section.
+    async fn saved_board_restore_missing_backup_redirects_back_to_board_backup_section(
+    ) -> TestResult {
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
         let app = admin_routes().with_state(state);
 
         let response = app
@@ -911,28 +1100,48 @@ mod tests {
                     .body(Body::from(format!(
                         "filename=missing.zip&_csrf={}",
                         admin_signed_csrf()
-                    )))
-                    .expect("request"),
+                    )))?,
             )
-            .await
-            .expect("response");
+            .await?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "missing saved board backup should redirect"
+        );
         let location = response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .expect("redirect location");
-        assert!(location.contains("/admin/panel?restore_error="));
-        assert!(location.contains("Backup+file+not+found."));
-        assert!(location.contains("open=board-backup-restore"));
-        assert!(location.contains("#board-backup-restore"));
+            .context("missing-board-backup redirect omitted location")?;
+        assert!(
+            location.contains("/admin/panel?restore_error="),
+            "redirect should carry the restore error"
+        );
+        assert!(
+            location.contains("Backup+file+not+found."),
+            "redirect should explain that the board backup was not found"
+        );
+        assert!(
+            location.contains("open=board-backup-restore"),
+            "redirect should reopen the board restore panel"
+        );
+        assert!(
+            location.contains("#board-backup-restore"),
+            "redirect should target the board restore section"
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn board_restore_invalid_upload_redirects_back_to_board_backup_section() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Returns an invalid uploaded archive to the board-backup panel section.
+    async fn board_restore_invalid_upload_redirects_back_to_board_backup_section() -> TestResult {
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
         let app = admin_routes().with_state(state);
         let (boundary, body) = crate::test_support::multipart_body(
             &[("_csrf", &admin_signed_csrf())],
@@ -952,21 +1161,36 @@ mod tests {
                     .header(header::ORIGIN, "http://localhost")
                     .header(header::COOKIE, admin_cookie_header())
                     .extension(crate::test_support::connect_info())
-                    .body(Body::from(body))
-                    .expect("request"),
+                    .body(Body::from(body))?,
             )
-            .await
-            .expect("response");
+            .await?;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "invalid archive error page should render successfully"
+        );
         let refresh = response
             .headers()
             .get("refresh")
             .and_then(|value| value.to_str().ok())
-            .expect("refresh header");
-        assert!(refresh.contains("/admin/panel?restore_error="));
-        assert!(refresh.contains("open=board-backup-restore"));
-        assert!(refresh.contains("#board-backup-restore"));
-        assert!(refresh.contains("Unrecognized+format"));
+            .context("invalid-archive response omitted refresh header")?;
+        assert!(
+            refresh.contains("/admin/panel?restore_error="),
+            "refresh should carry the restore error"
+        );
+        assert!(
+            refresh.contains("open=board-backup-restore"),
+            "refresh should reopen the board restore panel"
+        );
+        assert!(
+            refresh.contains("#board-backup-restore"),
+            "refresh should target the board restore section"
+        );
+        assert!(
+            refresh.contains("Unrecognized+format"),
+            "refresh should identify the invalid archive format"
+        );
+        Ok(())
     }
 }

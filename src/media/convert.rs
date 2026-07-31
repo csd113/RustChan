@@ -58,6 +58,7 @@ pub fn conversion_action(mime: &str) -> ConversionAction {
 }
 
 /// Result of a conversion operation.
+#[derive(Debug)]
 pub struct ConversionResult {
     /// Absolute path to the final file on disk.
     pub final_path: PathBuf,
@@ -157,7 +158,7 @@ fn convert_to_webp(input: &Path, output_dir: &Path, file_stem: &str) -> Result<C
             })
         }
         Err(e) => {
-            let _ = std::fs::remove_file(&tmp_out);
+            drop(std::fs::remove_file(&tmp_out));
             tracing::warn!("ffmpeg image→webp failed ({:#}); storing original", e);
             // Fall back: copy input to its original extension destination
             copy_as_is_with_ext(input, output_dir, file_stem, ext_for_original_mime(input))
@@ -191,13 +192,13 @@ fn convert_png_if_smaller(
                 })
             } else {
                 // PNG is already optimal
-                let _ = std::fs::remove_file(&tmp_webp);
+                drop(std::fs::remove_file(&tmp_webp));
                 tracing::debug!("PNG→WebP skipped: webp ({webp_size}B) ≥ png ({original_size}B)");
                 copy_as_is_with_ext(input, output_dir, file_stem, "png")
             }
         }
         Err(e) => {
-            let _ = std::fs::remove_file(&tmp_webp);
+            drop(std::fs::remove_file(&tmp_webp));
             tracing::warn!("ffmpeg png→webp failed ({:#}); storing original PNG", e);
             copy_as_is_with_ext(input, output_dir, file_stem, "png")
         }
@@ -231,6 +232,7 @@ fn copy_as_is_with_ext(
     copy_as_is_with_mime(input, output_dir, file_stem, ext, ext_to_static_mime(ext))
 }
 
+/// Copy input bytes using an explicit canonical MIME type and extension.
 fn copy_as_is_with_mime(
     input: &Path,
     output_dir: &Path,
@@ -250,6 +252,7 @@ fn copy_as_is_with_mime(
     })
 }
 
+/// Map a validated upload MIME type to the static lifetime used by results.
 fn upload_mime_to_static(mime: &str) -> &'static str {
     match mime {
         "image/jpeg" => "image/jpeg",

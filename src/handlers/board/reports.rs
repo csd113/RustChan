@@ -1,19 +1,28 @@
-// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
-#![allow(clippy::wildcard_imports)]
-
-use super::*;
+use super::{
+    board_access_cookie_from_jar, check_csrf_jar, db, hash_ip, identity_key,
+    load_board_access_context, templates, AppError, AppState, CookieJar, Form, Redirect, Response,
+    Result, State, ADMIN_SESSION_COOKIE, CONFIG,
+};
+use axum::response::IntoResponse as _;
 
 #[derive(serde::Deserialize)]
-pub struct ReportForm {
+/// Form fields accepted by the report request.
+pub(crate) struct ReportForm {
+    /// The post identifier.
     pub post_id: i64,
+    /// The thread identifier.
     pub thread_id: i64,
+    /// The board.
     pub board: String,
+    /// The optional reason.
     pub reason: Option<String>,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
-pub async fn file_report(
+/// Handles the file report request.
+pub(crate) async fn file_report(
     State(state): State<AppState>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
@@ -104,13 +113,16 @@ pub async fn file_report(
 /// rather than display or play it inline.
 
 #[derive(serde::Deserialize)]
-pub struct AppealForm {
+pub(crate) struct AppealForm {
+    /// The reason.
     pub reason: String,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
-pub async fn submit_appeal(
+/// Handles the submit appeal request.
+pub(crate) async fn submit_appeal(
     State(state): State<AppState>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
@@ -119,13 +131,13 @@ pub async fn submit_appeal(
     use axum::response::Html;
 
     if check_csrf_jar(&jar, form.csrf.as_deref()).is_err() {
-        return Html(crate::templates::error_page(403, "CSRF token mismatch.")).into_response();
+        return Html(templates::error_page(403, "CSRF token mismatch.")).into_response();
     }
 
     let ip_hash = hash_ip(&identity_key(&client_ip, &jar), &CONFIG.cookie_secret);
     let reason = form.reason.trim().chars().take(512).collect::<String>();
     if reason.is_empty() {
-        return Html(crate::templates::error_page(
+        return Html(templates::error_page(
             400,
             "Appeal message cannot be empty.",
         ))
@@ -134,7 +146,7 @@ pub async fn submit_appeal(
 
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> crate::error::Result<db::BanAppealSubmission> {
+        move || -> Result<db::BanAppealSubmission> {
             let conn = pool.get()?;
             Ok(db::file_ban_appeal(&conn, &ip_hash, &reason)?)
         }
@@ -162,7 +174,7 @@ pub async fn submit_appeal(
 <p>{msg}</p>
 <p><a href="/">return home</a></p>
 </div></body></html>"#,
-        stylesheet_href = crate::templates::static_asset_url("/static/style.css"),
+        stylesheet_href = templates::static_asset_url("/static/style.css"),
         msg = crate::utils::sanitize::escape_html(msg)
     );
     Html(html).into_response()

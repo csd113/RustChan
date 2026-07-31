@@ -1,4 +1,4 @@
-//! `src/tls/self_signed.rs`
+//! Self-signed development certificate management.
 use crate::error::AppError;
 use crate::error::Result;
 use rustls::ServerConfig;
@@ -33,7 +33,7 @@ const CERT_SANS: &[&str] = &["localhost", "127.0.0.1", "::1"];
 /// Returns [`AppError::Tls`] (wrapped in [`crate::Result`]) if directory
 /// creation fails, certificate/key generation fails, the private files cannot
 /// be written, or the PEM files cannot be loaded into a `TlsAcceptor`.
-pub fn generate_or_load(data_dir: &Path) -> Result<(Arc<TlsAcceptor>, Arc<ServerConfig>)> {
+pub(super) fn generate_or_load(data_dir: &Path) -> Result<(Arc<TlsAcceptor>, Arc<ServerConfig>)> {
     let dir = data_dir.join("runtime/tls/dev");
     let cert_path = dir.join("self-signed.crt");
     let key_path = dir.join("self-signed.key");
@@ -72,8 +72,9 @@ pub fn generate_or_load(data_dir: &Path) -> Result<(Arc<TlsAcceptor>, Arc<Server
 // ---------------------------------------------------------------------------
 // Generation
 // ---------------------------------------------------------------------------
+/// Generates a self-signed certificate and writes its PEM files atomically.
 fn write_self_signed_cert(cert_path: &Path, key_path: &Path) -> Result<()> {
-    let params = build_cert_params();
+    let params = build_cert_params()?;
     let key_pair = rcgen::KeyPair::generate()
         .map_err(|e| AppError::Tls(format!("rcgen key generation failed: {e}")))?;
 
@@ -94,7 +95,8 @@ fn write_self_signed_cert(cert_path: &Path, key_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn build_cert_params() -> rcgen::CertificateParams {
+/// Builds the constrained certificate parameters used for development TLS.
+fn build_cert_params() -> Result<rcgen::CertificateParams> {
     use rcgen::{
         CertificateParams, DistinguishedName, DnValue, ExtendedKeyUsagePurpose, KeyUsagePurpose,
     };
@@ -122,7 +124,7 @@ fn build_cert_params() -> rcgen::CertificateParams {
 
     // Subject Alternative Names — required for modern browsers / TLS stacks
     for san in CERT_SANS {
-        params.subject_alt_names.push(san_for(san));
+        params.subject_alt_names.push(san_for(san)?);
     }
 
     // Mark as end-entity (not a CA)
@@ -135,17 +137,21 @@ fn build_cert_params() -> rcgen::CertificateParams {
     ];
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
 
-    params
+    Ok(params)
 }
 
 /// Decide the correct [`SanType`] for a raw string: IPv4/6 literals become
 /// `IpAddress`, everything else becomes `DnsName`.
-#[expect(clippy::unwrap_used)]
-fn san_for(s: &str) -> rcgen::SanType {
-    s.parse::<std::net::IpAddr>().map_or_else(
-        |_| rcgen::SanType::DnsName(s.to_owned().try_into().unwrap()),
-        rcgen::SanType::IpAddress,
-    )
+fn san_for(s: &str) -> Result<rcgen::SanType> {
+    if let Ok(address) = s.parse::<std::net::IpAddr>() {
+        return Ok(rcgen::SanType::IpAddress(address));
+    }
+
+    let dns_name = s
+        .to_owned()
+        .try_into()
+        .map_err(|error| AppError::Tls(format!("invalid self-signed DNS name {s:?}: {error}")))?;
+    Ok(rcgen::SanType::DnsName(dns_name))
 }
 
 // ---------------------------------------------------------------------------
@@ -212,59 +218,85 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
 // Tests
 // ---------------------------------------------------------------------------
 #[cfg(test)]
+/// Tests for certificate generation, reuse, expiry, and subject names.
 mod tests {
-    // Panic-on-bug is intentional here: certificate generation or test fixture setup should stop immediately if it fails.
-    #![allow(clippy::unwrap_used)]
     use super::*;
+    use anyhow::{Context as _, Result};
     use tempfile::TempDir;
 
     /// Install the `ring` crypto provider process-wide.
     /// Returns `Ok(())` the first time; returns `Err` (harmlessly) if
     /// another test in this process already installed it.
     fn ensure_crypto_provider() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        drop(rustls::crypto::ring::default_provider().install_default());
     }
 
+    /// Generates both certificate files on first use.
     #[test]
-    fn generates_cert_on_first_call() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions intentionally report violations of first-run certificate generation"
+    )]
+    fn generates_cert_on_first_call() -> Result<()> {
         ensure_crypto_provider();
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().context("create temporary TLS directory")?;
         let cert = tmp.path().join("runtime/tls/dev/self-signed.crt");
         let key = tmp.path().join("runtime/tls/dev/self-signed.key");
-        assert!(!cert.exists());
-        generate_or_load(tmp.path()).expect("generate_or_load failed");
+        assert!(
+            !cert.exists(),
+            "certificate must not exist before generation"
+        );
+        generate_or_load(tmp.path()).context("generate self-signed certificate")?;
         assert!(cert.exists(), "cert file should exist after first call");
         assert!(key.exists(), "key file should exist after first call");
+        Ok(())
     }
 
+    /// Reuses an existing valid certificate without rewriting it.
     #[test]
-    fn reuses_valid_cert_on_second_call() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions intentionally report violations of certificate reuse"
+    )]
+    fn reuses_valid_cert_on_second_call() -> Result<()> {
         ensure_crypto_provider();
-        let tmp = TempDir::new().unwrap();
-        generate_or_load(tmp.path()).unwrap();
+        let tmp = TempDir::new().context("create temporary TLS directory")?;
+        generate_or_load(tmp.path()).context("generate self-signed certificate")?;
         let cert_path = tmp.path().join("runtime/tls/dev/self-signed.crt");
-        let mtime_1 = std::fs::metadata(&cert_path).unwrap().modified().unwrap();
+        let mtime_1 = std::fs::metadata(&cert_path)
+            .context("read initial certificate metadata")?
+            .modified()
+            .context("read initial certificate modification time")?;
         // Small sleep to ensure mtime would differ if the file were rewritten.
         std::thread::sleep(std::time::Duration::from_millis(10));
-        generate_or_load(tmp.path()).unwrap();
-        let mtime_2 = std::fs::metadata(&cert_path).unwrap().modified().unwrap();
+        generate_or_load(tmp.path()).context("reload self-signed certificate")?;
+        let mtime_2 = std::fs::metadata(&cert_path)
+            .context("read reused certificate metadata")?
+            .modified()
+            .context("read reused certificate modification time")?;
         assert_eq!(mtime_1, mtime_2, "valid cert should not be regenerated");
+        Ok(())
     }
 
+    /// Anchors the generated certificate validity window to current UTC time.
     #[test]
-    fn generated_cert_validity_uses_current_utc_window() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions intentionally report violations of certificate validity bounds"
+    )]
+    fn generated_cert_validity_uses_current_utc_window() -> Result<()> {
         use x509_cert::der::Decode as _;
 
         ensure_crypto_provider();
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().context("create temporary TLS directory")?;
         let before = SystemTime::now();
-        generate_or_load(tmp.path()).unwrap();
+        generate_or_load(tmp.path()).context("generate self-signed certificate")?;
         let after = SystemTime::now();
 
         let cert_path = tmp.path().join("runtime/tls/dev/self-signed.crt");
-        let pem_bytes = std::fs::read(cert_path).unwrap();
-        let (_, der) = pem_rfc7468::decode_vec(&pem_bytes).unwrap();
-        let cert = x509_cert::Certificate::from_der(&der).unwrap();
+        let pem_bytes = std::fs::read(cert_path).context("read generated certificate")?;
+        let (_, der) = pem_rfc7468::decode_vec(&pem_bytes).context("decode certificate PEM")?;
+        let cert = x509_cert::Certificate::from_der(&der).context("decode certificate DER")?;
         let not_before = cert
             .tbs_certificate()
             .validity()
@@ -272,56 +304,83 @@ mod tests {
             .to_system_time();
         let not_after = cert.tbs_certificate().validity().not_after.to_system_time();
 
-        assert!(not_before <= after);
-        assert!(not_after > before);
         assert!(
-            not_after
-                .duration_since(not_before)
-                .expect("positive certificate validity")
+            not_before <= after,
+            "certificate must not begin after generation completes"
+        );
+        assert!(
+            not_after > before,
+            "certificate must expire after generation begins"
+        );
+        let validity = not_after
+            .duration_since(not_before)
+            .context("certificate validity window must be positive")?;
+        assert!(
+            validity
                 >= std::time::Duration::from_secs(
                     (u64::from(CERT_VALIDITY_DAYS) - 1) * 24 * 60 * 60
-                )
+                ),
+            "certificate validity must cover nearly the configured duration"
+        );
+        Ok(())
+    }
+
+    /// Treats an absent certificate as requiring regeneration.
+    #[test]
+    fn needs_regeneration_returns_true_for_missing_file() {
+        assert!(
+            needs_regeneration(
+                Path::new("/nonexistent/path/cert.pem"),
+                Path::new("/nonexistent/path/key.pem")
+            ),
+            "missing certificate material must require regeneration"
         );
     }
 
+    /// Regenerates both files when the private key is missing.
     #[test]
-    fn needs_regeneration_returns_true_for_missing_file() {
-        assert!(needs_regeneration(
-            Path::new("/nonexistent/path/cert.pem"),
-            Path::new("/nonexistent/path/key.pem")
-        ));
-    }
-
-    #[test]
-    fn missing_key_triggers_regeneration_on_next_startup() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions intentionally report violations of missing-key recovery"
+    )]
+    fn missing_key_triggers_regeneration_on_next_startup() -> Result<()> {
         ensure_crypto_provider();
-        let tmp = TempDir::new().unwrap();
-        generate_or_load(tmp.path()).unwrap();
+        let tmp = TempDir::new().context("create temporary TLS directory")?;
+        generate_or_load(tmp.path()).context("generate self-signed certificate")?;
 
         let cert_path = tmp.path().join("runtime/tls/dev/self-signed.crt");
         let key_path = tmp.path().join("runtime/tls/dev/self-signed.key");
-        let original_cert = std::fs::read(&cert_path).unwrap();
-        std::fs::remove_file(&key_path).unwrap();
+        let original_cert = std::fs::read(&cert_path).context("read original certificate")?;
+        std::fs::remove_file(&key_path).context("remove private key")?;
 
-        generate_or_load(tmp.path()).unwrap();
+        generate_or_load(tmp.path()).context("regenerate missing key")?;
 
-        let regenerated_cert = std::fs::read(&cert_path).unwrap();
+        let regenerated_cert = std::fs::read(&cert_path).context("read regenerated certificate")?;
         assert!(key_path.exists(), "missing key should be regenerated");
         assert_ne!(
             original_cert, regenerated_cert,
             "cert should be rewritten when the key file is missing"
         );
+        Ok(())
     }
 
+    /// Parses an IPv4 subject alternative name as an IP address.
     #[test]
     fn san_for_parses_ipv4() {
         let san = san_for("127.0.0.1");
-        assert!(matches!(san, rcgen::SanType::IpAddress(_)));
+        assert!(
+            matches!(san, Ok(rcgen::SanType::IpAddress(_))),
+            "IPv4 SAN must be represented as an IP address"
+        );
     }
 
+    /// Parses a hostname subject alternative name as DNS.
     #[test]
     fn san_for_parses_dns() {
         let san = san_for("localhost");
-        assert!(matches!(san, rcgen::SanType::DnsName(_)));
+        assert!(
+            matches!(san, Ok(rcgen::SanType::DnsName(_))),
+            "hostname SAN must be represented as a DNS name"
+        );
     }
 }

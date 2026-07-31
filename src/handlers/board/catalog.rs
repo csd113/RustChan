@@ -1,8 +1,19 @@
-// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
-#![allow(clippy::wildcard_imports)]
+use super::{
+    activity_html_cache_control, admin_scoped_csrf_token, board_access_cookie_from_jar,
+    board_access_denied_response, board_access_preflight, current_theme_from_jar, db,
+    ensure_csrf_for_request, header, latest_visible_thread_marker_tuple,
+    optional_connect_info_peer, remember_board_activity, remember_visible_thread_activity,
+    sha256_hex, split_catalog_threads, templates, thread_activity_markers_from_jar,
+    thread_unread_counts, user_preferences_from_jar, viewer_preference_key, AppError, AppState,
+    BoardAccessDecision, BoardAccessRequirement, CatalogRenderData, CookieJar, HashMap, HeaderMap,
+    HeaderValue, Html, OptionalConnectInfoPeer, Pagination, Path, Query, Response, Result,
+    SearchQuery, State, StatusCode, ADMIN_SESSION_COOKIE, SEARCH_QUERY_MAX_CHARS,
+    THREAD_ACTIVITY_MARKER_LIMIT,
+};
+use axum::response::IntoResponse as _;
+use std::fmt::Write as _;
 
-use super::*;
-
+/// Composite value returned by catalog load result.
 type CatalogLoadResult = (
     CatalogRenderData,
     crate::banner::BannerSelection,
@@ -12,7 +23,12 @@ type CatalogLoadResult = (
     Option<(i64, i64)>,
 );
 
-pub async fn catalog(
+#[expect(
+    clippy::too_many_lines,
+    reason = "access control, catalog loading, unread-state calculation, and rendering form one request"
+)]
+/// Handles the catalog request.
+pub(crate) async fn catalog(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
@@ -142,7 +158,7 @@ pub async fn catalog(
     let admin_tag = admin_csrf.as_deref().map_or_else(String::new, |token| {
         format!(
             "-a{}",
-            crate::utils::crypto::sha256_hex(token.as_bytes())
+            sha256_hex(token.as_bytes())
                 .chars()
                 .take(12)
                 .collect::<String>()
@@ -154,20 +170,15 @@ pub async fn catalog(
     } else {
         "-cg0"
     };
-    let theme_tag = crate::templates::page_theme_etag_fragment(
-        current_theme.as_deref(),
-        Some(&board.default_theme),
-    );
+    let theme_tag =
+        templates::page_theme_etag_fragment(current_theme.as_deref(), Some(&board.default_theme));
     let activity_tag = if thread_badges_enabled {
         let mut badge_parts = thread_badges
             .iter()
             .map(|(thread_id, count)| format!("{thread_id}:{count}"))
             .collect::<Vec<_>>();
         badge_parts.sort();
-        format!(
-            "-na{}",
-            crate::utils::crypto::sha256_hex(badge_parts.join("|").as_bytes())
-        )
+        format!("-na{}", sha256_hex(badge_parts.join("|").as_bytes()))
     } else {
         "-na0".to_owned()
     };
@@ -209,13 +220,12 @@ pub async fn catalog(
         // StatusCode::NOT_MODIFIED and Body::empty() are always valid constants;
         // this builder call is infallible.
         let mut resp = axum::http::Response::builder()
-            .status(axum::http::StatusCode::NOT_MODIFIED)
+            .status(StatusCode::NOT_MODIFIED)
             .body(axum::body::Body::empty())
             .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
         resp.headers_mut().insert(
             "etag",
-            axum::http::HeaderValue::from_str(&etag)
-                .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"0\"")),
+            HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("\"0\"")),
         );
         resp.headers_mut().insert(
             header::CACHE_CONTROL,
@@ -230,7 +240,7 @@ pub async fn catalog(
         "board-banner-slot",
         "board-banner-image",
     );
-    let all_boards = crate::templates::live_boards();
+    let all_boards = templates::live_boards();
     let html = templates::catalog_page(
         &board,
         &threads,
@@ -238,7 +248,7 @@ pub async fn catalog(
         hidden_count,
         false,
         &csrf,
-        all_boards.as_slice(),
+        all_boards.as_ref(),
         access_context.is_admin,
         admin_csrf.as_deref(),
         &thread_badges,
@@ -250,7 +260,7 @@ pub async fn catalog(
         user_preferences,
     );
     let mut resp = Html(html).into_response();
-    if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
+    if let Ok(v) = HeaderValue::from_str(&etag) {
         resp.headers_mut().insert("etag", v);
     }
     resp.headers_mut().insert(
@@ -261,7 +271,8 @@ pub async fn catalog(
     Ok((jar, resp).into_response())
 }
 
-pub async fn hidden_threads(
+/// Handles the hidden threads request.
+pub(crate) async fn hidden_threads(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
@@ -312,7 +323,7 @@ pub async fn hidden_threads(
             let prefs = db::get_preferences_for_board(&conn, &viewer_key, board.id)?;
             let (_visible, hidden_threads, pinned_ids) = split_catalog_threads(all_threads, &prefs);
 
-            let all_boards = crate::templates::live_boards();
+            let all_boards = templates::live_boards();
             Ok(templates::catalog_page(
                 &board,
                 &hidden_threads,
@@ -320,7 +331,7 @@ pub async fn hidden_threads(
                 hidden_threads.len(),
                 true,
                 &csrf,
-                all_boards.as_slice(),
+                all_boards.as_ref(),
                 access_context.is_admin,
                 admin_csrf.as_deref(),
                 &HashMap::new(),
@@ -341,7 +352,8 @@ pub async fn hidden_threads(
 
 // ─── GET /:board/archive ──────────────────────────────────────────────────────
 
-pub async fn board_archive(
+/// Handles the board archive request.
+pub(crate) async fn board_archive(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     Query(params): Query<HashMap<String, String>>,
@@ -408,13 +420,13 @@ pub async fn board_archive(
                 pagination.offset(),
             )?;
 
-            let all_boards = crate::templates::live_boards();
+            let all_boards = templates::live_boards();
             Ok(templates::archive_page(
                 &board,
                 &threads,
                 &pagination,
                 &csrf_clone,
-                all_boards.as_slice(),
+                all_boards.as_ref(),
                 current_theme.as_deref(),
                 board.collapse_greentext,
             ))
@@ -428,7 +440,8 @@ pub async fn board_archive(
 
 // ─── GET /:board/search ───────────────────────────────────────────────────────
 
-pub async fn search(
+/// Handles the search request.
+pub(crate) async fn search(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     Query(q): Query<SearchQuery>,
@@ -450,10 +463,12 @@ pub async fn search(
     let page = q.page.max(1);
     let mut return_to = format!(
         "/{board_short}/search?q={}",
-        crate::templates::urlencoding_simple(&query_str)
+        templates::urlencoding_simple(&query_str)
     );
     if page > 1 {
-        return_to.push_str(&format!("&page={page}"));
+        write!(return_to, "&page={page}").map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("Build search return URL: {error}"))
+        })?;
     }
     if let BoardAccessDecision::Denied(denial) = board_access_preflight(
         &state,
@@ -491,14 +506,14 @@ pub async fn search(
                 pagination.offset(),
             )?;
 
-            let all_boards = crate::templates::live_boards();
+            let all_boards = templates::live_boards();
             Ok(templates::search_page(
                 &board,
                 &query_str,
                 &posts,
                 &pagination,
                 &csrf_clone,
-                all_boards.as_slice(),
+                all_boards.as_ref(),
                 current_theme.as_deref(),
                 board.collapse_greentext,
                 user_preferences,

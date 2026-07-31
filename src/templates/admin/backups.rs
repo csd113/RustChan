@@ -1,6 +1,9 @@
+//! Full-site and per-board backup sections of the admin panel.
+
 use super::{escape_html, format_file_size, render_board_backup_card, AdminPanelViewModel};
 use std::fmt::Write as _;
 
+/// Renders the complete backups tab of the admin panel.
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let backup_warning_html = view
         .backups
@@ -59,7 +62,11 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "each backup row keeps its related restore, download, and audit controls together"
+)]
+/// Renders saved full-backup rows and their available actions.
 fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
     let mut full_backup_rows = String::new();
     if view.backups.full_backups.is_empty() {
@@ -258,6 +265,7 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
     full_backup_rows
 }
 
+/// Renders the Tor-key option for scheduled full backups when supported.
 fn render_auto_full_backup_tor_option(view: &AdminPanelViewModel<'_>) -> String {
     if !view.backups.tor_hidden_service_key_backup_available {
         return String::new();
@@ -283,6 +291,7 @@ fn render_auto_full_backup_tor_option(view: &AdminPanelViewModel<'_>) -> String 
     )
 }
 
+/// Renders the Tor-key option for an on-demand full backup when supported.
 fn render_full_backup_create_tor_option(view: &AdminPanelViewModel<'_>) -> String {
     if !view.backups.tor_hidden_service_key_backup_available {
         return String::new();
@@ -297,6 +306,7 @@ fn render_full_backup_create_tor_option(view: &AdminPanelViewModel<'_>) -> Strin
     </label>"#.to_owned()
 }
 
+/// Renders the Tor-key restore option for uploaded full backups when supported.
 fn render_full_backup_restore_upload_tor_option(view: &AdminPanelViewModel<'_>) -> String {
     if !view.backups.tor_hidden_service_key_backup_available {
         return String::new();
@@ -312,6 +322,7 @@ fn render_full_backup_restore_upload_tor_option(view: &AdminPanelViewModel<'_>) 
     <p class="backup-extract-help backup-tor-warning">Anyone with these keys can impersonate this onion service.</p>"#.to_owned()
 }
 
+/// Renders saved per-board backup rows and their available actions.
 fn render_board_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
     let mut board_backup_rows = String::new();
     if view.backups.board_backups.is_empty() {
@@ -396,6 +407,7 @@ fn render_board_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
     board_backup_rows
 }
 
+/// Renders supported split-archive sizes and selects the configured value.
 fn split_zip_part_size_options(selected_gib: u64) -> String {
     let mut options = String::new();
     for value in [1, 2, 4, 8, 16, 32, 64] {
@@ -413,9 +425,16 @@ fn split_zip_part_size_options(selected_gib: u64) -> String {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the backup section is one stable server-rendered HTML fragment"
+)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the section interpolates independent pre-rendered backup controls"
+)]
+/// Renders the full-site and per-board backup management sections.
 fn render_admin_backups_section(
     csrf_token: &str,
     backup_warning_html: &str,

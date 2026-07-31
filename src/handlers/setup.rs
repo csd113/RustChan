@@ -1,5 +1,3 @@
-#![allow(clippy::too_many_lines)]
-
 use crate::{
     config::CONFIG,
     db,
@@ -17,21 +15,30 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 
+/// Setup CSRF scope used by this handler.
 const SETUP_CSRF_SCOPE: &str = "first-run-setup";
+/// Setup pending admin hash cookie used by this handler.
 const SETUP_PENDING_ADMIN_HASH_COOKIE: &str = "setup_pending_admin_hash";
+/// MiB used by this handler.
 const MIB: u64 = 1024 * 1024;
+/// MiB i64 used by this handler.
 const MIB_I64: i64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SetupPreset {
+/// Variants supported by the setup preset workflow.
+pub(crate) enum SetupPreset {
+    /// Represents the public case.
     Public,
+    /// Represents the private case.
     Private,
+    /// Represents the local case.
     Local,
 }
 
 impl SetupPreset {
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    /// Returns the string representation.
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Public => "public",
             Self::Private => "private",
@@ -40,7 +47,8 @@ impl SetupPreset {
     }
 
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    /// Performs the label handler operation.
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Public => "Public instance",
             Self::Private => "Private instance",
@@ -54,23 +62,37 @@ impl SetupPreset {
     clippy::struct_excessive_bools,
     reason = "preset defaults mirror independent setup toggles shown in the form"
 )]
-pub struct PresetDefaults {
+/// Data used by the preset defaults workflow.
+pub(crate) struct PresetDefaults {
+    /// The site name.
     pub site_name: &'static str,
+    /// The board slug.
     pub board_slug: &'static str,
+    /// The board name.
     pub board_name: &'static str,
+    /// The board description.
     pub board_description: &'static str,
+    /// The board visibility.
     pub board_visibility: &'static str,
+    /// Whether to allow uploads.
     pub allow_uploads: bool,
+    /// Whether to allow video.
     pub allow_video: bool,
+    /// Whether to allow audio.
     pub allow_audio: bool,
+    /// Whether to allow PDF.
     pub allow_pdf: bool,
+    /// Whether to allow captcha.
     pub allow_captcha: bool,
+    /// The post cooldown duration in seconds.
     pub post_cooldown_secs: i64,
+    /// Whether the hide NSFW default setting is active.
     pub hide_nsfw_default: bool,
 }
 
 #[must_use]
-pub const fn preset_defaults(preset: SetupPreset) -> PresetDefaults {
+/// Performs the preset defaults handler operation.
+pub(crate) const fn preset_defaults(preset: SetupPreset) -> PresetDefaults {
     match preset {
         SetupPreset::Public => PresetDefaults {
             site_name: "RustChan",
@@ -117,6 +139,7 @@ pub const fn preset_defaults(preset: SetupPreset) -> PresetDefaults {
     }
 }
 
+/// Parses preset.
 fn parse_preset(value: &str) -> SetupPreset {
     match value.trim() {
         "private" => SetupPreset::Private,
@@ -126,49 +149,92 @@ fn parse_preset(value: &str) -> SetupPreset {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetupWizardForm {
+/// Form fields accepted by the setup wizard request.
+pub(crate) struct SetupWizardForm {
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
+    /// The preset.
     pub preset: String,
+    /// The site name.
     pub site_name: String,
+    /// The optional site subtitle.
     pub site_subtitle: Option<String>,
+    /// The optional default theme.
     pub default_theme: Option<String>,
+    /// The optional admin username.
     pub admin_username: Option<String>,
+    /// The optional admin password.
     pub admin_password: Option<String>,
+    /// The optional admin password confirm.
     pub admin_password_confirm: Option<String>,
+    /// The optional admin password token.
     pub admin_password_token: Option<String>,
+    /// The optional enable Tor.
     pub enable_tor: Option<String>,
+    /// The optional Tor only.
     pub tor_only: Option<String>,
+    /// The public URL.
     pub public_url: Option<String>,
+    /// The optional HTTPS cookies.
     pub https_cookies: Option<String>,
+    /// The optional behind proxy.
     pub behind_proxy: Option<String>,
+    /// The board slug.
     pub board_slug: String,
+    /// The board name.
     pub board_name: String,
+    /// The optional board description.
     pub board_description: Option<String>,
+    /// The optional board NSFW.
     pub board_nsfw: Option<String>,
+    /// The optional board visibility.
     pub board_visibility: Option<String>,
+    /// The optional allow posting.
     pub allow_posting: Option<String>,
+    /// The optional allow uploads.
     pub allow_uploads: Option<String>,
+    /// The optional allow video.
     pub allow_video: Option<String>,
+    /// The optional allow audio.
     pub allow_audio: Option<String>,
+    /// The optional allow PDF.
     pub allow_pdf: Option<String>,
+    /// The optional allow video embeds.
     pub allow_video_embeds: Option<String>,
+    /// The optional allow thread editing.
     pub allow_thread_editing: Option<String>,
+    /// The optional allow self delete.
     pub allow_self_delete: Option<String>,
+    /// The optional allow archive.
     pub allow_archive: Option<String>,
+    /// The image limit MiB.
     pub image_limit_mib: String,
+    /// The video limit MiB.
     pub video_limit_mib: String,
+    /// The audio limit MiB.
     pub audio_limit_mib: String,
+    /// The PDF limit MiB.
     pub pdf_limit_mib: String,
+    /// The optional allow captcha.
     pub allow_captcha: Option<String>,
+    /// The optional captcha type.
     pub captcha_type: Option<String>,
+    /// The post cooldown duration in seconds.
     pub post_cooldown_secs: Option<String>,
+    /// Whether homepage new thread badges is enabled.
     pub homepage_new_thread_badges_enabled: Option<String>,
+    /// Whether homepage new reply badges is enabled.
     pub homepage_new_reply_badges_enabled: Option<String>,
+    /// Whether thread new reply badges is enabled.
     pub thread_new_reply_badges_enabled: Option<String>,
+    /// The optional hide NSFW default.
     pub hide_nsfw_default: Option<String>,
+    /// Whether auto backup is enabled.
     pub auto_backup_enabled: Option<String>,
+    /// The optional backup retention.
     pub backup_retention: Option<String>,
+    /// The optional include Tor keys in backups.
     pub include_tor_keys_in_backups: Option<String>,
 }
 
@@ -177,50 +243,91 @@ pub struct SetupWizardForm {
     clippy::struct_excessive_bools,
     reason = "parsed setup data carries independent persisted toggles from the review form"
 )]
-pub struct ParsedSetup {
+/// Data used by the parsed setup workflow.
+pub(crate) struct ParsedSetup {
+    /// The preset.
     pub preset: SetupPreset,
+    /// The site name.
     pub site_name: String,
+    /// The site subtitle.
     pub site_subtitle: String,
+    /// The default theme.
     pub default_theme: String,
+    /// The optional admin username.
     pub admin_username: Option<String>,
+    /// The optional admin password.
     pub admin_password: Option<String>,
+    /// The board slug.
     pub board_slug: String,
+    /// The board name.
     pub board_name: String,
+    /// The board description.
     pub board_description: String,
+    /// Whether the board NSFW setting is active.
     pub board_nsfw: bool,
+    /// The board visibility.
     pub board_visibility: String,
+    /// Whether to allow posting.
     pub allow_posting: bool,
+    /// Whether to allow uploads.
     pub allow_uploads: bool,
+    /// Whether to allow video.
     pub allow_video: bool,
+    /// Whether to allow audio.
     pub allow_audio: bool,
+    /// Whether to allow PDF.
     pub allow_pdf: bool,
+    /// Whether to allow video embeds.
     pub allow_video_embeds: bool,
+    /// Whether to allow thread editing.
     pub allow_thread_editing: bool,
+    /// Whether to allow self delete.
     pub allow_self_delete: bool,
+    /// Whether to allow archive.
     pub allow_archive: bool,
+    /// The image limit size in bytes.
     pub image_limit_bytes: i64,
+    /// The video limit size in bytes.
     pub video_limit_bytes: i64,
+    /// The audio limit size in bytes.
     pub audio_limit_bytes: i64,
+    /// The PDF limit size in bytes.
     pub pdf_limit_bytes: i64,
+    /// Whether to allow captcha.
     pub allow_captcha: bool,
+    /// The captcha type.
     pub captcha_type: String,
+    /// The post cooldown duration in seconds.
     pub post_cooldown_secs: i64,
+    /// Whether homepage new thread badges is enabled.
     pub homepage_new_thread_badges_enabled: bool,
+    /// Whether homepage new reply badges is enabled.
     pub homepage_new_reply_badges_enabled: bool,
+    /// Whether thread new reply badges is enabled.
     pub thread_new_reply_badges_enabled: bool,
+    /// Whether the hide NSFW default setting is active.
     pub hide_nsfw_default: bool,
+    /// Whether the enable Tor setting is active.
     pub enable_tor: bool,
+    /// Whether the Tor only setting is active.
     pub tor_only: bool,
+    /// The public URL.
     pub public_url: String,
+    /// Whether the HTTPS cookies setting is active.
     pub https_cookies: bool,
+    /// Whether the behind proxy setting is active.
     pub behind_proxy: bool,
+    /// The auto backup interval hours.
     pub auto_backup_interval_hours: u64,
+    /// The backup retention.
     pub backup_retention: u64,
+    /// Whether to include Tor keys in backups.
     pub include_tor_keys_in_backups: bool,
 }
 
 #[must_use]
-pub fn validate_board_slug(raw: &str) -> Option<String> {
+/// Validates board slug.
+pub(crate) fn validate_board_slug(raw: &str) -> Option<String> {
     let slug = raw.trim().to_ascii_lowercase();
     let valid = !slug.is_empty()
         && slug.len() <= 8
@@ -231,7 +338,8 @@ pub fn validate_board_slug(raw: &str) -> Option<String> {
 }
 
 #[must_use]
-pub fn parse_upload_limit_mib(raw: &str) -> Option<i64> {
+/// Parses upload limit MiB.
+pub(crate) fn parse_upload_limit_mib(raw: &str) -> Option<i64> {
     let mib = raw.trim().parse::<u64>().ok()?;
     if !(1..=4096).contains(&mib) {
         return None;
@@ -240,14 +348,17 @@ pub fn parse_upload_limit_mib(raw: &str) -> Option<i64> {
 }
 
 #[must_use]
-pub fn validate_password_confirmation(password: &str, confirmation: &str) -> bool {
+/// Validates password confirmation.
+pub(crate) fn validate_password_confirmation(password: &str, confirmation: &str) -> bool {
     password == confirmation && password.chars().count() >= 12 && password.chars().count() <= 1024
 }
 
+/// Performs the checkbox handler operation.
 fn checkbox(value: Option<&str>) -> bool {
     value.is_some_and(|value| matches!(value, "1" | "true" | "on"))
 }
 
+/// Performs the checked handler operation.
 fn checked(value: Option<&str>) -> &'static str {
     if checkbox(value) {
         " checked"
@@ -256,6 +367,7 @@ fn checked(value: Option<&str>) -> &'static str {
     }
 }
 
+/// Performs the pending admin hash signature handler operation.
 fn pending_admin_hash_signature(token: &str, password_hash_hex: &str) -> String {
     crypto::sha256_hex(
         format!(
@@ -266,6 +378,7 @@ fn pending_admin_hash_signature(token: &str, password_hash_hex: &str) -> String 
     )
 }
 
+/// Performs the make pending admin hash cookie handler operation.
 fn make_pending_admin_hash_cookie(
     token: &str,
     password_hash: &str,
@@ -288,6 +401,7 @@ fn make_pending_admin_hash_cookie(
     cookie
 }
 
+/// Performs the pending admin hash from cookie handler operation.
 fn pending_admin_hash_from_cookie(jar: &CookieJar, token: Option<&str>) -> Result<Option<String>> {
     let Some(token) = token.filter(|value| !value.is_empty()) else {
         return Ok(None);
@@ -322,6 +436,7 @@ fn pending_admin_hash_from_cookie(jar: &CookieJar, token: Option<&str>) -> Resul
     Ok(Some(password_hash))
 }
 
+/// Performs the trimmed limited handler operation.
 fn trimmed_limited(value: Option<&str>, max_chars: usize) -> String {
     value
         .unwrap_or_default()
@@ -331,13 +446,19 @@ fn trimmed_limited(value: Option<&str>, max_chars: usize) -> String {
         .collect()
 }
 
-pub fn parse_setup_form(
+/// Parses setup form.
+pub(crate) fn parse_setup_form(
     form: &SetupWizardForm,
     admin_count: i64,
 ) -> std::result::Result<ParsedSetup, Vec<String>> {
     parse_setup_form_inner(form, admin_count, false)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the wizard's dependent fields must be validated together before any setup mutation"
+)]
+/// Parses setup form inner.
 fn parse_setup_form_inner(
     form: &SetupWizardForm,
     admin_count: i64,
@@ -487,6 +608,7 @@ fn parse_setup_form_inner(
     })
 }
 
+/// Ensures setup CSRF.
 fn ensure_setup_csrf(
     jar: CookieJar,
     headers: &HeaderMap,
@@ -511,6 +633,7 @@ fn ensure_setup_csrf(
     )
 }
 
+/// Validates setup CSRF.
 fn validate_setup_csrf(
     jar: &CookieJar,
     headers: &HeaderMap,
@@ -531,11 +654,13 @@ fn validate_setup_csrf(
     }
 }
 
+/// Handles the admin session ID request.
 fn admin_session_id(jar: &CookieJar) -> Option<String> {
     jar.get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned())
 }
 
+/// Handles the load setup state request.
 async fn load_setup_state(
     state: &AppState,
     session_id: Option<String>,
@@ -568,7 +693,8 @@ async fn load_setup_state(
     .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?
 }
 
-pub async fn setup_get(
+/// Handles the setup get request.
+pub(crate) async fn setup_get(
     State(state): State<AppState>,
     Query(query): Query<SetupQuery>,
     jar: CookieJar,
@@ -593,11 +719,14 @@ pub async fn setup_get(
 }
 
 #[derive(Deserialize)]
-pub struct SetupQuery {
+/// Query parameters accepted by the setup request.
+pub(crate) struct SetupQuery {
+    /// The optional preset.
     preset: Option<String>,
 }
 
-pub async fn setup_review(
+/// Handles the setup review request.
+pub(crate) async fn setup_review(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -661,7 +790,12 @@ pub async fn setup_review(
         .into_response())
 }
 
-pub async fn setup_finish(
+#[expect(
+    clippy::too_many_lines,
+    reason = "authorization, final validation, atomic setup writes, and session issuance form one request"
+)]
+/// Handles the setup finish request.
+pub(crate) async fn setup_finish(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -846,12 +980,15 @@ pub async fn setup_finish(
 }
 
 #[derive(Deserialize)]
-pub struct ReopenSetupForm {
+/// Form fields accepted by the reopen setup request.
+pub(crate) struct ReopenSetupForm {
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-pub async fn admin_reopen_setup(
+/// Handles the admin reopen setup request.
+pub(crate) async fn admin_reopen_setup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -880,7 +1017,8 @@ pub async fn admin_reopen_setup(
     Ok(Redirect::to("/setup").into_response())
 }
 
-pub async fn admin_close_setup(
+/// Handles the admin close setup request.
+pub(crate) async fn admin_close_setup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -913,7 +1051,8 @@ pub async fn admin_close_setup(
 
 impl SetupWizardForm {
     #[must_use]
-    pub fn defaults_for(preset: SetupPreset) -> Self {
+    /// Performs the defaults for handler operation.
+    pub(crate) fn defaults_for(preset: SetupPreset) -> Self {
         let defaults = preset_defaults(preset);
         Self {
             csrf: None,
@@ -962,6 +1101,7 @@ impl SetupWizardForm {
     }
 }
 
+/// Performs the request transport warning handler operation.
 fn request_transport_warning(
     headers: &HeaderMap,
     context: crate::middleware::SecureCookieContext,
@@ -982,6 +1122,11 @@ fn request_transport_warning(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the function renders one ordered wizard form whose field names and fallback values are coupled"
+)]
+/// Performs the setup form page handler operation.
 fn setup_form_page(
     csrf: &str,
     state: db::SetupState,
@@ -1165,6 +1310,7 @@ fn setup_form_page(
     )
 }
 
+/// Performs the setup review page handler operation.
 fn setup_review_page(
     csrf: &str,
     state: db::SetupState,
@@ -1250,6 +1396,7 @@ fn setup_review_page(
     )
 }
 
+/// Performs the preset options handler operation.
 fn preset_options(selected: &str) -> String {
     let mut out = String::new();
     for preset in [
@@ -1272,6 +1419,7 @@ fn preset_options(selected: &str) -> String {
     out
 }
 
+/// Performs the visibility options handler operation.
 fn visibility_options(selected: &str) -> String {
     let mut out = String::new();
     for (value, label) in [
@@ -1288,6 +1436,7 @@ fn visibility_options(selected: &str) -> String {
     out
 }
 
+/// Performs the hidden field handler operation.
 fn hidden_field(name: &str, value: &str) -> String {
     format!(
         r#"<input type="hidden" name="{name}" value="{value}">"#,
@@ -1296,6 +1445,7 @@ fn hidden_field(name: &str, value: &str) -> String {
     )
 }
 
+/// Performs the hidden checkbox handler operation.
 fn hidden_checkbox(name: &str, value: Option<&str>) -> String {
     if checkbox(value) {
         hidden_field(name, "1")
@@ -1304,6 +1454,7 @@ fn hidden_checkbox(name: &str, value: Option<&str>) -> String {
     }
 }
 
+/// Performs the hidden form fields handler operation.
 fn hidden_form_fields(csrf: &str, form: &SetupWizardForm) -> String {
     let mut out = String::new();
     out.push_str(&hidden_field("_csrf", csrf));
@@ -1399,6 +1550,7 @@ fn hidden_form_fields(csrf: &str, form: &SetupWizardForm) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{bail, ensure, Context as _, Result as AnyResult};
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
@@ -1408,16 +1560,19 @@ mod tests {
     use tower::ServiceExt as _;
 
     #[test]
-    fn setup_validation_rejects_bad_slug_and_password_mismatch() {
+    fn setup_validation_rejects_bad_slug_and_password_mismatch() -> AnyResult<()> {
         let mut form = SetupWizardForm::defaults_for(SetupPreset::Public);
         form.board_slug = "../bad".to_owned();
         form.admin_password = Some("long-enough-password".to_owned());
         form.admin_password_confirm = Some("different-password".to_owned());
 
-        let errors = parse_setup_form(&form, 0).expect_err("validation errors");
+        let Err(errors) = parse_setup_form(&form, 0) else {
+            bail!("invalid setup form unexpectedly passed validation");
+        };
 
-        assert!(errors.iter().any(|error| error.contains("Board slug")));
-        assert!(errors.iter().any(|error| error.contains("Admin password")));
+        ensure!(errors.iter().any(|error| error.contains("Board slug")));
+        ensure!(errors.iter().any(|error| error.contains("Admin password")));
+        Ok(())
     }
 
     #[test]
@@ -1486,8 +1641,8 @@ mod tests {
     }
 
     fn install_setup_theme_test_state() {
-        crate::templates::set_live_default_theme("forest");
-        crate::templates::set_live_themes(vec![
+        templates::set_live_default_theme("forest");
+        templates::set_live_themes(vec![
             crate::models::Theme {
                 slug: "forest".to_owned(),
                 display_name: "Forest".to_owned(),
@@ -1512,11 +1667,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initialized_instance_blocks_setup_route() {
+    async fn initialized_instance_blocks_setup_route() -> AnyResult<()> {
         let state = crate::test_support::app_state();
         {
-            let conn = state.db.get().expect("conn");
-            crate::db::create_admin(&conn, "admin", "hash").expect("admin");
+            let conn = state.db.get().context("get database connection")?;
+            db::create_admin(&conn, "admin", "hash").context("create admin fixture")?;
         }
         let app = Router::new()
             .route("/setup", get(setup_get))
@@ -1529,25 +1684,26 @@ mod tests {
                     .header(header::HOST, "localhost")
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build setup request")?,
             )
             .await
-            .expect("response");
+            .context("serve setup request")?;
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        ensure!(response.status() == StatusCode::NOT_FOUND);
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("body");
-        let body = String::from_utf8(body.to_vec()).expect("utf8");
-        assert!(body.contains("Setup wizard is not available"));
+            .context("read setup response body")?;
+        let body = String::from_utf8(body.to_vec()).context("decode setup response body")?;
+        ensure!(body.contains("Setup wizard is not available"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn initialized_instance_blocks_setup_post_routes() {
+    async fn initialized_instance_blocks_setup_post_routes() -> AnyResult<()> {
         let state = crate::test_support::app_state();
         {
-            let conn = state.db.get().expect("conn");
-            crate::db::mark_setup_complete(&conn).expect("complete");
+            let conn = state.db.get().context("get database connection")?;
+            db::mark_setup_complete(&conn).context("mark setup complete")?;
         }
         let app = Router::new()
             .route("/setup/review", post(setup_review))
@@ -1568,17 +1724,18 @@ mod tests {
                         .header(header::COOKIE, "csrf_token=csrf123")
                         .extension(crate::test_support::connect_info())
                         .body(Body::from(body.clone()))
-                        .expect("request"),
+                        .context("build initialized setup POST request")?,
                 )
                 .await
-                .expect("response");
+                .context("serve initialized setup POST request")?;
 
-            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            ensure!(response.status() == StatusCode::NOT_FOUND);
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn setup_get_uses_current_theme_cookie() {
+    async fn setup_get_uses_current_theme_cookie() -> AnyResult<()> {
         install_setup_theme_test_state();
         let state = crate::test_support::app_state();
         let app = Router::new()
@@ -1593,22 +1750,23 @@ mod tests {
                     .header(header::COOKIE, "rustchan_theme=blue-sky")
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build themed setup request")?,
             )
             .await
-            .expect("response");
+            .context("serve themed setup request")?;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        ensure!(response.status() == StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("body");
-        let body = String::from_utf8(body.to_vec()).expect("utf8");
-        assert!(body.contains(r#"data-active-theme="blue-sky""#));
-        assert!(body.contains(r#"data-theme="blue-sky""#));
+            .context("read themed setup response")?;
+        let body = String::from_utf8(body.to_vec()).context("decode themed setup response")?;
+        ensure!(body.contains(r#"data-active-theme="blue-sky""#));
+        ensure!(body.contains(r#"data-theme="blue-sky""#));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn setup_review_uses_selected_default_theme_without_js() {
+    async fn setup_review_uses_selected_default_theme_without_js() -> AnyResult<()> {
         install_setup_theme_test_state();
         let state = crate::test_support::app_state();
         let app = Router::new()
@@ -1628,23 +1786,24 @@ mod tests {
                     .header(header::COOKIE, "csrf_token=csrf123")
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(body))
-                    .expect("request"),
+                    .context("build setup review request")?,
             )
             .await
-            .expect("response");
+            .context("serve setup review request")?;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        ensure!(response.status() == StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("body");
-        let body = String::from_utf8(body.to_vec()).expect("utf8");
-        assert!(body.contains(r#"data-active-theme="blue-sky""#));
-        assert!(body.contains(r#"data-theme="blue-sky""#));
-        assert!(body.contains(r#"name="default_theme" value="blue-sky""#));
+            .context("read setup review response")?;
+        let body = String::from_utf8(body.to_vec()).context("decode setup review response")?;
+        ensure!(body.contains(r#"data-active-theme="blue-sky""#));
+        ensure!(body.contains(r#"data-theme="blue-sky""#));
+        ensure!(body.contains(r#"name="default_theme" value="blue-sky""#));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn setup_review_does_not_echo_admin_password() {
+    async fn setup_review_does_not_echo_admin_password() -> AnyResult<()> {
         let state = crate::test_support::app_state();
         let app = Router::new()
             .route("/setup/review", post(setup_review))
@@ -1665,27 +1824,30 @@ mod tests {
                         "b",
                         Some("long-enough-password"),
                     )))
-                    .expect("request"),
+                    .context("build password-redaction review request")?,
             )
             .await
-            .expect("response");
+            .context("serve password-redaction review request")?;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        ensure!(response.status() == StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("body");
-        let body = String::from_utf8(body.to_vec()).expect("utf8");
-        assert!(!body.contains("long-enough-password"));
-        assert!(!body.contains("admin_password\""));
-        assert!(body.contains("admin_password_token"));
+            .context("read password-redaction review response")?;
+        let body =
+            String::from_utf8(body.to_vec()).context("decode password-redaction response")?;
+        ensure!(!body.contains("long-enough-password"));
+        ensure!(!body.contains("admin_password\""));
+        ensure!(body.contains("admin_password_token"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn failed_setup_finish_does_not_mark_complete() {
+    async fn failed_setup_finish_does_not_mark_complete() -> AnyResult<()> {
         let state = crate::test_support::app_state();
         {
-            let conn = state.db.get().expect("conn");
-            crate::db::create_board(&conn, "b", "Existing", "", false).expect("board");
+            let conn = state.db.get().context("get database connection")?;
+            db::create_board(&conn, "b", "Existing", "", false)
+                .context("create conflicting board fixture")?;
         }
         let app = Router::new()
             .route("/setup/finish", post(setup_finish))
@@ -1706,19 +1868,20 @@ mod tests {
                         "b",
                         Some("long-enough-password"),
                     )))
-                    .expect("request"),
+                    .context("build failing setup-finish request")?,
             )
             .await
-            .expect("response");
+            .context("serve failing setup-finish request")?;
 
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        let conn = state.db.get().expect("conn");
-        let setup_state = db::setup_state(&conn).expect("state");
-        assert!(!setup_state.completed);
+        ensure!(response.status() == StatusCode::CONFLICT);
+        let conn = state.db.get().context("get database connection")?;
+        let setup_state = db::setup_state(&conn).context("load setup state")?;
+        ensure!(!setup_state.completed);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn setup_finish_marks_completion_durably_and_persists_pdf_limit() {
+    async fn setup_finish_marks_completion_durably_and_persists_pdf_limit() -> AnyResult<()> {
         let state = crate::test_support::app_state();
         let app = Router::new()
             .route("/setup/finish", post(setup_finish))
@@ -1739,19 +1902,20 @@ mod tests {
                         "pdf",
                         Some("long-enough-password"),
                     )))
-                    .expect("request"),
+                    .context("build successful setup-finish request")?,
             )
             .await
-            .expect("response");
+            .context("serve successful setup-finish request")?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        let conn = state.db.get().expect("conn");
-        let setup_state = db::setup_state(&conn).expect("state");
-        assert!(setup_state.completed);
-        assert!(!setup_state.reopened);
+        ensure!(response.status() == StatusCode::SEE_OTHER);
+        let conn = state.db.get().context("get database connection")?;
+        let setup_state = db::setup_state(&conn).context("load completed setup state")?;
+        ensure!(setup_state.completed);
+        ensure!(!setup_state.reopened);
         let board = db::get_board_by_short(&conn, "pdf")
-            .expect("load board")
-            .expect("board");
-        assert_eq!(board.max_pdf_size, 7 * MIB_I64);
+            .context("load setup-created board")?
+            .context("setup-created board is missing")?;
+        ensure!(board.max_pdf_size == 7 * MIB_I64);
+        Ok(())
     }
 }

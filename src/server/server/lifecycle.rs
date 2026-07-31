@@ -1,4 +1,4 @@
-// src/server/server/lifecycle.rs
+//! Request lifecycle accounting and shutdown-signal handling.
 
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -6,8 +6,10 @@ use tracing::Instrument as _;
 
 use super::{ScopedDecrement, ACTIVE_IPS, ACTIVE_UPLOADS, IN_FLIGHT, REQUEST_COUNT};
 
+/// Response header containing the generated request identifier.
 const REQUEST_ID_HEADER: &str = "x-request-id";
 
+/// Track request counts, active clients, uploads, tracing, and request IDs.
 pub(super) async fn track_requests(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -57,6 +59,7 @@ pub(super) async fn track_requests(
     response
 }
 
+/// Wait for a platform shutdown signal.
 pub(super) async fn shutdown_signal() {
     use tokio::signal;
 

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use super::ffmpeg;
 
+/// Maximum decoded pixel area accepted by the in-process image fallback.
 const MAX_IMAGE_THUMBNAIL_PIXELS: u64 = 100_000_000;
 
 #[cfg(test)]
@@ -23,6 +24,7 @@ static PDF_RENDERER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 // would terminate a `r#"..."#` raw string early.  We use `r##"..."##` so the
 // closing delimiter requires two consecutive `#` signs, which never appear in
 // the SVG body.
+/// Static placeholder used when a video preview cannot be generated.
 const VIDEO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="250" height="250" viewBox="0 0 250 250">
   <rect width="250" height="250" fill="#0a0f0a"/>
   <circle cx="125" cy="125" r="60" fill="#0d120d" stroke="#00c840" stroke-width="2"/>
@@ -30,6 +32,7 @@ const VIDEO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" 
   <text x="125" y="215" text-anchor="middle" fill="#3a4a3a" font-family="monospace" font-size="12">VIDEO</text>
 </svg>"##;
 
+/// Static placeholder used for audio uploads.
 const AUDIO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="250" height="250" viewBox="0 0 250 250">
   <rect width="250" height="250" fill="#0a0f0a"/>
   <circle cx="125" cy="125" r="60" fill="#0d120d" stroke="#00c840" stroke-width="2"/>
@@ -37,6 +40,7 @@ const AUDIO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" 
   <text x="125" y="215" text-anchor="middle" fill="#3a4a3a" font-family="monospace" font-size="12">AUDIO</text>
 </svg>"##;
 
+/// Static placeholder used when a PDF preview cannot be generated.
 const PDF_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="250" height="250" viewBox="0 0 250 250">
   <rect width="250" height="250" rx="20" fill="#0a0f0a"/>
   <rect x="48" y="26" width="154" height="198" rx="14" fill="#f2f0ea" stroke="#203020" stroke-width="4"/>
@@ -55,19 +59,27 @@ const PDF_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" wi
 /// generated.
 #[derive(Debug, Clone, Copy)]
 pub enum PlaceholderKind {
+    /// Generic video-file placeholder.
     Video,
+    /// Generic audio-file placeholder.
     Audio,
+    /// Generic PDF-document placeholder.
     Pdf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// External PDF renderer that can produce a first-page preview.
 pub enum PdfRenderer {
+    /// Poppler's `pdftoppm` command.
     Pdftoppm,
+    /// `MuPDF`'s `mutool` command.
     Mutool,
+    /// macOS Quick Look's `qlmanage` command.
     Qlmanage,
 }
 
 impl PdfRenderer {
+    /// Return the executable name used to probe and invoke this renderer.
     #[must_use]
     pub const fn binary_name(self) -> &'static str {
         match self {
@@ -79,20 +91,32 @@ impl PdfRenderer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of attempting to generate a PDF preview.
 pub enum PdfThumbnailOutcome {
-    Rendered { renderer: PdfRenderer },
+    /// A real first-page preview was generated.
+    Rendered {
+        /// Renderer that produced the preview.
+        renderer: PdfRenderer,
+    },
+    /// No renderer succeeded, so a static placeholder was written.
     Placeholder,
 }
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Test-only override for external PDF renderer behavior.
 pub enum TestPdfRendererMode {
+    /// Simulate no available renderer.
     Unavailable,
+    /// Simulate a renderer that exits unsuccessfully.
     Fail,
+    /// Simulate a renderer that exceeds its timeout.
     Timeout,
 }
 
 #[cfg(test)]
+#[derive(Debug)]
+/// Guard that serializes and restores PDF-renderer test overrides.
 pub struct PdfRendererTestGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
 }
@@ -107,6 +131,7 @@ impl Drop for PdfRendererTestGuard {
 }
 
 #[cfg(test)]
+/// Installs a serialized test-only override for PDF renderer detection.
 pub fn override_pdf_renderer_mode(mode: TestPdfRendererMode) -> PdfRendererTestGuard {
     let guard = PDF_RENDERER_TEST_LOCK
         .lock()
@@ -172,14 +197,14 @@ pub fn generate_thumbnail(
 
         "application/pdf" => {
             let placeholder_path = pdf_placeholder_output_path(output_path);
-            let _ = std::fs::remove_file(output_path);
-            let _ = std::fs::remove_file(&placeholder_path);
+            drop(std::fs::remove_file(output_path));
+            drop(std::fs::remove_file(&placeholder_path));
             match pdf_first_page_thumbnail(input_path, output_path, max_dim) {
                 Ok(PdfThumbnailOutcome::Rendered { .. }) => Ok(output_path.to_path_buf()),
                 Ok(PdfThumbnailOutcome::Placeholder) => Ok(placeholder_path),
                 Err(error) => {
-                    let _ = std::fs::remove_file(output_path);
-                    let _ = std::fs::remove_file(&placeholder_path);
+                    drop(std::fs::remove_file(output_path));
+                    drop(std::fs::remove_file(&placeholder_path));
                     Err(error)
                 }
             }
@@ -315,18 +340,10 @@ fn image_crate_thumbnail(
         .context("failed to decode image for thumbnail")?;
 
     let (w, h) = img.dimensions();
-    // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
-    #[expect(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
     let (tw, th) = if w > h {
-        let r = max_dim as f32 / w as f32;
-        (max_dim, (h as f32 * r) as u32)
+        (max_dim, scaled_dimension(h, max_dim, w))
     } else {
-        let r = max_dim as f32 / h as f32;
-        ((w as f32 * r) as u32, max_dim)
+        (scaled_dimension(w, max_dim, h), max_dim)
     };
 
     let thumb = if w <= tw && h <= th {
@@ -340,6 +357,7 @@ fn image_crate_thumbnail(
         .with_context(|| format!("failed to save WebP thumbnail to {}", output_path.display()))
 }
 
+/// Generate an image fallback or replace a failed decode with a placeholder.
 fn image_crate_thumbnail_or_placeholder(
     input_path: &Path,
     mime: &str,
@@ -356,17 +374,21 @@ fn image_crate_thumbnail_or_placeholder(
                 "image thumbnail generation failed; using generic placeholder"
             );
             let svg_path = output_path.with_extension("svg");
-            let _ = std::fs::remove_file(output_path);
+            drop(std::fs::remove_file(output_path));
             write_placeholder(&svg_path, PlaceholderKind::Video).map(|()| svg_path)
         }
     }
 }
 
-#[allow(
+#[expect(
     clippy::cognitive_complexity,
     reason = "the renderer fallback and fail-closed validation sequence is intentionally linear"
 )]
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "PDF rendering keeps subprocess validation, fallback, and cleanup in one auditable sequence"
+)]
+/// Render a PDF first page with available tools or publish a placeholder.
 fn pdf_first_page_thumbnail(
     input_path: &Path,
     output_path: &Path,
@@ -474,7 +496,7 @@ fn pdf_first_page_thumbnail(
             %error,
             "Saving PDF thumbnail failed; using built-in generic thumbnail"
         );
-        let _ = std::fs::remove_file(output_path);
+        drop(std::fs::remove_file(output_path));
         write_placeholder(
             &pdf_placeholder_output_path(output_path),
             PlaceholderKind::Pdf,
@@ -485,6 +507,14 @@ fn pdf_first_page_thumbnail(
     Ok(PdfThumbnailOutcome::Rendered { renderer })
 }
 
+/// Scale one dimension proportionally using widened integer arithmetic.
+fn scaled_dimension(side: u32, max_dimension: u32, denominator: u32) -> u32 {
+    let scaled =
+        u64::from(side).saturating_mul(u64::from(max_dimension)) / u64::from(denominator.max(1));
+    u32::try_from(scaled).unwrap_or(max_dimension)
+}
+
+/// Render a PDF first page using Poppler's `pdftoppm`.
 fn render_pdf_with_pdftoppm(input_path: &Path, png_path: &Path, max_dim: u32) -> Result<()> {
     #[cfg(test)]
     {
@@ -513,6 +543,7 @@ fn render_pdf_with_pdftoppm(input_path: &Path, png_path: &Path, max_dim: u32) ->
     }
 }
 
+/// Render a PDF first page using `MuPDF`'s `mutool`.
 fn render_pdf_with_mutool(input_path: &Path, png_path: &Path, max_dim: u32) -> Result<()> {
     #[cfg(test)]
     {
@@ -529,6 +560,7 @@ fn render_pdf_with_mutool(input_path: &Path, png_path: &Path, max_dim: u32) -> R
     }
 }
 
+/// Build a bounded first-page `mutool draw` command.
 fn build_mutool_command(input_path: &Path, png_path: &Path, max_dim: u32) -> Result<Command> {
     let mut command = Command::new("mutool");
     command.args([
@@ -546,6 +578,7 @@ fn build_mutool_command(input_path: &Path, png_path: &Path, max_dim: u32) -> Res
     Ok(command)
 }
 
+/// Render a PDF preview using macOS Quick Look.
 fn render_pdf_with_qlmanage(
     input_path: &Path,
     png_path: &Path,
@@ -581,11 +614,13 @@ fn render_pdf_with_qlmanage(
     }
 }
 
+/// Convert a filesystem path to UTF-8 for an external command argument.
 fn path_to_str(path: &Path) -> Result<&str> {
     path.to_str()
         .ok_or_else(|| anyhow::anyhow!("path contains non-UTF-8 characters: {}", path.display()))
 }
 
+/// Run a PDF renderer with the configured subprocess timeout.
 fn run_pdf_renderer_with_timeout(command: &mut Command) -> Result<std::process::ExitStatus> {
     let timeout = Duration::from_secs(10);
     let mut child = command
@@ -599,19 +634,21 @@ fn run_pdf_renderer_with_timeout(command: &mut Command) -> Result<std::process::
             return Ok(status);
         }
         if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
+            drop(child.kill());
+            drop(child.wait());
             anyhow::bail!("PDF renderer timed out after {}s", timeout.as_secs());
         }
         thread::sleep(Duration::from_millis(50));
     }
 }
 
+/// Return the SVG fallback sibling for a requested PDF thumbnail path.
 fn pdf_placeholder_output_path(output_path: &Path) -> PathBuf {
     output_path.with_extension("svg")
 }
 
 #[must_use]
+/// Detect all supported PDF renderer executables available on this host.
 pub fn detect_pdf_renderers() -> Vec<PdfRenderer> {
     [
         PdfRenderer::Pdftoppm,
@@ -623,6 +660,7 @@ pub fn detect_pdf_renderers() -> Vec<PdfRenderer> {
     .collect()
 }
 
+/// Probe one supported PDF renderer for availability.
 fn probe_renderer(renderer: PdfRenderer) -> bool {
     #[cfg(test)]
     if matches!(
@@ -637,6 +675,7 @@ fn probe_renderer(renderer: PdfRenderer) -> bool {
     probe_renderer_with_timeout(renderer.binary_name())
 }
 
+/// Run a bounded version probe for an external renderer program.
 fn probe_renderer_with_timeout(program: &str) -> bool {
     let timeout = Duration::from_secs(10);
     let Ok(mut child) = Command::new(program)
@@ -656,8 +695,8 @@ fn probe_renderer_with_timeout(program: &str) -> bool {
             Err(_) => return false,
         }
         if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
+            drop(child.kill());
+            drop(child.wait());
             return false;
         }
         thread::sleep(Duration::from_millis(50));
@@ -788,38 +827,54 @@ mod tests {
     }
 
     #[test]
-    fn write_pdf_placeholder_outputs_svg() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn write_pdf_placeholder_outputs_svg() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         let output = tempdir.path().join("thumb.svg");
-        write_placeholder(&output, PlaceholderKind::Pdf).expect("write pdf placeholder");
-        let svg = std::fs::read_to_string(&output).expect("read placeholder");
-        assert!(svg.contains("PDF"));
-        assert!(svg.contains("<svg"));
+        write_placeholder(&output, PlaceholderKind::Pdf)?;
+        let svg = std::fs::read_to_string(&output)?;
+        assert!(svg.contains("PDF"), "placeholder must identify PDF content");
+        assert!(svg.contains("<svg"), "placeholder must be SVG markup");
+        Ok(())
     }
 
     #[test]
-    fn unsupported_image_thumbnail_falls_back_to_svg_placeholder_without_ffmpeg() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn unsupported_image_thumbnail_falls_back_to_svg_placeholder_without_ffmpeg() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         let input = tempdir.path().join("input.heic");
         let output = tempdir.path().join("thumb.webp");
-        std::fs::write(&input, b"not decoded by image crate").expect("write input");
+        std::fs::write(&input, b"not decoded by image crate")?;
 
-        let actual = generate_thumbnail(&input, "image/heic", &output, 64, false, false)
-            .expect("fallback thumbnail");
+        let actual = generate_thumbnail(&input, "image/heic", &output, 64, false, false)?;
 
-        assert_eq!(actual.extension().and_then(|ext| ext.to_str()), Some("svg"));
-        assert!(actual.exists());
-        assert!(!output.exists());
+        assert_eq!(
+            actual.extension().and_then(|ext| ext.to_str()),
+            Some("svg"),
+            "fallback path must use the SVG extension"
+        );
+        assert!(actual.exists(), "fallback placeholder must exist");
+        assert!(!output.exists(), "failed WebP output must not remain");
+        Ok(())
     }
 
     #[test]
-    fn mutool_command_caps_render_dimensions() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn mutool_command_caps_render_dimensions() -> Result<()> {
         let command = build_mutool_command(
             Path::new("/tmp/input.pdf"),
             Path::new("/tmp/page1.png"),
             250,
-        )
-        .expect("build mutool command");
+        )?;
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -840,5 +895,6 @@ mod tests {
                 "1",
             ]
         );
+        Ok(())
     }
 }

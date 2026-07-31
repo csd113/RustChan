@@ -1,41 +1,57 @@
-// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
-#![allow(clippy::wildcard_imports)]
-
-use super::*;
+use super::{
+    admin_panel_error_redirect_anchor, admin_panel_redirect_anchor, checkbox_is_on, db, header,
+    require_admin_post_origin_and_csrf, require_admin_session_sid, AppError, AppState, CookieJar,
+    Form, HeaderMap, HeaderValue, Html, Query, Response, Result, State, CONFIG, SESSION_COOKIE,
+};
+use axum::response::IntoResponse as _;
+use serde::Deserialize;
 use std::sync::atomic::Ordering;
 
 #[cfg(test)]
 static PRE_REPAIR_BACKUP_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 #[derive(Deserialize)]
-pub struct VacuumForm {
+/// Form fields accepted by the vacuum request.
+pub(crate) struct VacuumForm {
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub struct DbMaintenanceForm {
+/// Form fields accepted by the database maintenance request.
+pub(crate) struct DbMaintenanceForm {
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub struct MediaSettingsForm {
+/// Form fields accepted by the media settings request.
+pub(crate) struct MediaSettingsForm {
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
+    /// The `FFmpeg` timeout duration in seconds.
     pub ffmpeg_timeout_secs: Option<String>,
+    /// Whether media auto prune is enabled.
     pub media_auto_prune_enabled: Option<String>,
+    /// The optional media max active content size.
     pub media_max_active_content_size: Option<String>,
+    /// The optional media max active content size unit.
     pub media_max_active_content_size_unit: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
-pub struct DbRepairStatusQuery {
+/// Query parameters accepted by the database repair status request.
+pub(crate) struct DbRepairStatusQuery {
+    /// The job identifier.
     pub job_id: Option<u64>,
 }
 
+/// Creates pre repair backup.
 fn create_pre_repair_backup(
-    pool: &crate::db::DbPool,
+    pool: &db::DbPool,
     progress: &std::sync::Arc<crate::middleware::BackupProgress>,
     job_id: u64,
 ) -> Result<String> {
@@ -43,7 +59,7 @@ fn create_pre_repair_backup(
     {
         let backup_failure = PRE_REPAIR_BACKUP_FAILURE
             .lock()
-            .expect("backup failure mutex")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         if let Some(message) = backup_failure {
             return Err(AppError::Internal(anyhow::anyhow!(message)));
@@ -59,6 +75,7 @@ fn create_pre_repair_backup(
     )
 }
 
+/// Parses `FFmpeg` timeout secs input.
 fn parse_ffmpeg_timeout_secs_input(input: Option<&str>) -> Result<u64> {
     let raw = input
         .map(str::trim)
@@ -71,6 +88,7 @@ fn parse_ffmpeg_timeout_secs_input(input: Option<&str>) -> Result<u64> {
         .map_err(|error| AppError::BadRequest(error.to_string()))
 }
 
+/// Parses media prune size input.
 fn parse_media_prune_size_input(
     enabled: bool,
     value: Option<&str>,
@@ -80,7 +98,7 @@ fn parse_media_prune_size_input(
     const GIB: u64 = 1024 * MIB;
     const MIN_ENABLED_BYTES: u64 = MIB;
 
-    let raw = value.map(str::trim).unwrap_or("");
+    let raw = value.map_or("", str::trim);
     if raw.is_empty() {
         if enabled {
             return Err(AppError::BadRequest(
@@ -118,22 +136,21 @@ fn parse_media_prune_size_input(
     Ok(bytes)
 }
 
-pub async fn update_media_settings(
+/// Handles the update media settings request.
+pub(crate) async fn update_media_settings(
     State(state): State<AppState>,
     jar: CookieJar,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<MediaSettingsForm>,
 ) -> Result<Response> {
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let timeout_secs = match parse_ffmpeg_timeout_secs_input(form.ffmpeg_timeout_secs.as_deref()) {
         Ok(timeout_secs) => timeout_secs,
         Err(AppError::BadRequest(message)) => {
-            return Ok(
-                super::admin_panel_error_redirect_anchor(&message, "maintenance").into_response(),
-            );
+            return Ok(admin_panel_error_redirect_anchor(&message, "maintenance").into_response());
         }
         Err(error) => return Err(error),
     };
@@ -145,9 +162,7 @@ pub async fn update_media_settings(
     ) {
         Ok(bytes) => bytes,
         Err(AppError::BadRequest(message)) => {
-            return Ok(
-                super::admin_panel_error_redirect_anchor(&message, "maintenance").into_response(),
-            );
+            return Ok(admin_panel_error_redirect_anchor(&message, "maintenance").into_response());
         }
         Err(error) => return Err(error),
     };
@@ -156,15 +171,13 @@ pub async fn update_media_settings(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             crate::config::set_live_ffmpeg_timeout_secs(timeout_secs)?;
             db::set_media_prune_settings(&conn, prune_enabled, prune_max_bytes)?;
             crate::config::update_settings_file_ffmpeg_timeout(timeout_secs);
             crate::config::update_settings_file_media_pruning(prune_enabled, prune_max_bytes);
-            let prune_report = crate::media::prune::run_configured_prune(
-                &conn,
-                &crate::config::CONFIG.upload_dir,
-            )?;
+            let prune_report =
+                crate::media::prune::run_configured_prune(&conn, &CONFIG.upload_dir)?;
             tracing::info!(
                 target: "admin",
                 ffmpeg_timeout_secs = timeout_secs,
@@ -180,26 +193,22 @@ pub async fn update_media_settings(
     .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
 
     Ok(
-        super::admin_panel_redirect_anchor("Media processing settings saved.", "maintenance")
+        admin_panel_redirect_anchor("Media processing settings saved.", "maintenance")
             .into_response(),
     )
 }
 
-pub async fn admin_vacuum(
+/// Handles the admin vacuum request.
+pub(crate) async fn admin_vacuum(
     State(state): State<AppState>,
     jar: CookieJar,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<VacuumForm>,
 ) -> Result<Response> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(
-        &jar,
-        &headers,
-        secure_context.peer,
-        form.csrf.as_deref(),
-    )?;
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context.peer, form.csrf.as_deref())?;
 
     let (jar, csrf) = super::super::ensure_admin_csrf(
         jar,
@@ -212,7 +221,7 @@ pub async fn admin_vacuum(
         let csrf_clone = csrf.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
 
             let size_before = db::get_db_size_bytes(&conn).unwrap_or(0);
 
@@ -244,21 +253,17 @@ pub async fn admin_vacuum(
     Ok((jar, Html(html)).into_response())
 }
 
-pub async fn admin_db_check(
+/// Handles the admin database check request.
+pub(crate) async fn admin_db_check(
     State(state): State<AppState>,
     jar: CookieJar,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<DbMaintenanceForm>,
 ) -> Result<Response> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(
-        &jar,
-        &headers,
-        secure_context.peer,
-        form.csrf.as_deref(),
-    )?;
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context.peer, form.csrf.as_deref())?;
 
     let (jar, csrf) = super::super::ensure_admin_csrf(
         jar,
@@ -269,7 +274,7 @@ pub async fn admin_db_check(
         let csrf_clone = csrf.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
 
             let report = db::check_db_health(&conn);
             tracing::info!(
@@ -295,20 +300,16 @@ pub async fn admin_db_check(
     Ok((jar, Html(html)).into_response())
 }
 
-pub async fn admin_db_repair(
+/// Handles the admin database repair request.
+pub(crate) async fn admin_db_repair(
     State(state): State<AppState>,
     jar: CookieJar,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<DbMaintenanceForm>,
 ) -> Result<Response> {
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(
-        &jar,
-        &headers,
-        secure_context.peer,
-        form.csrf.as_deref(),
-    )?;
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context.peer, form.csrf.as_deref())?;
 
     let (jar, csrf) = super::super::ensure_admin_csrf(
         jar,
@@ -318,7 +319,7 @@ pub async fn admin_db_repair(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             Ok(())
         }
     })
@@ -398,22 +399,23 @@ pub async fn admin_db_repair(
     Ok(render_db_repair_entry_response(
         &jar,
         &csrf,
-        state.db_maintenance_jobs.snapshot(),
+        &state.db_maintenance_jobs.snapshot(),
     ))
 }
 
-pub async fn admin_db_repair_progress_json(
+/// Handles the admin database repair progress JSON request.
+pub(crate) async fn admin_db_repair_progress_json(
     State(state): State<AppState>,
     jar: CookieJar,
     Query(query): Query<DbRepairStatusQuery>,
 ) -> Result<Response> {
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
 
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             Ok(())
         }
     })
@@ -432,6 +434,7 @@ pub async fn admin_db_repair_progress_json(
         .into_response())
 }
 
+/// Performs the database repair progress payload handler operation.
 fn db_repair_progress_payload(
     status: crate::middleware::DbMaintenanceJobStatus,
     backup_progress: &crate::middleware::BackupProgress,
@@ -525,6 +528,7 @@ fn db_repair_progress_payload(
     }
 }
 
+/// Performs the backup percent handler operation.
 fn backup_percent(phase: u64, files_done: u64, files_total: u64) -> u64 {
     match phase {
         crate::middleware::backup_phase::SNAPSHOT_DB => 35,
@@ -538,6 +542,7 @@ fn backup_percent(phase: u64, files_done: u64, files_total: u64) -> u64 {
     }
 }
 
+/// Performs the backup progress label handler operation.
 fn backup_progress_label(phase: u64, files_done: u64, files_total: u64) -> String {
     match phase {
         crate::middleware::backup_phase::SNAPSHOT_DB => {
@@ -562,14 +567,15 @@ fn backup_progress_label(phase: u64, files_done: u64, files_total: u64) -> Strin
     }
 }
 
-pub async fn admin_db_repair_status(
+/// Handles the admin database repair status request.
+pub(crate) async fn admin_db_repair_status(
     State(state): State<AppState>,
     jar: CookieJar,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     secure_context: crate::middleware::SecureCookieContext,
     Query(query): Query<DbRepairStatusQuery>,
 ) -> Result<Response> {
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
 
     let (jar, csrf) = super::super::ensure_admin_csrf(
         jar,
@@ -579,7 +585,7 @@ pub async fn admin_db_repair_status(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             Ok(())
         }
     })
@@ -589,11 +595,12 @@ pub async fn admin_db_repair_status(
     Ok(render_db_repair_status_response(
         &jar,
         &csrf,
-        state.db_maintenance_jobs.snapshot(),
+        &state.db_maintenance_jobs.snapshot(),
         query.job_id,
     ))
 }
 
+/// Performs the database repair status URL handler operation.
 fn db_repair_status_url(job_id: Option<u64>) -> String {
     match job_id {
         Some(job_id) => format!("/admin/db/repair/status?job_id={job_id}"),
@@ -601,6 +608,7 @@ fn db_repair_status_url(job_id: Option<u64>) -> String {
     }
 }
 
+/// Builds the render database repair running response.
 fn render_db_repair_running_response(
     jar: &CookieJar,
     csrf: &str,
@@ -619,23 +627,23 @@ fn render_db_repair_running_response(
         )),
     )
         .into_response();
-    response.headers_mut().insert(
-        header::REFRESH,
-        HeaderValue::from_str(&refresh).expect("valid db repair refresh header"),
-    );
+    if let Ok(refresh) = HeaderValue::from_str(&refresh) {
+        response.headers_mut().insert(header::REFRESH, refresh);
+    }
     response
 }
 
+/// Builds the render database repair entry response.
 fn render_db_repair_entry_response(
     jar: &CookieJar,
     csrf: &str,
-    status: crate::middleware::DbMaintenanceJobStatus,
+    status: &crate::middleware::DbMaintenanceJobStatus,
 ) -> Response {
     let current_theme = crate::handlers::board::current_theme_from_jar(jar);
     match status {
         crate::middleware::DbMaintenanceJobStatus::Running {
             job_id, started_at, ..
-        } => render_db_repair_running_response(jar, csrf, job_id, started_at),
+        } => render_db_repair_running_response(jar, csrf, *job_id, *started_at),
         crate::middleware::DbMaintenanceJobStatus::Idle
         | crate::middleware::DbMaintenanceJobStatus::Finished { .. }
         | crate::middleware::DbMaintenanceJobStatus::Failed { .. } => (
@@ -649,24 +657,27 @@ fn render_db_repair_entry_response(
     }
 }
 
+/// Builds the render database repair status response.
 fn render_db_repair_status_response(
     jar: &CookieJar,
     csrf: &str,
-    status: crate::middleware::DbMaintenanceJobStatus,
+    status: &crate::middleware::DbMaintenanceJobStatus,
     requested_job_id: Option<u64>,
 ) -> Response {
     let current_theme = crate::handlers::board::current_theme_from_jar(jar);
-    if requested_job_id.is_some_and(|job_id| Some(job_id) != status.job_id()) {
-        return (
-            jar.clone(),
-            Html(crate::templates::admin_db_repair_stale_page(
-                csrf,
-                requested_job_id.expect("requested job id for stale page"),
-                status.job_id(),
-                current_theme.as_deref(),
-            )),
-        )
-            .into_response();
+    if let Some(requested_job_id) = requested_job_id {
+        if Some(requested_job_id) != status.job_id() {
+            return (
+                jar.clone(),
+                Html(crate::templates::admin_db_repair_stale_page(
+                    csrf,
+                    requested_job_id,
+                    status.job_id(),
+                    current_theme.as_deref(),
+                )),
+            )
+                .into_response();
+        }
     }
 
     match status {
@@ -680,14 +691,14 @@ fn render_db_repair_status_response(
             .into_response(),
         crate::middleware::DbMaintenanceJobStatus::Running {
             job_id, started_at, ..
-        } => render_db_repair_running_response(jar, csrf, job_id, started_at),
+        } => render_db_repair_running_response(jar, csrf, *job_id, *started_at),
         crate::middleware::DbMaintenanceJobStatus::Finished { job_id, report } => (
             jar.clone(),
             Html(crate::templates::admin_db_health_result_page(
-                &report,
+                report,
                 true,
                 csrf,
-                Some(job_id),
+                Some(*job_id),
                 current_theme.as_deref(),
             )),
         )
@@ -700,9 +711,9 @@ fn render_db_repair_status_response(
             jar.clone(),
             Html(crate::templates::admin_db_repair_failed_page(
                 csrf,
-                &message,
-                finished_at,
-                job_id,
+                message,
+                *finished_at,
+                *job_id,
                 current_theme.as_deref(),
             )),
         )
@@ -716,6 +727,7 @@ mod tests {
         admin_db_repair, admin_db_repair_status, admin_vacuum, parse_ffmpeg_timeout_secs_input,
         parse_media_prune_size_input, update_media_settings, PRE_REPAIR_BACKUP_FAILURE,
     };
+    use anyhow::{bail, ensure, Context as _};
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
@@ -728,18 +740,20 @@ mod tests {
     static REPAIR_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     static MEDIA_SETTINGS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    fn install_admin_session(state: &crate::middleware::AppState) {
-        let conn = state.db.get().expect("db connection");
-        let password_hash = crate::utils::crypto::hash_password("hunter2").expect("hash password");
+    fn install_admin_session(state: &crate::middleware::AppState) -> anyhow::Result<()> {
+        let conn = state.db.get().context("get database connection")?;
+        let password_hash =
+            crate::utils::crypto::hash_password("hunter2").context("hash admin password")?;
         let admin_id =
-            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_admin(&conn, "admin", &password_hash).context("create admin")?;
         crate::db::create_session(
             &conn,
             "session123",
             admin_id,
             chrono::Utc::now().timestamp() + 3600,
         )
-        .expect("create session");
+        .context("create admin session")?;
+        Ok(())
     }
 
     fn admin_signed_csrf() -> String {
@@ -750,21 +764,25 @@ mod tests {
         )
     }
 
-    fn posts_ai_trigger_sql(state: &crate::middleware::AppState) -> String {
-        let conn = state.db.get().expect("db connection");
+    fn posts_ai_trigger_sql(state: &crate::middleware::AppState) -> anyhow::Result<String> {
+        let conn = state.db.get().context("get database connection")?;
         conn.query_row(
             "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'posts_ai'",
             [],
             |row| row.get(0),
         )
-        .expect("posts_ai trigger sql")
+        .context("load posts_ai trigger SQL")
     }
 
-    fn create_controlled_integrity_problem(state: &crate::middleware::AppState) {
-        let board_short = format!("f{}", &uuid::Uuid::new_v4().simple().to_string()[..7]);
-        let conn = state.db.get().expect("db connection");
+    fn create_controlled_integrity_problem(
+        state: &crate::middleware::AppState,
+    ) -> anyhow::Result<()> {
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let suffix = unique.get(..7).unwrap_or(&unique);
+        let board_short = format!("f{suffix}");
+        let conn = state.db.get().context("get database connection")?;
         let board_id = crate::db::create_board(&conn, &board_short, "Repair Test", "", false)
-            .expect("create board");
+            .context("create repair-test board")?;
         let post = crate::db::NewPost {
             thread_id: 0,
             board_id,
@@ -796,12 +814,13 @@ mod tests {
             None,
             None,
         )
-        .expect("create thread");
+        .context("create repair-test thread")?;
 
         conn.execute_batch(&format!(
             "PRAGMA foreign_keys=OFF; BEGIN; DELETE FROM boards WHERE short_name='{board_short}'; COMMIT; PRAGMA foreign_keys=ON;"
         ))
-        .expect("create controlled integrity problem");
+        .context("create controlled integrity problem")?;
+        Ok(())
     }
 
     fn repair_router(state: crate::middleware::AppState) -> Router {
@@ -830,7 +849,7 @@ mod tests {
             .with_state(state)
     }
 
-    async fn admin_get(router: &Router, uri: &str) -> Response {
+    async fn admin_get(router: &Router, uri: &str) -> anyhow::Result<Response> {
         router
             .clone()
             .oneshot(
@@ -842,82 +861,79 @@ mod tests {
                         "csrf_token=csrf123; chan_admin_session=session123",
                     )
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build admin GET request")?,
             )
             .await
-            .expect("response")
+            .context("receive admin GET response")
     }
 
-    async fn response_body(response: Response) -> String {
+    async fn response_body(response: Response) -> anyhow::Result<String> {
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("body bytes");
-        String::from_utf8(body.to_vec()).expect("utf8 body")
+            .context("read response body")?;
+        String::from_utf8(body.to_vec()).context("decode UTF-8 response body")
     }
 
-    async fn repair_status_body(router: &Router) -> String {
-        let response = admin_get(router, "/admin/db/repair/status").await;
-        assert_eq!(response.status(), StatusCode::OK);
+    async fn repair_status_body(router: &Router) -> anyhow::Result<String> {
+        let response = admin_get(router, "/admin/db/repair/status").await?;
+        ensure!(response.status() == StatusCode::OK);
         response_body(response).await
     }
 
-    async fn wait_for_repair_result(router: &Router) -> String {
+    async fn wait_for_repair_result(router: &Router) -> anyhow::Result<String> {
         for _ in 0..100 {
-            let body = repair_status_body(router).await;
+            let body = repair_status_body(router).await?;
             if !body.contains("maintenance rebuild running") {
-                return body;
+                return Ok(body);
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        panic!("database repair did not finish");
+        bail!("database repair did not finish")
     }
 
     #[test]
-    fn parse_ffmpeg_timeout_secs_rejects_blank_or_out_of_range_values() {
-        assert!(parse_ffmpeg_timeout_secs_input(None).is_err());
-        assert!(parse_ffmpeg_timeout_secs_input(Some("")).is_err());
-        assert!(parse_ffmpeg_timeout_secs_input(Some("29")).is_err());
-        assert!(parse_ffmpeg_timeout_secs_input(Some("86401")).is_err());
-        assert_eq!(
-            parse_ffmpeg_timeout_secs_input(Some("600")).expect("valid timeout"),
-            600
-        );
+    fn parse_ffmpeg_timeout_secs_rejects_blank_or_out_of_range_values() -> anyhow::Result<()> {
+        ensure!(parse_ffmpeg_timeout_secs_input(None).is_err());
+        ensure!(parse_ffmpeg_timeout_secs_input(Some("")).is_err());
+        ensure!(parse_ffmpeg_timeout_secs_input(Some("29")).is_err());
+        ensure!(parse_ffmpeg_timeout_secs_input(Some("86401")).is_err());
+        ensure!(parse_ffmpeg_timeout_secs_input(Some("600"))? == 600);
+        Ok(())
     }
 
     #[test]
-    fn parse_media_prune_size_rejects_invalid_or_negative_values() {
-        assert!(parse_media_prune_size_input(true, Some("-1"), Some("mib")).is_err());
-        assert!(parse_media_prune_size_input(true, Some("abc"), Some("mib")).is_err());
-        assert!(parse_media_prune_size_input(true, Some("0"), Some("mib")).is_err());
-        assert!(parse_media_prune_size_input(true, Some("1024"), Some("bytes")).is_err());
-        assert_eq!(
-            parse_media_prune_size_input(true, Some("2"), Some("gib")).expect("valid size"),
-            2 * 1024 * 1024 * 1024
+    fn parse_media_prune_size_rejects_invalid_or_negative_values() -> anyhow::Result<()> {
+        ensure!(parse_media_prune_size_input(true, Some("-1"), Some("mib")).is_err());
+        ensure!(parse_media_prune_size_input(true, Some("abc"), Some("mib")).is_err());
+        ensure!(parse_media_prune_size_input(true, Some("0"), Some("mib")).is_err());
+        ensure!(parse_media_prune_size_input(true, Some("1024"), Some("bytes")).is_err());
+        ensure!(
+            parse_media_prune_size_input(true, Some("2"), Some("gib"))? == 2 * 1024 * 1024 * 1024
         );
-        assert_eq!(
-            parse_media_prune_size_input(false, Some("0"), Some("mib")).expect("disabled zero"),
-            0
-        );
+        ensure!(parse_media_prune_size_input(false, Some("0"), Some("mib"))? == 0);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn media_settings_save_updates_live_timeout_and_settings_file() {
+    async fn media_settings_save_updates_live_timeout_and_settings_file() -> anyhow::Result<()> {
         let _guard = MEDIA_SETTINGS_TEST_LOCK.lock().await;
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
 
         let settings_path = crate::config::data_dir().join("settings.toml");
         let previous_settings = std::fs::read_to_string(&settings_path).ok();
         let previous_timeout = crate::config::ffmpeg_timeout_secs();
-        let parent = settings_path.parent().expect("settings parent");
-        std::fs::create_dir_all(parent).expect("create settings parent");
+        let parent = settings_path
+            .parent()
+            .context("settings path has no parent")?;
+        std::fs::create_dir_all(parent).context("create settings parent")?;
         std::fs::write(
             &settings_path,
             format!(
                 "forum_name = \"RustChan\"\nffmpeg_timeout_secs = {previous_timeout}\nmedia_auto_prune_enabled = false\nmedia_max_active_content_size_bytes = 0\n"
             ),
         )
-        .expect("write settings fixture");
+        .context("write settings fixture")?;
 
         let router = media_settings_router(state.clone());
         let response = router
@@ -937,68 +953,67 @@ mod tests {
                         "_csrf={}&ffmpeg_timeout_secs=1800&media_auto_prune_enabled=1&media_max_active_content_size=2&media_max_active_content_size_unit=mib",
                         admin_signed_csrf()
                     )))
-                    .expect("request"),
+                    .context("build media-settings request")?,
             )
             .await
-            .expect("response");
+            .context("receive media-settings response")?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        ensure!(response.status() == StatusCode::SEE_OTHER);
         let location = response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .expect("location");
-        assert!(location.contains("flash="));
-        assert!(location.contains("Media"));
-        assert!(location.contains("processing"));
-        assert!(location.contains("#maintenance"));
+            .context("response omitted location header")?;
+        ensure!(location.contains("flash="));
+        ensure!(location.contains("Media"));
+        ensure!(location.contains("processing"));
+        ensure!(location.contains("#maintenance"));
 
-        assert_eq!(crate::config::ffmpeg_timeout_secs(), 1_800);
-        let updated_settings = std::fs::read_to_string(&settings_path).expect("read settings");
-        assert!(updated_settings.contains("ffmpeg_timeout_secs = 1800\n"));
-        assert!(updated_settings.contains("media_auto_prune_enabled = true\n"));
-        assert!(updated_settings.contains("media_max_active_content_size_bytes = 2097152\n"));
-        let conn = state.db.get().expect("db connection for settings");
-        assert!(crate::db::get_media_auto_prune_enabled(&conn));
-        assert_eq!(
-            crate::db::get_media_max_active_content_size_bytes(&conn),
-            2_097_152
-        );
+        ensure!(crate::config::ffmpeg_timeout_secs() == 1_800);
+        let updated_settings = std::fs::read_to_string(&settings_path).context("read settings")?;
+        ensure!(updated_settings.contains("ffmpeg_timeout_secs = 1800\n"));
+        ensure!(updated_settings.contains("media_auto_prune_enabled = true\n"));
+        ensure!(updated_settings.contains("media_max_active_content_size_bytes = 2097152\n"));
+        let conn = state.db.get().context("get settings database connection")?;
+        ensure!(crate::db::get_media_auto_prune_enabled(&conn));
+        ensure!(crate::db::get_media_max_active_content_size_bytes(&conn) == 2_097_152);
         let reloaded = crate::config::Config::from_env();
-        assert_eq!(reloaded.ffmpeg_timeout_secs, 1_800);
-        assert!(reloaded.initial_media_auto_prune_enabled);
-        assert_eq!(
-            reloaded.initial_media_max_active_content_size_bytes,
-            2_097_152
-        );
+        ensure!(reloaded.ffmpeg_timeout_secs == 1_800);
+        ensure!(reloaded.initial_media_auto_prune_enabled);
+        ensure!(reloaded.initial_media_max_active_content_size_bytes == 2_097_152);
+        drop(conn);
 
-        crate::config::set_live_ffmpeg_timeout_secs(previous_timeout).expect("restore timeout");
+        crate::config::set_live_ffmpeg_timeout_secs(previous_timeout).context("restore timeout")?;
         match previous_settings {
-            Some(contents) => std::fs::write(&settings_path, contents).expect("restore settings"),
+            Some(contents) => {
+                std::fs::write(&settings_path, contents).context("restore settings")?;
+            }
             None => {
-                let _ = std::fs::remove_file(&settings_path);
+                drop(std::fs::remove_file(&settings_path));
             }
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn admin_db_repair_aborts_before_mutation_when_pre_repair_backup_fails() {
+    async fn admin_db_repair_aborts_before_mutation_when_pre_repair_backup_fails(
+    ) -> anyhow::Result<()> {
         let _guard = REPAIR_TEST_LOCK.lock().await;
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
 
         let sentinel_trigger_sql =
             "CREATE TRIGGER posts_ai AFTER INSERT ON posts BEGIN SELECT RAISE(IGNORE); END";
         {
-            let conn = state.db.get().expect("db connection");
+            let conn = state.db.get().context("get database connection")?;
             conn.execute_batch(&format!("DROP TRIGGER posts_ai; {sentinel_trigger_sql};"))
-                .expect("install sentinel trigger");
+                .context("install sentinel trigger")?;
         }
 
         {
             let mut failure = PRE_REPAIR_BACKUP_FAILURE
                 .lock()
-                .expect("backup failure mutex");
+                .map_err(|_| anyhow::anyhow!("backup failure mutex was poisoned"))?;
             *failure = Some("simulated pre-repair backup failure".to_owned());
         }
 
@@ -1018,58 +1033,65 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(format!("_csrf={}", admin_signed_csrf())))
-                    .expect("request"),
+                    .context("build repair request")?,
             )
             .await
-            .expect("response");
+            .context("receive repair response")?;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        ensure!(response.status() == StatusCode::OK);
         let expected_refresh = format!(
             "10; url={}",
             super::db_repair_status_url(state.db_maintenance_jobs.snapshot().job_id())
         );
-        assert_eq!(
+        ensure!(
             response
                 .headers()
                 .get(header::REFRESH)
-                .and_then(|value| value.to_str().ok()),
-            Some(expected_refresh.as_str())
+                .and_then(|value| value.to_str().ok())
+                == Some(expected_refresh.as_str())
         );
         let started_body = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("started body bytes");
-        let started_body = String::from_utf8(started_body.to_vec()).expect("utf8 started body");
-        assert!(started_body.contains("[ database repair ]"));
+            .context("read repair-started body")?;
+        let started_body =
+            String::from_utf8(started_body.to_vec()).context("decode repair-started body")?;
+        ensure!(started_body.contains("[ database repair ]"));
 
-        let body = wait_for_repair_result(&router).await;
+        let body = wait_for_repair_result(&router).await?;
 
         {
             let mut failure = PRE_REPAIR_BACKUP_FAILURE
                 .lock()
-                .expect("backup failure mutex");
+                .map_err(|_| anyhow::anyhow!("backup failure mutex was poisoned"))?;
             *failure = None;
         }
 
-        assert!(body.contains("[ database repair ]"));
-        assert!(body.contains("Repair was not run because the pre-repair backup failed."));
-        assert!(body.contains("Pre-repair backup failed:"));
-        assert!(body.contains("simulated pre-repair backup failure"));
-        assert!(body.contains("<strong>Repair run:</strong> No"));
-        assert!(body.contains("No repair or maintenance actions were run."));
-        assert!(body.contains("No maintenance steps were run."));
-        assert!(body.contains("// repair outcome"));
-        assert!(body.contains("// maintenance actions run"));
-        assert!(body.contains("back to admin panel"));
+        ensure!(body.contains("[ database repair ]"));
+        ensure!(body.contains("Repair was not run because the pre-repair backup failed."));
+        ensure!(body.contains("Pre-repair backup failed:"));
+        ensure!(body.contains("simulated pre-repair backup failure"));
+        ensure!(body.contains("<strong>Repair run:</strong> No"));
+        ensure!(body.contains("No repair or maintenance actions were run."));
+        ensure!(body.contains("No maintenance steps were run."));
+        ensure!(body.contains("// repair outcome"));
+        ensure!(body.contains("// maintenance actions run"));
+        ensure!(body.contains("back to admin panel"));
 
-        assert_eq!(posts_ai_trigger_sql(&state), sentinel_trigger_sql);
+        ensure!(posts_ai_trigger_sql(&state)? == sentinel_trigger_sql);
+        Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the end-to-end test keeps its fixture setup and ordered assertions in one scenario"
+    )]
     #[tokio::test]
-    async fn admin_db_repair_reports_problem_when_integrity_issue_remains_after_repair() {
+    async fn admin_db_repair_reports_problem_when_integrity_issue_remains_after_repair(
+    ) -> anyhow::Result<()> {
         let _guard = REPAIR_TEST_LOCK.lock().await;
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
-        create_controlled_integrity_problem(&state);
+        install_admin_session(&state)?;
+        create_controlled_integrity_problem(&state)?;
 
         let router = Router::new()
             .route("/admin/db/check", post(super::admin_db_check))
@@ -1099,17 +1121,18 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(format!("_csrf={}", admin_signed_csrf())))
-                    .expect("request"),
+                    .context("build database-check request")?,
             )
             .await
-            .expect("check response");
+            .context("receive database-check response")?;
 
-        assert_eq!(check_response.status(), StatusCode::OK);
+        ensure!(check_response.status() == StatusCode::OK);
         let check_body = to_bytes(check_response.into_body(), usize::MAX)
             .await
-            .expect("check body bytes");
-        let check_body = String::from_utf8(check_body.to_vec()).expect("utf8 check body");
-        assert!(check_body.contains("Database health checks found a problem."));
+            .context("read database-check body")?;
+        let check_body =
+            String::from_utf8(check_body.to_vec()).context("decode database-check body")?;
+        ensure!(check_body.contains("Database health checks found a problem."));
 
         let repair_response = router
             .clone()
@@ -1126,230 +1149,247 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(format!("_csrf={}", admin_signed_csrf())))
-                    .expect("request"),
+                    .context("build database-repair request")?,
             )
             .await
-            .expect("repair response");
+            .context("receive database-repair response")?;
 
-        assert_eq!(repair_response.status(), StatusCode::OK);
+        ensure!(repair_response.status() == StatusCode::OK);
         let expected_refresh = format!(
             "10; url={}",
             super::db_repair_status_url(state.db_maintenance_jobs.snapshot().job_id())
         );
-        assert_eq!(
+        ensure!(
             repair_response
                 .headers()
                 .get(header::REFRESH)
-                .and_then(|value| value.to_str().ok()),
-            Some(expected_refresh.as_str())
+                .and_then(|value| value.to_str().ok())
+                == Some(expected_refresh.as_str())
         );
         let started_body = to_bytes(repair_response.into_body(), usize::MAX)
             .await
-            .expect("repair started body bytes");
-        let started_body = String::from_utf8(started_body.to_vec()).expect("utf8 repair body");
-        assert!(started_body.contains("[ database repair ]"));
+            .context("read repair-started body")?;
+        let started_body =
+            String::from_utf8(started_body.to_vec()).context("decode repair-started body")?;
+        ensure!(started_body.contains("[ database repair ]"));
 
-        let repair_body = wait_for_repair_result(&router).await;
+        let repair_body = wait_for_repair_result(&router).await?;
 
-        assert!(repair_body.contains("[ database repair ]"));
-        assert!(
+        ensure!(repair_body.contains("[ database repair ]"));
+        ensure!(
             repair_body.contains("Created pre-repair DB + config backup:"),
             "{repair_body}"
         );
-        assert!(repair_body.contains("<strong>Repair run:</strong> Yes"));
-        assert!(repair_body.contains("Repair finished, but the database still reports a problem."));
-        assert!(repair_body.contains("<strong>Pre-repair backup:</strong> <code>"));
-        assert!(repair_body.contains("<strong>Pre-repair backup type:</strong> DB + config"));
-        assert!(!repair_body
+        ensure!(repair_body.contains("<strong>Repair run:</strong> Yes"));
+        ensure!(repair_body.contains("Repair finished, but the database still reports a problem."));
+        ensure!(repair_body.contains("<strong>Pre-repair backup:</strong> <code>"));
+        ensure!(repair_body.contains("<strong>Pre-repair backup type:</strong> DB + config"));
+        ensure!(!repair_body
             .contains("Maintenance completed. Database health checks passed afterward."));
-        assert!(!repair_body.contains(
+        ensure!(!repair_body.contains(
             "The final database health check passed after the repair run, so the detected problem was cleared."
         ));
 
-        let conn = state.db.get().expect("db connection");
+        let conn = state.db.get().context("get database connection")?;
         let remaining_problem: i64 = conn
             .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
                 row.get(0)
             })
-            .expect("foreign key check");
-        assert!(
+            .context("run foreign-key check")?;
+        ensure!(
             remaining_problem > 0,
             "controlled integrity issue should remain"
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn admin_db_repair_get_shows_status_instead_of_method_not_allowed() {
+    async fn admin_db_repair_get_shows_status_instead_of_method_not_allowed() -> anyhow::Result<()>
+    {
         let _guard = REPAIR_TEST_LOCK.lock().await;
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
 
         let router = repair_router(state);
 
-        let response = admin_get(&router, "/admin/db/repair").await;
+        let response = admin_get(&router, "/admin/db/repair").await?;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response_body(response).await;
-        assert!(body.contains("[ database repair ]"));
+        ensure!(response.status() == StatusCode::OK);
+        let body = response_body(response).await?;
+        ensure!(body.contains("[ database repair ]"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn admin_db_repair_idle_get_page_is_not_running() {
+    async fn admin_db_repair_idle_get_page_is_not_running() -> anyhow::Result<()> {
         let _guard = REPAIR_TEST_LOCK.lock().await;
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
         let router = repair_router(state);
 
-        let response = admin_get(&router, "/admin/db/repair").await;
+        let response = admin_get(&router, "/admin/db/repair").await?;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(response.headers().get(header::REFRESH).is_none());
-        let body = response_body(response).await;
-        assert!(body.contains("No maintenance rebuild is running."));
-        assert!(!body.contains("maintenance rebuild running"));
-        assert!(!body.contains("Maintenance rebuild started at <code>0</code>"));
-        assert!(!body.contains("data-db-repair-progress"));
-        assert!(!body.contains("data-db-repair-progress-url"));
+        ensure!(response.status() == StatusCode::OK);
+        ensure!(response.headers().get(header::REFRESH).is_none());
+        let body = response_body(response).await?;
+        ensure!(body.contains("No maintenance rebuild is running."));
+        ensure!(!body.contains("maintenance rebuild running"));
+        ensure!(!body.contains("Maintenance rebuild started at <code>0</code>"));
+        ensure!(!body.contains("data-db-repair-progress"));
+        ensure!(!body.contains("data-db-repair-progress-url"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn admin_db_repair_idle_status_page_is_not_running() {
+    async fn admin_db_repair_idle_status_page_is_not_running() -> anyhow::Result<()> {
         let _guard = REPAIR_TEST_LOCK.lock().await;
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
         let router = repair_router(state);
 
-        let response = admin_get(&router, "/admin/db/repair/status").await;
+        let response = admin_get(&router, "/admin/db/repair/status").await?;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(response.headers().get(header::REFRESH).is_none());
-        let body = response_body(response).await;
-        assert!(body.contains("No maintenance rebuild is running."));
-        assert!(!body.contains("maintenance rebuild running"));
-        assert!(!body.contains("Maintenance rebuild started at <code>0</code>"));
-        assert!(!body.contains("data-db-repair-progress"));
+        ensure!(response.status() == StatusCode::OK);
+        ensure!(response.headers().get(header::REFRESH).is_none());
+        let body = response_body(response).await?;
+        ensure!(body.contains("No maintenance rebuild is running."));
+        ensure!(!body.contains("maintenance rebuild running"));
+        ensure!(!body.contains("Maintenance rebuild started at <code>0</code>"));
+        ensure!(!body.contains("data-db-repair-progress"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn admin_db_repair_running_status_page_carries_job_identity() {
+    async fn admin_db_repair_running_status_page_carries_job_identity() -> anyhow::Result<()> {
         let _guard = REPAIR_TEST_LOCK.lock().await;
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
         let job_id = state.db_maintenance_jobs.mark_running();
         let router = repair_router(state);
 
-        let response = admin_get(&router, "/admin/db/repair/status").await;
+        let response = admin_get(&router, "/admin/db/repair/status").await?;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        ensure!(response.status() == StatusCode::OK);
         let expected_refresh = format!("10; url=/admin/db/repair/status?job_id={job_id}");
-        assert_eq!(
+        ensure!(
             response
                 .headers()
                 .get(header::REFRESH)
-                .and_then(|value| value.to_str().ok()),
-            Some(expected_refresh.as_str())
+                .and_then(|value| value.to_str().ok())
+                == Some(expected_refresh.as_str())
         );
-        let body = response_body(response).await;
-        assert!(body.contains("maintenance rebuild running"));
-        assert!(body.contains(&format!(
+        let body = response_body(response).await?;
+        ensure!(body.contains("maintenance rebuild running"));
+        ensure!(body.contains(&format!(
             r#"data-db-repair-progress-url="/admin/db/repair/progress?job_id={job_id}""#
         )));
-        assert!(body.contains(&format!(r#"data-db-repair-job-id="{job_id}""#)));
-        assert!(body.contains(&format!(
+        ensure!(body.contains(&format!(r#"data-db-repair-job-id="{job_id}""#)));
+        ensure!(body.contains(&format!(
             r#"href="/admin/db/repair/status?job_id={job_id}""#
         )));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn admin_db_repair_terminal_status_is_bound_to_specific_job_id() {
+    async fn admin_db_repair_terminal_status_is_bound_to_specific_job_id() -> anyhow::Result<()> {
         let _guard = REPAIR_TEST_LOCK.lock().await;
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
-        let conn = state.db.get().expect("db connection");
+        install_admin_session(&state)?;
+        let conn = state.db.get().context("get database connection")?;
         let first_job_id = state.db_maintenance_jobs.mark_running();
-        state
-            .db_maintenance_jobs
-            .mark_finished(first_job_id, crate::db::check_db_health(&conn));
+        ensure!(
+            state
+                .db_maintenance_jobs
+                .mark_finished(first_job_id, crate::db::check_db_health(&conn)),
+            "the active first repair job should accept its completion report"
+        );
         let second_job_id = state.db_maintenance_jobs.mark_running();
+        drop(conn);
         let router = repair_router(state);
 
         let stale_progress = admin_get(
             &router,
             &format!("/admin/db/repair/progress?job_id={first_job_id}"),
         )
-        .await;
-        assert_eq!(stale_progress.status(), StatusCode::OK);
-        let stale_progress = response_body(stale_progress).await;
+        .await?;
+        ensure!(stale_progress.status() == StatusCode::OK);
+        let stale_progress = response_body(stale_progress).await?;
         let stale_progress: serde_json::Value =
-            serde_json::from_str(&stale_progress).expect("stale progress json");
-        assert_eq!(
+            serde_json::from_str(&stale_progress).context("parse stale-progress JSON")?;
+        ensure!(
             stale_progress
                 .get("state")
-                .and_then(serde_json::Value::as_str),
-            Some("stale")
+                .and_then(serde_json::Value::as_str)
+                == Some("stale")
         );
-        assert_eq!(
+        ensure!(
             stale_progress
                 .get("job_id")
-                .and_then(serde_json::Value::as_u64),
-            Some(second_job_id)
+                .and_then(serde_json::Value::as_u64)
+                == Some(second_job_id)
         );
         let expected_redirect = format!("/admin/db/repair/status?job_id={second_job_id}");
-        assert_eq!(
+        ensure!(
             stale_progress
                 .get("redirect_url")
-                .and_then(serde_json::Value::as_str),
-            Some(expected_redirect.as_str())
+                .and_then(serde_json::Value::as_str)
+                == Some(expected_redirect.as_str())
         );
 
         let stale_status = admin_get(
             &router,
             &format!("/admin/db/repair/status?job_id={first_job_id}"),
         )
-        .await;
-        assert_eq!(stale_status.status(), StatusCode::OK);
-        assert!(stale_status.headers().get(header::REFRESH).is_none());
-        let stale_status_body = response_body(stale_status).await;
-        assert!(stale_status_body.contains(&format!(
+        .await?;
+        ensure!(stale_status.status() == StatusCode::OK);
+        ensure!(stale_status.headers().get(header::REFRESH).is_none());
+        let stale_status_body = response_body(stale_status).await?;
+        ensure!(stale_status_body.contains(&format!(
             "This page is for maintenance rebuild <code>{first_job_id}</code>"
         )));
-        assert!(stale_status_body.contains(&format!(
+        ensure!(stale_status_body.contains(&format!(
             r#"href="/admin/db/repair/status?job_id={second_job_id}""#
         )));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn admin_db_repair_finished_status_page_shows_matching_run_id() {
+    async fn admin_db_repair_finished_status_page_shows_matching_run_id() -> anyhow::Result<()> {
         let _guard = REPAIR_TEST_LOCK.lock().await;
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
-        let conn = state.db.get().expect("db connection");
+        install_admin_session(&state)?;
+        let conn = state.db.get().context("get database connection")?;
         let job_id = state.db_maintenance_jobs.mark_running();
-        state
-            .db_maintenance_jobs
-            .mark_finished(job_id, crate::db::check_db_health(&conn));
+        ensure!(
+            state
+                .db_maintenance_jobs
+                .mark_finished(job_id, crate::db::check_db_health(&conn)),
+            "the active repair job should accept its completion report"
+        );
+        drop(conn);
         let router = repair_router(state);
 
         let response =
-            admin_get(&router, &format!("/admin/db/repair/status?job_id={job_id}")).await;
+            admin_get(&router, &format!("/admin/db/repair/status?job_id={job_id}")).await?;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(response.headers().get(header::REFRESH).is_none());
-        let body = response_body(response).await;
-        assert!(body.contains("[ database repair ]"));
-        assert!(body.contains(&format!("<strong>Run id:</strong> <code>{job_id}</code>")));
+        ensure!(response.status() == StatusCode::OK);
+        ensure!(response.headers().get(header::REFRESH).is_none());
+        let body = response_body(response).await?;
+        ensure!(body.contains("[ database repair ]"));
+        ensure!(body.contains(&format!("<strong>Run id:</strong> <code>{job_id}</code>")));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn admin_vacuum_is_blocked_while_other_maintenance_is_active() {
+    async fn admin_vacuum_is_blocked_while_other_maintenance_is_active() -> anyhow::Result<()> {
         let _guard = REPAIR_TEST_LOCK.lock().await;
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
         let router = vacuum_router(state.clone());
         let _maintenance_guard = state
             .maintenance_gate
             .try_begin("Full backup creation")
-            .expect("maintenance guard");
+            .context("begin competing maintenance operation")?;
 
         let response = router
             .oneshot(
@@ -1365,13 +1405,14 @@ mod tests {
                     )
                     .extension(crate::test_support::connect_info())
                     .body(Body::from(format!("_csrf={}", admin_signed_csrf())))
-                    .expect("request"),
+                    .context("build vacuum request")?,
             )
             .await
-            .expect("response");
+            .context("receive vacuum response")?;
 
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        let body = response_body(response).await;
-        assert!(body.contains("Full backup creation is already running"));
+        ensure!(response.status() == StatusCode::CONFLICT);
+        let body = response_body(response).await?;
+        ensure!(body.contains("Full backup creation is already running"));
+        Ok(())
     }
 }

@@ -1,4 +1,4 @@
-// chan_net/export.rs — Federation export handler.
+//! Federation export handler.
 //
 // POST /chan/export builds a full snapshot of all boards and active
 // (non-archived) threads via snapshot::build_snapshot and returns the ZIP
@@ -7,6 +7,12 @@
 use crate::{error::AppError, middleware::AppState};
 use axum::{extract::State, http::header, response::IntoResponse};
 
+/// Builds and returns a full federation snapshot ZIP.
+///
+/// # Errors
+///
+/// Returns a [`super::ChanError`] when the database cannot be acquired, the
+/// snapshot cannot be built, or the blocking task cannot be joined.
 pub async fn chan_export(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, super::ChanError> {
