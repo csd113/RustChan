@@ -326,7 +326,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
     // Schedule temp-file cleanup after a generous window so even slow clients finish.
     let cleanup_path = tmp_path;
     tokio::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
+        tokio::time::sleep(tokio::time::Duration::from_mins(10)).await;
         let _ = tokio::fs::remove_file(cleanup_path).await;
     });
 

@@ -168,7 +168,7 @@ fn remaining_validity_days(cert_path: &Path) -> Option<u64> {
     // Parse the DER-encoded certificate to reach the validity fields.
     let cert = x509_cert::Certificate::from_der(&pem).ok()?;
     // `not_after` is stored as an ASN.1 Time; convert via Unix timestamp.
-    let not_after = cert.tbs_certificate.validity.not_after.to_system_time();
+    let not_after = cert.tbs_certificate().validity().not_after.to_system_time();
     let remaining = not_after.duration_since(SystemTime::now()).ok()?;
     Some(remaining.as_secs() / 86_400)
 }
@@ -265,8 +265,12 @@ mod tests {
         let pem_bytes = std::fs::read(cert_path).unwrap();
         let (_, der) = pem_rfc7468::decode_vec(&pem_bytes).unwrap();
         let cert = x509_cert::Certificate::from_der(&der).unwrap();
-        let not_before = cert.tbs_certificate.validity.not_before.to_system_time();
-        let not_after = cert.tbs_certificate.validity.not_after.to_system_time();
+        let not_before = cert
+            .tbs_certificate()
+            .validity()
+            .not_before
+            .to_system_time();
+        let not_after = cert.tbs_certificate().validity().not_after.to_system_time();
 
         assert!(not_before <= after);
         assert!(not_after > before);

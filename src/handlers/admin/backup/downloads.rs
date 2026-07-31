@@ -42,7 +42,7 @@ pub(super) fn prune_stale_temp_board_downloads() {
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return;
     };
-    let cutoff = std::time::Duration::from_secs(60 * 60);
+    let cutoff = std::time::Duration::from_hours(1);
     for entry in entries.flatten() {
         let path = entry.path();
         let is_zip = path

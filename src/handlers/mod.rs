@@ -35,7 +35,7 @@ const PUBLIC_MULTIPART_MAX_FIELDS: usize = 64;
 // Conservative whole-request upload timeout. True min-rate enforcement would be
 // more precise, but this avoids indefinite request-slot pinning without breaking
 // normal large LAN uploads.
-pub const PUBLIC_UPLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+pub const PUBLIC_UPLOAD_TIMEOUT: Duration = Duration::from_mins(10);
 
 fn multipart_read_error(
     context: &'static str,

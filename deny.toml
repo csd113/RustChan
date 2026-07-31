@@ -10,8 +10,8 @@ yanked = "deny"
 
 # RUSTSEC-2023-0071: Marvin Attack timing side-channel in rsa 0.9.x.
 # No fixed version available. rsa is a transitive dep pulled in by arti-client;
-# we do not use RSA decryption directly, and Arti uses it only for TLS relay
-# connections where an adaptive chosen-ciphertext oracle is not exposed.
+# RustChan's Arti client/onion-service graph uses it for public-signature
+# verification, not private-key decryption or signing.
 # This exception is temporary and must be re-reviewed on every Arti upgrade.
 [[advisories.ignore]]
 id = "RUSTSEC-2023-0071"
@@ -140,7 +140,7 @@ version = "0.21"
 
 [[bans.skip]]
 name    = "itertools"
-version = "0.13"
+version = "0.14"
 
 [[bans.skip]]
 name    = "rand"
@@ -183,36 +183,12 @@ name    = "toml"
 version = "0.8"
 
 [[bans.skip]]
-name    = "toml"
-version = "0.9"
-
-[[bans.skip]]
 name    = "toml_datetime"
 version = "0.6"
 
 [[bans.skip]]
-name    = "toml_datetime"
-version = "0.7"
-
-[[bans.skip]]
 name    = "toml_edit"
 version = "0.22"
-
-[[bans.skip]]
-name    = "windows-core"
-version = "0.61"
-
-[[bans.skip]]
-name    = "windows-link"
-version = "0.1"
-
-[[bans.skip]]
-name    = "windows-result"
-version = "0.3"
-
-[[bans.skip]]
-name    = "windows-strings"
-version = "0.4"
 
 [[bans.skip]]
 name    = "windows-sys"

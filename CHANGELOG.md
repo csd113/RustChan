@@ -15,6 +15,9 @@ All notable changes to RustChan will be documented in this file.
 - Reduced overload stalls with a bounded database-pool acquisition timeout and consistent short-retry behavior for transient SQLite and pool exhaustion.
 - Improved server lifecycle handling by supervising the main HTTP, HTTPS, ACME, redirect, ChanNet, and Tor-backend listeners together and shutting peer listeners down when one exits unexpectedly.
 - Improved ChanNet validation and interoperability with a legal default body envelope, Unicode scalar-value character limits, consistent JSON errors for oversized imports, and explicit exact-boundary handling.
+- Refreshed all safely compatible direct and transitive Rust dependencies for Rust 1.91, including Tokio `1.53.1`, Hyper `1.11.0`, Tower HTTP `0.7.0`, Rustls `0.23.43`, Serde `1.0.229`, Clap `4.6.4`, UUID `1.24.0`, and `time` `0.3.54`; retained `rusqlite` `0.39` and `r2d2_sqlite` `0.34` as the newest pair compatible with Arti's SQLite constraint.
+- Standardized Rustls, Tokio Rustls, and Rustls ACME on the Ring cryptography provider while preserving TLS 1.2, logging, ACME support, and ACME root certificates, eliminating the unused AWS-LC build toolchain from the dependency graph.
+- Updated self-signed certificate validity handling for `x509-cert` `0.3.0` and adopted Tower HTTP `0.7.0` compression negotiation, including a `406 Not Acceptable` response when a client rejects every supported content coding.
 
 ### Fixed
 
@@ -32,7 +35,9 @@ All notable changes to RustChan will be documented in this file.
 - Rejects requests containing `Transfer-Encoding`, including ambiguous `Transfer-Encoding` plus `Content-Length` framing, at the outer HTTP boundary before they can reach application handlers.
 - Added conservative HTTP header limits of 32 KiB per value and 64 KiB for the parser/aggregate boundary across public and internal listeners.
 - Corrected dependency auditing so CI scans `Cargo.lock` and verifies that the resolved dependency graph is non-empty instead of treating the audit policy file as a lockfile.
-- Updated `anyhow` to `1.0.103` and `memmap2` to `0.9.11` to resolve denied unsoundness advisories, and updated `getset` to remove the unmaintained, future-incompatible `proc-macro-error2` dependency.
+- Upgraded all 38 Arti/Tor crates to `0.44.0`, explicitly enabled its now-default stable congestion control, and incorporated the medium-severity TROVE-2026-24 and TROVE-2026-27 denial-of-service fixes; this raises the project MSRV to Rust 1.91.
+- Updated `anyhow` to `1.0.104` and `memmap2` to `0.9.11` to resolve denied unsoundness advisories, and updated `getset` to remove the unmaintained, future-incompatible `proc-macro-error2` dependency.
+- Removed the yanked `spin` `0.9.8` release while refreshing the transitive graph; the resulting lockfile contains no yanked, pre-release, or non-registry dependencies.
 
 ### Documentation
 
@@ -41,7 +46,10 @@ All notable changes to RustChan will be documented in this file.
 
 ### Internal
 
-- Restored warning-clean strict Clippy coverage on the current Rust toolchain, the Rust 1.90 MSRV, and supported cross-compilation targets.
+- Restored warning-clean strict Clippy coverage on the current Rust toolchain, the Rust 1.91 MSRV, and supported cross-compilation targets.
+- Reduced the resolved dependency graph from 666 to 653 packages, removed stale duplicate exceptions from the dependency-audit policy, and corrected the documented rationale for Arti's RSA advisory exception.
+- Added deterministic offline regressions for Arti state, cache, and native-keystore initialization, plus focused coverage for certificate validity accessors and compression negotiation.
+- Replaced equivalent minute and hour duration calculations with Rust 1.91's dedicated constructors to remain warning-clean under current strict Clippy without changing timing behavior.
 - Kept local browser-testing and Node/Playwright artifacts excluded from version control so they do not add repository or release-package bloat.
 
 ## RustChan 1.3.0

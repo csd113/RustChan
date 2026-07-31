@@ -134,7 +134,7 @@ const fn detect_ansi_enabled(tty: bool) -> bool {
 /// dashboard owns the screen and will display the information itself.
 static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-const TOR_DESCRIPTOR_TIMEOUT_SUPPRESSION_WINDOW: Duration = Duration::from_secs(10 * 60);
+const TOR_DESCRIPTOR_TIMEOUT_SUPPRESSION_WINDOW: Duration = Duration::from_mins(10);
 static TOR_DESCRIPTOR_TIMEOUT_LIMITER: LazyLock<parking_lot::Mutex<TorDescriptorTimeoutLimiter>> =
     LazyLock::new(|| {
         parking_lot::Mutex::new(TorDescriptorTimeoutLimiter::new(
@@ -1608,7 +1608,7 @@ mod tests {
 
     #[test]
     fn rate_limits_repeated_tor_descriptor_upload_timeout_warnings() {
-        let mut limiter = TorDescriptorTimeoutLimiter::new(Duration::from_secs(600));
+        let mut limiter = TorDescriptorTimeoutLimiter::new(Duration::from_mins(10));
         let start = Instant::now();
 
         assert_eq!(
@@ -1627,7 +1627,7 @@ mod tests {
             limiter.decide_once(start + Duration::from_secs(601)),
             TorDescriptorTimeoutDecision::EmitSummary {
                 suppressed: 2,
-                window: Duration::from_secs(600),
+                window: Duration::from_mins(10),
             }
         );
         assert_eq!(
@@ -1638,7 +1638,7 @@ mod tests {
 
     #[test]
     fn rate_limiter_reuses_decision_for_second_formatter() {
-        let mut limiter = TorDescriptorTimeoutLimiter::new(Duration::from_secs(600));
+        let mut limiter = TorDescriptorTimeoutLimiter::new(Duration::from_mins(10));
         let start = Instant::now();
 
         assert_eq!(

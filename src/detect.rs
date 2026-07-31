@@ -424,7 +424,7 @@ pub fn detect_tor(
             match result {
                 Ok(()) => {
                     // a crash — reset attempt so backoff stays short on reconnect.
-                    if run_start.elapsed() >= std::time::Duration::from_secs(60) {
+                    if run_start.elapsed() >= std::time::Duration::from_mins(1) {
                         attempt = 0;
                     }
                     tracing::warn!(target: "rustchan::detect", "Tor: Arti exited cleanly");
@@ -511,7 +511,7 @@ async fn run_arti(
 
     tracing::info!(target: "rustchan::detect", "Tor: connected to the Tor network");
 
-    // Security hardening options available in OnionServiceConfigBuilder (Arti 0.43):
+    // Security hardening options available in OnionServiceConfigBuilder (Arti 0.44):
     //   .pow_resistance(...)          — proof-of-work DoS resistance
     //   .rate_limit_num_intro_points  — cap introduction point abuse
     // Currently left at defaults. Consider exposing these in settings.toml (F-18).
@@ -782,6 +782,34 @@ mod tests {
                 .chars()
                 .all(|c| matches!(c, 'a'..='z' | '2'..='7')),
             "base32 part must be lowercase a-z2-7 only"
+        );
+    }
+
+    #[test]
+    fn arti_config_preserves_explicit_state_and_cache_layout_offline() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let state_dir = tempdir.path().join("state");
+        let other_state_dir = tempdir.path().join("other-state");
+        let cache_dir = tempdir.path().join("cache");
+
+        let config = TorClientConfigBuilder::from_directories(&state_dir, &cache_dir)
+            .build()
+            .expect("Arti config");
+        let other_config = TorClientConfigBuilder::from_directories(&other_state_dir, &cache_dir)
+            .build()
+            .expect("Arti config with other state");
+
+        assert_eq!(
+            config.dir_mgr_config().expect("directory config").cache_dir,
+            cache_dir
+        );
+        assert!(
+            config.keystore().is_enabled(),
+            "onion-service builds must keep the persistent Arti keystore enabled"
+        );
+        assert_ne!(
+            config, other_config,
+            "the explicit state directory must remain part of the Arti configuration"
         );
     }
 

@@ -2,9 +2,9 @@
 name = "rustchan"
 version = "1.3.0"
 edition = "2021"
-# axum 0.8 requires Rust 1.75; keep the package MSRV and cargo-msrv metadata
+# Arti 0.44 requires Rust 1.91; keep the package MSRV and cargo-msrv metadata
 # in sync with the current dependency set.
-rust-version = "1.90"
+rust-version = "1.91"
 license = "MIT"
 description = "Self-contained imageboard — single binary, zero runtime dependencies"
 repository = "https://github.com/csd113/RustChan"
@@ -13,7 +13,7 @@ categories = ["web-programming", "multimedia::images"]
 
 # Keep `cargo-msrv` metadata aligned with `rust-version`.
 [package.metadata]
-msrv = "1.90"
+msrv = "1.91"
 
 [profile.release]
 opt-level      = 3
@@ -34,20 +34,23 @@ path  = "src/lib.rs"
 axum       = { version = "0.8.9",  features = ["multipart"] }
 axum-extra = { version = "0.12.6", features = ["cookie"] }
 tower      = "0.5.3"
-tower-http = { version = "0.6.11", features = ["fs", "set-header", "compression-full", "trace"] }
-tokio      = { version = "1.52.3", features = ["full"] }
-tokio-util = "0.7.18"
+tower-http = { version = "0.7.0", features = ["fs", "set-header", "compression-full", "trace"] }
+tokio      = { version = "1.53.1", features = ["full"] }
+tokio-util = "0.7.19"
 captcha    = { version = "1.0.0", default-features = false }
 
+# Arti 0.44's tor-dirmgr requires rusqlite >=0.36,<0.40. Because rusqlite
+# and libsqlite3-sys expose Cargo `links`, r2d2_sqlite 0.35/rusqlite 0.40
+# cannot coexist in the same graph. These are the newest Arti-compatible pair.
 rusqlite    = { version = "0.39.0", features = ["bundled", "backup"] }
 r2d2        = "0.8.10"
 r2d2_sqlite = "0.34.0"
-time        = "0.3.47"
+time        = "0.3.54"
 
-serde      = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
+serde      = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 # toml 1.0: serde parsing is built-in, no feature flag needed.
-toml  = "1.1.2"
+toml  = "1.1.4"
 
 argon2  = "0.5.3"
 sha2    = "0.11.0"
@@ -58,7 +61,7 @@ hex    = "0.4.3"
 # generation. Keep direct OS entropy reads on getrandom::SysRng and only use
 # password-hash's re-exported rand_core where that older trait set is required.
 rand_core = "0.10.1"
-getrandom = { version = "0.4.2", features = ["sys_rng"] }
+getrandom = { version = "0.4.3", features = ["sys_rng"] }
 
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "ico"] }
 
@@ -67,15 +70,15 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 # on phones display upright (4.1).
 kamadak-exif = "0.6.1"
 
-clap = { version = "4.6.1", features = ["derive"] }
+clap = { version = "4.6.4", features = ["derive"] }
 
-uuid      = { version = "1.23.2", features = ["v4", "serde"] }
+uuid      = { version = "1.24.0", features = ["v4", "serde"] }
 chrono    = { version = "0.4.45", features = ["serde"] }
 dashmap      = "6.2.1"
 parking_lot  = "0.12.5"
-anyhow       = "1.0.103"
+anyhow       = "1.0.104"
 once_cell    = "1.21.4"
-regex     = "1.12.3"
+regex     = "1.13.1"
 ipnet     = "2.12.0"
 
 # zip 8: SimpleFileOptions and core ZipWriter/ZipArchive API unchanged.
@@ -101,9 +104,9 @@ tracing            = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 tracing-appender   = "0.2.5"
 
-thiserror = "2.0.18"
+thiserror = "2.0.19"
 tempfile  = "3.27.0"
-libc      = "0.2.186"
+libc      = "0.2.189"
 
 # ── Tor / onion-service stack ──────────────────────────────────────────────────
 # F-09: Use rustls throughout — native-tls would pull in OpenSSL as a
@@ -119,35 +122,40 @@ libc      = "0.2.186"
 # Post-change verification:
 #   cargo tree --edges features | grep -iE "openssl|native.tls"   # expect nothing
 #   cargo tree -i openssl-sys                                       # expect error: not found
-arti-client = { version = "0.43.0", default-features = false, features = ["tokio", "rustls", "onion-service-service"] }
+# Arti 0.44.0 requires Rust 1.91 and makes its stable congestion control a
+# default. Enable flowctl-cc explicitly because defaults stay disabled for TLS.
+arti-client = { version = "0.44.0", default-features = false, features = ["tokio", "rustls", "onion-service-service", "flowctl-cc"] }
 
 # tor-hsservice / tor-cell: also part of the arti workspace.  Their `full`
 # default feature bundle can activate the native-tls TLS backend through
 # tor-rtcompat.  Disable defaults; add back only what the build requires.
 # If compilation fails with "feature X not found", re-add that feature here.
-tor-hsservice = { version = "0.43.0", default-features = false }
-tor-cell      = { version = "0.43.0", default-features = false }
+tor-hsservice = { version = "0.44.0", default-features = false }
+tor-cell      = { version = "0.44.0", default-features = false }
 
-futures       = "0.3.32"
+futures       = "0.3.33"
 sha3          = "0.12.0"
 data-encoding = "2.11.0"
 
 # ── TLS ───────────────────────────────────────────────────────────────────────
 # rustls-pki-types: standalone PKI types crate split out of rustls 0.23+.
 # Required directly by src/tls/mod.rs (CertificateDer, PrivateKeyDer, PemObject).
-rustls-pki-types = "1.14.1"
-tokio-rustls   = "0.26.4"
-rustls         = { version = "0.23.40", features = ["ring"] }
+rustls-pki-types = "1.15.1"
+# RustChan installs rustls's ring provider explicitly at startup. Keep every
+# TLS consumer on that provider instead of also compiling the unused aws-lc-rs
+# defaults; logging, TLS 1.2, and the system-independent root set stay enabled.
+tokio-rustls   = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
+rustls         = { version = "0.23.43", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 
 # Optional — gated by Cargo features
-rustls-acme    = { version = "0.15.3", features = ["tokio"], optional = true }
+rustls-acme    = { version = "0.15.3", default-features = false, features = ["ring", "tls12", "tokio", "webpki-roots"], optional = true }
 rcgen          = { version = "0.14.8", optional = true }
 pem-rfc7468    = { version = "1.0.0", optional = true, features = ["std"] }
-x509-cert      = { version = "0.2.5", optional = true }
+x509-cert      = { version = "0.3.0", optional = true }
 
 # HTTPS listen integration for Axum (handles Static cert path)
 axum-server    = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
-hyper          = { version = "1.10.1", features = ["http1", "http2", "server"] }
+hyper          = { version = "1.11.0", features = ["http1", "http2", "server"] }
 hyper-util     = { version = "0.1.20", features = ["tokio", "server"] }
 
 # ── Terminal UI ───────────────────────────────────────────────────────────────

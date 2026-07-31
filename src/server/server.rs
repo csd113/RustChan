@@ -469,7 +469,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         let bg = pool.clone();
         let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
-            let mut iv = tokio::time::interval(Duration::from_secs(3600));
+            let mut iv = tokio::time::interval(Duration::from_hours(1));
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
@@ -547,12 +547,12 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     {
         let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
-            let mut iv = tokio::time::interval(Duration::from_secs(300));
+            let mut iv = tokio::time::interval(Duration::from_mins(5));
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
                         let cutoff = Instant::now()
-                            .checked_sub(Duration::from_secs(300))
+                            .checked_sub(Duration::from_mins(5))
                             .unwrap_or_else(Instant::now);
                         ACTIVE_IPS.retain(|_, last_seen| *last_seen > cutoff);
                     }
@@ -572,7 +572,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     {
         let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
-            let mut iv = tokio::time::interval(Duration::from_secs(300));
+            let mut iv = tokio::time::interval(Duration::from_mins(5));
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
@@ -663,10 +663,10 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             let mut failure_streak = 0u32;
             let mut retry_not_before: Option<SystemTime> = None;
             tokio::select! {
-                () = tokio::time::sleep(Duration::from_secs(60)) => {}
+                () = tokio::time::sleep(Duration::from_mins(1)) => {}
                 () = cancel_clone.cancelled() => { return; }
             }
-            let mut iv = tokio::time::interval(Duration::from_secs(60));
+            let mut iv = tokio::time::interval(Duration::from_mins(1));
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
@@ -783,7 +783,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
             tokio::select! {
-                () = tokio::time::sleep(Duration::from_secs(600)) => {} // initial delay
+                () = tokio::time::sleep(Duration::from_mins(10)) => {} // initial delay
                 () = cancel_clone.cancelled() => { return; }
             }
             let mut iv = tokio::time::interval(Duration::from_secs(interval_secs));
@@ -826,10 +826,10 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
             tokio::select! {
-                () = tokio::time::sleep(Duration::from_secs(1800)) => {} // initial stagger
+                () = tokio::time::sleep(Duration::from_mins(30)) => {} // initial stagger
                 () = cancel_clone.cancelled() => { return; }
             }
-            let mut iv = tokio::time::interval(Duration::from_secs(3600));
+            let mut iv = tokio::time::interval(Duration::from_hours(1));
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
@@ -2148,24 +2148,24 @@ mod tests {
 
     #[test]
     fn scheduled_full_backup_retry_delay_uses_exponential_backoff() {
-        let interval = Duration::from_secs(24 * 3600);
+        let interval = Duration::from_hours(24);
         assert_eq!(
             scheduled_full_backup_failure_retry_delay(interval, 1),
-            Duration::from_secs(15 * 60)
+            Duration::from_mins(15)
         );
         assert_eq!(
             scheduled_full_backup_failure_retry_delay(interval, 2),
-            Duration::from_secs(30 * 60)
+            Duration::from_mins(30)
         );
         assert_eq!(
             scheduled_full_backup_failure_retry_delay(interval, 3),
-            Duration::from_secs(60 * 60)
+            Duration::from_hours(1)
         );
     }
 
     #[test]
     fn scheduled_full_backup_retry_delay_caps_at_backup_interval() {
-        let interval = Duration::from_secs(3600);
+        let interval = Duration::from_hours(1);
         assert_eq!(
             scheduled_full_backup_failure_retry_delay(interval, 10),
             interval

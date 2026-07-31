@@ -470,6 +470,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compression_rejects_requests_that_refuse_every_content_coding() {
+        let router = build_router(crate::test_support::app_state(), false);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::ACCEPT_ENCODING, "*;q=0, identity;q=0")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
+        assert!(response.headers().get(header::CONTENT_ENCODING).is_none());
+    }
+
+    #[tokio::test]
     async fn uploaded_pdf_route_allows_same_origin_embedding_only() {
         let state = crate::test_support::app_state();
         let board = unique_test_board("pdfhdr");

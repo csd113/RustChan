@@ -135,7 +135,7 @@ pub(super) async fn safe_timeout_middleware(
 
     let timeout = match *req.method() {
         http::Method::GET | http::Method::HEAD => std::time::Duration::from_secs(30),
-        _ => std::time::Duration::from_secs(300),
+        _ => std::time::Duration::from_mins(5),
     };
 
     tokio::time::timeout(timeout, next.run(req))
