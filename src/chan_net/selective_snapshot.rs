@@ -212,7 +212,8 @@ pub fn build_archive_snapshot(
     Ok((zip, tx_id))
 }
 
-/// Everything: all boards, all active threads, all archived threads, all posts.
+/// Everything exportable: all public boards, their active and archived
+/// threads, and their posts.
 ///
 /// Ignores all timestamps. Intended for initial sync and disaster recovery.
 ///
@@ -220,7 +221,7 @@ pub fn build_archive_snapshot(
 /// log — a full database dump over the gateway is a heavyweight operation.
 pub fn build_force_refresh_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
     tracing::warn!(
-        "Force refresh snapshot requested — returning full database dump including archives"
+        "Force refresh snapshot requested — returning all exportable data including archives"
     );
 
     let boards = fetch_all_boards(conn)?;
@@ -253,11 +254,14 @@ pub fn build_force_refresh_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)
 
 fn board_id_by_short_name(conn: &Connection, short_name: &str) -> Result<i64> {
     conn.query_row(
-        "SELECT id FROM boards WHERE short_name = ?1",
+        "SELECT id
+         FROM boards
+         WHERE short_name = ?1
+           AND access_mode IN ('public', 'post_password')",
         rusqlite::params![short_name],
         |r| r.get(0),
     )
-    .map_err(|_error| anyhow::anyhow!("Board '{short_name}' not found"))
+    .map_err(|_error| anyhow::anyhow!("Board '{short_name}' not found or not exportable"))
 }
 
 /// Load all boards for gateway snapshots.
@@ -265,7 +269,10 @@ fn board_id_by_short_name(conn: &Connection, short_name: &str) -> Result<i64> {
 /// `GwBoard.title` maps to the `boards.name` display-name column.
 fn fetch_all_boards(conn: &Connection) -> Result<Vec<GwBoard>> {
     let mut stmt = conn.prepare(
-        "SELECT short_name, name FROM boards ORDER BY nsfw ASC, display_order ASC, id ASC",
+        "SELECT short_name, name
+         FROM boards
+         WHERE access_mode IN ('public', 'post_password')
+         ORDER BY nsfw ASC, display_order ASC, id ASC",
     )?;
     let rows = stmt
         .query_map([], |r| {
@@ -280,7 +287,12 @@ fn fetch_all_boards(conn: &Connection) -> Result<Vec<GwBoard>> {
 
 /// Load one board by id for gateway snapshots.
 fn fetch_boards_by_id(conn: &Connection, board_id: i64) -> Result<Vec<GwBoard>> {
-    let mut stmt = conn.prepare("SELECT short_name, name FROM boards WHERE id = ?1")?;
+    let mut stmt = conn.prepare(
+        "SELECT short_name, name
+         FROM boards
+         WHERE id = ?1
+           AND access_mode IN ('public', 'post_password')",
+    )?;
     let rows = stmt
         .query_map(rusqlite::params![board_id], |r| {
             Ok(GwBoard {
@@ -294,7 +306,12 @@ fn fetch_boards_by_id(conn: &Connection, board_id: i64) -> Result<Vec<GwBoard>> 
 
 /// Load one board by short name for gateway snapshots.
 fn fetch_boards_by_short_name(conn: &Connection, short_name: &str) -> Result<Vec<GwBoard>> {
-    let mut stmt = conn.prepare("SELECT short_name, name FROM boards WHERE short_name = ?1")?;
+    let mut stmt = conn.prepare(
+        "SELECT short_name, name
+         FROM boards
+         WHERE short_name = ?1
+           AND access_mode IN ('public', 'post_password')",
+    )?;
     let rows = stmt
         .query_map(rusqlite::params![short_name], |r| {
             Ok(GwBoard {
@@ -327,14 +344,17 @@ fn fetch_threads(
             "SELECT t.id, b.short_name, COALESCE(t.subject, ''), t.created_at,
                     (SELECT COUNT(*) FROM posts p WHERE p.thread_id = t.id), t.archived
              FROM threads t JOIN boards b ON t.board_id = b.id
-             WHERE t.board_id = ?1 AND t.archived = ?2
+             WHERE t.board_id = ?1
+               AND b.access_mode IN ('public', 'post_password')
+               AND t.archived = ?2
              ORDER BY t.id"
         }
         None => {
             "SELECT t.id, b.short_name, COALESCE(t.subject, ''), t.created_at,
                     (SELECT COUNT(*) FROM posts p WHERE p.thread_id = t.id), t.archived
              FROM threads t JOIN boards b ON t.board_id = b.id
-             WHERE t.archived = ?1
+             WHERE b.access_mode IN ('public', 'post_password')
+               AND t.archived = ?1
              ORDER BY t.id"
         }
     };
@@ -369,7 +389,8 @@ fn fetch_thread_by_id(conn: &Connection, thread_id: i64) -> Result<Vec<GwThread>
         "SELECT t.id, b.short_name, COALESCE(t.subject, ''), t.created_at,
                 (SELECT COUNT(*) FROM posts p WHERE p.thread_id = t.id), t.archived
          FROM threads t JOIN boards b ON t.board_id = b.id
-         WHERE t.id = ?1",
+         WHERE t.id = ?1
+           AND b.access_mode IN ('public', 'post_password')",
     )?;
     let rows = stmt
         .query_map(rusqlite::params![thread_id], |r| {
@@ -421,6 +442,7 @@ fn fetch_posts(
          JOIN threads t ON p.thread_id = t.id
          JOIN boards  b ON t.board_id  = b.id
          WHERE t.archived = ?1
+           AND b.access_mode IN ('public', 'post_password')
            AND p.created_at > ?2",
     );
 
@@ -495,4 +517,129 @@ fn pack_zip(
     zip.write_all(&serde_json::to_vec(metadata)?)?;
 
     finish_zip(zip)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_archive_snapshot, build_board_snapshot, build_force_refresh_snapshot,
+        build_full_snapshot, build_thread_snapshot, GwBoard, GwPost, GwThread,
+    };
+    use std::io::{Cursor, Read as _};
+
+    fn setup_pool() -> crate::db::DbPool {
+        let pool = crate::db::init_test_pool().expect("test database");
+        let conn = pool.get().expect("database connection");
+        conn.execute(
+            "INSERT INTO boards
+             (id, short_name, name, description, access_mode, access_password_hash)
+             VALUES (1, 'public', 'Public', '', 'public', ''),
+                    (2, 'secret', 'Secret', '', 'view_password', 'protected'),
+                    (3, 'posting', 'Posting', '', 'post_password', 'protected')",
+            [],
+        )
+        .expect("insert boards");
+        conn.execute(
+            "INSERT INTO threads (id, board_id, subject, archived)
+             VALUES (11, 1, 'public active', 0),
+                    (12, 1, 'public archive', 1),
+                    (21, 2, 'secret active', 0),
+                    (22, 2, 'secret archive', 1),
+                    (31, 3, 'posting active', 0),
+                    (32, 3, 'posting archive', 1)",
+            [],
+        )
+        .expect("insert threads");
+        conn.execute(
+            "INSERT INTO posts
+             (id, thread_id, board_id, name, body, body_html, deletion_token, is_op)
+             VALUES (101, 11, 1, 'public', 'public active', 'public active', 'a', 1),
+                    (102, 12, 1, 'public', 'public archive', 'public archive', 'b', 1),
+                    (201, 21, 2, 'secret', 'secret active', 'secret active', 'c', 1),
+                    (202, 22, 2, 'secret', 'secret archive', 'secret archive', 'd', 1),
+                    (301, 31, 3, 'posting', 'posting active', 'posting active', 'e', 1),
+                    (302, 32, 3, 'posting', 'posting archive', 'posting archive', 'f', 1)",
+            [],
+        )
+        .expect("insert posts");
+        drop(conn);
+        pool
+    }
+
+    fn zip_json<T: serde::de::DeserializeOwned>(bytes: &[u8], name: &str) -> T {
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("open zip");
+        let mut entry = archive.by_name(name).expect("zip entry");
+        let mut json = Vec::new();
+        entry.read_to_end(&mut json).expect("read zip entry");
+        serde_json::from_slice(&json).expect("parse zip entry")
+    }
+
+    #[test]
+    fn protected_boards_are_excluded_from_every_gateway_export() {
+        let pool = setup_pool();
+        let conn = pool.get().expect("database connection");
+
+        let (full, _) = build_full_snapshot(&conn, None).expect("full snapshot");
+        let boards: Vec<GwBoard> = zip_json(&full, "boards.json");
+        let threads: Vec<GwThread> = zip_json(&full, "threads.json");
+        let posts: Vec<GwPost> = zip_json(&full, "posts.json");
+        assert_eq!(
+            boards
+                .iter()
+                .map(|board| board.short_name.as_str())
+                .collect::<Vec<_>>(),
+            ["public", "posting"]
+        );
+        assert!(threads
+            .iter()
+            .all(|thread| matches!(thread.board.as_str(), "public" | "posting")));
+        assert!(posts
+            .iter()
+            .all(|post| matches!(post.board.as_str(), "public" | "posting")));
+
+        let (force, _) = build_force_refresh_snapshot(&conn).expect("force refresh");
+        let force_threads: Vec<GwThread> = zip_json(&force, "threads.json");
+        let force_posts: Vec<GwPost> = zip_json(&force, "posts.json");
+        assert_eq!(force_threads.len(), 4);
+        assert_eq!(force_posts.len(), 4);
+        assert!(force_threads
+            .iter()
+            .all(|thread| matches!(thread.board.as_str(), "public" | "posting")));
+        assert!(force_posts
+            .iter()
+            .all(|post| matches!(post.board.as_str(), "public" | "posting")));
+
+        assert!(build_board_snapshot(&conn, "secret", None).is_err());
+        assert!(build_thread_snapshot(&conn, 21, None).is_err());
+        assert!(build_archive_snapshot(&conn, "secret").is_err());
+
+        assert!(build_board_snapshot(&conn, "public", None).is_ok());
+        assert!(build_thread_snapshot(&conn, 11, None).is_ok());
+        assert!(build_archive_snapshot(&conn, "public").is_ok());
+        assert!(build_board_snapshot(&conn, "posting", None).is_ok());
+        assert!(build_thread_snapshot(&conn, 31, None).is_ok());
+        assert!(build_archive_snapshot(&conn, "posting").is_ok());
+    }
+
+    #[test]
+    fn protected_boards_are_excluded_from_federation_export() {
+        let pool = setup_pool();
+        let conn = pool.get().expect("database connection");
+        let (snapshot, _) =
+            crate::chan_net::snapshot::build_snapshot(&conn).expect("federation snapshot");
+        let (boards, posts, _) =
+            crate::chan_net::snapshot::unpack_snapshot(&snapshot).expect("unpack snapshot");
+
+        assert_eq!(
+            boards
+                .iter()
+                .map(|board| board.id.as_str())
+                .collect::<Vec<_>>(),
+            ["public", "posting"]
+        );
+        assert_eq!(posts.len(), 2);
+        assert!(posts
+            .iter()
+            .all(|post| matches!(post.board.as_str(), "public" | "posting")));
+    }
 }

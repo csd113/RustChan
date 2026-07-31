@@ -68,38 +68,47 @@ impl From<rusqlite::Error> for ChanError {
 
 impl From<anyhow::Error> for ChanError {
     fn from(e: anyhow::Error) -> Self {
-        Self(AppError::Internal(e))
+        Self(AppError::from(e))
     }
 }
 
 impl IntoResponse for ChanError {
     fn into_response(self) -> Response {
-        let (status, message) = match self.0 {
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
-            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
-            AppError::BannedUser { reason, .. } => (StatusCode::FORBIDDEN, reason),
-            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg),
-            AppError::UploadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg),
-            AppError::InvalidMediaType(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg),
+        let (status, message, retry_after) = match self.0 {
+            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg, None),
+            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg, None),
+            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg, None),
+            AppError::BannedUser { reason, .. } => (StatusCode::FORBIDDEN, reason, None),
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg, None),
+            AppError::UploadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg, None),
+            AppError::InvalidMediaType(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg, None),
             AppError::DbBusy => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Database busy — retry shortly.".to_owned(),
+                Some("1"),
             ),
             AppError::Internal(e) => {
                 tracing::error!("ChanNet internal error: {:?}", e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred.".to_owned(),
+                    None,
                 )
             }
             AppError::Tls(msg) => {
                 tracing::error!("ChanNet TLS error: {msg}");
-                (StatusCode::INTERNAL_SERVER_ERROR, msg)
+                (StatusCode::INTERNAL_SERVER_ERROR, msg, None)
             }
         };
 
-        (status, Json(json!({ "error": message }))).into_response()
+        let mut response = (status, Json(json!({ "error": message }))).into_response();
+        if let Some(seconds) = retry_after {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static(seconds),
+            );
+        }
+        response
     }
 }
 
@@ -165,10 +174,9 @@ async fn verify_chan_api_key(
 /// apply to the ZIP import route and vice-versa.
 ///
 /// `/chan/command` body limit (`CONFIG.chan_net_command_max_body`) must be
-/// at least 128 KiB so that a `reply_push` carrying the maximum 32,768-char
-/// content field reaches the handler's length-validation logic rather than
-/// being rejected as 413 before validation runs. The config default is
-/// `128 * 1024`. Do NOT set it below `34_000` bytes.
+/// large enough that a `reply_push` carrying the maximum 32,768 Unicode scalar
+/// values plus JSON escaping and envelope overhead reaches semantic validation
+/// rather than being rejected as 413 first. The config default is `512 * 1024`.
 pub fn chan_router(state: AppState) -> Router {
     chan_router_with_auth(
         state,
@@ -178,7 +186,7 @@ pub fn chan_router(state: AppState) -> Router {
     )
 }
 
-fn chan_router_with_auth(
+pub fn chan_router_with_auth(
     state: AppState,
     api_key: Arc<str>,
     command_max_body: usize,
@@ -200,7 +208,9 @@ fn chan_router_with_auth(
         .route("/chan/export", post(export::chan_export))
         .route(
             "/chan/import",
-            post(import::chan_import).layer(DefaultBodyLimit::max(import_max_body)),
+            post(import::chan_import)
+                .layer(DefaultBodyLimit::max(import_max_body))
+                .layer(middleware::from_fn(json_body_limit_error)),
         )
         .route("/chan/refresh", post(refresh::chan_refresh))
         .route("/chan/poll", post(poll::chan_poll))
@@ -211,16 +221,22 @@ fn chan_router_with_auth(
         .route("/chan/status", get(status::chan_status))
         .merge(protected_routes)
         .with_state(state)
+        .layer(middleware::from_fn(
+            crate::server::request_boundary_middleware,
+        ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::chan_router_with_auth;
     use axum::{
-        body::Body,
+        body::{to_bytes, Body},
         http::{header, Request, StatusCode},
     };
-    use std::sync::Arc;
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
     use tower::ServiceExt as _;
 
     const TEST_KEY: &str = "0123456789abcdef0123456789abcdef";
@@ -234,7 +250,91 @@ mod tests {
     }
 
     fn chan_test_router(state: crate::middleware::AppState) -> axum::Router {
-        chan_router_with_auth(state, Arc::from(TEST_KEY), 128 * 1024, 10 * 1024 * 1024)
+        chan_router_with_auth(state, Arc::from(TEST_KEY), 512 * 1024, 10 * 1024 * 1024)
+    }
+
+    fn with_single_connection_pool(
+        mut state: crate::middleware::AppState,
+        connection_timeout: Duration,
+    ) -> crate::middleware::AppState {
+        let database_path: String = {
+            let conn = state.db.get().expect("initial connection");
+            conn.query_row(
+                "SELECT file FROM pragma_database_list WHERE name = 'main'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("test database path")
+        };
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(database_path).with_init(|conn| {
+            conn.execute_batch(
+                "PRAGMA foreign_keys = ON;
+                     PRAGMA busy_timeout = 25;",
+            )
+        });
+        state.db = r2d2::Pool::builder()
+            .max_size(1)
+            .connection_timeout(connection_timeout)
+            .build(manager)
+            .expect("single-connection pool");
+        state
+    }
+
+    fn seed_command_thread(state: &crate::middleware::AppState) -> i64 {
+        let conn = state.db.get().expect("db connection");
+        conn.execute(
+            "INSERT INTO boards (short_name, name, description)
+             VALUES ('gateway', 'Gateway', '')",
+            [],
+        )
+        .expect("insert board");
+        let board_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO threads (board_id, subject) VALUES (?1, 'gateway thread')",
+            rusqlite::params![board_id],
+        )
+        .expect("insert thread");
+        conn.last_insert_rowid()
+    }
+
+    async fn command_request(
+        router: &axum::Router,
+        payload: serde_json::Value,
+    ) -> axum::response::Response {
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chan/command")
+                    .header("X-ChanNet-Key", TEST_KEY)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&payload).expect("serialise command"),
+                    ))
+                    .expect("command request"),
+            )
+            .await
+            .expect("command response")
+    }
+
+    async fn assert_json_payload_too_large(response: axum::response::Response) {
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(response.into_body(), 1024)
+            .await
+            .expect("read error response");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("JSON error");
+        assert_eq!(
+            json.get("error").and_then(serde_json::Value::as_str),
+            Some("Request body too large")
+        );
     }
 
     #[tokio::test]
@@ -331,5 +431,420 @@ mod tests {
             .await
             .expect("import response");
         assert_eq!(import.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn command_accepts_legal_ascii_and_unicode_limits_and_rejects_replays() {
+        let state = chan_test_state();
+        let thread_id = seed_command_thread(&state);
+        let router = chan_test_router(state.clone());
+
+        let unicode = serde_json::json!({
+            "type": "reply_push",
+            "board": "gateway",
+            "thread_id": thread_id,
+            "author": "🦀".repeat(100),
+            "content": "🦀".repeat(32_768),
+            "timestamp": 100_u64,
+        });
+        let first = command_request(&router, unicode.clone()).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let replay = command_request(&router, unicode).await;
+        assert_eq!(replay.status(), StatusCode::CONFLICT);
+
+        let exact = command_request(
+            &router,
+            serde_json::json!({
+                "type": "reply_push",
+                "board": "gateway",
+                "thread_id": thread_id,
+                "author": "gateway",
+                "content": "a".repeat(32_768),
+                "timestamp": 101_u64,
+            }),
+        )
+        .await;
+        assert_eq!(exact.status(), StatusCode::OK);
+
+        let over = command_request(
+            &router,
+            serde_json::json!({
+                "type": "reply_push",
+                "board": "gateway",
+                "thread_id": thread_id,
+                "author": "gateway",
+                "content": "a".repeat(32_769),
+                "timestamp": 102_u64,
+            }),
+        )
+        .await;
+        assert_eq!(over.status(), StatusCode::BAD_REQUEST);
+
+        let exact_author = command_request(
+            &router,
+            serde_json::json!({
+                "type": "reply_push",
+                "board": "gateway",
+                "thread_id": thread_id,
+                "author": "界".repeat(255),
+                "content": "valid author boundary",
+                "timestamp": 103_u64,
+            }),
+        )
+        .await;
+        assert_eq!(exact_author.status(), StatusCode::OK);
+
+        let over_author = command_request(
+            &router,
+            serde_json::json!({
+                "type": "reply_push",
+                "board": "gateway",
+                "thread_id": thread_id,
+                "author": "界".repeat(256),
+                "content": "invalid author boundary",
+                "timestamp": 104_u64,
+            }),
+        )
+        .await;
+        assert_eq!(over_author.status(), StatusCode::BAD_REQUEST);
+
+        let conn = state.db.get().expect("db connection");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )
+            .expect("reply count");
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn command_uses_stable_message_ids_without_merging_identical_replies() {
+        let state = chan_test_state();
+        let thread_id = seed_command_thread(&state);
+        let router = chan_test_router(state.clone());
+        let first_id = "00000000-0000-4000-8000-000000000001";
+        let second_id = "00000000-0000-4000-8000-000000000002";
+
+        let request = |message_id: &str, author: &str, content: &str, timestamp: u64| {
+            serde_json::json!({
+                "type": "reply_push",
+                "board": "gateway",
+                "thread_id": thread_id,
+                "author": author,
+                "content": content,
+                "timestamp": timestamp,
+                "message_id": message_id,
+            })
+        };
+
+        let first = command_request(
+            &router,
+            request(first_id, "gateway", "same legitimate reply", 100),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let distinct = command_request(
+            &router,
+            request(second_id, "gateway", "same legitimate reply", 100),
+        )
+        .await;
+        assert_eq!(distinct.status(), StatusCode::OK);
+
+        let replay = command_request(
+            &router,
+            request(first_id, "changed author", "changed body", 999),
+        )
+        .await;
+        assert_eq!(replay.status(), StatusCode::CONFLICT);
+
+        let conn = state.db.get().expect("db connection");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )
+            .expect("reply count");
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn command_accepts_json_escaped_unicode_at_legal_limit() {
+        let state = chan_test_state();
+        let thread_id = seed_command_thread(&state);
+        let router = chan_test_router(state.clone());
+
+        // Some JSON clients encode a four-byte scalar value as a UTF-16
+        // surrogate pair. That representation is twelve wire bytes per
+        // character and must still fit beneath the default transport cap.
+        let escaped_content = "\\ud83e\\udd80".repeat(32_768);
+        let escaped_exact = format!(
+            r#"{{"type":"reply_push","board":"gateway","thread_id":{thread_id},"author":"gateway","content":"{escaped_content}","timestamp":105}}"#
+        );
+        let escaped_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chan/command")
+                    .header("X-ChanNet-Key", TEST_KEY)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(escaped_exact))
+                    .expect("escaped command request"),
+            )
+            .await
+            .expect("escaped command response");
+        assert_eq!(escaped_response.status(), StatusCode::OK);
+
+        let escaped_over_content = format!("{escaped_content}\\ud83e\\udd80");
+        let escaped_over = format!(
+            r#"{{"type":"reply_push","board":"gateway","thread_id":{thread_id},"author":"gateway","content":"{escaped_over_content}","timestamp":106}}"#
+        );
+        let escaped_over_response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chan/command")
+                    .header("X-ChanNet-Key", TEST_KEY)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(escaped_over))
+                    .expect("escaped over-limit command request"),
+            )
+            .await
+            .expect("escaped over-limit command response");
+        assert_eq!(escaped_over_response.status(), StatusCode::BAD_REQUEST);
+
+        let conn = state.db.get().expect("db connection");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )
+            .expect("reply count");
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn command_write_contention_is_bounded_and_returns_retry_contract() {
+        let state = chan_test_state();
+        let thread_id = seed_command_thread(&state);
+        let router = chan_test_router(state.clone());
+        let lock = state.db.get().expect("write-lock connection");
+        lock.execute_batch("BEGIN IMMEDIATE")
+            .expect("hold database write lock");
+
+        let started = Instant::now();
+        let response = command_request(
+            &router,
+            serde_json::json!({
+                "type": "reply_push",
+                "board": "gateway",
+                "thread_id": thread_id,
+                "author": "gateway",
+                "content": "contended reply",
+                "timestamp": 200_u64,
+            }),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "busy response took {elapsed:?}"
+        );
+        lock.execute_batch("ROLLBACK").expect("release write lock");
+
+        let conn = state.db.get().expect("verification connection");
+        let post_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )
+            .expect("reply count");
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .expect("database integrity");
+        assert_eq!(post_count, 0);
+        assert_eq!(integrity, "ok");
+    }
+
+    #[tokio::test]
+    async fn command_pool_exhaustion_is_bounded_and_returns_retry_contract() {
+        let state = with_single_connection_pool(chan_test_state(), Duration::from_millis(25));
+        let thread_id = seed_command_thread(&state);
+        let router = chan_test_router(state.clone());
+        let held_connection = state.db.get().expect("exhaust the only pool slot");
+
+        let started = Instant::now();
+        let response = command_request(
+            &router,
+            serde_json::json!({
+                "type": "reply_push",
+                "board": "gateway",
+                "thread_id": thread_id,
+                "author": "gateway",
+                "content": "pool-exhausted reply",
+                "timestamp": 201_u64,
+            }),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "pool exhaustion response took {elapsed:?}"
+        );
+
+        drop(held_connection);
+        let conn = state.db.get().expect("verification connection");
+        let post_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )
+            .expect("reply count");
+        assert_eq!(post_count, 0);
+    }
+
+    #[tokio::test]
+    async fn command_and_import_bodies_at_exact_limit_reach_semantic_validation() {
+        const BODY_LIMIT: usize = 128;
+
+        let state = chan_test_state();
+        let router = chan_router_with_auth(state, Arc::from(TEST_KEY), BODY_LIMIT, BODY_LIMIT);
+        let prefix = br#"{"type":"unsupported_command","padding":""#;
+        let suffix = br#""}"#;
+        let padding_len = BODY_LIMIT
+            .checked_sub(prefix.len() + suffix.len())
+            .expect("test command envelope fits body limit");
+        let mut body = Vec::with_capacity(BODY_LIMIT);
+        body.extend_from_slice(prefix);
+        body.extend(std::iter::repeat_n(b'x', padding_len));
+        body.extend_from_slice(suffix);
+        assert_eq!(body.len(), BODY_LIMIT);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chan/command")
+                    .header("X-ChanNet-Key", TEST_KEY)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("exact-limit command request"),
+            )
+            .await
+            .expect("exact-limit command response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(response.into_body(), 2048)
+            .await
+            .expect("read semantic error response");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("JSON error");
+        assert!(json
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message| message.contains("unsupported_command")));
+
+        let import = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chan/import")
+                    .header("X-ChanNet-Key", TEST_KEY)
+                    .header(header::CONTENT_TYPE, "application/zip")
+                    .body(Body::from(vec![0_u8; BODY_LIMIT]))
+                    .expect("exact-limit import request"),
+            )
+            .await
+            .expect("exact-limit import response");
+
+        assert_eq!(import.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            import
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(import.into_body(), 2048)
+            .await
+            .expect("read invalid ZIP error response");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("JSON error");
+        assert!(json
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message| !message.is_empty() && message != "Request body too large"));
+    }
+
+    #[tokio::test]
+    async fn command_and_import_body_limits_return_json_413() {
+        let state = chan_test_state();
+        let router = chan_router_with_auth(state, Arc::from(TEST_KEY), 128, 128);
+
+        let command = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chan/command")
+                    .header("X-ChanNet-Key", TEST_KEY)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "type": "full_export",
+                            "padding": "x".repeat(256),
+                        }))
+                        .expect("serialise oversized command"),
+                    ))
+                    .expect("oversized command request"),
+            )
+            .await
+            .expect("oversized command response");
+        assert_json_payload_too_large(command).await;
+
+        let import = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chan/import")
+                    .header("X-ChanNet-Key", TEST_KEY)
+                    .header(header::CONTENT_TYPE, "application/zip")
+                    .body(Body::from(vec![0_u8; 129]))
+                    .expect("oversized import request"),
+            )
+            .await
+            .expect("oversized import response");
+        assert_json_payload_too_large(import).await;
     }
 }

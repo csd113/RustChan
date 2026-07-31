@@ -11,7 +11,8 @@ use super::{
     assets::{serve_admin_css, serve_admin_js, serve_css, serve_main_js, serve_theme_init_js},
     headers::{
         admin_cache_middleware, hsts_middleware_with_mode, public_cache_middleware,
-        safe_timeout_middleware, text_response_compression_predicate, CONTENT_SECURITY_POLICY,
+        request_boundary_middleware, safe_timeout_middleware, text_response_compression_predicate,
+        CONTENT_SECURITY_POLICY,
     },
     lifecycle::track_requests,
     onion_location_middleware,
@@ -106,6 +107,9 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
             state.clone(),
             onion_location_middleware,
         ))
+        // Keep framing and header validation outermost so malformed requests
+        // never reach authentication, form, or upload handlers.
+        .layer(axum_middleware::from_fn(request_boundary_middleware))
         .with_state(state)
 }
 

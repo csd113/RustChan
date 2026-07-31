@@ -136,14 +136,18 @@ On first run, RustChan creates `<exe-dir>/rustchan-data/settings.toml`, the data
 
 Helpful notes:
 
-- HTTPS is enabled by default on `https://localhost:8443` with a self-signed development certificate. Your browser will complain locally, which is normal.
+- HTTPS is disabled in the generated configuration. For local testing, set `[tls].enabled = true` to use `https://localhost:8443` with a self-signed development certificate; your browser will warn about that certificate.
 - On Windows, the binary is `target/release/rustchan-cli.exe`.
 - If you want another port, pass `--port`, for example `./target/release/rustchan-cli --port 9090`.
+- For a service installation, pass an absolute data root such as `--data-dir /var/lib/rustchan`.
 - If you want the optional second listener, add `--chan-net`.
 
 ## Configuration And Data
 
-RustChan keeps its runtime state in `<exe-dir>/rustchan-data/` next to the binary. The live process reads `settings.toml` from that directory, not from the current working directory.
+By default, RustChan keeps its runtime state in `<exe-dir>/rustchan-data/` next
+to the binary. Pass `--data-dir /absolute/path` to select a different complete
+runtime root. The live process reads `settings.toml` from the selected data
+directory, not from the current working directory.
 
 ```text
 rustchan-data/
@@ -188,7 +192,7 @@ Worth knowing:
 
 - These stay TOML-owned at runtime: ports, Tor, arbitrary-file upload gate, ffmpeg/ffprobe paths, backup cadence, and other operational toggles.
 - `CHAN_*` environment variables still override the matching values from `settings.toml` at runtime.
-- When testing a copied or temporary binary, edit that binary's adjacent `rustchan-data/settings.toml`; do not rely on a cwd-local decoy file.
+- Without `--data-dir`, a copied or temporary binary uses its adjacent `rustchan-data/settings.toml`; do not rely on a cwd-local decoy file.
 - `enable_tor_support` is on by default in the generated config.
 - `tor_only = true` makes RustChan bind to loopback only and serve through Tor.
 - `require_ffmpeg = true` makes startup fail if `ffmpeg` is missing.
@@ -258,6 +262,12 @@ The ChanNet interface is text-only by design and exposes endpoints for:
 - refreshing from a remote peer
 - polling for new content
 - a typed JSON command gateway for RustWave
+
+New ChanNet gateways should include a stable, globally unique UUID
+`message_id` with every `reply_push`. RustChan uses it as the durable replay
+key. The field remains optional for older gateways, whose legacy
+content-and-timestamp fingerprint cannot distinguish identical replies created
+within the same timestamp second.
 
 If you are not using federation, keep it off or firewall it properly.
 

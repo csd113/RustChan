@@ -317,6 +317,7 @@ pub async fn delete_backup(
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    let _maintenance_guard = state.maintenance_gate.try_begin("Saved backup deletion")?;
 
     let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
 

@@ -30,6 +30,13 @@ pub use server::{ACTIVE_IPS, ACTIVE_UPLOADS, IN_FLIGHT, REQUEST_COUNT, SPINNER_T
 // Re-export cleanup so main.rs panic hook can call it without a long path.
 pub use console::cleanup;
 
+pub async fn request_boundary_middleware(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    server::secondary_listener_request_boundary(request, next).await
+}
+
 pub fn parent_dir_or_current(path: &Path) -> PathBuf {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),

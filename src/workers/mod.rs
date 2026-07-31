@@ -32,6 +32,7 @@ use crate::config::CONFIG;
 use crate::db::DbPool;
 use anyhow::{Context as _, Result};
 use dashmap::DashMap;
+use rusqlite::OptionalExtension as _;
 use serde::{Deserialize, Serialize};
 use std::num::NonZero;
 use std::path::PathBuf;
@@ -286,6 +287,367 @@ pub fn start_worker_pool(
 
 // ─── Worker loop ─────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
+enum JobCompletion {
+    Done,
+    Stale,
+    Failed(String),
+}
+
+enum CompletionRecovery {
+    Resolved(Option<crate::db::JobFailureState>),
+    Retry,
+}
+
+#[cfg(not(test))]
+const COMPLETION_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const COMPLETION_SHUTDOWN_GRACE: Duration = Duration::from_millis(200);
+
+fn persist_job_completion_once(
+    pool: &DbPool,
+    job_id: i64,
+    media_post_id: Option<i64>,
+    completion: &JobCompletion,
+) -> Result<Option<crate::db::JobFailureState>> {
+    let conn = pool.get().map_err(anyhow::Error::from)?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Failed to begin background-job completion transaction")?;
+
+    let result: Result<Option<crate::db::JobFailureState>> = (|| match completion {
+        JobCompletion::Done => {
+            crate::db::complete_job(&conn, job_id)?;
+            if let Some(post_id) = media_post_id {
+                crate::db::set_post_media_processing_state(&conn, post_id, None, None)?;
+            }
+            Ok(None)
+        }
+        JobCompletion::Stale => {
+            // A stale media job can refer to an older file while a newer job is
+            // pending for the same post. Completing the obsolete job must not
+            // clear the newer job's processing state.
+            crate::db::complete_job(&conn, job_id)?;
+            Ok(None)
+        }
+        JobCompletion::Failed(error) => {
+            let failure_state = crate::db::fail_job(&conn, job_id, error)?;
+            if let Some(post_id) = media_post_id {
+                match failure_state {
+                    crate::db::JobFailureState::Retrying => {
+                        crate::db::set_post_media_processing_state(
+                            &conn,
+                            post_id,
+                            Some(crate::db::MEDIA_PROCESSING_PENDING),
+                            None,
+                        )?;
+                    }
+                    crate::db::JobFailureState::PermanentlyFailed => {
+                        crate::db::set_post_media_processing_state(
+                            &conn,
+                            post_id,
+                            Some(crate::db::MEDIA_PROCESSING_FAILED),
+                            Some(error),
+                        )?;
+                    }
+                }
+            }
+            Ok(Some(failure_state))
+        }
+    })();
+
+    match result {
+        Ok(failure_state) => {
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(error).context("Failed to commit background-job completion");
+            }
+            Ok(failure_state)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn completion_error_is_transient(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .is_some_and(|sqlite_error| {
+                matches!(
+                    sqlite_error,
+                    rusqlite::Error::SqliteFailure(code, _)
+                        if matches!(
+                            code.code,
+                            rusqlite::ErrorCode::DatabaseBusy
+                                | rusqlite::ErrorCode::DatabaseLocked
+                        )
+                )
+            })
+            || cause
+                .downcast_ref::<r2d2::Error>()
+                .is_some_and(|pool_error| {
+                    let message = pool_error.to_string();
+                    message.contains("timed out") || message.contains("Timeout")
+                })
+    })
+}
+
+fn recover_job_after_completion_error_once(
+    pool: &DbPool,
+    job_id: i64,
+    media_post_id: Option<i64>,
+    completion: &JobCompletion,
+    completion_error: &str,
+) -> Result<Option<crate::db::JobFailureState>> {
+    let conn = pool.get().map_err(anyhow::Error::from)?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Failed to begin background-job recovery transaction")?;
+    let recovery_message: String = match completion {
+        JobCompletion::Done => format!(
+            "Work completed, but completion persistence failed; refusing to replay: \
+             {completion_error}"
+        ),
+        JobCompletion::Stale => format!(
+            "Stale work was discarded, but completion persistence failed; refusing to replay: \
+             {completion_error}"
+        ),
+        JobCompletion::Failed(job_error) => {
+            format!("{job_error}; completion persistence failed: {completion_error}")
+        }
+    }
+    .chars()
+    .take(512)
+    .collect();
+    let result: Result<Option<crate::db::JobFailureState>> = (|| {
+        let status = conn
+            .query_row(
+                "SELECT status FROM background_jobs WHERE id = ?1",
+                rusqlite::params![job_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if status.as_deref() != Some("running") {
+            return Ok(None);
+        }
+
+        let failure_state = match completion {
+            JobCompletion::Done | JobCompletion::Stale => {
+                // The external work has already succeeded (or was proven stale).
+                // Re-queueing it could repeat a non-idempotent mutation, so retain
+                // the attempt count and force a safe terminal state.
+                conn.execute(
+                    "UPDATE background_jobs
+                     SET status = 'failed',
+                         last_error = ?2,
+                         updated_at = unixepoch()
+                     WHERE id = ?1 AND status = 'running'",
+                    rusqlite::params![job_id, recovery_message],
+                )?;
+                if matches!(completion, JobCompletion::Done) {
+                    if let Some(post_id) = media_post_id {
+                        crate::db::set_post_media_processing_state(&conn, post_id, None, None)?;
+                    }
+                }
+                crate::db::JobFailureState::PermanentlyFailed
+            }
+            JobCompletion::Failed(_) => {
+                // The work itself failed, so the normal bounded retry policy is
+                // still safe. fail_job intentionally preserves the attempt count.
+                let failure_state = crate::db::fail_job(&conn, job_id, &recovery_message)?;
+                if let Some(post_id) = media_post_id {
+                    match failure_state {
+                        crate::db::JobFailureState::Retrying => {
+                            crate::db::set_post_media_processing_state(
+                                &conn,
+                                post_id,
+                                Some(crate::db::MEDIA_PROCESSING_PENDING),
+                                None,
+                            )?;
+                        }
+                        crate::db::JobFailureState::PermanentlyFailed => {
+                            crate::db::set_post_media_processing_state(
+                                &conn,
+                                post_id,
+                                Some(crate::db::MEDIA_PROCESSING_FAILED),
+                                Some(&recovery_message),
+                            )?;
+                        }
+                    }
+                }
+                failure_state
+            }
+        };
+        Ok(Some(failure_state))
+    })();
+
+    match result {
+        Ok(failure_state) => {
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(error).context("Failed to commit background-job recovery");
+            }
+            Ok(failure_state)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn completion_retry_delay(consecutive_errors: u32) -> Duration {
+    let exponent = consecutive_errors.min(5);
+    Duration::from_millis(50_u64.saturating_mul(1_u64 << exponent).min(1_000))
+}
+
+fn resolved_completion_recovery(
+    worker_id: usize,
+    job_id: i64,
+    failure_state: Option<crate::db::JobFailureState>,
+) -> CompletionRecovery {
+    match failure_state {
+        Some(crate::db::JobFailureState::Retrying) => {
+            warn!("Worker {worker_id}: retained job #{job_id} for a bounded retry after its work failed");
+            CompletionRecovery::Resolved(Some(crate::db::JobFailureState::Retrying))
+        }
+        Some(crate::db::JobFailureState::PermanentlyFailed) => {
+            warn!(
+                "Worker {worker_id}: moved job #{job_id} to a safe terminal state after a non-transient completion error"
+            );
+            CompletionRecovery::Resolved(Some(crate::db::JobFailureState::PermanentlyFailed))
+        }
+        None => {
+            warn!("Worker {worker_id}: job #{job_id} was already resolved while persisting completion");
+            CompletionRecovery::Resolved(None)
+        }
+    }
+}
+
+fn failed_completion_recovery(
+    worker_id: usize,
+    job_id: i64,
+    original_error: &str,
+    error: anyhow::Error,
+) -> Result<CompletionRecovery> {
+    if completion_error_is_transient(&error) {
+        error!("Worker {worker_id}: temporary error recovering job #{job_id}: {error}");
+        return Ok(CompletionRecovery::Retry);
+    }
+    Err(error).with_context(|| {
+        format!("Could not return job {job_id} to a recoverable state after: {original_error}")
+    })
+}
+
+async fn recover_non_transient_completion_error(
+    worker_id: usize,
+    pool: &DbPool,
+    job_id: i64,
+    media_post_id: Option<i64>,
+    completion: &JobCompletion,
+    completion_error: anyhow::Error,
+) -> Result<CompletionRecovery> {
+    let recovery_pool = pool.clone();
+    let recovery_completion = completion.clone();
+    let original_error = completion_error.to_string();
+    let recovery_error = original_error.clone();
+    let recovery_result = tokio::task::spawn_blocking(move || {
+        recover_job_after_completion_error_once(
+            &recovery_pool,
+            job_id,
+            media_post_id,
+            &recovery_completion,
+            &recovery_error,
+        )
+    })
+    .await
+    .map_err(|join_error| {
+        anyhow::anyhow!("Worker {worker_id}: recovery task for job #{job_id} failed: {join_error}")
+    })
+    .and_then(std::convert::identity);
+
+    match recovery_result {
+        Ok(failure_state) => Ok(resolved_completion_recovery(
+            worker_id,
+            job_id,
+            failure_state,
+        )),
+        Err(error) => failed_completion_recovery(worker_id, job_id, &original_error, error),
+    }
+}
+
+async fn persist_job_completion(
+    worker_id: usize,
+    pool: DbPool,
+    job_id: i64,
+    media_post_id: Option<i64>,
+    completion: JobCompletion,
+    cancel: CancellationToken,
+) -> Result<Option<crate::db::JobFailureState>> {
+    let mut consecutive_errors = 0_u32;
+    let mut shutdown_deadline = cancel
+        .is_cancelled()
+        .then(|| tokio::time::Instant::now() + COMPLETION_SHUTDOWN_GRACE);
+    loop {
+        let attempt_pool = pool.clone();
+        let attempt_completion = completion.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            persist_job_completion_once(&attempt_pool, job_id, media_post_id, &attempt_completion)
+        })
+        .await;
+
+        let error = match result {
+            Ok(Ok(failure_state)) => return Ok(failure_state),
+            Ok(Err(error)) => error,
+            Err(join_error) => anyhow::anyhow!(
+                "Worker {worker_id}: completion task for job #{job_id} failed: {join_error}"
+            ),
+        };
+        error!("Worker {worker_id}: failed to persist completion for job #{job_id}: {error}");
+
+        if !completion_error_is_transient(&error) {
+            match recover_non_transient_completion_error(
+                worker_id,
+                &pool,
+                job_id,
+                media_post_id,
+                &completion,
+                error,
+            )
+            .await?
+            {
+                CompletionRecovery::Resolved(failure_state) => return Ok(failure_state),
+                CompletionRecovery::Retry => {}
+            }
+        }
+
+        if shutdown_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            anyhow::bail!(
+                "Timed out persisting completion for job {job_id} during graceful shutdown"
+            );
+        }
+
+        let delay = completion_retry_delay(consecutive_errors);
+        consecutive_errors = consecutive_errors.saturating_add(1);
+        if shutdown_deadline.is_some() {
+            sleep(delay).await;
+        } else {
+            tokio::select! {
+                () = sleep(delay) => {}
+                () = cancel.cancelled() => {
+                    shutdown_deadline =
+                        Some(tokio::time::Instant::now() + COMPLETION_SHUTDOWN_GRACE);
+                }
+            }
+        }
+    }
+}
+
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "claim, execution, completion persistence, retry, and shutdown form one worker state machine"
+)]
 async fn worker_loop(
     id: usize,
     queue: Arc<JobQueue>,
@@ -321,30 +683,31 @@ async fn worker_loop(
                     Ok(job) => job,
                     Err(error) => {
                         error!("Worker {id}: cannot deserialize job #{job_id}: {error}");
-                        let pool_done = queue.pool.clone();
                         let err_msg = format!("Cannot deserialize job payload: {error}");
-                        let db_result = tokio::task::spawn_blocking(
-                            move || -> Result<crate::db::JobFailureState> {
-                                let c = pool_done.get().map_err(anyhow::Error::from)?;
-                                crate::db::fail_job(&c, job_id, &err_msg)
-                            },
+                        match persist_job_completion(
+                            id,
+                            queue.pool.clone(),
+                            job_id,
+                            None,
+                            JobCompletion::Failed(err_msg),
+                            queue.cancel.clone(),
                         )
-                        .await;
-                        match db_result {
-                            Ok(Ok(failure_state)) => {
+                        .await
+                        {
+                            Ok(Some(failure_state)) => {
                                 queue.mark_job_failure_state(failure_state);
                             }
-                            Ok(Err(db_error)) => {
-                                error!("Worker {id}: failed to mark broken job #{job_id} as failed: {db_error}");
-                            }
-                            Err(join_error) => {
-                                error!("Worker {id}: failed to join broken job #{job_id} status update: {join_error}");
+                            Ok(None) => {}
+                            Err(error) => {
+                                error!(
+                                    "Worker {id}: could not resolve broken job #{job_id}: {error}"
+                                );
+                                return;
                             }
                         }
                         continue;
                     }
                 };
-                let pool_done = queue.pool.clone();
                 let media_post_id = media_job_post_id(&job);
                 let result = handle_job(
                     job,
@@ -356,78 +719,36 @@ async fn worker_loop(
                     std::sync::Arc::clone(&queue.active_video_jobs),
                 )
                 .await;
-                // Previously pool_done.get() failures were
-                // silently ignored (if let Ok(c) = ...), leaving the job row
-                // permanently stuck in "running" — claim_next_job only claims
-                // "pending" rows, so it would never be retried or cleaned up.
-                // We now propagate the error into the back-off path so the
-                // worker retries acquiring a connection, and we log explicitly
-                // so operators can see pool exhaustion events.
-                let db_result = tokio::task::spawn_blocking(
-                    move || -> Result<Option<crate::db::JobFailureState>> {
-                        let c = pool_done.get().map_err(anyhow::Error::from)?;
-                        match result {
-                            Ok(()) => {
-                                crate::db::complete_job(&c, job_id)?;
-                                if let Some(post_id) = media_post_id {
-                                    crate::db::set_post_media_processing_state(
-                                        &c, post_id, None, None,
-                                    )?;
-                                }
-                                Ok(None)
-                            }
-                            Err(e) if crate::db::is_stale_media_target_error(&e) => {
-                                warn!("Worker {id}: job #{job_id} target is stale — {e}");
-                                crate::db::complete_job(&c, job_id)?;
-                                Ok(None)
-                            }
-                            Err(e) => {
-                                warn!("Worker {id}: job #{job_id} failed — {e}");
-                                let failure_state =
-                                    crate::db::fail_job(&c, job_id, &e.to_string())?;
-                                if let Some(post_id) = media_post_id {
-                                    match failure_state {
-                                        crate::db::JobFailureState::Retrying => {
-                                            crate::db::set_post_media_processing_state(
-                                                &c,
-                                                post_id,
-                                                Some(crate::db::MEDIA_PROCESSING_PENDING),
-                                                None,
-                                            )?;
-                                        }
-                                        crate::db::JobFailureState::PermanentlyFailed => {
-                                            crate::db::set_post_media_processing_state(
-                                                &c,
-                                                post_id,
-                                                Some(crate::db::MEDIA_PROCESSING_FAILED),
-                                                Some(&e.to_string()),
-                                            )?;
-                                        }
-                                    }
-                                }
-                                Ok(Some(failure_state))
-                            }
-                        }
-                    },
+                let completion = match result {
+                    Ok(()) => JobCompletion::Done,
+                    Err(error) if crate::db::is_stale_media_target_error(&error) => {
+                        warn!("Worker {id}: job #{job_id} target is stale — {error}");
+                        JobCompletion::Stale
+                    }
+                    Err(error) => {
+                        warn!("Worker {id}: job #{job_id} failed — {error}");
+                        JobCompletion::Failed(error.to_string())
+                    }
+                };
+                match persist_job_completion(
+                    id,
+                    queue.pool.clone(),
+                    job_id,
+                    media_post_id,
+                    completion,
+                    queue.cancel.clone(),
                 )
-                .await;
-                match db_result {
-                    Ok(Ok(failure_state)) => {
-                        if let Some(failure_state) = failure_state {
-                            queue.mark_job_failure_state(failure_state);
-                        }
+                .await
+                {
+                    Ok(Some(failure_state)) => {
+                        queue.mark_job_failure_state(failure_state);
                     }
-                    Ok(Err(e)) => {
-                        error!("Worker {id}: failed to update completion status for job #{job_id}: {e}");
-                        let delay = backoff_duration(consecutive_errors);
-                        consecutive_errors = consecutive_errors.saturating_add(1);
-                        tokio::select! {
-                            () = sleep(delay) => {}
-                            () = queue.cancel.cancelled() => { return; }
-                        }
-                    }
-                    Err(join_err) => {
-                        error!("Worker {id}: spawn_blocking panicked during job #{job_id} completion: {join_err}");
+                    Ok(None) => {}
+                    Err(error) => {
+                        error!(
+                            "Worker {id}: could not resolve completion for job #{job_id}: {error}"
+                        );
+                        return;
                     }
                 }
             }
@@ -486,6 +807,10 @@ fn backoff_duration(consecutive_errors: u32) -> Duration {
 
 // ─── Job dispatch ─────────────────────────────────────────────────────────────
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "the dispatcher mirrors the closed set of background job variants"
+)]
 async fn handle_job(
     job: Job,
     ffmpeg_available: bool,
@@ -612,6 +937,10 @@ const fn media_job_post_id(job: &Job) -> Option<i64> {
 /// immediately. No blocking thread is held during the wait.
 ///
 /// A hard timeout of the live `ffmpeg_timeout_secs` setting is applied.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "transcode process control and fail-closed cleanup share one lifecycle"
+)]
 async fn transcode_video(
     post_id: i64,
     file_path: String,
@@ -722,6 +1051,10 @@ type TranscodePrepareParts = (
     tempfile::NamedTempFile,
 );
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "source validation and codec-specific preparation share one preflight boundary"
+)]
 fn transcode_video_prepare(
     post_id: i64,
     file_path: &str,
@@ -1187,10 +1520,34 @@ fn waveform_finalise(
     tmp_png
         .persist(png_abs)
         .context("Failed to atomically rename waveform PNG into place")?;
-    let conn = pool.get()?;
-    if let Err(error) =
-        crate::db::update_post_thumb_path(&conn, post_id, expected_file_path, png_rel)
-    {
+    let result: Result<()> = (|| {
+        let audio_sha256 = sha256_file_hex(src_path)?;
+        let conn = pool.get()?;
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .context("Failed to begin waveform persistence transaction")?;
+        let db_result: Result<()> = (|| {
+            crate::db::update_post_thumb_path(&conn, post_id, expected_file_path, png_rel)?;
+            conn.execute(
+                "UPDATE file_hashes SET thumb_path = ?1 WHERE sha256 = ?2",
+                rusqlite::params![png_rel, audio_sha256],
+            )?;
+            Ok(())
+        })();
+        match db_result {
+            Ok(()) => {
+                if let Err(error) = conn.execute_batch("COMMIT") {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(error).context("Failed to commit waveform persistence");
+                }
+                Ok(())
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    })();
+    if let Err(error) = result {
         if let Err(cleanup_error) = std::fs::remove_file(png_abs) {
             warn!(
                 output = %png_abs.display(),
@@ -1200,12 +1557,6 @@ fn waveform_finalise(
         }
         return Err(error);
     }
-    // update dedup record with final thumb path.
-    let audio_sha256 = sha256_file_hex(src_path)?;
-    let _ = conn.execute(
-        "UPDATE file_hashes SET thumb_path = ?1 WHERE sha256 = ?2",
-        rusqlite::params![png_rel, audio_sha256],
-    );
 
     tracing::info!(target: "workers", post_id = post_id, thumb = %png_rel, "AudioWaveform done");
     Ok(())
@@ -1233,6 +1584,10 @@ fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
 
 // ─── ThreadPrune ─────────────────────────────────────────────────────────────
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "archive, prune, and filesystem finalization remain one consistency operation"
+)]
 async fn prune_threads(
     board_id: i64,
     board_short: String,
@@ -1408,11 +1763,13 @@ pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
 #[cfg(test)]
 mod tests {
     use super::{
-        persist_transcoded_webm, transcode_video_finalise, transcoded_webm_name,
-        validated_board_media_file, video_reencode_timeout_warning, waveform_finalise,
-        EnqueueOutcome, Job, JobQueue,
+        persist_job_completion, persist_job_completion_once, persist_transcoded_webm,
+        transcode_video_finalise, transcoded_webm_name, validated_board_media_file,
+        video_reencode_timeout_warning, waveform_finalise, EnqueueOutcome, Job, JobCompletion,
+        JobQueue,
     };
     use std::io::Write as _;
+    use std::time::Duration;
 
     fn file_hash_count(conn: &rusqlite::Connection, file_path: &str) -> i64 {
         conn.query_row(
@@ -1433,6 +1790,32 @@ mod tests {
             EnqueueOutcome::Enqueued(id) => id,
             EnqueueOutcome::DroppedAtCapacity => panic!("test job should not be dropped"),
         }
+    }
+
+    fn single_connection_test_pool(connection_timeout: Duration) -> crate::db::DbPool {
+        let initialized_pool = crate::db::init_test_pool().expect("initial test pool");
+        let database_path: String = {
+            let conn = initialized_pool.get().expect("initial connection");
+            conn.query_row(
+                "SELECT file FROM pragma_database_list WHERE name = 'main'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("test database path")
+        };
+        drop(initialized_pool);
+
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(database_path).with_init(|conn| {
+            conn.execute_batch(
+                "PRAGMA foreign_keys = ON;
+                     PRAGMA busy_timeout = 25;",
+            )
+        });
+        r2d2::Pool::builder()
+            .max_size(1)
+            .connection_timeout(connection_timeout)
+            .build(manager)
+            .expect("single-connection test pool")
     }
 
     fn claim_job(queue: &JobQueue, conn: &rusqlite::Connection, expected_id: i64) -> (i64, String) {
@@ -1500,6 +1883,349 @@ mod tests {
             0
         );
         assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completion_retries_the_same_job_after_pool_exhaustion() {
+        let pool = single_connection_test_pool(Duration::from_millis(25));
+        let queue = JobQueue::new(pool.clone());
+        let job_id = enqueue_spam_job(&queue);
+        {
+            let conn = pool.get().expect("claim connection");
+            claim_job(&queue, &conn, job_id);
+        }
+
+        let held_connection = pool.get().expect("exhaust pool");
+        let completion_pool = pool.clone();
+        let completion = tokio::spawn(async move {
+            persist_job_completion(
+                0,
+                completion_pool,
+                job_id,
+                None,
+                JobCompletion::Done,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !completion.is_finished(),
+            "completion must wait and retry while the pool is exhausted"
+        );
+        drop(held_connection);
+
+        let failure_state = tokio::time::timeout(Duration::from_secs(2), completion)
+            .await
+            .expect("completion retry timed out")
+            .expect("completion task panicked")
+            .expect("completion persistence failed");
+        assert_eq!(failure_state, None);
+
+        let conn = pool.get().expect("verification connection");
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM background_jobs WHERE id = ?1",
+                rusqlite::params![job_id],
+                |row| row.get(0),
+            )
+            .expect("job status");
+        assert_eq!(status, "done");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completion_stops_retrying_after_shutdown_grace_and_startup_can_recover() {
+        let pool = single_connection_test_pool(Duration::from_millis(25));
+        let queue = JobQueue::new(pool.clone());
+        let job_id = enqueue_spam_job(&queue);
+        {
+            let conn = pool.get().expect("claim connection");
+            claim_job(&queue, &conn, job_id);
+        }
+
+        let held_connection = pool.get().expect("exhaust pool");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let completion = tokio::time::timeout(
+            Duration::from_secs(1),
+            persist_job_completion(0, pool.clone(), job_id, None, JobCompletion::Done, cancel),
+        )
+        .await
+        .expect("shutdown-bounded completion timed out");
+        assert!(completion.is_err());
+        drop(held_connection);
+
+        let conn = pool.get().expect("recovery connection");
+        let recovery =
+            crate::db::recover_interrupted_background_jobs(&conn).expect("recover interrupted job");
+        assert_eq!(recovery.jobs_reset, 1);
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM background_jobs WHERE id = ?1",
+                rusqlite::params![job_id],
+                |row| row.get(0),
+            )
+            .expect("recovered job status");
+        assert_eq!(status, "pending");
+    }
+
+    #[tokio::test]
+    async fn already_resolved_completion_error_does_not_wedge_worker() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let queue = JobQueue::new(pool.clone());
+        let job_id = enqueue_spam_job(&queue);
+        {
+            let conn = pool.get().expect("claim connection");
+            claim_job(&queue, &conn, job_id);
+            conn.execute(
+                "DELETE FROM background_jobs WHERE id = ?1",
+                rusqlite::params![job_id],
+            )
+            .expect("delete claimed job");
+        }
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            persist_job_completion(
+                0,
+                pool,
+                job_id,
+                None,
+                JobCompletion::Done,
+                tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("permanent completion error must not loop")
+        .expect("already-resolved job is not a persistence failure");
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn non_transient_done_completion_is_terminal_and_never_replayed() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let queue = JobQueue::new(pool.clone());
+        let post_id = {
+            let conn = pool.get().expect("seed connection");
+            conn.execute(
+                "INSERT INTO boards (short_name, name, description)
+                 VALUES ('finished', 'Finished', '')",
+                [],
+            )
+            .expect("insert board");
+            let board_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO threads (board_id, subject) VALUES (?1, 'finished thread')",
+                rusqlite::params![board_id],
+            )
+            .expect("insert thread");
+            let thread_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO posts
+                 (thread_id, board_id, name, body, body_html, deletion_token,
+                  is_op, file_path, media_processing_state)
+                 VALUES (?1, ?2, 'anon', 'body', 'body', 'token', 1,
+                         'finished/final.webm', ?3)",
+                rusqlite::params![thread_id, board_id, crate::db::MEDIA_PROCESSING_PENDING],
+            )
+            .expect("insert media post");
+            conn.last_insert_rowid()
+        };
+        let job = Job::VideoTranscode {
+            post_id,
+            file_path: "finished/source.mp4".to_owned(),
+            board_short: "finished".to_owned(),
+        };
+        let job_id = match queue.enqueue(&job).expect("enqueue completed media job") {
+            EnqueueOutcome::Enqueued(id) => id,
+            EnqueueOutcome::DroppedAtCapacity => panic!("test job should not be dropped"),
+        };
+        {
+            let conn = pool.get().expect("claim connection");
+            conn.execute(
+                "UPDATE background_jobs SET attempts = 2 WHERE id = ?1",
+                rusqlite::params![job_id],
+            )
+            .expect("place job at final claimable attempt");
+            claim_job(&queue, &conn, job_id);
+            conn.execute_batch(
+                "CREATE TRIGGER reject_done_completion
+                 BEFORE UPDATE OF status ON background_jobs
+                 WHEN NEW.status = 'done'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected completion failure');
+                 END;",
+            )
+            .expect("install completion failure trigger");
+        }
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            persist_job_completion(
+                0,
+                pool.clone(),
+                job_id,
+                Some(post_id),
+                JobCompletion::Done,
+                tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("recovery timed out")
+        .expect("job should transition to a safe terminal state");
+        assert_eq!(result, Some(crate::db::JobFailureState::PermanentlyFailed));
+
+        let conn = pool.get().expect("verification connection");
+        let (status, attempts, error, file_path, media_state): (
+            String,
+            i64,
+            String,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT j.status, j.attempts, j.last_error,
+                        p.file_path, p.media_processing_state
+                 FROM background_jobs j
+                 JOIN posts p ON p.id = ?2
+                 WHERE j.id = ?1",
+                rusqlite::params![job_id, post_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("terminal job state");
+        assert_eq!(status, "failed");
+        assert_eq!(attempts, 3);
+        assert!(error.contains("injected completion failure"));
+        assert_eq!(file_path, "finished/final.webm");
+        assert!(media_state.is_empty());
+        assert!(
+            crate::db::claim_next_job(&conn)
+                .expect("query pending jobs")
+                .is_none(),
+            "successfully applied work must never be replayed"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_transient_failed_completion_preserves_bounded_attempt_count() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let queue = JobQueue::new(pool.clone());
+        let job_id = enqueue_spam_job(&queue);
+        {
+            let conn = pool.get().expect("claim connection");
+            claim_job(&queue, &conn, job_id);
+            conn.execute_batch(
+                "CREATE TRIGGER reject_original_job_failure
+                 BEFORE UPDATE OF status ON background_jobs
+                 WHEN NEW.last_error = 'work failed'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected failure persistence error');
+                 END;",
+            )
+            .expect("install failure persistence trigger");
+        }
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            persist_job_completion(
+                0,
+                pool.clone(),
+                job_id,
+                None,
+                JobCompletion::Failed("work failed".to_owned()),
+                tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("recovery timed out")
+        .expect("failed job should retain its normal retry policy");
+        assert_eq!(result, Some(crate::db::JobFailureState::Retrying));
+
+        let conn = pool.get().expect("verification connection");
+        let (status, attempts, error): (String, i64, String) = conn
+            .query_row(
+                "SELECT status, attempts, last_error
+                 FROM background_jobs
+                 WHERE id = ?1",
+                rusqlite::params![job_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("recovered failed-job state");
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 1);
+        assert!(error.contains("work failed"));
+        assert!(error.contains("injected failure persistence error"));
+    }
+
+    #[test]
+    fn stale_media_completion_preserves_newer_pending_state() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let queue = JobQueue::new(pool.clone());
+        let post_id = {
+            let conn = pool.get().expect("seed connection");
+            conn.execute(
+                "INSERT INTO boards (short_name, name, description)
+                 VALUES ('media', 'Media', '')",
+                [],
+            )
+            .expect("insert board");
+            let board_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO threads (board_id, subject) VALUES (?1, 'media thread')",
+                rusqlite::params![board_id],
+            )
+            .expect("insert thread");
+            let thread_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO posts
+                 (thread_id, board_id, name, body, body_html, deletion_token,
+                  is_op, file_path, media_processing_state)
+                 VALUES (?1, ?2, 'anon', 'body', 'body', 'token', 1,
+                         'media/new.mp4', ?3)",
+                rusqlite::params![thread_id, board_id, crate::db::MEDIA_PROCESSING_PENDING],
+            )
+            .expect("insert media post");
+            conn.last_insert_rowid()
+        };
+        let job = Job::VideoTranscode {
+            post_id,
+            file_path: "media/old.mp4".to_owned(),
+            board_short: "media".to_owned(),
+        };
+        let job_id = match queue.enqueue(&job).expect("enqueue stale media job") {
+            EnqueueOutcome::Enqueued(id) => id,
+            EnqueueOutcome::DroppedAtCapacity => panic!("test job should not be dropped"),
+        };
+        {
+            let conn = pool.get().expect("claim connection");
+            claim_job(&queue, &conn, job_id);
+        }
+
+        persist_job_completion_once(&pool, job_id, Some(post_id), &JobCompletion::Stale)
+            .expect("persist stale completion");
+
+        let conn = pool.get().expect("verification connection");
+        let (job_status, media_state): (String, String) = conn
+            .query_row(
+                "SELECT j.status, p.media_processing_state
+                 FROM background_jobs j
+                 JOIN posts p ON p.id = ?2
+                 WHERE j.id = ?1",
+                rusqlite::params![job_id, post_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("completion state");
+        assert_eq!(job_status, "done");
+        assert_eq!(media_state, crate::db::MEDIA_PROCESSING_PENDING);
     }
 
     #[test]

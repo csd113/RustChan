@@ -40,6 +40,10 @@ fn resolved_checkbox_setting(
     )
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "site setting validation and persistence remain together to avoid partial updates"
+)]
 pub async fn update_site_settings(
     State(state): State<AppState>,
     jar: CookieJar,

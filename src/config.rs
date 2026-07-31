@@ -3,14 +3,17 @@ use anyhow::Context as _;
 use serde::Deserialize;
 use std::env;
 use std::io::Write as _;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 mod template;
 
 #[cfg(test)]
 pub static RUNTIME_LAYOUT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+static DATA_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
 /// Absolute path to the directory the running binary lives in.
 fn binary_dir() -> PathBuf {
@@ -22,26 +25,129 @@ fn binary_dir() -> PathBuf {
                 std::io::stderr().lock(),
                 "Warning: could not determine binary directory; \
                  using current working directory for data storage. \
-                 Set CHAN_DB and CHAN_UPLOADS env vars to override."
+                 Pass --data-dir with an absolute path to override."
             );
             PathBuf::from(".")
         })
 }
 
 fn settings_file_path() -> PathBuf {
-    // Resolve settings.toml next to the running executable, inside
-    // <exe-dir>/rustchan-data/. This is the config source of truth for the live
-    // process; `CHAN_*` environment variables still override selected fields
-    // after the file is loaded.
-    // rustchan-data/ is created by run_server before CONFIG is first accessed,
-    // so this directory always exists by the time settings are read.
-    let data_dir = binary_dir().join("rustchan-data");
-    data_dir.join("settings.toml")
+    // Resolve settings.toml inside the configured data directory. By default
+    // that remains <exe-dir>/rustchan-data/; service installations can select
+    // an explicit writable directory with --data-dir.
+    // The selected directory is created during CLI startup before CONFIG is
+    // first accessed, so it exists by the time settings are read.
+    data_dir().join("settings.toml")
+}
+
+fn resolve_data_dir_override(path: &Path) -> anyhow::Result<PathBuf> {
+    if !path.is_absolute() {
+        anyhow::bail!("--data-dir must be an absolute path");
+    }
+    if path
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        anyhow::bail!("--data-dir must not contain '..' components");
+    }
+
+    let mut existing_ancestor = path;
+    let mut missing_components = Vec::new();
+    let mut resolved = loop {
+        match std::fs::canonicalize(existing_ancestor) {
+            Ok(resolved) => {
+                if resolved.parent().is_none() && existing_ancestor.parent().is_some() {
+                    anyhow::bail!(
+                        "--data-dir ancestor must not resolve to a filesystem root: {}",
+                        existing_ancestor.display()
+                    );
+                }
+                if !resolved.is_dir() {
+                    anyhow::bail!(
+                        "--data-dir ancestor is not a directory: {}",
+                        existing_ancestor.display()
+                    );
+                }
+                break resolved;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(existing_ancestor) {
+                    Ok(_) => {
+                        return Err(error).with_context(|| {
+                            format!(
+                                "could not resolve --data-dir path {}",
+                                existing_ancestor.display()
+                            )
+                        });
+                    }
+                    Err(metadata_error)
+                        if metadata_error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(metadata_error) => {
+                        return Err(metadata_error).with_context(|| {
+                            format!(
+                                "could not inspect --data-dir path {}",
+                                existing_ancestor.display()
+                            )
+                        });
+                    }
+                }
+
+                let component = existing_ancestor.file_name().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "could not find an existing parent for --data-dir {}",
+                        path.display()
+                    )
+                })?;
+                missing_components.push(component.to_os_string());
+                existing_ancestor = existing_ancestor.parent().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "could not find an existing parent for --data-dir {}",
+                        path.display()
+                    )
+                })?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "could not resolve --data-dir path {}",
+                        existing_ancestor.display()
+                    )
+                });
+            }
+        }
+    };
+
+    for component in missing_components.iter().rev() {
+        resolved.push(component);
+    }
+    if resolved.parent().is_none() {
+        anyhow::bail!("--data-dir must not resolve to a filesystem root");
+    }
+    Ok(resolved)
+}
+
+/// Configure an explicit runtime data directory before configuration is loaded.
+///
+/// # Errors
+/// Returns an error when the path is relative, is a filesystem root, contains
+/// parent-directory traversal, cannot be resolved safely, or an override was
+/// already configured.
+pub fn configure_data_dir(path: Option<&Path>) -> anyhow::Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let resolved = resolve_data_dir_override(path)?;
+    DATA_DIR_OVERRIDE
+        .set(resolved)
+        .map_err(|_| anyhow::anyhow!("runtime data directory was already configured"))
 }
 
 #[must_use]
 pub fn data_dir() -> PathBuf {
-    binary_dir().join("rustchan-data")
+    DATA_DIR_OVERRIDE
+        .get()
+        .cloned()
+        .unwrap_or_else(|| binary_dir().join("rustchan-data"))
 }
 
 #[must_use]
@@ -715,7 +821,7 @@ pub struct Config {
     pub chan_net_bind: String,
     /// Maximum request body size for `/chan/import` (ZIP snapshots). Default: 10 MiB.
     pub chan_net_max_body: usize,
-    /// Maximum request body size for `/chan/command` (raw JSON). Default: 8 KiB.
+    /// Maximum request body size for `/chan/command` (raw JSON). Default: 512 KiB.
     pub chan_net_command_max_body: usize,
     /// Pre-shared key required on X-ChanNet-Key header for /chan/refresh and
     /// /chan/poll. An empty string means those endpoints are disabled entirely.
@@ -857,7 +963,9 @@ impl Config {
         let chan_net_command_max_body: usize = env::var("CHAN_NET_COMMAND_MAX_BODY")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(8 * 1024); // 8 KiB default — commands are raw JSON, never ZIPs
+            // The legal 32,768-character reply envelope can approach 384 KiB
+            // when four-byte Unicode scalar values use JSON surrogate escapes.
+            .unwrap_or(512 * 1024);
         Self {
             forum_name,
             initial_site_subtitle,
@@ -1678,15 +1786,85 @@ fn port_from_bind_addr(addr: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        describe_timeout_secs, ffmpeg_timeout_secs, rewrite_settings_file_lines,
-        runtime_tor_hidden_service_keys_dir, set_live_ffmpeg_timeout_secs, settings_file_path,
-        template::settings_template, update_settings_file_ffmpeg_timeout,
-        validate_ffmpeg_timeout_secs, Config, TlsConfig, DEFAULT_FFMPEG_TIMEOUT_SECS,
-        MAX_FFMPEG_TIMEOUT_SECS, MIN_FFMPEG_TIMEOUT_SECS,
+        describe_timeout_secs, ffmpeg_timeout_secs, resolve_data_dir_override,
+        rewrite_settings_file_lines, runtime_tor_hidden_service_keys_dir,
+        set_live_ffmpeg_timeout_secs, settings_file_path, template::settings_template,
+        update_settings_file_ffmpeg_timeout, validate_ffmpeg_timeout_secs, Config, TlsConfig,
+        DEFAULT_FFMPEG_TIMEOUT_SECS, MAX_FFMPEG_TIMEOUT_SECS, MIN_FFMPEG_TIMEOUT_SECS,
     };
     use std::sync::Mutex;
 
     static SETTINGS_FILE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn data_dir_override_requires_a_scoped_absolute_path() {
+        let absolute = std::env::current_dir()
+            .expect("current directory")
+            .join("rustchan-test-data");
+        let filesystem_root = absolute.ancestors().last().expect("filesystem root");
+        let with_parent = absolute.join("nested").join("..").join("data");
+
+        assert!(resolve_data_dir_override(&absolute).is_ok());
+        assert!(resolve_data_dir_override(std::path::Path::new("relative/data")).is_err());
+        assert!(resolve_data_dir_override(filesystem_root).is_err());
+        assert!(resolve_data_dir_override(&with_parent).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn data_dir_override_rejects_symlink_to_root_without_mutation() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let root_link = temp_dir.path().join("root-link");
+        symlink("/", &root_link).expect("create root symlink");
+        let entries_before = std::fs::read_dir(temp_dir.path())
+            .expect("read temporary directory")
+            .map(|entry| entry.expect("directory entry").file_name())
+            .collect::<Vec<_>>();
+
+        let error =
+            resolve_data_dir_override(&root_link).expect_err("root symlink must be rejected");
+        let nested_error = resolve_data_dir_override(&root_link.join("new-data"))
+            .expect_err("root symlink ancestor must be rejected");
+
+        assert!(error.to_string().contains("filesystem root"));
+        assert!(nested_error.to_string().contains("filesystem root"));
+        assert_eq!(
+            std::fs::read_link(&root_link).expect("root symlink remains"),
+            std::path::Path::new("/")
+        );
+        let entries_after = std::fs::read_dir(temp_dir.path())
+            .expect("read temporary directory")
+            .map(|entry| entry.expect("directory entry").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries_after, entries_before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn data_dir_override_resolves_existing_symlink_ancestor_before_new_components() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let actual_parent = temp_dir.path().join("actual");
+        std::fs::create_dir(&actual_parent).expect("create actual parent");
+        let parent_link = temp_dir.path().join("parent-link");
+        symlink(&actual_parent, &parent_link).expect("create parent symlink");
+        let requested = parent_link.join("nested").join("data");
+
+        let resolved = resolve_data_dir_override(&requested).expect("resolve data directory");
+
+        assert_eq!(
+            resolved,
+            actual_parent
+                .canonicalize()
+                .expect("canonical actual parent")
+                .join("nested")
+                .join("data")
+        );
+        assert!(!actual_parent.join("nested").exists());
+    }
 
     fn valid_config() -> Config {
         const MIB: usize = 1024 * 1024;
@@ -1748,7 +1926,7 @@ mod tests {
             rustwave_url: "http://localhost:7071".to_owned(),
             chan_net_bind: "127.0.0.1:7070".to_owned(),
             chan_net_max_body: 10 * MIB,
-            chan_net_command_max_body: 8 * 1024,
+            chan_net_command_max_body: 512 * 1024,
             chan_net_api_key: String::new(),
             tls: TlsConfig::default(),
         }

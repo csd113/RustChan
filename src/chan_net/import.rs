@@ -86,9 +86,15 @@ pub async fn do_import(state: &AppState, bytes: bytes::Bytes) -> Result<usize, A
                 post.post_id
             )));
         }
-        if post.content.len() > 32_768 {
+        if post.content.chars().count() > 32_768 {
             return Err(AppError::BadRequest(format!(
                 "Post {} content exceeds the 32 768-character limit",
+                post.post_id
+            )));
+        }
+        if post.author.chars().count() > 255 {
+            return Err(AppError::BadRequest(format!(
+                "Post {} author exceeds the 255-character limit",
                 post.post_id
             )));
         }
@@ -115,7 +121,7 @@ pub async fn do_import(state: &AppState, bytes: bytes::Bytes) -> Result<usize, A
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("ChanNet import task failed: {e}")))?
-    .map_err(AppError::Internal)?;
+    .map_err(AppError::from)?;
 
     // ── 6. Record tx_id in ledger after confirmed successful write ───────────
     {

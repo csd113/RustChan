@@ -61,7 +61,7 @@ pub async fn add_ban(
                 "ban",
                 None,
                 "",
-                &format!("ip_hash={}… reason={}", &ip_hash_log, form.reason),
+                &format!("ip_hash={}… reason={}", ip_hash_log, form.reason),
             ) {
                 tracing::error!(
                     target: "admin",
@@ -134,6 +134,10 @@ pub struct BanDeleteForm {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "ban-and-delete keeps its authorization, mutation, cleanup, and audit steps together"
+)]
 #[expect(clippy::too_many_lines)]
 pub async fn admin_ban_and_delete(
     State(state): State<AppState>,
@@ -193,7 +197,7 @@ pub async fn admin_ban_and_delete(
                 "ban",
                 None,
                 &board_short,
-                &format!("inline ban — ip_hash={}… reason={reason}", &ip_hash_log),
+                &format!("inline ban — ip_hash={ip_hash_log}… reason={reason}"),
             ) {
                 tracing::error!(
                     target: "admin",

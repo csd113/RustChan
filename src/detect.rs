@@ -330,15 +330,16 @@ use tor_hsservice::{config::OnionServiceConfigBuilder, handle_rend_requests, HsI
 //      an ephemeral source port on the connecting end.
 //   2. That ephemeral port is what axum's ConnectInfo sees as the peer port
 //      on the accepted socket.
-//   3. A random "tor:<hex>" token is inserted into this map keyed by that port.
-//   4. ClientIp / extract_ip look up the peer port in this map and return the
+//   3. A random "tor:<hex>" token is inserted into this map keyed by that exact
+//      source socket address.
+//   4. ClientIp / extract_ip look up the peer address in this map and return the
 //      token as the request's "IP address".
 //   5. A RAII TokenGuard removes the entry when the proxy task ends.
 //
 // Result: every Tor stream gets its own isolated bucket for rate limiting, post
 // cooldowns, and bans — one Tor user's actions no longer affect all others.
 // The token is random per-stream so it cannot track users across reconnections.
-pub static TOR_STREAM_TOKENS: LazyLock<DashMap<u16, Arc<str>>> = LazyLock::new(DashMap::new);
+pub static TOR_STREAM_TOKENS: LazyLock<DashMap<SocketAddr, Arc<str>>> = LazyLock::new(DashMap::new);
 
 #[must_use]
 pub fn tor_stream_token_identity(
@@ -353,12 +354,12 @@ pub fn tor_stream_token_identity(
         return None;
     }
     TOR_STREAM_TOKENS
-        .get(&addr.port())
+        .get(&addr)
         .map(|token| token.value().to_string())
 }
 
-/// Removes a port→token entry from `TOR_STREAM_TOKENS` when dropped.
-struct TokenGuard(u16);
+/// Removes a peer-address→token entry from `TOR_STREAM_TOKENS` when dropped.
+struct TokenGuard(SocketAddr);
 impl Drop for TokenGuard {
     fn drop(&mut self) {
         TOR_STREAM_TOKENS.remove(&self.0);
@@ -459,6 +460,10 @@ pub fn detect_tor(
 
 // ─── Core Arti task ───────────────────────────────────────────────────────────
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "the Tor bootstrap and onion-service lifecycle is a single fail-closed state machine"
+)]
 async fn run_arti(
     _data_dir: std::path::PathBuf,
     bind_port: u16,
@@ -677,10 +682,12 @@ async fn proxy_tor_stream(
     .await
     .map_err(|_error| "timed out connecting to local HTTP server")?
     .map_err(|e| format!("local TCP connect failed: {e}"))?;
-    // local port. axum's ConnectInfo sees this port as the peer port on the
-    // incoming socket, so ClientIp / extract_ip can retrieve the token without
-    // any HTTP parsing, through keep-alive, across all content types.
-    let local_port = local.local_addr().map_or(0, |a| a.port());
+    // local address. axum's ConnectInfo sees this exact socket address as the
+    // peer on the accepted connection, so a different loopback address cannot
+    // impersonate the Tor proxy merely by reusing its source port.
+    let local_peer = local
+        .local_addr()
+        .map_err(|error| format!("could not determine local Tor proxy address: {error}"))?;
     let token: Arc<str> = {
         let mut bytes = [0u8; 16];
         crate::utils::crypto::fill_os_random_or_exit(
@@ -690,12 +697,8 @@ async fn proxy_tor_stream(
         Arc::from(format!("tor:{}", hex::encode(bytes)).as_str())
     };
     // _guard removes the map entry when this task ends (connection closed or error).
-    let _guard = if local_port != 0 {
-        TOR_STREAM_TOKENS.insert(local_port, Arc::clone(&token));
-        Some(TokenGuard(local_port))
-    } else {
-        return Err("could not determine local port for Tor identity isolation".into());
-    };
+    TOR_STREAM_TOKENS.insert(local_peer, Arc::clone(&token));
+    let _guard = TokenGuard(local_peer);
 
     tokio::io::copy_bidirectional(&mut tor_stream, &mut local).await?;
     Ok(())

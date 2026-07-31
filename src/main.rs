@@ -14,7 +14,7 @@
 //   rustchan-cli admin list-bans
 //   rustchan-cli admin db-status
 //
-// Data lives in  <exe-dir>/rustchan-data/   (override with CHAN_DB / CHAN_UPLOADS)
+// Data defaults to <exe-dir>/rustchan-data/ (override the root with --data-dir)
 // Static CSS is compiled into the binary — no external files needed.
 //
 // All HTTP server logic lives in server/server.rs.
@@ -63,6 +63,12 @@ use config::{generate_settings_file_if_missing, CONFIG};
 // CHAN_BLOCKING_THREADS environment variable.
 
 fn main() -> anyhow::Result<()> {
+    // Parse before terminal attachment, filesystem creation, logging, settings
+    // generation, or CONFIG access. Clap handles --help and --version here and
+    // exits successfully without mutating runtime state.
+    let cli = server::cli::Cli::parse();
+    crate::config::configure_data_dir(cli.data_dir.as_deref())?;
+
     // ── Double-click / no-TTY guard ───────────────────────────────────────────
     // When launched from a file manager (Linux) or Explorer (Windows), stdout
     // is not a TTY. Re-attach to a terminal so the banner, first-run wizard,
@@ -71,7 +77,11 @@ fn main() -> anyhow::Result<()> {
     // RUSTCHAN_SPAWNED prevents the child from looping back here.
     {
         use std::io::IsTerminal as _;
-        if !std::io::stdout().is_terminal() && std::env::var("RUSTCHAN_SPAWNED").is_err() {
+        let launched_without_arguments = std::env::args_os().nth(1).is_none();
+        if launched_without_arguments
+            && !std::io::stdout().is_terminal()
+            && std::env::var("RUSTCHAN_SPAWNED").is_err()
+        {
             #[cfg(target_os = "linux")]
             {
                 let exe = std::env::current_exe()?;
@@ -168,8 +178,6 @@ fn main() -> anyhow::Result<()> {
         .max_blocking_threads(blocking_threads)
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build Tokio runtime: {e}"))?;
-
-    let cli = server::cli::Cli::parse();
 
     rt.block_on(async move {
         // Install the ring crypto provider once before anything else accesses

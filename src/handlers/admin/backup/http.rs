@@ -340,6 +340,10 @@ pub(super) async fn restore_auth_preflight(
     Ok(session_id)
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "the multipart parser keeps all restore-field limits and duplicate checks at one boundary"
+)]
 pub(super) async fn stream_restore_upload_to_tempfile(
     kind: RestoreKind,
     multipart: &mut Multipart,

@@ -872,6 +872,15 @@ pub async fn extract_board_from_full_backup(
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    let _maintenance_guard = if form.action == "restore" {
+        Some(
+            state
+                .maintenance_gate
+                .try_begin(RestoreKind::Board.maintenance_label())?,
+        )
+    } else {
+        None
+    };
 
     let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
     let safe_board = sanitize_board_short_value(&form.board_short)?;
@@ -1007,6 +1016,9 @@ pub async fn restore_saved_board_backup(
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    let _maintenance_guard = state
+        .maintenance_gate
+        .try_begin(RestoreKind::Board.maintenance_label())?;
 
     let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
 
@@ -1076,6 +1088,10 @@ pub async fn restore_saved_board_backup(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "board restore validation, mutation, and rollback remain one guarded operation"
+)]
 #[expect(clippy::too_many_lines)]
 pub async fn board_restore(
     State(state): State<AppState>,

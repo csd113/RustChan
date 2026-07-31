@@ -38,6 +38,7 @@ pub enum JobFailureState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InterruptedJobRecovery {
     pub jobs_reset: i64,
+    pub jobs_resolved: i64,
     pub media_posts_reset: i64,
 }
 
@@ -1347,82 +1348,260 @@ pub fn recent_background_jobs(
     Ok(jobs)
 }
 
-/// Reset jobs that were interrupted after being claimed but before completion.
+/// Recover jobs that were interrupted after being claimed but before completion.
 ///
-/// This is intended for startup before workers begin claiming jobs. It does not
-/// trust or reuse any partial ffmpeg output; recovered media jobs are retried
-/// from their original payload.
+/// This is intended for startup before workers begin claiming jobs. Media jobs
+/// whose database mutation is observably complete or stale are resolved without
+/// replaying their external work. Other jobs return to the bounded retry queue.
 ///
 /// # Errors
 /// Returns an error if the recovery queries fail.
 pub fn recover_interrupted_background_jobs(
     conn: &rusqlite::Connection,
 ) -> Result<InterruptedJobRecovery> {
-    let interrupted_media_post_ids = interrupted_media_post_ids(conn)?;
-    let media_posts_reset = reset_interrupted_media_posts(conn, &interrupted_media_post_ids)?;
-    let jobs_reset = conn.execute(
-        "UPDATE background_jobs
-         SET status = 'pending',
-             attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
-             last_error = NULL,
-             updated_at = unixepoch()
-         WHERE status = 'running'",
-        [],
-    )?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Failed to begin interrupted-job recovery transaction")?;
+    let result = (|| {
+        let interrupted_jobs = interrupted_background_jobs(conn)?;
+        let mut jobs_reset = 0_i64;
+        let mut jobs_resolved = 0_i64;
+        let mut media_posts_reset = 0_i64;
 
-    Ok(InterruptedJobRecovery {
-        jobs_reset: i64::try_from(jobs_reset).unwrap_or(i64::MAX),
-        media_posts_reset,
-    })
+        for job in interrupted_jobs {
+            match interrupted_media_job_disposition(conn, &job)? {
+                InterruptedJobDisposition::Requeue { media_post_id } => {
+                    let updated = conn.execute(
+                        "UPDATE background_jobs
+                         SET status = 'pending',
+                             attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+                             last_error = NULL,
+                             updated_at = unixepoch()
+                         WHERE id = ?1 AND status = 'running'",
+                        params![job.id],
+                    )?;
+                    jobs_reset =
+                        jobs_reset.saturating_add(i64::try_from(updated).unwrap_or(i64::MAX));
+                    if let Some(post_id) = media_post_id {
+                        let reset = conn.execute(
+                            "UPDATE posts
+                             SET media_processing_state = ?1,
+                                 media_processing_error = NULL
+                             WHERE id = ?2",
+                            params![MEDIA_PROCESSING_PENDING, post_id],
+                        )?;
+                        media_posts_reset = media_posts_reset
+                            .saturating_add(i64::try_from(reset).unwrap_or(i64::MAX));
+                    }
+                }
+                InterruptedJobDisposition::Resolve {
+                    clear_media_post_id,
+                } => {
+                    let updated = conn.execute(
+                        "UPDATE background_jobs
+                         SET status = 'done',
+                             last_error = NULL,
+                             updated_at = unixepoch()
+                         WHERE id = ?1 AND status = 'running'",
+                        params![job.id],
+                    )?;
+                    jobs_resolved =
+                        jobs_resolved.saturating_add(i64::try_from(updated).unwrap_or(i64::MAX));
+                    if let Some(post_id) = clear_media_post_id {
+                        set_post_media_processing_state(conn, post_id, None, None)?;
+                    }
+                }
+            }
+        }
+
+        Ok(InterruptedJobRecovery {
+            jobs_reset,
+            jobs_resolved,
+            media_posts_reset,
+        })
+    })();
+
+    match result {
+        Ok(recovery) => {
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(error).context("Failed to commit interrupted-job recovery");
+            }
+            Ok(recovery)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
 }
 
-fn interrupted_media_post_ids(conn: &rusqlite::Connection) -> Result<Vec<i64>> {
+struct InterruptedBackgroundJob {
+    id: i64,
+    job_type: String,
+    payload: String,
+}
+
+fn interrupted_background_jobs(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<InterruptedBackgroundJob>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT job_type, payload
+        "SELECT id, job_type, payload
          FROM background_jobs
          WHERE status = 'running'",
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok(InterruptedBackgroundJob {
+            id: row.get(0)?,
+            job_type: row.get(1)?,
+            payload: row.get(2)?,
+        })
     })?;
-
-    let mut post_ids = Vec::new();
-    for row in rows {
-        let (job_type, payload) = row?;
-        if let Some(post_id) = media_post_id_from_payload(&job_type, &payload) {
-            post_ids.push(post_id);
-        }
-    }
-    post_ids.sort_unstable();
-    post_ids.dedup();
-    Ok(post_ids)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
-fn media_post_id_from_payload(job_type: &str, payload: &str) -> Option<i64> {
+enum InterruptedJobDisposition {
+    Requeue { media_post_id: Option<i64> },
+    Resolve { clear_media_post_id: Option<i64> },
+}
+
+enum InterruptedMediaTarget {
+    Video {
+        post_id: i64,
+        source_path: String,
+        expected_output_path: Option<String>,
+    },
+    Audio {
+        post_id: i64,
+        source_path: String,
+        expected_thumb_path: Option<String>,
+    },
+}
+
+fn interrupted_media_job_disposition(
+    conn: &rusqlite::Connection,
+    job: &InterruptedBackgroundJob,
+) -> Result<InterruptedJobDisposition> {
+    let Some(target) = interrupted_media_target(&job.job_type, &job.payload) else {
+        return Ok(InterruptedJobDisposition::Requeue {
+            media_post_id: None,
+        });
+    };
+    let post_id = match &target {
+        InterruptedMediaTarget::Video { post_id, .. }
+        | InterruptedMediaTarget::Audio { post_id, .. } => *post_id,
+    };
+    let post = conn
+        .query_row(
+            "SELECT file_path, thumb_path
+             FROM posts
+             WHERE id = ?1",
+            rusqlite::params![post_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((current_path, current_thumb_path)) = post else {
+        // The target was deleted while work was in flight. Replaying cannot
+        // attach the output and would only repeat an obsolete side effect.
+        return Ok(InterruptedJobDisposition::Resolve {
+            clear_media_post_id: None,
+        });
+    };
+
+    match target {
+        InterruptedMediaTarget::Video {
+            post_id,
+            source_path,
+            expected_output_path,
+        } => {
+            if current_path.as_deref() == Some(source_path.as_str()) {
+                return Ok(InterruptedJobDisposition::Requeue {
+                    media_post_id: Some(post_id),
+                });
+            }
+
+            // A changed path proves that this payload is no longer applicable.
+            // Clear state only when it changed to this job's deterministic
+            // output; otherwise a newer media job owns the post state.
+            let clear_media_post_id =
+                (current_path.as_deref() == expected_output_path.as_deref()).then_some(post_id);
+            Ok(InterruptedJobDisposition::Resolve {
+                clear_media_post_id,
+            })
+        }
+        InterruptedMediaTarget::Audio {
+            post_id,
+            source_path,
+            expected_thumb_path,
+        } => {
+            if current_path.as_deref() != Some(source_path.as_str()) {
+                return Ok(InterruptedJobDisposition::Resolve {
+                    clear_media_post_id: None,
+                });
+            }
+            if current_thumb_path.as_deref() == expected_thumb_path.as_deref()
+                && expected_thumb_path.is_some()
+            {
+                return Ok(InterruptedJobDisposition::Resolve {
+                    clear_media_post_id: Some(post_id),
+                });
+            }
+            Ok(InterruptedJobDisposition::Requeue {
+                media_post_id: Some(post_id),
+            })
+        }
+    }
+}
+
+fn interrupted_media_target(job_type: &str, payload: &str) -> Option<InterruptedMediaTarget> {
     if !matches!(job_type, "video_transcode" | "audio_waveform") {
         return None;
     }
 
     let payload: serde_json::Value = serde_json::from_str(payload).ok()?;
-    match payload.get("t")?.as_str()? {
-        "VideoTranscode" | "AudioWaveform" => payload.get("d")?.get("post_id")?.as_i64(),
+    let tag = payload.get("t")?.as_str()?;
+    let data = payload.get("d")?;
+    let post_id = data.get("post_id")?.as_i64()?;
+    let source_path = data.get("file_path")?.as_str()?.to_owned();
+    let board_short = data.get("board_short")?.as_str()?;
+    match (job_type, tag) {
+        ("video_transcode", "VideoTranscode") => Some(InterruptedMediaTarget::Video {
+            post_id,
+            expected_output_path: expected_transcoded_path(&source_path, board_short),
+            source_path,
+        }),
+        ("audio_waveform", "AudioWaveform") => Some(InterruptedMediaTarget::Audio {
+            post_id,
+            expected_thumb_path: expected_waveform_thumb_path(&source_path, board_short),
+            source_path,
+        }),
         _ => None,
     }
 }
 
-fn reset_interrupted_media_posts(conn: &rusqlite::Connection, post_ids: &[i64]) -> Result<i64> {
-    let mut reset = 0_i64;
-    for post_id in post_ids {
-        let changed = conn.execute(
-            "UPDATE posts
-             SET media_processing_state = ?1,
-                 media_processing_error = NULL
-             WHERE id = ?2",
-            params![MEDIA_PROCESSING_PENDING, post_id],
-        )?;
-        reset = reset.saturating_add(i64::try_from(changed).unwrap_or(i64::MAX));
+fn expected_transcoded_path(source_path: &str, board_short: &str) -> Option<String> {
+    let source = std::path::Path::new(source_path);
+    let stem = source.file_stem()?.to_str()?;
+    let extension = source.extension()?.to_str()?.to_ascii_lowercase();
+    let output_name = match extension.as_str() {
+        "webm" => format!("{stem}.vp9.webm"),
+        "mp4" | "mkv" => format!("{stem}.webm"),
+        _ => return None,
+    };
+    Some(format!("{board_short}/{output_name}"))
+}
+
+fn expected_waveform_thumb_path(source_path: &str, board_short: &str) -> Option<String> {
+    let stem = std::path::Path::new(source_path).file_stem()?.to_str()?;
+    if stem.is_empty() {
+        return None;
     }
-    Ok(reset)
+    Some(format!("{board_short}/thumbs/{stem}.png"))
 }
 
 pub const MEDIA_PROCESSING_PENDING: &str = "pending";
@@ -1489,7 +1668,11 @@ pub fn update_post_thumb_path(
     thumb_path: &str,
 ) -> Result<()> {
     let updated = conn.execute(
-        "UPDATE posts SET thumb_path = ?1 WHERE id = ?2 AND file_path = ?3",
+        "UPDATE posts
+         SET thumb_path = ?1,
+             media_processing_state = '',
+             media_processing_error = NULL
+         WHERE id = ?2 AND file_path = ?3",
         params![thumb_path, post_id, expected_file_path],
     )?;
     if updated == 0 {
@@ -1554,6 +1737,7 @@ pub fn replace_transcoded_media(
             params![new_path, new_mime, old_path],
         )?;
         debug_assert!(updated > 0, "target_exists guarantees at least one update");
+        set_post_media_processing_state(conn, post_id, None, None)?;
 
         let thumb_path = get_post_thumb_path(conn, post_id)?.unwrap_or_default();
         conn.execute(
@@ -1972,6 +2156,7 @@ mod tests {
             recover_interrupted_background_jobs(&conn).expect("recover interrupted jobs");
 
         assert_eq!(recovery.jobs_reset, 1);
+        assert_eq!(recovery.jobs_resolved, 0);
         assert_eq!(recovery.media_posts_reset, 0);
         assert_eq!(
             background_job_status(&conn, job_id),
@@ -1992,6 +2177,7 @@ mod tests {
             recover_interrupted_background_jobs(&conn).expect("recover interrupted jobs");
 
         assert_eq!(recovery.jobs_reset, 0);
+        assert_eq!(recovery.jobs_resolved, 0);
         assert_eq!(background_job_status(&conn, pending_id).0, "pending");
         assert_eq!(background_job_status(&conn, done_id).0, "done");
         assert_eq!(
@@ -2022,6 +2208,7 @@ mod tests {
             recover_interrupted_background_jobs(&conn).expect("recover interrupted jobs");
 
         assert_eq!(recovery.jobs_reset, 1);
+        assert_eq!(recovery.jobs_resolved, 0);
         assert_eq!(recovery.media_posts_reset, 1);
         let post = get_post(&conn, post_id)
             .expect("load post")
@@ -2031,6 +2218,130 @@ mod tests {
             Some(MEDIA_PROCESSING_PENDING)
         );
         assert_eq!(post.media_processing_error, None);
+    }
+
+    #[test]
+    fn startup_recovery_resolves_applied_transcode_without_replay() {
+        let conn = test_conn();
+        let post_id = seed_media_post(&conn, "applied", "applied/video.mp4");
+        set_post_media_processing_state(&conn, post_id, Some("running"), Some("old error"))
+            .expect("set interrupted processing state");
+        conn.execute(
+            "UPDATE posts SET file_path = 'applied/video.webm' WHERE id = ?1",
+            rusqlite::params![post_id],
+        )
+        .expect("simulate committed transcode path");
+        let payload = format!(
+            r#"{{"t":"VideoTranscode","d":{{"post_id":{post_id},"file_path":"applied/video.mp4","board_short":"applied"}}}}"#
+        );
+        let job_id = insert_background_job(
+            &conn,
+            "video_transcode",
+            &payload,
+            "running",
+            1,
+            Some("worker interrupted"),
+        );
+
+        let recovery =
+            recover_interrupted_background_jobs(&conn).expect("recover applied transcode");
+
+        assert_eq!(recovery.jobs_reset, 0);
+        assert_eq!(recovery.jobs_resolved, 1);
+        assert_eq!(recovery.media_posts_reset, 0);
+        assert_eq!(
+            background_job_status(&conn, job_id),
+            ("done".to_owned(), 1, None)
+        );
+        let post = get_post(&conn, post_id)
+            .expect("load post")
+            .expect("post exists");
+        assert_eq!(post.file_path.as_deref(), Some("applied/video.webm"));
+        assert_eq!(post.media_processing_state, None);
+        assert!(
+            claim_next_job(&conn).expect("query pending jobs").is_none(),
+            "already-applied transcode must not be replayed"
+        );
+    }
+
+    #[test]
+    fn startup_recovery_resolves_stale_media_without_clearing_newer_state() {
+        let conn = test_conn();
+        let post_id = seed_media_post(&conn, "newer", "newer/old.mp4");
+        conn.execute(
+            "UPDATE posts
+             SET file_path = 'newer/replacement.mp4',
+                 media_processing_state = ?2
+             WHERE id = ?1",
+            rusqlite::params![post_id, MEDIA_PROCESSING_PENDING],
+        )
+        .expect("install newer media target");
+        let payload = format!(
+            r#"{{"t":"VideoTranscode","d":{{"post_id":{post_id},"file_path":"newer/old.mp4","board_short":"newer"}}}}"#
+        );
+        let job_id = insert_background_job(
+            &conn,
+            "video_transcode",
+            &payload,
+            "running",
+            1,
+            Some("worker interrupted"),
+        );
+
+        let recovery = recover_interrupted_background_jobs(&conn).expect("recover stale transcode");
+
+        assert_eq!(recovery.jobs_reset, 0);
+        assert_eq!(recovery.jobs_resolved, 1);
+        let post = get_post(&conn, post_id)
+            .expect("load post")
+            .expect("post exists");
+        assert_eq!(post.file_path.as_deref(), Some("newer/replacement.mp4"));
+        assert_eq!(
+            post.media_processing_state.as_deref(),
+            Some(MEDIA_PROCESSING_PENDING)
+        );
+        assert_eq!(background_job_status(&conn, job_id).0, "done");
+    }
+
+    #[test]
+    fn startup_recovery_resolves_applied_waveform_without_replay() {
+        let conn = test_conn();
+        let post_id = seed_media_post(&conn, "audio", "audio/track.mp3");
+        conn.execute(
+            "UPDATE posts
+             SET thumb_path = 'audio/thumbs/track.png',
+                 media_processing_state = 'running'
+             WHERE id = ?1",
+            rusqlite::params![post_id],
+        )
+        .expect("simulate committed waveform path");
+        let payload = format!(
+            r#"{{"t":"AudioWaveform","d":{{"post_id":{post_id},"file_path":"audio/track.mp3","board_short":"audio"}}}}"#
+        );
+        let job_id = insert_background_job(
+            &conn,
+            "audio_waveform",
+            &payload,
+            "running",
+            1,
+            Some("worker interrupted"),
+        );
+
+        let recovery =
+            recover_interrupted_background_jobs(&conn).expect("recover applied waveform");
+
+        assert_eq!(recovery.jobs_reset, 0);
+        assert_eq!(recovery.jobs_resolved, 1);
+        assert_eq!(background_job_status(&conn, job_id).0, "done");
+        let post = get_post(&conn, post_id)
+            .expect("load post")
+            .expect("post exists");
+        assert_eq!(post.thumb_path.as_deref(), Some("audio/thumbs/track.png"));
+        assert_eq!(post.media_processing_state, None);
+        assert!(
+            claim_next_job(&conn).expect("query pending jobs").is_none(),
+            "already-applied waveform must not be replayed"
+        );
     }
 
     #[test]

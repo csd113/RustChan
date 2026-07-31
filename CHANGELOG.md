@@ -2,6 +2,48 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## indev
+
+### Added
+
+- Added an explicit `--data-dir` option with fail-closed validation for absolute paths, root directories, parent traversal, and symlink-resolved locations.
+- Added durable ChanNet reply idempotency through optional stable message IDs and a transactional replay ledger.
+
+### Improved
+
+- Improved background-job reliability under database pressure by retrying completion persistence for the same claimed job, applying media and terminal-state updates atomically, and reconciling completed, stale, failed, and retryable work correctly during startup recovery.
+- Reduced overload stalls with a bounded database-pool acquisition timeout and consistent short-retry behavior for transient SQLite and pool exhaustion.
+- Improved server lifecycle handling by supervising the main HTTP, HTTPS, ACME, redirect, ChanNet, and Tor-backend listeners together and shutting peer listeners down when one exits unexpectedly.
+- Improved ChanNet validation and interoperability with a legal default body envelope, Unicode scalar-value character limits, consistent JSON errors for oversized imports, and explicit exact-boundary handling.
+
+### Fixed
+
+- Fixed native-TLS deployments so the original plaintext application/admin listener is no longer left reachable beside the HTTPS and redirect listeners.
+- Fixed direct HTTPS session and CSRF cookies so they remain `Secure` independently of trusted-proxy compatibility settings.
+- Fixed destructive saved-backup operations so delete, full restore, board restore, and board extraction all honor the shared maintenance gate and cannot race active maintenance work.
+- Fixed ChanNet reply replays inserting duplicate posts and prevented view-password-protected boards from being exposed through selective exports.
+- Fixed database-busy `503 Service Unavailable` responses so they include a bounded `Retry-After` header.
+- Fixed `--help` and `--version` so informational CLI invocations do not initialize configuration or mutate the filesystem.
+- Fixed Linux service setup instructions and runtime data placement so an unprivileged systemd service uses its configured writable data directory.
+- Fixed Windows GNU target warnings caused by imports that were not guarded by the same target configuration as their call sites.
+
+### Security
+
+- Rejects requests containing `Transfer-Encoding`, including ambiguous `Transfer-Encoding` plus `Content-Length` framing, at the outer HTTP boundary before they can reach application handlers.
+- Added conservative HTTP header limits of 32 KiB per value and 64 KiB for the parser/aggregate boundary across public and internal listeners.
+- Corrected dependency auditing so CI scans `Cargo.lock` and verifies that the resolved dependency graph is non-empty instead of treating the audit policy file as a lockfile.
+- Updated `anyhow` to `1.0.103` and `memmap2` to `0.9.11` to resolve denied unsoundness advisories, and updated `getset` to remove the unmaintained, future-incompatible `proc-macro-error2` dependency.
+
+### Documentation
+
+- Corrected HTTPS documentation to state that TLS is disabled by default and clarified the distinction between self-signed certificate support and automatic HTTPS enablement.
+- Updated deployment documentation for the explicit writable data-directory workflow.
+
+### Internal
+
+- Restored warning-clean strict Clippy coverage on the current Rust toolchain, the Rust 1.90 MSRV, and supported cross-compilation targets.
+- Kept local browser-testing and Node/Playwright artifacts excluded from version control so they do not add repository or release-package bloat.
+
 ## RustChan 1.3.0
 
 ### Added

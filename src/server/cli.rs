@@ -11,12 +11,18 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "rustchan-cli",
+    version,
     about = "Self-contained imageboard server",
     long_about = "RustChan Imageboard — single binary, zero dependencies.\n\
-                  Config, database, logs, and uploads live in <exe-dir>/rustchan-data/.\n\
+                  Config, database, logs, and uploads default to <exe-dir>/rustchan-data/.\n\
+                  Use --data-dir with an absolute path to select another location.\n\
                   Run without arguments to start the server."
 )]
 pub struct Cli {
+    /// Absolute directory for config, database, uploads, logs, and backups
+    #[arg(long, global = true, value_name = "PATH")]
+    pub data_dir: Option<std::path::PathBuf>,
+
     /// TCP port to bind the main forum server
     #[arg(long, short = 'p', global = true)]
     pub port: Option<u16>,

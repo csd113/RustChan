@@ -958,6 +958,99 @@ async fn create_thread_xhr_validation_failure_returns_json_error() {
     assert!(body.contains("\"error\""));
 }
 
+#[test]
+fn database_busy_xhr_error_includes_retry_contract() {
+    let response = super::xhr_post_error_response(crate::error::AppError::DbBusy)
+        .expect("database busy response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-rustchan-error-status")
+            .and_then(|value| value.to_str().ok()),
+        Some(StatusCode::SERVICE_UNAVAILABLE.as_str())
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("1")
+    );
+}
+
+#[tokio::test]
+async fn contended_reply_returns_bounded_503_with_retry_after() {
+    let state = crate::test_support::app_state();
+    let (_board_id, thread_id) = seed_board_with_thread(&state, "busy", "original post");
+    let router = Router::new()
+        .route(
+            "/{board}/thread/{id}",
+            post(crate::handlers::thread::post_reply),
+        )
+        .with_state(state.clone());
+    let lock = state.db.get().expect("write-lock connection");
+    lock.execute_batch("BEGIN IMMEDIATE")
+        .expect("hold database write lock");
+    let submission_token = uuid::Uuid::new_v4().to_string();
+    let (boundary, body) = crate::test_support::multipart_body(
+        &[
+            ("_csrf", "csrf123"),
+            ("submission_token", &submission_token),
+            ("body", "contended reply"),
+        ],
+        None,
+    );
+
+    let started = std::time::Instant::now();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/busy/thread/{thread_id}"))
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .header(header::COOKIE, "csrf_token=csrf123")
+                .extension(crate::test_support::connect_info())
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("1")
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "busy response took {elapsed:?}"
+    );
+
+    lock.execute_batch("ROLLBACK").expect("release write lock");
+    let conn = state.db.get().expect("verification connection");
+    let post_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
+            rusqlite::params![thread_id],
+            |row| row.get(0),
+        )
+        .expect("post count");
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .expect("database integrity");
+    assert_eq!(post_count, 1);
+    assert_eq!(integrity, "ok");
+}
+
 #[tokio::test]
 async fn create_thread_rejects_mime_mismatch_with_415_inline_error() {
     let state = crate::test_support::app_state();

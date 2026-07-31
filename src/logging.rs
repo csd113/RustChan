@@ -730,6 +730,10 @@ fn normalize_message_text(message: &str) -> String {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "message rewriting intentionally centralizes the closed set of upstream log patterns"
+)]
 #[expect(clippy::too_many_lines)]
 fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields) {
     let Some(message) = fields.message.clone() else {
@@ -1282,7 +1286,7 @@ mod tests {
                 .iter()
                 .filter_map(|(name, value)| {
                     let clean = normalize_field_value(name, value);
-                    (!super::should_hide_field(name, &clean)).then(|| (name.to_string(), clean))
+                    (!super::should_hide_field(name, &clean)).then(|| ((*name).to_string(), clean))
                 })
                 .collect(),
         };

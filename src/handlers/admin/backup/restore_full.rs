@@ -369,6 +369,10 @@ fn create_live_restore_snapshot(
 }
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "full restore validation, replacement, and rollback remain one fail-closed operation"
+)]
 #[expect(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     live_conn: &mut rusqlite::Connection,
@@ -1038,6 +1042,9 @@ pub async fn restore_saved_full_backup(
         secure_context.peer,
         form.csrf.as_deref(),
     )?;
+    let _maintenance_guard = state
+        .maintenance_gate
+        .try_begin(RestoreKind::Full.maintenance_label())?;
 
     let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
     let upload_dir = CONFIG.upload_dir.clone();

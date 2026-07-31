@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn tor_stream_token_precedes_spoofed_forwarded_headers_for_loopback_peer() {
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 49_152);
-        crate::detect::TOR_STREAM_TOKENS.insert(peer.port(), Arc::from("tor:test-stream"));
+        crate::detect::TOR_STREAM_TOKENS.insert(peer, Arc::from("tor:test-stream"));
 
         let mut headers = HeaderMap::new();
         headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.10"));
@@ -222,7 +222,7 @@ mod tests {
 
         let resolved = resolved_client_ip(&headers, Some(peer), true, &trusted, true);
 
-        crate::detect::TOR_STREAM_TOKENS.remove(&peer.port());
+        crate::detect::TOR_STREAM_TOKENS.remove(&peer);
         assert_eq!(resolved, "tor:test-stream");
     }
 

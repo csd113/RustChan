@@ -174,9 +174,38 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
     // ── Status ────────────────────────────────────────────────────────────────
     writeln!(out, " {}", bold("Status")).ok();
 
-    // Local server
-    let local_status = format!("{}  ({})", green("RUNNING"), dim(&CONFIG.bind_addr));
-    row(&mut out, "Local Server", &local_status);
+    if CONFIG.tls.enabled {
+        if CONFIG.enable_tor_support {
+            let backend_addr = CONFIG.loopback_addr_with_port(
+                CONFIG
+                    .bind_addr
+                    .rsplit_once(':')
+                    .and_then(|(_, port)| port.parse::<u16>().ok())
+                    .unwrap_or(8080),
+            );
+            let backend_status = format!(
+                "{}  ({}  {}  {})",
+                green("RUNNING"),
+                dim(&backend_addr),
+                bullet(),
+                dim("Tor-internal"),
+            );
+            row(&mut out, "HTTP Backend", &backend_status);
+        } else {
+            row(&mut out, "HTTP App", &red("DISABLED"));
+        }
+        if CONFIG.tls.redirect_http {
+            let redirect_status = format!(
+                "{}  (port {})",
+                green("RUNNING"),
+                cyan(&CONFIG.tls.http_port.to_string()),
+            );
+            row(&mut out, "HTTP Redirect", &redirect_status);
+        }
+    } else {
+        let local_status = format!("{}  ({})", green("RUNNING"), dim(&CONFIG.bind_addr));
+        row(&mut out, "Local Server", &local_status);
+    }
 
     // HTTPS
     if CONFIG.tls.enabled {
@@ -224,16 +253,23 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
     // ── Endpoints ─────────────────────────────────────────────────────────────
     writeln!(out, " {}", bold("Endpoints")).ok();
 
-    // Derive the local URL — use localhost when bound to 0.0.0.0 / ::
-    let local_url = {
-        let port = CONFIG
-            .bind_addr
-            .rsplit_once(':')
-            .and_then(|(_, p)| p.parse::<u16>().ok())
-            .unwrap_or(8080);
-        format!("http://localhost:{port}")
-    };
-    row(&mut out, "Local", &cyan(&local_url));
+    if CONFIG.tls.enabled {
+        if CONFIG.tls.redirect_http {
+            let redirect_url = format!("http://localhost:{}", CONFIG.tls.http_port);
+            row(&mut out, "HTTP Redirect", &cyan(&redirect_url));
+        }
+    } else {
+        // Derive the local URL — use localhost when bound to 0.0.0.0 / ::.
+        let local_url = {
+            let port = CONFIG
+                .bind_addr
+                .rsplit_once(':')
+                .and_then(|(_, p)| p.parse::<u16>().ok())
+                .unwrap_or(8080);
+            format!("http://localhost:{port}")
+        };
+        row(&mut out, "Local", &cyan(&local_url));
+    }
 
     if CONFIG.tls.enabled {
         let https_url = format!("https://localhost:{}", CONFIG.tls.port);

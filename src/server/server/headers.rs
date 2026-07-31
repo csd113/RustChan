@@ -7,6 +7,9 @@ use axum::{
 };
 use std::net::{IpAddr, SocketAddr};
 
+pub(super) const HTTP_MAX_HEADER_BYTES: usize = 64 * 1024;
+pub(super) const HTTP_MAX_HEADER_VALUE_BYTES: usize = 32 * 1024;
+
 pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
      script-src 'self'; \
      script-src-elem 'self'; \
@@ -20,6 +23,67 @@ pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
      frame-ancestors 'none'; \
      object-src 'none'; \
      base-uri 'self'";
+
+pub(super) async fn request_boundary_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if request_headers_exceed_limits(req.headers()) {
+        return boundary_error_response(
+            http::StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "Request headers are too large",
+        );
+    }
+
+    // Hyper follows RFC 7230 by discarding Content-Length when it appears
+    // after Transfer-Encoding. That makes a TE+CL request indistinguishable
+    // from a transfer-coded request at the service boundary. RustChan does not
+    // require streaming request transfer codings, so reject all of them rather
+    // than allow ambiguous framing to reach a handler.
+    if req.headers().contains_key(header::TRANSFER_ENCODING) {
+        return boundary_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "Transfer-Encoding is not accepted",
+        );
+    }
+
+    next.run(req).await
+}
+
+fn request_headers_exceed_limits(headers: &http::HeaderMap) -> bool {
+    let mut total = 0usize;
+    for (name, value) in headers {
+        if value.as_bytes().len() > HTTP_MAX_HEADER_VALUE_BYTES {
+            return true;
+        }
+        let Some(next_total) = total
+            .checked_add(name.as_str().len())
+            .and_then(|size| size.checked_add(value.as_bytes().len()))
+            // Match HTTP/2's header-list accounting and leave room for HTTP/1
+            // separators and the request line under the protocol-level cap.
+            .and_then(|size| size.checked_add(32))
+        else {
+            return true;
+        };
+        total = next_total;
+        if total > HTTP_MAX_HEADER_BYTES {
+            return true;
+        }
+    }
+    false
+}
+
+fn boundary_error_response(
+    status: http::StatusCode,
+    message: &'static str,
+) -> axum::response::Response {
+    let mut response = (status, message).into_response();
+    response.headers_mut().insert(
+        header::CONNECTION,
+        header::HeaderValue::from_static("close"),
+    );
+    response
+}
 
 pub(super) async fn hsts_middleware_with_mode(
     req: axum::extract::Request,
@@ -297,14 +361,15 @@ fn is_loopback_host(host: &str) -> bool {
 mod tests {
     use super::{
         hsts_middleware_with_mode, public_dynamic_html_path, sensitive_admin_html_path,
-        should_emit_hsts, CONTENT_SECURITY_POLICY,
+        should_emit_hsts, CONTENT_SECURITY_POLICY, HTTP_MAX_HEADER_BYTES,
+        HTTP_MAX_HEADER_VALUE_BYTES,
     };
     use axum::{
         body::Body,
-        http::{header, Request},
+        http::{header, HeaderValue, Request, StatusCode},
         middleware::from_fn,
         response::IntoResponse as _,
-        routing::get,
+        routing::{get, post},
         Router,
     };
     use std::{
@@ -313,6 +378,154 @@ mod tests {
         path::{Path, PathBuf},
     };
     use tower::ServiceExt as _;
+
+    fn request_boundary_app() -> Router {
+        Router::new()
+            .route("/", post(|| async { StatusCode::NO_CONTENT }))
+            .layer(from_fn(super::request_boundary_middleware))
+    }
+
+    #[tokio::test]
+    async fn request_boundary_rejects_transfer_encoding_with_content_length() {
+        let response = request_boundary_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header(header::TRANSFER_ENCODING, "chunked")
+                    .header(header::CONTENT_LENGTH, "4")
+                    .body(Body::from("test"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.headers().get(header::CONNECTION),
+            Some(&HeaderValue::from_static("close"))
+        );
+    }
+
+    #[tokio::test]
+    async fn request_boundary_rejects_transfer_encoding_without_content_length() {
+        let response = request_boundary_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header(header::TRANSFER_ENCODING, "chunked")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn request_boundary_accepts_bounded_content_length_request() {
+        let response = request_boundary_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header(header::CONTENT_LENGTH, "4")
+                    .body(Body::from("test"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn request_boundary_rejects_oversized_single_header_value() {
+        let value =
+            HeaderValue::from_bytes(&vec![b'a'; HTTP_MAX_HEADER_VALUE_BYTES + 1]).expect("header");
+        let response = request_boundary_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("x-large", value)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+        );
+    }
+
+    #[tokio::test]
+    async fn request_boundary_accepts_exact_value_and_aggregate_limits() {
+        let exact_value =
+            HeaderValue::from_bytes(&vec![b'a'; HTTP_MAX_HEADER_VALUE_BYTES]).expect("header");
+        let exact_value_response = request_boundary_app()
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("x-boundary", exact_value)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(exact_value_response.status(), StatusCode::NO_CONTENT);
+
+        // Header-list accounting is name + value + 32 bytes per field.
+        let first_value =
+            HeaderValue::from_bytes(&vec![b'a'; HTTP_MAX_HEADER_VALUE_BYTES]).expect("header");
+        let aggregate_overhead = "x-a".len() + "x-b".len() + (2 * 32);
+        let second_value_len =
+            HTTP_MAX_HEADER_BYTES - HTTP_MAX_HEADER_VALUE_BYTES - aggregate_overhead;
+        let second_value = HeaderValue::from_bytes(&vec![b'b'; second_value_len]).expect("header");
+        let exact_aggregate_response = request_boundary_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("x-a", first_value)
+                    .header("x-b", second_value)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(exact_aggregate_response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn request_boundary_rejects_oversized_aggregate_headers() {
+        let value =
+            HeaderValue::from_bytes(&vec![b'a'; HTTP_MAX_HEADER_VALUE_BYTES]).expect("header");
+        let response = request_boundary_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("x-large-one", value.clone())
+                    .header("x-large-two", value)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+        );
+        assert_eq!(HTTP_MAX_HEADER_BYTES, 64 * 1024);
+    }
 
     #[test]
     fn csp_allows_core_end_user_media_features() {

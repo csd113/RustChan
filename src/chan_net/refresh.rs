@@ -50,7 +50,7 @@ pub async fn chan_refresh(
         tokio::task::spawn_blocking(move || super::snapshot::build_snapshot(&conn))
             .await
             .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))? // JoinError
-            .map_err(AppError::Internal)?; // anyhow::Error from build_snapshot
+            .map_err(AppError::from)?; // anyhow::Error from build_snapshot
 
     // ── Assemble multipart form ───────────────────────────────────────────
     let part = reqwest::multipart::Part::bytes(zip_bytes)

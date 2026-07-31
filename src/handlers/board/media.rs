@@ -411,7 +411,9 @@ pub async fn redirect_to_post(
 
 #[cfg(test)]
 mod tests {
-    use super::{safe_board_media_file, stale_webm_redirect_path};
+    #[cfg(unix)]
+    use super::safe_board_media_file;
+    use super::stale_webm_redirect_path;
 
     #[test]
     fn stale_mp4_redirect_path_accepts_valid_webm_sibling() {

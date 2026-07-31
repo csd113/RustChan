@@ -242,6 +242,10 @@ pub struct LoginForm {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "the authentication, lockout, and session issuance branches share one security boundary"
+)]
 #[expect(clippy::too_many_lines)]
 pub async fn admin_login(
     State(state): State<AppState>,
@@ -601,13 +605,14 @@ mod tests {
         let router = Router::new()
             .route("/admin/login", post(super::admin_login))
             .with_state(state);
-        let response = router
-            .oneshot(admin_login_request(format!(
-                "username=admin&password=hunter2&_csrf={}",
-                signed_admin_csrf()
-            )))
-            .await
-            .expect("response");
+        let mut request = admin_login_request(format!(
+            "username=admin&password=hunter2&_csrf={}",
+            signed_admin_csrf()
+        ));
+        request
+            .extensions_mut()
+            .insert(crate::middleware::RequestTransport { direct_https: true });
+        let response = router.oneshot(request).await.expect("response");
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         let session_cookie = response
@@ -619,6 +624,7 @@ mod tests {
             .expect("session cookie");
         assert!(session_cookie.contains("HttpOnly"));
         assert!(session_cookie.contains("SameSite=Lax"));
+        assert!(session_cookie.contains("Secure"));
         let csrf_cookie = response
             .headers()
             .get_all(header::SET_COOKIE)
@@ -627,6 +633,7 @@ mod tests {
             .find(|value| value.contains("csrf_token="))
             .expect("csrf cookie");
         assert!(csrf_cookie.contains("SameSite=Strict"));
+        assert!(csrf_cookie.contains("Secure"));
         assert!(!csrf_cookie.contains("csrf_token=csrf123"));
     }
 
@@ -790,10 +797,7 @@ mod tests {
             .filter_map(|value| value.to_str().ok())
             .find(|value| value.contains(super::super::SESSION_COOKIE))
             .expect("session cookie");
-        assert_eq!(
-            session_cookie.contains("Secure"),
-            crate::config::CONFIG.https_cookies
-        );
+        assert!(session_cookie.contains("Secure"));
     }
 
     #[tokio::test]

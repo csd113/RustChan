@@ -129,6 +129,10 @@ pub fn build_acme_acceptor(
 ///
 /// The loop exits only when the underlying stream closes, which normally
 /// only happens when the process shuts down.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "the ACME stream loop directly models all terminal and retryable event states"
+)]
 async fn run_acme_event_loop<EC, EA>(mut state: rustls_acme::AcmeState<EC, EA>, env_label: String)
 where
     EC: Debug + Send + 'static,

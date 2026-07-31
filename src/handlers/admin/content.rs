@@ -432,6 +432,10 @@ pub struct AdminDeletePostForm {
     csrf: Option<String>,
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "post deletion keeps authorization, database mutation, file cleanup, and audit logging together"
+)]
 pub async fn admin_delete_post(
     State(state): State<AppState>,
     jar: CookieJar,

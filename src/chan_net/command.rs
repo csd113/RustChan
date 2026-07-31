@@ -76,13 +76,47 @@ where
                     }
                     _ => rejection.to_string(),
                 };
-                Err(AppError::BadRequest(msg).into())
+                if rejection.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+                    Err(AppError::UploadTooLarge("Request body too large".to_owned()).into())
+                } else {
+                    Err(AppError::BadRequest(msg).into())
+                }
             }
         }
     }
 }
 
 // ── Command enum ──────────────────────────────────────────────────────────────
+
+const MAX_REPLY_CONTENT_CHARS: usize = 32_768;
+const MAX_REPLY_AUTHOR_CHARS: usize = 255;
+
+fn validate_reply_text(author: &str, content: &str) -> anyhow::Result<()> {
+    if content.chars().count() > MAX_REPLY_CONTENT_CHARS {
+        anyhow::bail!("Reply content exceeds maximum length of 32,768 characters");
+    }
+    if author.chars().count() > MAX_REPLY_AUTHOR_CHARS {
+        anyhow::bail!("Author name exceeds maximum length of 255 characters");
+    }
+    Ok(())
+}
+
+fn map_command_error(error: anyhow::Error) -> AppError {
+    if error
+        .downcast_ref::<crate::db::chan_net::ReplyReplayError>()
+        .is_some()
+    {
+        return AppError::Conflict(error.to_string());
+    }
+
+    match AppError::from(error) {
+        // Snapshot selection and command precondition errors historically use
+        // the command API's 400 contract. Preserve that contract while letting
+        // typed temporary database contention remain a retryable 503.
+        AppError::Internal(error) => AppError::BadRequest(error.to_string()),
+        other => other,
+    }
+}
 
 /// All commands accepted by `POST /chan/command`.
 ///
@@ -127,12 +161,20 @@ pub enum Command {
     /// `content` must be ≤ 32,768 characters.
     /// `author`  must be ≤ 255 characters.
     /// These are validated before any DB write; violations return 400.
+    ///
+    /// New integrations should always provide a stable, globally unique
+    /// `message_id`. It is the durable idempotency key, so retrying the same
+    /// message is safe even if other fields change. The field remains optional
+    /// for compatibility with older gateways; legacy requests use the original
+    /// content-and-timestamp fingerprint and therefore cannot distinguish two
+    /// identical replies created within the same timestamp second.
     ReplyPush {
         board: String,
         thread_id: i64,
         author: String,
         content: String,
         timestamp: u64,
+        message_id: Option<uuid::Uuid>,
     },
 }
 
@@ -205,14 +247,10 @@ pub async fn chan_command(
                     author,
                     content,
                     timestamp,
+                    message_id,
                 } => {
                     // ── Input validation — must happen before any DB write ──
-                    if content.len() > 32_768 {
-                        anyhow::bail!("Reply content exceeds maximum length of 32,768 characters");
-                    }
-                    if author.len() > 255 {
-                        anyhow::bail!("Author name exceeds maximum length of 255 characters");
-                    }
+                    validate_reply_text(&author, &content)?;
 
                     // ── DB write ───────────────────────────────────────────
                     // insert_reply_into_thread validates thread existence,
@@ -224,6 +262,7 @@ pub async fn chan_command(
                         &author,
                         &content,
                         timestamp.cast_signed(),
+                        message_id.as_ref(),
                     )?;
 
                     // Return the updated thread as the confirmation payload.
@@ -239,7 +278,7 @@ pub async fn chan_command(
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))? // JoinError → 500
-        .map_err(|e| AppError::BadRequest(e.to_string()))?; // anyhow::Error → 400
+        .map_err(map_command_error)?;
 
     let disposition = format!("attachment; filename=\"{filename}\"");
 
@@ -251,4 +290,16 @@ pub async fn chan_command(
         ],
         zip_bytes,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_reply_text;
+
+    #[test]
+    fn reply_limits_count_unicode_scalar_values() {
+        assert!(validate_reply_text(&"🦀".repeat(255), &"🦀".repeat(32_768)).is_ok());
+        assert!(validate_reply_text(&"🦀".repeat(256), "valid").is_err());
+        assert!(validate_reply_text("valid", &"🦀".repeat(32_769)).is_err());
+    }
 }

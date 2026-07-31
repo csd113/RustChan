@@ -392,6 +392,10 @@ pub fn build_new_post(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "post validation and transactional creation share one consistency boundary"
+)]
 #[expect(clippy::too_many_lines)]
 pub fn submit_post(
     conn: &rusqlite::Connection,

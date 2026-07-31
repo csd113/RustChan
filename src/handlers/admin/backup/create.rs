@@ -2,6 +2,10 @@
 #![allow(clippy::redundant_pub_crate, clippy::too_many_lines)]
 use super::*;
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "full backup stages and cleanup remain together to preserve a fail-closed operation"
+)]
 pub(crate) fn create_full_backup_to_server(
     pool: &crate::db::DbPool,
     session_id: Option<&str>,
@@ -740,6 +744,10 @@ pub struct BoardBackupCreateForm {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "board backup validation, snapshotting, and packaging form one guarded operation"
+)]
 #[expect(clippy::too_many_lines)]
 pub async fn create_board_backup(
     State(state): State<AppState>,
@@ -1779,10 +1787,9 @@ fn finalize_v4_backup_root(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_full_backup_manifest, copy_regular_file_to_backup, count_required_private_files,
-        FullBackupCreateForm,
-    };
+    #[cfg(unix)]
+    use super::copy_regular_file_to_backup;
+    use super::{build_full_backup_manifest, count_required_private_files, FullBackupCreateForm};
     use crate::handlers::admin::backup::common::{
         resolve_tor_hidden_service_keys_availability, verify_full_backup_zip,
         TorHiddenServiceKeysAvailability, FULL_BACKUP_MANIFEST_NAME,

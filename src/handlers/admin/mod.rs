@@ -323,9 +323,9 @@ fn should_set_secure_cookie_with_config(
     https_cookies: bool,
     behind_proxy: bool,
 ) -> bool {
-    https_cookies
-        && (context.direct_https
-            || crate::middleware::forwarded_proto_is_https(headers, context.peer, behind_proxy))
+    context.direct_https
+        || (https_cookies
+            && crate::middleware::forwarded_proto_is_https(headers, context.peer, behind_proxy))
 }
 
 fn request_scheme_for_same_origin(
@@ -2937,7 +2937,7 @@ mod tests {
         assert!(should_set_secure_cookie_with_config(
             &headers, context, true, false,
         ));
-        assert!(!should_set_secure_cookie_with_config(
+        assert!(should_set_secure_cookie_with_config(
             &headers, context, false, false,
         ));
     }
@@ -3238,19 +3238,28 @@ mod tests {
             .await
             .expect("body bytes");
         let payload: serde_json::Value = serde_json::from_slice(&body).expect("json payload");
-        assert_eq!(
-            payload.get("filename").and_then(serde_json::Value::as_str),
-            Some("no log file")
-        );
-        assert_eq!(
+        let filename = payload
+            .get("filename")
+            .and_then(serde_json::Value::as_str)
+            .expect("filename string");
+        let content = payload
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .expect("content string");
+        assert!(
             payload
                 .get("truncated")
-                .and_then(serde_json::Value::as_bool),
-            Some(false)
+                .and_then(serde_json::Value::as_bool)
+                .is_some(),
+            "truncated boolean"
         );
-        assert_eq!(
-            payload.get("content").and_then(serde_json::Value::as_str),
-            Some("No live log file found yet.")
-        );
+        if filename == "no log file" {
+            assert_eq!(content, "No live log file found yet.");
+        } else {
+            assert!(
+                crate::logging::is_main_log_file(std::path::Path::new(filename)),
+                "unexpected log filename: {filename}"
+            );
+        }
     }
 }

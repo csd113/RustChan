@@ -14,8 +14,10 @@ const CONNECTION_PRAGMAS: &str = "
     PRAGMA cache_size = -32000;
     PRAGMA temp_store = MEMORY;
     PRAGMA mmap_size = 67108864;
-    PRAGMA busy_timeout = 10000;
+    PRAGMA busy_timeout = 1000;
 ";
+
+const POOL_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Initialise the `SQLite` connection pool and ensure the schema exists.
 ///
@@ -35,7 +37,7 @@ pub fn init_pool() -> Result<DbPool> {
     let pool_size = CONFIG.db_pool_size;
     let pool = Pool::builder()
         .max_size(pool_size)
-        .connection_timeout(std::time::Duration::from_secs(5))
+        .connection_timeout(POOL_CONNECTION_TIMEOUT)
         .build(manager)
         .context("Failed to build database pool")?;
 
@@ -61,7 +63,7 @@ pub fn init_test_pool() -> Result<DbPool> {
 
     let pool = Pool::builder()
         .max_size(4)
-        .connection_timeout(std::time::Duration::from_secs(5))
+        .connection_timeout(POOL_CONNECTION_TIMEOUT)
         .build(manager)
         .context("Failed to build test database pool")?;
 
@@ -106,4 +108,22 @@ pub fn has_no_admin(pool: &DbPool) -> bool {
             .ok()
         })
         .is_some_and(|count| count == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sqlite_busy_wait_is_bounded_for_overload_responses() {
+        let pool = super::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("connection");
+        let busy_timeout_ms: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("busy timeout");
+
+        assert_eq!(busy_timeout_ms, 1_000);
+        assert_eq!(
+            super::POOL_CONNECTION_TIMEOUT,
+            std::time::Duration::from_secs(1)
+        );
+    }
 }

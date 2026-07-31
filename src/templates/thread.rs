@@ -833,6 +833,10 @@ fn effective_media_type(post: &Post) -> crate::models::MediaType {
 /// user-supplied string in this function must continue to pass through
 /// `escape_html()`. Do not change the `body_html` insertion without ensuring
 /// the upstream sanitiser is still in place.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "post rendering keeps its security-sensitive escaping and media branches together"
+)]
 #[expect(clippy::too_many_lines)]
 pub fn render_post(
     post: &Post,

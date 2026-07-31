@@ -13,6 +13,7 @@
 //   • hsts_middleware         — HSTS header (HTTPS-only)
 //   • shutdown_signal()       — Ctrl-C / SIGTERM waiter
 
+use anyhow::Context as _;
 use axum::{
     http::header,
     response::{IntoResponse as _, Redirect},
@@ -37,6 +38,13 @@ mod router;
 
 use lifecycle::shutdown_signal;
 use router::build_router;
+
+pub(super) async fn secondary_listener_request_boundary(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    headers::request_boundary_middleware(request, next).await
+}
 
 fn should_run_background_maintenance(state: &AppState, max_in_flight: u64) -> bool {
     !state.maintenance_gate.is_active()
@@ -107,6 +115,77 @@ impl Drop for ScopedDecrement<'_> {
 
 // ─── Server mode ─────────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlaintextAppListener {
+    Public,
+    TorBackend,
+    Disabled,
+}
+
+const fn plaintext_app_listener(tls_enabled: bool, tor_enabled: bool) -> PlaintextAppListener {
+    match (tls_enabled, tor_enabled) {
+        (false, _) => PlaintextAppListener::Public,
+        (true, true) => PlaintextAppListener::TorBackend,
+        (true, false) => PlaintextAppListener::Disabled,
+    }
+}
+
+async fn tls_plaintext_backend_gate(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+    https_port: u16,
+    redirect_http: bool,
+) -> axum::response::Response {
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|connect_info| connect_info.0);
+    if crate::detect::tor_stream_token_identity(peer, true).is_some() {
+        return next.run(req).await;
+    }
+
+    if redirect_http {
+        return build_redirect_response(&req, https_port).unwrap_or_else(|| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                "Refusing HTTP redirect for untrusted host header",
+            )
+                .into_response()
+        });
+    }
+
+    let mut response = (
+        axum::http::StatusCode::UPGRADE_REQUIRED,
+        "HTTPS is required",
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::CONNECTION,
+        header::HeaderValue::from_static("close"),
+    );
+    response
+}
+
+fn protect_tls_plaintext_backend(
+    app: axum::Router,
+    https_port: u16,
+    redirect_http: bool,
+) -> axum::Router {
+    app.layer(axum::middleware::from_fn(move |req, next| {
+        tls_plaintext_backend_gate(req, next, https_port, redirect_http)
+    }))
+    // build_router already has this boundary for requests that pass the gate.
+    // Keep a second, outer boundary so malformed direct traffic is rejected
+    // before redirect or upgrade handling as well.
+    .layer(axum::middleware::from_fn(
+        headers::request_boundary_middleware,
+    ))
+}
+
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "startup, listener selection, and coordinated shutdown form one server lifecycle"
+)]
 #[expect(clippy::too_many_lines)]
 pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::Result<()> {
     // rustls 0.23 requires an explicit process-wide crypto provider.
@@ -325,10 +404,11 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     {
         let conn = pool.get()?;
         let recovery = crate::db::recover_interrupted_background_jobs(&conn)?;
-        if recovery.jobs_reset > 0 {
+        if recovery.jobs_reset > 0 || recovery.jobs_resolved > 0 {
             tracing::warn!(
                 target: "workers",
                 jobs_reset = recovery.jobs_reset,
+                jobs_resolved = recovery.jobs_resolved,
                 media_posts_reset = recovery.media_posts_reset,
                 "Recovered interrupted background jobs from previous shutdown"
             );
@@ -769,10 +849,48 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         });
     }
 
-    let app = build_router(state.clone(), false);
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    tracing::info!(target: "server", addr = %bind_addr, "HTTP server listening");
-    tracing::info!(target: "server", url = %format!("http://{bind_addr}/admin"), "Admin panel");
+    let plaintext_server = match plaintext_app_listener(
+        CONFIG.tls.enabled,
+        CONFIG.enable_tor_support,
+    ) {
+        PlaintextAppListener::Public => {
+            let app = build_router(state.clone(), false);
+            let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+            tracing::info!(target: "server", addr = %bind_addr, "HTTP server listening");
+            tracing::info!(target: "server", url = %format!("http://{bind_addr}/admin"), "Admin panel");
+            Some((listener, app))
+        }
+        PlaintextAppListener::TorBackend => {
+            let backend_addr = CONFIG.loopback_addr_with_port(bind_port);
+            let https_port = CONFIG.tls.port;
+            let redirect_http = CONFIG.tls.redirect_http;
+            let app = protect_tls_plaintext_backend(
+                build_router(state.clone(), false),
+                https_port,
+                redirect_http,
+            );
+            let listener = tokio::net::TcpListener::bind(&backend_addr)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Failed to bind internal Tor HTTP backend on {backend_addr}: {error}"
+                    )
+                })?;
+            tracing::info!(
+                target: "server",
+                addr = %backend_addr,
+                "Internal Tor HTTP backend listening; non-Tor requests require HTTPS"
+            );
+            Some((listener, app))
+        }
+        PlaintextAppListener::Disabled => {
+            tracing::info!(
+                target: "server",
+                "Native TLS enabled; plaintext application listener disabled"
+            );
+            None
+        }
+    };
     tracing::info!(target: "server", path = %data_dir.display(), "Data directory");
 
     // First-run admin wizard: if no admin accounts exist and stdout is a TTY,
@@ -972,21 +1090,22 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         });
     }
 
+    let mut listener_tasks: tokio::task::JoinSet<ListenerTaskResult> = tokio::task::JoinSet::new();
     if chan_net {
         let chan_addr = crate::config::CONFIG.chan_net_bind.clone();
         let chan_app = crate::chan_net::chan_router(state.clone());
         let chan_listener = tokio::net::TcpListener::bind(&chan_addr).await?;
+        let chan_cancel = worker_cancel.clone();
         tracing::info!(target: "chan_net", addr = %chan_addr, "ChanNet API listening");
-        // requests are drained before the runtime is dropped. Without this the
-        // ChanNet task was detached and forcibly killed on SIGTERM, potentially
-        // corrupting a streaming snapshot response mid-transfer.
-        tokio::spawn(async move {
-            if let Err(e) = axum::serve(chan_listener, chan_app.into_make_service())
-                .with_graceful_shutdown(shutdown_signal())
-                .await
-            {
-                tracing::error!(target: "chan_net", error = %e, "ChanNet server error");
-            }
+        // Reuse the bounded HTTP server so this secondary listener gets the
+        // same protocol-level header cap and graceful shutdown as the forum.
+        listener_tasks.spawn(async move {
+            (
+                "ChanNet",
+                run_plain_http(chan_listener, chan_app, chan_cancel)
+                    .await
+                    .map_err(anyhow::Error::from),
+            )
         });
     }
 
@@ -1044,8 +1163,13 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     "Admin panel available over HTTPS"
                 );
 
-                tokio::spawn(async move {
-                    run_https_static(https_tcp, rustls_cfg, app_tls, cancel_tls).await;
+                listener_tasks.spawn(async move {
+                    (
+                        "HTTPS",
+                        run_https_static(https_tcp, rustls_cfg, app_tls, cancel_tls)
+                            .await
+                            .map_err(anyhow::Error::from),
+                    )
                 });
             }
 
@@ -1064,12 +1188,21 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     "Admin panel available over HTTPS (ACME)"
                 );
 
-                tokio::spawn(async move {
-                    run_https_acme(https_tcp, acme_acceptor, server_cfg, app_tls, cancel_tls).await;
+                listener_tasks.spawn(async move {
+                    (
+                        "HTTPS/ACME",
+                        run_https_acme(https_tcp, acme_acceptor, server_cfg, app_tls, cancel_tls)
+                            .await
+                            .map_err(anyhow::Error::from),
+                    )
                 });
             }
 
-            None => { /* tls.enabled = false — unreachable here but exhaustive */ }
+            None => {
+                return Err(anyhow::anyhow!(
+                    "TLS is enabled but no HTTPS acceptor was constructed"
+                ));
+            }
 
             // Suppress unreachable-pattern warning when tls-acme feature is off.
             #[expect(unreachable_patterns)]
@@ -1096,47 +1229,40 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 anyhow::anyhow!("Failed to bind HTTP→HTTPS redirect listener on {http_addr}: {e}")
             })?;
         tracing::info!(target: "server", addr = %http_addr, "HTTP→HTTPS redirect listening");
-        tokio::spawn(async move {
-            run_http_redirect(http_listener, https_port, cancel_redirect).await;
+        listener_tasks.spawn(async move {
+            (
+                "HTTP redirect",
+                run_http_redirect(http_listener, https_port, cancel_redirect)
+                    .await
+                    .map_err(anyhow::Error::from),
+            )
         });
     }
 
-    let serve_cancel = worker_cancel.clone();
     let wait_shutdown = worker_cancel.clone();
-    let mut http_server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            serve_cancel.cancelled().await;
-        })
-        .await
-    });
-
-    tokio::select! {
-        () = shutdown_signal() => {
-            worker_cancel.cancel();
-        }
-        () = wait_shutdown.cancelled() => {}
+    if let Some((listener, app)) = plaintext_server {
+        let serve_cancel = worker_cancel.clone();
+        listener_tasks.spawn(async move {
+            (
+                "HTTP",
+                run_plain_http(listener, app, serve_cancel)
+                    .await
+                    .map_err(anyhow::Error::from),
+            )
+        });
     }
 
-    let server_result: anyhow::Result<()> =
-        match tokio::time::timeout(Duration::from_secs(1), &mut http_server).await {
-            Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(e))) => Err(e.into()),
-            Ok(Err(join_err)) => Err(anyhow::anyhow!("HTTP server task failed: {join_err}")),
-            Err(_) => {
-                tracing::warn!(
-                    target: "server",
-                    "Forcing disconnect of active HTTP clients during shutdown"
-                );
-                http_server.abort();
-                let _ = http_server.await;
-                Ok(())
-            }
-        };
-    server_result?;
+    let runtime_result = tokio::select! {
+        () = shutdown_signal() => {
+            worker_cancel.cancel();
+            Ok(())
+        }
+        () = wait_shutdown.cancelled() => Ok(()),
+        result = next_listener_exit(&mut listener_tasks, &worker_cancel) => result,
+    };
+    worker_cancel.cancel();
+    let listener_shutdown_result = finish_listener_tasks(&mut listener_tasks).await;
+
     // timeout, replacing the previous blind 10-second sleep. Each worker is
     // given up to (ffmpeg_timeout + 10)s to finish its in-flight job.
     tracing::info!(target: "server", "Signalling background workers to shut down…");
@@ -1154,6 +1280,8 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         let _ = tokio::time::timeout(Duration::from_secs(15), h).await;
     }
 
+    runtime_result?;
+    listener_shutdown_result?;
     tracing::info!(target: "server", "Server shut down gracefully.");
     Ok(())
 }
@@ -1196,6 +1324,86 @@ fn seed_initial_default_theme(conn: &rusqlite::Connection, initial_default_theme
     }
 }
 
+fn configure_http_limits(
+    builder: &mut hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor>,
+) {
+    builder.http1().max_buf_size(headers::HTTP_MAX_HEADER_BYTES);
+    builder
+        .http2()
+        .max_header_list_size(u32::try_from(headers::HTTP_MAX_HEADER_BYTES).unwrap_or(u32::MAX));
+}
+
+type ListenerTaskResult = (&'static str, anyhow::Result<()>);
+
+async fn next_listener_exit(
+    listeners: &mut tokio::task::JoinSet<ListenerTaskResult>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> anyhow::Result<()> {
+    match listeners.join_next().await {
+        Some(Ok((_, Ok(())))) if cancel.is_cancelled() => Ok(()),
+        Some(Ok((listener, Ok(())))) => {
+            anyhow::bail!("{listener} listener stopped unexpectedly")
+        }
+        Some(Ok((listener, Err(error)))) => {
+            Err(error).with_context(|| format!("{listener} listener failed"))
+        }
+        Some(Err(error)) => Err(anyhow::anyhow!("Listener task failed: {error}")),
+        None => std::future::pending().await,
+    }
+}
+
+async fn finish_listener_tasks(
+    listeners: &mut tokio::task::JoinSet<ListenerTaskResult>,
+) -> anyhow::Result<()> {
+    let drain = async {
+        let mut first_error = None;
+        while let Some(result) = listeners.join_next().await {
+            let result = match result {
+                Ok((_, Ok(()))) => Ok(()),
+                Ok((listener, Err(error))) => {
+                    Err(error).with_context(|| format!("{listener} listener failed"))
+                }
+                Err(error) => Err(anyhow::anyhow!("Listener task failed: {error}")),
+            };
+            if first_error.is_none() {
+                first_error = result.err();
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    };
+
+    if let Ok(result) = tokio::time::timeout(Duration::from_secs(3), drain).await {
+        return result;
+    }
+    tracing::warn!(
+        target: "server",
+        "Forcing disconnect of active listener clients during shutdown"
+    );
+    listeners.shutdown().await;
+    Ok(())
+}
+
+async fn run_plain_http(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    cancel: tokio_util::sync::CancellationToken,
+) -> std::io::Result<()> {
+    let handle = axum_server::Handle::new();
+    let shutdown_handle = handle.clone();
+    tokio::spawn(async move {
+        cancel.cancelled().await;
+        shutdown_handle.graceful_shutdown(Some(Duration::from_secs(1)));
+    });
+
+    let std_listener = listener.into_std()?;
+    let mut server = axum_server::from_tcp(std_listener)?;
+    configure_http_limits(server.http_builder());
+    server
+        .handle(handle)
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        .await
+}
+
 // ── HTTPS listener (Static path: self-signed or manual PEM) ──────────────────
 //
 // Uses axum-server which preserves ConnectInfo<SocketAddr> so the IP-banning
@@ -1212,7 +1420,7 @@ pub async fn run_https_static(
     tls_config: axum_server::tls_rustls::RustlsConfig,
     app: axum::Router,
     cancel: tokio_util::sync::CancellationToken,
-) {
+) -> std::io::Result<()> {
     let handle = axum_server::Handle::new();
     let handle_clone = handle.clone();
 
@@ -1225,29 +1433,14 @@ pub async fn run_https_static(
 
     // Convert tokio TcpListener → std TcpListener for axum_server::from_tcp_rustls.
     // set_nonblocking(true) is required — axum-server expects a non-blocking socket.
-    let std_listener = match listener.into_std() {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!(target: "server", error = %e, "Failed to convert HTTPS listener");
-            return;
-        }
-    };
+    let std_listener = listener.into_std()?;
+    let mut server = axum_server::from_tcp_rustls(std_listener, tls_config)?;
+    configure_http_limits(server.http_builder());
 
-    let server = match axum_server::from_tcp_rustls(std_listener, tls_config) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(target: "server", error = %e, "Failed to create HTTPS server");
-            return;
-        }
-    };
-
-    if let Err(e) = server
+    server
         .handle(handle)
         .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .await
-    {
-        tracing::error!(target: "server", error = %e, "HTTPS server error");
-    }
 }
 
 // ── HTTPS listener (ACME / Let's Encrypt path) ────────────────────────────────
@@ -1265,11 +1458,12 @@ pub async fn run_https_acme(
     server_cfg: std::sync::Arc<rustls::ServerConfig>,
     app: axum::Router,
     cancel: tokio_util::sync::CancellationToken,
-) {
+) -> std::io::Result<()> {
     use hyper::server::conn::http1;
     use hyper_util::rt::TokioIo;
     use tower::Service as _;
 
+    let mut connections = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             () = cancel.cancelled() => {
@@ -1277,19 +1471,13 @@ pub async fn run_https_acme(
                 break;
             }
             result = listener.accept() => {
-                let (tcp, peer_addr) = match result {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!(target: "server", error = %e, "ACME TCP accept error");
-                        continue;
-                    }
-                };
+                let (tcp, peer_addr) = result?;
 
                 let acme_acceptor = std::sync::Arc::clone(&acme_acceptor);
                 let server_cfg = std::sync::Arc::clone(&server_cfg);
                 let svc           = app.clone();
 
-                tokio::spawn(async move {
+                connections.spawn(async move {
                     use tokio_util::compat::{TokioAsyncReadCompatExt as _, FuturesAsyncReadCompatExt as _};
                     // rustls-acme requires futures::{AsyncRead, AsyncWrite}; wrap
                     // the tokio TcpStream with the tokio-util compat shim.
@@ -1313,10 +1501,9 @@ pub async fn run_https_acme(
                                         );
                                         svc.clone().call(req)
                                     });
-                                    if let Err(e) = http1::Builder::new()
-                                        .serve_connection(io, svc)
-                                        .await
-                                    {
+                                    let mut builder = http1::Builder::new();
+                                    builder.max_buf_size(headers::HTTP_MAX_HEADER_BYTES);
+                                    if let Err(e) = builder.serve_connection(io, svc).await {
                                         tracing::debug!(
                                             target: "server",
                                             peer = %peer_addr,
@@ -1343,8 +1530,36 @@ pub async fn run_https_acme(
                     }
                 });
             }
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                if let Err(error) = result {
+                    tracing::warn!(
+                        target: "server",
+                        %error,
+                        "ACME HTTPS connection task failed"
+                    );
+                }
+            }
         }
     }
+
+    let drain_connections = async {
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                tracing::warn!(
+                    target: "server",
+                    %error,
+                    "ACME HTTPS connection task failed during shutdown"
+                );
+            }
+        }
+    };
+    if tokio::time::timeout(Duration::from_secs(1), drain_connections)
+        .await
+        .is_err()
+    {
+        connections.shutdown().await;
+    }
+    Ok(())
 }
 
 // ── HTTP→HTTPS redirect listener ─────────────────────────────────────────────
@@ -1355,26 +1570,27 @@ pub async fn run_http_redirect(
     listener: tokio::net::TcpListener,
     https_port: u16,
     cancel: tokio_util::sync::CancellationToken,
-) {
+) -> std::io::Result<()> {
     use axum::{extract::Request, http::StatusCode, response::IntoResponse as _, routing::any};
 
-    let redirect_app = axum::Router::new().route(
-        "/{*path}",
-        any(move |req: Request| async move {
-            build_redirect_response(&req, https_port).unwrap_or_else(|| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    "Refusing HTTP redirect for untrusted host header",
-                )
-                    .into_response()
-            })
-        }),
-    );
+    let redirect_app = axum::Router::new()
+        .route(
+            "/{*path}",
+            any(move |req: Request| async move {
+                build_redirect_response(&req, https_port).unwrap_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "Refusing HTTP redirect for untrusted host header",
+                    )
+                        .into_response()
+                })
+            }),
+        )
+        .layer(axum::middleware::from_fn(
+            headers::request_boundary_middleware,
+        ));
 
-    axum::serve(listener, redirect_app)
-        .with_graceful_shutdown(async move { cancel.cancelled().await })
-        .await
-        .ok();
+    run_plain_http(listener, redirect_app, cancel).await
 }
 
 fn build_redirect_response(
@@ -1552,12 +1768,22 @@ async fn onion_location_middleware(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_redirect_response, format_redirect_authority, redirect_host,
-        redirect_trusted_hosts_with, scheduled_full_backup_failure_retry_delay,
-        seed_initial_default_theme,
+        build_redirect_response, format_redirect_authority, next_listener_exit,
+        protect_tls_plaintext_backend, redirect_host, redirect_trusted_hosts_with, run_plain_http,
+        scheduled_full_backup_failure_retry_delay, seed_initial_default_theme,
+        PlaintextAppListener,
     };
-    use axum::{body::Body, extract::Request, http::header};
-    use std::time::Duration;
+    use axum::{
+        body::Body,
+        extract::{ConnectInfo, Request},
+        http::{header, StatusCode},
+        middleware::from_fn,
+        routing::any,
+        Router,
+    };
+    use std::{net::SocketAddr, sync::Arc, time::Duration};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tower::ServiceExt as _;
 
     fn request_with_host(host: &str) -> Request {
         Request::builder()
@@ -1570,6 +1796,269 @@ mod tests {
     fn test_conn() -> r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager> {
         let pool = crate::db::init_test_pool().expect("test pool");
         pool.get().expect("db connection")
+    }
+
+    fn tls_backend_app(redirect_http: bool) -> Router {
+        protect_tls_plaintext_backend(
+            Router::new().route("/", any(|| async { StatusCode::NO_CONTENT })),
+            8443,
+            redirect_http,
+        )
+    }
+
+    fn request_from_peer(peer: SocketAddr) -> Request {
+        Request::builder()
+            .uri("/")
+            .header(header::HOST, "127.0.0.1")
+            .extension(ConnectInfo(peer))
+            .body(Body::empty())
+            .expect("request")
+    }
+
+    async fn raw_http_request(address: SocketAddr, request: &[u8]) -> Vec<u8> {
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+        stream.write_all(request).await.expect("write request");
+        let mut response = Vec::new();
+        let read_result =
+            tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut response))
+                .await
+                .expect("response timeout");
+        if let Err(error) = read_result {
+            assert!(
+                error.kind() == std::io::ErrorKind::ConnectionReset && !response.is_empty(),
+                "read response: {error}"
+            );
+        }
+        response
+    }
+
+    fn assert_raw_status(response: &[u8], expected: &[u8]) {
+        let status_line = response
+            .split(|byte| *byte == b'\n')
+            .next()
+            .unwrap_or_default();
+        assert!(
+            status_line
+                .windows(expected.len())
+                .any(|part| part == expected),
+            "unexpected response status: {}",
+            String::from_utf8_lossy(status_line)
+        );
+    }
+
+    #[test]
+    fn native_tls_never_selects_a_public_plaintext_application_listener() {
+        assert_eq!(
+            super::plaintext_app_listener(false, false),
+            PlaintextAppListener::Public
+        );
+        assert_eq!(
+            super::plaintext_app_listener(true, false),
+            PlaintextAppListener::Disabled
+        );
+        assert_eq!(
+            super::plaintext_app_listener(true, true),
+            PlaintextAppListener::TorBackend
+        );
+    }
+
+    #[tokio::test]
+    async fn tls_tor_backend_redirects_direct_plaintext_requests() {
+        let peer = "127.0.0.1:61001".parse().expect("peer");
+        let response = tls_backend_app(true)
+            .oneshot(request_from_peer(peer))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("https://127.0.0.1:8443/")
+        );
+    }
+
+    #[tokio::test]
+    async fn tls_tor_backend_rejects_direct_plaintext_without_redirect_listener() {
+        let peer = "127.0.0.1:61003".parse().expect("peer");
+        let response = tls_backend_app(false)
+            .oneshot(request_from_peer(peer))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+        assert_eq!(
+            response.headers().get(header::CONNECTION),
+            Some(&header::HeaderValue::from_static("close"))
+        );
+    }
+
+    #[tokio::test]
+    async fn tls_tor_backend_allows_only_registered_tor_proxy_peers() {
+        let peer: SocketAddr = "127.0.0.1:61002".parse().expect("peer");
+        let same_port_other_loopback: SocketAddr =
+            "127.0.0.2:61002".parse().expect("alternate loopback peer");
+        crate::detect::TOR_STREAM_TOKENS.insert(peer, "tor:test".into());
+
+        let response = tls_backend_app(true)
+            .oneshot(request_from_peer(peer))
+            .await
+            .expect("response");
+        let spoofed = tls_backend_app(true)
+            .oneshot(request_from_peer(same_port_other_loopback))
+            .await
+            .expect("spoofed response");
+        crate::detect::TOR_STREAM_TOKENS.remove(&peer);
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(spoofed.status(), StatusCode::PERMANENT_REDIRECT);
+    }
+
+    #[tokio::test]
+    async fn tls_tor_backend_rejects_ambiguous_framing_before_redirect_gate() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("local address");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let server_cancel = cancel.clone();
+        let server = tokio::spawn(async move {
+            run_plain_http(listener, tls_backend_app(true), server_cancel)
+                .await
+                .expect("server");
+        });
+
+        let ambiguous = raw_http_request(
+            address,
+            b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\nConnection: close\r\n\r\n4\r\ntest\r\n0\r\n\r\n",
+        )
+        .await;
+        assert_raw_status(&ambiguous, b"400");
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .expect("server shutdown timeout")
+            .expect("server task");
+    }
+
+    #[tokio::test]
+    async fn listener_supervisor_reports_unexpected_listener_failure() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut listeners: tokio::task::JoinSet<super::ListenerTaskResult> =
+            tokio::task::JoinSet::new();
+        listeners.spawn(async { ("HTTPS", Err(anyhow::anyhow!("injected listener failure"))) });
+
+        let error = next_listener_exit(&mut listeners, &cancel)
+            .await
+            .expect_err("unexpected listener failure must stop the runtime");
+        let message = format!("{error:#}");
+        assert!(message.contains("HTTPS listener failed"));
+        assert!(message.contains("injected listener failure"));
+    }
+
+    #[tokio::test]
+    async fn plain_http_boundary_rejects_te_cl_and_large_request_heads() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("local address");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let app = Router::new()
+            .route("/", any(|| async { StatusCode::NO_CONTENT }))
+            .layer(from_fn(super::headers::request_boundary_middleware));
+        let server_cancel = cancel.clone();
+        let server = tokio::spawn(async move {
+            run_plain_http(listener, app, server_cancel)
+                .await
+                .expect("server");
+        });
+
+        let valid = raw_http_request(
+            address,
+            b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest",
+        )
+        .await;
+        assert_raw_status(&valid, b"204");
+
+        let exact_header_value = format!(
+            "GET / HTTP/1.1\r\nHost: localhost\r\nX-Boundary: {}\r\nConnection: close\r\n\r\n",
+            "a".repeat(super::headers::HTTP_MAX_HEADER_VALUE_BYTES)
+        );
+        let exact_header_value = raw_http_request(address, exact_header_value.as_bytes()).await;
+        assert_raw_status(&exact_header_value, b"204");
+
+        let ambiguous = raw_http_request(
+            address,
+            b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\nConnection: close\r\n\r\n4\r\ntest\r\n0\r\n\r\n",
+        )
+        .await;
+        assert_raw_status(&ambiguous, b"400");
+
+        let oversized = format!(
+            "GET / HTTP/1.1\r\nHost: localhost\r\nX-Large: {}\r\nConnection: close\r\n\r\n",
+            "a".repeat(super::headers::HTTP_MAX_HEADER_BYTES)
+        );
+        let oversized = raw_http_request(address, oversized.as_bytes()).await;
+        assert_raw_status(&oversized, b"431");
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .expect("server shutdown timeout")
+            .expect("server task");
+    }
+
+    #[tokio::test]
+    async fn channet_listener_rejects_ambiguous_framing_and_large_request_heads() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("local address");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let app = crate::chan_net::chan_router_with_auth(
+            crate::test_support::app_state(),
+            Arc::from("0123456789abcdef0123456789abcdef"),
+            512 * 1024,
+            10 * 1024 * 1024,
+        );
+        let server_cancel = cancel.clone();
+        let server = tokio::spawn(async move {
+            run_plain_http(listener, app, server_cancel)
+                .await
+                .expect("server");
+        });
+
+        let valid = raw_http_request(
+            address,
+            b"GET /chan/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_raw_status(&valid, b"200");
+
+        let ambiguous = raw_http_request(
+            address,
+            b"GET /chan/status HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\nConnection: close\r\n\r\n0\r\n\r\n",
+        )
+        .await;
+        assert_raw_status(&ambiguous, b"400");
+
+        let oversized = format!(
+            "GET /chan/status HTTP/1.1\r\nHost: localhost\r\nX-Large: {}\r\nConnection: close\r\n\r\n",
+            "a".repeat(super::headers::HTTP_MAX_HEADER_BYTES)
+        );
+        let oversized = raw_http_request(address, oversized.as_bytes()).await;
+        assert_raw_status(&oversized, b"431");
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .expect("server shutdown timeout")
+            .expect("server task");
     }
 
     #[test]

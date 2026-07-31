@@ -15,8 +15,8 @@ use std::io::{Cursor, Write as _};
 use uuid::Uuid;
 use zip::{write::SimpleFileOptions, ZipWriter};
 
-/// Build a full in-memory snapshot ZIP of all boards and all active
-/// (non-archived) posts.
+/// Build a full in-memory snapshot ZIP of all exportable public boards and
+/// their active (non-archived) posts.
 ///
 /// Returns ZIP bytes and the transaction UUID for this snapshot.
 /// Used by the federation layer (`/chan/export`, `/chan/refresh`).
@@ -24,7 +24,10 @@ pub fn build_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
     // ── Boards ────────────────────────────────────────────────────────────
     // Column is `name` (display name), not `title` — verified against db/mod.rs.
     let mut stmt = conn.prepare(
-        "SELECT short_name, name FROM boards ORDER BY nsfw ASC, display_order ASC, id ASC",
+        "SELECT short_name, name
+         FROM boards
+         WHERE access_mode IN ('public', 'post_password')
+         ORDER BY nsfw ASC, display_order ASC, id ASC",
     )?;
     let boards: Vec<SnapshotBoard> = stmt
         .query_map([], |row| {
@@ -42,6 +45,7 @@ pub fn build_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
          JOIN   threads t ON p.thread_id = t.id
          JOIN   boards  b ON t.board_id  = b.id
          WHERE  t.archived = 0
+           AND  b.access_mode IN ('public', 'post_password')
          ORDER  BY p.id",
     )?;
     let posts: Vec<SnapshotPost> = stmt

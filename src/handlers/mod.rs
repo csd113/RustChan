@@ -295,6 +295,10 @@ pub struct PostFormData {
 
 /// Drain all fields from a multipart form into [`PostFormData`].
 /// `csrf_cookie` is the value from the browser cookie for CSRF verification.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "the multipart parser keeps per-field size and duplicate checks at one input boundary"
+)]
 #[expect(clippy::too_many_lines)]
 pub async fn parse_post_multipart(
     mut multipart: Multipart,
@@ -864,6 +868,10 @@ fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
 
 /// Enqueue background media-processing and spam-check jobs for a newly created
 /// post.  Shared by `create_thread` and `post_reply`.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "job selection mirrors the closed media-type and follow-up job matrix"
+)]
 pub fn enqueue_post_jobs(
     job_queue: &JobQueue,
     conn: &rusqlite::Connection,

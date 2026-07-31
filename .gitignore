@@ -10,3 +10,5 @@ package-lock.json
 package.json
 playwright.config.ts
 /tests
+/.github/workflows/e2e.yml
+/.cargo/audit.toml

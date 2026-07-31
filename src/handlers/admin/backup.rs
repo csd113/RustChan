@@ -780,6 +780,32 @@ mod tests {
         format!("{prefix}-{}.zip", uuid::Uuid::new_v4().simple())
     }
 
+    fn admin_form_post(uri: &str, body: String) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::HOST, "localhost")
+            .header(header::ORIGIN, "http://localhost")
+            .header(
+                header::COOKIE,
+                "csrf_token=csrf123; chan_admin_session=session123",
+            )
+            .extension(crate::test_support::connect_info())
+            .body(Body::from(body))
+            .expect("admin form request")
+    }
+
+    async fn response_body_string(response: axum::response::Response) -> String {
+        String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("utf8 response body")
+    }
+
     #[tokio::test]
     async fn board_backup_get_requires_admin_csrf() {
         let state = crate::test_support::app_state();
@@ -903,6 +929,235 @@ mod tests {
         assert_eq!(
             target,
             "/admin/panel?flash=Board+%2Ftech%2F+restored.&open=board-backup-restore#board-backup-tech"
+        );
+    }
+
+    #[tokio::test]
+    async fn saved_backup_delete_is_blocked_during_active_maintenance_without_mutation() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+
+        let backup_ref = format!("delete-gate-{}", uuid::Uuid::new_v4().simple());
+        let backup_root = crate::config::backups_dir().join(&backup_ref);
+        let sentinel_path = backup_root.join("sentinel");
+        let _backup_cleanup = PathCleanup(backup_root.clone());
+        std::fs::create_dir_all(&backup_root).expect("create saved backup");
+        std::fs::write(&sentinel_path, b"protected backup").expect("write backup sentinel");
+
+        let app = Router::new()
+            .route("/admin/backup/delete", post(super::delete_backup))
+            .with_state(state.clone());
+        let form_body = format!(
+            "_csrf={}&kind=full&filename={backup_ref}",
+            admin_signed_csrf()
+        );
+
+        let active_guard = state
+            .maintenance_gate
+            .try_begin("Full backup creation")
+            .expect("begin maintenance");
+        let blocked = app
+            .clone()
+            .oneshot(admin_form_post("/admin/backup/delete", form_body.clone()))
+            .await
+            .expect("blocked delete response");
+
+        assert_eq!(blocked.status(), StatusCode::CONFLICT);
+        assert!(response_body_string(blocked)
+            .await
+            .contains("already running"));
+        assert_eq!(
+            std::fs::read(&sentinel_path).expect("protected backup remains"),
+            b"protected backup"
+        );
+
+        drop(active_guard);
+        let allowed = app
+            .oneshot(admin_form_post("/admin/backup/delete", form_body))
+            .await
+            .expect("allowed delete response");
+
+        assert_eq!(allowed.status(), StatusCode::SEE_OTHER);
+        assert!(!backup_root.exists());
+    }
+
+    #[tokio::test]
+    async fn saved_restore_routes_are_blocked_during_active_maintenance_without_mutation() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+
+        let marker_board = format!("m{}", &uuid::Uuid::new_v4().simple().to_string()[..7]);
+        {
+            let conn = state.db.get().expect("db connection");
+            crate::db::create_board(&conn, &marker_board, "Maintenance Marker", "", false)
+                .expect("create marker board");
+        }
+
+        std::fs::create_dir_all(super::full_backup_dir()).expect("create full backup dir");
+        std::fs::create_dir_all(super::board_backup_dir()).expect("create board backup dir");
+        let full_filename = unique_zip_name("saved-full-restore-gate");
+        let board_filename = unique_zip_name("saved-board-restore-gate");
+        let full_backup_path = super::full_backup_dir().join(&full_filename);
+        let board_backup_path = super::board_backup_dir().join(&board_filename);
+        let _full_backup_cleanup = PathCleanup(full_backup_path.clone());
+        let _board_backup_cleanup = PathCleanup(board_backup_path.clone());
+        std::fs::write(&full_backup_path, b"full backup marker").expect("write full backup marker");
+        std::fs::write(&board_backup_path, b"board backup marker")
+            .expect("write board backup marker");
+
+        let app = Router::new()
+            .route(
+                "/admin/backup/restore-saved",
+                post(super::restore_saved_full_backup),
+            )
+            .route(
+                "/admin/board/backup/restore-saved",
+                post(super::restore_saved_board_backup),
+            )
+            .with_state(state.clone());
+        let full_form_body = format!("_csrf={}&filename={full_filename}", admin_signed_csrf());
+        let board_form_body = format!("_csrf={}&filename={board_filename}", admin_signed_csrf());
+
+        let active_guard = state
+            .maintenance_gate
+            .try_begin("Full backup creation")
+            .expect("begin maintenance");
+        for (route, form_body) in [
+            ("/admin/backup/restore-saved", full_form_body.clone()),
+            ("/admin/board/backup/restore-saved", board_form_body.clone()),
+        ] {
+            let blocked = app
+                .clone()
+                .oneshot(admin_form_post(route, form_body))
+                .await
+                .expect("blocked restore response");
+            assert_eq!(blocked.status(), StatusCode::CONFLICT);
+            assert!(response_body_string(blocked)
+                .await
+                .contains("already running"));
+        }
+
+        assert_eq!(
+            std::fs::read(&full_backup_path).expect("full backup remains"),
+            b"full backup marker"
+        );
+        assert_eq!(
+            std::fs::read(&board_backup_path).expect("board backup remains"),
+            b"board backup marker"
+        );
+        {
+            let conn = state.db.get().expect("db connection");
+            let marker_name: String = conn
+                .query_row(
+                    "SELECT name FROM boards WHERE short_name = ?1",
+                    [&marker_board],
+                    |row| row.get(0),
+                )
+                .expect("marker board remains");
+            assert_eq!(marker_name, "Maintenance Marker");
+        }
+
+        drop(active_guard);
+        for (route, form_body) in [
+            ("/admin/backup/restore-saved", full_form_body),
+            ("/admin/board/backup/restore-saved", board_form_body),
+        ] {
+            let control = app
+                .clone()
+                .oneshot(admin_form_post(route, form_body))
+                .await
+                .expect("ungated restore response");
+            assert_eq!(control.status(), StatusCode::SEE_OTHER);
+            let location = control
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .expect("restore error redirect");
+            assert!(location.contains("/admin/panel?restore_error="));
+            assert!(location.contains("Invalid+zip"));
+        }
+    }
+
+    #[tokio::test]
+    async fn extracted_board_restore_is_blocked_during_active_maintenance_without_mutation() {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state);
+
+        let board_short = format!("e{}", &uuid::Uuid::new_v4().simple().to_string()[..7]);
+        std::fs::create_dir_all(full_backup_dir()).expect("create full backup dir");
+        let filename = unique_zip_name("extract-board-restore-gate");
+        let backup_path = full_backup_dir().join(&filename);
+        let _backup_cleanup = PathCleanup(backup_path.clone());
+        write_sample_full_backup_zip_for_board_at(&backup_path, true, &board_short);
+        let backup_before = std::fs::read(&backup_path).expect("read original full backup");
+
+        let upload_board_dir = PathBuf::from(&crate::config::CONFIG.upload_dir).join(&board_short);
+        let upload_path = upload_board_dir.join("hello.txt");
+        let _upload_cleanup = PathCleanup(upload_board_dir.clone());
+        assert!(!upload_board_dir.exists());
+
+        let app = Router::new()
+            .route(
+                "/admin/backup/extract-board",
+                post(super::extract_board_from_full_backup),
+            )
+            .with_state(state.clone());
+        let form_body = format!(
+            "filename={filename}&board_short={board_short}&action=restore&_csrf={}",
+            admin_signed_csrf()
+        );
+
+        let active_guard = state
+            .maintenance_gate
+            .try_begin("Full backup creation")
+            .expect("begin maintenance");
+        let blocked = app
+            .clone()
+            .oneshot(admin_form_post(
+                "/admin/backup/extract-board",
+                form_body.clone(),
+            ))
+            .await
+            .expect("blocked extracted board restore response");
+
+        assert_eq!(blocked.status(), StatusCode::CONFLICT);
+        assert!(response_body_string(blocked)
+            .await
+            .contains("already running"));
+        {
+            let conn = state.db.get().expect("db connection");
+            assert!(crate::db::get_board_by_short(&conn, &board_short)
+                .expect("query restored board")
+                .is_none());
+        }
+        assert!(!upload_board_dir.exists());
+        assert_eq!(
+            std::fs::read(&backup_path).expect("full backup remains"),
+            backup_before
+        );
+
+        drop(active_guard);
+        let allowed = app
+            .oneshot(admin_form_post("/admin/backup/extract-board", form_body))
+            .await
+            .expect("allowed extracted board restore response");
+
+        assert_eq!(allowed.status(), StatusCode::SEE_OTHER);
+        let location = allowed
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("restore success redirect");
+        assert!(location.contains(&format!("board-backup-{board_short}")));
+        {
+            let conn = state.db.get().expect("db connection");
+            assert!(crate::db::get_board_by_short(&conn, &board_short)
+                .expect("query restored board")
+                .is_some());
+        }
+        assert_eq!(
+            std::fs::read(&upload_path).expect("restored upload"),
+            b"hello"
         );
     }
 
@@ -1187,6 +1442,10 @@ mod tests {
             )
             .with_state(state.clone());
 
+        let active_guard = state
+            .maintenance_gate
+            .try_begin("Full backup creation")
+            .expect("begin concurrent maintenance");
         let response = app
             .clone()
             .oneshot(
@@ -1209,6 +1468,7 @@ mod tests {
             )
             .await
             .expect("extract response");
+        drop(active_guard);
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         let location = response
@@ -1604,14 +1864,23 @@ mod tests {
     }
 
     fn write_sample_full_backup_zip_at(zip_path: &std::path::Path, indexed_boards: bool) {
+        write_sample_full_backup_zip_for_board_at(zip_path, indexed_boards, "tech");
+    }
+
+    fn write_sample_full_backup_zip_for_board_at(
+        zip_path: &std::path::Path,
+        indexed_boards: bool,
+        board_short: &str,
+    ) {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let db_path = temp_dir.path().join("snapshot.db");
 
         let pool = crate::db::init_test_pool().expect("test pool");
         {
             let conn = pool.get().expect("db conn");
-            crate::db::create_board(&conn, "tech", "Technology", "", false).expect("create board");
-            let board = crate::db::get_board_by_short(&conn, "tech")
+            crate::db::create_board(&conn, board_short, "Technology", "", false)
+                .expect("create board");
+            let board = crate::db::get_board_by_short(&conn, board_short)
                 .expect("get board")
                 .expect("board exists");
             let post = crate::db::NewPost {
@@ -1623,7 +1892,7 @@ mod tests {
                 body: "hello".into(),
                 body_html: "hello".into(),
                 ip_hash: Some("hash".into()),
-                file_path: Some("tech/hello.txt".into()),
+                file_path: Some(format!("{board_short}/hello.txt")),
                 file_name: Some("hello.txt".into()),
                 file_size: Some(5),
                 thumb_path: None,
@@ -1664,7 +1933,7 @@ mod tests {
             tor_hidden_service_key_file_count: 0,
             boards: if indexed_boards {
                 vec![BackupBoardSummary {
-                    short_name: "tech".into(),
+                    short_name: board_short.to_owned(),
                     name: "Technology".into(),
                 }]
             } else {
@@ -1683,7 +1952,7 @@ mod tests {
             zip.write_all(&manifest_json).expect("write manifest");
             zip.start_file("chan.db", options).expect("start db");
             zip.write_all(&db_bytes).expect("write db");
-            zip.start_file("uploads/tech/hello.txt", options)
+            zip.start_file(format!("uploads/{board_short}/hello.txt"), options)
                 .expect("start upload");
             zip.write_all(b"hello").expect("write upload");
             zip.finish().expect("finish zip");

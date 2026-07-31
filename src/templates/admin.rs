@@ -2341,6 +2341,10 @@ mod tests {
         assert!(pruning_section_idx < prune_toggle_idx);
     }
 
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "the test intentionally checks a linear list of independent health-panel controls"
+    )]
     #[test]
     fn admin_panel_site_health_renders_after_site_settings_closed_by_default() {
         let board = sample_board();
@@ -2548,6 +2552,10 @@ mod tests {
             .contains(r#"<div class="page-box" style="margin-top:0.75rem;max-width:760px">"#));
     }
 
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "the test intentionally checks a linear list of independent panel groupings"
+    )]
     #[test]
     fn admin_panel_groups_board_and_backup_areas_by_task() {
         let board = sample_board();

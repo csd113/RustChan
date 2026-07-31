@@ -34,7 +34,7 @@ This guide reflects the current RustChan architecture:
 RustChan is a single Rust binary. A basic install only needs:
 
 - Rust toolchain to build it
-- a writable working directory
+- a writable runtime data directory (next to the binary by default, or selected with `--data-dir`)
 - `ffmpeg` if you want the enhanced media pipeline
 
 RustChan does not require:
@@ -239,11 +239,16 @@ Binary:
 ```bash
 ./target/release/rustchan-cli --port 9090
 ./target/release/rustchan-cli serve --chan-net
+./target/release/rustchan-cli --data-dir /absolute/path/to/rustchan-data
 ```
 
 ## First-Run Files and Layout
 
-By default RustChan stores runtime state in `rustchan-data/` next to the binary:
+By default RustChan stores runtime state in `rustchan-data/` next to the binary.
+Pass `--data-dir` with an absolute, non-root path to place the complete runtime
+layout elsewhere. This is the supported layout for service installations; it
+includes `settings.toml`, the database, uploads, logs, backups, and runtime
+secrets. The selected data directory has this layout:
 
 ```text
 rustchan-data/
@@ -502,10 +507,10 @@ sudo chown -R rustchan:rustchan /var/lib/rustchan
 This creates `settings.toml` and the runtime layout:
 
 ```bash
-sudo -u rustchan -H sh -lc 'cd /var/lib/rustchan && /usr/local/bin/rustchan-cli'
+sudo -u rustchan -H /usr/local/bin/rustchan-cli --data-dir /var/lib/rustchan
 ```
 
-Stop it after the first start, edit `/var/lib/rustchan/rustchan-data/settings.toml`, then continue.
+Stop it after the first start, edit `/var/lib/rustchan/settings.toml`, then continue.
 
 ### 4. Create a systemd Unit
 
@@ -521,7 +526,9 @@ Wants=network-online.target
 User=rustchan
 Group=rustchan
 WorkingDirectory=/var/lib/rustchan
-ExecStart=/usr/local/bin/rustchan-cli
+StateDirectory=rustchan
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/rustchan-cli --data-dir /var/lib/rustchan serve
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -532,6 +539,10 @@ ProtectHome=true
 [Install]
 WantedBy=multi-user.target
 ```
+
+`StateDirectory=rustchan` asks systemd to keep `/var/lib/rustchan` writable by
+the unprivileged service account. The explicit `--data-dir` keeps all runtime
+state there even though the root-owned executable lives under `/usr/local/bin`.
 
 Then:
 
@@ -565,6 +576,17 @@ If you put nginx or Caddy in front of RustChan:
 - set `CHAN_BEHIND_PROXY=true` if you want proxy headers trusted
 - set `CHAN_TRUSTED_PROXY_CIDRS` to the proxy's loopback or private CIDR when the proxy is not on localhost
 - decide whether TLS terminates at the proxy or inside RustChan
+
+When RustChan's built-in TLS is enabled, the main plaintext application listener
+is disabled. If `redirect_http = true`, `tls.http_port` is the only public HTTP
+listener and it serves redirects, not application routes. With the built-in Tor
+service enabled, RustChan also keeps a loopback-only HTTP backend that accepts
+only connections registered by its in-process Tor proxy.
+
+RustChan accepts bounded `Content-Length` request bodies and rejects
+`Transfer-Encoding` at the application boundary. Configure a reverse proxy to
+dechunk request bodies before forwarding them. Request headers are limited to
+32 KiB per value and 64 KiB in aggregate.
 
 Typical loopback setup:
 

@@ -1099,14 +1099,14 @@ mod tests {
 
         let deleted = delete_thread(&conn, thread_id).expect("delete thread");
         assert!(deleted.paths.is_empty());
-        assert!(
+        assert_eq!(
             conn.query_row(
                 "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
                 rusqlite::params![thread_id],
                 |row| row.get::<_, i64>(0),
             )
-            .expect("post count after delete")
-                == 0
+            .expect("post count after delete"),
+            0
         );
         match delete_thread(&conn, thread_id) {
             Err(AppError::NotFound(msg)) => assert!(msg.contains("Thread id")),

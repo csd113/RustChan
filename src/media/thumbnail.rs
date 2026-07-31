@@ -362,6 +362,10 @@ fn image_crate_thumbnail_or_placeholder(
     }
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "the renderer fallback and fail-closed validation sequence is intentionally linear"
+)]
 #[expect(clippy::too_many_lines)]
 fn pdf_first_page_thumbnail(
     input_path: &Path,

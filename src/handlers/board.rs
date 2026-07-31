@@ -189,6 +189,11 @@ fn xhr_json_error_response(
         HeaderValue::from_str(error_status.as_str())
             .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?,
     );
+    if error_status == StatusCode::SERVICE_UNAVAILABLE {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
     Ok(response)
 }
 
