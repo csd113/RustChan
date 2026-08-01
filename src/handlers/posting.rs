@@ -98,6 +98,10 @@ pub(crate) struct SubmitPostResult {
     pub created_at: i64,
 }
 
+/// Resolve a committed submission token to its canonical public post response.
+///
+/// # Errors
+/// Returns an error if the canonical post cannot be loaded from the database.
 fn existing_submission_result(
     conn: &rusqlite::Connection,
     board_short: String,
