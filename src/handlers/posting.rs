@@ -98,6 +98,26 @@ pub(crate) struct SubmitPostResult {
     pub created_at: i64,
 }
 
+fn existing_submission_result(
+    conn: &rusqlite::Connection,
+    board_short: String,
+    existing: db::PostSubmissionRecord,
+) -> Result<SubmitPostResult> {
+    let stored_post = db::get_post(conn, existing.post_id)?
+        .ok_or_else(|| AppError::NotFound("Existing post submission target not found.".into()))?;
+    Ok(SubmitPostResult {
+        redirect_url: format!(
+            "/{board_short}/thread/{}#p{}",
+            existing.thread_id, existing.post_id
+        ),
+        board_short,
+        thread_id: existing.thread_id,
+        post_id: existing.post_id,
+        deletion_token: stored_post.deletion_token,
+        created_at: stored_post.created_at,
+    })
+}
+
 /// Data used by the upload config workflow.
 pub(crate) struct UploadConfig<'a> {
     /// The upload directory.
@@ -547,20 +567,7 @@ pub(crate) fn submit_post(
         });
     }
     if let Some(existing) = db::get_post_submission(conn, &submission_token, &ip_hash, board.id)? {
-        let stored_post = db::get_post(conn, existing.post_id)?.ok_or_else(|| {
-            AppError::NotFound("Existing post submission target not found.".into())
-        })?;
-        return Ok(SubmitPostResult {
-            redirect_url: format!(
-                "/{}/thread/{}#p{}",
-                board.short_name, existing.thread_id, existing.post_id
-            ),
-            board_short: board.short_name,
-            thread_id: existing.thread_id,
-            post_id: existing.post_id,
-            deletion_token: stored_post.deletion_token,
-            created_at: stored_post.created_at,
-        });
+        return existing_submission_result(conn, board.short_name, existing);
     }
 
     let is_admin = is_admin_session(conn, admin_session_id.as_deref());
@@ -675,7 +682,7 @@ pub(crate) fn submit_post(
                     expires_at,
                 })
             };
-            let create_result = db::create_thread_with_optional_poll(
+            let create_result = db::threads::create_thread_submission(
                 conn,
                 board.id,
                 subject.as_deref(),
@@ -685,7 +692,11 @@ pub(crate) fn submit_post(
                 pending_upload_op.as_ref(),
             );
             let (thread_id, post_id, _) = match create_result {
-                Ok(ids) => ids,
+                Ok(db::threads::PostCreationOutcome::Created(ids)) => ids,
+                Ok(db::threads::PostCreationOutcome::Replayed(existing)) => {
+                    uploads.rollback_new_files(conn, &upload_dir)?;
+                    return existing_submission_result(conn, board.short_name, existing);
+                }
                 Err(error) => {
                     uploads.rollback_new_files(conn, &upload_dir)?;
                     return Err(error.into());
@@ -701,7 +712,7 @@ pub(crate) fn submit_post(
             (
                 post_id,
                 thread_id,
-                format!("/{}/thread/{thread_id}", board.short_name),
+                format!("/{}/thread/{thread_id}#p{post_id}", board.short_name),
                 Some(prune_job),
             )
         }
@@ -722,14 +733,18 @@ pub(crate) fn submit_post(
                 deletion_token.clone(),
                 false,
             );
-            let post_id = match db::create_reply_with_thread_update(
+            let post_id = match db::threads::create_reply_submission(
                 conn,
                 &new_post,
                 &submission_token,
                 should_bump,
                 pending_upload_op.as_ref(),
             ) {
-                Ok(post_id) => post_id,
+                Ok(db::threads::PostCreationOutcome::Created(post_id)) => post_id,
+                Ok(db::threads::PostCreationOutcome::Replayed(existing)) => {
+                    uploads.rollback_new_files(conn, &upload_dir)?;
+                    return existing_submission_result(conn, board.short_name, existing);
+                }
                 Err(error) => {
                     let stale_state_error = error.to_string();
                     uploads.rollback_new_files(conn, &upload_dir)?;
@@ -1040,6 +1055,117 @@ mod tests {
         assert_eq!(thread_count, 0);
         assert_eq!(post_count, 0);
         Ok(())
+    }
+
+    fn submit_concurrently(
+        state: &crate::middleware::AppState,
+        commands: Vec<SubmitPostCommand>,
+    ) -> Result<Vec<super::SubmitPostResult>> {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(commands.len()));
+        let job_queue = std::sync::Arc::new(crate::workers::JobQueue::new(
+            crate::db::init_test_pool().context("failed to create isolated test job queue")?,
+        ));
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(commands.len());
+            for command in commands {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let pool = state.db.clone();
+                let job_queue = std::sync::Arc::clone(&job_queue);
+                handles.push(scope.spawn(move || {
+                    barrier.wait();
+                    let conn = pool.get()?;
+                    submit_post(&conn, job_queue.as_ref(), command)
+                }));
+            }
+
+            let mut results = Vec::with_capacity(handles.len());
+            for handle in handles {
+                let result = handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("concurrent submission worker panicked"))?;
+                results.push(result.context("concurrent submission failed")?);
+            }
+            Ok(results)
+        })
+    }
+
+    fn assert_database_integrity(
+        conn: &rusqlite::Connection,
+        upload_dir: &std::path::Path,
+    ) -> Result<()> {
+        let quick_check: String = conn
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))
+            .context("quick_check failed")?;
+        assert_eq!(quick_check, "ok");
+
+        let foreign_key_failures: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .context("foreign_key_check failed")?;
+        assert_eq!(foreign_key_failures, 0);
+
+        let reply_counter_mismatches: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM threads AS thread
+                 WHERE thread.reply_count != (
+                     SELECT COUNT(*) FROM posts
+                     WHERE posts.thread_id = thread.id AND posts.is_op = 0
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .context("reply-counter consistency check failed")?;
+        assert_eq!(reply_counter_mismatches, 0);
+
+        let pending_fs_ops: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pending_fs_ops", [], |row| row.get(0))
+            .context("pending filesystem operation check failed")?;
+        assert_eq!(pending_fs_ops, 0);
+
+        let orphan_file_hashes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM file_hashes AS hash
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM posts
+                     WHERE posts.file_path = hash.file_path
+                        OR posts.thumb_path = hash.thumb_path
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .context("orphan media hash check failed")?;
+        assert_eq!(orphan_file_hashes, 0);
+        assert_eq!(pending_upload_stage_count(upload_dir)?, 0);
+        Ok(())
+    }
+
+    fn regular_files(
+        root: &std::path::Path,
+    ) -> Result<std::collections::HashSet<std::path::PathBuf>> {
+        fn visit(
+            directory: &std::path::Path,
+            files: &mut std::collections::HashSet<std::path::PathBuf>,
+        ) -> Result<()> {
+            if !directory.exists() {
+                return Ok(());
+            }
+            for entry in std::fs::read_dir(directory)? {
+                let path = entry?.path();
+                if path.is_dir() {
+                    visit(&path, files)?;
+                } else if path.is_file() {
+                    files.insert(path);
+                }
+            }
+            Ok(())
+        }
+
+        let mut files = std::collections::HashSet::new();
+        visit(root, &mut files)?;
+        Ok(files)
     }
 
     #[test]
@@ -1989,6 +2115,440 @@ mod tests {
             format!("/{TEST_BOARD}/thread/{thread_id}#p{reply_post_id}")
         );
         assert_eq!(reply_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_thread_submissions_share_one_atomic_result_on_fresh_databases() -> Result<()> {
+        for repetition in 0..3 {
+            let state = crate::test_support::app_state();
+            let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+            let conn = state
+                .db
+                .get()
+                .context("failed to get setup database connection")?;
+            crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+                .context("failed to create board")?;
+            drop(conn);
+
+            let token = format!("thread-race-{repetition}");
+            let body = format!("thread race body {repetition}");
+            let upload_path = upload_dir
+                .path()
+                .to_str()
+                .context("upload directory was not valid UTF-8")?;
+            let commands = (0..8)
+                .map(|_| thread_command(TEST_BOARD, &token, &body, upload_path))
+                .collect();
+            let results = submit_concurrently(&state, commands)?;
+
+            let canonical_locations = results
+                .iter()
+                .map(|result| result.redirect_url.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let canonical_posts = results
+                .iter()
+                .map(|result| (result.thread_id, result.post_id))
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(canonical_locations.len(), 1);
+            assert_eq!(canonical_posts.len(), 1);
+
+            let conn = state
+                .db
+                .get()
+                .context("failed to get verification database connection")?;
+            let post_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM posts WHERE body = ?1",
+                rusqlite::params![body],
+                |row| row.get(0),
+            )?;
+            let thread_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM threads WHERE board_id = (
+                    SELECT id FROM boards WHERE short_name = ?1
+                 )",
+                rusqlite::params![TEST_BOARD],
+                |row| row.get(0),
+            )?;
+            let token_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM post_submissions WHERE submission_token = ?1",
+                rusqlite::params![token],
+                |row| row.get(0),
+            )?;
+            assert_eq!(post_count, 1);
+            assert_eq!(thread_count, 1);
+            assert_eq!(token_count, 1);
+            assert_database_integrity(&conn, upload_dir.path())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_reply_submissions_share_one_atomic_result_on_fresh_databases() -> Result<()> {
+        for repetition in 0..3 {
+            let state = crate::test_support::app_state();
+            let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+            let conn = state
+                .db
+                .get()
+                .context("failed to get setup database connection")?;
+            let board_id = crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+                .context("failed to create board")?;
+            let (thread_id, _, _) = crate::db::create_thread_with_optional_poll(
+                &conn,
+                board_id,
+                Some("reply target"),
+                &sample_post(board_id, 0, "op body", true, Some("other-ip".to_owned())),
+                "",
+                None,
+                None,
+            )?;
+            drop(conn);
+
+            let token = format!("reply-race-{repetition}");
+            let body = format!("reply race body {repetition}");
+            let upload_path = upload_dir
+                .path()
+                .to_str()
+                .context("upload directory was not valid UTF-8")?;
+            let commands = (0..8)
+                .map(|_| reply_command(TEST_BOARD, thread_id, &token, &body, upload_path))
+                .collect();
+            let results = submit_concurrently(&state, commands)?;
+
+            let canonical_locations = results
+                .iter()
+                .map(|result| result.redirect_url.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let canonical_posts = results
+                .iter()
+                .map(|result| (result.thread_id, result.post_id))
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(canonical_locations.len(), 1);
+            assert_eq!(canonical_posts.len(), 1);
+
+            let conn = state
+                .db
+                .get()
+                .context("failed to get verification database connection")?;
+            let reply_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM posts WHERE thread_id = ?1 AND is_op = 0",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )?;
+            let stored_reply_count: i64 = conn.query_row(
+                "SELECT reply_count FROM threads WHERE id = ?1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )?;
+            let token_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM post_submissions WHERE submission_token = ?1",
+                rusqlite::params![token],
+                |row| row.get(0),
+            )?;
+            assert_eq!(reply_count, 1);
+            assert_eq!(stored_reply_count, 1);
+            assert_eq!(token_count, 1);
+            assert_database_integrity(&conn, upload_dir.path())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_thread_replay_cleans_losing_staged_media() -> Result<()> {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get setup database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
+        drop(conn);
+
+        let png = one_pixel_png()?;
+        let upload_path = upload_dir
+            .path()
+            .to_str()
+            .context("upload directory was not valid UTF-8")?;
+        let commands = (0..8)
+            .map(|index| {
+                let mut command = thread_command(
+                    TEST_BOARD,
+                    "thread-media-race",
+                    "thread media race body",
+                    upload_path,
+                );
+                command.file_data = Some(temp_upload(&format!("race-{index}.png"), &png)?);
+                Ok(command)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let results = submit_concurrently(&state, commands)?;
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.redirect_url.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            1
+        );
+
+        let conn = state
+            .db
+            .get()
+            .context("failed to get verification database connection")?;
+        let (file_path, thumb_path): (String, String) = conn.query_row(
+            "SELECT file_path, thumb_path FROM posts WHERE body = 'thread media race body'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let post_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM posts WHERE body = 'thread media race body'",
+            [],
+            |row| row.get(0),
+        )?;
+        let token_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM post_submissions
+             WHERE submission_token = 'thread-media-race'",
+            [],
+            |row| row.get(0),
+        )?;
+        let file_hash_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM file_hashes", [], |row| row.get(0))?;
+        assert_eq!(post_count, 1);
+        assert_eq!(token_count, 1);
+        assert_eq!(file_hash_count, 1);
+
+        let expected_files = std::iter::once(file_path)
+            .chain(std::iter::once(thumb_path))
+            .filter(|path| !path.is_empty())
+            .map(|path| upload_dir.path().join(path))
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(regular_files(upload_dir.path())?, expected_files);
+        assert_database_integrity(&conn, upload_dir.path())?;
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one end-to-end token lifecycle test covers sequential, distinct, rollback, and retry invariants"
+    )]
+    fn submission_tokens_preserve_sequential_distinct_and_rollback_behavior() -> Result<()> {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let upload_path = upload_dir
+            .path()
+            .to_str()
+            .context("upload directory was not valid UTF-8")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get setup database connection")?;
+        let board_id = crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
+
+        let first_thread = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            thread_command(
+                TEST_BOARD,
+                "sequential-thread",
+                "sequential thread",
+                upload_path,
+            ),
+        )?;
+        let replayed_thread = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            thread_command(
+                TEST_BOARD,
+                "sequential-thread",
+                "sequential thread",
+                upload_path,
+            ),
+        )?;
+        assert_eq!(first_thread.redirect_url, replayed_thread.redirect_url);
+        assert_eq!(first_thread.post_id, replayed_thread.post_id);
+        drop(conn);
+
+        let distinct_threads = submit_concurrently(
+            &state,
+            (0..8)
+                .map(|index| {
+                    thread_command(
+                        TEST_BOARD,
+                        &format!("distinct-thread-{index}"),
+                        &format!("distinct thread body {index}"),
+                        upload_path,
+                    )
+                })
+                .collect(),
+        )?;
+        assert_eq!(
+            distinct_threads
+                .iter()
+                .map(|result| result.post_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            8
+        );
+
+        let conn = state
+            .db
+            .get()
+            .context("failed to get reply setup database connection")?;
+        let (reply_thread_id, _, _) = crate::db::create_thread_with_optional_poll(
+            &conn,
+            board_id,
+            Some("reply target"),
+            &sample_post(
+                board_id,
+                0,
+                "reply target op",
+                true,
+                Some("other-ip".to_owned()),
+            ),
+            "",
+            None,
+            None,
+        )?;
+        let first_reply = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            reply_command(
+                TEST_BOARD,
+                reply_thread_id,
+                "sequential-reply",
+                "sequential reply",
+                upload_path,
+            ),
+        )?;
+        let replayed_reply = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            reply_command(
+                TEST_BOARD,
+                reply_thread_id,
+                "sequential-reply",
+                "sequential reply",
+                upload_path,
+            ),
+        )?;
+        assert_eq!(first_reply.redirect_url, replayed_reply.redirect_url);
+        assert_eq!(first_reply.post_id, replayed_reply.post_id);
+        drop(conn);
+
+        let distinct_replies = submit_concurrently(
+            &state,
+            (0..8)
+                .map(|index| {
+                    reply_command(
+                        TEST_BOARD,
+                        reply_thread_id,
+                        &format!("distinct-reply-{index}"),
+                        &format!("distinct reply body {index}"),
+                        upload_path,
+                    )
+                })
+                .collect(),
+        )?;
+        assert_eq!(
+            distinct_replies
+                .iter()
+                .map(|result| result.post_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            8
+        );
+
+        let conn = state
+            .db
+            .get()
+            .context("failed to get rollback database connection")?;
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER fail_submission_post
+             BEFORE INSERT ON posts
+             WHEN NEW.body IN ('force thread rollback', 'force reply rollback')
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced submission rollback');
+             END;",
+        )?;
+        let failed_thread = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            thread_command(
+                TEST_BOARD,
+                "rollback-thread",
+                "force thread rollback",
+                upload_path,
+            ),
+        );
+        assert!(failed_thread.is_err());
+        let failed_reply = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            reply_command(
+                TEST_BOARD,
+                reply_thread_id,
+                "rollback-reply",
+                "force reply rollback",
+                upload_path,
+            ),
+        );
+        assert!(failed_reply.is_err());
+        let failed_token_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM post_submissions
+             WHERE submission_token IN ('rollback-thread', 'rollback-reply')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(failed_token_count, 0);
+        conn.execute_batch("DROP TRIGGER fail_submission_post")?;
+
+        let corrected_thread = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            thread_command(
+                TEST_BOARD,
+                "rollback-thread",
+                "corrected thread retry",
+                upload_path,
+            ),
+        )?;
+        let corrected_reply = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            reply_command(
+                TEST_BOARD,
+                reply_thread_id,
+                "rollback-reply",
+                "corrected reply retry",
+                upload_path,
+            ),
+        )?;
+        assert!(corrected_thread.post_id > 0);
+        assert!(corrected_reply.post_id > 0);
+
+        let distinct_thread_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM posts WHERE body LIKE 'distinct thread body %'",
+            [],
+            |row| row.get(0),
+        )?;
+        let distinct_reply_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM posts WHERE body LIKE 'distinct reply body %'",
+            [],
+            |row| row.get(0),
+        )?;
+        let corrected_token_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM post_submissions
+             WHERE submission_token IN ('rollback-thread', 'rollback-reply')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(distinct_thread_count, 8);
+        assert_eq!(distinct_reply_count, 8);
+        assert_eq!(corrected_token_count, 2);
+        assert_database_integrity(&conn, upload_dir.path())?;
         Ok(())
     }
 }

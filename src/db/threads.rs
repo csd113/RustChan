@@ -195,6 +195,15 @@ pub fn get_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<
 
 // ─── Thread creation (atomic with OP post) ────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of atomically deciding whether a public post submission is new.
+pub(crate) enum PostCreationOutcome<T> {
+    /// The transaction created and committed a new post bundle.
+    Created(T),
+    /// The token already names a canonical committed post.
+    Replayed(super::PostSubmissionRecord),
+}
+
 /// Create a thread, its OP post, and an optional poll atomically.
 ///
 /// # Errors
@@ -208,6 +217,38 @@ pub fn create_thread_with_optional_poll(
     poll: Option<&PollInsert<'_>>,
     pending_fs_op: Option<&crate::pending_fs::PendingFsOpInsert>,
 ) -> Result<(i64, i64, Option<i64>)> {
+    match create_thread_submission(
+        conn,
+        board_id,
+        subject,
+        post,
+        submission_token,
+        poll,
+        pending_fs_op,
+    )? {
+        PostCreationOutcome::Created(ids) => Ok(ids),
+        PostCreationOutcome::Replayed(existing) => Ok((existing.thread_id, existing.post_id, None)),
+    }
+}
+
+/// Create a public thread submission or return its canonical replay target.
+///
+/// The submission-token lookup is performed after `BEGIN IMMEDIATE`, before
+/// any content mutation, so concurrent requests serialize on one durable
+/// database decision.
+///
+/// # Errors
+/// Returns an error if the transaction cannot be started or committed, or if
+/// any insert in a new submission fails.
+pub(crate) fn create_thread_submission(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+    subject: Option<&str>,
+    post: &super::NewPost,
+    submission_token: &str,
+    poll: Option<&PollInsert<'_>>,
+    pending_fs_op: Option<&crate::pending_fs::PendingFsOpInsert>,
+) -> Result<PostCreationOutcome<(i64, i64, Option<i64>)>> {
     // BEGIN IMMEDIATE acquires the write lock upfront to avoid SQLITE_BUSY
     // during the lock-upgrade step that DEFERRED transactions perform on first
     // write. With &Connection (not &mut Connection) we cannot use rusqlite's
@@ -215,7 +256,15 @@ pub fn create_thread_with_optional_poll(
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin IMMEDIATE transaction for create_thread_with_optional_poll")?;
 
-    let result: Result<(i64, i64, Option<i64>)> = (|| {
+    let result: Result<PostCreationOutcome<(i64, i64, Option<i64>)>> = (|| {
+        if let Some(ip_hash) = post.ip_hash.as_deref() {
+            if let Some(existing) =
+                super::posts::get_post_submission(conn, submission_token, ip_hash, board_id)?
+            {
+                return Ok(PostCreationOutcome::Replayed(existing));
+            }
+        }
+
         let thread_id: i64 = conn.query_row(
             "INSERT INTO threads (board_id, subject) VALUES (?1, ?2) RETURNING id",
             params![board_id, subject],
@@ -257,7 +306,7 @@ pub fn create_thread_with_optional_poll(
             )?;
         }
 
-        Ok((thread_id, post_id, poll_id))
+        Ok(PostCreationOutcome::Created((thread_id, post_id, poll_id)))
     })();
 
     match result {
@@ -286,10 +335,36 @@ pub fn create_reply_with_thread_update(
     should_bump: bool,
     pending_fs_op: Option<&crate::pending_fs::PendingFsOpInsert>,
 ) -> Result<i64> {
+    match create_reply_submission(conn, post, submission_token, should_bump, pending_fs_op)? {
+        PostCreationOutcome::Created(post_id) => Ok(post_id),
+        PostCreationOutcome::Replayed(existing) => Ok(existing.post_id),
+    }
+}
+
+/// Create a public reply submission or return its canonical replay target.
+///
+/// # Errors
+/// Returns an error if the transaction cannot be started or committed, if the
+/// thread is not writable, or if any mutation in a new submission fails.
+pub(crate) fn create_reply_submission(
+    conn: &rusqlite::Connection,
+    post: &super::NewPost,
+    submission_token: &str,
+    should_bump: bool,
+    pending_fs_op: Option<&crate::pending_fs::PendingFsOpInsert>,
+) -> Result<PostCreationOutcome<i64>> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin create_reply_with_thread_update transaction")?;
 
-    let result: Result<i64> = (|| {
+    let result: Result<PostCreationOutcome<i64>> = (|| {
+        if let Some(ip_hash) = post.ip_hash.as_deref() {
+            if let Some(existing) =
+                super::posts::get_post_submission(conn, submission_token, ip_hash, post.board_id)?
+            {
+                return Ok(PostCreationOutcome::Replayed(existing));
+            }
+        }
+
         let flags = conn
             .query_row(
                 "SELECT locked, archived
@@ -349,14 +424,14 @@ pub fn create_reply_with_thread_update(
                 false,
             )?;
         }
-        Ok(post_id)
+        Ok(PostCreationOutcome::Created(post_id))
     })();
 
     match result {
-        Ok(post_id) => {
+        Ok(outcome) => {
             conn.execute_batch("COMMIT")
                 .context("Failed to commit create_reply_with_thread_update transaction")?;
-            Ok(post_id)
+            Ok(outcome)
         }
         Err(error) => {
             drop(conn.execute_batch("ROLLBACK"));

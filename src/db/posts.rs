@@ -373,7 +373,7 @@ pub fn get_post_submission(
 /// Store a post submission token and prune expired rows.
 ///
 /// # Errors
-/// Returns an error if either database write fails.
+/// Returns an error if the token already exists or either database write fails.
 pub fn record_post_submission(
     conn: &rusqlite::Connection,
     submission_token: &str,
@@ -388,7 +388,7 @@ pub fn record_post_submission(
     }
 
     conn.execute(
-        "INSERT OR IGNORE INTO post_submissions
+        "INSERT INTO post_submissions
          (submission_token, ip_hash, board_id, thread_id, post_id, is_thread)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
@@ -400,7 +400,7 @@ pub fn record_post_submission(
             i32::from(is_thread)
         ],
     )
-    .context("Failed to record post submission token")?;
+    .context("Failed to record unique post submission token")?;
 
     conn.execute(
         "DELETE FROM post_submissions WHERE created_at < unixepoch() - 604800",
