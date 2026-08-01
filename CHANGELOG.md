@@ -25,6 +25,7 @@ All notable changes to RustChan will be documented in this file.
 
 ### Fixed
 
+- Fixed concurrent public thread and reply submissions reusing the same submission token so the token lookup, post creation, reply-counter update, pending filesystem operation, and canonical token mapping are committed atomically; concurrent and sequential replays now resolve to the same post without duplicate content, consumed tokens after rollback, or orphaned media.
 - Fixed admin job status semantics so a healthy idle queue reports `OK` and `idle — ready`, while warnings are reserved for failed or blocked work.
 - Fixed public preference cookies on plain-HTTP onion requests so their `Secure` attribute follows the actual request transport and preferences remain usable over Tor.
 - Fixed upgrades with native TLS enabled so they no longer force HTTPS unexpectedly; HTTPS-only access is now an explicit opt-in through `[tls].require_https`.
@@ -52,6 +53,7 @@ All notable changes to RustChan will be documented in this file.
 
 ### Internal
 
+- Added deterministic submission-token race regressions covering shared and distinct tokens, sequential reuse, rollback and corrected retry behavior, staged-media cleanup, canonical redirects, and SQLite integrity checks across fresh disposable databases; documented the canonical replay helper for strict Quality lint compliance.
 - Restored warning-clean strict Clippy coverage on the current Rust toolchain, the Rust 1.91 MSRV, and supported cross-compilation targets.
 - Reduced the resolved dependency graph from 666 to 653 packages, removed stale duplicate exceptions from the dependency-audit policy, and corrected the documented rationale for Arti's RSA advisory exception.
 - Added deterministic offline regressions for Arti state, cache, and native-keystore initialization, plus focused coverage for certificate validity accessors and compression negotiation.
