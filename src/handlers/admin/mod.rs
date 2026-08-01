@@ -1938,15 +1938,16 @@ fn dashboard_dependency_status(
 fn dashboard_job_status(
     site_health: &SiteHealthSnapshot,
 ) -> (String, String, crate::templates::AdminDashboardState) {
+    let backup_active = !matches!(
+        site_health.backup_jobs.as_str(),
+        "idle" | "last run complete" | "unknown"
+    );
     let state = if site_health.failed_jobs > 0 {
         crate::templates::AdminDashboardState::ActionNeeded
-    } else if site_health.running_jobs > 0
-        || site_health.queued_jobs > 0
-        || site_health.backup_jobs != "idle"
-    {
-        crate::templates::AdminDashboardState::Warning
     } else if site_health.backup_jobs == "unknown" {
         crate::templates::AdminDashboardState::Unknown
+    } else if site_health.queued_jobs > 0 && site_health.running_jobs == 0 && !backup_active {
+        crate::templates::AdminDashboardState::Warning
     } else {
         crate::templates::AdminDashboardState::Ok
     };
@@ -1957,8 +1958,10 @@ fn dashboard_job_status(
             "{} running / {} queued",
             site_health.running_jobs, site_health.queued_jobs
         )
+    } else if backup_active {
+        format!("backup {}", site_health.backup_jobs)
     } else {
-        "idle".to_owned()
+        "idle — ready".to_owned()
     };
     (
         status,
@@ -2631,14 +2634,14 @@ pub(super) fn consume_admin_session_bootstrap(token: &str) -> Option<String> {
 mod tests {
     use super::{
         admin_live_log, admin_site_health_jobs, consume_admin_session_bootstrap,
-        create_admin_session_bootstrap, dashboard_backup_status, dashboard_recent_count,
-        dashboard_thread_counts, dismiss_failed_site_health_jobs,
+        create_admin_session_bootstrap, dashboard_backup_status, dashboard_job_status,
+        dashboard_recent_count, dashboard_thread_counts, dismiss_failed_site_health_jobs,
         host_header_uses_https_port_with_config, hosts_match_for_same_origin, latest_log_file,
         load_dashboard_activity_snapshot, optional_count_query, read_log_tail,
         request_origin_uses_https, request_scheme_for_same_origin_with_config,
         require_same_origin_or_valid_csrf, require_same_origin_request,
         should_set_secure_cookie_with_config, BackupSummary, DismissFailedJobsForm, LiveLogQuery,
-        SESSION_COOKIE,
+        SiteHealthSnapshot, SESSION_COOKIE,
     };
     use crate::error::AppError;
     use crate::middleware::SecureCookieContext;
@@ -2774,6 +2777,61 @@ mod tests {
             dashboard_backup_status(&ok).2,
             crate::templates::AdminDashboardState::Ok
         );
+    }
+
+    fn site_health_with_jobs(
+        running_jobs: i64,
+        queued_jobs: i64,
+        failed_jobs: i64,
+        backup_jobs: &str,
+    ) -> SiteHealthSnapshot {
+        SiteHealthSnapshot {
+            server_status: "running".to_owned(),
+            database_schema_status: "current".to_owned(),
+            database_integrity_status: "passed".to_owned(),
+            last_successful_backup: "today".to_owned(),
+            next_scheduled_backup: "tomorrow".to_owned(),
+            data_dir_usage: "1 MiB".to_owned(),
+            upload_dir_size: "1 MiB".to_owned(),
+            tor_status: "disabled".to_owned(),
+            tor_service_status: "not started".to_owned(),
+            tor_mode: "disabled".to_owned(),
+            tor_config_summary: "disabled".to_owned(),
+            running_jobs,
+            queued_jobs,
+            recent_completed_jobs: 0,
+            failed_jobs,
+            backup_jobs: backup_jobs.to_owned(),
+            restore_jobs: "not available".to_owned(),
+            recent_warnings: "none".to_owned(),
+        }
+    }
+
+    #[test]
+    fn dashboard_job_status_treats_idle_as_healthy() {
+        let (status, _detail, state) =
+            dashboard_job_status(&site_health_with_jobs(0, 0, 0, "idle"));
+
+        assert_eq!(status, "idle — ready");
+        assert_eq!(state, crate::templates::AdminDashboardState::Ok);
+    }
+
+    #[test]
+    fn dashboard_job_status_reserves_warning_for_a_blocked_queue() {
+        let (status, _detail, state) =
+            dashboard_job_status(&site_health_with_jobs(0, 3, 0, "idle"));
+
+        assert_eq!(status, "0 running / 3 queued");
+        assert_eq!(state, crate::templates::AdminDashboardState::Warning);
+    }
+
+    #[test]
+    fn dashboard_job_status_keeps_routine_active_work_healthy() {
+        let (status, _detail, state) =
+            dashboard_job_status(&site_health_with_jobs(0, 0, 0, "compressing (2/10 files)"));
+
+        assert_eq!(status, "backup compressing (2/10 files)");
+        assert_eq!(state, crate::templates::AdminDashboardState::Ok);
     }
 
     fn same_origin_headers(host: &str) -> HeaderMap {

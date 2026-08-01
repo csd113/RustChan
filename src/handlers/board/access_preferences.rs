@@ -603,6 +603,7 @@ pub(crate) async fn set_theme(
     Query(params): Query<ThemePreferenceQuery>,
     jar: CookieJar,
     headers: HeaderMap,
+    secure_context: SecureCookieContext,
 ) -> Result<Response> {
     let theme = templates::normalize_theme_slug(&theme)
         .ok_or_else(|| AppError::BadRequest("Unknown theme.".into()))?;
@@ -618,7 +619,7 @@ pub(crate) async fn set_theme(
     cookie.set_http_only(false);
     cookie.set_same_site(SameSite::Lax);
     cookie.set_path("/");
-    cookie.set_secure(CONFIG.https_cookies);
+    cookie.set_secure(should_set_public_secure_cookie(&headers, secure_context));
     cookie.set_max_age(Duration::days(365));
     let jar = jar.add(cookie);
 
@@ -666,12 +667,12 @@ pub(crate) struct UserPreferencesForm {
 }
 
 /// Performs the public preference cookie handler operation.
-fn public_preference_cookie(name: &'static str, value: String) -> Cookie<'static> {
+fn public_preference_cookie(name: &'static str, value: String, secure: bool) -> Cookie<'static> {
     let mut cookie = Cookie::new(name, value);
     cookie.set_http_only(false);
     cookie.set_same_site(SameSite::Lax);
     cookie.set_path("/");
-    cookie.set_secure(CONFIG.https_cookies);
+    cookie.set_secure(secure);
     cookie.set_max_age(Duration::days(365));
     cookie
 }
@@ -680,9 +681,11 @@ fn public_preference_cookie(name: &'static str, value: String) -> Cookie<'static
 pub(crate) async fn set_user_preferences(
     jar: CookieJar,
     headers: HeaderMap,
+    secure_context: SecureCookieContext,
     Form(form): Form<UserPreferencesForm>,
 ) -> Result<Response> {
     check_csrf_jar(&jar, form.csrf.as_deref())?;
+    let secure_cookie = should_set_public_secure_cookie(&headers, secure_context);
 
     let existing_preferences = user_preferences_from_jar(&jar);
     let existing_theme = current_theme_from_jar(&jar);
@@ -734,7 +737,11 @@ pub(crate) async fn set_user_preferences(
     };
 
     let jar = if let Some(theme) = theme {
-        jar.add(public_preference_cookie(USER_THEME_COOKIE, theme))
+        jar.add(public_preference_cookie(
+            USER_THEME_COOKIE,
+            theme,
+            secure_cookie,
+        ))
     } else {
         jar.remove(Cookie::from(USER_THEME_COOKIE))
     };
@@ -742,18 +749,22 @@ pub(crate) async fn set_user_preferences(
         .add(public_preference_cookie(
             USER_HIDE_NSFW_COOKIE,
             hide_nsfw.to_owned(),
+            secure_cookie,
         ))
         .add(public_preference_cookie(
             USER_VIDEO_AUDIO_COOKIE,
             video_audio.to_owned(),
+            secure_cookie,
         ))
         .add(public_preference_cookie(
             USER_PREFERRED_VIEW_COOKIE,
             preferred_board_view.to_owned(),
+            secure_cookie,
         ))
         .add(public_preference_cookie(
             USER_ACTIVITY_BADGES_COOKIE,
             show_badges.to_owned(),
+            secure_cookie,
         ));
 
     if headers
@@ -1223,12 +1234,17 @@ mod tests {
     use super::{
         board_activity_markers_from_jar, ensure_csrf_with_secure, owned_post_grants_from_jar,
         owned_posts_cookie, owned_posts_cookie_value, prune_board_activity_markers,
-        remember_owned_post_until, thread_activity_markers_from_jar, OwnedPostGrant,
+        public_preference_cookie, remember_owned_post_until, set_user_preferences,
+        thread_activity_markers_from_jar, OwnedPostGrant, UserPreferencesForm,
         BOARD_ACTIVITY_COOKIE, OWNED_POSTS_COOKIE_MAX_LEN, SELF_DELETE_WINDOW_SECS,
-        THREAD_ACTIVITY_COOKIE, VISITOR_ID_COOKIE,
+        THREAD_ACTIVITY_COOKIE, USER_HIDE_NSFW_COOKIE, VISITOR_ID_COOKIE,
     };
     use anyhow::{ensure, Context as _, Result as AnyResult};
-    use axum_extra::extract::cookie::{CookieJar, SameSite};
+    use axum::{
+        extract::Form,
+        http::{header, HeaderMap, HeaderValue},
+    };
+    use axum_extra::extract::cookie::{Cookie as TestCookie, CookieJar, SameSite};
     use std::collections::HashSet;
 
     #[test]
@@ -1252,6 +1268,62 @@ mod tests {
         ensure!(cookie.secure() == Some(true));
         ensure!(cookie.domain().is_none(), "cookie should remain host-only");
         ensure!(cookie.max_age() == Some(time::Duration::minutes(5)));
+        Ok(())
+    }
+
+    #[test]
+    fn public_preference_cookie_is_durable_and_uses_the_supplied_transport() -> AnyResult<()> {
+        let onion_cookie = public_preference_cookie(USER_HIDE_NSFW_COOKIE, "1".to_owned(), false);
+        let https_cookie = public_preference_cookie(USER_HIDE_NSFW_COOKIE, "1".to_owned(), true);
+
+        ensure!(onion_cookie.path() == Some("/"));
+        ensure!(onion_cookie.same_site() == Some(SameSite::Lax));
+        ensure!(onion_cookie.max_age().is_some());
+        ensure!(!onion_cookie.secure().unwrap_or(false));
+        ensure!(https_cookie.secure().unwrap_or(false));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn user_preferences_remain_settable_on_plain_http_onion_transport() -> AnyResult<()> {
+        let jar = CookieJar::new().add(TestCookie::new("csrf_token", "csrf123"));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_static(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion",
+            ),
+        );
+        let response = set_user_preferences(
+            jar,
+            headers,
+            crate::middleware::SecureCookieContext::default(),
+            Form(UserPreferencesForm {
+                csrf: Some("csrf123".to_owned()),
+                preferences_form: None,
+                return_to: Some("/".to_owned()),
+                theme: None,
+                hide_nsfw_boards_present: Some("1".to_owned()),
+                hide_nsfw_boards: Some("1".to_owned()),
+                video_audio: None,
+                preferred_board_view: None,
+                show_activity_badges_present: None,
+                show_activity_badges: None,
+            }),
+        )
+        .await
+        .context("set onion preference")?;
+
+        let cookies = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .collect::<Vec<_>>();
+        ensure!(cookies
+            .iter()
+            .any(|cookie| cookie.starts_with("rustchan_hide_nsfw=1;")));
+        ensure!(cookies.iter().all(|cookie| !cookie.contains("; Secure")));
         Ok(())
     }
 

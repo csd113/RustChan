@@ -127,7 +127,8 @@ mod tests {
             "x-rustchan-background",
             "keepalive: true",
             "new URLSearchParams(new FormData(form))",
-            "form.addEventListener('submit', function (event) {\n        event.preventDefault();",
+            "setPreferenceStatus('Saving…', 'saving');",
+            "setPreferenceStatus('Saved.', 'saved');",
             "control.name === 'theme'",
             "control.name === 'hide_nsfw_boards'",
             "data-hide-nsfw-boards",
@@ -145,6 +146,12 @@ mod tests {
         assert!(
             !MAIN_JS.contains("var firstControl = panel.querySelector('select, input, button');"),
             "opening preferences should not force focus onto the first control"
+        );
+        assert!(
+            !MAIN_JS.contains(
+                "form.addEventListener('submit', function (event) {\n        event.preventDefault();\n        mirrorUserPreferencesToCookies(form);"
+            ),
+            "preferences should persist on change without a redundant submit flow"
         );
     }
 

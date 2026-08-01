@@ -1138,7 +1138,7 @@ fn setup_form_page(
 ) -> String {
     let mut alerts = String::new();
     if state.requires_admin_auth() {
-        alerts.push_str(r#"<div class="setup-alert">Setup was reopened by an admin. Existing admin credentials will not be replaced.</div>"#);
+        alerts.push_str(r#"<div class="setup-alert" role="status"><strong>Admin setup session.</strong> Setup was reopened by an administrator. Existing credentials will not be replaced.</div>"#);
     }
     if let Some(warning) = transport_warning {
         let _ = write!(
@@ -1147,25 +1147,28 @@ fn setup_form_page(
             escape_html(warning)
         );
     }
-    for error in errors {
-        let _ = write!(
-            alerts,
-            r#"<div class="error" role="alert">{}</div>"#,
-            escape_html(error)
+    if !errors.is_empty() {
+        alerts.push_str(
+            r#"<div class="setup-validation" role="alert" tabindex="-1"><h2>Check the highlighted setup details</h2><p>Nothing was saved. Correct the following items and review again.</p><ul>"#,
         );
+        for error in errors {
+            let _ = write!(alerts, "<li>{}</li>", escape_html(error));
+        }
+        alerts.push_str("</ul></div>");
     }
     let admin_fields = if state.admin_count == 0 {
-        r#"<section class="setup-section">
-<h2>3. Admin account</h2>
+        r#"<section class="setup-section" aria-labelledby="setup-step-3">
+<div class="setup-section-head"><span class="setup-step">Step 3</span><h2 id="setup-step-3">Admin account</h2><p>Create the first administrator. The password is hashed before setup is committed.</p></div>
 <div class="setup-grid">
-<label>Username <input name="admin_username" value="admin" required autocomplete="username"></label>
-<label>Password <input type="password" name="admin_password" required autocomplete="new-password" minlength="12"></label>
-<label>Confirm password <input type="password" name="admin_password_confirm" required autocomplete="new-password" minlength="12"></label>
+<label><span>Username</span><input name="admin_username" value="admin" required autocomplete="username" aria-describedby="setup-admin-help"></label>
+<label><span>Password</span><input type="password" name="admin_password" required autocomplete="new-password" minlength="12" aria-describedby="setup-admin-help"></label>
+<label><span>Confirm password</span><input type="password" name="admin_password_confirm" required autocomplete="new-password" minlength="12" aria-describedby="setup-admin-help"></label>
 </div>
+<p class="setup-field-help" id="setup-admin-help">Use 3–32 letters, numbers, underscores, or dashes for the username and at least 12 characters for the password.</p>
 </section>"#
             .to_owned()
     } else {
-        r#"<section class="setup-section"><h2>3. Admin account</h2><p class="admin-copy">An admin account already exists. Continue as the currently authenticated admin; this wizard will not replace credentials.</p></section>"#.to_owned()
+        r#"<section class="setup-section" aria-labelledby="setup-step-3"><div class="setup-section-head"><span class="setup-step">Step 3</span><h2 id="setup-step-3">Admin account</h2><p>Existing administrator credentials stay unchanged.</p></div><p class="admin-copy">Continue as the currently authenticated administrator; this wizard will not replace credentials.</p></section>"#.to_owned()
     };
     let ffmpeg = if app_state.ffmpeg_available {
         "detected"
@@ -1180,69 +1183,83 @@ fn setup_form_page(
     let body = format!(
         r#"<main class="setup-wizard">
 <div class="setup-head">
+<p class="setup-eyebrow">First-run configuration</p>
 <h1>RustChan setup</h1>
-<p>Configure this local runtime before opening the instance to users. All controls work without JavaScript.</p>
+<p>Configure the instance before opening it to users. Review is a separate step, and every control works without JavaScript.</p>
 </div>
 {alerts}
-<form method="POST" action="/setup/review">
+<form class="setup-form" method="POST" action="/setup/review">
 <input type="hidden" name="_csrf" value="{csrf}">
-<section class="setup-section"><h2>1. Instance mode</h2><div class="setup-choice-row">{preset_options}</div></section>
-<section class="setup-section"><h2>2. Site basics</h2><div class="setup-grid">
-<label>Site name <input name="site_name" value="{site_name}" maxlength="64" required></label>
-<label>Subtitle <input name="site_subtitle" value="{site_subtitle}" maxlength="128"></label>
-<label>Default theme <input name="default_theme" value="{default_theme}" maxlength="32"></label>
-</div><p class="admin-copy">About, rules, and contact links can be added later from supported site surfaces.</p></section>
+<section class="setup-section setup-section-wide" aria-labelledby="setup-step-1">
+<div class="setup-section-head"><span class="setup-step">Step 1</span><h2 id="setup-step-1">Instance mode</h2><p>Choose a safe starting point. You can still adjust every setting below.</p></div>
+<div class="setup-choice-row">{preset_options}</div>
+</section>
+<section class="setup-section" aria-labelledby="setup-step-2">
+<div class="setup-section-head"><span class="setup-step">Step 2</span><h2 id="setup-step-2">Site basics</h2><p>Set the public identity and initial visual theme.</p></div>
+<div class="setup-grid">
+<label><span>Site name</span><input name="site_name" value="{site_name}" maxlength="64" required></label>
+<label><span>Subtitle</span><input name="site_subtitle" value="{site_subtitle}" maxlength="128"></label>
+<label><span>Default theme slug</span><input name="default_theme" value="{default_theme}" maxlength="32"></label>
+</div><p class="setup-field-help">About, rules, and contact links can be added later from supported site surfaces.</p></section>
 {admin_fields}
-<section class="setup-section"><h2>4. Network / Tor</h2><div class="setup-grid">
-<label>Public URL <input name="public_url" value="{public_url}" placeholder="https://example.com"></label>
+<section class="setup-section" aria-labelledby="setup-step-4">
+<div class="setup-section-head"><span class="setup-step">Step 4</span><h2 id="setup-step-4">Network and Tor</h2><p>Describe how visitors reach this instance. Runtime binding changes take effect after restart.</p></div>
+<div class="setup-grid">
+<label><span>Public URL</span><input name="public_url" value="{public_url}" placeholder="https://example.com" inputmode="url"></label>
 <label class="setup-check"><input type="checkbox" name="enable_tor" value="1"{enable_tor}> Enable Tor/onion service</label>
 <label class="setup-check"><input type="checkbox" name="tor_only" value="1"{tor_only}> Tor-only loopback binding after restart</label>
 <label class="setup-check"><input type="checkbox" name="https_cookies" value="1"{https_cookies}> Use Secure cookies when request transport is HTTPS</label>
 <label class="setup-check"><input type="checkbox" name="behind_proxy" value="1"{behind_proxy}> Instance is behind a trusted HTTPS proxy</label>
 </div></section>
-<section class="setup-section"><h2>5. Default board</h2><div class="setup-grid">
-<label>Slug <input name="board_slug" value="{board_slug}" maxlength="8" required></label>
-<label>Name <input name="board_name" value="{board_name}" maxlength="64" required></label>
-<label>Description <input name="board_description" value="{board_description}" maxlength="256"></label>
-<label>Visibility <select name="board_visibility">{visibility_options}</select></label>
+<section class="setup-section" aria-labelledby="setup-step-5">
+<div class="setup-section-head"><span class="setup-step">Step 5</span><h2 id="setup-step-5">Default board</h2><p>Create the first board and choose its initial access and posting rules.</p></div>
+<div class="setup-grid">
+<label><span>Slug</span><input name="board_slug" value="{board_slug}" maxlength="8" required aria-describedby="setup-board-slug-help"></label>
+<label><span>Name</span><input name="board_name" value="{board_name}" maxlength="64" required></label>
+<label><span>Description</span><input name="board_description" value="{board_description}" maxlength="256"></label>
+<label><span>Visibility</span><select name="board_visibility">{visibility_options}</select></label>
 <label class="setup-check"><input type="checkbox" name="allow_posting" value="1"{allow_posting}> Allow posting</label>
 <label class="setup-check"><input type="checkbox" name="board_nsfw" value="1"{board_nsfw}> Mark board NSFW</label>
 <label class="setup-check"><input type="checkbox" name="allow_thread_editing" value="1"{allow_thread_editing}> Allow post editing</label>
 <label class="setup-check"><input type="checkbox" name="allow_self_delete" value="1"{allow_self_delete}> Allow self-delete</label>
 <label class="setup-check"><input type="checkbox" name="allow_archive" value="1"{allow_archive}> Archive overflow threads</label>
-</div></section>
-<section class="setup-section"><h2>6. Uploads and media</h2>
-<p class="admin-copy">ffmpeg: <strong>{ffmpeg}</strong>; ffprobe: <strong>{ffprobe}</strong>. PDF uploads use the PDF limit shown here; other file types use their matching media limits.</p>
+</div><p class="setup-field-help" id="setup-board-slug-help">The slug becomes the board URL and must contain 1–8 lowercase letters or digits.</p></section>
+<section class="setup-section setup-section-wide" aria-labelledby="setup-step-6">
+<div class="setup-section-head"><span class="setup-step">Step 6</span><h2 id="setup-step-6">Uploads and media</h2><p>Enable only the formats this instance should accept and set whole-MiB limits.</p></div>
+<p class="setup-runtime-note">Runtime detection: ffmpeg <strong>{ffmpeg}</strong>; ffprobe <strong>{ffprobe}</strong>.</p>
 <div class="setup-grid">
 <label class="setup-check"><input type="checkbox" name="allow_uploads" value="1"{allow_uploads}> Allow image uploads</label>
 <label class="setup-check"><input type="checkbox" name="allow_video" value="1"{allow_video}> Allow video uploads</label>
 <label class="setup-check"><input type="checkbox" name="allow_audio" value="1"{allow_audio}> Allow audio uploads</label>
 <label class="setup-check"><input type="checkbox" name="allow_pdf" value="1"{allow_pdf}> Allow PDF uploads</label>
-<label>Image limit (MiB) <input type="number" name="image_limit_mib" value="{image_limit_mib}" min="1" max="4096" required></label>
-<label>Video limit (MiB) <input type="number" name="video_limit_mib" value="{video_limit_mib}" min="1" max="4096" required></label>
-<label>Audio limit (MiB) <input type="number" name="audio_limit_mib" value="{audio_limit_mib}" min="1" max="4096" required></label>
-<label>PDF limit (MiB) <input type="number" name="pdf_limit_mib" value="{pdf_limit_mib}" min="1" max="4096" required></label>
+<label><span>Image limit (MiB)</span><input type="number" name="image_limit_mib" value="{image_limit_mib}" min="1" max="4096" required></label>
+<label><span>Video limit (MiB)</span><input type="number" name="video_limit_mib" value="{video_limit_mib}" min="1" max="4096" required></label>
+<label><span>Audio limit (MiB)</span><input type="number" name="audio_limit_mib" value="{audio_limit_mib}" min="1" max="4096" required></label>
+<label><span>PDF limit (MiB)</span><input type="number" name="pdf_limit_mib" value="{pdf_limit_mib}" min="1" max="4096" required></label>
 <label class="setup-check"><input type="checkbox" name="allow_video_embeds" value="1"{allow_video_embeds}> Allow video embeds</label>
 </div></section>
-<section class="setup-section"><h2>7. Anti-spam and privacy</h2><div class="setup-grid">
+<section class="setup-section" aria-labelledby="setup-step-7">
+<div class="setup-section-head"><span class="setup-step">Step 7</span><h2 id="setup-step-7">Anti-spam and privacy</h2><p>Choose initial abuse controls and visitor-facing activity defaults.</p></div>
+<div class="setup-grid">
 <label class="setup-check"><input type="checkbox" name="allow_captcha" value="1"{allow_captcha}> Enable CAPTCHA on default board</label>
-<label>CAPTCHA type <select name="captcha_type"><option value="builtin">Built-in</option><option value="disabled">Disabled</option></select></label>
-<label>Posting cooldown seconds <input type="number" name="post_cooldown_secs" value="{post_cooldown_secs}" min="0" max="3600"></label>
+<label><span>CAPTCHA type</span><select name="captcha_type"><option value="builtin">Built-in</option><option value="disabled">Disabled</option></select></label>
+<label><span>Posting cooldown (seconds)</span><input type="number" name="post_cooldown_secs" value="{post_cooldown_secs}" min="0" max="3600"></label>
 <label class="setup-check"><input type="checkbox" name="homepage_new_thread_badges_enabled" value="1"{homepage_new_thread_badges_enabled}> Homepage new-thread badges</label>
 <label class="setup-check"><input type="checkbox" name="homepage_new_reply_badges_enabled" value="1"{homepage_new_reply_badges_enabled}> Homepage new-reply badges</label>
 <label class="setup-check"><input type="checkbox" name="thread_new_reply_badges_enabled" value="1"{thread_new_reply_badges_enabled}> Thread new-reply badges</label>
 <label class="setup-check"><input type="checkbox" name="hide_nsfw_default" value="1"{hide_nsfw_default}> Hide NSFW boards by default</label>
 </div></section>
-<section class="setup-section"><h2>8. Backups</h2>
-<p class="admin-copy">Default destination: <strong>{backup_dir}</strong>. Automatic backups stay disabled unless enabled here.</p>
+<section class="setup-section" aria-labelledby="setup-step-8">
+<div class="setup-section-head"><span class="setup-step">Step 8</span><h2 id="setup-step-8">Backups</h2><p>Set the initial automatic full-backup policy. Automatic backups remain off unless enabled here.</p></div>
+<p class="setup-runtime-note">Default destination: <strong>{backup_dir}</strong></p>
 <div class="setup-grid">
 <label class="setup-check"><input type="checkbox" name="auto_backup_enabled" value="1"{auto_backup_enabled}> Enable automatic full backups every 24 hours</label>
-<label>Retention count <input type="number" name="backup_retention" value="{backup_retention}" min="1" max="1000"></label>
+<label><span>Retention count</span><input type="number" name="backup_retention" value="{backup_retention}" min="1" max="1000"></label>
 <label class="setup-check"><input type="checkbox" name="include_tor_keys_in_backups" value="1"{include_tor_keys_in_backups}> Include Tor hidden-service keys in automatic backups</label>
-</div><p class="admin-copy">Tor keys are excluded by default. Include them only if a backup should restore the same onion identity.</p></section>
-<section class="setup-section"><h2>9. Review and finish</h2>
-<p class="admin-copy">Review the next page before anything is written. Setup is marked complete only after all database writes succeed.</p>
-<button type="submit">review setup</button>
+</div><p class="setup-field-help">Tor keys are excluded by default. Include them only when a backup must restore the same onion identity.</p></section>
+<section class="setup-section setup-section-wide setup-section-actions" aria-labelledby="setup-step-9">
+<div class="setup-section-head"><span class="setup-step">Step 9</span><h2 id="setup-step-9">Review and finish</h2><p>The next page is read-only. Nothing is written until you confirm there.</p></div>
+<div class="setup-actions"><span>Setup is marked complete only after all database writes succeed.</span><button type="submit">review setup</button></div>
 </section>
 </form>
 </main>"#,
@@ -1329,9 +1346,9 @@ fn setup_review_page(
     };
     let body = format!(
         r#"<main class="setup-wizard">
-<div class="setup-head"><h1>Review setup</h1><p>Confirm these settings before RustChan writes setup state.</p></div>
-<section class="setup-section">
-<h2>Summary</h2>
+<div class="setup-head"><p class="setup-eyebrow">Final review</p><h1>Review setup</h1><p>Confirm these settings before RustChan writes configuration or setup state.</p></div>
+<section class="setup-section setup-review-card" aria-labelledby="setup-review-heading">
+<div class="setup-section-head"><span class="setup-step">Review</span><h2 id="setup-review-heading">Configuration summary</h2><p>Use “edit settings” to go back without making changes.</p></div>
 <dl class="setup-review-list">
 <dt>Preset</dt><dd>{preset}</dd>
 <dt>Site</dt><dd>{site}</dd>
@@ -1341,7 +1358,7 @@ fn setup_review_page(
 <dt>Network</dt><dd>Tor {tor}; HTTPS cookies {https_cookies}; proxy {proxy}</dd>
 <dt>Backups</dt><dd>{backup}</dd>
 </dl>
-<form method="POST" action="/setup/finish">
+<form class="setup-review-actions" method="POST" action="/setup/finish">
 {hidden}
 <button type="submit">finish setup</button>
 <a class="button-secondary" href="/setup">edit settings</a>
@@ -1404,9 +1421,14 @@ fn preset_options(selected: &str) -> String {
         SetupPreset::Private,
         SetupPreset::Local,
     ] {
+        let description = match preset {
+            SetupPreset::Public => "Public posting defaults with Tor available.",
+            SetupPreset::Private => "Restricted board visibility and conservative access.",
+            SetupPreset::Local => "Loopback-focused defaults for local evaluation.",
+        };
         let _ = write!(
             out,
-            r#"<label class="setup-preset"><input type="radio" name="preset" value="{value}"{checked}> <span>{label}</span> <a href="/setup?preset={value}">prefill</a></label>"#,
+            r#"<div class="setup-preset"><label><input type="radio" name="preset" value="{value}"{checked}> <span>{label}</span></label><p>{description}</p><a href="/setup?preset={value}">load defaults</a></div>"#,
             value = preset.as_str(),
             checked = if selected == preset.as_str() {
                 " checked"
@@ -1414,6 +1436,7 @@ fn preset_options(selected: &str) -> String {
                 ""
             },
             label = preset.label(),
+            description = description,
         );
     }
     out
@@ -1573,6 +1596,37 @@ mod tests {
         ensure!(errors.iter().any(|error| error.contains("Board slug")));
         ensure!(errors.iter().any(|error| error.contains("Admin password")));
         Ok(())
+    }
+
+    #[test]
+    fn setup_form_renders_accessible_cards_and_grouped_validation() {
+        let form = SetupWizardForm::defaults_for(SetupPreset::Public);
+        let state = db::SetupState {
+            access: db::SetupAccess::Fresh,
+            admin_count: 0,
+            board_count: 0,
+            completed: false,
+            reopened: false,
+        };
+        let app_state = crate::test_support::app_state();
+
+        let html = setup_form_page(
+            "csrf",
+            state,
+            &form,
+            &["Board name is required.".to_owned()],
+            None,
+            &app_state,
+            None,
+        );
+
+        assert!(html.contains(r#"<form class="setup-form" method="POST" action="/setup/review">"#));
+        assert!(html.contains(r#"aria-labelledby="setup-step-1""#));
+        assert!(html.contains(r#"class="setup-validation" role="alert" tabindex="-1""#));
+        assert!(html.contains("Nothing was saved."));
+        assert!(html.contains(r#"<div class="setup-preset"><label>"#));
+        assert!(html.contains("load defaults</a>"));
+        assert!(!html.contains("<label class=\"setup-preset\""));
     }
 
     #[test]

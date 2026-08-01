@@ -561,14 +561,12 @@ html[data-theme="{slug}"] .site-header::before {{
 html[data-theme="{slug}"] .site-header a,
 html[data-theme="{slug}"] .board-list,
 html[data-theme="{slug}"] .board-list a,
-html[data-theme="{slug}"] .home-btn,
-html[data-theme="{slug}"] .admin-header-link {{
+html[data-theme="{slug}"] .home-btn {{
   color: {header_text};
 }}
 
 html[data-theme="{slug}"] .board-list a:hover,
-html[data-theme="{slug}"] .home-btn:hover,
-html[data-theme="{slug}"] .admin-header-link:hover {{
+html[data-theme="{slug}"] .home-btn:hover {{
   color: {link_hover};
 }}
 

@@ -2721,12 +2721,13 @@ function clampPopupToViewport(anchor, popup) {
       if (hideNsfw) applyHideNsfwPreference(hideNsfw.checked);
       var showBadges = form.querySelector('input[name="show_activity_badges"]');
       if (showBadges) applyActivityBadgePreference(showBadges.checked);
+      var status = form.querySelector('.user-preferences-status');
 
-      form.addEventListener('submit', function (event) {
-        event.preventDefault();
-        mirrorUserPreferencesToCookies(form);
-        persistUserPreferencesForm(form);
-      });
+      function setPreferenceStatus(message, state) {
+        if (!status) return;
+        status.textContent = message;
+        status.dataset.state = state || '';
+      }
 
       form.addEventListener('change', function (event) {
         var control = event.target;
@@ -2745,8 +2746,13 @@ function clampPopupToViewport(anchor, popup) {
         }
 
         mirrorUserPreferencesToCookies(form);
+        setPreferenceStatus('Saving…', 'saving');
         persistUserPreferencesForm(form).then(function (saved) {
-          if (!saved) return;
+          if (!saved) {
+            setPreferenceStatus('Could not save. Try the change again.', 'error');
+            return;
+          }
+          setPreferenceStatus('Saved.', 'saved');
           if (
             control.name === 'preferred_board_view' ||
             (control.name === 'hide_nsfw_boards' && !control.checked && !hadNsfwNodes)

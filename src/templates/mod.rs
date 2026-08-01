@@ -776,6 +776,7 @@ pub fn base_layout_with_preferences(
     let main_js_src = static_asset_url("/static/main.js");
     let admin_js_src = static_asset_url("/static/admin.js");
     let is_admin_page = current_path.starts_with("/admin");
+    let uses_admin_styles = is_admin_page || current_path.starts_with("/setup");
     let theme_stylesheet_href = if active_theme == "terminal" {
         String::new()
     } else {
@@ -788,7 +789,7 @@ pub fn base_layout_with_preferences(
             r#"<link rel="stylesheet" id="active-theme-stylesheet" href="{theme_stylesheet_href}">"#
         )
     };
-    let admin_stylesheet_link = if is_admin_page {
+    let admin_stylesheet_link = if uses_admin_styles {
         format!(r#"<link rel="stylesheet" href="{admin_stylesheet_href}">"#)
     } else {
         String::new()
@@ -798,9 +799,9 @@ pub fn base_layout_with_preferences(
     } else {
         String::new()
     };
-    let mut theme_picker_fallback = String::new();
     let mut theme_picker_panel = String::new();
     let mut theme_select_options = String::new();
+    let mut theme_noscript_buttons = String::new();
     for theme in enabled_themes.iter().filter(|theme| theme.enabled) {
         let href = theme_href(&theme.slug);
         let selected_attr = if theme.slug == active_theme {
@@ -816,10 +817,15 @@ pub fn base_layout_with_preferences(
             label = escape_html(&theme.display_name),
         );
         let _ = write!(
-            theme_picker_fallback,
-            r#" <a href="{href}">{label}</a>"#,
-            href = href,
-            label = escape_html(&theme.display_name)
+            theme_noscript_buttons,
+            r#"<button type="submit" name="theme" value="{slug}" aria-pressed="{selected}">{label}</button>"#,
+            slug = escape_html(&theme.slug),
+            selected = if theme.slug == active_theme {
+                "true"
+            } else {
+                "false"
+            },
+            label = escape_html(&theme.display_name),
         );
         let _ = write!(
             theme_picker_panel,
@@ -888,22 +894,18 @@ pub fn base_layout_with_preferences(
     {board_links}
   </nav>
   <div class="header-search">{search_bar}</div>
-  <a class="admin-header-link" href="/admin">[Admin]</a>
 </header>
 <main>
 {body}
 </main>
 <footer class="site-footer">
-  <p class="site-footer-copy">{forum_name} &mdash; <a href="/">home</a></p>
+  <p class="site-footer-copy">{forum_name} &mdash; <a href="/">home</a> <span aria-hidden="true">&middot;</span> <a class="admin-footer-link" href="/admin" aria-label="Administrator login">admin</a></p>
   <div class="site-footer-theme">
-    <nav class="theme-picker-fallback" aria-label="Theme selector">
-      <span class="theme-picker-fallback-title">Theme:</span>
-      {theme_picker_fallback}
-    </nav>
     <details class="user-preferences-panel">
-      <summary id="theme-picker-btn" class="user-preferences-summary" aria-controls="user-preferences-form">&#9881; User Preferences</summary>
+      <summary id="theme-picker-btn" class="user-preferences-summary">&#9881; User Preferences</summary>
       <form class="user-preferences-form" id="user-preferences-form" method="POST" action="/preferences">
         <button type="button" class="user-preferences-mobile-close" aria-label="Close preferences">&times;</button>
+        <p class="user-preferences-status" role="status" aria-live="polite">Changes apply immediately.</p>
         <input type="hidden" name="preferences_form" value="1">
         <input type="hidden" name="_csrf" value="{csrf_token}">
         <input type="hidden" name="return_to" value="{current_path}">
@@ -924,8 +926,51 @@ pub fn base_layout_with_preferences(
         </fieldset>
         <input type="hidden" name="show_activity_badges_present" value="1">
         <label><input type="checkbox" name="show_activity_badges" value="1"{badges_checked}> Show new activity badges</label>
-        <button type="submit">save preferences</button>
       </form>
+      <noscript>
+        <div class="user-preferences-noscript">
+          <p class="user-preferences-status">JavaScript is off. Each choice below applies immediately.</p>
+          <form class="user-preferences-noscript-form" method="POST" action="/preferences">
+            <input type="hidden" name="_csrf" value="{csrf_token}">
+            <input type="hidden" name="return_to" value="{current_path}">
+            <fieldset><legend>Theme</legend><div class="user-preferences-choice-row">{theme_noscript_buttons}</div></fieldset>
+          </form>
+          <form class="user-preferences-noscript-form" method="POST" action="/preferences">
+            <input type="hidden" name="_csrf" value="{csrf_token}">
+            <input type="hidden" name="return_to" value="{current_path}">
+            <input type="hidden" name="hide_nsfw_boards_present" value="1">
+            <fieldset><legend>NSFW boards</legend><div class="user-preferences-choice-row">
+              <button type="submit" name="hide_nsfw_boards" value="0" aria-pressed="{show_nsfw_pressed}">Show</button>
+              <button type="submit" name="hide_nsfw_boards" value="1" aria-pressed="{hide_nsfw_pressed}">Hide</button>
+            </div></fieldset>
+          </form>
+          <form class="user-preferences-noscript-form" method="POST" action="/preferences">
+            <input type="hidden" name="_csrf" value="{csrf_token}">
+            <input type="hidden" name="return_to" value="{current_path}">
+            <fieldset><legend>Video audio by default</legend><div class="user-preferences-choice-row">
+              <button type="submit" name="video_audio" value="on" aria-pressed="{audio_on_pressed}">On</button>
+              <button type="submit" name="video_audio" value="mute" aria-pressed="{audio_muted_pressed}">Mute</button>
+            </div></fieldset>
+          </form>
+          <form class="user-preferences-noscript-form" method="POST" action="/preferences">
+            <input type="hidden" name="_csrf" value="{csrf_token}">
+            <input type="hidden" name="return_to" value="{current_path}">
+            <fieldset><legend>Board links</legend><div class="user-preferences-choice-row">
+              <button type="submit" name="preferred_board_view" value="catalog" aria-pressed="{catalog_pressed}">Catalog</button>
+              <button type="submit" name="preferred_board_view" value="index" aria-pressed="{index_pressed}">Index</button>
+            </div></fieldset>
+          </form>
+          <form class="user-preferences-noscript-form" method="POST" action="/preferences">
+            <input type="hidden" name="_csrf" value="{csrf_token}">
+            <input type="hidden" name="return_to" value="{current_path}">
+            <input type="hidden" name="show_activity_badges_present" value="1">
+            <fieldset><legend>New activity badges</legend><div class="user-preferences-choice-row">
+              <button type="submit" name="show_activity_badges" value="1" aria-pressed="{show_badges_pressed}">Show</button>
+              <button type="submit" name="show_activity_badges" value="0" aria-pressed="{hide_badges_pressed}">Hide</button>
+            </div></fieldset>
+          </form>
+        </div>
+      </noscript>
     </details>
     <div id="theme-picker-panel" hidden inert aria-hidden="true">
       <div class="tp-title">// SELECT THEME</div>
@@ -959,9 +1004,9 @@ pub fn base_layout_with_preferences(
         theme_slugs_attr = theme_slugs_attr,
         active_theme_value_attr = active_theme_value_attr,
         active_theme_attr = active_theme_attr,
-        theme_picker_fallback = theme_picker_fallback,
         theme_select_options = theme_select_options,
         theme_picker_panel = theme_picker_panel,
+        theme_noscript_buttons = theme_noscript_buttons,
         current_path = escape_html(current_path),
         hide_nsfw_checked = hide_nsfw_checked,
         audio_on_checked = audio_on_checked,
@@ -969,6 +1014,46 @@ pub fn base_layout_with_preferences(
         catalog_checked = catalog_checked,
         index_checked = index_checked,
         badges_checked = badges_checked,
+        show_nsfw_pressed = if preferences.hide_nsfw_boards {
+            "false"
+        } else {
+            "true"
+        },
+        hide_nsfw_pressed = if preferences.hide_nsfw_boards {
+            "true"
+        } else {
+            "false"
+        },
+        audio_on_pressed = if preferences.video_audio_muted {
+            "false"
+        } else {
+            "true"
+        },
+        audio_muted_pressed = if preferences.video_audio_muted {
+            "true"
+        } else {
+            "false"
+        },
+        catalog_pressed = if preferences.preferred_board_view.is_catalog() {
+            "true"
+        } else {
+            "false"
+        },
+        index_pressed = if preferences.preferred_board_view.is_catalog() {
+            "false"
+        } else {
+            "true"
+        },
+        show_badges_pressed = if preferences.show_activity_badges {
+            "true"
+        } else {
+            "false"
+        },
+        hide_badges_pressed = if preferences.show_activity_badges {
+            "false"
+        } else {
+            "true"
+        },
         collapse_attr = if collapse_greentext {
             " data-collapse-greentext=\"1\""
         } else {
@@ -1124,11 +1209,11 @@ mod tests {
 
         assert!(html.contains(r#"data-default-theme="forest""#));
 
-        let forest_idx = html.find(">Forest</a>");
-        let blue_sky_idx = html.find(">Blue Sky</a>");
-        let deep_orbit_idx = html.find(">Deep Orbit</a>");
-        let terminal_idx = html.find(">Terminal</a>");
-        let dorfic_idx = html.find(">DORFic</a>");
+        let forest_idx = html.find(r#"<option value="forest" selected>Forest</option>"#);
+        let blue_sky_idx = html.find(r#"<option value="blue-sky">Blue Sky</option>"#);
+        let deep_orbit_idx = html.find(r#"<option value="deep-orbit">Deep Orbit</option>"#);
+        let terminal_idx = html.find(r#"<option value="terminal">Terminal</option>"#);
+        let dorfic_idx = html.find(r#"<option value="dorfic">DORFic</option>"#);
 
         assert!(forest_idx.is_some(), "forest option should be present");
         assert!(blue_sky_idx.is_some(), "blue sky option should be present");
@@ -1186,8 +1271,33 @@ mod tests {
         assert!(html.contains(r#"name="preferred_board_view" value="index" checked"#));
         assert!(html.contains(r#"name="show_activity_badges_present" value="1""#));
         assert!(!html.contains(r#"name="show_activity_badges" value="1" checked"#));
-        assert!(!html.contains("Save preferences"));
-        assert!(!html.contains(r#"type="submit">Save preferences"#));
+        assert!(html.contains("Changes apply immediately."));
+        assert!(html.contains("JavaScript is off. Each choice below applies immediately."));
+        assert!(html.contains(r#"name="hide_nsfw_boards" value="0" aria-pressed="false""#));
+        assert!(html.contains(r#"name="hide_nsfw_boards" value="1" aria-pressed="true""#));
+        assert!(!html.contains("save preferences"));
+        assert!(!html.contains(r#"class="admin-header-link""#));
+        assert!(html.contains(
+            r#"<a class="admin-footer-link" href="/admin" aria-label="Administrator login">admin</a>"#
+        ));
+    }
+
+    #[test]
+    fn setup_layout_loads_admin_styles_without_admin_javascript() {
+        let html = base_layout(
+            "setup",
+            None,
+            r#"<main class="setup-wizard"></main>"#,
+            "csrf",
+            &[],
+            None,
+            None,
+            false,
+            "/setup",
+        );
+
+        assert!(html.contains("/static/admin.css?v="));
+        assert!(!html.contains("/static/admin.js?v="));
     }
 
     #[test]
