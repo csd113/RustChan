@@ -805,7 +805,7 @@ html:not([data-theme]) .board-header h1 { text-shadow: 0 0 10px rgba(0,255,65,0.
 }
 
 .board-banner-image {
-  width: min(100%, 702px);
+  width: min(100%, 585px);
   height: auto;
   aspect-ratio: 468 / 60;
   display: block;
