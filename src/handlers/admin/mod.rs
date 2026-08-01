@@ -892,6 +892,8 @@ struct SiteHealthSnapshot {
     recent_completed_jobs: i64,
     /// The failed jobs.
     failed_jobs: i64,
+    /// Whether the background-job summary query succeeded.
+    background_jobs_available: bool,
     /// The backup jobs.
     backup_jobs: String,
     /// The restore jobs.
@@ -903,6 +905,9 @@ struct SiteHealthSnapshot {
 #[derive(Serialize)]
 /// Point-in-time data for site health jobs.
 struct SiteHealthJobsSnapshot {
+    #[serde(skip)]
+    /// Whether the background-job summary query succeeded.
+    summary_available: bool,
     #[serde(rename = "running_jobs")]
     /// The running.
     running: i64,
@@ -1103,6 +1108,7 @@ fn load_site_health_snapshot(
         queued_jobs: jobs.queued,
         recent_completed_jobs: jobs.recent_completed,
         failed_jobs: jobs.failed,
+        background_jobs_available: jobs.summary_available,
         backup_jobs: jobs.backup,
         restore_jobs: jobs.restore,
         recent_warnings,
@@ -1204,16 +1210,25 @@ fn load_site_health_jobs_snapshot(
     conn: &rusqlite::Connection,
     state: &AppState,
 ) -> SiteHealthJobsSnapshot {
-    let job_summary =
-        db::background_job_summary(conn).unwrap_or_else(|_| db::BackgroundJobSummary {
-            running: 0,
-            queued: state.job_queue.pending_count(),
-            recent_completed: 0,
-            failed: 0,
-        });
+    let (job_summary, summary_available) = match db::background_job_summary(conn) {
+        Ok(summary) => (summary, true),
+        Err(error) => {
+            tracing::warn!(target: "admin", %error, "Could not load background-job summary");
+            (
+                db::BackgroundJobSummary {
+                    running: 0,
+                    queued: state.job_queue.pending_count(),
+                    recent_completed: 0,
+                    failed: 0,
+                },
+                false,
+            )
+        }
+    };
     let recent_failed = load_site_health_job_details(conn, "failed");
     let recent_completed_details = load_site_health_job_details(conn, "done");
     SiteHealthJobsSnapshot {
+        summary_available,
         running: job_summary.running,
         queued: job_summary.queued,
         recent_completed: job_summary.recent_completed,
@@ -1707,12 +1722,16 @@ fn build_admin_dashboard_summary(inputs: DashboardSummaryInputs<'_>) -> AdminDas
         dashboard_backup_status(inputs.backup_summary);
     let (storage_status, storage_detail, storage_state) =
         dashboard_storage_status(inputs.activity, inputs.maintenance, inputs.site_health);
-    let (tor_status, tor_detail, tor_state) = dashboard_tor_status(inputs.tor_address);
+    let (tor_status, tor_detail, tor_state) =
+        dashboard_tor_status(CONFIG.enable_tor_support, inputs.tor_address);
     let (dependency_status, dependency_detail, dependency_state) =
-        dashboard_dependency_status(inputs.maintenance);
+        dashboard_dependency_status(inputs.maintenance, CONFIG.require_ffmpeg);
     let (job_status, job_detail, job_state) = dashboard_job_status(inputs.site_health);
-    let (report_status, report_detail, report_state) =
-        dashboard_report_status(inputs.activity, inputs.moderation);
+    let (report_status, report_detail, report_state) = dashboard_report_status(
+        inputs.activity.recent_reports_7d,
+        inputs.moderation.reports.len(),
+        inputs.moderation.appeals.len(),
+    );
 
     AdminDashboardSummary {
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -1759,7 +1778,7 @@ fn dashboard_setup_status(
         crate::templates::AdminPanelSetupStatus::Reopened => (
             "reopened".to_owned(),
             "Setup wizard is admin-only and currently reopened.".to_owned(),
-            crate::templates::AdminDashboardState::Warning,
+            crate::templates::AdminDashboardState::Informational,
         ),
         crate::templates::AdminPanelSetupStatus::Complete => (
             "complete".to_owned(),
@@ -1787,9 +1806,9 @@ fn dashboard_database_status(
         || site_health.database_schema_status.contains("mismatch")
         || site_health.database_integrity_status.contains("failed")
     {
-        crate::templates::AdminDashboardState::ActionNeeded
+        crate::templates::AdminDashboardState::Failure
     } else if site_health.database_integrity_status.contains("running") {
-        crate::templates::AdminDashboardState::Warning
+        crate::templates::AdminDashboardState::Pending
     } else if site_health.database_integrity_status == "not checked" {
         crate::templates::AdminDashboardState::Unknown
     } else {
@@ -1825,7 +1844,7 @@ fn dashboard_backup_status(
     } else if warning.contains("failed verification") {
         (
             "verification failed",
-            crate::templates::AdminDashboardState::ActionNeeded,
+            crate::templates::AdminDashboardState::Failure,
         )
     } else {
         (
@@ -1877,9 +1896,10 @@ fn dashboard_storage_status(
 
 /// Performs the dashboard Tor status handler operation.
 fn dashboard_tor_status(
+    tor_enabled: bool,
     tor_address: Option<&str>,
 ) -> (String, String, crate::templates::AdminDashboardState) {
-    if !CONFIG.enable_tor_support {
+    if !tor_enabled {
         return (
             "disabled".to_owned(),
             "Set enable_tor_support = true in settings.toml, then restart RustChan.".to_owned(),
@@ -1897,7 +1917,7 @@ fn dashboard_tor_status(
             "enabled, address pending".to_owned(),
             "Wait for bootstrap, or check Site Health Tor diagnostics if no onion appears."
                 .to_owned(),
-            crate::templates::AdminDashboardState::Warning,
+            crate::templates::AdminDashboardState::Pending,
         )
     }
 }
@@ -1905,19 +1925,20 @@ fn dashboard_tor_status(
 /// Performs the dashboard dependency status handler operation.
 fn dashboard_dependency_status(
     maintenance: &MaintenanceDomainData,
+    ffmpeg_required: bool,
 ) -> (String, String, crate::templates::AdminDashboardState) {
     let ffmpeg = detection_word(maintenance.ffmpeg_available);
     let ffprobe = detection_word(maintenance.ffprobe_available);
     let state = if maintenance.ffmpeg_available && maintenance.ffprobe_available {
         crate::templates::AdminDashboardState::Ok
-    } else if CONFIG.require_ffmpeg {
+    } else if ffmpeg_required {
         crate::templates::AdminDashboardState::ActionNeeded
     } else {
-        crate::templates::AdminDashboardState::Warning
+        crate::templates::AdminDashboardState::Informational
     };
     let status = if maintenance.ffmpeg_available && maintenance.ffprobe_available {
         "ready"
-    } else if CONFIG.require_ffmpeg {
+    } else if ffmpeg_required {
         "required tool missing"
     } else {
         "limited"
@@ -1942,16 +1963,20 @@ fn dashboard_job_status(
         site_health.backup_jobs.as_str(),
         "idle" | "last run complete" | "unknown"
     );
-    let state = if site_health.failed_jobs > 0 {
-        crate::templates::AdminDashboardState::ActionNeeded
+    let state = if !site_health.background_jobs_available {
+        crate::templates::AdminDashboardState::Unknown
+    } else if site_health.failed_jobs > 0 {
+        crate::templates::AdminDashboardState::Failure
     } else if site_health.backup_jobs == "unknown" {
         crate::templates::AdminDashboardState::Unknown
-    } else if site_health.queued_jobs > 0 && site_health.running_jobs == 0 && !backup_active {
-        crate::templates::AdminDashboardState::Warning
+    } else if site_health.running_jobs > 0 || site_health.queued_jobs > 0 || backup_active {
+        crate::templates::AdminDashboardState::Pending
     } else {
         crate::templates::AdminDashboardState::Ok
     };
-    let status = if site_health.failed_jobs > 0 {
+    let status = if !site_health.background_jobs_available {
+        "status unavailable".to_owned()
+    } else if site_health.failed_jobs > 0 {
         format!("{} failed", site_health.failed_jobs)
     } else if site_health.running_jobs > 0 || site_health.queued_jobs > 0 {
         format!(
@@ -1963,28 +1988,30 @@ fn dashboard_job_status(
     } else {
         "idle — ready".to_owned()
     };
-    (
-        status,
+    let detail = if site_health.background_jobs_available {
         format!(
             "Recently completed {}; backup job {}; restore jobs {}.",
             site_health.recent_completed_jobs, site_health.backup_jobs, site_health.restore_jobs
-        ),
-        state,
-    )
+        )
+    } else {
+        format!(
+            "Background-job summary unavailable; backup job {}; restore jobs {}.",
+            site_health.backup_jobs, site_health.restore_jobs
+        )
+    };
+    (status, detail, state)
 }
 
 /// Performs the dashboard report status handler operation.
 fn dashboard_report_status(
-    activity: &DashboardActivitySnapshot,
-    moderation: &ModerationDomainData,
+    recent_reports: Option<i64>,
+    open_reports: usize,
+    open_appeals: usize,
 ) -> (String, String, crate::templates::AdminDashboardState) {
-    let open_reports = moderation.reports.len();
-    let open_appeals = moderation.appeals.len();
-    let recent_reports = activity.recent_reports_7d;
     let state = if open_reports > 0 || open_appeals > 0 {
         crate::templates::AdminDashboardState::ActionNeeded
     } else if recent_reports.is_some_and(|count| count > 0) {
-        crate::templates::AdminDashboardState::Warning
+        crate::templates::AdminDashboardState::Informational
     } else if recent_reports.is_some() {
         crate::templates::AdminDashboardState::Ok
     } else {
@@ -2634,14 +2661,15 @@ pub(super) fn consume_admin_session_bootstrap(token: &str) -> Option<String> {
 mod tests {
     use super::{
         admin_live_log, admin_site_health_jobs, consume_admin_session_bootstrap,
-        create_admin_session_bootstrap, dashboard_backup_status, dashboard_job_status,
-        dashboard_recent_count, dashboard_thread_counts, dismiss_failed_site_health_jobs,
+        create_admin_session_bootstrap, dashboard_backup_status, dashboard_dependency_status,
+        dashboard_job_status, dashboard_recent_count, dashboard_report_status,
+        dashboard_thread_counts, dashboard_tor_status, dismiss_failed_site_health_jobs,
         host_header_uses_https_port_with_config, hosts_match_for_same_origin, latest_log_file,
         load_dashboard_activity_snapshot, optional_count_query, read_log_tail,
         request_origin_uses_https, request_scheme_for_same_origin_with_config,
         require_same_origin_or_valid_csrf, require_same_origin_request,
         should_set_secure_cookie_with_config, BackupSummary, DismissFailedJobsForm, LiveLogQuery,
-        SiteHealthSnapshot, SESSION_COOKIE,
+        MaintenanceDomainData, SiteHealthSnapshot, SESSION_COOKIE,
     };
     use crate::error::AppError;
     use crate::middleware::SecureCookieContext;
@@ -2764,6 +2792,12 @@ mod tests {
             warning: None,
             status_line: "Latest full backup: backup.zip (1h ago) - verified.".to_owned(),
         };
+        let failed = BackupSummary {
+            warning: Some(
+                "Latest full backup 'backup.zip' failed verification: digest mismatch".to_owned(),
+            ),
+            status_line: "Latest full backup: backup.zip - invalid.".to_owned(),
+        };
 
         assert_eq!(
             dashboard_backup_status(&missing).2,
@@ -2776,6 +2810,10 @@ mod tests {
         assert_eq!(
             dashboard_backup_status(&ok).2,
             crate::templates::AdminDashboardState::Ok
+        );
+        assert_eq!(
+            dashboard_backup_status(&failed).2,
+            crate::templates::AdminDashboardState::Failure
         );
     }
 
@@ -2801,6 +2839,7 @@ mod tests {
             queued_jobs,
             recent_completed_jobs: 0,
             failed_jobs,
+            background_jobs_available: true,
             backup_jobs: backup_jobs.to_owned(),
             restore_jobs: "not available".to_owned(),
             recent_warnings: "none".to_owned(),
@@ -2817,21 +2856,96 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_job_status_reserves_warning_for_a_blocked_queue() {
+    fn dashboard_job_status_treats_queued_work_as_pending() {
         let (status, _detail, state) =
             dashboard_job_status(&site_health_with_jobs(0, 3, 0, "idle"));
 
         assert_eq!(status, "0 running / 3 queued");
-        assert_eq!(state, crate::templates::AdminDashboardState::Warning);
+        assert_eq!(state, crate::templates::AdminDashboardState::Pending);
     }
 
     #[test]
-    fn dashboard_job_status_keeps_routine_active_work_healthy() {
+    fn dashboard_job_status_presents_routine_active_work_as_pending() {
         let (status, _detail, state) =
             dashboard_job_status(&site_health_with_jobs(0, 0, 0, "compressing (2/10 files)"));
 
         assert_eq!(status, "backup compressing (2/10 files)");
-        assert_eq!(state, crate::templates::AdminDashboardState::Ok);
+        assert_eq!(state, crate::templates::AdminDashboardState::Pending);
+    }
+
+    #[test]
+    fn dashboard_job_status_fails_closed_when_summary_is_unavailable() {
+        let mut health = site_health_with_jobs(0, 0, 0, "idle");
+        health.background_jobs_available = false;
+
+        let (status, detail, state) = dashboard_job_status(&health);
+
+        assert_eq!(status, "status unavailable");
+        assert!(detail.contains("Background-job summary unavailable"));
+        assert_eq!(state, crate::templates::AdminDashboardState::Unknown);
+    }
+
+    #[test]
+    fn dashboard_job_status_distinguishes_failures_from_action_queues() {
+        let (_status, _detail, state) =
+            dashboard_job_status(&site_health_with_jobs(0, 0, 2, "idle"));
+
+        assert_eq!(state, crate::templates::AdminDashboardState::Failure);
+    }
+
+    fn maintenance_with_media_tools(ffmpeg: bool, ffprobe: bool) -> MaintenanceDomainData {
+        MaintenanceDomainData {
+            db_size_bytes: 0,
+            db_size_warning: false,
+            ffmpeg_timeout_secs: 30,
+            media_auto_prune_enabled: false,
+            media_max_active_content_size_bytes: 0,
+            ffmpeg_available: ffmpeg,
+            ffprobe_available: ffprobe,
+            ffmpeg_webp_available: false,
+            ffmpeg_vp9_available: false,
+            ffmpeg_vp9_encoder_available: false,
+            ffmpeg_opus_available: false,
+            pdf_thumbnail_renderer: None,
+        }
+    }
+
+    #[test]
+    fn dashboard_optional_media_tools_are_informational_not_warning() {
+        let maintenance = maintenance_with_media_tools(false, false);
+
+        assert_eq!(
+            dashboard_dependency_status(&maintenance, false).2,
+            crate::templates::AdminDashboardState::Informational,
+        );
+        assert_eq!(
+            dashboard_dependency_status(&maintenance, true).2,
+            crate::templates::AdminDashboardState::ActionNeeded,
+        );
+    }
+
+    #[test]
+    fn dashboard_tor_bootstrap_is_pending_and_disabled_is_neutral() {
+        assert_eq!(
+            dashboard_tor_status(true, None).2,
+            crate::templates::AdminDashboardState::Pending,
+        );
+        assert_eq!(
+            dashboard_tor_status(false, None).2,
+            crate::templates::AdminDashboardState::Disabled,
+        );
+    }
+
+    #[test]
+    fn dashboard_resolved_report_history_is_informational() {
+        assert_eq!(
+            dashboard_report_status(Some(3), 0, 0).2,
+            crate::templates::AdminDashboardState::Informational,
+        );
+        assert_eq!(
+            dashboard_report_status(Some(3), 1, 0).2,
+            crate::templates::AdminDashboardState::ActionNeeded,
+        );
     }
 
     fn same_origin_headers(host: &str) -> HeaderMap {

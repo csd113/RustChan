@@ -73,6 +73,8 @@ mod appearance;
 mod backups;
 /// Board-section rendering.
 mod boards;
+/// Task-oriented Control Center rendering.
+mod control_center;
 /// Admin page layout and dashboard rendering.
 mod layout;
 /// Maintenance-section rendering.
@@ -187,10 +189,16 @@ pub struct AdminPanelDashboardView<'a> {
 pub enum AdminDashboardState {
     /// Healthy or complete.
     Ok,
+    /// Neutral context that does not require administrator action.
+    Informational,
+    /// Normal work is actively progressing.
+    Pending,
     /// Degraded or worth reviewing.
     Warning,
     /// Requires administrator action.
     ActionNeeded,
+    /// An operation or required capability failed.
+    Failure,
     /// Intentionally unavailable.
     Disabled,
     /// State could not be determined.
@@ -2600,7 +2608,7 @@ mod tests {
     }
 
     #[test]
-    fn admin_panel_control_center_uses_persistent_dropdown_pattern() {
+    fn admin_panel_control_center_defaults_open_with_task_oriented_groups() {
         let board = sample_board();
         let themes = vec![sample_theme()];
         let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
@@ -2609,13 +2617,50 @@ mod tests {
             r#"<section class="admin-section admin-section-collapsible" id="control-center""#
         ));
         assert!(html.contains(r#"data-admin-dropdown-key="control-center""#));
-        assert!(!html.contains(
-            r#"<details class="admin-dropdown" data-admin-dropdown-key="control-center" open>"#
+        assert!(html.contains(
+            r#"<details class="admin-dropdown" data-admin-dropdown-key="control-center" data-admin-dropdown-default-open open>"#
         ));
-        assert!(html.contains(r##"href="#public-url-settings""##));
-        assert!(html.contains(r##"href="#tor-status""##));
+        assert!(html.contains(r#"<h2 id="control-center-title">"#));
+        for title in [
+            "// site overview and health",
+            "// moderation and recent activity",
+            "// backups and recovery",
+            "// maintenance and background jobs",
+            "// network and Tor",
+            "// configuration shortcuts",
+        ] {
+            assert!(
+                html.contains(title),
+                "missing Control Center group: {title}"
+            );
+        }
+        assert!(html.contains(r#"href="/admin/panel?open=site-settings#public-url-settings""#));
+        assert!(html.contains(r#"href="/admin/panel?open=site-health#tor-status""#));
+        assert!(html.contains(r#"href="/admin/panel?open=theme-catalog#theme-catalog""#));
+        assert!(html.contains(r#"data-dashboard-status="jobs""#));
+        assert!(html.contains(r#"data-dashboard-state="ok""#));
+        assert!(html.contains("system details, logs, and diagnostics"));
         assert!(html.contains(r#"id="public-url-settings""#));
         assert!(html.contains("settings.toml public_hosts"));
+    }
+
+    #[test]
+    fn admin_panel_control_center_links_to_protected_setup_controls_without_duplicating_forms() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+        let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
+        let control_center = html
+            .split_once(r#"id="control-center""#)
+            .map_or("", |(_, tail)| tail)
+            .split_once(r#"id="live-log""#)
+            .map_or("", |(control_center, _)| control_center);
+
+        assert!(control_center
+            .contains(r#"href="/admin/panel?open=database-maintenance#database-maintenance""#));
+        assert!(!control_center.contains(r#"action="/admin/setup/reopen""#));
+        assert!(!control_center.contains(r#"action="/admin/setup/close""#));
+        assert!(html.contains(r#"action="/admin/setup/reopen""#));
+        assert!(html.contains(r#"name="_csrf" value="csrf""#));
     }
 
     #[test]
@@ -2632,6 +2677,7 @@ mod tests {
         assert!(html.contains(
             r#"<details class="admin-dropdown" data-admin-dropdown-key="control-center" open>"#
         ));
+        assert!(!html.contains("data-admin-dropdown-default-open open"));
     }
 
     #[test]
@@ -3028,13 +3074,16 @@ mod tests {
     }
 
     #[test]
-    fn admin_panel_live_log_renders_connection_status_surface() {
+    fn admin_panel_live_log_renders_truthful_no_js_fallback() {
         let board = sample_board();
         let themes = vec![sample_theme()];
         let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
 
         assert!(html.contains(r#"id="admin-live-log-status""#));
-        assert!(html.contains("Connecting to live log"));
+        assert!(html.contains("JavaScript enables live updates"));
+        assert!(html.contains(r#"href="/admin/log/live?bytes=65536""#));
+        assert!(html.contains(r"data-admin-live-log-controls hidden"));
+        assert!(html.contains("Live updates start when JavaScript is available."));
     }
 
     #[test]

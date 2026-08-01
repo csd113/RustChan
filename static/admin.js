@@ -65,7 +65,8 @@ function setAdminModalOpen(modal, open, displayValue) {
     document.querySelectorAll('details.admin-dropdown[data-admin-dropdown-key]').forEach(function (details) {
       var key = details.dataset.adminDropdownKey;
       if (!key) return;
-      var hasExplicitOpenState = details.hasAttribute('open');
+      var hasExplicitOpenState = details.hasAttribute('open') &&
+        !details.hasAttribute('data-admin-dropdown-default-open');
 
       if (!hasExplicitOpenState) {
         var stored = readAdminDropdownState(key);
@@ -133,21 +134,37 @@ function setAdminModalOpen(modal, open, displayValue) {
 })();
 
 (function () {
-  function openAdminSection(sectionId) {
+  function openAdminSection(sectionId, anchorId) {
     if (!sectionId) return;
     var section = document.getElementById(sectionId);
     if (!section) return;
     var details = section.querySelector('details.admin-dropdown');
     if (details) details.open = true;
-    if (typeof section.scrollIntoView === 'function') {
-      section.scrollIntoView({ block: 'start' });
+    var target = document.getElementById(anchorId || sectionId) || section;
+    var current = target;
+    while (current) {
+      if (current.tagName && current.tagName.toLowerCase() === 'details') {
+        current.open = true;
+      }
+      current = current.parentElement;
+    }
+    if (typeof target.scrollIntoView === 'function') {
+      target.scrollIntoView({ block: 'start' });
     }
   }
 
   function initAdminSectionLinks() {
     document.querySelectorAll('[data-open-admin-section]').forEach(function (link) {
-      link.addEventListener('click', function () {
-        openAdminSection(link.getAttribute('data-open-admin-section'));
+      link.addEventListener('click', function (event) {
+        if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        var sectionId = link.getAttribute('data-open-admin-section');
+        var anchorId = link.getAttribute('data-open-admin-anchor') || sectionId;
+        if (!sectionId || !document.getElementById(sectionId)) return;
+        event.preventDefault();
+        openAdminSection(sectionId, anchorId);
+        if (window.history && typeof window.history.replaceState === 'function') {
+          window.history.replaceState(null, '', link.getAttribute('href'));
+        }
       });
     });
   }
@@ -797,9 +814,13 @@ function setAdminModalOpen(modal, open, displayValue) {
     var refreshBtn = document.getElementById('admin-live-log-refresh');
     var clearBtn = document.getElementById('admin-live-log-clear');
     var autoscroll = document.getElementById('admin-live-log-autoscroll');
+    var controls = document.querySelector('[data-admin-live-log-controls]');
+    var disclosure = document.querySelector('#live-log > details');
     if (!output) return;
 
     var timer = null;
+    var activeController = null;
+    var polling = false;
     var lastText = '';
     var clearedBaseline = '';
     var clearedFile = '';
@@ -828,6 +849,7 @@ function setAdminModalOpen(modal, open, displayValue) {
     }
 
     function scheduleNextPoll(delayMs) {
+      if (!polling) return;
       if (timer) clearTimeout(timer);
       timer = window.setTimeout(fetchLog, delayMs);
     }
@@ -843,11 +865,13 @@ function setAdminModalOpen(modal, open, displayValue) {
     }
 
     function fetchLog(force) {
+      if (!polling) return;
       if (requestInFlight && !force) return;
       requestInFlight = true;
       requestSerial += 1;
       var serial = requestSerial;
       var controller = typeof AbortController === 'function' ? new AbortController() : null;
+      activeController = controller;
       var timeoutHandle = window.setTimeout(function () {
         if (controller) {
           controller.abort();
@@ -865,8 +889,9 @@ function setAdminModalOpen(modal, open, displayValue) {
       })
         .then(function (resp) { return resp.json(); })
         .then(function (data) {
-          if (serial !== requestSerial) return;
           window.clearTimeout(timeoutHandle);
+          if (serial !== requestSerial) return;
+          activeController = null;
           requestInFlight = false;
           consecutiveFailures = 0;
           var fileName = data.filename || 'current log';
@@ -891,8 +916,9 @@ function setAdminModalOpen(modal, open, displayValue) {
           scheduleNextPoll(pollIntervalMs);
         })
         .catch(function (error) {
-          if (serial !== requestSerial) return;
           window.clearTimeout(timeoutHandle);
+          if (serial !== requestSerial) return;
+          activeController = null;
           requestInFlight = false;
           consecutiveFailures += 1;
           var delayMs = retryDelayMs();
@@ -911,6 +937,29 @@ function setAdminModalOpen(modal, open, displayValue) {
         });
     }
 
+    function startPolling() {
+      if (polling) return;
+      polling = true;
+      if (controls) controls.hidden = false;
+      fetchLog(false);
+    }
+
+    function stopPolling() {
+      polling = false;
+      requestSerial += 1;
+      if (timer) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+      if (activeController) {
+        activeController.abort();
+        activeController = null;
+      }
+      requestInFlight = false;
+      if (controls) controls.hidden = true;
+      setStatus('Open this section to start live updates. The current log tail remains available below.');
+    }
+
     if (refreshBtn) {
       refreshBtn.addEventListener('click', function () {
         consecutiveFailures = 0;
@@ -927,7 +976,21 @@ function setAdminModalOpen(modal, open, displayValue) {
       });
     }
 
-    fetchLog(false);
+    if (disclosure) {
+      disclosure.addEventListener('toggle', function () {
+        if (disclosure.open) {
+          startPolling();
+        } else {
+          stopPolling();
+        }
+      });
+    }
+
+    if (!disclosure || disclosure.open) {
+      startPolling();
+    } else {
+      stopPolling();
+    }
   }
 
   document.addEventListener('DOMContentLoaded', initAdminLiveLog);
