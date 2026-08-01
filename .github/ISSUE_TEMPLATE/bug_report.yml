@@ -1,0 +1,129 @@
+name: Bug report
+description: Report a reproducible RustChan defect using sanitized evidence.
+title: "[Bug]: "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve RustChan. Search existing issues first.
+
+        Do not report vulnerabilities here; read the [security policy](https://github.com/csd113/RustChan/security/policy). Do not include illegal content, personal information, credentials, private keys, databases, backups, private media, onion private keys, or sensitive instance data. Reports about moderation or abuse on an independently operated site belong with that site's operator.
+
+  - type: input
+    id: version
+    attributes:
+      label: RustChan version or commit
+      description: Use a release number, full commit SHA, or both.
+      placeholder: "1.3.0 or 0123456789abcdef..."
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: "Ubuntu 24.04 x86_64, macOS 15 arm64, Windows 11 x86_64"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation method
+      options:
+        - Built from source
+        - Release binary
+        - Service installation based on SETUP.md
+        - Other or unknown
+    validations:
+      required: true
+
+  - type: input
+    id: features
+    attributes:
+      label: Enabled Cargo features
+      description: Include default, no-default-features, tls-self-signed, tls-acme, or all-features as applicable.
+      placeholder: "default (tls-self-signed)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: deployment
+    attributes:
+      label: Relevant deployment configuration
+      description: Describe reverse proxy, TLS, Tor/onion service, ports, and ChanNet only where relevant. Use placeholders instead of real hostnames, addresses, keys, or secrets.
+      placeholder: "Direct HTTP / nginx TLS termination / Tor enabled / ChanNet disabled"
+    validations:
+      required: true
+
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and JavaScript status
+      description: Required for public or admin UI defects; otherwise enter Not applicable.
+      placeholder: "Firefox 141, JavaScript disabled"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Use a disposable local instance and synthetic data where possible.
+      placeholder: |
+        1. Start RustChan with ...
+        2. Open ...
+        3. Perform ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include frequency and whether restarting changes the result.
+    validations:
+      required: true
+
+  - type: textarea
+    id: data_involvement
+    attributes:
+      label: Database or media involvement
+      description: State whether SQLite, migrations, uploads, ffmpeg/ffprobe, boards, backups, or restore is involved. Do not upload real data.
+      placeholder: "SQLite involved; reproduced on a new disposable database. No media involved."
+    validations:
+      required: true
+
+  - type: textarea
+    id: sanitized_logs
+    attributes:
+      label: Sanitized logs or diagnostics
+      description: Remove tokens, cookies, passwords, IP addresses, hostnames, database contents, private posts/media, paths containing identities, and all keys. Enter None if unavailable.
+      render: shell
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I removed secrets, personal information, private content, instance identifiers, databases, backups, and private keys from this report.
+          required: true
+        - label: This is a RustChan software defect, not a vulnerability report or a moderation/abuse report about an independently operated site.
+          required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Add only public, sanitized information needed to understand the defect.

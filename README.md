@@ -294,6 +294,10 @@ The architecture is intentionally compact. That is the point.
 ## More Reading
 
 - [SETUP.md](SETUP.md) for installation, deployment, Tor, TLS, and troubleshooting
+- [CONTRIBUTING.md](CONTRIBUTING.md) for contribution workflow and validation
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for conduct in project-managed spaces
+- [SECURITY.md](SECURITY.md) for vulnerability-reporting scope and safe handling
+- [SUPPORT.md](SUPPORT.md) for support boundaries and operator responsibilities
 - [CHANGELOG.md](CHANGELOG.md) for release history
 - [LICENSE](LICENSE) for the MIT license
 

@@ -1,0 +1,94 @@
+name: Feature request
+description: Propose a focused improvement to RustChan itself.
+title: "[Feature]: "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests are for RustChan software, not for policies or moderation decisions on independently operated sites. Do not include illegal content, personal information, credentials, private keys, databases, backups, private media, or sensitive instance data.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the operator, contributor, moderator, or public-user problem without assuming a solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed behavior
+      description: Explain observable behavior, defaults, and failure handling.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include current workarounds and why they are insufficient.
+    validations:
+      required: true
+
+  - type: textarea
+    id: affected_users
+    attributes:
+      label: Affected users
+      description: Identify who benefits and who may be disrupted, including operators, admins/moderators, posters, readers, or integrations.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surfaces
+    attributes:
+      label: Affected RustChan surfaces
+      description: Select every area that changes, or None/not sure.
+      multiple: true
+      options:
+        - Public UI or no-JavaScript flow
+        - Admin UI
+        - Storage or database schema
+        - Media processing or uploads
+        - Moderation or abuse-resistance tooling
+        - Backup or restore
+        - Tor or onion-service operation
+        - ChanNet
+        - TLS, reverse proxy, or deployment
+        - None or not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: deployment_impact
+    attributes:
+      label: Deployment and compatibility impact
+      description: Cover configuration, Cargo features, MSRV, dependencies, migrations, storage, ports, upgrades, resource use, and rollback as relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: privacy_security
+    attributes:
+      label: Privacy and security considerations
+      description: Discuss trust boundaries, sensitive data, abuse cases, operator control, and safe defaults. Do not include an undisclosed vulnerability.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Additional context
+      description: Add sanitized mockups, examples, or links when useful. Do not use private instance content.
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I searched existing issues and this request concerns RustChan software rather than an independently operated site's moderation or content.
+          required: true
+        - label: I removed secrets, personal information, private content, databases, backups, and private keys.
+          required: true

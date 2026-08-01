@@ -48,6 +48,9 @@ All notable changes to RustChan will be documented in this file.
 
 ### Documentation
 
+- Added RustChan-specific community standards, contribution and support guidance,
+  a security disclosure policy, pull request guidance, and structured GitHub
+  issue forms with privacy-conscious reporting requirements.
 - Corrected HTTPS documentation to state that TLS is disabled by default and clarified the distinction between self-signed certificate support and automatic HTTPS enablement.
 - Updated deployment documentation for the explicit writable data-directory workflow.
 
