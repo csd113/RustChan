@@ -2560,7 +2560,10 @@ fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
         let modified = metadata.modified().ok()?;
         if latest
             .as_ref()
-            .is_none_or(|(current, _)| modified > *current)
+            .is_none_or(|(current_modified, current_path)| {
+                modified > *current_modified
+                    || (modified == *current_modified && path > *current_path)
+            })
         {
             latest = Some((modified, path));
         }
@@ -3263,10 +3266,22 @@ mod tests {
     #[test]
     fn picks_latest_log_file() -> anyhow::Result<()> {
         let dir = tempfile::tempdir().context("create log directory")?;
-        std::fs::write(dir.path().join("rustchan.2026-04-01.log"), "old")
-            .context("write older log")?;
-        std::fs::write(dir.path().join("rustchan.2026-04-02.log"), "new")
-            .context("write newer log")?;
+        let older_path = dir.path().join("rustchan.2026-04-01.log");
+        let newer_path = dir.path().join("rustchan.2026-04-02.log");
+        std::fs::write(&older_path, "old").context("write older log")?;
+        std::fs::write(&newer_path, "new").context("write newer log")?;
+
+        let shared_modified =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        for path in [&older_path, &newer_path] {
+            let file = std::fs::File::options()
+                .write(true)
+                .open(path)
+                .with_context(|| format!("open log fixture {}", path.display()))?;
+            file.set_times(std::fs::FileTimes::new().set_modified(shared_modified))
+                .with_context(|| format!("set log fixture timestamp {}", path.display()))?;
+        }
+
         std::fs::write(
             dir.path().join(crate::logging::DEPENDENCY_LOG_FILE_NAME),
             "deps",
