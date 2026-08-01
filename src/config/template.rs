@@ -216,6 +216,8 @@ db_pool_size = 8
 # For production, configure [tls.acme] (Let's Encrypt) or [tls.manual_cert].
 [tls]
 enabled = false
+# Keep the main HTTP application listener enabled unless HTTPS-only access is intentional.
+require_https = false
 port = 8443
 redirect_http = false
 http_port = 8080

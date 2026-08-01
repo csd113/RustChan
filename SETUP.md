@@ -335,6 +335,7 @@ ffmpeg_timeout_secs = 600
 
 [tls]
 enabled = false
+require_https = false
 port = 8443
 # redirect_http = true
 # http_port = 8080
@@ -346,6 +347,7 @@ port = 8443
 - `tor_only = true`: bind RustChan to loopback and serve only through Tor
 - `require_ffmpeg = true`: fail startup if ffmpeg is missing
 - `[tls].enabled = true`: explicitly enable RustChan's native HTTPS listener
+- `[tls].require_https = true`: opt into disabling public plaintext application access
 - `ffmpeg_timeout_secs = 600`: max runtime for a single ffmpeg job
 
 ## Tor Onion Service
@@ -577,11 +579,13 @@ If you put nginx or Caddy in front of RustChan:
 - set `CHAN_TRUSTED_PROXY_CIDRS` to the proxy's loopback or private CIDR when the proxy is not on localhost
 - decide whether TLS terminates at the proxy or inside RustChan
 
-When RustChan's built-in TLS is enabled, the main plaintext application listener
-is disabled. If `redirect_http = true`, `tls.http_port` is the only public HTTP
-listener and it serves redirects, not application routes. With the built-in Tor
-service enabled, RustChan also keeps a loopback-only HTTP backend that accepts
-only connections registered by its in-process Tor proxy.
+When RustChan's built-in TLS is enabled, HTTPS is an additional listener and the
+main HTTP application listener remains available by default. Set
+`require_https = true` under `[tls]` to opt into HTTPS-only access. Independently,
+`redirect_http = true` exposes `tls.http_port` as a redirect listener instead of
+serving application routes there. With the built-in Tor service enabled,
+HTTPS-only mode also keeps a loopback HTTP backend that accepts only connections
+registered by its in-process Tor proxy.
 
 RustChan accepts bounded `Content-Length` request bodies and rejects
 `Transfer-Encoding` at the application boundary. Configure a reverse proxy to

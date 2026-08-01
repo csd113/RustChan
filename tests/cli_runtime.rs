@@ -210,6 +210,7 @@ public_hosts = ["localhost", "127.0.0.1", "::1"]
 
 [tls]
 enabled = true
+require_https = true
 port = {https_port}
 redirect_http = true
 http_port = {redirect_port}

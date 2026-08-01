@@ -27,7 +27,7 @@ All notable changes to RustChan will be documented in this file.
 
 - Fixed admin job status semantics so a healthy idle queue reports `OK` and `idle — ready`, while warnings are reserved for failed or blocked work.
 - Fixed public preference cookies on plain-HTTP onion requests so their `Secure` attribute follows the actual request transport and preferences remain usable over Tor.
-- Fixed native-TLS deployments so the original plaintext application/admin listener is no longer left reachable beside the HTTPS and redirect listeners.
+- Fixed upgrades with native TLS enabled so they no longer force HTTPS unexpectedly; HTTPS-only access is now an explicit opt-in through `[tls].require_https`.
 - Fixed direct HTTPS session and CSRF cookies so they remain `Secure` independently of trusted-proxy compatibility settings.
 - Fixed destructive saved-backup operations so delete, full restore, board restore, and board extraction all honor the shared maintenance gate and cannot race active maintenance work.
 - Fixed ChanNet reply replays inserting duplicate posts and prevented view-password-protected boards from being exposed through selective exports.

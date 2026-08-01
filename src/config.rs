@@ -631,6 +631,9 @@ pub struct TlsConfig {
     #[serde(default)]
     /// Whether the HTTPS listener is enabled.
     pub enabled: bool,
+    #[serde(default)]
+    /// Whether enabling HTTPS also disables public plaintext application access.
+    pub require_https: bool,
     #[serde(default = "default_https_port")]
     /// HTTPS listener port.
     pub port: u16,
@@ -651,6 +654,7 @@ impl Default for TlsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            require_https: false,
             port: default_https_port(),
             redirect_http: false,
             http_port: default_http_port(),
@@ -2892,6 +2896,22 @@ port = 8080
     }
 
     #[test]
+    /// Keeps plaintext application access enabled for pre-setting TLS configurations.
+    fn tls_config_without_require_https_defaults_to_optional_https() -> TestResult {
+        let parsed = super::parse_settings_file_str(
+            "[tls]\nenabled = true\nport = 8443\nredirect_http = false\nhttp_port = 8081\n",
+        )
+        .context("could not parse legacy TLS settings")?;
+        let tls = parsed.tls.context("TLS settings should be present")?;
+
+        anyhow::ensure!(
+            !tls.require_https,
+            "omitting tls.require_https must preserve the plaintext listener"
+        );
+        Ok(())
+    }
+
+    #[test]
     /// Renders the expected first-run defaults and featured-theme order.
     fn settings_template_uses_forest_and_featured_theme_order() {
         let template = settings_template("secret");
@@ -2903,7 +2923,7 @@ port = 8080
             "media_auto_prune_enabled = false",
             "media_max_active_content_size_bytes = 0",
             r#"default_theme = "forest""#,
-            "enabled = false\nport = 8443",
+            "require_https = false",
             "auto_full_backup_include_tor_hidden_service_keys = true",
             r#"auto_full_backup_storage_mode = "directory""#,
             "auto_full_backup_split_zip_part_size_gib = 4",

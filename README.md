@@ -185,6 +185,7 @@ require_ffmpeg = false
 
 [tls]
 enabled = false
+require_https = false
 port = 8443
 ```
 
@@ -195,6 +196,7 @@ Worth knowing:
 - Without `--data-dir`, a copied or temporary binary uses its adjacent `rustchan-data/settings.toml`; do not rely on a cwd-local decoy file.
 - `enable_tor_support` is on by default in the generated config.
 - `tor_only = true` makes RustChan bind to loopback only and serve through Tor.
+- `[tls].require_https = true` opts into disabling public plaintext application access when native TLS is enabled.
 - `require_ffmpeg = true` makes startup fail if `ffmpeg` is missing.
 - `cookie_secret` is auto-generated on first run and should not be changed casually once the site is live.
 - `auto_full_backup_interval_hours` and `auto_full_backup_copies_to_keep` control saved full-site backups.

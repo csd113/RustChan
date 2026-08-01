@@ -139,8 +139,12 @@ enum PlaintextAppListener {
 }
 
 /// Select the plaintext listener mode for the current TLS and Tor configuration.
-const fn plaintext_app_listener(tls_enabled: bool, tor_enabled: bool) -> PlaintextAppListener {
-    match (tls_enabled, tor_enabled) {
+const fn plaintext_app_listener(
+    tls_enabled: bool,
+    require_https: bool,
+    tor_enabled: bool,
+) -> PlaintextAppListener {
+    match (tls_enabled && require_https, tor_enabled) {
         (false, _) => PlaintextAppListener::Public,
         (true, true) => PlaintextAppListener::TorBackend,
         (true, false) => PlaintextAppListener::Disabled,
@@ -895,6 +899,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 
     let plaintext_server = match plaintext_app_listener(
         CONFIG.tls.enabled,
+        CONFIG.tls.require_https,
         CONFIG.enable_tor_support,
     ) {
         PlaintextAppListener::Public => {
@@ -923,14 +928,14 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             tracing::info!(
                 target: "server",
                 addr = %backend_addr,
-                "Internal Tor HTTP backend listening; non-Tor requests require HTTPS"
+                "HTTPS-only mode enabled; internal Tor HTTP backend listening"
             );
             Some((listener, app))
         }
         PlaintextAppListener::Disabled => {
             tracing::info!(
                 target: "server",
-                "Native TLS enabled; plaintext application listener disabled"
+                "HTTPS-only mode enabled; plaintext application listener disabled"
             );
             None
         }
@@ -1932,17 +1937,29 @@ mod tests {
     }
 
     #[test]
-    fn native_tls_never_selects_a_public_plaintext_application_listener() {
+    fn native_tls_requires_explicit_https_only_mode_to_disable_plaintext() {
         assert_eq!(
-            super::plaintext_app_listener(false, false),
+            super::plaintext_app_listener(false, false, false),
             PlaintextAppListener::Public
         );
         assert_eq!(
-            super::plaintext_app_listener(true, false),
+            super::plaintext_app_listener(false, true, false),
+            PlaintextAppListener::Public
+        );
+        assert_eq!(
+            super::plaintext_app_listener(true, false, false),
+            PlaintextAppListener::Public
+        );
+        assert_eq!(
+            super::plaintext_app_listener(true, false, true),
+            PlaintextAppListener::Public
+        );
+        assert_eq!(
+            super::plaintext_app_listener(true, true, false),
             PlaintextAppListener::Disabled
         );
         assert_eq!(
-            super::plaintext_app_listener(true, true),
+            super::plaintext_app_listener(true, true, true),
             PlaintextAppListener::TorBackend
         );
     }
