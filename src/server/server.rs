@@ -253,11 +253,18 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     {
         let reconcile_pool = pool.clone();
         let upload_dir = CONFIG.upload_dir.clone();
-        tokio::task::spawn_blocking(move || {
+        let reconciliation = tokio::task::spawn_blocking(move || {
             crate::pending_fs::reconcile_pending_fs_ops(&reconcile_pool, &upload_dir)
         })
         .await
-        .map_err(|error| anyhow::anyhow!("pending_fs_ops reconciliation task failed: {error}"))??;
+        .map_err(|error| anyhow::anyhow!("pending_fs_ops reconciliation task failed: {error}"))?;
+        if let Err(error) = reconciliation {
+            tracing::warn!(
+                target: "pending_fs",
+                error = %error,
+                "startup filesystem reconciliation left quarantined operations for retry"
+            );
+        }
     }
 
     // Check whether cookie_secret has changed since the last run (#19).
@@ -868,14 +875,53 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         });
     }
 
-    // 2.6: Waveform/thumbnail cache eviction — keep total size of all thumbs
-    // directories under CONFIG.waveform_cache_max_bytes by deleting the oldest
-    // files when the threshold is exceeded.  Waveform PNGs can be regenerated
-    // by re-enqueueing the AudioWaveform job; image thumbnails can be
-    // regenerated from the originals.  Uses 1-hour intervals.
+    // 2.6: Retry durable filesystem operations independently of request traffic.
+    // Each pass is bounded by the finite queue snapshot loaded by the reconciler.
+    {
+        let bg = pool.clone();
+        let cancel_clone = worker_cancel.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_mins(5)) => {}
+                () = cancel_clone.cancelled() => { return; }
+            }
+            let mut iv = tokio::time::interval(Duration::from_mins(15));
+            loop {
+                tokio::select! {
+                    _ = iv.tick() => {
+                        let retry_pool = bg.clone();
+                        let upload_dir = CONFIG.upload_dir.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if let Err(error) = crate::pending_fs::reconcile_pending_fs_ops(
+                                &retry_pool,
+                                &upload_dir,
+                            ) {
+                                tracing::warn!(
+                                    target: "pending_fs",
+                                    error = %error,
+                                    "periodic filesystem reconciliation left quarantined operations"
+                                );
+                            }
+                        })
+                        .await
+                        .ok();
+                    }
+                    () = cancel_clone.cancelled() => {
+                        tracing::debug!("Filesystem reconciliation task shutting down");
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    // 2.7: Waveform/thumbnail cache eviction — keep total size of all thumbs
+    // directories under CONFIG.waveform_cache_max_bytes by deleting only the
+    // oldest files that have no post reference. Uses 1-hour intervals.
     if CONFIG.waveform_cache_max_bytes > 0 {
         let max_bytes = CONFIG.waveform_cache_max_bytes;
         let cancel_clone = worker_cancel.clone();
+        let bg = pool.clone();
         tokio::spawn(async move {
             tokio::select! {
                 () = tokio::time::sleep(Duration::from_mins(30)) => {} // initial stagger
@@ -886,8 +932,19 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 tokio::select! {
                     _ = iv.tick() => {
                         let upload_dir = CONFIG.upload_dir.clone();
+                        let eviction_pool = bg.clone();
                         tokio::task::spawn_blocking(move || {
-                            crate::workers::evict_thumb_cache(&upload_dir, max_bytes);
+                            let Ok(conn) = eviction_pool.get() else {
+                                return;
+                            };
+                            let eviction_result = crate::workers::evict_thumb_cache(
+                                &conn,
+                                &upload_dir,
+                                max_bytes,
+                            );
+                            if let Err(error) = eviction_result {
+                                tracing::warn!(error = %error, "Thumbnail cache eviction failed");
+                            }
                         })
                         .await
                         .ok();

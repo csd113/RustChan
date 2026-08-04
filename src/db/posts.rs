@@ -957,7 +957,7 @@ pub fn find_file_by_hash(
     let mut stmt = conn.prepare_cached(
         "SELECT file_path, thumb_path, mime_type FROM file_hashes WHERE sha256 = ?1",
     )?;
-    Ok(stmt
+    let cached = stmt
         .query_row(params![sha256], |r| {
             Ok(super::CachedFile {
                 file_path: r.get(0)?,
@@ -965,7 +965,32 @@ pub fn find_file_by_hash(
                 mime_type: r.get(2)?,
             })
         })
-        .optional()?)
+        .optional()?;
+    let Some(cached) = cached else {
+        return Ok(None);
+    };
+    let posts_table_exists = conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'posts'
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !posts_table_exists {
+        return Ok(Some(cached));
+    }
+    let prune_pending = conn
+        .query_row(
+            "SELECT 1 FROM posts
+             WHERE (file_path = ?1 OR audio_file_path = ?1)
+               AND media_processing_state = ?2
+             LIMIT 1",
+            params![cached.file_path, MEDIA_ORIGINAL_PRUNE_PENDING],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    Ok((!prune_pending).then_some(cached))
 }
 
 /// Record a newly saved upload in the deduplication table.
@@ -1673,6 +1698,8 @@ fn expected_waveform_thumb_path(source_path: &str, board_short: &str) -> Option<
 pub const MEDIA_PROCESSING_PENDING: &str = "pending";
 /// Media-processing state assigned after terminal worker failure.
 pub const MEDIA_PROCESSING_FAILED: &str = "failed";
+/// Media-processing state assigned after a durable original-prune intent commits.
+pub const MEDIA_ORIGINAL_PRUNE_PENDING: &str = "prune_pending";
 /// Media-processing state indicating that the original upload was pruned.
 pub const MEDIA_ORIGINAL_PRUNED: &str = "pruned";
 

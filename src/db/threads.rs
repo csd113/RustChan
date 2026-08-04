@@ -204,6 +204,29 @@ pub(crate) enum PostCreationOutcome<T> {
     Replayed(super::PostSubmissionRecord),
 }
 
+#[derive(Debug, Clone, Copy)]
+/// Filesystem lifecycle context validated in a public post transaction.
+pub(crate) struct PostFilesystemCommit<'a> {
+    /// Durable publication operation for newly staged files.
+    pending_fs_op: Option<&'a crate::pending_fs::PendingFsOpInsert>,
+    /// Prior dedup cache hits that must still be valid under the write lock.
+    deduplicated_paths: &'a [&'a str],
+}
+
+impl<'a> PostFilesystemCommit<'a> {
+    /// Build filesystem context for one post-creation transaction.
+    #[must_use]
+    pub(crate) const fn new(
+        pending_fs_op: Option<&'a crate::pending_fs::PendingFsOpInsert>,
+        deduplicated_paths: &'a [&'a str],
+    ) -> Self {
+        Self {
+            pending_fs_op,
+            deduplicated_paths,
+        }
+    }
+}
+
 /// Create a thread, its OP post, and an optional poll atomically.
 ///
 /// # Errors
@@ -224,7 +247,7 @@ pub fn create_thread_with_optional_poll(
         post,
         submission_token,
         poll,
-        pending_fs_op,
+        PostFilesystemCommit::new(pending_fs_op, &[]),
     )? {
         PostCreationOutcome::Created(ids) => Ok(ids),
         PostCreationOutcome::Replayed(existing) => Ok((existing.thread_id, existing.post_id, None)),
@@ -247,7 +270,7 @@ pub(crate) fn create_thread_submission(
     post: &super::NewPost,
     submission_token: &str,
     poll: Option<&PollInsert<'_>>,
-    pending_fs_op: Option<&crate::pending_fs::PendingFsOpInsert>,
+    filesystem: PostFilesystemCommit<'_>,
 ) -> Result<PostCreationOutcome<(i64, i64, Option<i64>)>> {
     // BEGIN IMMEDIATE acquires the write lock upfront to avoid SQLITE_BUSY
     // during the lock-upgrade step that DEFERRED transactions perform on first
@@ -264,6 +287,8 @@ pub(crate) fn create_thread_submission(
                 return Ok(PostCreationOutcome::Replayed(existing));
             }
         }
+
+        validate_deduplicated_paths(conn, filesystem.deduplicated_paths)?;
 
         let thread_id: i64 = conn.query_row(
             "INSERT INTO threads (board_id, subject) VALUES (?1, ?2) RETURNING id",
@@ -291,7 +316,7 @@ pub(crate) fn create_thread_submission(
             })
             .transpose()?;
 
-        if let Some(op) = pending_fs_op {
+        if let Some(op) = filesystem.pending_fs_op {
             super::insert_pending_fs_op(conn, op)?;
         }
         if let Some(ip_hash) = post.ip_hash.as_deref() {
@@ -335,7 +360,13 @@ pub fn create_reply_with_thread_update(
     should_bump: bool,
     pending_fs_op: Option<&crate::pending_fs::PendingFsOpInsert>,
 ) -> Result<i64> {
-    match create_reply_submission(conn, post, submission_token, should_bump, pending_fs_op)? {
+    match create_reply_submission(
+        conn,
+        post,
+        submission_token,
+        should_bump,
+        PostFilesystemCommit::new(pending_fs_op, &[]),
+    )? {
         PostCreationOutcome::Created(post_id) => Ok(post_id),
         PostCreationOutcome::Replayed(existing) => Ok(existing.post_id),
     }
@@ -351,7 +382,7 @@ pub(crate) fn create_reply_submission(
     post: &super::NewPost,
     submission_token: &str,
     should_bump: bool,
-    pending_fs_op: Option<&crate::pending_fs::PendingFsOpInsert>,
+    filesystem: PostFilesystemCommit<'_>,
 ) -> Result<PostCreationOutcome<i64>> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin create_reply_with_thread_update transaction")?;
@@ -364,6 +395,8 @@ pub(crate) fn create_reply_submission(
                 return Ok(PostCreationOutcome::Replayed(existing));
             }
         }
+
+        validate_deduplicated_paths(conn, filesystem.deduplicated_paths)?;
 
         let flags = conn
             .query_row(
@@ -410,7 +443,7 @@ pub(crate) fn create_reply_submission(
                 post.thread_id
             );
         }
-        if let Some(op) = pending_fs_op {
+        if let Some(op) = filesystem.pending_fs_op {
             super::insert_pending_fs_op(conn, op)?;
         }
         if let Some(ip_hash) = post.ip_hash.as_deref() {
@@ -438,6 +471,27 @@ pub(crate) fn create_reply_submission(
             Err(error)
         }
     }
+}
+
+/// Revalidate a prior dedup cache hit after the post transaction owns the write lock.
+fn validate_deduplicated_paths(conn: &rusqlite::Connection, paths: &[&str]) -> Result<()> {
+    for path in paths {
+        let valid = conn.query_row(
+            "SELECT EXISTS (
+                 SELECT 1 FROM file_hashes fh WHERE fh.file_path = ?1
+             ) AND NOT EXISTS (
+                 SELECT 1 FROM posts p
+                 WHERE (p.file_path = ?1 OR p.audio_file_path = ?1)
+                   AND p.media_processing_state = ?2
+             )",
+            params![path, super::MEDIA_ORIGINAL_PRUNE_PENDING],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !valid {
+            anyhow::bail!("deduplicated media changed before post creation");
+        }
+    }
+    Ok(())
 }
 
 /// # Errors
@@ -880,7 +934,7 @@ pub fn count_archived_threads_for_board(conn: &rusqlite::Connection, board_id: i
 mod tests {
     use super::{
         count_threads_for_board, create_reply_with_thread_update, delete_thread,
-        prune_old_archived_threads, prune_old_threads,
+        prune_old_archived_threads, prune_old_threads, validate_deduplicated_paths,
     };
     use crate::db::{create_board, create_thread_with_optional_poll, get_board_by_short, NewPost};
     use crate::error::AppError;
@@ -974,6 +1028,43 @@ mod tests {
 
     fn pending_fs_op_count(conn: &Connection) -> Result<i64> {
         Ok(conn.query_row("SELECT COUNT(*) FROM pending_fs_ops", [], |row| row.get(0))?)
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn dedup_path_revalidation_rejects_a_concurrent_prune_transition() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "b", "Random", "", false)?;
+        crate::db::record_file_hash(
+            &conn,
+            "hash",
+            "b/file.webp",
+            "b/thumbs/file.webp",
+            "image/webp",
+        )?;
+        validate_deduplicated_paths(&conn, &["b/file.webp"])?;
+
+        let thread_id = create_plain_thread(&conn, board_id, "thread")?;
+        let post_id = create_reply_with_thread_update(
+            &conn,
+            &plain_reply(board_id, thread_id),
+            "submission",
+            true,
+            None,
+        )?;
+        conn.execute(
+            "UPDATE posts
+             SET file_path = 'b/file.webp', media_processing_state = ?1
+             WHERE id = ?2",
+            params![crate::db::MEDIA_ORIGINAL_PRUNE_PENDING, post_id],
+        )?;
+
+        assert!(validate_deduplicated_paths(&conn, &["b/file.webp"]).is_err());
+        assert!(crate::db::find_file_by_hash(&conn, "hash")?.is_none());
+        Ok(())
     }
 
     #[test]

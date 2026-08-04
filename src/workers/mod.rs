@@ -1916,21 +1916,49 @@ fn run_spam_check(post_id: i64, ip_hash: &str, body_len: usize) {
 
 // ─── Thumbnail / waveform cache eviction ─────────────────────────────────────
 
-/// Walk every board's `thumbs/` subdirectory, collect all files with their
-/// modification times, and delete the oldest ones until the total size of
-/// the remaining set is under `max_bytes`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Result of one database-aware thumbnail-cache eviction pass.
+pub struct ThumbCacheEvictionReport {
+    /// Bytes in all inspected thumbnail files before eviction.
+    pub total_before_bytes: u64,
+    /// Bytes remaining after all safe candidates were considered.
+    pub total_after_bytes: u64,
+    /// Unreferenced files removed.
+    pub removed_files: u64,
+    /// Bytes freed by removed files.
+    pub removed_bytes: u64,
+}
+
+/// Walk every board's `thumbs/` subdirectory and evict unreferenced files.
 ///
 /// Only files inside `{upload_dir}/{board}/thumbs/` are considered — original
 /// uploads are never touched.  Deletion is best-effort: individual failures
 /// are logged and skipped rather than aborting the whole pass.
-pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
+///
+/// # Errors
+/// Returns an error if current thumbnail references cannot be loaded. In that
+/// fail-closed case no filesystem deletion is attempted.
+pub fn evict_thumb_cache(
+    conn: &rusqlite::Connection,
+    upload_dir: &str,
+    max_bytes: u64,
+) -> Result<ThumbCacheEvictionReport> {
+    let mut reference_stmt = conn.prepare(
+        "SELECT DISTINCT thumb_path
+         FROM posts
+         WHERE thumb_path IS NOT NULL AND TRIM(thumb_path) != ''",
+    )?;
+    let referenced: std::collections::HashSet<String> = reference_stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+
     // Collect (mtime_secs, path, size) for every file inside any thumbs/ dir.
-    let mut files: Vec<(u64, PathBuf, u64)> = Vec::new();
+    let mut files: Vec<(u64, PathBuf, u64, bool)> = Vec::new();
     let Ok(upload_root) = std::path::Path::new(upload_dir).canonicalize() else {
-        return;
+        return Ok(ThumbCacheEvictionReport::default());
     };
     let Ok(boards_iter) = std::fs::read_dir(upload_dir) else {
-        return;
+        return Ok(ThumbCacheEvictionReport::default());
     };
     for board_entry in boards_iter.flatten() {
         let Ok(board_metadata) = board_entry.path().symlink_metadata() else {
@@ -1968,7 +1996,12 @@ pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(0, |d| d.as_secs());
-            files.push((mtime, canonical_path, meta.len()));
+            let is_referenced = canonical_path
+                .strip_prefix(&upload_root)
+                .ok()
+                .and_then(std::path::Path::to_str)
+                .is_some_and(|relative| referenced.contains(relative));
+            files.push((mtime, canonical_path, meta.len(), is_referenced));
         }
     }
 
@@ -1976,20 +2009,28 @@ pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
     // clarity.  `Iterator<Item = &u64>` implements `Sum<&u64>` in std so this
     // compiled before, but the explicit form is more readable and avoids the
     // implicit coercion.
-    let total: u64 = files.iter().map(|(_, _, sz)| *sz).sum::<u64>();
+    let total: u64 = files.iter().map(|(_, _, size, _)| *size).sum::<u64>();
+    let mut report = ThumbCacheEvictionReport {
+        total_before_bytes: total,
+        total_after_bytes: total,
+        ..ThumbCacheEvictionReport::default()
+    };
     if total <= max_bytes {
-        return; // already within budget
+        return Ok(report);
     }
 
     // Sort oldest-first so we delete the least-recently-used files first.
-    files.sort_unstable_by_key(|(mtime, _, _)| *mtime);
+    files.sort_unstable_by_key(|(mtime, _, _, _)| *mtime);
 
     let mut remaining = total;
     let mut deleted = 0u64;
     let mut deleted_bytes = 0u64;
-    for (_, path, size) in &files {
+    for (_, path, size, is_referenced) in &files {
         if remaining <= max_bytes {
             break;
+        }
+        if *is_referenced {
+            continue;
         }
         match std::fs::remove_file(path) {
             Ok(()) => {
@@ -2006,6 +2047,10 @@ pub fn evict_thumb_cache(upload_dir: &str, max_bytes: u64) {
     if deleted > 0 {
         tracing::info!(target: "workers", files_removed = deleted, freed_kib = deleted_bytes / 1024, remaining_kib = remaining / 1024, limit_kib = max_bytes / 1024, "Thumbnail cache eviction complete");
     }
+    report.total_after_bytes = remaining;
+    report.removed_files = deleted;
+    report.removed_bytes = deleted_bytes;
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -2636,7 +2681,10 @@ mod tests {
         std::fs::write(&outside_file, b"outside").expect("write outside file");
         unix_fs::symlink(&outside_dir, board_dir.join("thumbs")).expect("symlink thumbs dir");
 
-        super::evict_thumb_cache(upload_root.to_str().expect("utf8 upload root"), 0);
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("test connection");
+        super::evict_thumb_cache(&conn, upload_root.to_str().expect("utf8 upload root"), 0)
+            .expect("evict thumbnail cache");
 
         assert_eq!(
             std::fs::read(&outside_file).expect("read outside"),
@@ -2663,7 +2711,10 @@ mod tests {
         std::fs::write(&outside_file, b"outside").expect("write outside file");
         unix_fs::symlink(&outside_board, upload_root.join("b")).expect("symlink board dir");
 
-        super::evict_thumb_cache(upload_root.to_str().expect("utf8 upload root"), 0);
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("test connection");
+        super::evict_thumb_cache(&conn, upload_root.to_str().expect("utf8 upload root"), 0)
+            .expect("evict thumbnail cache");
 
         assert_eq!(
             std::fs::read(&outside_file).expect("read outside"),
@@ -2688,12 +2739,100 @@ mod tests {
         std::fs::write(&outside_file, b"outside").expect("write outside file");
         unix_fs::symlink(&outside_file, thumbs_dir.join("thumb.webp")).expect("symlink thumb file");
 
-        super::evict_thumb_cache(upload_root.to_str().expect("utf8 upload root"), 0);
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("test connection");
+        super::evict_thumb_cache(&conn, upload_root.to_str().expect("utf8 upload root"), 0)
+            .expect("evict thumbnail cache");
 
         assert_eq!(
             std::fs::read(&outside_file).expect("read outside"),
             b"outside"
         );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "fixture setup must succeed before eviction assertions"
+    )]
+    fn thumb_cache_evicts_only_unreferenced_files_across_all_media_states() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let upload_root = temp_dir.path().join("uploads");
+        let thumbs_dir = upload_root.join("b/thumbs");
+        std::fs::create_dir_all(&thumbs_dir).expect("create thumbs");
+        let referenced_paths = [
+            "normal.webp",
+            "pending.webp",
+            "failed.webp",
+            "pruned.webp",
+            "shared.webp",
+        ];
+        for name in referenced_paths
+            .iter()
+            .chain(std::iter::once(&"orphan.webp"))
+        {
+            std::fs::write(thumbs_dir.join(name), [0_u8; 4]).expect("write thumbnail");
+        }
+
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let conn = pool.get().expect("test connection");
+        let board_id =
+            crate::db::create_board(&conn, "b", "Random", "", false).expect("create board");
+        let thread_id: i64 = conn
+            .query_row(
+                "INSERT INTO threads (board_id, subject) VALUES (?1, 'thread') RETURNING id",
+                [board_id],
+                |row| row.get(0),
+            )
+            .expect("create thread");
+        let fixtures = [
+            (101, "normal.webp", ""),
+            (102, "pending.webp", crate::db::MEDIA_PROCESSING_PENDING),
+            (103, "failed.webp", crate::db::MEDIA_PROCESSING_FAILED),
+            (104, "pruned.webp", crate::db::MEDIA_ORIGINAL_PRUNED),
+            (105, "shared.webp", ""),
+            (106, "shared.webp", crate::db::MEDIA_ORIGINAL_PRUNED),
+        ];
+        for (post_id, thumb_name, state) in fixtures {
+            conn.execute(
+                "INSERT INTO posts (
+                    id, thread_id, board_id, name, body, body_html, file_path,
+                    file_name, file_size, thumb_path, mime_type, deletion_token,
+                    is_op, media_type, media_processing_state, created_at
+                 ) VALUES (
+                    ?1, ?2, ?3, 'anon', 'body', 'body', ?4, 'file.webp', 4,
+                    ?5, 'image/webp', ?6, 0, 'image', ?7, ?1
+                 )",
+                rusqlite::params![
+                    post_id,
+                    thread_id,
+                    board_id,
+                    format!("b/file-{post_id}.webp"),
+                    format!("b/thumbs/{thumb_name}"),
+                    format!("token-{post_id}"),
+                    state,
+                ],
+            )
+            .expect("insert media post");
+        }
+
+        let upload_dir = upload_root.to_str().expect("UTF-8 upload root");
+        let first = super::evict_thumb_cache(&conn, upload_dir, 0).expect("first eviction");
+        assert_eq!(first.total_before_bytes, 24);
+        assert_eq!(first.total_after_bytes, 20);
+        assert_eq!(first.removed_files, 1);
+        assert!(!thumbs_dir.join("orphan.webp").exists());
+        for name in referenced_paths {
+            assert!(
+                thumbs_dir.join(name).exists(),
+                "referenced thumbnail {name} must remain"
+            );
+        }
+
+        let second = super::evict_thumb_cache(&conn, upload_dir, 0).expect("second eviction");
+        assert_eq!(second.total_before_bytes, 20);
+        assert_eq!(second.total_after_bytes, 20);
+        assert_eq!(second.removed_files, 0, "fixed point is idempotent");
     }
 
     #[expect(

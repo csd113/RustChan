@@ -629,6 +629,12 @@ pub(crate) fn submit_post(
     )?;
     let deletion_token = resolve_deletion_token(&deletion_token);
     let pending_upload_op = build_pending_upload_op(&uploads)?;
+    let deduplicated_paths: Vec<&str> = uploads
+        .primary
+        .iter()
+        .filter(|upload| upload.dedup_reused)
+        .map(|upload| upload.file_path.as_str())
+        .collect();
 
     let (post_id, thread_id, redirect_url, prune_job) = match mode {
         SubmitPostMode::NewThread {
@@ -693,7 +699,10 @@ pub(crate) fn submit_post(
                 &new_post,
                 &submission_token,
                 poll_insert.as_ref(),
-                pending_upload_op.as_ref(),
+                db::threads::PostFilesystemCommit::new(
+                    pending_upload_op.as_ref(),
+                    &deduplicated_paths,
+                ),
             );
             let (thread_id, post_id, _) = match create_result {
                 Ok(db::threads::PostCreationOutcome::Created(ids)) => ids,
@@ -742,7 +751,10 @@ pub(crate) fn submit_post(
                 &new_post,
                 &submission_token,
                 should_bump,
-                pending_upload_op.as_ref(),
+                db::threads::PostFilesystemCommit::new(
+                    pending_upload_op.as_ref(),
+                    &deduplicated_paths,
+                ),
             ) {
                 Ok(db::threads::PostCreationOutcome::Created(post_id)) => post_id,
                 Ok(db::threads::PostCreationOutcome::Replayed(existing)) => {

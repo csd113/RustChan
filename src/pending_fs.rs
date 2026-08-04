@@ -1167,56 +1167,28 @@ pub fn reconcile_pending_fs_ops(pool: &crate::db::DbPool, upload_dir: &str) -> R
     let pending_ops = crate::db::list_pending_fs_ops(&conn)?;
     drop(conn);
     let mut referenced_upload_stage_dirs = std::collections::HashSet::new();
+    let mut reconciliation_errors = Vec::new();
 
     for op in pending_ops {
-        let conn = pool
-            .get()
-            .context("Get DB connection for pending_fs_op application failed")?;
-        match op.kind.as_str() {
-            UPLOAD_FINALIZE_KIND => {
-                let payload: UploadFinalizePayload = serde_json::from_str(&op.payload_json)
-                    .with_context(|| format!("Parse upload_finalize payload for {}", op.id))?;
-                referenced_upload_stage_dirs.insert(payload.stage_dir.clone());
-                finalize_upload_payload(&conn, upload_dir, &payload)?;
-            }
-            DELETE_FILES_KIND => {
-                let payload: DeleteFilesPayload = serde_json::from_str(&op.payload_json)
-                    .with_context(|| format!("Parse delete_files payload for {}", op.id))?;
-                finalize_delete_files_and_dirs_payload(
-                    &conn,
-                    upload_dir,
-                    Some(&op.id),
-                    &payload.paths,
-                    &payload.dirs,
-                )?;
-            }
-            DELETE_BANNER_ASSETS_KIND => {
-                let payload: DeleteBannerAssetsPayload = serde_json::from_str(&op.payload_json)
-                    .with_context(|| format!("Parse delete_banner_assets payload for {}", op.id))?;
-                finalize_delete_banner_assets_payload(&conn, Some(&op.id), &payload)?;
-            }
-            FULL_RESTORE_SWAP_KIND => {
-                let payload: FullRestoreSwapPayload = serde_json::from_str(&op.payload_json)
-                    .with_context(|| format!("Parse full_restore_swap payload for {}", op.id))?;
-                let tor_hidden_service_keys_dir =
-                    crate::config::configured_tor_hidden_service_keys_dir();
-                finalize_full_restore_payload(
-                    &payload,
-                    Path::new(upload_dir),
-                    tor_hidden_service_keys_dir.as_deref(),
-                )?;
-            }
-            BOARD_RESTORE_SWAP_KIND => {
-                let payload: BoardRestoreSwapPayload = serde_json::from_str(&op.payload_json)
-                    .with_context(|| format!("Parse board_restore_swap payload for {}", op.id))?;
-                finalize_board_restore_payload(&payload, Path::new(upload_dir))?;
-            }
-            other => {
-                anyhow::bail!("Unknown pending_fs_op kind {other:?} for {}", op.id);
-            }
+        let result = apply_pending_fs_op(pool, upload_dir, &op, &mut referenced_upload_stage_dirs);
+        if let Err(error) = result {
+            tracing::warn!(
+                target: "pending_fs",
+                op_id = %op.id,
+                kind = %op.kind,
+                error = %error,
+                "pending filesystem operation quarantined for retry"
+            );
+            reconciliation_errors.push(format!("{} ({}): {error}", op.id, op.kind));
         }
+    }
 
-        crate::db::delete_pending_fs_op(&conn, &op.id)?;
+    if !reconciliation_errors.is_empty() {
+        anyhow::bail!(
+            "Pending filesystem reconciliation left {} quarantined operation(s): {}",
+            reconciliation_errors.len(),
+            reconciliation_errors.join("; ")
+        );
     }
 
     let pending_root = Path::new(upload_dir).join(".pending");
@@ -1249,6 +1221,69 @@ pub fn reconcile_pending_fs_ops(pool: &crate::db::DbPool, upload_dir: &str) -> R
     )?;
     cleanup_orphan_banner_files(&conn, Path::new(upload_dir))?;
 
+    Ok(())
+}
+
+/// Decode and apply one pending operation without affecting later queue entries.
+fn apply_pending_fs_op(
+    pool: &crate::db::DbPool,
+    upload_dir: &str,
+    op: &crate::db::PendingFsOpRow,
+    referenced_upload_stage_dirs: &mut std::collections::HashSet<String>,
+) -> Result<()> {
+    let conn = pool
+        .get()
+        .context("Get DB connection for pending_fs_op application failed")?;
+    match op.kind.as_str() {
+        UPLOAD_FINALIZE_KIND => {
+            let payload: UploadFinalizePayload = serde_json::from_str(&op.payload_json)
+                .with_context(|| format!("Parse upload_finalize payload for {}", op.id))?;
+            referenced_upload_stage_dirs.insert(payload.stage_dir.clone());
+            finalize_upload_payload(&conn, upload_dir, &payload)?;
+        }
+        DELETE_FILES_KIND => {
+            let payload: DeleteFilesPayload = serde_json::from_str(&op.payload_json)
+                .with_context(|| format!("Parse delete_files payload for {}", op.id))?;
+            finalize_delete_files_and_dirs_payload(
+                &conn,
+                upload_dir,
+                Some(&op.id),
+                &payload.paths,
+                &payload.dirs,
+            )?;
+        }
+        DELETE_BANNER_ASSETS_KIND => {
+            let payload: DeleteBannerAssetsPayload = serde_json::from_str(&op.payload_json)
+                .with_context(|| format!("Parse delete_banner_assets payload for {}", op.id))?;
+            finalize_delete_banner_assets_payload(&conn, Some(&op.id), &payload)?;
+        }
+        FULL_RESTORE_SWAP_KIND => {
+            let payload: FullRestoreSwapPayload = serde_json::from_str(&op.payload_json)
+                .with_context(|| format!("Parse full_restore_swap payload for {}", op.id))?;
+            let tor_hidden_service_keys_dir =
+                crate::config::configured_tor_hidden_service_keys_dir();
+            finalize_full_restore_payload(
+                &payload,
+                Path::new(upload_dir),
+                tor_hidden_service_keys_dir.as_deref(),
+            )?;
+        }
+        BOARD_RESTORE_SWAP_KIND => {
+            let payload: BoardRestoreSwapPayload = serde_json::from_str(&op.payload_json)
+                .with_context(|| format!("Parse board_restore_swap payload for {}", op.id))?;
+            finalize_board_restore_payload(&payload, Path::new(upload_dir))?;
+        }
+        crate::media::prune::ORIGINAL_PRUNE_KIND => {
+            let payload: crate::media::prune::OriginalPrunePayload =
+                serde_json::from_str(&op.payload_json)
+                    .with_context(|| format!("Parse original_prune payload for {}", op.id))?;
+            crate::media::prune::finalize_original_prune_payload(
+                &conn, upload_dir, &op.id, &payload,
+            )?;
+        }
+        other => anyhow::bail!("Unknown pending_fs_op kind {other:?} for {}", op.id),
+    }
+    crate::db::delete_pending_fs_op(&conn, &op.id)?;
     Ok(())
 }
 
