@@ -24,6 +24,7 @@ pub(crate) fn run_std_command_with_timeout(
 ) -> Result<Output> {
     configure_std_command(command);
     let mut child = command
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -114,7 +115,9 @@ impl Drop for ProcessGroupGuard {
 fn terminate_process_group(pid: u32) -> std::io::Result<()> {
     let group = format!("-{pid}");
     let status = Command::new("/bin/kill")
-        .args(["-KILL", &group])
+        // GNU kill requires `--` before a negative process-group identifier;
+        // BSD kill accepts the same portable form.
+        .args(["-KILL", "--", &group])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()?;

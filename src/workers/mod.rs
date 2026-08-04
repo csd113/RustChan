@@ -46,8 +46,11 @@ use tracing::{debug, error, warn};
 /// Builds an `FFmpeg` command using the configured executable path.
 fn ffmpeg_command() -> TokioCommand {
     let mut command = TokioCommand::new(&CONFIG.ffmpeg_path);
+    command.stdin(Stdio::null());
     #[cfg(unix)]
-    command.process_group(0);
+    {
+        command.process_group(0);
+    }
     command
 }
 
