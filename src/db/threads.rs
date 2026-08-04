@@ -211,6 +211,8 @@ pub(crate) struct PostFilesystemCommit<'a> {
     pending_fs_op: Option<&'a crate::pending_fs::PendingFsOpInsert>,
     /// Prior dedup cache hits that must still be valid under the write lock.
     deduplicated_paths: &'a [&'a str],
+    /// Whether a new thread must atomically persist board-prune work.
+    schedule_thread_prune: bool,
 }
 
 impl<'a> PostFilesystemCommit<'a> {
@@ -219,10 +221,12 @@ impl<'a> PostFilesystemCommit<'a> {
     pub(crate) const fn new(
         pending_fs_op: Option<&'a crate::pending_fs::PendingFsOpInsert>,
         deduplicated_paths: &'a [&'a str],
+        schedule_thread_prune: bool,
     ) -> Self {
         Self {
             pending_fs_op,
             deduplicated_paths,
+            schedule_thread_prune,
         }
     }
 }
@@ -247,7 +251,7 @@ pub fn create_thread_with_optional_poll(
         post,
         submission_token,
         poll,
-        PostFilesystemCommit::new(pending_fs_op, &[]),
+        PostFilesystemCommit::new(pending_fs_op, &[], false),
     )? {
         PostCreationOutcome::Created(ids) => Ok(ids),
         PostCreationOutcome::Replayed(existing) => Ok((existing.thread_id, existing.post_id, None)),
@@ -330,6 +334,10 @@ pub(crate) fn create_thread_submission(
                 true,
             )?;
         }
+        if filesystem.schedule_thread_prune {
+            super::posts::persist_thread_prune_intent_in_tx(conn, board_id)
+                .context("Persist required board prune intent failed")?;
+        }
 
         Ok(PostCreationOutcome::Created((thread_id, post_id, poll_id)))
     })();
@@ -365,7 +373,7 @@ pub fn create_reply_with_thread_update(
         post,
         submission_token,
         should_bump,
-        PostFilesystemCommit::new(pending_fs_op, &[]),
+        PostFilesystemCommit::new(pending_fs_op, &[], false),
     )? {
         PostCreationOutcome::Created(post_id) => Ok(post_id),
         PostCreationOutcome::Replayed(existing) => Ok(existing.post_id),
@@ -933,8 +941,9 @@ pub fn count_archived_threads_for_board(conn: &rusqlite::Connection, board_id: i
 #[cfg(test)]
 mod tests {
     use super::{
-        count_threads_for_board, create_reply_with_thread_update, delete_thread,
-        prune_old_archived_threads, prune_old_threads, validate_deduplicated_paths,
+        count_threads_for_board, create_reply_with_thread_update, create_thread_submission,
+        delete_thread, prune_old_archived_threads, prune_old_threads, validate_deduplicated_paths,
+        PostFilesystemCommit,
     };
     use crate::db::{create_board, create_thread_with_optional_poll, get_board_by_short, NewPost};
     use crate::error::AppError;
@@ -975,6 +984,59 @@ mod tests {
         let (thread_id, _, _) =
             create_thread_with_optional_poll(conn, board_id, Some(title), &post, "", None, None)?;
         Ok(thread_id)
+    }
+
+    #[test]
+    fn required_prune_insert_failure_rolls_back_new_thread() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "durable", "Durable", "", false)?;
+        conn.execute_batch(
+            "CREATE TRIGGER fail_required_thread_prune
+             BEFORE INSERT ON background_jobs
+             WHEN NEW.job_type = 'thread_prune'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected durable prune failure');
+             END;",
+        )?;
+        let post = NewPost {
+            thread_id: 0,
+            board_id,
+            name: "anon".to_owned(),
+            tripcode: None,
+            subject: Some("atomic".to_owned()),
+            body: "atomic".to_owned(),
+            body_html: "atomic".to_owned(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_owned(),
+            is_op: true,
+        };
+
+        let result = create_thread_submission(
+            &conn,
+            board_id,
+            Some("atomic"),
+            &post,
+            "submission",
+            None,
+            PostFilesystemCommit::new(None, &[], true),
+        );
+
+        anyhow::ensure!(result.is_err());
+        anyhow::ensure!(count_threads_for_board(&conn, board_id)? == 0);
+        let jobs: i64 =
+            conn.query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row.get(0))?;
+        anyhow::ensure!(jobs == 0);
+        Ok(())
     }
 
     fn plain_reply(board_id: i64, thread_id: i64) -> NewPost {

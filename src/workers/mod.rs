@@ -124,14 +124,6 @@ pub enum Job {
     ThreadPrune {
         /// Database identifier of the board to prune.
         board_id: i64,
-        /// Short name of the board to prune.
-        board_short: String,
-        /// Maximum number of live threads retained by the board.
-        max_threads: i64,
-        /// Maximum number of archived threads retained by the board.
-        max_archived_threads: i64,
-        /// Whether overflow threads may be archived before deletion.
-        allow_archive: bool,
     },
     /// Lightweight spam / abuse signal logging.
     SpamCheck {
@@ -164,6 +156,21 @@ pub enum EnqueueOutcome {
     Enqueued(i64),
     /// Capacity back-pressure rejected the job before persistence.
     DroppedAtCapacity,
+}
+
+/// Emit diagnostics only for legacy duplicate states; ordinary coalescing is
+/// expected and intentionally remains quiet.
+fn log_thread_prune_schedule(board_id: i64, schedule: crate::db::ThreadPruneSchedule) {
+    if schedule.duplicates_resolved > 0 || schedule.duplicate_running > 0 {
+        warn!(
+            target: "workers",
+            board_id,
+            job_id = schedule.job_id,
+            duplicates_resolved = schedule.duplicates_resolved,
+            duplicate_running = schedule.duplicate_running,
+            "coalesced duplicate legacy thread-prune jobs"
+        );
+    }
 }
 
 // ─── Job queue ────────────────────────────────────────────────────────────────
@@ -218,13 +225,28 @@ impl JobQueue {
     /// 2.1: If the number of pending jobs already equals or exceeds
     /// `CONFIG.job_queue_capacity`, the job is dropped with a warning log
     /// rather than accepted. This prevents the queue table growing without
-    /// bound under a post flood.
+    /// bound under a post flood. Required `ThreadPrune` work is the exception:
+    /// it is coalesced durably per board and never subjected to this capacity.
     ///
     /// # Errors
     ///
     /// Returns an error when serializing the job, acquiring a database
     /// connection, or persisting the job fails.
     pub fn enqueue(&self, job: &Job) -> Result<EnqueueOutcome> {
+        if let Job::ThreadPrune { board_id } = job {
+            let conn = self
+                .pool
+                .get()
+                .context("Get DB connection for required board prune intent failed")?;
+            let schedule = crate::db::persist_thread_prune_intent(&conn, *board_id)?;
+            if schedule.inserted {
+                self.pending_jobs.fetch_add(1, Ordering::Relaxed);
+            }
+            log_thread_prune_schedule(*board_id, schedule);
+            self.notify.notify_one();
+            return Ok(EnqueueOutcome::Enqueued(schedule.job_id));
+        }
+
         let payload = serde_json::to_string(job)?;
 
         // Back-pressure: check pending count before inserting.
@@ -270,6 +292,24 @@ impl JobQueue {
     #[must_use]
     pub fn active_video_count(&self) -> u64 {
         self.active_video_jobs.load(Ordering::Relaxed)
+    }
+
+    /// Refresh queue accounting and wake a worker after a thread transaction
+    /// has already committed its required prune intent.
+    ///
+    /// The durable row is authoritative: even if this diagnostic refresh
+    /// fails, workers discover the intent through their periodic database poll.
+    ///
+    /// # Errors
+    /// Returns an error if the persisted pending-job count cannot be read.
+    pub fn notify_persisted_thread_prune(&self, conn: &rusqlite::Connection) -> Result<()> {
+        let pending = crate::db::pending_job_count(conn)?;
+        self.pending_jobs.store(
+            u64::try_from(pending).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.notify.notify_one();
+        Ok(())
     }
 
     /// Atomically reserves capacity for a job before it is persisted.
@@ -984,22 +1024,17 @@ async fn handle_job(
             result
         }
 
-        Job::ThreadPrune {
-            board_id,
-            board_short,
-            max_threads,
-            max_archived_threads,
-            allow_archive,
-        } => {
-            prune_threads(
-                board_id,
-                board_short,
-                max_threads,
-                max_archived_threads,
-                allow_archive,
-                pool,
-            )
-            .await
+        Job::ThreadPrune { board_id } => {
+            let result = prune_threads(board_id, pool).await;
+            if let Err(error) = result.as_ref() {
+                warn!(
+                    target: "workers",
+                    board_id,
+                    error = %error,
+                    "board thread-prune evaluation failed and will follow durable retry policy"
+                );
+            }
+            result
         }
 
         Job::SpamCheck {
@@ -1835,70 +1870,400 @@ fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
     reason = "archive, prune, and filesystem finalization remain one consistency operation"
 )]
 /// Applies one board's live and archived thread-retention limits.
-async fn prune_threads(
-    board_id: i64,
-    board_short: String,
-    max_threads: i64,
-    max_archived_threads: i64,
-    allow_archive: bool,
-    pool: DbPool,
-) -> Result<()> {
+async fn prune_threads(board_id: i64, pool: DbPool) -> Result<()> {
     tokio::task::spawn_blocking(move || {
         let conn = pool.get()?;
+        let Some(policy) = load_board_retention_policy(&conn, board_id)? else {
+            warn!(
+                target: "workers",
+                board_id,
+                "thread-prune intent targeted a missing board; resolving safely"
+            );
+            return Ok(());
+        };
         // 2.5: archive_before_prune acts as a global safety net — when true,
         // overflow threads are always archived rather than hard-deleted, even
         // on boards where allow_archive = false.  This closes the silent data
         // loss gap where a thread could disappear simply because a board hit
         // its thread limit while the admin had not opted into archiving.
-        let do_archive = allow_archive || CONFIG.archive_before_prune;
+        let do_archive = policy.allow_archive || CONFIG.archive_before_prune;
         if do_archive {
-            let count = crate::db::archive_old_threads(&conn, board_id, max_threads)?;
-            let deleted =
-                crate::db::prune_old_archived_threads(&conn, board_id, max_archived_threads)?;
-            if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
-                &conn,
-                &CONFIG.upload_dir,
-                deleted.pending_fs_op_id.as_deref(),
-                &deleted.paths,
-            ) {
-                tracing::warn!(
-                    target: "workers",
-                    board = %board_short,
-                    board_id = board_id,
-                    error = %error,
-                    "archived prune cleanup did not fully complete"
-                );
-            }
+            let count = crate::db::archive_old_threads(&conn, board_id, policy.max_threads)?;
             if count > 0 {
-                tracing::info!(target: "workers", count = count, board = %board_short, board_id = board_id, "ThreadArchive: threads archived");
-            }
-            if !deleted.paths.is_empty() {
-                tracing::info!(target: "workers", archived_cap = max_archived_threads, board = %board_short, board_id = board_id, files_removed = deleted.paths.len(), "ThreadArchivePrune: archived threads deleted");
+                tracing::info!(target: "workers", count, board = %policy.board_short, board_id, "ThreadArchive: threads archived");
             }
         } else {
-            let deleted = crate::db::prune_old_threads(&conn, board_id, max_threads)?;
+            let deleted = crate::db::prune_old_threads(&conn, board_id, policy.max_threads)?;
             let count = deleted.paths.len();
-            if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
+            finalize_thread_prune_cleanup(
                 &conn,
-                &CONFIG.upload_dir,
-                deleted.pending_fs_op_id.as_deref(),
-                &deleted.paths,
-            ) {
-                tracing::warn!(
-                    target: "workers",
-                    board = %board_short,
-                    board_id = board_id,
-                    error = %error,
-                    "thread prune cleanup did not fully complete"
-                );
-            }
+                &policy,
+                &deleted,
+                "thread prune cleanup did not fully complete",
+            );
             if count > 0 {
-                tracing::info!(target: "workers", count = count, board = %board_short, board_id = board_id, files_removed = deleted.paths.len(), "ThreadPrune: threads deleted");
+                tracing::info!(target: "workers", count, board = %policy.board_short, board_id, files_removed = deleted.paths.len(), "ThreadPrune: threads deleted");
             }
+        }
+
+        // Archived retention remains authoritative even if archiving has since
+        // been disabled; disabling archive changes live overflow behavior but
+        // does not make already-archived content exempt from its current cap.
+        let archived = crate::db::prune_old_archived_threads(
+            &conn,
+            board_id,
+            policy.max_archived_threads,
+        )?;
+        finalize_thread_prune_cleanup(
+            &conn,
+            &policy,
+            &archived,
+            "archived prune cleanup did not fully complete",
+        );
+        if !archived.paths.is_empty() {
+            tracing::info!(target: "workers", archived_cap = policy.max_archived_threads, board = %policy.board_short, board_id, files_removed = archived.paths.len(), "ThreadArchivePrune: archived threads deleted");
+        }
+
+        let (live_eligible, archived_count) = board_retention_counts(&conn, board_id)?;
+        if live_eligible > policy.max_threads || archived_count > policy.max_archived_threads {
+            warn!(
+                target: "workers",
+                board = %policy.board_short,
+                board_id,
+                live_eligible,
+                live_limit = policy.max_threads,
+                archived_count,
+                archived_limit = policy.max_archived_threads,
+                "board remains over its current retention limit after prune attempt"
+            );
         }
         Ok(())
     })
     .await?
+}
+
+/// Current validated policy loaded at execution time, never from job payloads.
+struct BoardRetentionPolicy {
+    /// Database identifier used for mutation and structured diagnostics.
+    board_id: i64,
+    /// Current board route name used only for structured diagnostics.
+    board_short: String,
+    /// Current maximum retained non-sticky live threads.
+    max_threads: i64,
+    /// Current maximum retained archived threads.
+    max_archived_threads: i64,
+    /// Current board preference for archiving live overflow.
+    allow_archive: bool,
+}
+
+/// Load and validate all mutable values that can decide content retention.
+fn load_board_retention_policy(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+) -> Result<Option<BoardRetentionPolicy>> {
+    let raw = conn
+        .query_row(
+            "SELECT short_name, max_threads, max_archived_threads, allow_archive
+             FROM boards WHERE id = ?1",
+            rusqlite::params![board_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .context("Load current board retention policy failed")?;
+    let Some((board_short, max_threads, max_archived_threads, allow_archive)) = raw else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        (1..=1_000).contains(&max_threads),
+        "invalid current live-thread limit for board {board_id}: {max_threads}; preserving content"
+    );
+    anyhow::ensure!(
+        (1..=10_000).contains(&max_archived_threads),
+        "invalid current archived-thread limit for board {board_id}: {max_archived_threads}; preserving content"
+    );
+    anyhow::ensure!(
+        matches!(allow_archive, 0 | 1),
+        "invalid current archive policy for board {board_id}: {allow_archive}; preserving content"
+    );
+    Ok(Some(BoardRetentionPolicy {
+        board_id,
+        board_short,
+        max_threads,
+        max_archived_threads,
+        allow_archive: allow_archive == 1,
+    }))
+}
+
+/// Count only live threads eligible for the existing sticky-preserving prune,
+/// plus every archived thread subject to the archive cap.
+fn board_retention_counts(conn: &rusqlite::Connection, board_id: i64) -> Result<(i64, i64)> {
+    conn.query_row(
+        "SELECT
+             SUM(CASE WHEN archived = 0 AND sticky = 0 THEN 1 ELSE 0 END),
+             SUM(CASE WHEN archived = 1 THEN 1 ELSE 0 END)
+         FROM threads WHERE board_id = ?1",
+        rusqlite::params![board_id],
+        |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+            ))
+        },
+    )
+    .context("Count board retention state failed")
+}
+
+/// Replay durable filesystem cleanup after the deletion transaction commits.
+fn finalize_thread_prune_cleanup(
+    conn: &rusqlite::Connection,
+    policy: &BoardRetentionPolicy,
+    deleted: &crate::db::DeletePathsResult,
+    message: &'static str,
+) {
+    if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
+        conn,
+        &CONFIG.upload_dir,
+        deleted.pending_fs_op_id.as_deref(),
+        &deleted.paths,
+    ) {
+        warn!(
+            target: "workers",
+            board = %policy.board_short,
+            board_id = policy.board_id,
+            error = %error,
+            "{message}"
+        );
+    }
+}
+
+/// Maximum boards inspected by one startup or periodic retention pass.
+pub(crate) const THREAD_PRUNE_RECONCILE_BATCH: usize = 128;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Summary of one bounded board-retention reconciliation page.
+pub(crate) struct ThreadPruneReconciliation {
+    /// Boards whose current retention state was inspected.
+    pub scanned: usize,
+    /// Over-limit boards for which durable work was newly inserted.
+    pub inserted: usize,
+    /// Over-limit boards already represented by pending work.
+    pub coalesced: usize,
+    /// Boards that could not be evaluated or scheduled.
+    pub failures: usize,
+    /// Cursor for the next page, or zero after reaching the end.
+    pub next_board_id: i64,
+}
+
+/// Inspect a bounded page of boards and durably schedule each current policy
+/// violation. Errors are isolated per board so one bad row does not block the
+/// remainder of the page.
+///
+/// # Errors
+/// Returns an error only when the database connection or page query itself
+/// cannot be completed.
+pub(crate) fn reconcile_thread_prune_intents(
+    pool: &DbPool,
+    after_board_id: i64,
+    limit: usize,
+) -> Result<ThreadPruneReconciliation> {
+    let conn = pool
+        .get()
+        .context("Get DB connection for thread-prune reconciliation failed")?;
+    let bounded_limit = limit.clamp(1, THREAD_PRUNE_RECONCILE_BATCH);
+    let mut stmt = conn
+        .prepare(
+            "SELECT b.id, b.short_name, b.max_threads, b.max_archived_threads,
+                    b.allow_archive,
+                    (SELECT COUNT(*) FROM threads AS live
+                     WHERE live.board_id = b.id AND live.archived = 0 AND live.sticky = 0),
+                    (SELECT COUNT(*) FROM threads AS archived
+                     WHERE archived.board_id = b.id AND archived.archived = 1)
+             FROM boards AS b
+             WHERE b.id > ?1
+             ORDER BY b.id ASC
+             LIMIT ?2",
+        )
+        .context("Prepare thread-prune reconciliation page failed")?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                after_board_id.max(0),
+                i64::try_from(bounded_limit).unwrap_or(i64::MAX)
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            },
+        )
+        .context("Query thread-prune reconciliation page failed")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("Read thread-prune reconciliation page failed")?;
+    drop(stmt);
+
+    let mut report = ThreadPruneReconciliation {
+        scanned: rows.len(),
+        next_board_id: rows.last().map_or(0, |row| row.0),
+        ..ThreadPruneReconciliation::default()
+    };
+    if rows.len() < bounded_limit {
+        report.next_board_id = 0;
+    }
+
+    for (
+        board_id,
+        board_short,
+        max_threads,
+        max_archived_threads,
+        allow_archive,
+        live_count,
+        archived_count,
+    ) in rows
+    {
+        let policy_valid = (1..=1_000).contains(&max_threads)
+            && (1..=10_000).contains(&max_archived_threads)
+            && matches!(allow_archive, 0 | 1);
+        if !policy_valid {
+            report.failures = report.failures.saturating_add(1);
+            warn!(
+                target: "workers",
+                board = %board_short,
+                board_id,
+                max_threads,
+                max_archived_threads,
+                allow_archive,
+                "thread-prune reconciliation found invalid policy; preserving content"
+            );
+            continue;
+        }
+        if live_count <= max_threads && archived_count <= max_archived_threads {
+            continue;
+        }
+
+        let schedule_result = crate::db::persist_thread_prune_intent(&conn, board_id);
+        match schedule_result {
+            Ok(schedule) => {
+                log_thread_prune_schedule(board_id, schedule);
+                if schedule.inserted {
+                    report.inserted = report.inserted.saturating_add(1);
+                } else {
+                    report.coalesced = report.coalesced.saturating_add(1);
+                }
+            }
+            Err(error) => {
+                report.failures = report.failures.saturating_add(1);
+                error!(
+                    target: "workers",
+                    board = %board_short,
+                    board_id,
+                    error = %error,
+                    "failed to persist or coalesce reconciled board prune intent"
+                );
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// Normalize a bounded set of active legacy prune payloads before workers
+/// start. Policy fields in those payloads are ignored by `Job` deserialization.
+/// Missing-board jobs are resolved, and duplicate pending jobs are coalesced.
+///
+/// # Errors
+/// Returns an error if the legacy job page cannot be queried.
+pub(crate) fn normalize_legacy_thread_prune_jobs(pool: &DbPool, limit: usize) -> Result<()> {
+    let conn = pool
+        .get()
+        .context("Get DB connection for legacy thread-prune recovery failed")?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, payload
+             FROM background_jobs
+             WHERE job_type = 'thread_prune' AND status = 'pending'
+             ORDER BY id ASC LIMIT ?1",
+        )
+        .context("Prepare legacy thread-prune recovery failed")?;
+    let jobs = stmt
+        .query_map(
+            rusqlite::params![i64::try_from(limit.max(1)).unwrap_or(i64::MAX)],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .context("Query legacy thread-prune jobs failed")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("Read legacy thread-prune jobs failed")?;
+    drop(stmt);
+
+    let mut board_ids = std::collections::BTreeSet::new();
+    for (job_id, payload) in jobs {
+        match serde_json::from_str::<Job>(&payload) {
+            Ok(Job::ThreadPrune { board_id }) => {
+                board_ids.insert(board_id);
+            }
+            Ok(_) => {
+                error!(target: "workers", job_id, "thread_prune row contained another job type");
+            }
+            Err(error) => {
+                error!(target: "workers", job_id, error = %error, "invalid legacy thread-prune payload remains retryable");
+            }
+        }
+    }
+
+    for board_id in board_ids {
+        let exists = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM boards WHERE id = ?1)",
+                rusqlite::params![board_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .context("Check legacy thread-prune board failed")?;
+        if exists {
+            let schedule_result = crate::db::persist_thread_prune_intent(&conn, board_id);
+            match schedule_result {
+                Ok(schedule) => log_thread_prune_schedule(board_id, schedule),
+                Err(error) => error!(
+                    target: "workers",
+                    board_id,
+                    error = %error,
+                    "failed to normalize legacy thread-prune jobs"
+                ),
+            }
+        } else {
+            let resolved = conn
+                .execute(
+                    "UPDATE background_jobs
+                     SET status = 'done',
+                         last_error = 'resolved missing-board legacy thread-prune job',
+                         updated_at = unixepoch()
+                     WHERE job_type = 'thread_prune' AND status = 'pending'
+                       AND CAST(json_extract(
+                             CASE WHEN json_valid(payload) THEN payload ELSE NULL END,
+                             '$.d.board_id'
+                           ) AS INTEGER) = ?1",
+                    rusqlite::params![board_id],
+                )
+                .context("Resolve missing-board legacy thread-prune jobs failed")?;
+            warn!(
+                target: "workers",
+                board_id,
+                jobs_resolved = resolved,
+                "resolved legacy thread-prune work for missing board"
+            );
+        }
+    }
+    Ok(())
 }
 
 // ─── SpamCheck ────────────────────────────────────────────────────────────────
@@ -2056,13 +2421,15 @@ pub fn evict_thumb_cache(
 #[cfg(test)]
 mod tests {
     use super::{
-        persist_job_completion, persist_job_completion_once, persist_transcoded_webm,
+        normalize_legacy_thread_prune_jobs, persist_job_completion, persist_job_completion_once,
+        persist_transcoded_webm, prune_threads, reconcile_thread_prune_intents,
         transcode_video_finalise, transcoded_webm_name, validated_board_media_file,
         video_reencode_timeout_warning, waveform_finalise, EnqueueOutcome, Job, JobCompletion,
         JobQueue,
     };
     use anyhow::{bail, ensure, Context as _};
     use std::io::Write as _;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     #[expect(
@@ -2088,6 +2455,286 @@ mod tests {
             EnqueueOutcome::Enqueued(id) => Ok(id),
             EnqueueOutcome::DroppedAtCapacity => bail!("test job was dropped at capacity"),
         }
+    }
+
+    fn seed_retention_board(
+        pool: &crate::db::DbPool,
+        short: &str,
+        max_threads: i64,
+        max_archived_threads: i64,
+        allow_archive: bool,
+    ) -> anyhow::Result<i64> {
+        let conn = pool.get().context("get retention fixture connection")?;
+        let board_id = crate::db::create_board(&conn, short, short, "", false)?;
+        conn.execute(
+            "UPDATE boards
+             SET max_threads = ?2, max_archived_threads = ?3, allow_archive = ?4
+             WHERE id = ?1",
+            rusqlite::params![
+                board_id,
+                max_threads,
+                max_archived_threads,
+                i64::from(allow_archive)
+            ],
+        )?;
+        Ok(board_id)
+    }
+
+    fn seed_threads(
+        pool: &crate::db::DbPool,
+        board_id: i64,
+        live: usize,
+        archived: usize,
+    ) -> anyhow::Result<()> {
+        let conn = pool.get().context("get thread fixture connection")?;
+        for ordinal in 0..live {
+            conn.execute(
+                "INSERT INTO threads (board_id, subject, bumped_at)
+                 VALUES (?1, 'live', ?2)",
+                rusqlite::params![board_id, i64::try_from(ordinal).unwrap_or(i64::MAX)],
+            )?;
+        }
+        for ordinal in 0..archived {
+            conn.execute(
+                "INSERT INTO threads (board_id, subject, bumped_at, archived, locked)
+                 VALUES (?1, 'archived', ?2, 1, 1)",
+                rusqlite::params![board_id, i64::try_from(ordinal).unwrap_or(i64::MAX)],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn active_prune_count(conn: &rusqlite::Connection, board_id: i64) -> anyhow::Result<i64> {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM background_jobs
+             WHERE job_type = 'thread_prune' AND status IN ('pending', 'running')
+               AND CAST(json_extract(payload, '$.d.board_id') AS INTEGER) = ?1",
+            rusqlite::params![board_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "fixture setup failures should stop this queue durability test"
+    )]
+    fn required_thread_prune_bypasses_capacity_and_survives_queue_recreation() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let board_id =
+            seed_retention_board(&pool, "capacity", 1, 10, true).expect("seed retention board");
+        let queue = JobQueue::new(pool.clone());
+        queue.pending_jobs.store(
+            crate::config::CONFIG.job_queue_capacity.max(1),
+            Ordering::Relaxed,
+        );
+
+        let outcome = queue
+            .enqueue(&Job::ThreadPrune { board_id })
+            .expect("persist required prune intent");
+        assert!(matches!(outcome, EnqueueOutcome::Enqueued(_)));
+        let conn = pool.get().expect("verification connection");
+        assert_eq!(
+            active_prune_count(&conn, board_id).expect("count intents"),
+            1
+        );
+        drop(conn);
+
+        let restarted = JobQueue::new(pool);
+        assert!(restarted.pending_count() >= 1);
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "fixture setup failures should stop this coalescing test"
+    )]
+    fn board_prune_coalesces_and_running_work_leaves_one_dirty_evaluation() {
+        let pool = crate::db::init_test_pool().expect("test pool");
+        let board_id = seed_retention_board(&pool, "coalesce", 1, 10, true).expect("seed board");
+        let conn = pool.get().expect("database connection");
+        for _ in 0..100 {
+            crate::db::persist_thread_prune_intent(&conn, board_id).expect("coalesce prune intent");
+        }
+        assert_eq!(
+            active_prune_count(&conn, board_id).expect("count intents"),
+            1
+        );
+
+        let (running_id, _) = crate::db::claim_next_job(&conn)
+            .expect("claim intent")
+            .expect("intent exists");
+        let dirty = crate::db::persist_thread_prune_intent(&conn, board_id)
+            .expect("persist dirty evaluation");
+        assert!(dirty.inserted);
+        assert_eq!(
+            active_prune_count(&conn, board_id).expect("count intents"),
+            2
+        );
+        assert!(crate::db::claim_next_job(&conn)
+            .expect("check conflicting claim")
+            .is_none());
+
+        crate::db::complete_job(&conn, running_id).expect("complete running intent");
+        assert!(crate::db::claim_next_job(&conn)
+            .expect("claim dirty intent")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn delayed_prune_uses_only_current_limits() -> anyhow::Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let board_id = seed_retention_board(&pool, "policy", 1, 10, true)?;
+        seed_threads(&pool, board_id, 3, 0)?;
+        {
+            let conn = pool.get()?;
+            crate::db::persist_thread_prune_intent(&conn, board_id)?;
+            conn.execute(
+                "UPDATE boards SET max_threads = 3, allow_archive = 0 WHERE id = ?1",
+                rusqlite::params![board_id],
+            )?;
+        }
+
+        prune_threads(board_id, pool.clone()).await?;
+        {
+            let conn = pool.get()?;
+            let live = crate::db::count_threads_for_board(&conn, board_id)?;
+            ensure!(
+                live == 3,
+                "increased current limit must preserve all threads"
+            );
+            conn.execute(
+                "UPDATE boards SET max_threads = 1 WHERE id = ?1",
+                rusqlite::params![board_id],
+            )?;
+        }
+        prune_threads(board_id, pool.clone()).await?;
+        let conn = pool.get()?;
+        ensure!(crate::db::count_threads_for_board(&conn, board_id)? == 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delayed_prune_uses_current_archived_limit() -> anyhow::Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let board_id = seed_retention_board(&pool, "archive-policy", 10, 1, true)?;
+        seed_threads(&pool, board_id, 0, 3)?;
+        {
+            let conn = pool.get()?;
+            crate::db::persist_thread_prune_intent(&conn, board_id)?;
+            conn.execute(
+                "UPDATE boards SET max_archived_threads = 3 WHERE id = ?1",
+                rusqlite::params![board_id],
+            )?;
+        }
+
+        prune_threads(board_id, pool.clone()).await?;
+        {
+            let conn = pool.get()?;
+            ensure!(crate::db::count_archived_threads_for_board(&conn, board_id)? == 3);
+            conn.execute(
+                "UPDATE boards SET max_archived_threads = 1 WHERE id = ?1",
+                rusqlite::params![board_id],
+            )?;
+        }
+        prune_threads(board_id, pool.clone()).await?;
+        let conn = pool.get()?;
+        ensure!(crate::db::count_archived_threads_for_board(&conn, board_id)? == 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_current_policy_fails_closed() -> anyhow::Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let board_id = seed_retention_board(&pool, "invalid", 1, 10, true)?;
+        seed_threads(&pool, board_id, 3, 2)?;
+        {
+            let conn = pool.get()?;
+            conn.execute(
+                "UPDATE boards SET max_threads = 0 WHERE id = ?1",
+                rusqlite::params![board_id],
+            )?;
+        }
+
+        ensure!(prune_threads(board_id, pool.clone()).await.is_err());
+        let conn = pool.get()?;
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM threads WHERE board_id = ?1",
+            rusqlite::params![board_id],
+            |row| row.get(0),
+        )?;
+        ensure!(total == 5, "invalid policy must not remove content");
+        Ok(())
+    }
+
+    #[test]
+    fn reconciliation_is_bounded_and_reaches_a_clean_fixed_point() -> anyhow::Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let excess_live = seed_retention_board(&pool, "live", 1, 10, true)?;
+        let excess_archive = seed_retention_board(&pool, "archive", 10, 1, true)?;
+        let within_limit = seed_retention_board(&pool, "clean", 10, 10, true)?;
+        seed_threads(&pool, excess_live, 2, 0)?;
+        seed_threads(&pool, excess_archive, 0, 2)?;
+        seed_threads(&pool, within_limit, 1, 1)?;
+
+        let first = reconcile_thread_prune_intents(&pool, 0, 128)?;
+        ensure!(first.scanned == 3);
+        ensure!(first.inserted == 2);
+        let second = reconcile_thread_prune_intents(&pool, 0, 128)?;
+        ensure!(second.inserted == 0);
+        ensure!(second.coalesced == 2);
+
+        let conn = pool.get()?;
+        ensure!(active_prune_count(&conn, excess_live)? == 1);
+        ensure!(active_prune_count(&conn, excess_archive)? == 1);
+        ensure!(active_prune_count(&conn, within_limit)? == 0);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_duplicates_coalesce_and_missing_board_work_resolves() -> anyhow::Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let board_id = seed_retention_board(&pool, "legacy", 1, 10, true)?;
+        let conn = pool.get()?;
+        let legacy_payload = serde_json::json!({
+            "t": "ThreadPrune",
+            "d": {
+                "board_id": board_id,
+                "board_short": "legacy",
+                "max_threads": 1,
+                "max_archived_threads": 10,
+                "allow_archive": false
+            }
+        })
+        .to_string();
+        for _ in 0..3 {
+            crate::db::enqueue_job(&conn, "thread_prune", &legacy_payload)?;
+        }
+        let missing_payload = serde_json::json!({
+            "t": "ThreadPrune",
+            "d": {
+                "board_id": 999_999,
+                "board_short": "gone",
+                "max_threads": 1,
+                "max_archived_threads": 1,
+                "allow_archive": false
+            }
+        })
+        .to_string();
+        let missing_job_id = crate::db::enqueue_job(&conn, "thread_prune", &missing_payload)?;
+        drop(conn);
+
+        normalize_legacy_thread_prune_jobs(&pool, 128)?;
+
+        let conn = pool.get()?;
+        ensure!(active_prune_count(&conn, board_id)? == 1);
+        let missing_status: String = conn.query_row(
+            "SELECT status FROM background_jobs WHERE id = ?1",
+            rusqlite::params![missing_job_id],
+            |row| row.get(0),
+        )?;
+        ensure!(missing_status == "done");
+        Ok(())
     }
 
     #[expect(

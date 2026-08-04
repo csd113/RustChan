@@ -470,6 +470,44 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             );
         }
     }
+    if let Err(error) = crate::workers::normalize_legacy_thread_prune_jobs(
+        &pool,
+        crate::workers::THREAD_PRUNE_RECONCILE_BATCH,
+    ) {
+        tracing::error!(
+            target: "workers",
+            error = %error,
+            "startup legacy thread-prune normalization failed; periodic recovery remains enabled"
+        );
+    }
+    let startup_prune_reconciliation = match crate::workers::reconcile_thread_prune_intents(
+        &pool,
+        0,
+        crate::workers::THREAD_PRUNE_RECONCILE_BATCH,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::error!(
+                target: "workers",
+                error = %error,
+                "startup thread-retention reconciliation failed; periodic recovery remains enabled"
+            );
+            crate::workers::ThreadPruneReconciliation::default()
+        }
+    };
+    if startup_prune_reconciliation.inserted > 0
+        || startup_prune_reconciliation.coalesced > 0
+        || startup_prune_reconciliation.failures > 0
+    {
+        tracing::info!(
+            target: "workers",
+            boards_scanned = startup_prune_reconciliation.scanned,
+            intents_inserted = startup_prune_reconciliation.inserted,
+            intents_coalesced = startup_prune_reconciliation.coalesced,
+            failures = startup_prune_reconciliation.failures,
+            "startup thread-retention reconciliation completed"
+        );
+    }
     let worker_queue = Arc::new(crate::workers::JobQueue::new(pool.clone()));
     let worker_handles = crate::workers::start_worker_pool(
         &worker_queue,
@@ -519,6 +557,64 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // spawned below. detect_tor is called later, after the first-run wizard.
     let worker_cancel = state.job_queue.cancel.clone();
     let start_time = Instant::now();
+
+    // Required thread-retention work is repaired independently of new posts.
+    // Each pass inspects one bounded board-id page and carries its cursor into
+    // the next pass, wrapping only after reaching the end.
+    {
+        let reconcile_pool = pool.clone();
+        let reconcile_queue = Arc::clone(&state.job_queue);
+        let cancel_clone = worker_cancel.clone();
+        tokio::spawn(async move {
+            let mut cursor = startup_prune_reconciliation.next_board_id;
+            let mut interval = tokio::time::interval(Duration::from_mins(1));
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let pass_pool = reconcile_pool.clone();
+                        let pass = tokio::task::spawn_blocking(move || {
+                            crate::workers::reconcile_thread_prune_intents(
+                                &pass_pool,
+                                cursor,
+                                crate::workers::THREAD_PRUNE_RECONCILE_BATCH,
+                            )
+                        }).await;
+                        match pass {
+                            Ok(Ok(report)) => {
+                                cursor = report.next_board_id;
+                                if report.inserted > 0 {
+                                    reconcile_queue.notify.notify_waiters();
+                                }
+                                if report.failures > 0 {
+                                    tracing::warn!(
+                                        target: "workers",
+                                        boards_scanned = report.scanned,
+                                        failures = report.failures,
+                                        "periodic thread-retention reconciliation had board failures"
+                                    );
+                                }
+                            }
+                            Ok(Err(error)) => tracing::error!(
+                                target: "workers",
+                                error = %error,
+                                "periodic thread-retention reconciliation failed"
+                            ),
+                            Err(error) => tracing::error!(
+                                target: "workers",
+                                error = %error,
+                                "periodic thread-retention reconciliation task failed"
+                            ),
+                        }
+                    }
+                    () = cancel_clone.cancelled() => {
+                        tracing::debug!("Thread-retention reconciliation task shutting down");
+                        return;
+                    }
+                }
+            }
+        });
+    }
 
     // Background: purge expired sessions hourly
     {

@@ -52,6 +52,19 @@ pub struct InterruptedJobRecovery {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of transactionally persisting one board-level prune evaluation.
+pub struct ThreadPruneSchedule {
+    /// Durable background-job identifier representing the pending evaluation.
+    pub job_id: i64,
+    /// Whether this call inserted a new pending row instead of coalescing.
+    pub inserted: bool,
+    /// Number of duplicate pending legacy rows resolved by this call.
+    pub duplicates_resolved: usize,
+    /// Number of duplicate running legacy rows observed for operator diagnostics.
+    pub duplicate_running: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Aggregate status counts for the background-job dashboard.
 pub struct BackgroundJobSummary {
     /// Jobs currently claimed by workers.
@@ -1212,6 +1225,134 @@ pub fn enqueue_job(conn: &rusqlite::Connection, job_type: &str, payload: &str) -
     Ok(id)
 }
 
+/// Return the canonical policy-free payload for a board prune evaluation.
+fn thread_prune_payload(board_id: i64) -> Result<String> {
+    serde_json::to_string(&serde_json::json!({
+        "t": "ThreadPrune",
+        "d": { "board_id": board_id }
+    }))
+    .context("Failed to serialize board prune intent")
+}
+
+/// Persist or coalesce one board-level thread-prune intent inside the caller's
+/// write transaction.
+///
+/// A board can have one running evaluation plus one pending dirty evaluation.
+/// `SQLite`'s write transaction serializes concurrent producers, so the
+/// read/coalesce/insert decision cannot race another producer.
+///
+/// # Errors
+/// Returns an error if the payload cannot be serialized or the durable job
+/// cannot be queried, updated, or inserted.
+pub(crate) fn persist_thread_prune_intent_in_tx(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+) -> Result<ThreadPruneSchedule> {
+    let payload = thread_prune_payload(board_id)?;
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT id, status
+             FROM background_jobs
+             WHERE job_type = 'thread_prune'
+               AND status IN ('pending', 'running')
+               AND CAST(json_extract(
+                     CASE WHEN json_valid(payload) THEN payload ELSE NULL END,
+                     '$.d.board_id'
+                   ) AS INTEGER) = ?1
+             ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, id ASC",
+        )
+        .context("Prepare active board prune intent lookup failed")?;
+    let active = stmt
+        .query_map(params![board_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .context("Query active board prune intents failed")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("Read active board prune intents failed")?;
+    drop(stmt);
+
+    let running_count = active
+        .iter()
+        .filter(|(_, status)| status == "running")
+        .count();
+    let pending_ids = active
+        .iter()
+        .filter_map(|(id, status)| (status == "pending").then_some(*id))
+        .collect::<Vec<_>>();
+
+    if let Some((&job_id, duplicate_ids)) = pending_ids.split_first() {
+        conn.execute(
+            "UPDATE background_jobs
+             SET payload = ?2, priority = 10, attempts = 0, last_error = NULL,
+                 updated_at = unixepoch()
+             WHERE id = ?1 AND status = 'pending'",
+            params![job_id, payload],
+        )
+        .context("Refresh coalesced board prune intent failed")?;
+
+        for duplicate_id in duplicate_ids {
+            conn.execute(
+                "UPDATE background_jobs
+                 SET status = 'done',
+                     last_error = 'coalesced duplicate legacy thread-prune intent',
+                     updated_at = unixepoch()
+                 WHERE id = ?1 AND status = 'pending'",
+                params![duplicate_id],
+            )
+            .context("Resolve duplicate legacy board prune intent failed")?;
+        }
+
+        return Ok(ThreadPruneSchedule {
+            job_id,
+            inserted: false,
+            duplicates_resolved: duplicate_ids.len(),
+            duplicate_running: running_count.saturating_sub(1),
+        });
+    }
+
+    let job_id: i64 = conn
+        .query_row(
+            "INSERT INTO background_jobs
+                 (job_type, payload, status, priority, updated_at)
+             VALUES ('thread_prune', ?1, 'pending', 10, unixepoch())
+             RETURNING id",
+            params![payload],
+            |row| row.get(0),
+        )
+        .context("Persist board prune intent failed")?;
+    Ok(ThreadPruneSchedule {
+        job_id,
+        inserted: true,
+        duplicates_resolved: 0,
+        duplicate_running: running_count.saturating_sub(1),
+    })
+}
+
+/// Persist or coalesce one board-level prune intent atomically.
+///
+/// # Errors
+/// Returns an error if the immediate transaction or intent persistence fails.
+pub fn persist_thread_prune_intent(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+) -> Result<ThreadPruneSchedule> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Failed to begin board prune intent transaction")?;
+    match persist_thread_prune_intent_in_tx(conn, board_id) {
+        Ok(schedule) => {
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                drop(conn.execute_batch("ROLLBACK"));
+                return Err(error).context("Failed to commit board prune intent");
+            }
+            Ok(schedule)
+        }
+        Err(error) => {
+            drop(conn.execute_batch("ROLLBACK"));
+            Err(error)
+        }
+    }
+}
+
 /// Atomically claim the highest-priority pending job that has not exhausted
 /// its retry budget. Returns (`job_id`, payload) or None when the queue is empty.
 ///
@@ -1227,9 +1368,28 @@ pub fn claim_next_job(conn: &rusqlite::Connection) -> Result<Option<(i64, String
              attempts  = attempts + 1,
              updated_at = unixepoch()
          WHERE id = (
-             SELECT id FROM background_jobs
-             WHERE status = 'pending' AND attempts < ?1
-             ORDER BY priority DESC, created_at ASC
+             SELECT candidate.id FROM background_jobs AS candidate
+             WHERE candidate.status = 'pending' AND candidate.attempts < ?1
+               AND (
+                   candidate.job_type != 'thread_prune'
+                   OR NOT EXISTS (
+                       SELECT 1
+                       FROM background_jobs AS active
+                       WHERE active.job_type = 'thread_prune'
+                         AND active.status = 'running'
+                         AND CAST(json_extract(
+                               CASE WHEN json_valid(active.payload)
+                                    THEN active.payload ELSE NULL END,
+                               '$.d.board_id'
+                             ) AS INTEGER)
+                             = CAST(json_extract(
+                                   CASE WHEN json_valid(candidate.payload)
+                                        THEN candidate.payload ELSE NULL END,
+                                   '$.d.board_id'
+                               ) AS INTEGER)
+                   )
+               )
+             ORDER BY candidate.priority DESC, candidate.created_at ASC
              LIMIT 1
          )
          RETURNING id, payload",

@@ -636,7 +636,7 @@ pub(crate) fn submit_post(
         .map(|upload| upload.file_path.as_str())
         .collect();
 
-    let (post_id, thread_id, redirect_url, prune_job) = match mode {
+    let (post_id, thread_id, redirect_url, prune_board_id) = match mode {
         SubmitPostMode::NewThread {
             subject,
             poll_question,
@@ -702,6 +702,7 @@ pub(crate) fn submit_post(
                 db::threads::PostFilesystemCommit::new(
                     pending_upload_op.as_ref(),
                     &deduplicated_paths,
+                    true,
                 ),
             );
             let (thread_id, post_id, _) = match create_result {
@@ -715,18 +716,11 @@ pub(crate) fn submit_post(
                     return Err(error.into());
                 }
             };
-            let prune_job = crate::workers::Job::ThreadPrune {
-                board_id: board.id,
-                board_short: board.short_name.clone(),
-                max_threads: board.max_threads,
-                max_archived_threads: board.max_archived_threads,
-                allow_archive: board.allow_archive,
-            };
             (
                 post_id,
                 thread_id,
                 format!("/{}/thread/{thread_id}#p{post_id}", board.short_name),
-                Some(prune_job),
+                Some(board.id),
             )
         }
         SubmitPostMode::Reply { .. } => {
@@ -754,6 +748,7 @@ pub(crate) fn submit_post(
                 db::threads::PostFilesystemCommit::new(
                     pending_upload_op.as_ref(),
                     &deduplicated_paths,
+                    false,
                 ),
             ) {
                 Ok(db::threads::PostCreationOutcome::Created(post_id)) => post_id,
@@ -792,8 +787,16 @@ pub(crate) fn submit_post(
         uploads.primary.as_ref(),
         &board.short_name,
     );
-    if let Some(prune_job) = prune_job.as_ref() {
-        drop(job_queue.enqueue(prune_job));
+    if let Some(prune_board_id) = prune_board_id {
+        if let Err(error) = job_queue.notify_persisted_thread_prune(conn) {
+            tracing::warn!(
+                target: "workers",
+                board = %board.short_name,
+                board_id = prune_board_id,
+                error = %error,
+                "durable board prune intent persisted but worker notification accounting failed"
+            );
+        }
         tracing::info!(
             target: "board",
             board = %board.short_name,
