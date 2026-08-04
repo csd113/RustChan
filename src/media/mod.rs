@@ -6,6 +6,7 @@ pub mod convert;
 pub mod exif;
 /// Bounded `FFmpeg` and `FFprobe` subprocess helpers.
 pub mod ffmpeg;
+pub mod process;
 /// Active-media size pruning.
 pub mod prune;
 /// Image, video, audio, and PDF thumbnail generation.

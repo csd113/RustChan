@@ -1035,8 +1035,8 @@ mod tests {
         Ok(bytes)
     }
 
-    fn webm_header_bytes() -> Vec<u8> {
-        b"\x1a\x45\xdf\xa3\x00\x00\x00\x00\x00\x00\x42\x82\x84webm\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec()
+    fn mp4_header_bytes() -> Vec<u8> {
+        b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2mp41".to_vec()
     }
 
     fn pending_upload_stage_count(upload_dir: &std::path::Path) -> Result<usize> {
@@ -1671,7 +1671,7 @@ mod tests {
                 .to_str()
                 .context("upload directory was not valid UTF-8")?,
         );
-        command.file_data = Some(temp_upload("tiny.webm", &webm_header_bytes())?);
+        command.file_data = Some(temp_upload("tiny.mp4", &mp4_header_bytes())?);
 
         let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
             Ok(result) => bail!(
@@ -1763,7 +1763,7 @@ mod tests {
                 .to_str()
                 .context("upload directory was not valid UTF-8")?,
         );
-        command.file_data = Some(temp_upload("tiny.webm", &webm_header_bytes())?);
+        command.file_data = Some(temp_upload("tiny.mp4", &mp4_header_bytes())?);
 
         let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
             Ok(result) => bail!(

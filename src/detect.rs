@@ -212,20 +212,15 @@ fn status_with_timeout(
     command: &mut Command,
     timeout: Duration,
 ) -> Option<std::process::ExitStatus> {
-    let mut child = command.spawn().ok()?;
-    let started = Instant::now();
-
-    loop {
-        if let Some(status) = child.try_wait().ok()? {
-            return Some(status);
-        }
-        if started.elapsed() >= timeout {
-            drop(child.kill());
-            drop(child.wait());
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    crate::media::process::run_std_command_with_timeout(
+        command,
+        timeout,
+        "external tool probe",
+        || "failed to spawn external tool probe".to_owned(),
+        || "external tool probe I/O error".to_owned(),
+    )
+    .ok()
+    .map(|output| output.status)
 }
 
 /// Probe whether the detected ffmpeg has `libvpx-vp9` + `libopus` compiled in.

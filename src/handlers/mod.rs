@@ -618,6 +618,7 @@ pub(crate) fn process_primary_upload(
     )
     .map_err(|error| classify_upload_error(&error))?;
     let detected_media = crate::models::MediaType::from_mime(&detected_mime);
+    let ambiguous_webm = detected_mime == crate::utils::files::AMBIGUOUS_WEBM_MIME;
 
     match detected_media {
         crate::models::MediaType::Image if !board.allow_images => {
@@ -640,7 +641,15 @@ pub(crate) fn process_primary_upload(
                 "PDF uploads are disabled on this board.".into(),
             ))
         }
-        crate::models::MediaType::Other if !allow_any_files => {
+        crate::models::MediaType::Other
+            if ambiguous_webm && (!board.allow_video || !board.allow_audio) =>
+        {
+            return Err(AppError::BadRequest(
+                "WebM stream type could not be established; both video and audio uploads must be enabled to accept it as a neutral download."
+                    .into(),
+            ));
+        }
+        crate::models::MediaType::Other if !ambiguous_webm && !allow_any_files => {
             return Err(AppError::BadRequest(
                 "This board only accepts image, video, audio, or PDF uploads.".into(),
             ))

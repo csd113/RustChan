@@ -7,6 +7,7 @@ use uuid::Uuid;
 use super::disk_space::check_disk_space;
 use super::jpeg::{read_exif_orientation_from_file, strip_jpeg_exif_file};
 use super::mime::detect_mime_type;
+use super::AMBIGUOUS_WEBM_MIME;
 
 /// Metadata describing a persisted upload and its generated thumbnail.
 #[derive(Debug)]
@@ -391,7 +392,11 @@ fn validate_upload(
     }
 
     let media_type = crate::models::MediaType::from_mime(&mime_type);
-    let max_size = max_size_for_media(media_type, options);
+    let max_size = if mime_type == AMBIGUOUS_WEBM_MIME {
+        options.max_video_size.min(options.max_audio_size)
+    } else {
+        max_size_for_media(media_type, options)
+    };
     if original_size > max_size {
         anyhow::bail!(
             "File too large. Maximum {} upload size is {}.",
@@ -455,11 +460,16 @@ fn save_generic_upload(
     tmp.persist(&file_path_abs)
         .context("Failed to atomically rename generic upload temp file")?;
 
+    let persisted_mime = if plan.mime_type == AMBIGUOUS_WEBM_MIME {
+        super::fallback_download_mime_type()
+    } else {
+        &plan.mime_type
+    };
     Ok(UploadedFile {
         file_path: format!("{}/{filename}", options.board_short),
         thumb_path: String::new(),
         original_name: crate::utils::sanitize::sanitize_filename(options.original_filename),
-        mime_type: plan.mime_type.clone(),
+        mime_type: persisted_mime.to_owned(),
         file_size: i64::try_from(original_size).context("File size overflows i64")?,
         media_type: plan.media_type,
         processing_pending: false,
@@ -791,6 +801,15 @@ fn mime_to_image_format(mime_type: &str) -> Option<image::ImageFormat> {
 /// Returns an error when required `ffprobe` validation fails or the detected
 /// stream kind conflicts with the container policy.
 fn refine_probe_mime(input_path: &Path, detected: &str, ffprobe_available: bool) -> Result<String> {
+    if detected == "video/webm" {
+        return Ok(refine_webm_mime(
+            input_path,
+            ffprobe_available,
+            || crate::media::ffmpeg::probe_stream_kind(input_path),
+            || crate::media::ffmpeg::probe_stream_kind_with_ffmpeg(input_path),
+        ));
+    }
+
     let media_type = crate::models::MediaType::from_mime(detected);
     let should_probe = matches!(
         media_type,
@@ -804,12 +823,6 @@ fn refine_probe_mime(input_path: &Path, detected: &str, ffprobe_available: bool)
         if is_matroska_mime(detected) {
             anyhow::bail!(
                 "File appears to be Matroska/MKV, but ffprobe is required to validate MKV uploads."
-            );
-        }
-        if detected == "video/webm" {
-            tracing::debug!(
-                path = %input_path.display(),
-                "ffprobe unavailable; treating WebM upload as video/webm"
             );
         }
         return Ok(detected.to_owned());
@@ -848,6 +861,44 @@ fn refine_probe_mime(input_path: &Path, detected: &str, ffprobe_available: bool)
             | crate::models::MediaType::Other,
             _,
         ) => Ok(detected.to_owned()),
+    }
+}
+
+/// Refines `WebM` with `FFprobe`, falls back to `FFmpeg`, and selects a neutral
+/// download classification when neither configured tool establishes its kind.
+fn refine_webm_mime(
+    input_path: &Path,
+    ffprobe_available: bool,
+    ffprobe: impl FnOnce() -> Result<crate::media::ffmpeg::StreamKind>,
+    ffmpeg: impl FnOnce() -> Result<crate::media::ffmpeg::StreamKind>,
+) -> String {
+    if ffprobe_available {
+        match ffprobe() {
+            Ok(crate::media::ffmpeg::StreamKind::Video) => return "video/webm".to_owned(),
+            Ok(crate::media::ffmpeg::StreamKind::AudioOnly) => {
+                return "audio/webm".to_owned();
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %input_path.display(),
+                    error = %error,
+                    "ffprobe could not inspect WebM; trying bounded ffmpeg fallback"
+                );
+            }
+        }
+    }
+
+    match ffmpeg() {
+        Ok(crate::media::ffmpeg::StreamKind::Video) => "video/webm".to_owned(),
+        Ok(crate::media::ffmpeg::StreamKind::AudioOnly) => "audio/webm".to_owned(),
+        Err(error) => {
+            tracing::warn!(
+                path = %input_path.display(),
+                error = %error,
+                "WebM stream kind is ambiguous; storing as a neutral download"
+            );
+            AMBIGUOUS_WEBM_MIME.to_owned()
+        }
     }
 }
 
@@ -1120,8 +1171,8 @@ fn mime_to_ext(mime: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        delete_file_checked, save_audio_with_image_thumb_from_path, save_upload_from_path,
-        validate_adts_aac_bytes, SaveUploadOptions,
+        delete_file_checked, refine_webm_mime, save_audio_with_image_thumb_from_path,
+        save_upload_from_path, validate_adts_aac_bytes, SaveUploadOptions, AMBIGUOUS_WEBM_MIME,
     };
     use anyhow::{Context as _, Result};
     use std::path::Path;
@@ -1700,9 +1751,124 @@ trailer << /Root 1 0 R >>
         let mime = super::classify_upload_mime(input.path(), webm, false, false)?;
 
         anyhow::ensure!(
-            mime == "video/webm",
-            "WebM classification changed without ffprobe"
+            mime == AMBIGUOUS_WEBM_MIME,
+            "uninspectable WebM should use the neutral classification"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn uninspectable_webm_is_persisted_as_neutral_download() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let input = tempdir.path().join("ambiguous.webm");
+        let webm = valid_webm_header();
+        std::fs::write(&input, webm)?;
+        let options = test_upload_options(tempdir.path(), "ambiguous.webm")?;
+
+        let uploaded = save_upload_from_path(&input, webm, webm.len(), &options)?;
+
+        anyhow::ensure!(uploaded.mime_type == "application/octet-stream");
+        anyhow::ensure!(uploaded.media_type == crate::models::MediaType::Other);
+        anyhow::ensure!(
+            Path::new(&uploaded.file_path).extension() == Some(std::ffi::OsStr::new("bin"))
+        );
+        anyhow::ensure!(!uploaded.processing_pending);
+        Ok(())
+    }
+
+    #[test]
+    fn missing_ffprobe_uses_ffmpeg_stream_kind_for_webm() {
+        let input = Path::new("fixture.webm");
+        let missing_probe = || anyhow::bail!("ffprobe executable is missing");
+
+        let audio = refine_webm_mime(input, false, missing_probe, || {
+            Ok(crate::media::ffmpeg::StreamKind::AudioOnly)
+        });
+        let video = refine_webm_mime(
+            input,
+            false,
+            || anyhow::bail!("ffprobe executable is missing"),
+            || Ok(crate::media::ffmpeg::StreamKind::Video),
+        );
+
+        assert_eq!(audio, "audio/webm");
+        assert_eq!(video, "video/webm");
+    }
+
+    #[test]
+    fn failing_ffprobe_never_defaults_webm_to_video() {
+        let input = Path::new("fixture.webm");
+        let audio = refine_webm_mime(
+            input,
+            true,
+            || anyhow::bail!("ffprobe exited with status 1"),
+            || Ok(crate::media::ffmpeg::StreamKind::AudioOnly),
+        );
+        let ambiguous = refine_webm_mime(
+            input,
+            true,
+            || anyhow::bail!("ffprobe exited with status 1"),
+            || anyhow::bail!("ffmpeg stream fallback also failed"),
+        );
+
+        assert_eq!(audio, "audio/webm");
+        assert_eq!(ambiguous, AMBIGUOUS_WEBM_MIME);
+    }
+
+    #[test]
+    #[expect(
+        clippy::print_stderr,
+        reason = "test skip diagnostics must remain visible when optional ffmpeg fixtures are unavailable"
+    )]
+    fn ffmpeg_fallback_distinguishes_audio_only_and_av_webm() -> Result<()> {
+        if !ffmpeg_available() {
+            eprintln!("skipping WebM fallback fixtures; ffmpeg unavailable");
+            return Ok(());
+        }
+        let tempdir = tempfile::tempdir()?;
+        let audio_path = tempdir.path().join("audio.webm");
+        let audio = generate_ffmpeg_fixture(
+            &audio_path,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.05",
+                "-c:a",
+                "libopus",
+                "-f",
+                "webm",
+            ],
+        )
+        .context("generate audio-only WebM")?;
+        let video_path = tempdir.path().join("av.webm");
+        let av = generate_ffmpeg_fixture(
+            &video_path,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=16x16:d=0.1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.1",
+                "-c:v",
+                "libvpx-vp9",
+                "-c:a",
+                "libopus",
+                "-shortest",
+                "-f",
+                "webm",
+            ],
+        )
+        .context("generate A/V WebM")?;
+
+        let audio_mime = super::classify_upload_mime(&audio_path, sniff(&audio), false, false)?;
+        let video_mime = super::classify_upload_mime(&video_path, sniff(&av), false, false)?;
+
+        anyhow::ensure!(audio_mime == "audio/webm");
+        anyhow::ensure!(video_mime == "video/webm");
         Ok(())
     }
 
@@ -1885,39 +2051,39 @@ trailer << /Root 1 0 R >>
     fn video_upload_saves_with_svg_placeholder_when_ffmpeg_is_missing() -> Result<()> {
         let tempdir = tempfile::tempdir()?;
         let input = tempfile::Builder::new()
-            .suffix(".webm")
+            .suffix(".mp4")
             .tempfile_in(tempdir.path())?;
-        let webm = valid_webm_header();
-        std::fs::write(input.path(), webm)?;
+        let mp4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2mp41";
+        std::fs::write(input.path(), mp4)?;
 
         let uploaded = save_upload_from_path(
             input.path(),
-            webm,
-            webm.len(),
-            &test_upload_options(tempdir.path(), "clip.webm")?,
+            mp4,
+            mp4.len(),
+            &test_upload_options(tempdir.path(), "clip.mp4")?,
         )?;
 
         anyhow::ensure!(
-            uploaded.mime_type == "video/webm",
-            "WebM upload received the wrong MIME type"
+            uploaded.mime_type == "video/mp4",
+            "MP4 upload received the wrong MIME type"
         );
         anyhow::ensure!(
             uploaded.media_type == crate::models::MediaType::Video,
-            "WebM upload was not categorized as video"
+            "MP4 upload was not categorized as video"
         );
         anyhow::ensure!(
             tempdir.path().join(&uploaded.file_path).exists(),
-            "WebM upload was not persisted"
+            "MP4 upload was not persisted"
         );
         anyhow::ensure!(
             Path::new(&uploaded.thumb_path)
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")),
-            "WebM fallback thumbnail did not use SVG"
+            "MP4 fallback thumbnail did not use SVG"
         );
         anyhow::ensure!(
             tempdir.path().join(&uploaded.thumb_path).exists(),
-            "WebM fallback thumbnail was not persisted"
+            "MP4 fallback thumbnail was not persisted"
         );
         Ok(())
     }

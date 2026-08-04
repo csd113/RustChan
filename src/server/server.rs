@@ -449,6 +449,10 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     {
         let conn = pool.get()?;
         let recovery = crate::db::recover_interrupted_background_jobs(&conn)?;
+        crate::workers::cleanup_recovered_waveform_placeholders(
+            &conn,
+            std::path::Path::new(&CONFIG.upload_dir),
+        )?;
         if recovery.jobs_reset > 0 || recovery.jobs_resolved > 0 {
             tracing::warn!(
                 target: "workers",

@@ -15,6 +15,8 @@ pub use storage::{
     save_audio_with_image_thumb_from_path, save_upload_from_path, validate_upload_from_path,
     SaveUploadOptions, UploadedFile,
 };
+/// Internal marker for a `WebM` upload whose stream type remains unknown.
+pub(crate) const AMBIGUOUS_WEBM_MIME: &str = "application/x-rustchan-ambiguous-webm";
 
 #[cfg(test)]
 mod tests {

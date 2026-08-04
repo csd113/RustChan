@@ -1226,7 +1226,8 @@ pub fn claim_next_job(conn: &rusqlite::Connection) -> Result<Option<(i64, String
 /// Returns an error if the database operation fails.
 pub fn complete_job(conn: &rusqlite::Connection, id: i64) -> Result<()> {
     let n = conn.execute(
-        "UPDATE background_jobs SET status = 'done', updated_at = unixepoch()
+        "UPDATE background_jobs
+         SET status = 'done', last_error = NULL, updated_at = unixepoch()
          WHERE id = ?1 AND status = 'running'",
         params![id],
     )?;
@@ -1779,6 +1780,7 @@ pub fn replace_transcoded_media(
     new_path: &str,
     new_mime: &str,
     new_sha256: &str,
+    new_size: i64,
 ) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin transcode media replacement transaction")?;
@@ -1800,8 +1802,10 @@ pub fn replace_transcoded_media(
         }
 
         let updated = conn.execute(
-            "UPDATE posts SET file_path = ?1, mime_type = ?2 WHERE file_path = ?3",
-            params![new_path, new_mime, old_path],
+            "UPDATE posts
+             SET file_path = ?1, mime_type = ?2, file_size = ?3
+             WHERE file_path = ?4",
+            params![new_path, new_mime, new_size, old_path],
         )?;
         debug_assert!(updated > 0, "target_exists guarantees at least one update");
         set_post_media_processing_state(conn, post_id, None, None)?;
@@ -1870,7 +1874,7 @@ pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        acknowledge_failed_background_jobs, background_job_summary, claim_next_job,
+        acknowledge_failed_background_jobs, background_job_summary, claim_next_job, complete_job,
         count_posts_by_media_processing_state, count_search_results, get_post, get_post_submission,
         get_posts_for_thread, is_stale_media_target_error, recent_background_jobs,
         record_post_submission, recover_interrupted_background_jobs, replace_transcoded_media,
@@ -2654,6 +2658,7 @@ mod tests {
             "trans/video.webm",
             "video/webm",
             "deadbeef",
+            4,
         )
         .err()
         .context("stale transcode update should be rejected")?;
@@ -2677,6 +2682,49 @@ mod tests {
             hash_count, 0,
             "stale transcode must not insert a deduplication row"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn completed_retry_clears_prior_last_error() -> Result<()> {
+        let conn = test_conn()?;
+        let job_id = insert_background_job(
+            &conn,
+            "spam_check",
+            r#"{"t":"SpamCheck","d":{"post_id":1,"ip_hash":"hash","body_len":5}}"#,
+            "running",
+            2,
+            Some("previous attempt failed"),
+        )?;
+
+        complete_job(&conn, job_id)?;
+
+        let (status, attempts, last_error) = background_job_status(&conn, job_id)?;
+        anyhow::ensure!(status == "done");
+        anyhow::ensure!(attempts == 2);
+        anyhow::ensure!(last_error.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn transcode_replacement_persists_final_file_size() -> Result<()> {
+        let conn = test_conn()?;
+        let post_id = seed_media_post(&conn, "sized", "sized/video.mp4")?;
+
+        replace_transcoded_media(
+            &conn,
+            post_id,
+            "sized/video.mp4",
+            "sized/video.webm",
+            "video/webm",
+            "feedface",
+            4,
+        )?;
+
+        let post = get_post(&conn, post_id)?.context("transcoded post should exist")?;
+        anyhow::ensure!(post.file_path.as_deref() == Some("sized/video.webm"));
+        anyhow::ensure!(post.mime_type.as_deref() == Some("video/webm"));
+        anyhow::ensure!(post.file_size == Some(4));
         Ok(())
     }
 

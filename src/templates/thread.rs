@@ -1691,6 +1691,81 @@ mod tests {
     }
 
     #[test]
+    fn render_post_uses_persisted_transcoded_file_size() {
+        let post = Post {
+            file_path: Some("test/video.webm".into()),
+            file_name: Some("video.mp4".into()),
+            file_size: Some(4),
+            thumb_path: Some("test/thumbs/video.webp".into()),
+            mime_type: Some("video/webm".into()),
+            media_type: Some(MediaType::Video),
+            ..sample_post()
+        };
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                admin_csrf_token: None,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+                video_audio_muted: false,
+            },
+            0,
+        );
+
+        assert!(html.contains("video-container"));
+        assert!(html.contains("(4 B)"));
+        assert!(!html.contains("(1.0 KiB)"));
+    }
+
+    #[test]
+    fn neutral_webm_fallback_never_renders_as_video() {
+        let post = Post {
+            file_path: Some("test/ambiguous.bin".into()),
+            file_name: Some("ambiguous.webm".into()),
+            thumb_path: None,
+            mime_type: Some("application/octet-stream".into()),
+            media_type: Some(MediaType::Other),
+            ..sample_post()
+        };
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                admin_csrf_token: None,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+                video_audio_muted: false,
+            },
+            0,
+        );
+
+        assert!(html.contains("file-download"));
+        assert!(!html.contains("video-container"));
+        assert!(!html.contains("<video"));
+    }
+
+    #[test]
     fn image_audio_combo_renders_single_media_box_with_inline_audio() {
         let mut post = sample_post();
         post.audio_file_path = Some("test/song.flac".into());

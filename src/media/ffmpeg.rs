@@ -16,11 +16,10 @@
 use anyhow::{Context as _, Result};
 use std::borrow::Cow;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::LazyLock;
-use std::thread;
 use std::thread::available_parallelism;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Construct a command for the configured `FFmpeg` executable.
 fn ffmpeg_command() -> Command {
@@ -76,12 +75,10 @@ static ENCODER_LIST: LazyLock<Option<String>> = LazyLock::new(|| {
 /// unavailable; all callers must degrade gracefully.
 #[must_use]
 pub fn detect_ffmpeg() -> bool {
-    ffmpeg_command()
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    let mut command = ffmpeg_command();
+    command.arg("-version");
+    run_command_with_timeout(&mut command, &crate::config::CONFIG.ffmpeg_path, "ffmpeg")
+        .is_ok_and(|output| output.status.success())
 }
 
 /// Execute `ffmpeg` with the given argument slice.
@@ -267,6 +264,46 @@ pub fn probe_stream_kind(path: &Path) -> Result<StreamKind> {
             "ffprobe returned no audio or video streams for: {path_str}"
         ))
     }
+}
+
+/// Uses the configured `FFmpeg` binary as a bounded stream-inspection fallback.
+///
+/// This is used only for an otherwise ambiguous `WebM` container when `FFprobe`
+/// is missing or fails. Explicit stream maps let `FFmpeg` validate whether a
+/// video or audio stream exists without decoding the upload.
+///
+/// # Errors
+/// Returns an error if `FFmpeg` cannot be run or neither stream kind is found.
+pub fn probe_stream_kind_with_ffmpeg(path: &Path) -> Result<StreamKind> {
+    let path_str = path_to_str(path)?;
+    if ffmpeg_has_stream(path_str, "0:v:0", "v")? {
+        return Ok(StreamKind::Video);
+    }
+    if ffmpeg_has_stream(path_str, "0:a:0", "a")? {
+        return Ok(StreamKind::AudioOnly);
+    }
+    anyhow::bail!("ffmpeg returned no audio or video streams for: {path_str}")
+}
+
+/// Tests one explicit stream mapping without decoding media frames.
+fn ffmpeg_has_stream(path: &str, selector: &str, stream_specifier: &str) -> Result<bool> {
+    let mut command = ffmpeg_command();
+    command.args([
+        "-v",
+        "error",
+        "-i",
+        path,
+        "-map",
+        selector,
+        &format!("-frames:{stream_specifier}"),
+        "0",
+        "-f",
+        "null",
+        "-",
+    ]);
+    let output =
+        run_command_with_timeout(&mut command, &crate::config::CONFIG.ffmpeg_path, "ffmpeg")?;
+    Ok(output.status.success())
 }
 
 /// Probe the primary video codec of a media file using `ffprobe`.
@@ -506,61 +543,30 @@ fn run_command_with_timeout(
     label: &str,
 ) -> Result<std::process::Output> {
     let timeout = Duration::from_secs(crate::config::ffmpeg_timeout_secs());
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| {
-            format!("failed to spawn {label} binary '{program}' — is it installed and executable?")
-        })?;
-    let started = Instant::now();
-
-    loop {
-        if child.try_wait()?.is_some() {
-            return child
-                .wait_with_output()
-                .with_context(|| format!("{label} I/O error"));
-        }
-        if started.elapsed() >= timeout {
-            drop(child.kill());
-            drop(child.wait());
-            return Err(anyhow::anyhow!(
-                "{label} timed out after {}s",
-                timeout.as_secs()
-            ));
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
+    crate::media::process::run_std_command_with_timeout(
+        command,
+        timeout,
+        label,
+        || format!("failed to spawn {label} binary '{program}' — is it installed and executable?"),
+        || format!("{label} I/O error"),
+    )
 }
 
 /// Run a bounded command and return trimmed UTF-8 stdout on success.
 fn output_stdout_with_timeout(program: &str, args: &[&str]) -> Option<String> {
     let timeout = Duration::from_secs(10);
-    let mut child = Command::new(program)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let started = Instant::now();
-
-    loop {
-        if let Some(status) = child.try_wait().ok()? {
-            if status.success() {
-                return child
-                    .wait_with_output()
-                    .ok()
-                    .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
-            }
-            return None;
-        }
-        if started.elapsed() >= timeout {
-            drop(child.kill());
-            drop(child.wait());
-            return None;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
+    let mut command = Command::new(program);
+    command.args(args);
+    crate::media::process::run_std_command_with_timeout(
+        &mut command,
+        timeout,
+        "media capability probe",
+        || format!("failed to spawn media capability probe '{program}'"),
+        || "media capability probe I/O error".to_owned(),
+    )
+    .ok()
+    .filter(|output| output.status.success())
+    .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Probe whether the current ffmpeg binary has the `libwebp` encoder compiled in.

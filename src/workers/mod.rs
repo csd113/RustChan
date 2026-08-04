@@ -33,18 +33,60 @@ use rusqlite::OptionalExtension as _;
 use serde::{Deserialize, Serialize};
 use std::num::NonZero;
 use std::path::PathBuf;
+use std::process::Output;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::Notify;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
 /// Builds an `FFmpeg` command using the configured executable path.
 fn ffmpeg_command() -> TokioCommand {
-    TokioCommand::new(&CONFIG.ffmpeg_path)
+    let mut command = TokioCommand::new(&CONFIG.ffmpeg_path);
+    #[cfg(unix)]
+    command.process_group(0);
+    command
+}
+
+/// Result of waiting for an asynchronous `FFmpeg` subprocess.
+pub(crate) enum AsyncWaitOutcome {
+    /// The process exited and its captured output is available.
+    Exited(Output),
+    /// The configured execution deadline elapsed.
+    TimedOut,
+    /// Application shutdown or explicit cancellation was requested.
+    Cancelled,
+}
+
+/// Waits for an `FFmpeg` child while racing its deadline and cancellation token.
+pub(crate) async fn wait_for_ffmpeg_output(
+    child: tokio::process::Child,
+    timeout: Duration,
+    cancel: CancellationToken,
+) -> Result<AsyncWaitOutcome> {
+    let mut process_group = crate::media::process::ProcessGroupGuard::new(child.id());
+    let wait = child.wait_with_output();
+    tokio::pin!(wait);
+
+    let outcome = tokio::select! {
+        biased;
+        () = cancel.cancelled() => AsyncWaitOutcome::Cancelled,
+        result = &mut wait => {
+            let output = result.context("media subprocess I/O error")?;
+            process_group.terminate_remaining();
+            return Ok(AsyncWaitOutcome::Exited(output));
+        }
+        () = sleep(timeout) => AsyncWaitOutcome::TimedOut,
+    };
+
+    process_group.terminate_remaining();
+    // The group signal closes inherited pipes. Awaiting the original future
+    // reaps the direct child and prevents zombies before returning to callers.
+    drop((&mut wait).await);
+    Ok(outcome)
 }
 
 /// How long a worker sleeps when the queue is empty.
@@ -771,6 +813,7 @@ async fn worker_loop(
                     queue.pool.clone(),
                     Arc::clone(&queue.in_progress),
                     Arc::clone(&queue.active_video_jobs),
+                    queue.cancel.clone(),
                 )
                 .await;
                 let completion = match result {
@@ -863,6 +906,7 @@ fn backoff_duration(consecutive_errors: u32) -> Duration {
 
 #[expect(
     clippy::cognitive_complexity,
+    clippy::too_many_arguments,
     reason = "the dispatcher mirrors the closed set of background job variants"
 )]
 /// Dispatches a decoded job to the corresponding worker operation.
@@ -874,6 +918,7 @@ async fn handle_job(
     pool: DbPool,
     in_progress: Arc<DashMap<String, bool>>,
     active_video_jobs: Arc<AtomicU64>,
+    cancel: CancellationToken,
 ) -> Result<()> {
     debug!("Dispatching {} job", job.type_str());
 
@@ -901,6 +946,7 @@ async fn handle_job(
                 ffprobe_available,
                 ffmpeg_vp9_available,
                 pool,
+                cancel,
             )
             .await;
             active_video_jobs.fetch_sub(1, Ordering::Relaxed);
@@ -928,6 +974,7 @@ async fn handle_job(
                 board_short,
                 ffmpeg_available,
                 pool,
+                cancel,
             )
             .await;
             in_progress.remove(&file_path);
@@ -980,21 +1027,13 @@ const fn media_job_post_id(job: &Job) -> Option<i64> {
 /// (libvpx-vp9 + libopus compiled in).  If either flag is false the job is
 /// skipped gracefully — no error is returned and the file remains as-is.
 ///
-/// The previous implementation wrapped `std::process::Command`
-/// in `spawn_blocking` and applied `tokio::time::timeout`. When the timeout
-/// fired, Tokio stopped polling the future but the OS process kept running,
-/// occupying a blocking thread until it finished. The log message "ffmpeg killed"
-/// was factually incorrect.
-///
-/// The fix switches to `tokio::process::Command` with `kill_on_drop(true)`.
-/// The `Child` handle is driven by `child.wait_with_output()` directly on the
-/// async executor. When `timeout` fires, the future (and the `Child` inside it)
-/// is dropped, and `kill_on_drop` ensures the OS process receives SIGKILL
-/// immediately. No blocking thread is held during the wait.
+/// The command runs in its own process group. Timeout, cancellation, and scope
+/// cleanup terminate that whole group so descendants cannot outlive the job.
 ///
 /// A hard timeout of the live `ffmpeg_timeout_secs` setting is applied.
 #[expect(
     clippy::cognitive_complexity,
+    clippy::too_many_arguments,
     reason = "transcode process control and fail-closed cleanup share one lifecycle"
 )]
 async fn transcode_video(
@@ -1005,6 +1044,7 @@ async fn transcode_video(
     ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
     pool: DbPool,
+    cancel: CancellationToken,
 ) -> Result<()> {
     if !ffmpeg_available {
         debug!("VideoTranscode skipped for post {post_id}: ffmpeg not available");
@@ -1049,16 +1089,19 @@ async fn transcode_video(
     // When the timeout future is dropped, the Child is dropped, and kill_on_drop
     // ensures the OS process receives SIGKILL immediately — unlike the previous
     // spawn_blocking approach where the OS process kept running after timeout.
-    let child = ffmpeg_command()
+    let mut command = ffmpeg_command();
+    command
         .args(&args)
         .stderr(Stdio::piped())
         .stdout(Stdio::null())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    let child = command
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to spawn ffmpeg '{}': {e}", CONFIG.ffmpeg_path))?;
+    drop(command);
 
-    match timeout(ffmpeg_timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => {
+    match wait_for_ffmpeg_output(child, ffmpeg_timeout, cancel).await? {
+        AsyncWaitOutcome::Exited(output) => {
             if !output.status.success() {
                 return Err(anyhow::anyhow!(
                     "ffmpeg exited with {}: {}",
@@ -1067,12 +1110,15 @@ async fn transcode_video(
                 ));
             }
         }
-        Ok(Err(e)) => return Err(anyhow::anyhow!("ffmpeg I/O error: {e}")),
-        Err(_elapsed) => {
-            // Child is dropped here; kill_on_drop fires SIGKILL on the OS process.
+        AsyncWaitOutcome::TimedOut => {
             warn!("{}", video_reencode_timeout_warning(post_id, timeout_secs));
             return Err(anyhow::anyhow!(
                 "ffmpeg transcode timed out after {timeout_secs}s"
+            ));
+        }
+        AsyncWaitOutcome::Cancelled => {
+            return Err(anyhow::anyhow!(
+                "ffmpeg transcode cancelled during shutdown"
             ));
         }
     }
@@ -1335,32 +1381,39 @@ fn persist_transcoded_webm(
 ) -> Result<()> {
     tmp.persist(webm_abs)
         .map_err(|e| anyhow::anyhow!("Failed to atomically rename WebM output: {e}"))?;
-    let webm_sha256 = sha256_file_hex(webm_abs)?;
-    let webm_bytes = std::fs::metadata(webm_abs)
-        .with_context(|| format!("Failed to stat transcoded WebM {}", webm_abs.display()))?
-        .len();
-    let conn = pool.get()?;
+    let persist_result: Result<u64> = (|| {
+        let webm_sha256 = sha256_file_hex(webm_abs)?;
+        let webm_bytes = std::fs::metadata(webm_abs)
+            .with_context(|| format!("Failed to stat transcoded WebM {}", webm_abs.display()))?
+            .len();
+        let persisted_size =
+            i64::try_from(webm_bytes).context("Transcoded WebM size exceeds database range")?;
+        let conn = pool.get()?;
+        crate::db::replace_transcoded_media(
+            &conn,
+            post_id,
+            file_path,
+            webm_rel,
+            "video/webm",
+            &webm_sha256,
+            persisted_size,
+        )?;
+        Ok(webm_bytes)
+    })();
 
-    // clean up on DB failure.
-    let db_result = crate::db::replace_transcoded_media(
-        &conn,
-        post_id,
-        file_path,
-        webm_rel,
-        "video/webm",
-        &webm_sha256,
-    );
-
-    if let Err(e) = db_result {
-        if let Err(cleanup_error) = std::fs::remove_file(webm_abs) {
-            warn!(
-                output = %webm_abs.display(),
-                error = %cleanup_error,
-                "VideoTranscode: failed to remove unattached WebM output"
-            );
+    let webm_bytes = match persist_result {
+        Ok(webm_bytes) => webm_bytes,
+        Err(error) => {
+            if let Err(cleanup_error) = std::fs::remove_file(webm_abs) {
+                warn!(
+                    output = %webm_abs.display(),
+                    error = %cleanup_error,
+                    "VideoTranscode: failed to remove unattached WebM output"
+                );
+            }
+            return Err(error);
         }
-        return Err(e);
-    }
+    };
 
     tracing::info!(target: "workers", post_id = post_id, source = %src.display(), output = %webm_rel, bytes = webm_bytes, "VideoTranscode done");
     Ok(())
@@ -1444,6 +1497,7 @@ async fn generate_waveform(
     board_short: String,
     ffmpeg_available: bool,
     pool: DbPool,
+    cancel: CancellationToken,
 ) -> Result<()> {
     if !ffmpeg_available {
         return Ok(());
@@ -1462,21 +1516,22 @@ async fn generate_waveform(
     };
 
     // Phase 2: run ffmpeg with kill_on_drop.
-    let child = ffmpeg_command()
+    let mut command = ffmpeg_command();
+    command
         .args(&args)
         .stderr(Stdio::piped())
         .stdout(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "failed to spawn ffmpeg '{}' for waveform: {e}",
-                CONFIG.ffmpeg_path
-            )
-        })?;
+        .kill_on_drop(true);
+    let child = command.spawn().map_err(|e| {
+        anyhow::anyhow!(
+            "failed to spawn ffmpeg '{}' for waveform: {e}",
+            CONFIG.ffmpeg_path
+        )
+    })?;
+    drop(command);
 
-    match timeout(ffmpeg_timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => {
+    match wait_for_ffmpeg_output(child, ffmpeg_timeout, cancel).await? {
+        AsyncWaitOutcome::Exited(output) => {
             if !output.status.success() {
                 return Err(anyhow::anyhow!(
                     "ffmpeg waveform exited with {}: {}",
@@ -1485,17 +1540,19 @@ async fn generate_waveform(
                 ));
             }
         }
-        Ok(Err(e)) => return Err(anyhow::anyhow!("ffmpeg waveform I/O error: {e}")),
-        Err(_elapsed) => {
+        AsyncWaitOutcome::TimedOut => {
             warn!("AudioWaveform: job for post {post_id} timed out after {timeout_secs}s — ffmpeg process killed");
             return Err(anyhow::anyhow!(
                 "ffmpeg waveform timed out after {timeout_secs}s"
             ));
         }
+        AsyncWaitOutcome::Cancelled => {
+            return Err(anyhow::anyhow!("ffmpeg waveform cancelled during shutdown"));
+        }
     }
 
     // Phase 3: persist + DB update — blocking.
-    tokio::task::spawn_blocking(move || {
+    let finalise_result = tokio::task::spawn_blocking(move || {
         waveform_finalise(
             post_id,
             &png_abs,
@@ -1503,11 +1560,13 @@ async fn generate_waveform(
             &src_path,
             &expected_file_path,
             tmp_png,
+            std::path::Path::new(&CONFIG.upload_dir),
             &pool,
         )
     })
     .await
-    .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in waveform finalise: {e}"))?
+    .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in waveform finalise: {e}"))?;
+    finalise_result
 }
 
 /// Formats the actionable warning emitted when video re-encoding times out.
@@ -1579,6 +1638,10 @@ fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepar
 
 /// Blocking finalise phase for [`generate_waveform`]: atomically persist the
 /// temp PNG and update the database with the new thumb path.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the finalisation boundary explicitly carries all validated paths and DB identity"
+)]
 fn waveform_finalise(
     post_id: i64,
     png_abs: &std::path::Path,
@@ -1586,6 +1649,7 @@ fn waveform_finalise(
     src_path: &std::path::Path,
     expected_file_path: &str,
     tmp_png: tempfile::NamedTempFile,
+    upload_root: &std::path::Path,
     pool: &DbPool,
 ) -> Result<()> {
     use anyhow::Context as _;
@@ -1597,19 +1661,35 @@ fn waveform_finalise(
         let conn = pool.get()?;
         conn.execute_batch("BEGIN IMMEDIATE")
             .context("Failed to begin waveform persistence transaction")?;
-        let db_result: Result<()> = (|| {
+        let db_result: Result<Option<String>> = (|| {
+            let previous_thumb = conn
+                .query_row(
+                    "SELECT thumb_path FROM posts WHERE id = ?1 AND file_path = ?2",
+                    rusqlite::params![post_id, expected_file_path],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten();
             crate::db::update_post_thumb_path(&conn, post_id, expected_file_path, png_rel)?;
             conn.execute(
                 "UPDATE file_hashes SET thumb_path = ?1 WHERE sha256 = ?2",
                 rusqlite::params![png_rel, audio_sha256],
             )?;
-            Ok(())
+            Ok(previous_thumb)
         })();
         match db_result {
-            Ok(()) => {
+            Ok(previous_thumb) => {
                 if let Err(error) = conn.execute_batch("COMMIT") {
                     drop(conn.execute_batch("ROLLBACK"));
                     return Err(error).context("Failed to commit waveform persistence");
+                }
+                if let Some(previous_thumb) = previous_thumb {
+                    cleanup_waveform_placeholder_candidate(
+                        &conn,
+                        upload_root,
+                        &previous_thumb,
+                        png_rel,
+                    );
                 }
                 Ok(())
             }
@@ -1631,6 +1711,96 @@ fn waveform_finalise(
     }
 
     tracing::info!(target: "workers", post_id = post_id, thumb = %png_rel, "AudioWaveform done");
+    Ok(())
+}
+
+/// Removes one superseded SVG waveform placeholder after verifying that no
+/// post or deduplication record still references it.
+fn cleanup_waveform_placeholder_candidate(
+    conn: &rusqlite::Connection,
+    upload_root: &std::path::Path,
+    placeholder_rel: &str,
+    current_png_rel: &str,
+) {
+    let placeholder = std::path::Path::new(placeholder_rel);
+    if placeholder.extension().and_then(|ext| ext.to_str()) != Some("svg")
+        || placeholder.with_extension("png") != std::path::Path::new(current_png_rel)
+    {
+        return;
+    }
+
+    let referenced = conn
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM posts WHERE thumb_path = ?1
+                 UNION ALL
+                 SELECT 1 FROM file_hashes WHERE thumb_path = ?1
+             )",
+            rusqlite::params![placeholder_rel],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(true);
+    if referenced {
+        return;
+    }
+
+    let placeholder_abs = match crate::utils::fs_security::existing_regular_file_child(
+        upload_root,
+        placeholder_rel,
+    ) {
+        Ok(path) => path,
+        Err(error)
+            if error
+                .chain()
+                .find_map(|source| source.downcast_ref::<std::io::Error>())
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return;
+        }
+        Err(error) => {
+            warn!(
+                placeholder = placeholder_rel,
+                error = %error,
+                "AudioWaveform: rejected unsafe obsolete placeholder path"
+            );
+            return;
+        }
+    };
+    if let Err(error) = std::fs::remove_file(&placeholder_abs) {
+        warn!(
+            placeholder = %placeholder_abs.display(),
+            error = %error,
+            "AudioWaveform: failed to remove obsolete SVG placeholder"
+        );
+    }
+}
+
+/// Removes unreferenced SVG placeholders left by a completed waveform update
+/// that was interrupted before its post-commit filesystem cleanup.
+///
+/// # Errors
+/// Returns an error when candidate discovery cannot be queried.
+pub fn cleanup_recovered_waveform_placeholders(
+    conn: &rusqlite::Connection,
+    upload_root: &std::path::Path,
+) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT thumb_path
+         FROM posts
+         WHERE mime_type LIKE 'audio/%' AND thumb_path LIKE '%.png'",
+    )?;
+    let png_paths = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    for png_rel in png_paths {
+        let placeholder_rel = std::path::Path::new(&png_rel)
+            .with_extension("svg")
+            .to_string_lossy()
+            .into_owned();
+        cleanup_waveform_placeholder_candidate(conn, upload_root, &placeholder_rel, &png_rel);
+    }
     Ok(())
 }
 
@@ -2550,6 +2720,7 @@ mod tests {
             &src,
             "b/audio.mp3",
             tmp,
+            temp_dir.path(),
             &pool,
         )
         .expect_err("deleted waveform target rejected");
@@ -2559,6 +2730,83 @@ mod tests {
         let conn = pool.get().expect("db connection");
         assert_eq!(file_hash_count(&conn, "b/audio.mp3"), 0);
         assert_eq!(file_hash_count(&conn, "b/thumbs/audio.png"), 0);
+    }
+
+    #[test]
+    fn successful_waveform_finalise_removes_obsolete_svg_placeholder() -> anyhow::Result<()> {
+        let temp_dir = tempfile::tempdir().context("create temp directory")?;
+        let board_dir = temp_dir.path().join("b");
+        let thumbs_dir = board_dir.join("thumbs");
+        std::fs::create_dir_all(&thumbs_dir).context("create thumbnail directory")?;
+        let src = board_dir.join("audio.mp3");
+        std::fs::write(&src, b"source audio").context("write audio source")?;
+        let svg_abs = thumbs_dir.join("audio.svg");
+        std::fs::write(&svg_abs, b"<svg/>").context("write placeholder")?;
+        let png_abs = thumbs_dir.join("audio.png");
+        let mut tmp = tempfile::Builder::new()
+            .suffix(".png")
+            .tempfile_in(&thumbs_dir)
+            .context("create temporary waveform")?;
+        tmp.write_all(b"png waveform")
+            .context("write temporary waveform")?;
+        let pool = crate::db::init_test_pool().context("create test pool")?;
+        let post_id = {
+            let conn = pool.get().context("get seed connection")?;
+            conn.execute(
+                "INSERT INTO boards (short_name, name, description)
+                 VALUES ('b', 'B', '')",
+                [],
+            )?;
+            let board_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO threads (board_id, subject) VALUES (?1, 'audio')",
+                rusqlite::params![board_id],
+            )?;
+            let thread_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO posts
+                 (thread_id, board_id, name, body, body_html, deletion_token, is_op,
+                  file_path, file_size, thumb_path, mime_type, media_type)
+                 VALUES (?1, ?2, 'anon', '', '', 'token', 1,
+                         'b/audio.mp3', 12, 'b/thumbs/audio.svg', 'audio/mpeg', 'audio')",
+                rusqlite::params![thread_id, board_id],
+            )?;
+            let post_id = conn.last_insert_rowid();
+            let audio_hash = super::sha256_file_hex(&src)?;
+            crate::db::record_file_hash(
+                &conn,
+                &audio_hash,
+                "b/audio.mp3",
+                "b/thumbs/audio.svg",
+                "audio/mpeg",
+            )?;
+            post_id
+        };
+
+        waveform_finalise(
+            post_id,
+            &png_abs,
+            "b/thumbs/audio.png",
+            &src,
+            "b/audio.mp3",
+            tmp,
+            temp_dir.path(),
+            &pool,
+        )?;
+
+        ensure!(png_abs.exists(), "waveform PNG was not installed");
+        ensure!(
+            !svg_abs.exists(),
+            "obsolete SVG placeholder was not removed"
+        );
+        let conn = pool.get().context("get verification connection")?;
+        let thumb_path: String = conn.query_row(
+            "SELECT thumb_path FROM posts WHERE id = ?1",
+            rusqlite::params![post_id],
+            |row| row.get(0),
+        )?;
+        ensure!(thumb_path == "b/thumbs/audio.png");
+        Ok(())
     }
 
     #[test]
