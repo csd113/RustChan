@@ -266,6 +266,39 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             );
         }
     }
+    let startup_managed_media_cursor = {
+        let reconcile_pool = pool.clone();
+        let upload_dir = CONFIG.upload_dir.clone();
+        let reconciliation = tokio::task::spawn_blocking(move || {
+            crate::media::reconcile::reconcile_managed_media(
+                &reconcile_pool,
+                &upload_dir,
+                crate::media::reconcile::configured_mode(),
+                &crate::media::reconcile::ReconcileCursor::default(),
+                crate::media::reconcile::configured_limits(),
+            )
+        })
+        .await;
+        match reconciliation {
+            Ok(Ok(report)) => report.next_cursor,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    target: "media_reconcile",
+                    error = %error,
+                    "startup managed-media audit failed; periodic recovery remains enabled"
+                );
+                crate::media::reconcile::ReconcileCursor::default()
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "media_reconcile",
+                    error = %error,
+                    "startup managed-media audit task failed; periodic recovery remains enabled"
+                );
+                crate::media::reconcile::ReconcileCursor::default()
+            }
+        }
+    };
     let startup_media_reconciliation = match crate::workers::reconcile_media_job_states(
         &pool,
         0,
@@ -642,6 +675,58 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                         }
                     }
                     () = cancel_clone.cancelled() => break,
+                }
+            }
+        });
+    }
+
+    // Managed-media auditing advances one bounded filesystem page per interval.
+    // Audit mode is the default; the internal repair switch only enables the
+    // reconciler's transactionally revalidated, journal-first repair subset.
+    if CONFIG.media_reconcile_interval_hours > 0 {
+        let reconcile_pool = pool.clone();
+        let cancel_clone = worker_cancel.clone();
+        let interval_hours = CONFIG.media_reconcile_interval_hours;
+        tokio::spawn(async move {
+            let mut cursor = startup_managed_media_cursor;
+            let mut interval = tokio::time::interval(Duration::from_hours(interval_hours));
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let pass_pool = reconcile_pool.clone();
+                        let upload_dir = CONFIG.upload_dir.clone();
+                        let pass_cursor = cursor.clone();
+                        let pass = tokio::task::spawn_blocking(move || {
+                            crate::media::reconcile::reconcile_managed_media(
+                                &pass_pool,
+                                &upload_dir,
+                                crate::media::reconcile::configured_mode(),
+                                &pass_cursor,
+                                crate::media::reconcile::configured_limits(),
+                            )
+                        }).await;
+                        match pass {
+                            Ok(Ok(report)) => cursor = report.next_cursor,
+                            Ok(Err(error)) => tracing::warn!(
+                                target: "media_reconcile",
+                                error = %error,
+                                "periodic managed-media audit failed"
+                            ),
+                            Err(error) => tracing::warn!(
+                                target: "media_reconcile",
+                                error = %error,
+                                "periodic managed-media audit task failed"
+                            ),
+                        }
+                    }
+                    () = cancel_clone.cancelled() => {
+                        tracing::debug!(
+                            target: "media_reconcile",
+                            "managed-media audit task shutting down"
+                        );
+                        return;
+                    }
                 }
             }
         });

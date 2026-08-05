@@ -206,6 +206,7 @@ pub(super) async fn metrics(State(state): State<AppState>) -> Response {
 )]
 async fn metrics_response(state: AppState) -> Response {
     let backup = &state.backup_progress;
+    let media_reconcile = crate::media::reconcile::metrics_snapshot();
     let tor_onion_ready = if CONFIG.enable_tor_support {
         state.onion_address.read().await.is_some()
     } else {
@@ -283,6 +284,22 @@ async fn metrics_response(state: AppState) -> Response {
             "rustchan_media_processing_pending {}\n",
             "# TYPE rustchan_media_processing_failed gauge\n",
             "rustchan_media_processing_failed {}\n",
+            "# TYPE rustchan_media_reconcile_files_scanned_total counter\n",
+            "rustchan_media_reconcile_files_scanned_total {}\n",
+            "# TYPE rustchan_media_reconcile_references_scanned_total counter\n",
+            "rustchan_media_reconcile_references_scanned_total {}\n",
+            "# TYPE rustchan_media_reconcile_missing_references_total counter\n",
+            "rustchan_media_reconcile_missing_references_total {}\n",
+            "# TYPE rustchan_media_reconcile_safe_orphan_bytes_total counter\n",
+            "rustchan_media_reconcile_safe_orphan_bytes_total {}\n",
+            "# TYPE rustchan_media_reconcile_ambiguous_files_total counter\n",
+            "rustchan_media_reconcile_ambiguous_files_total {}\n",
+            "# TYPE rustchan_media_reconcile_repairs_total counter\n",
+            "rustchan_media_reconcile_repairs_total {}\n",
+            "# TYPE rustchan_media_reconcile_repair_conflicts_total counter\n",
+            "rustchan_media_reconcile_repair_conflicts_total {}\n",
+            "# TYPE rustchan_media_reconcile_scan_incomplete_total counter\n",
+            "rustchan_media_reconcile_scan_incomplete_total {}\n",
             "# TYPE rustchan_database_schema_valid gauge\n",
             "rustchan_database_schema_valid{{version=\"{}\"}} {}\n",
             "# TYPE rustchan_full_backups_saved gauge\n",
@@ -316,6 +333,14 @@ async fn metrics_response(state: AppState) -> Response {
         state.job_queue.dropped_count(),
         media_processing_pending,
         media_processing_failed,
+        media_reconcile.files_scanned_total,
+        media_reconcile.references_scanned_total,
+        media_reconcile.missing_references_total,
+        media_reconcile.safe_orphan_bytes_total,
+        media_reconcile.ambiguous_files_total,
+        media_reconcile.repairs_total,
+        media_reconcile.repair_conflicts_total,
+        media_reconcile.incomplete_scans_total,
         crate::db::baseline_schema_version(),
         u8::from(database_schema_valid),
         full_backup_count,
@@ -453,6 +478,8 @@ mod tests {
         for metric in [
             "rustchan_requests_total",
             "rustchan_job_queue_pending",
+            "rustchan_media_reconcile_files_scanned_total",
+            "rustchan_media_reconcile_repair_conflicts_total",
             "rustchan_database_schema_valid{version=\"1.3.0\"} 1",
         ] {
             assert!(

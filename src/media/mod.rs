@@ -9,6 +9,8 @@ pub mod ffmpeg;
 pub mod process;
 /// Active-media size pruning.
 pub mod prune;
+/// Managed-media reference auditing and conservative orphan reconciliation.
+pub mod reconcile;
 /// Image, video, audio, and PDF thumbnail generation.
 pub mod thumbnail;
 

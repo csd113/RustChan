@@ -900,6 +900,18 @@ pub struct Config {
     pub archive_before_prune: bool,
     /// Total thumbnail/waveform cache size limit in bytes. 0 = disabled.
     pub waveform_cache_max_bytes: u64,
+    /// Explicitly permit managed-media reconciliation to schedule safe repairs.
+    pub media_reconcile_repair_enabled: bool,
+    /// Hours between bounded managed-media audit pages. 0 disables periodic passes.
+    pub media_reconcile_interval_hours: u64,
+    /// Maximum managed filesystem entries inspected per reconciliation pass.
+    pub media_reconcile_files_per_pass: usize,
+    /// Maximum database rows loaded into one authoritative reference snapshot.
+    pub media_reconcile_database_rows_per_pass: usize,
+    /// Maximum file bytes hashed during one reconciliation pass.
+    pub media_reconcile_hash_bytes_per_pass: u64,
+    /// Maximum safe repair attempts during one reconciliation pass.
+    pub media_reconcile_repairs_per_pass: usize,
     /// Number of threads in Tokio's blocking pool. Default: logical CPUs × 4.
     pub blocking_threads: usize,
     /// `SQLite` `r2d2` connection pool size (default 8).
@@ -1029,6 +1041,30 @@ impl std::fmt::Debug for Config {
             )
             .field("archive_before_prune", &self.archive_before_prune)
             .field("waveform_cache_max_bytes", &self.waveform_cache_max_bytes)
+            .field(
+                "media_reconcile_repair_enabled",
+                &self.media_reconcile_repair_enabled,
+            )
+            .field(
+                "media_reconcile_interval_hours",
+                &self.media_reconcile_interval_hours,
+            )
+            .field(
+                "media_reconcile_files_per_pass",
+                &self.media_reconcile_files_per_pass,
+            )
+            .field(
+                "media_reconcile_database_rows_per_pass",
+                &self.media_reconcile_database_rows_per_pass,
+            )
+            .field(
+                "media_reconcile_hash_bytes_per_pass",
+                &self.media_reconcile_hash_bytes_per_pass,
+            )
+            .field(
+                "media_reconcile_repairs_per_pass",
+                &self.media_reconcile_repairs_per_pass,
+            )
             .field("blocking_threads", &self.blocking_threads)
             .field("db_pool_size", &self.db_pool_size)
             .field("rustwave_url", &"[REDACTED]")
@@ -1316,6 +1352,21 @@ impl Config {
                 );
                 mb.saturating_mul(1024).saturating_mul(1024)
             },
+            media_reconcile_repair_enabled: env_bool("CHAN_MEDIA_RECONCILE_REPAIR_ENABLED", false),
+            media_reconcile_interval_hours: env_parse("CHAN_MEDIA_RECONCILE_INTERVAL_HOURS", 24),
+            media_reconcile_files_per_pass: env_parse("CHAN_MEDIA_RECONCILE_FILES_PER_PASS", 512),
+            media_reconcile_database_rows_per_pass: env_parse(
+                "CHAN_MEDIA_RECONCILE_DATABASE_ROWS_PER_PASS",
+                16_384,
+            ),
+            media_reconcile_hash_bytes_per_pass: env_parse(
+                "CHAN_MEDIA_RECONCILE_HASH_BYTES_PER_PASS",
+                64 * 1024 * 1024,
+            ),
+            media_reconcile_repairs_per_pass: env_parse(
+                "CHAN_MEDIA_RECONCILE_REPAIRS_PER_PASS",
+                32,
+            ),
             blocking_threads: {
                 let cpus = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
                 let configured =
@@ -2341,6 +2392,12 @@ mod tests {
             initial_media_max_active_content_size_bytes: 0,
             archive_before_prune: true,
             waveform_cache_max_bytes: 200 * MIB_U64,
+            media_reconcile_repair_enabled: false,
+            media_reconcile_interval_hours: 24,
+            media_reconcile_files_per_pass: 512,
+            media_reconcile_database_rows_per_pass: 16_384,
+            media_reconcile_hash_bytes_per_pass: 64 * MIB_U64,
+            media_reconcile_repairs_per_pass: 32,
             blocking_threads: 4,
             db_pool_size: 8,
             rustwave_url: "http://localhost:7071".to_owned(),
