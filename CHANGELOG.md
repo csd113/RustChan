@@ -2,7 +2,7 @@
 
 All notable changes to RustChan will be documented in this file.
 
-## indev
+## RustChan 1.4.0
 
 ### Added
 

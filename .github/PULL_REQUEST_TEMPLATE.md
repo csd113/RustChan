@@ -24,7 +24,7 @@ State "None" where appropriate.
       explained why no test applies.
 - [ ] Formatting, Clippy, Rust tests, and/or focused Playwright checks were run
       as appropriate to the change.
-- [ ] Documentation and the `CHANGELOG.md` `indev` section were updated when
+- [ ] Documentation and the top `CHANGELOG.md` section were updated when
       behavior, configuration, deployment, or operator expectations changed.
 - [ ] Schema changes use a forward migration and cover fresh, upgrade, failure,
       and backup/restore behavior where applicable.

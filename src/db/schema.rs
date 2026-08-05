@@ -780,8 +780,8 @@ fn rebuild_boards_table_for_baseline(conn: &rusqlite::Connection) -> Result<()> 
         DROP TABLE boards;
         ALTER TABLE boards_new RENAME TO boards;
         ",
-        "Structural migration: rebuild boards table for 1.3.0 baseline failed",
-        "Applied structural migration: boards table matches 1.3.0 baseline",
+        "Structural migration: rebuild boards table for 1.4.0 baseline failed",
+        "Applied structural migration: boards table matches 1.4.0 baseline",
     )
 }
 
@@ -1446,18 +1446,18 @@ mod tests {
         clippy::panic_in_result_fn,
         reason = "test assertions intentionally panic on failure"
     )]
-    fn fresh_database_installs_130_baseline_directly() -> Result<()> {
+    fn fresh_database_installs_140_baseline_directly() -> Result<()> {
         let conn = rusqlite::Connection::open_in_memory()?;
         install_or_migrate_schema(&conn)?;
 
         assert_eq!(
             schema_version(&conn)?,
-            "1.3.0",
+            "1.4.0",
             "fresh schema should record the release baseline"
         );
         assert_eq!(
             baseline_schema_version(),
-            "1.3.0",
+            "1.4.0",
             "compiled baseline should match the release"
         );
         assert!(
@@ -1501,7 +1501,7 @@ mod tests {
         clippy::panic_in_result_fn,
         reason = "test assertions intentionally panic on failure"
     )]
-    fn existing_current_schema_is_adopted_as_130_without_data_loss() -> Result<()> {
+    fn existing_current_schema_is_adopted_as_140_without_data_loss() -> Result<()> {
         let conn = rusqlite::Connection::open_in_memory()?;
         create_baseline_schema_objects(&conn)?;
         conn.execute_batch(
@@ -1520,7 +1520,7 @@ mod tests {
 
         assert_eq!(
             schema_version(&conn)?,
-            "1.3.0",
+            "1.4.0",
             "adopted schema should receive the release version"
         );
         let body: String = conn.query_row("SELECT body FROM posts WHERE id = 100", [], |row| {
@@ -1538,7 +1538,7 @@ mod tests {
         clippy::panic_in_result_fn,
         reason = "test assertions intentionally panic on failure"
     )]
-    fn historical_v41_schema_drift_repairs_to_130_baseline_without_data_loss() -> Result<()> {
+    fn historical_v41_schema_drift_repairs_to_140_baseline_without_data_loss() -> Result<()> {
         let conn = rusqlite::Connection::open_in_memory()?;
         create_baseline_schema_objects(&conn)?;
         conn.execute(
@@ -1575,7 +1575,7 @@ mod tests {
 
         assert_eq!(
             schema_version(&conn)?,
-            "1.3.0",
+            "1.4.0",
             "repaired schema should be stamped with the release version"
         );
         assert!(
@@ -1645,7 +1645,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("does not match RustChan 1.3.0 baseline"),
+                .contains("does not match RustChan 1.4.0 baseline"),
             "unexpected error: {error:#}"
         );
 
@@ -1731,7 +1731,7 @@ mod tests {
         clippy::panic_in_result_fn,
         reason = "test assertions intentionally panic on failure"
     )]
-    fn invalid_structural_change_does_not_stamp_130() -> Result<()> {
+    fn invalid_structural_change_does_not_stamp_140() -> Result<()> {
         let conn = rusqlite::Connection::open_in_memory()?;
         create_baseline_schema_objects(&conn)?;
         conn.execute_batch(

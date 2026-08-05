@@ -81,13 +81,13 @@ src/db/posts.rs	2755	expect	clippy::panic_in_result_fn	test assertions intention
 src/db/posts.rs	2836	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn self_delete_post_deletes_reply_with_matching_token_inside_window
 src/db/posts.rs	2911	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn self_delete_post_rejects_wrong_token
 src/db/posts.rs	2938	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn self_delete_post_refuses_op_when_thread_has_replies
-src/db/schema.rs	1445	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn fresh_database_installs_130_baseline_directly
-src/db/schema.rs	1500	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn existing_current_schema_is_adopted_as_130_without_data_loss
-src/db/schema.rs	1537	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn historical_v41_schema_drift_repairs_to_130_baseline_without_data_loss
+src/db/schema.rs	1445	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn fresh_database_installs_140_baseline_directly
+src/db/schema.rs	1500	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn existing_current_schema_is_adopted_as_140_without_data_loss
+src/db/schema.rs	1537	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn historical_v41_schema_drift_repairs_to_140_baseline_without_data_loss
 src/db/schema.rs	1622	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn partial_schema_fails_closed_without_creating_missing_tables
 src/db/schema.rs	1665	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn unknown_schema_object_fails_closed
 src/db/schema.rs	1687	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn fresh_schema_uses_new_board_feature_defaults
-src/db/schema.rs	1730	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn invalid_structural_change_does_not_stamp_130
+src/db/schema.rs	1730	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn invalid_structural_change_does_not_stamp_140
 src/db/setup.rs	162	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn fresh_database_allows_setup
 src/db/setup.rs	189	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn admin_without_marker_blocks_setup_as_initialized
 src/db/setup.rs	217	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn admin_reopen_makes_setup_available_but_admin_authenticated

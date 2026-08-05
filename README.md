@@ -12,7 +12,7 @@ One binary. One data folder. SQLite only. The rest is features.
 
 RustChan is built in Rust, ships with bundled SQLite, and is designed to be understandable, movable, and fun to run.
 
-Current development version: `1.3.0`.
+Current development version: `1.4.0`.
 
 [What is RustChan?](#what-is-rustchan) ·
 [Why it exists](#why-it-exists) ·
@@ -167,10 +167,10 @@ rustchan-data/
 
 That folder is the thing to back up if you want to move the site or keep it safe.
 
-For RustChan `1.3.0`, fresh databases are created directly from the `1.3.0`
+For RustChan `1.4.0`, fresh databases are created directly from the `1.4.0`
 baseline schema. Earlier internal development migrations were squashed before
 release; a database that already matches the baseline is marked as schema
-version `1.3.0`, while partial or unknown schemas fail closed without deleting
+version `1.4.0`, while partial or unknown schemas fail closed without deleting
 data.
 
 `settings.toml` is generated automatically on first run and documents the available options inline. A few of the more important ones:

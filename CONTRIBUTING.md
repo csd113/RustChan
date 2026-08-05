@@ -122,9 +122,9 @@ flow. Security-sensitive changes need negative tests and failure-path coverage.
 Update `README.md`, `SETUP.md`, generated configuration guidance, or other
 operator documentation when behavior, defaults, features, storage, Tor, TLS,
 backups, moderation, or ChanNet changes. Add a concise entry under the matching
-`CHANGELOG.md` `indev` subsection for notable changes. Do not promise anonymity,
-perfect security, availability, legal compliance, or protection from a
-malicious operator.
+subsection in the top `CHANGELOG.md` section for notable changes. Do not promise
+anonymity, perfect security, availability, legal compliance, or protection from
+a malicious operator.
 
 ### Generated files
 

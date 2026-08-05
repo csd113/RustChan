@@ -564,10 +564,10 @@ mod tests {
     fn db_status_output_uses_release_schema_version() -> anyhow::Result<()> {
         let mut out = Vec::new();
 
-        write_db_status_output(&mut out, "1.3.0 baseline verified", "3.test")?;
+        write_db_status_output(&mut out, "1.4.0 baseline verified", "3.test")?;
         let output = String::from_utf8(out)?;
         anyhow::ensure!(
-            output.contains("Database schema: 1.3.0 baseline verified"),
+            output.contains("Database schema: 1.4.0 baseline verified"),
             "status output should include the release schema label"
         );
         anyhow::ensure!(

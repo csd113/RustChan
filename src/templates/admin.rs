@@ -2153,8 +2153,8 @@ mod tests {
     fn sample_site_health() -> AdminPanelSiteHealthView<'static> {
         AdminPanelSiteHealthView {
             server_status: "ready",
-            rustchan_version: "1.3.0",
-            database_schema_status: "1.3.0 baseline verified",
+            rustchan_version: "1.4.0",
+            database_schema_status: "1.4.0 baseline verified",
             database_integrity_status: "not checked",
             last_successful_backup: "none saved",
             next_scheduled_backup: "not scheduled",
@@ -2180,13 +2180,13 @@ mod tests {
             backup_jobs: "idle",
             restore_jobs: "not available",
             diagnostics_text:
-                "RustChan version: 1.3.0\nDatabase schema: 1.3.0 baseline verified\nRecent warnings:\n  none",
+                "RustChan version: 1.4.0\nDatabase schema: 1.4.0 baseline verified\nRecent warnings:\n  none",
         }
     }
 
     fn sample_dashboard() -> AdminPanelDashboardView<'static> {
         AdminPanelDashboardView {
-            version: "1.3.0",
+            version: "1.4.0",
             build: "test/test",
             setup_status: "complete",
             setup_detail: "Public setup routes are blocked.",
@@ -2570,9 +2570,9 @@ mod tests {
         assert!(html.contains("Database integrity status"));
         assert!(html.contains("open media panel"));
         assert!(html.contains("copy diagnostics"));
-        assert!(html.contains("RustChan version: 1.3.0"));
+        assert!(html.contains("RustChan version: 1.4.0"));
         assert!(html.contains("Database schema"));
-        assert!(html.contains("1.3.0 baseline verified"));
+        assert!(html.contains("1.4.0 baseline verified"));
         assert!(html.contains(r#"data-admin-health-jobs-url="/admin/site-health/jobs""#));
         assert!(html.contains(r#"data-admin-health-job="running_jobs""#));
         assert!(html.contains(r#"data-admin-health-job="queued_jobs""#));
@@ -2760,7 +2760,7 @@ mod tests {
             before: DbHealthSnapshot {
                 schema: DbCheckResult {
                     ok: true,
-                    messages: vec!["1.3.0 baseline verified".into()],
+                    messages: vec!["1.4.0 baseline verified".into()],
                 },
                 integrity: DbCheckResult {
                     ok: false,

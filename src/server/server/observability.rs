@@ -480,7 +480,7 @@ mod tests {
             "rustchan_job_queue_pending",
             "rustchan_media_reconcile_files_scanned_total",
             "rustchan_media_reconcile_repair_conflicts_total",
-            "rustchan_database_schema_valid{version=\"1.3.0\"} 1",
+            "rustchan_database_schema_valid{version=\"1.4.0\"} 1",
         ] {
             assert!(
                 body.contains(metric),

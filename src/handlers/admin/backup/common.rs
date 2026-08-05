@@ -890,7 +890,7 @@ mod tests {
         let manifest = FullBackupManifest {
             version: 3,
             generated_at: 1_700_000_000,
-            rustchan_version: "1.3.0".into(),
+            rustchan_version: "1.4.0".into(),
             db_bytes: u64::try_from(db_bytes.len()).context("convert database size")?,
             upload_file_count: 0,
             favicon_file_count: 0,
@@ -914,7 +914,7 @@ mod tests {
         ensure!(
             error
                 .to_string()
-                .contains("does not match the RustChan 1.3.0 database baseline"),
+                .contains("does not match the RustChan 1.4.0 database baseline"),
             "unexpected error: {error:#}"
         );
         Ok(())
