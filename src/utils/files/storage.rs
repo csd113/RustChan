@@ -508,15 +508,12 @@ fn save_processed_upload(
         apply_image_exif_orientation(&processed.file_path, plan.jpeg_orientation);
     }
 
-    if plan.jpeg_orientation > 1
-        && processed.thumbnail_path.exists()
-        && processed
-            .thumbnail_path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            == Some("webp")
-    {
-        apply_thumb_exif_orientation(&processed.thumbnail_path, plan.jpeg_orientation);
+    if let Some(thumbnail_path) = processed.thumbnail_path.as_ref().filter(|thumbnail_path| {
+        plan.jpeg_orientation > 1
+            && thumbnail_path.exists()
+            && thumbnail_path.extension().and_then(|ext| ext.to_str()) == Some("webp")
+    }) {
+        apply_thumb_exif_orientation(thumbnail_path, plan.jpeg_orientation);
     }
 
     let final_size = final_processed_size_within_limit(&processed, options)?;
@@ -526,15 +523,22 @@ fn save_processed_upload(
         .file_name()
         .and_then(|name| name.to_str())
         .context("Converted file has non-UTF-8 name")?;
-    let thumb_filename = processed
+    let thumb_path = processed
         .thumbnail_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("Thumbnail file has non-UTF-8 name")?;
+        .as_ref()
+        .map(|thumbnail_path| -> Result<String> {
+            let thumb_filename = thumbnail_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("Thumbnail file has non-UTF-8 name")?;
+            Ok(format!("{}/thumbs/{thumb_filename}", options.board_short))
+        })
+        .transpose()?
+        .unwrap_or_default();
 
     Ok(UploadedFile {
         file_path: format!("{}/{filename}", options.board_short),
-        thumb_path: format!("{}/thumbs/{thumb_filename}", options.board_short),
+        thumb_path,
         original_name: crate::utils::sanitize::sanitize_filename(options.original_filename),
         mime_type: processed.mime_type.clone(),
         file_size: i64::try_from(final_size).context("File size overflows i64")?,
@@ -592,7 +596,7 @@ fn final_processed_size_within_limit(
 
 /// Best-effort removes both outputs from a failed processed upload.
 fn cleanup_processed_outputs(processed: &crate::media::ProcessedMedia) {
-    for path in [&processed.file_path, &processed.thumbnail_path] {
+    for path in std::iter::once(&processed.file_path).chain(processed.thumbnail_path.iter()) {
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1251,7 +1255,7 @@ trailer << /Root 1 0 R >>
         options.max_image_size = 4;
         let processed = crate::media::ProcessedMedia {
             file_path: file_path.clone(),
-            thumbnail_path: thumbnail_path.clone(),
+            thumbnail_path: Some(thumbnail_path.clone()),
             mime_type: "image/png".to_owned(),
             was_converted: false,
             final_size: 9,

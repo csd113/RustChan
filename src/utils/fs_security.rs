@@ -73,9 +73,14 @@ pub fn canonical_parent_for_new_child(root: &Path, path: &Path) -> Result<PathBu
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Runtime path has no parent."))?;
+    let relative_parent = parent
+        .strip_prefix(root)
+        .context("Runtime destination is not below its configured root.")?;
     let root = root
         .canonicalize()
         .with_context(|| format!("Canonicalize runtime root {}", root.display()))?;
+    let parent = root.join(relative_parent);
+    reject_symlink_components(&parent)?;
     let parent = parent
         .canonicalize()
         .with_context(|| format!("Canonicalize runtime parent {}", parent.display()))?;

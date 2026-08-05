@@ -34,8 +34,17 @@ pub struct PendingFsOpInsert {
 pub struct UploadFinalizePayload {
     /// Absolute path of the transaction's staging directory.
     pub stage_dir: String,
-    /// Safe upload-root-relative files to publish.
+    /// Safe upload-root-relative required files to publish.
+    ///
+    /// Legacy payloads may also contain their thumbnail here. Replay
+    /// classifies that one path conservatively from `primary_thumb_path`.
     pub relative_paths: Vec<String>,
+    #[serde(default)]
+    /// Safe upload-root-relative optional derived files to publish.
+    pub optional_paths: Vec<String>,
+    #[serde(default)]
+    /// SHA-256 digests of staged artifacts keyed by their relative path.
+    pub artifact_sha256: std::collections::BTreeMap<String, String>,
     /// Optional digest of the primary uploaded file.
     pub primary_hash: Option<String>,
     /// Optional persisted path of the primary file.
@@ -148,80 +157,293 @@ fn safe_relative_path(relative_path: &str, context: &str) -> Result<PathBuf> {
     Ok(normalized)
 }
 
+/// Validate the shape of a managed board upload path.
+fn validate_managed_upload_path(relative_path: &str, thumbnail: bool) -> Result<PathBuf> {
+    let rel = safe_relative_path(relative_path, "Upload finalize")
+        .map_err(|_| anyhow::anyhow!("Upload finalize artifact path contains unsafe components"))?;
+    let components = rel
+        .iter()
+        .map(|component| component.to_str())
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| anyhow::anyhow!("Upload finalize path contains non-UTF-8 components"))?;
+    let valid_board = components.first().is_some_and(|board| {
+        !board.is_empty()
+            && board.len() <= 8
+            && board.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    });
+    let valid_shape = if thumbnail {
+        components.len() == 3 && components.get(1) == Some(&"thumbs")
+    } else {
+        components.len() == 2 && components.get(1) != Some(&".pending")
+    };
+    if !valid_board || !valid_shape {
+        let category = if thumbnail { "thumbnail" } else { "original" };
+        anyhow::bail!("Upload finalize {category} path is outside its managed board category");
+    }
+    Ok(rel)
+}
+
+/// Return whether two managed upload paths belong to the same board.
+fn upload_paths_share_board(left: &str, right: &str) -> bool {
+    Path::new(left).components().next() == Path::new(right).components().next()
+}
+
 /// Validate that every path in an upload-finalization payload stays in its allowed root.
-fn validate_upload_finalize_payload(
+pub(crate) fn validate_upload_finalize_payload(
     upload_dir: &Path,
     payload: &UploadFinalizePayload,
 ) -> Result<()> {
-    let upload_root = validated_restore_path(upload_dir)?;
+    let upload_root =
+        validated_restore_path(upload_dir).context("Upload finalize managed root is invalid")?;
     let pending_root = upload_root.join(".pending");
-    let stage_dir = validated_restore_path(Path::new(&payload.stage_dir))?;
+    let stage_dir = validated_restore_path(Path::new(&payload.stage_dir))
+        .map_err(|_| anyhow::anyhow!("Upload finalize stage path is invalid"))?;
     if stage_dir == pending_root || !stage_dir.starts_with(&pending_root) {
-        anyhow::bail!(
-            "Upload finalize stage {} is outside {}",
-            stage_dir.display(),
-            pending_root.display()
-        );
+        anyhow::bail!("Upload finalize stage is outside the managed pending root");
     }
 
+    let mut seen = std::collections::HashSet::new();
     for relative_path in &payload.relative_paths {
-        let rel = safe_relative_path(relative_path, "Upload finalize")?;
+        let legacy_thumbnail = payload.optional_paths.is_empty()
+            && payload.primary_thumb_path.as_deref() == Some(relative_path.as_str());
+        let rel = validate_managed_upload_path(relative_path, legacy_thumbnail)?;
+        if !seen.insert(relative_path) {
+            anyhow::bail!("Upload finalize contains a duplicate artifact path");
+        }
         let target = upload_root.join(&rel);
         if !target.starts_with(&upload_root) {
-            anyhow::bail!(
-                "Upload finalize target {} escapes {}",
-                target.display(),
-                upload_root.display()
-            );
+            anyhow::bail!("Upload finalize target escapes its managed root");
         }
     }
 
-    for path in [
-        payload.primary_file_path.as_deref(),
-        payload.primary_thumb_path.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let rel = safe_relative_path(path, "Upload finalize metadata")?;
+    for relative_path in &payload.optional_paths {
+        let rel = validate_managed_upload_path(relative_path, true)?;
+        if !seen.insert(relative_path) {
+            anyhow::bail!("Upload finalize contains a duplicate artifact path");
+        }
         let target = upload_root.join(&rel);
         if !target.starts_with(&upload_root) {
-            anyhow::bail!(
-                "Upload finalize metadata target {} escapes {}",
-                target.display(),
-                upload_root.display()
-            );
+            anyhow::bail!("Upload finalize optional target escapes its managed root");
+        }
+    }
+
+    if let Some(file_path) = payload.primary_file_path.as_deref() {
+        validate_managed_upload_path(file_path, false)?;
+    }
+    if let Some(thumb_path) = payload.primary_thumb_path.as_deref() {
+        validate_managed_upload_path(thumb_path, true)?;
+        let file_path = payload.primary_file_path.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("Upload finalize thumbnail metadata has no primary file")
+        })?;
+        if file_path == thumb_path || !upload_paths_share_board(file_path, thumb_path) {
+            anyhow::bail!("Upload finalize thumbnail metadata is not paired with its primary");
+        }
+        let is_known_artifact = payload.optional_paths.iter().any(|path| path == thumb_path)
+            || payload.relative_paths.iter().any(|path| path == thumb_path);
+        if !is_known_artifact {
+            anyhow::bail!("Upload finalize thumbnail metadata is not an artifact");
+        }
+    }
+
+    if payload.optional_paths.len() > 1
+        || payload.optional_paths.first().map(String::as_str)
+            != payload
+                .primary_thumb_path
+                .as_deref()
+                .filter(|_| !payload.optional_paths.is_empty())
+    {
+        anyhow::bail!("Upload finalize optional artifact metadata is inconsistent");
+    }
+    if let Some(file_path) = payload.primary_file_path.as_deref() {
+        if !payload.relative_paths.iter().any(|path| path == file_path) {
+            anyhow::bail!("Upload finalize primary is not a required artifact");
+        }
+    }
+    let primary_metadata_count = [
+        payload.primary_hash.is_some(),
+        payload.primary_file_path.is_some(),
+        payload.primary_mime_type.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    if primary_metadata_count != 0 && primary_metadata_count != 3 {
+        anyhow::bail!("Upload finalize primary hash metadata is incomplete");
+    }
+
+    for path in payload.artifact_sha256.keys() {
+        if !seen.contains(path) {
+            anyhow::bail!("Upload finalize digest names an unknown artifact");
+        }
+    }
+    if !payload.artifact_sha256.is_empty() {
+        if payload.artifact_sha256.len() != seen.len() {
+            anyhow::bail!("Upload finalize artifact digest set is incomplete");
+        }
+        if payload.artifact_sha256.values().any(|digest| {
+            digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }) {
+            anyhow::bail!("Upload finalize artifact digest is invalid");
         }
     }
 
     Ok(())
 }
 
-/// Move one validated staged file into the live upload tree.
-fn move_stage_file(stage_dir: &Path, upload_dir: &Path, relative_path: &str) -> Result<()> {
+/// Compute the digest of one regular upload artifact.
+pub(crate) fn upload_artifact_sha256(path: &Path, category: &str) -> Result<String> {
+    use sha2::{Digest as _, Sha256};
+    use std::io::Read as _;
+
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("Inspect staged {category} artifact"))?;
+    if !metadata.file_type().is_file() {
+        anyhow::bail!("Staged {category} artifact is not a regular file");
+    }
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("Open staged {category} artifact"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("Read staged {category} artifact"))?;
+        if read == 0 {
+            break;
+        }
+        let bytes = buffer
+            .get(..read)
+            .ok_or_else(|| anyhow::anyhow!("Artifact read exceeded its hash buffer"))?;
+        hasher.update(bytes);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Resolve and hash a staged artifact without following symlink components.
+pub(crate) fn staged_upload_artifact_sha256(
+    stage_dir: &Path,
+    relative_path: &str,
+    category: &str,
+) -> Result<String> {
+    let path = crate::utils::fs_security::existing_regular_file_child(stage_dir, relative_path)
+        .with_context(|| format!("Validate staged {category} artifact"))?;
+    upload_artifact_sha256(&path, category)
+}
+
+/// Verify that an existing artifact is a regular file and matches its digest.
+fn artifact_is_installed(
+    upload_dir: &Path,
+    path: &Path,
+    digest: Option<&str>,
+    category: &str,
+) -> Result<bool> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("Inspect {category} target")),
+    };
+    if !metadata.file_type().is_file() {
+        anyhow::bail!("Upload finalize {category} target is not a regular file");
+    }
+    crate::utils::fs_security::canonical_parent_for_new_child(upload_dir, path)
+        .with_context(|| format!("Validate {category} target parent"))?;
+    crate::utils::fs_security::assert_regular_file_no_symlink(path)
+        .with_context(|| format!("Validate {category} target"))?;
+    digest.map_or(Ok(true), |expected| {
+        Ok(upload_artifact_sha256(path, category)? == expected)
+    })
+}
+
+/// Move one validated required staged file into the live upload tree.
+fn move_required_stage_file(
+    stage_dir: &Path,
+    upload_dir: &Path,
+    relative_path: &str,
+    digest: Option<&str>,
+) -> Result<()> {
     let source = stage_dir.join(relative_path);
     let target = upload_dir.join(relative_path);
-    if !source.exists() {
-        if target.exists() {
+    let source_metadata = match std::fs::symlink_metadata(&source) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("Inspect staged required upload artifact"),
+    };
+    if source_metadata.is_none() {
+        if artifact_is_installed(upload_dir, &target, digest, "required")? {
             return Ok(());
         }
-        anyhow::bail!(
-            "Pending staged file {} is missing and target {} does not exist",
-            source.display(),
-            target.display()
-        );
+        anyhow::bail!("Required staged upload artifact and its valid target are missing");
+    }
+    if !source_metadata.is_some_and(|metadata| metadata.file_type().is_file()) {
+        anyhow::bail!("Staged required upload artifact is not a regular file");
+    }
+    if let Some(expected) = digest {
+        if staged_upload_artifact_sha256(stage_dir, relative_path, "required")? != expected {
+            anyhow::bail!("Staged required upload artifact digest changed");
+        }
+    } else {
+        crate::utils::fs_security::existing_regular_file_child(stage_dir, relative_path)
+            .context("Validate legacy staged required upload artifact")?;
     }
 
     ensure_parent_dir(&target)?;
-    if target.exists() {
-        std::fs::remove_file(&source).with_context(|| {
-            format!("Remove already-finalized staged file {}", source.display())
-        })?;
+    crate::utils::fs_security::canonical_parent_for_new_child(upload_dir, &target)
+        .context("Validate required upload target parent")?;
+    if artifact_is_installed(upload_dir, &target, digest, "required")? {
+        std::fs::remove_file(&source)
+            .with_context(|| "Remove already-finalized staged required upload artifact")?;
         return Ok(());
     }
+    if std::fs::symlink_metadata(&target).is_ok() {
+        anyhow::bail!("Required upload target conflicts with an existing artifact");
+    }
 
-    std::fs::rename(&source, &target)
-        .with_context(|| format!("Move staged file {} into place", target.display()))
+    std::fs::rename(&source, &target).context("Move staged required upload artifact into place")
+}
+
+/// Move an optional derived artifact, returning `false` if both source and
+/// target disappeared after the database commit.
+fn move_optional_stage_file(
+    stage_dir: &Path,
+    upload_dir: &Path,
+    relative_path: &str,
+    digest: Option<&str>,
+) -> Result<bool> {
+    let source = stage_dir.join(relative_path);
+    let target = upload_dir.join(relative_path);
+    let source_metadata = match std::fs::symlink_metadata(&source) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("Inspect staged optional upload artifact"),
+    };
+    if source_metadata.is_none() {
+        return artifact_is_installed(upload_dir, &target, digest, "optional");
+    }
+    if !source_metadata.is_some_and(|metadata| metadata.file_type().is_file()) {
+        anyhow::bail!("Staged optional upload artifact is not a regular file");
+    }
+    if let Some(expected) = digest {
+        if staged_upload_artifact_sha256(stage_dir, relative_path, "optional")? != expected {
+            anyhow::bail!("Staged optional upload artifact digest changed");
+        }
+    } else {
+        crate::utils::fs_security::existing_regular_file_child(stage_dir, relative_path)
+            .context("Validate legacy staged optional upload artifact")?;
+    }
+
+    ensure_parent_dir(&target)?;
+    crate::utils::fs_security::canonical_parent_for_new_child(upload_dir, &target)
+        .context("Validate optional upload target parent")?;
+    if artifact_is_installed(upload_dir, &target, digest, "optional")? {
+        std::fs::remove_file(&source)
+            .context("Remove already-finalized staged optional upload artifact")?;
+        return Ok(true);
+    }
+    if std::fs::symlink_metadata(&target).is_ok() {
+        anyhow::bail!("Optional upload target conflicts with an existing artifact");
+    }
+    std::fs::rename(&source, &target).context("Move staged optional upload artifact into place")?;
+    Ok(true)
 }
 
 /// Remove a file, symlink, or directory tree when it exists.
@@ -231,10 +453,21 @@ fn cleanup_path_if_exists(path: &Path) -> Result<()> {
     };
 
     if metadata.is_dir() {
-        std::fs::remove_dir_all(path)
-            .with_context(|| format!("Remove directory {}", path.display()))?;
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("Remove directory {}", path.display()));
+            }
+        }
     } else {
-        std::fs::remove_file(path).with_context(|| format!("Remove file {}", path.display()))?;
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("Remove file {}", path.display()));
+            }
+        }
     }
 
     Ok(())
@@ -905,25 +1138,140 @@ pub fn finalize_upload_payload(
     upload_dir: &str,
     payload: &UploadFinalizePayload,
 ) -> Result<()> {
+    finalize_upload_payload_for_op(conn, upload_dir, None, payload)
+}
+
+/// Commit upload hash metadata, optional-thumbnail repair, and intent removal.
+fn commit_upload_finalize_metadata(
+    conn: &rusqlite::Connection,
+    pending_op_id: Option<&str>,
+    payload: &UploadFinalizePayload,
+    missing_optional: Option<&str>,
+) -> Result<Vec<i64>> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Begin upload finalization metadata transaction")?;
+    let result = (|| -> Result<Vec<i64>> {
+        let mut repaired_post_ids = Vec::new();
+        if let Some(thumb_path) = missing_optional {
+            let mut statement = conn
+                .prepare("SELECT id FROM posts WHERE thumb_path = ?1 ORDER BY id")
+                .context("Prepare stale thumbnail post lookup")?;
+            repaired_post_ids = statement
+                .query_map([thumb_path], |row| row.get(0))
+                .context("Query stale thumbnail posts")?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .context("Read stale thumbnail post identifiers")?;
+            drop(statement);
+            conn.execute(
+                "UPDATE posts SET thumb_path = NULL WHERE thumb_path = ?1",
+                [thumb_path],
+            )
+            .context("Clear stale post thumbnail paths")?;
+            conn.execute(
+                "UPDATE file_hashes SET thumb_path = '' WHERE thumb_path = ?1",
+                [thumb_path],
+            )
+            .context("Clear stale deduplication thumbnail paths")?;
+        }
+
+        if let (Some(hash), Some(file_path), Some(mime_type)) = (
+            payload.primary_hash.as_deref(),
+            payload.primary_file_path.as_deref(),
+            payload.primary_mime_type.as_deref(),
+        ) {
+            let thumb_path = if missing_optional.is_some() {
+                ""
+            } else {
+                payload.primary_thumb_path.as_deref().unwrap_or("")
+            };
+            crate::db::record_file_hash(conn, hash, file_path, thumb_path, mime_type)?;
+        }
+        if let Some(op_id) = pending_op_id {
+            crate::db::delete_pending_fs_op(conn, op_id)?;
+        }
+        Ok(repaired_post_ids)
+    })();
+    match result {
+        Ok(post_ids) => {
+            conn.execute_batch("COMMIT")
+                .context("Commit upload finalization metadata transaction")?;
+            Ok(post_ids)
+        }
+        Err(error) => {
+            drop(conn.execute_batch("ROLLBACK"));
+            Err(error)
+        }
+    }
+}
+
+/// Finalize an upload and atomically complete its durable operation.
+pub(crate) fn finalize_upload_payload_for_op(
+    conn: &rusqlite::Connection,
+    upload_dir: &str,
+    pending_op_id: Option<&str>,
+    payload: &UploadFinalizePayload,
+) -> Result<()> {
     let upload_root = Path::new(upload_dir);
     let stage_dir = Path::new(&payload.stage_dir);
     validate_upload_finalize_payload(upload_root, payload)?;
 
     for relative_path in &payload.relative_paths {
-        // Payload validation above constrains every source to `.pending/`
-        // and every destination to a normalized relative path under upload_root.
-        move_stage_file(stage_dir, upload_root, relative_path)?;
+        let legacy_optional_thumbnail = payload.optional_paths.is_empty()
+            && payload.primary_thumb_path.as_deref() == Some(relative_path.as_str());
+        if !legacy_optional_thumbnail {
+            move_required_stage_file(
+                stage_dir,
+                upload_root,
+                relative_path,
+                payload
+                    .artifact_sha256
+                    .get(relative_path)
+                    .map(String::as_str),
+            )?;
+        }
     }
 
-    if let (Some(hash), Some(file_path), Some(thumb_path), Some(mime_type)) = (
-        payload.primary_hash.as_deref(),
-        payload.primary_file_path.as_deref(),
-        payload.primary_thumb_path.as_deref(),
-        payload.primary_mime_type.as_deref(),
-    ) {
-        crate::db::record_file_hash(conn, hash, file_path, thumb_path, mime_type)?;
+    let optional_paths = if payload.optional_paths.is_empty() {
+        payload
+            .primary_thumb_path
+            .as_ref()
+            .filter(|thumb_path| payload.relative_paths.contains(thumb_path))
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        payload.optional_paths.iter().collect::<Vec<_>>()
+    };
+    let mut missing_optional = None;
+    for relative_path in optional_paths {
+        let installed = move_optional_stage_file(
+            stage_dir,
+            upload_root,
+            relative_path,
+            payload
+                .artifact_sha256
+                .get(relative_path)
+                .map(String::as_str),
+        )?;
+        if !installed {
+            missing_optional = Some(relative_path.as_str());
+        }
     }
 
+    let repaired_post_ids =
+        commit_upload_finalize_metadata(conn, pending_op_id, payload, missing_optional)?;
+
+    if missing_optional.is_some() {
+        tracing::warn!(
+            target: "pending_fs",
+            op_id = pending_op_id.unwrap_or("direct-finalize"),
+            kind = UPLOAD_FINALIZE_KIND,
+            post_ids = ?repaired_post_ids,
+            source_category = "optional_thumbnail",
+            destination_category = "managed_board_thumbnail",
+            outcome = "repaired",
+            "cleared database references for a lost optional upload thumbnail"
+        );
+    }
     cleanup_path_if_exists(stage_dir)?;
     Ok(())
 }
@@ -1211,15 +1559,20 @@ pub fn reconcile_pending_fs_ops(pool: &crate::db::DbPool, upload_dir: &str) -> R
         .get()
         .context("Get DB connection for startup filesystem cleanup failed")?;
     cleanup_known_upload_temp_paths(Path::new(upload_dir))?;
-    cleanup_generated_sibling_dirs(
-        &crate::favicon::global_backup_source_dir(),
-        &["stage", "old", "restore-stage", "restore-old"],
-    )?;
-    cleanup_generated_sibling_dirs(
-        &crate::banner::backup_source_dir(),
-        &["restore-stage", "restore-old"],
-    )?;
-    cleanup_orphan_banner_files(&conn, Path::new(upload_dir))?;
+    // Global runtime cleanup belongs only to the configured live upload tree.
+    // Keeping it out of reconciliation calls for isolated restore/test roots
+    // also prevents one root's pass from deleting another root's active stage.
+    if Path::new(upload_dir) == Path::new(&crate::config::CONFIG.upload_dir) {
+        cleanup_generated_sibling_dirs(
+            &crate::favicon::global_backup_source_dir(),
+            &["stage", "old", "restore-stage", "restore-old"],
+        )?;
+        cleanup_generated_sibling_dirs(
+            &crate::banner::backup_source_dir(),
+            &["restore-stage", "restore-old"],
+        )?;
+        cleanup_orphan_banner_files(&conn, Path::new(upload_dir))?;
+    }
 
     Ok(())
 }
@@ -1239,7 +1592,7 @@ fn apply_pending_fs_op(
             let payload: UploadFinalizePayload = serde_json::from_str(&op.payload_json)
                 .with_context(|| format!("Parse upload_finalize payload for {}", op.id))?;
             referenced_upload_stage_dirs.insert(payload.stage_dir.clone());
-            finalize_upload_payload(&conn, upload_dir, &payload)?;
+            finalize_upload_payload_for_op(&conn, upload_dir, Some(&op.id), &payload)?;
         }
         DELETE_FILES_KIND => {
             let payload: DeleteFilesPayload = serde_json::from_str(&op.payload_json)
@@ -1283,7 +1636,9 @@ fn apply_pending_fs_op(
         }
         other => anyhow::bail!("Unknown pending_fs_op kind {other:?} for {}", op.id),
     }
-    crate::db::delete_pending_fs_op(&conn, &op.id)?;
+    if op.kind != UPLOAD_FINALIZE_KIND {
+        crate::db::delete_pending_fs_op(&conn, &op.id)?;
+    }
     Ok(())
 }
 
@@ -1596,6 +1951,432 @@ mod tests {
         Ok(())
     }
 
+    /// Seed one board post that references an original and optional thumbnail.
+    fn seed_upload_post(
+        conn: &rusqlite::Connection,
+        file_path: &str,
+        thumb_path: Option<&str>,
+    ) -> Result<i64> {
+        crate::db::create_board(conn, "tech", "Technology", "", false)
+            .context("Create upload recovery board")?;
+        let board_id: i64 = conn.query_row(
+            "SELECT id FROM boards WHERE short_name = 'tech'",
+            [],
+            |row| row.get(0),
+        )?;
+        let thread_id: i64 = conn.query_row(
+            "INSERT INTO threads (board_id, subject) VALUES (?1, 'recovery') RETURNING id",
+            [board_id],
+            |row| row.get(0),
+        )?;
+        Ok(conn.query_row(
+            "INSERT INTO posts
+                (thread_id, board_id, body, body_html, file_path, thumb_path,
+                 mime_type, deletion_token)
+             VALUES (?1, ?2, 'body', 'body', ?3, ?4, 'image/png', 'token')
+             RETURNING id",
+            rusqlite::params![thread_id, board_id, file_path, thumb_path],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Build a new-format upload payload and capture current staged digests.
+    fn upload_payload(
+        stage_dir: &std::path::Path,
+        required: &[&str],
+        optional: Option<&str>,
+        hash: &str,
+    ) -> Result<UploadFinalizePayload> {
+        let mut artifact_sha256 = std::collections::BTreeMap::new();
+        for path in required.iter().copied().chain(optional) {
+            artifact_sha256.insert(
+                path.to_owned(),
+                super::upload_artifact_sha256(&stage_dir.join(path), "test")?,
+            );
+        }
+        Ok(UploadFinalizePayload {
+            stage_dir: stage_dir.display().to_string(),
+            relative_paths: required.iter().map(|path| (*path).to_owned()).collect(),
+            optional_paths: optional.into_iter().map(str::to_owned).collect(),
+            artifact_sha256,
+            primary_hash: Some(hash.to_owned()),
+            primary_file_path: required.first().map(|path| (*path).to_owned()),
+            primary_thumb_path: optional.map(str::to_owned),
+            primary_mime_type: Some("image/png".to_owned()),
+        })
+    }
+
+    /// A legitimate thumbnail-free upload finalizes and remains idempotent.
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally report violated recovery invariants"
+    )]
+    fn reconcile_upload_without_thumbnail_records_original_hash_idempotently() -> Result<()> {
+        let temp_dir = tempfile::tempdir().context("Create upload recovery root")?;
+        let upload_dir = temp_dir.path().join("uploads");
+        let stage_dir = upload_dir.join(".pending/upload-no-thumb");
+        std::fs::create_dir_all(stage_dir.join("tech"))?;
+        std::fs::write(stage_dir.join("tech/original.png"), b"original")?;
+        let payload = upload_payload(&stage_dir, &["tech/original.png"], None, "no-thumb-hash")?;
+        let pool = init_test_pool()?;
+        let conn = pool.get()?;
+        let post_id = seed_upload_post(&conn, "tech/original.png", None)?;
+        let op = crate::pending_fs::PendingFsOpInsert {
+            id: "upload-no-thumb".to_owned(),
+            kind: super::UPLOAD_FINALIZE_KIND,
+            payload_json: serde_json::to_string(&payload)?,
+        };
+        insert_pending_fs_op(&conn, &op)?;
+        drop(conn);
+
+        crate::pending_fs::reconcile_pending_fs_ops(
+            &pool,
+            upload_dir.to_str().context("UTF-8 upload root")?,
+        )?;
+        crate::pending_fs::reconcile_pending_fs_ops(
+            &pool,
+            upload_dir.to_str().context("UTF-8 upload root")?,
+        )?;
+
+        let conn = pool.get()?;
+        let state: (Option<String>, i64, String) = conn.query_row(
+            "SELECT p.thumb_path,
+                    (SELECT COUNT(*) FROM pending_fs_ops),
+                    (SELECT thumb_path FROM file_hashes WHERE sha256 = 'no-thumb-hash')
+             FROM posts p WHERE p.id = ?1",
+            [post_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(state, (None, 0, String::new()));
+        assert_eq!(
+            std::fs::read(upload_dir.join("tech/original.png"))?,
+            b"original"
+        );
+        Ok(())
+    }
+
+    /// Losing an optional thumbnail after commit repairs metadata and does not
+    /// block a later valid operation.
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally report violated recovery invariants"
+    )]
+    fn reconcile_lost_optional_thumbnail_repairs_metadata_and_continues() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let upload_dir = temp_dir.path().join("uploads");
+        let first_stage = upload_dir.join(".pending/upload-lost-thumb");
+        let later_stage = upload_dir.join(".pending/upload-later");
+        std::fs::create_dir_all(first_stage.join("tech/thumbs"))?;
+        std::fs::create_dir_all(later_stage.join("tech"))?;
+        std::fs::write(first_stage.join("tech/original.png"), b"original")?;
+        std::fs::write(first_stage.join("tech/thumbs/original.webp"), b"thumbnail")?;
+        std::fs::write(later_stage.join("tech/later.png"), b"later")?;
+        let first_payload = upload_payload(
+            &first_stage,
+            &["tech/original.png"],
+            Some("tech/thumbs/original.webp"),
+            "lost-thumb-hash",
+        )?;
+        let later_payload = upload_payload(&later_stage, &["tech/later.png"], None, "later-hash")?;
+        std::fs::remove_file(first_stage.join("tech/thumbs/original.webp"))?;
+
+        let pool = init_test_pool()?;
+        let conn = pool.get()?;
+        let post_id = seed_upload_post(
+            &conn,
+            "tech/original.png",
+            Some("tech/thumbs/original.webp"),
+        )?;
+        crate::db::record_file_hash(
+            &conn,
+            "lost-thumb-hash",
+            "tech/original.png",
+            "tech/thumbs/original.webp",
+            "image/png",
+        )?;
+        conn.execute(
+            "INSERT INTO pending_fs_ops (id, kind, payload_json, created_at)
+             VALUES ('lost-thumb', 'upload_finalize', ?1, 1),
+                    ('later-upload', 'upload_finalize', ?2, 2)",
+            rusqlite::params![
+                serde_json::to_string(&first_payload)?,
+                serde_json::to_string(&later_payload)?
+            ],
+        )?;
+        drop(conn);
+
+        crate::pending_fs::reconcile_pending_fs_ops(
+            &pool,
+            upload_dir.to_str().context("UTF-8 upload root")?,
+        )?;
+        crate::pending_fs::reconcile_pending_fs_ops(
+            &pool,
+            upload_dir.to_str().context("UTF-8 upload root")?,
+        )?;
+
+        let conn = pool.get()?;
+        let thumb_path: Option<String> = conn.query_row(
+            "SELECT thumb_path FROM posts WHERE id = ?1",
+            [post_id],
+            |row| row.get(0),
+        )?;
+        let hash_thumb: String = conn.query_row(
+            "SELECT thumb_path FROM file_hashes WHERE sha256 = 'lost-thumb-hash'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(thumb_path.is_none());
+        assert!(hash_thumb.is_empty());
+        assert!(crate::db::list_pending_fs_ops(&conn)?.is_empty());
+        assert!(upload_dir.join("tech/original.png").is_file());
+        assert!(upload_dir.join("tech/later.png").is_file());
+        Ok(())
+    }
+
+    /// Thumbnail metadata repair is atomic and can resume after a database
+    /// failure without re-moving the original.
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally report violated recovery invariants"
+    )]
+    fn lost_thumbnail_metadata_repair_rolls_back_and_retries() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let upload_dir = temp_dir.path().join("uploads");
+        let stage_dir = upload_dir.join(".pending/repair-retry");
+        std::fs::create_dir_all(stage_dir.join("tech/thumbs"))?;
+        std::fs::write(stage_dir.join("tech/original.png"), b"original")?;
+        std::fs::write(stage_dir.join("tech/thumbs/original.webp"), b"thumbnail")?;
+        let payload = upload_payload(
+            &stage_dir,
+            &["tech/original.png"],
+            Some("tech/thumbs/original.webp"),
+            "repair-retry-hash",
+        )?;
+        std::fs::remove_file(stage_dir.join("tech/thumbs/original.webp"))?;
+
+        let pool = init_test_pool()?;
+        let conn = pool.get()?;
+        let post_id = seed_upload_post(
+            &conn,
+            "tech/original.png",
+            Some("tech/thumbs/original.webp"),
+        )?;
+        crate::db::record_file_hash(
+            &conn,
+            "repair-retry-hash",
+            "tech/original.png",
+            "tech/thumbs/original.webp",
+            "image/png",
+        )?;
+        insert_pending_fs_op(
+            &conn,
+            &crate::pending_fs::PendingFsOpInsert {
+                id: "repair-retry".to_owned(),
+                kind: super::UPLOAD_FINALIZE_KIND,
+                payload_json: serde_json::to_string(&payload)?,
+            },
+        )?;
+        conn.execute_batch(
+            "CREATE TRIGGER fail_thumbnail_hash_repair
+             BEFORE UPDATE OF thumb_path ON file_hashes
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected hash repair failure');
+             END;",
+        )?;
+        drop(conn);
+
+        let first = crate::pending_fs::reconcile_pending_fs_ops(
+            &pool,
+            upload_dir.to_str().context("UTF-8 upload root")?,
+        );
+        assert!(
+            first.is_err(),
+            "injected metadata repair should fail closed"
+        );
+        let conn = pool.get()?;
+        let state: (Option<String>, String, i64) = conn.query_row(
+            "SELECT p.thumb_path,
+                    (SELECT thumb_path FROM file_hashes
+                     WHERE sha256 = 'repair-retry-hash'),
+                    (SELECT COUNT(*) FROM pending_fs_ops WHERE id = 'repair-retry')
+             FROM posts p WHERE p.id = ?1",
+            [post_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(
+            state,
+            (
+                Some("tech/thumbs/original.webp".to_owned()),
+                "tech/thumbs/original.webp".to_owned(),
+                1
+            )
+        );
+        assert!(upload_dir.join("tech/original.png").is_file());
+        conn.execute_batch("DROP TRIGGER fail_thumbnail_hash_repair")?;
+        drop(conn);
+
+        crate::pending_fs::reconcile_pending_fs_ops(
+            &pool,
+            upload_dir.to_str().context("UTF-8 upload root")?,
+        )?;
+        let conn = pool.get()?;
+        let final_state: (Option<String>, String, i64) = conn.query_row(
+            "SELECT p.thumb_path,
+                    (SELECT thumb_path FROM file_hashes
+                     WHERE sha256 = 'repair-retry-hash'),
+                    (SELECT COUNT(*) FROM pending_fs_ops)
+             FROM posts p WHERE p.id = ?1",
+            [post_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(final_state, (None, String::new(), 0));
+        Ok(())
+    }
+
+    /// A legacy impossible thumbnail move is repaired without losing its
+    /// already-installed original.
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally report violated recovery invariants"
+    )]
+    fn reconcile_legacy_missing_thumbnail_repairs_stale_references() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let upload_dir = temp_dir.path().join("uploads");
+        let stage_dir = upload_dir.join(".pending/legacy-upload");
+        std::fs::create_dir_all(&stage_dir)?;
+        std::fs::create_dir_all(upload_dir.join("tech"))?;
+        std::fs::write(upload_dir.join("tech/original.png"), b"original")?;
+        let payload = UploadFinalizePayload {
+            stage_dir: stage_dir.display().to_string(),
+            relative_paths: vec![
+                "tech/original.png".to_owned(),
+                "tech/thumbs/original.webp".to_owned(),
+            ],
+            optional_paths: Vec::new(),
+            artifact_sha256: std::collections::BTreeMap::new(),
+            primary_hash: Some("legacy-hash".to_owned()),
+            primary_file_path: Some("tech/original.png".to_owned()),
+            primary_thumb_path: Some("tech/thumbs/original.webp".to_owned()),
+            primary_mime_type: Some("image/png".to_owned()),
+        };
+        let pool = init_test_pool()?;
+        let conn = pool.get()?;
+        let post_id = seed_upload_post(
+            &conn,
+            "tech/original.png",
+            Some("tech/thumbs/original.webp"),
+        )?;
+        crate::db::record_file_hash(
+            &conn,
+            "legacy-hash",
+            "tech/original.png",
+            "tech/thumbs/original.webp",
+            "image/png",
+        )?;
+        insert_pending_fs_op(
+            &conn,
+            &crate::pending_fs::PendingFsOpInsert {
+                id: "legacy-upload".to_owned(),
+                kind: super::UPLOAD_FINALIZE_KIND,
+                payload_json: serde_json::to_string(&payload)?,
+            },
+        )?;
+        drop(conn);
+
+        for _ in 0..2 {
+            crate::pending_fs::reconcile_pending_fs_ops(
+                &pool,
+                upload_dir.to_str().context("UTF-8 upload root")?,
+            )?;
+        }
+
+        let conn = pool.get()?;
+        let thumb_path: Option<String> = conn.query_row(
+            "SELECT thumb_path FROM posts WHERE id = ?1",
+            [post_id],
+            |row| row.get(0),
+        )?;
+        assert!(thumb_path.is_none());
+        assert_eq!(
+            conn.query_row(
+                "SELECT thumb_path FROM file_hashes WHERE sha256 = 'legacy-hash'",
+                [],
+                |row| row.get::<_, String>(0)
+            )?,
+            ""
+        );
+        assert!(crate::db::list_pending_fs_ops(&conn)?.is_empty());
+        assert_eq!(
+            std::fs::read(upload_dir.join("tech/original.png"))?,
+            b"original"
+        );
+        Ok(())
+    }
+
+    /// A missing required original remains quarantined while a later valid
+    /// upload still completes.
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally report violated recovery invariants"
+    )]
+    fn reconcile_missing_required_original_isolated_from_later_upload() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let upload_dir = temp_dir.path().join("uploads");
+        let missing_stage = upload_dir.join(".pending/missing-required");
+        let valid_stage = upload_dir.join(".pending/valid-later");
+        std::fs::create_dir_all(&missing_stage)?;
+        std::fs::create_dir_all(valid_stage.join("tech"))?;
+        std::fs::write(valid_stage.join("tech/valid.png"), b"valid")?;
+        let missing_payload = UploadFinalizePayload {
+            stage_dir: missing_stage.display().to_string(),
+            relative_paths: vec!["tech/missing.png".to_owned()],
+            optional_paths: Vec::new(),
+            artifact_sha256: std::collections::BTreeMap::new(),
+            primary_hash: Some("missing-hash".to_owned()),
+            primary_file_path: Some("tech/missing.png".to_owned()),
+            primary_thumb_path: None,
+            primary_mime_type: Some("image/png".to_owned()),
+        };
+        let valid_payload = upload_payload(&valid_stage, &["tech/valid.png"], None, "valid-hash")?;
+        let pool = init_test_pool()?;
+        let conn = pool.get()?;
+        seed_upload_post(&conn, "tech/missing.png", None)?;
+        conn.execute(
+            "INSERT INTO pending_fs_ops (id, kind, payload_json, created_at)
+             VALUES ('missing-required', 'upload_finalize', ?1, 1),
+                    ('valid-later', 'upload_finalize', ?2, 2)",
+            rusqlite::params![
+                serde_json::to_string(&missing_payload)?,
+                serde_json::to_string(&valid_payload)?
+            ],
+        )?;
+        drop(conn);
+
+        let result = crate::pending_fs::reconcile_pending_fs_ops(
+            &pool,
+            upload_dir.to_str().context("UTF-8 upload root")?,
+        );
+        assert!(
+            result.is_err(),
+            "missing required original must remain fail-closed"
+        );
+        let conn = pool.get()?;
+        let pending = crate::db::list_pending_fs_ops(&conn)?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending.first().map(|operation| operation.id.as_str()),
+            Some("missing-required")
+        );
+        assert!(upload_dir.join("tech/valid.png").is_file());
+        assert!(!upload_dir.join("tech/missing.png").exists());
+        Ok(())
+    }
+
     /// Banner cleanup removes canonical orphans while preserving referenced and unknown files.
     #[test]
     #[expect(
@@ -1783,6 +2564,8 @@ mod tests {
         let payload = UploadFinalizePayload {
             stage_dir: stage_dir.display().to_string(),
             relative_paths: vec!["../sentinel.txt".to_owned()],
+            optional_paths: Vec::new(),
+            artifact_sha256: std::collections::BTreeMap::new(),
             primary_hash: None,
             primary_file_path: Some("../sentinel.txt".to_owned()),
             primary_thumb_path: None,
@@ -1830,6 +2613,8 @@ mod tests {
         let payload = UploadFinalizePayload {
             stage_dir: stage_dir.display().to_string(),
             relative_paths: vec!["tech/file.webp".to_owned()],
+            optional_paths: Vec::new(),
+            artifact_sha256: std::collections::BTreeMap::new(),
             primary_hash: None,
             primary_file_path: Some("tech/file.webp".to_owned()),
             primary_thumb_path: None,

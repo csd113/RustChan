@@ -246,35 +246,110 @@ fn cleanup_unused_upload_stage(stage_root: Option<&std::path::Path>) {
 /// Builds upload finalize payload.
 fn build_upload_finalize_payload(
     stage_dir: &std::path::Path,
-    primary: Option<&crate::utils::files::UploadedFile>,
-    audio: Option<&crate::utils::files::UploadedFile>,
+    mut primary: Option<&mut crate::utils::files::UploadedFile>,
+    audio: Option<&mut crate::utils::files::UploadedFile>,
     primary_hash: Option<String>,
-) -> Option<crate::pending_fs::UploadFinalizePayload> {
+) -> Result<Option<crate::pending_fs::UploadFinalizePayload>> {
     let mut relative_paths = Vec::new();
+    let mut optional_paths = Vec::new();
+    let mut artifact_sha256 = std::collections::BTreeMap::new();
 
-    if let Some(file) = primary.filter(|file| !file.dedup_reused) {
+    if let Some(file) = primary.as_deref().filter(|file| !file.dedup_reused) {
         relative_paths.push(file.file_path.clone());
-        if !file.thumb_path.is_empty() {
-            relative_paths.push(file.thumb_path.clone());
-        }
     }
 
-    if let Some(file) = audio.filter(|file| !file.dedup_reused) {
+    if let Some(file) = audio.as_deref().filter(|file| !file.dedup_reused) {
         relative_paths.push(file.file_path.clone());
     }
 
     relative_paths.sort_unstable();
     relative_paths.dedup();
 
-    (!relative_paths.is_empty()).then(|| crate::pending_fs::UploadFinalizePayload {
+    for relative_path in &relative_paths {
+        artifact_sha256.insert(
+            relative_path.clone(),
+            crate::pending_fs::staged_upload_artifact_sha256(stage_dir, relative_path, "required")
+                .map_err(AppError::Internal)?,
+        );
+    }
+
+    if let Some(file) = primary.as_deref_mut().filter(|file| !file.dedup_reused) {
+        if !file.thumb_path.is_empty() {
+            let staged_path = stage_dir.join(&file.thumb_path);
+            match std::fs::symlink_metadata(&staged_path) {
+                Ok(metadata) if metadata.file_type().is_file() => {
+                    optional_paths.push(file.thumb_path.clone());
+                    artifact_sha256.insert(
+                        file.thumb_path.clone(),
+                        crate::pending_fs::staged_upload_artifact_sha256(
+                            stage_dir,
+                            &file.thumb_path,
+                            "optional",
+                        )
+                        .map_err(AppError::Internal)?,
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::warn!(
+                        artifact = "optional_thumbnail",
+                        outcome = "omitted_before_commit",
+                        "generated thumbnail was absent; preserving upload without it"
+                    );
+                    file.thumb_path.clear();
+                }
+                Ok(_) => {
+                    return Err(AppError::Internal(anyhow::anyhow!(
+                        "Optional staged upload artifact is not a regular file"
+                    )));
+                }
+                Err(error) => {
+                    return Err(AppError::Internal(anyhow::anyhow!(
+                        "Optional staged upload artifact cannot be inspected: {error}"
+                    )));
+                }
+            }
+        }
+    }
+
+    if primary
+        .as_deref()
+        .is_some_and(|primary| primary.thumb_path.is_empty())
+    {
+        if let Some(audio) = audio {
+            audio.thumb_path.clear();
+        }
+    }
+
+    let payload = (!relative_paths.is_empty()).then(|| crate::pending_fs::UploadFinalizePayload {
         stage_dir: stage_dir.display().to_string(),
         relative_paths,
+        optional_paths,
+        artifact_sha256,
         primary_hash,
-        primary_file_path: primary.map(|file| file.file_path.clone()),
+        primary_file_path: primary
+            .as_deref()
+            .filter(|file| !file.dedup_reused)
+            .map(|file| file.file_path.clone()),
         primary_thumb_path: primary
+            .as_deref()
+            .filter(|file| !file.dedup_reused)
             .and_then(|file| (!file.thumb_path.is_empty()).then(|| file.thumb_path.clone())),
-        primary_mime_type: primary.map(|file| file.mime_type.clone()),
-    })
+        primary_mime_type: primary
+            .as_deref()
+            .filter(|file| !file.dedup_reused)
+            .map(|file| file.mime_type.clone()),
+    });
+    if let Some(payload) = payload.as_ref() {
+        let upload_root = stage_dir
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or_else(|| {
+                AppError::Internal(anyhow::anyhow!("Upload stage has no managed root"))
+            })?;
+        crate::pending_fs::validate_upload_finalize_payload(upload_root, payload)
+            .map_err(AppError::Internal)?;
+    }
+    Ok(payload)
 }
 
 /// Builds pending upload op.
@@ -306,16 +381,13 @@ pub(crate) fn finalize_pending_uploads(
         return;
     };
 
-    match crate::pending_fs::finalize_upload_payload(conn, upload_dir, &pending.payload) {
-        Ok(()) => {
-            if let Err(error) = db::delete_pending_fs_op(conn, &pending.op_id) {
-                tracing::error!(
-                    op_id = %pending.op_id,
-                    error = %error,
-                    "finalized upload files but failed to clear pending_fs_op"
-                );
-            }
-        }
+    match crate::pending_fs::finalize_upload_payload_for_op(
+        conn,
+        upload_dir,
+        Some(&pending.op_id),
+        &pending.payload,
+    ) {
+        Ok(()) => {}
         Err(error) => {
             tracing::error!(
                 op_id = %pending.op_id,
@@ -421,7 +493,7 @@ pub(crate) fn process_uploads(
         config.ffmpeg_webp_available,
     );
 
-    let (primary, audio, primary_hash) = match processed {
+    let (mut primary, mut audio, primary_hash) = match processed {
         Ok(processed) => processed,
         Err(error) => {
             cleanup_unused_upload_stage(stage_root.as_deref());
@@ -429,13 +501,17 @@ pub(crate) fn process_uploads(
         }
     };
 
-    let pending_finalize = stage_root.as_ref().and_then(|stage_dir| {
-        build_upload_finalize_payload(stage_dir, primary.as_ref(), audio.as_ref(), primary_hash)
-            .map(|payload| PendingUploadFinalize {
-                op_id: uuid::Uuid::new_v4().to_string(),
-                payload,
-            })
-    });
+    let pending_finalize = stage_root
+        .as_ref()
+        .map(|stage_dir| {
+            build_upload_finalize_payload(stage_dir, primary.as_mut(), audio.as_mut(), primary_hash)
+        })
+        .transpose()?
+        .flatten()
+        .map(|payload| PendingUploadFinalize {
+            op_id: uuid::Uuid::new_v4().to_string(),
+            payload,
+        });
 
     if pending_finalize.is_none() {
         cleanup_unused_upload_stage(stage_root.as_deref());
@@ -1952,7 +2028,12 @@ mod tests {
 
     #[test]
     fn upload_finalize_payload_omits_empty_generic_thumb_path() -> Result<()> {
-        let primary = crate::utils::files::UploadedFile {
+        let upload_dir = tempfile::tempdir().context("create upload root")?;
+        let stage_dir = upload_dir.path().join(".pending/upload-test");
+        std::fs::create_dir_all(stage_dir.join("test")).context("create upload stage")?;
+        std::fs::write(stage_dir.join("test/file.bin"), b"file")
+            .context("write staged original")?;
+        let mut primary = crate::utils::files::UploadedFile {
             file_path: "test/file.bin".to_owned(),
             thumb_path: String::new(),
             original_name: "file.bin".to_owned(),
@@ -1964,16 +2045,88 @@ mod tests {
         };
 
         let payload = super::build_upload_finalize_payload(
-            std::path::Path::new("/tmp/rustchan-stage"),
-            Some(&primary),
+            &stage_dir,
+            Some(&mut primary),
             None,
-            None,
+            Some("original-upload-hash".to_owned()),
         )
-        .context("failed to build generic upload payload")?;
+        .context("failed to build generic upload payload")?
+        .context("generic upload should require finalization")?;
 
         assert_eq!(payload.relative_paths, vec!["test/file.bin"]);
+        assert!(payload.optional_paths.is_empty());
         assert_eq!(payload.primary_file_path.as_deref(), Some("test/file.bin"));
         assert!(payload.primary_thumb_path.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn thumbnail_failures_preserve_original_and_omit_derived_intent_metadata() -> Result<()> {
+        let state = crate::test_support::app_state();
+        let conn = state.db.get().context("get test database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)?;
+        let board = crate::db::get_board_by_short(&conn, TEST_BOARD)?
+            .context("test board did not exist")?;
+        let upload_dir = tempfile::tempdir().context("create upload directory")?;
+        let png = one_pixel_png()?;
+
+        for (index, mode) in [
+            crate::media::TestThumbnailFailure::OutputCreation,
+            crate::media::TestThumbnailFailure::Encoder,
+            crate::media::TestThumbnailFailure::TempRename,
+            crate::media::TestThumbnailFailure::InvalidDerivedOutput,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let _override = crate::media::override_thumbnail_failure(mode);
+            let uploads = process_uploads(
+                None,
+                Some(temp_upload(&format!("failure-{index}.png"), &png)?),
+                None,
+                &board,
+                &conn,
+                &UploadConfig {
+                    upload_dir: upload_dir.path().to_str().context("UTF-8 upload root")?,
+                    thumb_size: 64,
+                    max_image_size: 1024 * 1024,
+                    max_video_size: 1024 * 1024,
+                    max_audio_size: 1024 * 1024,
+                    max_pdf_size: 1024 * 1024,
+                    ffmpeg_available: false,
+                    ffprobe_available: false,
+                    ffmpeg_webp_available: false,
+                },
+            )?;
+
+            let primary = uploads
+                .primary
+                .as_ref()
+                .context("missing processed original")?;
+            let pending = uploads
+                .pending_finalize
+                .as_ref()
+                .context("missing original finalize intent")?;
+            assert!(primary.thumb_path.is_empty());
+            assert!(pending.payload.primary_thumb_path.is_none());
+            assert!(pending.payload.optional_paths.is_empty());
+            assert_eq!(
+                pending.payload.relative_paths,
+                vec![primary.file_path.clone()]
+            );
+            assert!(
+                std::path::Path::new(&pending.payload.stage_dir)
+                    .join(&primary.file_path)
+                    .is_file(),
+                "successfully processed original should remain staged"
+            );
+        }
+
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM file_hashes", [], |row| row
+                .get::<_, i64>(0))?,
+            0
+        );
         Ok(())
     }
 
