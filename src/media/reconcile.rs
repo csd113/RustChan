@@ -598,6 +598,7 @@ struct InventoryEntry {
 enum InventoryEntryKind {
     File,
     Symlink,
+    #[cfg(unix)]
     HardLink,
     UnexpectedDirectory,
     Special,
@@ -2110,7 +2111,8 @@ struct InventoryWalker<'a> {
     model: &'a ReferenceModel,
     after: Option<&'a str>,
     limit: usize,
-    root_device: Option<u64>,
+    #[cfg(unix)]
+    root_device: u64,
     page: InventoryPage,
 }
 
@@ -2129,15 +2131,14 @@ impl<'a> InventoryWalker<'a> {
         #[cfg(unix)]
         let root_device = {
             use std::os::unix::fs::MetadataExt as _;
-            Some(metadata.dev())
+            metadata.dev()
         };
-        #[cfg(not(unix))]
-        let root_device = None;
         Ok(Self {
             root,
             model,
             after: cursor.after_managed_key.as_deref(),
             limit,
+            #[cfg(unix)]
             root_device,
             page: InventoryPage::default(),
         })
@@ -2575,8 +2576,7 @@ impl<'a> InventoryWalker<'a> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
-            self.root_device
-                .is_some_and(|device| metadata.dev() != device)
+            metadata.dev() != self.root_device
         }
         #[cfg(not(unix))]
         {
@@ -2851,6 +2851,7 @@ const fn classification_for_entry_kind(kind: InventoryEntryKind) -> AuditClassif
     match kind {
         InventoryEntryKind::File => AuditClassification::Healthy,
         InventoryEntryKind::Symlink => AuditClassification::UnsafeSymlink,
+        #[cfg(unix)]
         InventoryEntryKind::HardLink => AuditClassification::UnsafeHardLink,
         InventoryEntryKind::UnexpectedDirectory => AuditClassification::UnexpectedDirectory,
         InventoryEntryKind::Special => AuditClassification::UnsafeSpecialEntry,
