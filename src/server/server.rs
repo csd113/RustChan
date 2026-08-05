@@ -266,6 +266,36 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             );
         }
     }
+    let startup_media_reconciliation = match crate::workers::reconcile_media_job_states(
+        &pool,
+        0,
+        0,
+        crate::workers::MEDIA_RECONCILE_BATCH,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::error!(
+                target: "workers",
+                error = %error,
+                "startup media reconciliation failed; periodic recovery remains enabled"
+            );
+            crate::workers::MediaReconciliation::default()
+        }
+    };
+    if startup_media_reconciliation.jobs_resolved > 0
+        || startup_media_reconciliation.posts_repaired > 0
+        || startup_media_reconciliation.malformed_jobs > 0
+    {
+        tracing::warn!(
+            target: "workers",
+            jobs_scanned = startup_media_reconciliation.jobs_scanned,
+            posts_scanned = startup_media_reconciliation.posts_scanned,
+            jobs_resolved = startup_media_reconciliation.jobs_resolved,
+            posts_repaired = startup_media_reconciliation.posts_repaired,
+            malformed_jobs = startup_media_reconciliation.malformed_jobs,
+            "startup media reconciliation repaired legacy state"
+        );
+    }
 
     // Check whether cookie_secret has changed since the last run (#19).
     // Must run after DB init so the site_settings table exists.
@@ -557,6 +587,65 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // spawned below. detect_tor is called later, after the first-run wizard.
     let worker_cancel = state.job_queue.cancel.clone();
     let start_time = Instant::now();
+
+    // Media reconciliation is deliberately paged and periodic: workers poll
+    // durable pending rows independently, while this pass repairs only bounded
+    // legacy inconsistencies without scanning the whole table on each loop.
+    {
+        let reconcile_pool = pool.clone();
+        let reconcile_queue = Arc::clone(&state.job_queue);
+        let cancel_clone = worker_cancel.clone();
+        tokio::spawn(async move {
+            let mut job_cursor = startup_media_reconciliation.next_job_id;
+            let mut post_cursor = startup_media_reconciliation.next_post_id;
+            let mut interval = tokio::time::interval(Duration::from_mins(1));
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let pass_pool = reconcile_pool.clone();
+                        let pass = tokio::task::spawn_blocking(move || {
+                            crate::workers::reconcile_media_job_states(
+                                &pass_pool,
+                                job_cursor,
+                                post_cursor,
+                                crate::workers::MEDIA_RECONCILE_BATCH,
+                            )
+                        }).await;
+                        match pass {
+                            Ok(Ok(report)) => {
+                                job_cursor = report.next_job_id;
+                                post_cursor = report.next_post_id;
+                                if report.jobs_resolved > 0 || report.posts_repaired > 0 {
+                                    tracing::info!(
+                                        target: "workers",
+                                        jobs_scanned = report.jobs_scanned,
+                                        posts_scanned = report.posts_scanned,
+                                        jobs_resolved = report.jobs_resolved,
+                                        posts_repaired = report.posts_repaired,
+                                        malformed_jobs = report.malformed_jobs,
+                                        "periodic media reconciliation repaired legacy state"
+                                    );
+                                    reconcile_queue.notify.notify_waiters();
+                                }
+                            }
+                            Ok(Err(error)) => tracing::error!(
+                                target: "workers",
+                                error = %error,
+                                "periodic media reconciliation failed"
+                            ),
+                            Err(error) => tracing::error!(
+                                target: "workers",
+                                error = %error,
+                                "periodic media reconciliation task failed"
+                            ),
+                        }
+                    }
+                    () = cancel_clone.cancelled() => break,
+                }
+            }
+        });
+    }
 
     // Required thread-retention work is repaired independently of new posts.
     // Each pass inspects one bounded board-id page and carries its cursor into

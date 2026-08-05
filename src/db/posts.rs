@@ -65,6 +65,26 @@ pub struct ThreadPruneSchedule {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of atomically scheduling media work for a post.
+pub struct MediaJobSchedule {
+    /// Durable background-job identifier representing the work.
+    pub job_id: i64,
+    /// Whether this call inserted a new row instead of coalescing an active job.
+    pub inserted: bool,
+    /// Legacy pending rows resolved while coalescing this schedule.
+    pub pending_jobs_resolved: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Result of atomically resolving a successful media job.
+pub struct MediaJobFinish {
+    /// Whether the output was attached to the post.
+    pub applied: bool,
+    /// Durable, post-commit cleanup created by the transaction.
+    pub cleanup: super::DeletePathsResult,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Aggregate status counts for the background-job dashboard.
 pub struct BackgroundJobSummary {
     /// Jobs currently claimed by workers.
@@ -1225,6 +1245,250 @@ pub fn enqueue_job(conn: &rusqlite::Connection, job_type: &str, payload: &str) -
     Ok(id)
 }
 
+/// Atomically validate a post, transition it to `pending`, and persist its
+/// durable media job.
+///
+/// The serialized payload's source path is the generation guard: completion is
+/// legal only while the post still references that path.
+///
+/// Existing active jobs for the same post and source are coalesced. Active jobs
+/// for an older source are resolved as stale before the new row is inserted.
+///
+/// # Errors
+/// Returns an error if the post is missing, belongs to another board, no longer
+/// references `expected_source`, is in an original-prune state, or any part of
+/// the immediate transaction fails.
+#[expect(
+    clippy::too_many_lines,
+    reason = "validation, duplicate coalescing, state transition, insertion, and rollback form one auditable transaction"
+)]
+pub fn persist_media_job(
+    conn: &rusqlite::Connection,
+    job_type: &str,
+    payload: &str,
+    post_id: i64,
+    expected_source: &str,
+    board_short: &str,
+) -> Result<MediaJobSchedule> {
+    anyhow::ensure!(
+        matches!(job_type, "video_transcode" | "audio_waveform"),
+        "unsupported media job type"
+    );
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Failed to begin atomic media-job creation")?;
+
+    let result = (|| {
+        let post = conn
+            .query_row(
+                "SELECT p.file_path, p.media_processing_state, b.short_name
+                 FROM posts p
+                 JOIN boards b ON b.id = p.board_id
+                 WHERE p.id = ?1",
+                params![post_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .with_context(|| format!("media-job target post {post_id} no longer exists"))?;
+        anyhow::ensure!(
+            post.0.as_deref() == Some(expected_source),
+            "media-job target source changed before scheduling"
+        );
+        anyhow::ensure!(
+            post.2 == board_short,
+            "media-job target board does not match its payload"
+        );
+        anyhow::ensure!(
+            !matches!(
+                post.1.as_str(),
+                MEDIA_ORIGINAL_PRUNE_PENDING | MEDIA_ORIGINAL_PRUNED
+            ),
+            "media-job target is incompatible with original pruning"
+        );
+
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, job_type, payload, status
+             FROM background_jobs
+             WHERE status IN ('pending', 'running')
+               AND job_type IN ('video_transcode', 'audio_waveform')
+               AND json_valid(payload)
+               AND CAST(json_extract(payload, '$.d.post_id') AS INTEGER) = ?1
+             ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, id ASC",
+        )?;
+        let active = stmt
+            .query_map(params![post_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+
+        let mut matching_id = None;
+        let mut pending_jobs_resolved = 0_usize;
+        for (id, active_type, active_payload, status) in active {
+            let active_source = serde_json::from_str::<serde_json::Value>(&active_payload)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .pointer("/d/file_path")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                });
+            if matching_id.is_none()
+                && active_type == job_type
+                && active_source.as_deref() == Some(expected_source)
+            {
+                matching_id = Some(id);
+            } else {
+                conn.execute(
+                    "UPDATE background_jobs
+                     SET status = 'done',
+                         last_error = 'resolved stale duplicate during media scheduling',
+                         updated_at = unixepoch()
+                     WHERE id = ?1 AND status IN ('pending', 'running')",
+                    params![id],
+                )?;
+                if status == "pending" {
+                    pending_jobs_resolved = pending_jobs_resolved.saturating_add(1);
+                }
+            }
+        }
+
+        if let Some(job_id) = matching_id {
+            // Never overwrite a terminal post state merely because a legacy job
+            // was still active. Pending/running markers may be refreshed safely.
+            if matches!(
+                post.1.as_str(),
+                MEDIA_PROCESSING_PENDING | "running" | MEDIA_PROCESSING_FAILED
+            ) {
+                conn.execute(
+                    "UPDATE posts
+                     SET media_processing_state = ?1, media_processing_error = NULL
+                     WHERE id = ?2 AND file_path = ?3
+                       AND media_processing_state IN (?1, 'running', ?4)",
+                    params![
+                        MEDIA_PROCESSING_PENDING,
+                        post_id,
+                        expected_source,
+                        MEDIA_PROCESSING_FAILED
+                    ],
+                )?;
+            }
+            return Ok(MediaJobSchedule {
+                job_id,
+                inserted: false,
+                pending_jobs_resolved,
+            });
+        }
+
+        let updated = conn.execute(
+            "UPDATE posts
+             SET media_processing_state = ?1, media_processing_error = NULL
+             WHERE id = ?2 AND file_path = ?3
+               AND media_processing_state IN ('', ?4)",
+            params![
+                MEDIA_PROCESSING_PENDING,
+                post_id,
+                expected_source,
+                MEDIA_PROCESSING_FAILED
+            ],
+        )?;
+        anyhow::ensure!(
+            updated == 1,
+            "illegal media-processing transition to pending"
+        );
+        let job_id = enqueue_job(conn, job_type, payload)?;
+        Ok(MediaJobSchedule {
+            job_id,
+            inserted: true,
+            pending_jobs_resolved,
+        })
+    })();
+
+    match result {
+        Ok(schedule) => {
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                drop(conn.execute_batch("ROLLBACK"));
+                return Err(error).context("Failed to commit atomic media-job creation");
+            }
+            Ok(schedule)
+        }
+        Err(error) => {
+            drop(conn.execute_batch("ROLLBACK"));
+            Err(error)
+        }
+    }
+}
+
+/// Record an explicit capacity failure without creating a pending marker.
+/// A pre-existing durable job wins over the rejection and is left untouched.
+///
+/// # Errors
+/// Returns an error if the guarded transaction cannot be completed.
+pub fn reject_media_job_at_capacity(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+    expected_source: &str,
+    detail: &str,
+) -> Result<Option<i64>> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Failed to begin media capacity-rejection transaction")?;
+    let result = (|| {
+        let active = conn
+            .query_row(
+                "SELECT id FROM background_jobs
+                 WHERE status IN ('pending', 'running')
+                   AND job_type IN ('video_transcode', 'audio_waveform')
+                   AND json_valid(payload)
+                   AND CAST(json_extract(payload, '$.d.post_id') AS INTEGER) = ?1
+                   AND json_extract(payload, '$.d.file_path') = ?2
+                 ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, id ASC
+                 LIMIT 1",
+                params![post_id, expected_source],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if active.is_some() {
+            return Ok(active);
+        }
+        let error: String = detail.trim().chars().take(512).collect();
+        conn.execute(
+            "UPDATE posts
+             SET media_processing_state = ?1, media_processing_error = ?2
+             WHERE id = ?3 AND file_path = ?4
+               AND media_processing_state IN ('', ?5)",
+            params![
+                MEDIA_PROCESSING_FAILED,
+                error,
+                post_id,
+                expected_source,
+                MEDIA_PROCESSING_FAILED
+            ],
+        )?;
+        Ok(None)
+    })();
+    match result {
+        Ok(active) => {
+            conn.execute_batch("COMMIT")
+                .context("Failed to commit media capacity rejection")?;
+            Ok(active)
+        }
+        Err(error) => {
+            drop(conn.execute_batch("ROLLBACK"));
+            Err(error)
+        }
+    }
+}
+
 /// Return the canonical policy-free payload for a board prune evaluation.
 fn thread_prune_payload(board_id: i64) -> Result<String> {
     serde_json::to_string(&serde_json::json!({
@@ -1609,7 +1873,8 @@ pub fn recover_interrupted_background_jobs(
                             "UPDATE posts
                              SET media_processing_state = ?1,
                                  media_processing_error = NULL
-                             WHERE id = ?2",
+                             WHERE id = ?2
+                               AND media_processing_state IN ('', ?1, 'running')",
                             params![MEDIA_PROCESSING_PENDING, post_id],
                         )?;
                         media_posts_reset = media_posts_reset
@@ -1630,7 +1895,13 @@ pub fn recover_interrupted_background_jobs(
                     jobs_resolved =
                         jobs_resolved.saturating_add(i64::try_from(updated).unwrap_or(i64::MAX));
                     if let Some(post_id) = clear_media_post_id {
-                        set_post_media_processing_state(conn, post_id, None, None)?;
+                        conn.execute(
+                            "UPDATE posts
+                             SET media_processing_state = '', media_processing_error = NULL
+                             WHERE id = ?1
+                               AND media_processing_state IN (?2, 'running')",
+                            params![post_id, MEDIA_PROCESSING_PENDING],
+                        )?;
                     }
                 }
             }
@@ -1675,7 +1946,9 @@ fn interrupted_background_jobs(
     let mut stmt = conn.prepare_cached(
         "SELECT id, job_type, payload
          FROM background_jobs
-         WHERE status = 'running'",
+         WHERE status = 'running'
+         ORDER BY id ASC
+         LIMIT 256",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(InterruptedBackgroundJob {
@@ -1740,7 +2013,7 @@ fn interrupted_media_job_disposition(
     };
     let post = conn
         .query_row(
-            "SELECT file_path, thumb_path
+            "SELECT file_path, thumb_path, media_processing_state
              FROM posts
              WHERE id = ?1",
             rusqlite::params![post_id],
@@ -1748,11 +2021,12 @@ fn interrupted_media_job_disposition(
                 Ok((
                     row.get::<_, Option<String>>(0)?,
                     row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
                 ))
             },
         )
         .optional()?;
-    let Some((current_path, current_thumb_path)) = post else {
+    let Some((current_path, current_thumb_path, processing_state)) = post else {
         // The target was deleted while work was in flight. Replaying cannot
         // attach the output and would only repeat an obsolete side effect.
         return Ok(InterruptedJobDisposition::Resolve {
@@ -1766,6 +2040,14 @@ fn interrupted_media_job_disposition(
             source_path,
             expected_output_path,
         } => {
+            if matches!(
+                processing_state.as_str(),
+                MEDIA_ORIGINAL_PRUNE_PENDING | MEDIA_ORIGINAL_PRUNED | MEDIA_PROCESSING_FAILED
+            ) {
+                return Ok(InterruptedJobDisposition::Resolve {
+                    clear_media_post_id: None,
+                });
+            }
             if current_path.as_deref() == Some(source_path.as_str()) {
                 return Ok(InterruptedJobDisposition::Requeue {
                     media_post_id: Some(post_id),
@@ -1786,6 +2068,14 @@ fn interrupted_media_job_disposition(
             source_path,
             expected_thumb_path,
         } => {
+            if matches!(
+                processing_state.as_str(),
+                MEDIA_ORIGINAL_PRUNE_PENDING | MEDIA_ORIGINAL_PRUNED | MEDIA_PROCESSING_FAILED
+            ) {
+                return Ok(InterruptedJobDisposition::Resolve {
+                    clear_media_post_id: None,
+                });
+            }
             if current_path.as_deref() != Some(source_path.as_str()) {
                 return Ok(InterruptedJobDisposition::Resolve {
                     clear_media_post_id: None,
@@ -1854,6 +2144,22 @@ fn expected_waveform_thumb_path(source_path: &str, board_short: &str) -> Option<
     Some(format!("{board_short}/thumbs/{stem}.png"))
 }
 
+// Legal asynchronous media state machine:
+//
+//   normal ("") / failed
+//       -> pending + durable job                 (one creation transaction)
+//   pending
+//       -> pending + durable retry               (one failure transaction)
+//       -> normal + attached output + done job   (one completion transaction)
+//       -> normal + safe original + done job     (one no-op transaction)
+//       -> failed + terminal job                 (one failure transaction)
+//   pending/running + missing or changed target
+//       -> done stale job, without post mutation
+//   prune_pending / pruned
+//       -> never accepts media-job completion
+//
+// The job payload's post id, operation kind, board, and expected source path are
+// its generation identity. No worker transition updates a post by id alone.
 /// Media-processing state assigned while work is queued or running.
 pub const MEDIA_PROCESSING_PENDING: &str = "pending";
 /// Media-processing state assigned after terminal worker failure.
@@ -1937,6 +2243,326 @@ pub fn update_post_thumb_path(
         }));
     }
     Ok(())
+}
+
+/// Verify that a running job row still carries the expected media identity.
+fn media_job_matches(
+    conn: &rusqlite::Connection,
+    job_id: i64,
+    job_type: &str,
+    post_id: i64,
+    expected_source: &str,
+) -> Result<bool> {
+    let row = conn
+        .query_row(
+            "SELECT job_type, payload, status FROM background_jobs WHERE id = ?1",
+            params![job_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((stored_type, payload, status)) = row else {
+        return Ok(false);
+    };
+    if stored_type != job_type || status != "running" {
+        return Ok(false);
+    }
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload) else {
+        return Ok(false);
+    };
+    Ok(payload
+        .pointer("/d/post_id")
+        .and_then(serde_json::Value::as_i64)
+        == Some(post_id)
+        && payload
+            .pointer("/d/file_path")
+            .and_then(serde_json::Value::as_str)
+            == Some(expected_source))
+}
+
+/// Create durable cleanup for paths proven unreferenced in the current write
+/// transaction.
+fn journal_unreferenced_media_paths(
+    conn: &rusqlite::Connection,
+    candidates: Vec<String>,
+) -> Result<super::DeletePathsResult> {
+    let paths = super::paths_safe_to_delete(conn, candidates)?;
+    let pending = super::build_delete_files_pending_op(&paths)?;
+    if let Some(op) = pending.as_ref() {
+        super::insert_pending_fs_op(conn, op)?;
+    }
+    Ok(super::DeletePathsResult {
+        paths,
+        pending_fs_op_id: pending.map(|op| op.id),
+    })
+}
+
+/// Complete a media job that intentionally kept the safe original. This must
+/// be called inside the worker's completion transaction.
+///
+/// # Errors
+/// Returns an error if the running job identity or database mutation is invalid.
+pub fn complete_media_job_without_output_in_tx(
+    conn: &rusqlite::Connection,
+    job_id: i64,
+    job_type: &str,
+    post_id: i64,
+    expected_source: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        media_job_matches(conn, job_id, job_type, post_id, expected_source)?,
+        "media completion job identity is stale"
+    );
+    conn.execute(
+        "UPDATE posts
+         SET media_processing_state = '', media_processing_error = NULL
+         WHERE id = ?1 AND file_path = ?2
+           AND media_processing_state IN (?3, 'running')",
+        params![post_id, expected_source, MEDIA_PROCESSING_PENDING],
+    )?;
+    complete_job(conn, job_id)
+}
+
+/// Resolve a stale or deleted media target without mutating post state. This
+/// must be called inside the worker's completion transaction.
+///
+/// # Errors
+/// Returns an error if the job is no longer running or cannot be updated.
+pub fn complete_stale_media_job_in_tx(conn: &rusqlite::Connection, job_id: i64) -> Result<()> {
+    complete_job(conn, job_id)
+}
+
+/// Apply the bounded retry policy while preserving the post/job invariant.
+/// Missing, changed, pruned, or otherwise terminal targets resolve as stale and
+/// do not consume further queue capacity.
+///
+/// This must be called inside the worker's completion transaction.
+///
+/// # Errors
+/// Returns an error if the job state cannot be inspected or updated.
+pub fn fail_media_job_in_tx(
+    conn: &rusqlite::Connection,
+    job_id: i64,
+    job_type: &str,
+    post_id: i64,
+    expected_source: &str,
+    error: &str,
+) -> Result<Option<JobFailureState>> {
+    anyhow::ensure!(
+        media_job_matches(conn, job_id, job_type, post_id, expected_source)?,
+        "media failure job identity is stale"
+    );
+    let applicable = conn
+        .query_row(
+            "SELECT 1 FROM posts
+             WHERE id = ?1 AND file_path = ?2
+               AND media_processing_state IN (?3, 'running')",
+            params![post_id, expected_source, MEDIA_PROCESSING_PENDING],
+            |_row| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !applicable {
+        complete_job(conn, job_id)?;
+        return Ok(None);
+    }
+
+    let failure_state = fail_job(conn, job_id, error)?;
+    match failure_state {
+        JobFailureState::Retrying => {
+            conn.execute(
+                "UPDATE posts
+                 SET media_processing_state = ?1, media_processing_error = NULL
+                 WHERE id = ?2 AND file_path = ?3
+                   AND media_processing_state IN (?1, 'running')",
+                params![MEDIA_PROCESSING_PENDING, post_id, expected_source],
+            )?;
+        }
+        JobFailureState::PermanentlyFailed => {
+            let error: String = error.trim().chars().take(512).collect();
+            conn.execute(
+                "UPDATE posts
+                 SET media_processing_state = ?1, media_processing_error = ?2
+                 WHERE id = ?3 AND file_path = ?4
+                   AND media_processing_state IN (?5, 'running')",
+                params![
+                    MEDIA_PROCESSING_FAILED,
+                    error,
+                    post_id,
+                    expected_source,
+                    MEDIA_PROCESSING_PENDING
+                ],
+            )?;
+        }
+    }
+    Ok(Some(failure_state))
+}
+
+/// Atomically attach a validated video output, update deduplication metadata,
+/// journal unreferenced source cleanup, and mark the owning job done.
+///
+/// The caller must already hold an immediate transaction and must only perform
+/// filesystem cleanup after it commits.
+///
+/// # Errors
+/// Returns an error if the job identity, post update, hash update, cleanup
+/// journal, or terminal job update fails.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the atomic completion boundary explicitly carries job, source, and validated output identity"
+)]
+pub fn finish_video_media_job_in_tx(
+    conn: &rusqlite::Connection,
+    job_id: i64,
+    post_id: i64,
+    expected_source: &str,
+    output_path: &str,
+    output_mime: &str,
+    output_sha256: &str,
+    output_size: i64,
+) -> Result<MediaJobFinish> {
+    if !media_job_matches(conn, job_id, "video_transcode", post_id, expected_source)? {
+        return Err(anyhow::Error::new(StaleMediaTargetError {
+            post_id,
+            expected_path: expected_source.to_owned(),
+        }));
+    }
+    let thumb_path = conn
+        .query_row(
+            "SELECT thumb_path FROM posts
+             WHERE id = ?1 AND file_path = ?2
+               AND media_processing_state IN (?3, 'running')",
+            params![post_id, expected_source, MEDIA_PROCESSING_PENDING],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let applicable = conn.query_row(
+        "SELECT EXISTS(
+                 SELECT 1 FROM posts
+                 WHERE id = ?1 AND file_path = ?2
+                   AND media_processing_state IN (?3, 'running')
+             )",
+        params![post_id, expected_source, MEDIA_PROCESSING_PENDING],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !applicable {
+        complete_job(conn, job_id)?;
+        let cleanup = journal_unreferenced_media_paths(conn, vec![output_path.to_owned()])?;
+        return Ok(MediaJobFinish {
+            applied: false,
+            cleanup,
+        });
+    }
+
+    let updated = conn.execute(
+        "UPDATE posts
+         SET file_path = ?1, mime_type = ?2, file_size = ?3,
+             media_processing_state = '', media_processing_error = NULL
+         WHERE id = ?4 AND file_path = ?5
+           AND media_processing_state IN (?6, 'running')",
+        params![
+            output_path,
+            output_mime,
+            output_size,
+            post_id,
+            expected_source,
+            MEDIA_PROCESSING_PENDING
+        ],
+    )?;
+    anyhow::ensure!(updated == 1, "video target changed during completion");
+    let cleanup = journal_unreferenced_media_paths(conn, vec![expected_source.to_owned()])?;
+    record_file_hash(
+        conn,
+        output_sha256,
+        output_path,
+        thumb_path.as_deref().unwrap_or(""),
+        output_mime,
+    )?;
+    complete_job(conn, job_id)?;
+    Ok(MediaJobFinish {
+        applied: true,
+        cleanup,
+    })
+}
+
+/// Atomically attach a waveform output, update its hash metadata, journal a
+/// superseded placeholder, and mark the job done.
+///
+/// The caller must already hold an immediate transaction.
+///
+/// # Errors
+/// Returns an error if any guarded database mutation fails.
+pub fn finish_waveform_media_job_in_tx(
+    conn: &rusqlite::Connection,
+    job_id: i64,
+    post_id: i64,
+    expected_source: &str,
+    output_path: &str,
+    source_sha256: &str,
+) -> Result<MediaJobFinish> {
+    if !media_job_matches(conn, job_id, "audio_waveform", post_id, expected_source)? {
+        return Err(anyhow::Error::new(StaleMediaTargetError {
+            post_id,
+            expected_path: expected_source.to_owned(),
+        }));
+    }
+    let previous_thumb = conn
+        .query_row(
+            "SELECT thumb_path FROM posts
+             WHERE id = ?1 AND file_path = ?2
+               AND media_processing_state IN (?3, 'running')",
+            params![post_id, expected_source, MEDIA_PROCESSING_PENDING],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?;
+    let Some(previous_thumb) = previous_thumb else {
+        complete_job(conn, job_id)?;
+        let cleanup = journal_unreferenced_media_paths(conn, vec![output_path.to_owned()])?;
+        return Ok(MediaJobFinish {
+            applied: false,
+            cleanup,
+        });
+    };
+    let updated = conn.execute(
+        "UPDATE posts
+         SET thumb_path = ?1, media_processing_state = '', media_processing_error = NULL
+         WHERE id = ?2 AND file_path = ?3
+           AND media_processing_state IN (?4, 'running')",
+        params![
+            output_path,
+            post_id,
+            expected_source,
+            MEDIA_PROCESSING_PENDING
+        ],
+    )?;
+    anyhow::ensure!(updated == 1, "waveform target changed during completion");
+    conn.execute(
+        "UPDATE file_hashes SET thumb_path = ?1
+         WHERE sha256 = ?2 AND file_path = ?3",
+        params![output_path, source_sha256, expected_source],
+    )?;
+    let cleanup = if previous_thumb
+        .as_deref()
+        .is_some_and(|path| path != output_path)
+    {
+        journal_unreferenced_media_paths(conn, previous_thumb.into_iter().collect())?
+    } else {
+        super::DeletePathsResult {
+            paths: Vec::new(),
+            pending_fs_op_id: None,
+        }
+    };
+    complete_job(conn, job_id)?;
+    Ok(MediaJobFinish {
+        applied: true,
+        cleanup,
+    })
 }
 
 /// Retrieve just the `thumb_path` for a post (used by `VideoTranscode` worker to
@@ -2063,11 +2689,11 @@ mod tests {
     use super::{
         acknowledge_failed_background_jobs, background_job_summary, claim_next_job, complete_job,
         count_posts_by_media_processing_state, count_search_results, get_post, get_post_submission,
-        get_posts_for_thread, is_stale_media_target_error, recent_background_jobs,
-        record_post_submission, recover_interrupted_background_jobs, replace_transcoded_media,
-        search_posts, search_terms, self_delete_post, set_post_media_processing_state,
-        to_fts_query, update_post_thumb_path, SelfDeleteOutcome, MEDIA_PROCESSING_FAILED,
-        MEDIA_PROCESSING_PENDING,
+        get_posts_for_thread, is_stale_media_target_error, persist_media_job,
+        recent_background_jobs, record_post_submission, recover_interrupted_background_jobs,
+        replace_transcoded_media, search_posts, search_terms, self_delete_post,
+        set_post_media_processing_state, to_fts_query, update_post_thumb_path, SelfDeleteOutcome,
+        MEDIA_PROCESSING_FAILED, MEDIA_PROCESSING_PENDING,
     };
     use crate::db::{
         create_board, create_reply_with_thread_update, create_thread_with_optional_poll,
@@ -2478,6 +3104,135 @@ mod tests {
             0,
             "cleared state should leave the failed count"
         );
+        Ok(())
+    }
+
+    fn video_job_payload(post_id: i64, source: &str, board: &str) -> String {
+        serde_json::json!({
+            "t": "VideoTranscode",
+            "d": { "post_id": post_id, "file_path": source, "board_short": board }
+        })
+        .to_string()
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic after fallible fixture setup"
+    )]
+    fn atomic_media_schedule_commits_pending_and_durable_job_together() -> Result<()> {
+        let conn = test_conn()?;
+        let post_id = seed_media_post(&conn, "atomic", "atomic/video.mp4")?;
+        let payload = video_job_payload(post_id, "atomic/video.mp4", "atomic");
+
+        let schedule = persist_media_job(
+            &conn,
+            "video_transcode",
+            &payload,
+            post_id,
+            "atomic/video.mp4",
+            "atomic",
+        )?;
+
+        let state: String = conn.query_row(
+            "SELECT media_processing_state FROM posts WHERE id = ?1",
+            rusqlite::params![post_id],
+            |row| row.get(0),
+        )?;
+        let status: String = conn.query_row(
+            "SELECT status FROM background_jobs WHERE id = ?1",
+            rusqlite::params![schedule.job_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(state, MEDIA_PROCESSING_PENDING);
+        assert_eq!(status, "pending");
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "fault-injection assertions intentionally panic after fallible fixture setup"
+    )]
+    fn atomic_media_schedule_rolls_back_lookup_update_insert_and_commit_failures() -> Result<()> {
+        fn assert_clean(conn: &Connection, post_id: i64) -> Result<()> {
+            let state: String = conn.query_row(
+                "SELECT media_processing_state FROM posts WHERE id = ?1",
+                rusqlite::params![post_id],
+                |row| row.get(0),
+            )?;
+            let jobs: i64 =
+                conn.query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row.get(0))?;
+            anyhow::ensure!(state.is_empty(), "rollback left a pending marker");
+            anyhow::ensure!(jobs == 0, "rollback left a durable job");
+            Ok(())
+        }
+
+        let missing_conn = test_conn()?;
+        let missing = persist_media_job(
+            &missing_conn,
+            "video_transcode",
+            &video_job_payload(999, "missing/video.mp4", "missing"),
+            999,
+            "missing/video.mp4",
+            "missing",
+        );
+        assert!(missing.is_err());
+        let missing_jobs: i64 =
+            missing_conn.query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row.get(0))?;
+        assert_eq!(missing_jobs, 0);
+
+        for (board, trigger) in [
+            (
+                "upd",
+                "CREATE TRIGGER inject_media_pending_failure
+                 BEFORE UPDATE OF media_processing_state ON posts
+                 WHEN NEW.media_processing_state = 'pending'
+                 BEGIN SELECT RAISE(ABORT, 'injected pending update failure'); END;",
+            ),
+            (
+                "ins",
+                "CREATE TRIGGER inject_media_insert_failure
+                 BEFORE INSERT ON background_jobs
+                 BEGIN SELECT RAISE(ABORT, 'injected job insert failure'); END;",
+            ),
+        ] {
+            let conn = test_conn()?;
+            let source = format!("{board}/video.mp4");
+            let post_id = seed_media_post(&conn, board, &source)?;
+            conn.execute_batch(trigger)?;
+            let result = persist_media_job(
+                &conn,
+                "video_transcode",
+                &video_job_payload(post_id, &source, board),
+                post_id,
+                &source,
+                board,
+            );
+            assert!(result.is_err());
+            assert_clean(&conn, post_id)?;
+        }
+
+        let conn = test_conn()?;
+        let post_id = seed_media_post(&conn, "commit", "commit/video.mp4")?;
+        conn.execute_batch(
+            "PRAGMA defer_foreign_keys = ON;
+             CREATE TRIGGER inject_media_commit_failure
+             AFTER INSERT ON background_jobs
+             BEGIN
+                 INSERT INTO threads (board_id, subject) VALUES (999999, 'invalid');
+             END;",
+        )?;
+        let result = persist_media_job(
+            &conn,
+            "video_transcode",
+            &video_job_payload(post_id, "commit/video.mp4", "commit"),
+            post_id,
+            "commit/video.mp4",
+            "commit",
+        );
+        assert!(result.is_err());
+        assert_clean(&conn, post_id)?;
         Ok(())
     }
 

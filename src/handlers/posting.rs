@@ -862,7 +862,7 @@ pub(crate) fn submit_post(
         body_text.len(),
         uploads.primary.as_ref(),
         &board.short_name,
-    );
+    )?;
     if let Some(prune_board_id) = prune_board_id {
         if let Err(error) = job_queue.notify_persisted_thread_prune(conn) {
             tracing::warn!(

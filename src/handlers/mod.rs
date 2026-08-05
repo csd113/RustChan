@@ -948,10 +948,6 @@ fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
 
 /// Enqueue background media-processing and spam-check jobs for a newly created
 /// post.  Shared by `create_thread` and `post_reply`.
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "job selection mirrors the closed media-type and follow-up job matrix"
-)]
 pub(crate) fn enqueue_post_jobs(
     job_queue: &JobQueue,
     conn: &rusqlite::Connection,
@@ -960,7 +956,7 @@ pub(crate) fn enqueue_post_jobs(
     body_len: usize,
     uploaded: Option<&crate::utils::files::UploadedFile>,
     board_short: &str,
-) {
+) -> Result<()> {
     // 1. Media post-processing (video transcode / audio waveform)
     if let Some(up) = uploaded {
         if up.processing_pending {
@@ -980,52 +976,25 @@ pub(crate) fn enqueue_post_jobs(
                 | crate::models::MediaType::Other => None,
             };
             if let Some(j) = job {
-                match job_queue.enqueue(&j) {
-                    Ok(crate::workers::EnqueueOutcome::Enqueued(_)) => {
-                        if let Err(error) = crate::db::set_post_media_processing_state(
-                            conn,
-                            post_id,
-                            Some(crate::db::MEDIA_PROCESSING_PENDING),
-                            None,
-                        ) {
-                            tracing::warn!(
-                                post_id,
-                                error = %error,
-                                "Failed to mark post media processing as pending"
-                            );
-                        }
-                    }
+                match job_queue.enqueue_media(conn, &j) {
+                    Ok(crate::workers::EnqueueOutcome::Enqueued(job_id)) => tracing::debug!(
+                        target: "workers",
+                        post_id,
+                        job_id,
+                        job_type = j.type_str(),
+                        board = board_short,
+                        "atomically scheduled post media processing"
+                    ),
                     Ok(crate::workers::EnqueueOutcome::DroppedAtCapacity) => {
-                        let detail = "Background media queue is full; upload kept original file but deferred processing was skipped.";
-                        tracing::warn!(post_id, "Media job dropped at queue capacity");
-                        if let Err(error) = crate::db::set_post_media_processing_state(
-                            conn,
+                        tracing::warn!(
+                            target: "workers",
                             post_id,
-                            Some(crate::db::MEDIA_PROCESSING_FAILED),
-                            Some(detail),
-                        ) {
-                            tracing::warn!(
-                                post_id,
-                                error = %error,
-                                "Failed to persist queue-capacity media failure"
-                            );
-                        }
+                            job_type = j.type_str(),
+                            board = board_short,
+                            "media job rejected at capacity with terminal post state"
+                        );
                     }
-                    Err(e) => {
-                        tracing::warn!("Failed to enqueue media job: {e}");
-                        if let Err(error) = crate::db::set_post_media_processing_state(
-                            conn,
-                            post_id,
-                            Some(crate::db::MEDIA_PROCESSING_FAILED),
-                            Some(&format!("Could not enqueue background media job: {e}")),
-                        ) {
-                            tracing::warn!(
-                                post_id,
-                                error = %error,
-                                "Failed to persist media enqueue failure"
-                            );
-                        }
-                    }
+                    Err(error) => return Err(error.into()),
                 }
             }
         }
@@ -1037,6 +1006,7 @@ pub(crate) fn enqueue_post_jobs(
         ip_hash: ip_hash.to_owned(),
         body_len,
     }));
+    Ok(())
 }
 
 #[cfg(test)]

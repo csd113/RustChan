@@ -147,6 +147,28 @@ impl Job {
             Self::SpamCheck { .. } => "spam_check",
         }
     }
+
+    /// Return the durable post/source identity for asynchronous media work.
+    const fn media_target(&self) -> Option<(i64, &str, &str)> {
+        match self {
+            Self::VideoTranscode {
+                post_id,
+                file_path,
+                board_short,
+            }
+            | Self::AudioWaveform {
+                post_id,
+                file_path,
+                board_short,
+            } => Some((*post_id, file_path.as_str(), board_short.as_str())),
+            Self::ThreadPrune { .. } | Self::SpamCheck { .. } => None,
+        }
+    }
+}
+
+/// Serialize a durable payload before any queue-state transaction begins.
+fn serialize_job_payload<T: Serialize + ?Sized>(value: &T) -> Result<String> {
+    serde_json::to_string(value).context("Serialize background job failed")
 }
 
 /// Result of attempting to add a background job to the bounded queue.
@@ -233,6 +255,13 @@ impl JobQueue {
     /// Returns an error when serializing the job, acquiring a database
     /// connection, or persisting the job fails.
     pub fn enqueue(&self, job: &Job) -> Result<EnqueueOutcome> {
+        if job.media_target().is_some() {
+            let conn = self
+                .pool
+                .get()
+                .context("Get DB connection for atomic media-job creation failed")?;
+            return self.enqueue_media(&conn, job);
+        }
         if let Job::ThreadPrune { board_id } = job {
             let conn = self
                 .pool
@@ -247,7 +276,7 @@ impl JobQueue {
             return Ok(EnqueueOutcome::Enqueued(schedule.job_id));
         }
 
-        let payload = serde_json::to_string(job)?;
+        let payload = serialize_job_payload(job)?;
 
         // Back-pressure: check pending count before inserting.
         if self.reserve_pending_slot(job.type_str()) {
@@ -272,6 +301,68 @@ impl JobQueue {
         } else {
             self.dropped_jobs.fetch_add(1, Ordering::Relaxed);
             Ok(EnqueueOutcome::DroppedAtCapacity)
+        }
+    }
+
+    /// Atomically mark a post pending and persist its durable media job, then
+    /// wake workers only after commit. A failed wakeup cannot lose work because
+    /// workers also poll the database.
+    ///
+    /// Capacity rejection is recorded as an explicit guarded failure and never
+    /// leaves a pending marker without a durable row.
+    ///
+    /// # Errors
+    /// Returns an error when serialization, target validation, or the atomic
+    /// database transaction fails.
+    pub(crate) fn enqueue_media(
+        &self,
+        conn: &rusqlite::Connection,
+        job: &Job,
+    ) -> Result<EnqueueOutcome> {
+        let (post_id, expected_source, board_short) = job
+            .media_target()
+            .context("enqueue_media requires a media job")?;
+        let payload = serialize_job_payload(job)?;
+        if !self.reserve_pending_slot(job.type_str()) {
+            let detail = "Background media queue is full; upload kept original file but deferred processing was skipped.";
+            let active =
+                crate::db::reject_media_job_at_capacity(conn, post_id, expected_source, detail)
+                    .context("Persist media queue-capacity failure")?;
+            if let Some(job_id) = active {
+                return Ok(EnqueueOutcome::Enqueued(job_id));
+            }
+            self.dropped_jobs.fetch_add(1, Ordering::Relaxed);
+            return Ok(EnqueueOutcome::DroppedAtCapacity);
+        }
+
+        let schedule = crate::db::persist_media_job(
+            conn,
+            job.type_str(),
+            &payload,
+            post_id,
+            expected_source,
+            board_short,
+        );
+        match schedule {
+            Ok(schedule) => {
+                let reservation = usize::from(!schedule.inserted);
+                self.decrement_pending_by(
+                    reservation.saturating_add(schedule.pending_jobs_resolved),
+                );
+                self.notify.notify_one();
+                Ok(EnqueueOutcome::Enqueued(schedule.job_id))
+            }
+            Err(error) => {
+                self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
+                error!(
+                    target: "workers",
+                    post_id,
+                    job_type = job.type_str(),
+                    error = %error,
+                    "atomic media-job creation failed"
+                );
+                Err(error)
+            }
         }
     }
 
@@ -345,9 +436,15 @@ impl JobQueue {
 
     /// Decrements the pending-job gauge after a worker claims a job.
     fn mark_job_claimed(&self) {
+        self.decrement_pending_by(1);
+    }
+
+    /// Saturating queue-accounting decrement used after claims and coalescing.
+    fn decrement_pending_by(&self, count: usize) {
+        let count = u64::try_from(count).unwrap_or(u64::MAX);
         self.pending_jobs
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
-                Some(pending.saturating_sub(1))
+                Some(pending.saturating_sub(count))
             })
             .ok();
     }
@@ -418,6 +515,28 @@ enum JobCompletion {
     Failed(String),
 }
 
+/// Outcome of executing external work before the generic completion path.
+#[derive(Debug)]
+enum JobExecution {
+    /// The worker still needs to commit the job's terminal state.
+    NeedsCompletion,
+    /// Media attachment and job completion already committed atomically.
+    Persisted,
+    /// The job was a duplicate or otherwise stale before external mutation.
+    Stale,
+}
+
+#[derive(Clone)]
+/// Durable identity used to guard media completion and failure transitions.
+struct MediaJobIdentity {
+    /// Post targeted by the durable job.
+    post_id: i64,
+    /// Stable background-job type discriminator.
+    job_type: &'static str,
+    /// Source path captured when this generation was scheduled.
+    expected_source: String,
+}
+
 /// Resolution selected after completion persistence itself fails.
 enum CompletionRecovery {
     /// The job reached a known database state.
@@ -437,7 +556,7 @@ const COMPLETION_SHUTDOWN_GRACE: Duration = Duration::from_millis(200);
 fn persist_job_completion_once(
     pool: &DbPool,
     job_id: i64,
-    media_post_id: Option<i64>,
+    media_identity: Option<&MediaJobIdentity>,
     completion: &JobCompletion,
 ) -> Result<Option<crate::db::JobFailureState>> {
     let conn = pool.get().map_err(anyhow::Error::from)?;
@@ -446,9 +565,16 @@ fn persist_job_completion_once(
 
     let result: Result<Option<crate::db::JobFailureState>> = (|| match completion {
         JobCompletion::Done => {
-            crate::db::complete_job(&conn, job_id)?;
-            if let Some(post_id) = media_post_id {
-                crate::db::set_post_media_processing_state(&conn, post_id, None, None)?;
+            if let Some(identity) = media_identity {
+                crate::db::complete_media_job_without_output_in_tx(
+                    &conn,
+                    job_id,
+                    identity.job_type,
+                    identity.post_id,
+                    &identity.expected_source,
+                )?;
+            } else {
+                crate::db::complete_job(&conn, job_id)?;
             }
             Ok(None)
         }
@@ -456,32 +582,22 @@ fn persist_job_completion_once(
             // A stale media job can refer to an older file while a newer job is
             // pending for the same post. Completing the obsolete job must not
             // clear the newer job's processing state.
-            crate::db::complete_job(&conn, job_id)?;
+            crate::db::complete_stale_media_job_in_tx(&conn, job_id)?;
             Ok(None)
         }
         JobCompletion::Failed(error) => {
-            let failure_state = crate::db::fail_job(&conn, job_id, error)?;
-            if let Some(post_id) = media_post_id {
-                match failure_state {
-                    crate::db::JobFailureState::Retrying => {
-                        crate::db::set_post_media_processing_state(
-                            &conn,
-                            post_id,
-                            Some(crate::db::MEDIA_PROCESSING_PENDING),
-                            None,
-                        )?;
-                    }
-                    crate::db::JobFailureState::PermanentlyFailed => {
-                        crate::db::set_post_media_processing_state(
-                            &conn,
-                            post_id,
-                            Some(crate::db::MEDIA_PROCESSING_FAILED),
-                            Some(error),
-                        )?;
-                    }
-                }
+            if let Some(identity) = media_identity {
+                crate::db::fail_media_job_in_tx(
+                    &conn,
+                    job_id,
+                    identity.job_type,
+                    identity.post_id,
+                    &identity.expected_source,
+                    error,
+                )
+            } else {
+                Ok(Some(crate::db::fail_job(&conn, job_id, error)?))
             }
-            Ok(Some(failure_state))
         }
     })();
 
@@ -529,7 +645,7 @@ fn completion_error_is_transient(error: &anyhow::Error) -> bool {
 fn recover_job_after_completion_error_once(
     pool: &DbPool,
     job_id: i64,
-    media_post_id: Option<i64>,
+    media_identity: Option<&MediaJobIdentity>,
     completion: &JobCompletion,
     completion_error: &str,
 ) -> Result<Option<crate::db::JobFailureState>> {
@@ -578,8 +694,18 @@ fn recover_job_after_completion_error_once(
                     rusqlite::params![job_id, recovery_message],
                 )?;
                 if matches!(completion, JobCompletion::Done) {
-                    if let Some(post_id) = media_post_id {
-                        crate::db::set_post_media_processing_state(&conn, post_id, None, None)?;
+                    if let Some(identity) = media_identity {
+                        conn.execute(
+                            "UPDATE posts
+                             SET media_processing_state = '', media_processing_error = NULL
+                             WHERE id = ?1 AND file_path = ?2
+                               AND media_processing_state IN (?3, 'running')",
+                            rusqlite::params![
+                                identity.post_id,
+                                identity.expected_source,
+                                crate::db::MEDIA_PROCESSING_PENDING
+                            ],
+                        )?;
                     }
                 }
                 crate::db::JobFailureState::PermanentlyFailed
@@ -587,28 +713,19 @@ fn recover_job_after_completion_error_once(
             JobCompletion::Failed(_) => {
                 // The work itself failed, so the normal bounded retry policy is
                 // still safe. fail_job intentionally preserves the attempt count.
-                let failure_state = crate::db::fail_job(&conn, job_id, &recovery_message)?;
-                if let Some(post_id) = media_post_id {
-                    match failure_state {
-                        crate::db::JobFailureState::Retrying => {
-                            crate::db::set_post_media_processing_state(
-                                &conn,
-                                post_id,
-                                Some(crate::db::MEDIA_PROCESSING_PENDING),
-                                None,
-                            )?;
-                        }
-                        crate::db::JobFailureState::PermanentlyFailed => {
-                            crate::db::set_post_media_processing_state(
-                                &conn,
-                                post_id,
-                                Some(crate::db::MEDIA_PROCESSING_FAILED),
-                                Some(&recovery_message),
-                            )?;
-                        }
-                    }
+                if let Some(identity) = media_identity {
+                    crate::db::fail_media_job_in_tx(
+                        &conn,
+                        job_id,
+                        identity.job_type,
+                        identity.post_id,
+                        &identity.expected_source,
+                        &recovery_message,
+                    )?
+                    .unwrap_or(crate::db::JobFailureState::PermanentlyFailed)
+                } else {
+                    crate::db::fail_job(&conn, job_id, &recovery_message)?
                 }
-                failure_state
             }
         };
         Ok(Some(failure_state))
@@ -680,19 +797,20 @@ async fn recover_non_transient_completion_error(
     worker_id: usize,
     pool: &DbPool,
     job_id: i64,
-    media_post_id: Option<i64>,
+    media_identity: Option<MediaJobIdentity>,
     completion: &JobCompletion,
     completion_error: anyhow::Error,
 ) -> Result<CompletionRecovery> {
     let recovery_pool = pool.clone();
     let recovery_completion = completion.clone();
+    let recovery_identity = media_identity.clone();
     let original_error = completion_error.to_string();
     let recovery_error = original_error.clone();
     let recovery_result = tokio::task::spawn_blocking(move || {
         recover_job_after_completion_error_once(
             &recovery_pool,
             job_id,
-            media_post_id,
+            recovery_identity.as_ref(),
             &recovery_completion,
             &recovery_error,
         )
@@ -718,7 +836,7 @@ async fn persist_job_completion(
     worker_id: usize,
     pool: DbPool,
     job_id: i64,
-    media_post_id: Option<i64>,
+    media_identity: Option<MediaJobIdentity>,
     completion: JobCompletion,
     cancel: CancellationToken,
 ) -> Result<Option<crate::db::JobFailureState>> {
@@ -729,8 +847,14 @@ async fn persist_job_completion(
     loop {
         let attempt_pool = pool.clone();
         let attempt_completion = completion.clone();
+        let attempt_identity = media_identity.clone();
         let result = tokio::task::spawn_blocking(move || {
-            persist_job_completion_once(&attempt_pool, job_id, media_post_id, &attempt_completion)
+            persist_job_completion_once(
+                &attempt_pool,
+                job_id,
+                attempt_identity.as_ref(),
+                &attempt_completion,
+            )
         })
         .await;
 
@@ -748,7 +872,7 @@ async fn persist_job_completion(
                 worker_id,
                 &pool,
                 job_id,
-                media_post_id,
+                media_identity.clone(),
                 &completion,
                 error,
             )
@@ -847,8 +971,9 @@ async fn worker_loop(
                         continue;
                     }
                 };
-                let media_post_id = media_job_post_id(&job);
+                let media_identity = media_job_identity(&job);
                 let result = handle_job(
+                    job_id,
                     job,
                     ffmpeg_available,
                     ffprobe_available,
@@ -860,7 +985,9 @@ async fn worker_loop(
                 )
                 .await;
                 let completion = match result {
-                    Ok(()) => JobCompletion::Done,
+                    Ok(JobExecution::Persisted) => continue,
+                    Ok(JobExecution::NeedsCompletion) => JobCompletion::Done,
+                    Ok(JobExecution::Stale) => JobCompletion::Stale,
                     Err(error) if crate::db::is_stale_media_target_error(&error) => {
                         warn!("Worker {id}: job #{job_id} target is stale — {error}");
                         JobCompletion::Stale
@@ -874,7 +1001,7 @@ async fn worker_loop(
                     id,
                     queue.pool.clone(),
                     job_id,
-                    media_post_id,
+                    media_identity,
                     completion,
                     queue.cancel.clone(),
                 )
@@ -954,6 +1081,7 @@ fn backoff_duration(consecutive_errors: u32) -> Duration {
 )]
 /// Dispatches a decoded job to the corresponding worker operation.
 async fn handle_job(
+    job_id: i64,
     job: Job,
     ffmpeg_available: bool,
     ffprobe_available: bool,
@@ -962,7 +1090,7 @@ async fn handle_job(
     in_progress: Arc<DashMap<String, bool>>,
     active_video_jobs: Arc<AtomicU64>,
     cancel: CancellationToken,
-) -> Result<()> {
+) -> Result<JobExecution> {
     debug!("Dispatching {} job", job.type_str());
 
     match job {
@@ -977,11 +1105,12 @@ async fn handle_job(
                     "VideoTranscode: skipping duplicate job for post {} ({}): already in flight",
                     post_id, file_path
                 );
-                return Ok(());
+                return Ok(JobExecution::Stale);
             }
             in_progress.insert(file_path.clone(), true);
             active_video_jobs.fetch_add(1, Ordering::Relaxed);
             let result = transcode_video(
+                job_id,
                 post_id,
                 file_path.clone(),
                 board_short,
@@ -1008,10 +1137,11 @@ async fn handle_job(
                     "AudioWaveform: skipping duplicate job for post {} ({}): already in flight",
                     post_id, file_path
                 );
-                return Ok(());
+                return Ok(JobExecution::Stale);
             }
             in_progress.insert(file_path.clone(), true);
             let result = generate_waveform(
+                job_id,
                 post_id,
                 file_path.clone(),
                 board_short,
@@ -1034,7 +1164,7 @@ async fn handle_job(
                     "board thread-prune evaluation failed and will follow durable retry policy"
                 );
             }
-            result
+            result.map(|()| JobExecution::NeedsCompletion)
         }
 
         Job::SpamCheck {
@@ -1043,15 +1173,32 @@ async fn handle_job(
             body_len,
         } => {
             run_spam_check(post_id, &ip_hash, body_len);
-            Ok(())
+            Ok(JobExecution::NeedsCompletion)
         }
     }
 }
 
 /// Returns the post identifier whose media state follows this job, if any.
-const fn media_job_post_id(job: &Job) -> Option<i64> {
+fn media_job_identity(job: &Job) -> Option<MediaJobIdentity> {
     match job {
-        Job::VideoTranscode { post_id, .. } | Job::AudioWaveform { post_id, .. } => Some(*post_id),
+        Job::VideoTranscode {
+            post_id,
+            file_path,
+            board_short: _,
+        } => Some(MediaJobIdentity {
+            post_id: *post_id,
+            job_type: "video_transcode",
+            expected_source: file_path.clone(),
+        }),
+        Job::AudioWaveform {
+            post_id,
+            file_path,
+            board_short: _,
+        } => Some(MediaJobIdentity {
+            post_id: *post_id,
+            job_type: "audio_waveform",
+            expected_source: file_path.clone(),
+        }),
         Job::ThreadPrune { .. } | Job::SpamCheck { .. } => None,
     }
 }
@@ -1075,6 +1222,7 @@ const fn media_job_post_id(job: &Job) -> Option<i64> {
     reason = "transcode process control and fail-closed cleanup share one lifecycle"
 )]
 async fn transcode_video(
+    job_id: i64,
     post_id: i64,
     file_path: String,
     board_short: String,
@@ -1083,10 +1231,10 @@ async fn transcode_video(
     ffmpeg_vp9_available: bool,
     pool: DbPool,
     cancel: CancellationToken,
-) -> Result<()> {
+) -> Result<JobExecution> {
     if !ffmpeg_available {
         debug!("VideoTranscode skipped for post {post_id}: ffmpeg not available");
-        return Ok(());
+        return Ok(JobExecution::NeedsCompletion);
     }
 
     if !ffprobe_available {
@@ -1094,7 +1242,7 @@ async fn transcode_video(
             "VideoTranscode skipped for post {post_id}: ffprobe not available. \
              Install ffprobe alongside ffmpeg to enable safe video transcoding."
         );
-        return Ok(());
+        return Ok(JobExecution::NeedsCompletion);
     }
 
     if !ffmpeg_vp9_available {
@@ -1102,7 +1250,7 @@ async fn transcode_video(
             "VideoTranscode skipped for post {post_id}: libvpx-vp9 or libopus not available. \
              Install ffmpeg with VP9 + Opus support to enable MP4/MKV→WebM transcoding."
         );
-        return Ok(());
+        return Ok(JobExecution::NeedsCompletion);
     }
 
     let timeout_secs = crate::config::ffmpeg_timeout_secs();
@@ -1120,7 +1268,7 @@ async fn transcode_video(
     }?;
 
     let Some((args, src_path, webm_abs, webm_rel, _webm_name, tmp)) = prepare_result else {
-        return Ok(()); // skip gracefully
+        return Ok(JobExecution::NeedsCompletion); // skip gracefully
     };
 
     // Phase 2: run ffmpeg via tokio::process::Command with kill_on_drop(true).
@@ -1164,7 +1312,7 @@ async fn transcode_video(
     // Phase 3: persist temp file + DB updates — blocking.
     let finalise_result = tokio::task::spawn_blocking(move || {
         transcode_video_finalise(
-            post_id, &file_path, &src_path, &webm_abs, &webm_rel, tmp, &pool,
+            job_id, post_id, &file_path, &src_path, &webm_abs, &webm_rel, tmp, &pool,
         )
     })
     .await
@@ -1363,7 +1511,12 @@ fn transcoded_webm_name(stem: &str, source_ext: &str) -> String {
 /// read the result for dedup, and update the database.
 ///
 /// On any DB error the temp-turned-final `WebM` is removed to prevent leaks.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the finalisation boundary carries the durable job and all validated filesystem identities"
+)]
 fn transcode_video_finalise(
+    job_id: i64,
     post_id: i64,
     file_path: &str,
     src: &std::path::Path,
@@ -1371,13 +1524,7 @@ fn transcode_video_finalise(
     webm_rel: &str,
     tmp: tempfile::NamedTempFile,
     pool: &DbPool,
-) -> Result<()> {
-    let ext = src
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-
+) -> Result<JobExecution> {
     match validate_transcoded_webm_output(src, tmp.path()) {
         Ok(TranscodeOutputDecision::Accept) => {}
         Ok(TranscodeOutputDecision::Skip { reason }) => {
@@ -1387,7 +1534,7 @@ fn transcode_video_finalise(
                 reason,
                 "VideoTranscode: keeping original media"
             );
-            return Ok(());
+            return Ok(JobExecution::NeedsCompletion);
         }
         Err(error) => {
             tracing::warn!(
@@ -1396,19 +1543,22 @@ fn transcode_video_finalise(
                 error = %error,
                 "VideoTranscode: output validation failed; keeping original media"
             );
-            return Ok(());
+            return Ok(JobExecution::NeedsCompletion);
         }
     }
 
-    persist_transcoded_webm(post_id, file_path, src, webm_abs, webm_rel, tmp, pool)?;
-    if ext != "webm" {
-        drop(std::fs::remove_file(src));
-    }
-    Ok(())
+    persist_transcoded_webm(
+        job_id, post_id, file_path, src, webm_abs, webm_rel, tmp, pool,
+    )
 }
 
 /// Atomically installs a validated transcode and replaces the post media record.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "output installation and atomic DB completion require the full validated transcode identity"
+)]
 fn persist_transcoded_webm(
+    job_id: i64,
     post_id: i64,
     file_path: &str,
     src: &std::path::Path,
@@ -1416,9 +1566,8 @@ fn persist_transcoded_webm(
     webm_rel: &str,
     tmp: tempfile::NamedTempFile,
     pool: &DbPool,
-) -> Result<()> {
-    tmp.persist(webm_abs)
-        .map_err(|e| anyhow::anyhow!("Failed to atomically rename WebM output: {e}"))?;
+) -> Result<JobExecution> {
+    let installed_new = install_deterministic_output(tmp, webm_abs)?;
     let persist_result: Result<u64> = (|| {
         let webm_sha256 = sha256_file_hex(webm_abs)?;
         let webm_bytes = std::fs::metadata(webm_abs)
@@ -1427,34 +1576,115 @@ fn persist_transcoded_webm(
         let persisted_size =
             i64::try_from(webm_bytes).context("Transcoded WebM size exceeds database range")?;
         let conn = pool.get()?;
-        crate::db::replace_transcoded_media(
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .context("Failed to begin atomic video-job completion")?;
+        let finish = crate::db::finish_video_media_job_in_tx(
             &conn,
+            job_id,
             post_id,
             file_path,
             webm_rel,
             "video/webm",
             &webm_sha256,
             persisted_size,
-        )?;
+        );
+        let finish = match finish {
+            Ok(finish) => {
+                if let Err(error) = conn.execute_batch("COMMIT") {
+                    drop(conn.execute_batch("ROLLBACK"));
+                    return Err(error).context("Failed to commit atomic video-job completion");
+                }
+                finish
+            }
+            Err(error) => {
+                drop(conn.execute_batch("ROLLBACK"));
+                return Err(error);
+            }
+        };
+        finalize_media_cleanup(
+            &conn,
+            &CONFIG.upload_dir,
+            &finish.cleanup,
+            post_id,
+            job_id,
+            "video_transcode",
+        );
         Ok(webm_bytes)
     })();
 
     let webm_bytes = match persist_result {
         Ok(webm_bytes) => webm_bytes,
         Err(error) => {
-            if let Err(cleanup_error) = std::fs::remove_file(webm_abs) {
-                warn!(
-                    output = %webm_abs.display(),
-                    error = %cleanup_error,
-                    "VideoTranscode: failed to remove unattached WebM output"
-                );
+            if installed_new {
+                if let Err(cleanup_error) = std::fs::remove_file(webm_abs) {
+                    warn!(
+                        output = %webm_abs.display(),
+                        error = %cleanup_error,
+                        "VideoTranscode: failed to remove unattached WebM output"
+                    );
+                }
             }
             return Err(error);
         }
     };
 
     tracing::info!(target: "workers", post_id = post_id, source = %src.display(), output = %webm_rel, bytes = webm_bytes, "VideoTranscode done");
-    Ok(())
+    Ok(JobExecution::Persisted)
+}
+
+/// Install a deterministic output without overwriting an existing managed file.
+/// An existing byte-identical regular file is reused; mismatches, symlinks, and
+/// hard links fail closed.
+fn install_deterministic_output(
+    tmp: tempfile::NamedTempFile,
+    destination: &std::path::Path,
+) -> Result<bool> {
+    if destination.exists() {
+        crate::utils::fs_security::assert_regular_file_no_symlink(destination)
+            .context("Existing deterministic media output is unsafe")?;
+        let existing_digest = sha256_file_hex(destination)?;
+        let candidate_digest = sha256_file_hex(tmp.path())?;
+        anyhow::ensure!(
+            existing_digest == candidate_digest,
+            "existing deterministic media output does not match this job"
+        );
+        return Ok(false);
+    }
+    tmp.persist_noclobber(destination)
+        .map_err(|error| anyhow::anyhow!("Failed to atomically install media output: {error}"))?;
+    crate::utils::fs_security::assert_regular_file_no_symlink(destination)
+        .context("Installed deterministic media output is unsafe")?;
+    Ok(true)
+}
+
+/// Replay cleanup journaled by an atomic media completion. Failures leave the
+/// durable row for startup/periodic filesystem reconciliation.
+fn finalize_media_cleanup(
+    conn: &rusqlite::Connection,
+    upload_dir: &str,
+    cleanup: &crate::db::DeletePathsResult,
+    post_id: i64,
+    job_id: i64,
+    job_type: &str,
+) {
+    if cleanup.paths.is_empty() {
+        return;
+    }
+    if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
+        conn,
+        upload_dir,
+        cleanup.pending_fs_op_id.as_deref(),
+        &cleanup.paths,
+    ) {
+        warn!(
+            target: "workers",
+            post_id,
+            job_id,
+            job_type,
+            error = %error,
+            "media completion cleanup replay failed; durable intent retained"
+        );
+    }
 }
 
 /// Decision produced by post-transcode validation.
@@ -1530,15 +1760,16 @@ type WaveformPrepareParts = (
 
 /// Generates and persists an audio waveform thumbnail with bounded process time.
 async fn generate_waveform(
+    job_id: i64,
     post_id: i64,
     file_path: String,
     board_short: String,
     ffmpeg_available: bool,
     pool: DbPool,
     cancel: CancellationToken,
-) -> Result<()> {
+) -> Result<JobExecution> {
     if !ffmpeg_available {
-        return Ok(());
+        return Ok(JobExecution::NeedsCompletion);
     }
 
     let timeout_secs = crate::config::ffmpeg_timeout_secs();
@@ -1592,6 +1823,7 @@ async fn generate_waveform(
     // Phase 3: persist + DB update — blocking.
     let finalise_result = tokio::task::spawn_blocking(move || {
         waveform_finalise(
+            job_id,
             post_id,
             &png_abs,
             &png_rel,
@@ -1681,6 +1913,7 @@ fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepar
     reason = "the finalisation boundary explicitly carries all validated paths and DB identity"
 )]
 fn waveform_finalise(
+    job_id: i64,
     post_id: i64,
     png_abs: &std::path::Path,
     png_rel: &str,
@@ -1689,46 +1922,36 @@ fn waveform_finalise(
     tmp_png: tempfile::NamedTempFile,
     upload_root: &std::path::Path,
     pool: &DbPool,
-) -> Result<()> {
+) -> Result<JobExecution> {
     use anyhow::Context as _;
-    tmp_png
-        .persist(png_abs)
-        .context("Failed to atomically rename waveform PNG into place")?;
+    let installed_new = install_deterministic_output(tmp_png, png_abs)?;
     let result: Result<()> = (|| {
         let audio_sha256 = sha256_file_hex(src_path)?;
         let conn = pool.get()?;
         conn.execute_batch("BEGIN IMMEDIATE")
             .context("Failed to begin waveform persistence transaction")?;
-        let db_result: Result<Option<String>> = (|| {
-            let previous_thumb = conn
-                .query_row(
-                    "SELECT thumb_path FROM posts WHERE id = ?1 AND file_path = ?2",
-                    rusqlite::params![post_id, expected_file_path],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .optional()?
-                .flatten();
-            crate::db::update_post_thumb_path(&conn, post_id, expected_file_path, png_rel)?;
-            conn.execute(
-                "UPDATE file_hashes SET thumb_path = ?1 WHERE sha256 = ?2",
-                rusqlite::params![png_rel, audio_sha256],
-            )?;
-            Ok(previous_thumb)
-        })();
+        let db_result = crate::db::finish_waveform_media_job_in_tx(
+            &conn,
+            job_id,
+            post_id,
+            expected_file_path,
+            png_rel,
+            &audio_sha256,
+        );
         match db_result {
-            Ok(previous_thumb) => {
+            Ok(finish) => {
                 if let Err(error) = conn.execute_batch("COMMIT") {
                     drop(conn.execute_batch("ROLLBACK"));
                     return Err(error).context("Failed to commit waveform persistence");
                 }
-                if let Some(previous_thumb) = previous_thumb {
-                    cleanup_waveform_placeholder_candidate(
-                        &conn,
-                        upload_root,
-                        &previous_thumb,
-                        png_rel,
-                    );
-                }
+                finalize_media_cleanup(
+                    &conn,
+                    upload_root.to_string_lossy().as_ref(),
+                    &finish.cleanup,
+                    post_id,
+                    job_id,
+                    "audio_waveform",
+                );
                 Ok(())
             }
             Err(error) => {
@@ -1738,18 +1961,20 @@ fn waveform_finalise(
         }
     })();
     if let Err(error) = result {
-        if let Err(cleanup_error) = std::fs::remove_file(png_abs) {
-            warn!(
-                output = %png_abs.display(),
-                error = %cleanup_error,
-                "AudioWaveform: failed to remove unattached waveform output"
-            );
+        if installed_new {
+            if let Err(cleanup_error) = std::fs::remove_file(png_abs) {
+                warn!(
+                    output = %png_abs.display(),
+                    error = %cleanup_error,
+                    "AudioWaveform: failed to remove unattached waveform output"
+                );
+            }
         }
         return Err(error);
     }
 
     tracing::info!(target: "workers", post_id = post_id, thumb = %png_rel, "AudioWaveform done");
-    Ok(())
+    Ok(JobExecution::Persisted)
 }
 
 /// Removes one superseded SVG waveform placeholder after verifying that no
@@ -2266,6 +2491,377 @@ pub(crate) fn normalize_legacy_thread_prune_jobs(pool: &DbPool, limit: usize) ->
     Ok(())
 }
 
+/// Maximum media jobs and pending posts inspected by one reconciliation pass.
+pub(crate) const MEDIA_RECONCILE_BATCH: usize = 128;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Summary of one bounded media-state reconciliation page.
+pub struct MediaReconciliation {
+    /// Active media-job rows inspected.
+    pub jobs_scanned: usize,
+    /// Pending post rows inspected.
+    pub posts_scanned: usize,
+    /// Job rows moved to a safe terminal state.
+    pub jobs_resolved: usize,
+    /// Post media states repaired.
+    pub posts_repaired: usize,
+    /// Malformed rows isolated without blocking later work.
+    pub malformed_jobs: usize,
+    /// Cursor for the next active-job page, or zero after wrapping.
+    pub next_job_id: i64,
+    /// Cursor for the next pending-post page, or zero after wrapping.
+    pub next_post_id: i64,
+}
+
+/// Derive the deterministic output named by a video job payload.
+fn deterministic_video_output_path(source: &str, board: &str) -> Option<String> {
+    let source = std::path::Path::new(source);
+    let stem = source.file_stem()?.to_str()?;
+    let extension = source.extension()?.to_str()?.to_ascii_lowercase();
+    matches!(extension.as_str(), "mp4" | "mkv" | "webm")
+        .then(|| format!("{board}/{}", transcoded_webm_name(stem, &extension)))
+}
+
+/// Derive the deterministic output named by an audio-waveform payload.
+fn deterministic_waveform_output_path(source: &str, board: &str) -> Option<String> {
+    let stem = std::path::Path::new(source).file_stem()?.to_str()?;
+    (!stem.is_empty()).then(|| format!("{board}/thumbs/{stem}.png"))
+}
+
+/// Reconcile one bounded page of legacy media job/post inconsistencies.
+///
+/// Repairs use only the job payload's source identity and current durable post
+/// state. Deterministic files are never assumed to belong to a post merely from
+/// their name.
+///
+/// # Errors
+/// Returns an error if the immediate transaction or bounded queries fail.
+#[expect(
+    clippy::cognitive_complexity,
+    clippy::too_many_lines,
+    reason = "the bounded legacy-state matrix is intentionally explicit"
+)]
+pub fn reconcile_media_job_states(
+    pool: &DbPool,
+    after_job_id: i64,
+    after_post_id: i64,
+    limit: usize,
+) -> Result<MediaReconciliation> {
+    let conn = pool
+        .get()
+        .context("Get DB connection for media reconciliation failed")?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Begin media reconciliation transaction failed")?;
+    let result = (|| {
+        let bounded_limit = limit.clamp(1, MEDIA_RECONCILE_BATCH);
+        let sql_limit = i64::try_from(bounded_limit).unwrap_or(i64::MAX);
+        let mut job_stmt = conn.prepare(
+            "SELECT id, job_type, payload
+             FROM background_jobs
+             WHERE id > ?1 AND status IN ('pending', 'running')
+               AND job_type IN ('video_transcode', 'audio_waveform')
+             ORDER BY id ASC LIMIT ?2",
+        )?;
+        let jobs = job_stmt
+            .query_map(rusqlite::params![after_job_id.max(0), sql_limit], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(job_stmt);
+
+        let mut report = MediaReconciliation {
+            jobs_scanned: jobs.len(),
+            next_job_id: jobs.last().map_or(0, |job| job.0),
+            ..MediaReconciliation::default()
+        };
+        if jobs.len() < bounded_limit {
+            report.next_job_id = 0;
+        }
+
+        for (job_id, stored_type, payload) in jobs {
+            let parsed = serde_json::from_str::<Job>(&payload);
+            let job = match parsed {
+                Ok(job) if job.type_str() == stored_type => job,
+                Ok(_) | Err(_) => {
+                    conn.execute(
+                        "UPDATE background_jobs
+                         SET status = 'failed',
+                             last_error = 'malformed legacy media job payload',
+                             updated_at = unixepoch()
+                         WHERE id = ?1 AND status IN ('pending', 'running')",
+                        rusqlite::params![job_id],
+                    )?;
+                    report.jobs_resolved = report.jobs_resolved.saturating_add(1);
+                    report.malformed_jobs = report.malformed_jobs.saturating_add(1);
+                    warn!(
+                        target: "workers",
+                        job_id,
+                        job_type = %stored_type,
+                        "isolated malformed legacy media job"
+                    );
+                    continue;
+                }
+            };
+            let Some(identity) = media_job_identity(&job) else {
+                continue;
+            };
+            let post = conn
+                .query_row(
+                    "SELECT file_path, media_processing_state
+                     FROM posts WHERE id = ?1",
+                    rusqlite::params![identity.post_id],
+                    |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            let compatible = post.as_ref().is_some_and(|(path, state)| {
+                path.as_deref() == Some(identity.expected_source.as_str())
+                    && matches!(
+                        state.as_str(),
+                        crate::db::MEDIA_PROCESSING_PENDING | "running"
+                    )
+            });
+            let older_duplicate: bool = conn.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM background_jobs
+                     WHERE id < ?1 AND status IN ('pending', 'running')
+                       AND job_type = ?2 AND json_valid(payload)
+                       AND CAST(json_extract(payload, '$.d.post_id') AS INTEGER) = ?3
+                       AND json_extract(payload, '$.d.file_path') = ?4
+                 )",
+                rusqlite::params![
+                    job_id,
+                    identity.job_type,
+                    identity.post_id,
+                    identity.expected_source
+                ],
+                |row| row.get(0),
+            )?;
+            if compatible && !older_duplicate {
+                continue;
+            }
+
+            conn.execute(
+                "UPDATE background_jobs
+                 SET status = 'done',
+                     last_error = ?2,
+                     updated_at = unixepoch()
+                 WHERE id = ?1 AND status IN ('pending', 'running')",
+                rusqlite::params![
+                    job_id,
+                    if post.is_none() {
+                        "resolved missing media target"
+                    } else if older_duplicate {
+                        "resolved duplicate media job"
+                    } else {
+                        "resolved stale or terminal media target"
+                    }
+                ],
+            )?;
+            report.jobs_resolved = report.jobs_resolved.saturating_add(1);
+            debug!(
+                target: "workers",
+                post_id = identity.post_id,
+                job_id,
+                job_type = identity.job_type,
+                "resolved stale, duplicate, or missing-target media job"
+            );
+        }
+
+        let mut post_stmt = conn.prepare(
+            "SELECT p.id, p.file_path, p.thumb_path
+             FROM posts p
+             WHERE p.id > ?1 AND p.media_processing_state = ?2
+             ORDER BY p.id ASC LIMIT ?3",
+        )?;
+        let posts = post_stmt
+            .query_map(
+                rusqlite::params![
+                    after_post_id.max(0),
+                    crate::db::MEDIA_PROCESSING_PENDING,
+                    sql_limit
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(post_stmt);
+        report.posts_scanned = posts.len();
+        report.next_post_id = posts.last().map_or(0, |post| post.0);
+        if posts.len() < bounded_limit {
+            report.next_post_id = 0;
+        }
+
+        for (post_id, source, current_thumb) in posts {
+            let Some(source) = source else {
+                conn.execute(
+                    "UPDATE posts SET media_processing_state = ?1,
+                         media_processing_error = 'pending media post has no source'
+                     WHERE id = ?2 AND media_processing_state = ?3",
+                    rusqlite::params![
+                        crate::db::MEDIA_PROCESSING_FAILED,
+                        post_id,
+                        crate::db::MEDIA_PROCESSING_PENDING
+                    ],
+                )?;
+                report.posts_repaired = report.posts_repaired.saturating_add(1);
+                continue;
+            };
+            let mut active_stmt = conn.prepare(
+                "SELECT job_type, payload FROM background_jobs
+                 WHERE status IN ('pending', 'running')
+                   AND job_type IN ('video_transcode', 'audio_waveform')
+                   AND json_valid(payload)
+                   AND CAST(json_extract(payload, '$.d.post_id') AS INTEGER) = ?1
+                 ORDER BY id ASC",
+            )?;
+            let active_payloads = active_stmt
+                .query_map(rusqlite::params![post_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(active_stmt);
+            let has_compatible = active_payloads.iter().any(|(stored_type, payload)| {
+                serde_json::from_str::<Job>(payload)
+                    .ok()
+                    .is_some_and(|job| {
+                        job.type_str() == stored_type
+                            && media_job_identity(&job).is_some_and(|identity| {
+                                identity.post_id == post_id && identity.expected_source == source
+                            })
+                    })
+            });
+            if has_compatible {
+                continue;
+            }
+
+            let mut terminal_stmt = conn.prepare(
+                "SELECT job_type, payload, status, last_error FROM background_jobs
+                     WHERE status IN ('done', 'failed')
+                       AND job_type IN ('video_transcode', 'audio_waveform')
+                       AND json_valid(payload)
+                       AND CAST(json_extract(payload, '$.d.post_id') AS INTEGER) = ?1
+                     ORDER BY id DESC LIMIT 16",
+            )?;
+            let terminal_rows = terminal_stmt
+                .query_map(rusqlite::params![post_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(terminal_stmt);
+            let mut terminal = None;
+            for (job_type, payload, status, error) in terminal_rows {
+                let Ok(job) = serde_json::from_str::<Job>(&payload) else {
+                    continue;
+                };
+                if job.type_str() != job_type {
+                    continue;
+                }
+                let disposition = match job {
+                    Job::VideoTranscode {
+                        file_path,
+                        board_short,
+                        ..
+                    } => {
+                        let expected_output_path =
+                            deterministic_video_output_path(&file_path, &board_short);
+                        let installed_output_matches = status == "done"
+                            && expected_output_path.as_deref() == Some(source.as_str())
+                            && crate::utils::fs_security::existing_regular_file_child(
+                                std::path::Path::new(&CONFIG.upload_dir),
+                                &source,
+                            )
+                            .is_ok();
+                        if file_path == source || installed_output_matches {
+                            Some((status.as_str(), error))
+                        } else {
+                            None
+                        }
+                    }
+                    Job::AudioWaveform {
+                        file_path,
+                        board_short,
+                        ..
+                    } => {
+                        let expected_thumb_path =
+                            deterministic_waveform_output_path(&file_path, &board_short);
+                        if file_path == source
+                            && (status != "done"
+                                || expected_thumb_path.is_none()
+                                || current_thumb.as_deref() == expected_thumb_path.as_deref())
+                        {
+                            Some((status.as_str(), error))
+                        } else {
+                            None
+                        }
+                    }
+                    Job::ThreadPrune { .. } | Job::SpamCheck { .. } => None,
+                };
+                if let Some((status, error)) = disposition {
+                    terminal = Some((status.to_owned(), error));
+                    break;
+                }
+            }
+            let (state, detail) = match terminal {
+                Some((status, _error)) if status == "done" => ("", None),
+                Some((_status, error)) => (
+                    crate::db::MEDIA_PROCESSING_FAILED,
+                    error.or_else(|| Some("media job permanently failed".to_owned())),
+                ),
+                None => (
+                    crate::db::MEDIA_PROCESSING_FAILED,
+                    Some("pending media state has no durable compatible job".to_owned()),
+                ),
+            };
+            conn.execute(
+                "UPDATE posts SET media_processing_state = ?1, media_processing_error = ?2
+                 WHERE id = ?3 AND file_path = ?4 AND media_processing_state = ?5",
+                rusqlite::params![
+                    state,
+                    detail,
+                    post_id,
+                    source,
+                    crate::db::MEDIA_PROCESSING_PENDING
+                ],
+            )?;
+            report.posts_repaired = report.posts_repaired.saturating_add(1);
+            warn!(
+                target: "workers",
+                post_id,
+                "repaired pending post without compatible durable media work"
+            );
+        }
+        Ok(report)
+    })();
+
+    match result {
+        Ok(report) => {
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                drop(conn.execute_batch("ROLLBACK"));
+                return Err(error).context("Commit media reconciliation failed");
+            }
+            Ok(report)
+        }
+        Err(error) => {
+            drop(conn.execute_batch("ROLLBACK"));
+            Err(error)
+        }
+    }
+}
+
 // ─── SpamCheck ────────────────────────────────────────────────────────────────
 
 /// Records lightweight abuse signals for later operational review.
@@ -2421,8 +3017,9 @@ pub fn evict_thumb_cache(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_legacy_thread_prune_jobs, persist_job_completion, persist_job_completion_once,
-        persist_transcoded_webm, prune_threads, reconcile_thread_prune_intents,
+        media_job_identity, normalize_legacy_thread_prune_jobs, persist_job_completion,
+        persist_job_completion_once, persist_transcoded_webm, prune_threads,
+        reconcile_media_job_states, reconcile_thread_prune_intents, serialize_job_payload,
         transcode_video_finalise, transcoded_webm_name, validated_board_media_file,
         video_reencode_timeout_warning, waveform_finalise, EnqueueOutcome, Job, JobCompletion,
         JobQueue,
@@ -2443,6 +3040,34 @@ mod tests {
             |row| row.get(0),
         )
         .expect("file hash count")
+    }
+
+    fn seed_media_job_post(
+        pool: &crate::db::DbPool,
+        board: &str,
+        source: &str,
+        state: &str,
+    ) -> anyhow::Result<i64> {
+        let conn = pool.get().context("get media fixture connection")?;
+        conn.execute(
+            "INSERT INTO boards (short_name, name, description) VALUES (?1, ?1, '')",
+            rusqlite::params![board],
+        )?;
+        let board_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO threads (board_id, subject) VALUES (?1, 'media')",
+            rusqlite::params![board_id],
+        )?;
+        let thread_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO posts
+             (thread_id, board_id, name, body, body_html, deletion_token, is_op,
+              file_path, file_size, mime_type, media_type, media_processing_state)
+             VALUES (?1, ?2, 'anon', '', '', 'token', 1, ?3, 10,
+                     'video/mp4', 'video', ?4)",
+            rusqlite::params![thread_id, board_id, source, state],
+        )?;
+        Ok(conn.last_insert_rowid())
     }
 
     fn enqueue_spam_job(queue: &JobQueue) -> anyhow::Result<i64> {
@@ -2542,6 +3167,439 @@ mod tests {
 
         let restarted = JobQueue::new(pool);
         assert!(restarted.pending_count() >= 1);
+    }
+
+    #[test]
+    fn media_capacity_rejection_is_terminal_without_a_durable_job() -> anyhow::Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let post_id = seed_media_job_post(&pool, "cap", "cap/video.mp4", "")?;
+        let queue = JobQueue::new(pool.clone());
+        queue.pending_jobs.store(
+            crate::config::CONFIG.job_queue_capacity.max(1),
+            Ordering::Relaxed,
+        );
+        let outcome = queue.enqueue(&Job::VideoTranscode {
+            post_id,
+            file_path: "cap/video.mp4".to_owned(),
+            board_short: "cap".to_owned(),
+        })?;
+        ensure!(outcome == EnqueueOutcome::DroppedAtCapacity);
+        let conn = pool.get()?;
+        let state: (String, Option<String>) = conn.query_row(
+            "SELECT media_processing_state, media_processing_error FROM posts WHERE id = ?1",
+            rusqlite::params![post_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        ensure!(state.0 == crate::db::MEDIA_PROCESSING_FAILED);
+        ensure!(state.1.is_some());
+        ensure!(crate::db::pending_job_count(&conn)? == 0);
+        Ok(())
+    }
+
+    #[test]
+    fn media_serialization_failure_precedes_any_state_transaction() -> anyhow::Result<()> {
+        use std::result::Result as StdResult;
+
+        struct FailingSerialization;
+        impl serde::Serialize for FailingSerialization {
+            fn serialize<S>(&self, _serializer: S) -> StdResult<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom("injected serialization failure"))
+            }
+        }
+
+        let pool = crate::db::init_test_pool()?;
+        let post_id = seed_media_job_post(&pool, "ser", "ser/video.mp4", "")?;
+        ensure!(serialize_job_payload(&FailingSerialization).is_err());
+        let conn = pool.get()?;
+        let state: String = conn.query_row(
+            "SELECT media_processing_state FROM posts WHERE id = ?1",
+            rusqlite::params![post_id],
+            |row| row.get(0),
+        )?;
+        ensure!(state.is_empty());
+        ensure!(crate::db::pending_job_count(&conn)? == 0);
+        Ok(())
+    }
+
+    #[test]
+    fn fast_worker_completion_cannot_be_overwritten_back_to_pending() -> anyhow::Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let post_id = seed_media_job_post(&pool, "race", "race/video.mp4", "")?;
+        let queue = JobQueue::new(pool.clone());
+        let job = Job::VideoTranscode {
+            post_id,
+            file_path: "race/video.mp4".to_owned(),
+            board_short: "race".to_owned(),
+        };
+
+        // This return is the old handler pause point. Both pending state and the
+        // durable row have already committed, and there is no later state write.
+        let job_id = match queue.enqueue(&job)? {
+            EnqueueOutcome::Enqueued(job_id) => job_id,
+            EnqueueOutcome::DroppedAtCapacity => bail!("race fixture dropped at capacity"),
+        };
+        {
+            let conn = pool.get()?;
+            claim_job(&queue, &conn, job_id);
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            let finish = crate::db::finish_video_media_job_in_tx(
+                &conn,
+                job_id,
+                post_id,
+                "race/video.mp4",
+                "race/video.webm",
+                "video/webm",
+                &"a".repeat(64),
+                5,
+            )?;
+            ensure!(finish.applied);
+            conn.execute_batch("COMMIT")?;
+        }
+
+        // Resume the handler: enqueue_media has no handler-side pending update.
+        let conn = pool.get()?;
+        let post: (String, String, i64) = conn.query_row(
+            "SELECT file_path, media_processing_state,
+                    (SELECT COUNT(*) FROM file_hashes WHERE file_path = 'race/video.webm')
+             FROM posts WHERE id = ?1",
+            rusqlite::params![post_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let status: String = conn.query_row(
+            "SELECT status FROM background_jobs WHERE id = ?1",
+            rusqlite::params![job_id],
+            |row| row.get(0),
+        )?;
+        ensure!(post == ("race/video.webm".to_owned(), String::new(), 1));
+        ensure!(status == "done");
+        ensure!(crate::db::list_pending_fs_ops(&conn)?.len() == 1);
+        Ok(())
+    }
+
+    #[test]
+    fn deleted_media_target_resolves_without_retrying() -> anyhow::Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let post_id = seed_media_job_post(&pool, "gone", "gone/video.mp4", "")?;
+        let queue = JobQueue::new(pool.clone());
+        let job = Job::VideoTranscode {
+            post_id,
+            file_path: "gone/video.mp4".to_owned(),
+            board_short: "gone".to_owned(),
+        };
+        let job_id = match queue.enqueue(&job)? {
+            EnqueueOutcome::Enqueued(job_id) => job_id,
+            EnqueueOutcome::DroppedAtCapacity => bail!("deleted-target fixture dropped"),
+        };
+        let identity = media_job_identity(&job).context("media identity")?;
+        {
+            let conn = pool.get()?;
+            conn.execute(
+                "DELETE FROM posts WHERE id = ?1",
+                rusqlite::params![post_id],
+            )?;
+            claim_job(&queue, &conn, job_id);
+        }
+        let state = persist_job_completion_once(
+            &pool,
+            job_id,
+            Some(&identity),
+            &JobCompletion::Failed("source disappeared".to_owned()),
+        )?;
+        ensure!(state.is_none());
+        let conn = pool.get()?;
+        let status: String = conn.query_row(
+            "SELECT status FROM background_jobs WHERE id = ?1",
+            rusqlite::params![job_id],
+            |row| row.get(0),
+        )?;
+        ensure!(status == "done");
+        ensure!(crate::db::claim_next_job(&conn)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn committed_media_job_is_recovered_without_notification() -> anyhow::Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let post_id = seed_media_job_post(&pool, "wake", "wake/video.mp4", "")?;
+        let job = Job::VideoTranscode {
+            post_id,
+            file_path: "wake/video.mp4".to_owned(),
+            board_short: "wake".to_owned(),
+        };
+        let payload = serde_json::to_string(&job)?;
+        let job_id = {
+            let conn = pool.get()?;
+            crate::db::persist_media_job(
+                &conn,
+                job.type_str(),
+                &payload,
+                post_id,
+                "wake/video.mp4",
+                "wake",
+            )?
+            .job_id
+        };
+
+        // Simulate interruption after commit and before Notify::notify_one.
+        let restarted = JobQueue::new(pool.clone());
+        ensure!(restarted.pending_count() == 1);
+        let conn = pool.get()?;
+        let claimed = crate::db::claim_next_job(&conn)?.context("poll recovered durable job")?;
+        ensure!(claimed.0 == job_id);
+        Ok(())
+    }
+
+    #[test]
+    fn media_retry_and_permanent_failure_remain_atomic_and_reschedulable() -> anyhow::Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let post_id = seed_media_job_post(&pool, "retry", "retry/video.mp4", "")?;
+        let queue = JobQueue::new(pool.clone());
+        let job = Job::VideoTranscode {
+            post_id,
+            file_path: "retry/video.mp4".to_owned(),
+            board_short: "retry".to_owned(),
+        };
+        let job_id = match queue.enqueue(&job)? {
+            EnqueueOutcome::Enqueued(job_id) => job_id,
+            EnqueueOutcome::DroppedAtCapacity => bail!("retry fixture dropped"),
+        };
+        let identity = media_job_identity(&job).context("media identity")?;
+        for attempt in 1..=3 {
+            {
+                let conn = pool.get()?;
+                claim_job(&queue, &conn, job_id);
+            }
+            let failure = persist_job_completion_once(
+                &pool,
+                job_id,
+                Some(&identity),
+                &JobCompletion::Failed(format!("failure {attempt}")),
+            )?;
+            let conn = pool.get()?;
+            let (job_status, post_state, source): (String, String, String) = conn.query_row(
+                "SELECT j.status, p.media_processing_state, p.file_path
+                 FROM background_jobs j JOIN posts p ON p.id = ?2 WHERE j.id = ?1",
+                rusqlite::params![job_id, post_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            ensure!(source == "retry/video.mp4");
+            if attempt < 3 {
+                ensure!(failure == Some(crate::db::JobFailureState::Retrying));
+                ensure!(job_status == "pending");
+                ensure!(post_state == crate::db::MEDIA_PROCESSING_PENDING);
+                queue.mark_job_failure_state(crate::db::JobFailureState::Retrying);
+            } else {
+                ensure!(failure == Some(crate::db::JobFailureState::PermanentlyFailed));
+                ensure!(job_status == "failed");
+                ensure!(post_state == crate::db::MEDIA_PROCESSING_FAILED);
+            }
+        }
+
+        let replacement_id = match queue.enqueue(&job)? {
+            EnqueueOutcome::Enqueued(job_id) => job_id,
+            EnqueueOutcome::DroppedAtCapacity => bail!("rescheduled fixture dropped"),
+        };
+        {
+            let conn = pool.get()?;
+            claim_job(&queue, &conn, replacement_id);
+        }
+        persist_job_completion_once(&pool, replacement_id, Some(&identity), &JobCompletion::Done)?;
+        let conn = pool.get()?;
+        let state: String = conn.query_row(
+            "SELECT media_processing_state FROM posts WHERE id = ?1",
+            rusqlite::params![post_id],
+            |row| row.get(0),
+        )?;
+        ensure!(state.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn changed_source_and_original_prune_reject_stale_completion() -> anyhow::Result<()> {
+        for (board, replacement_state) in [
+            ("newsrc", crate::db::MEDIA_PROCESSING_PENDING),
+            ("prune", crate::db::MEDIA_ORIGINAL_PRUNE_PENDING),
+        ] {
+            let pool = crate::db::init_test_pool()?;
+            let old_source = format!("{board}/old.mp4");
+            let post_id = seed_media_job_post(&pool, board, &old_source, "")?;
+            let queue = JobQueue::new(pool.clone());
+            let old_job = Job::VideoTranscode {
+                post_id,
+                file_path: old_source.clone(),
+                board_short: board.to_owned(),
+            };
+            let old_job_id = match queue.enqueue(&old_job)? {
+                EnqueueOutcome::Enqueued(job_id) => job_id,
+                EnqueueOutcome::DroppedAtCapacity => bail!("stale fixture dropped"),
+            };
+            {
+                let conn = pool.get()?;
+                claim_job(&queue, &conn, old_job_id);
+                if board == "newsrc" {
+                    conn.execute_batch("BEGIN IMMEDIATE")?;
+                }
+                conn.execute(
+                    "UPDATE posts SET file_path = ?2, media_processing_state = ?3 WHERE id = ?1",
+                    rusqlite::params![post_id, format!("{board}/new.mp4"), replacement_state],
+                )?;
+                if board == "newsrc" {
+                    let newer = Job::VideoTranscode {
+                        post_id,
+                        file_path: "newsrc/new.mp4".to_owned(),
+                        board_short: "newsrc".to_owned(),
+                    };
+                    crate::db::enqueue_job(
+                        &conn,
+                        newer.type_str(),
+                        &serde_json::to_string(&newer)?,
+                    )?;
+                    conn.execute_batch("COMMIT")?;
+                }
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let finish = crate::db::finish_video_media_job_in_tx(
+                    &conn,
+                    old_job_id,
+                    post_id,
+                    &old_source,
+                    &format!("{board}/old.webm"),
+                    "video/webm",
+                    &"b".repeat(64),
+                    5,
+                )?;
+                ensure!(!finish.applied);
+                conn.execute_batch("COMMIT")?;
+            }
+            let conn = pool.get()?;
+            let (path, state, job_status): (String, String, String) = conn.query_row(
+                "SELECT p.file_path, p.media_processing_state, j.status
+                 FROM posts p JOIN background_jobs j ON j.id = ?2 WHERE p.id = ?1",
+                rusqlite::params![post_id, old_job_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            ensure!(path == format!("{board}/new.mp4"));
+            ensure!(state == replacement_state);
+            ensure!(job_status == "done");
+            ensure!(crate::db::list_pending_fs_ops(&conn)?.len() == 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn video_completion_preserves_shared_deduplicated_source() -> anyhow::Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let post_id = seed_media_job_post(&pool, "share", "share/video.mp4", "")?;
+        let queue = JobQueue::new(pool.clone());
+        let shared_post_id = {
+            let conn = pool.get()?;
+            let (thread_id, board_id): (i64, i64) = conn.query_row(
+                "SELECT thread_id, board_id FROM posts WHERE id = ?1",
+                rusqlite::params![post_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            conn.execute(
+                "INSERT INTO posts
+                 (thread_id, board_id, name, body, body_html, deletion_token,
+                  file_path, file_size, mime_type, media_type)
+                 VALUES (?1, ?2, 'anon', '', '', 'token2', 'share/video.mp4', 10,
+                         'video/mp4', 'video')",
+                rusqlite::params![thread_id, board_id],
+            )?;
+            conn.last_insert_rowid()
+        };
+        let job = Job::VideoTranscode {
+            post_id,
+            file_path: "share/video.mp4".to_owned(),
+            board_short: "share".to_owned(),
+        };
+        let job_id = match queue.enqueue(&job)? {
+            EnqueueOutcome::Enqueued(job_id) => job_id,
+            EnqueueOutcome::DroppedAtCapacity => bail!("shared-source fixture dropped"),
+        };
+        let conn = pool.get()?;
+        claim_job(&queue, &conn, job_id);
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let finish = crate::db::finish_video_media_job_in_tx(
+            &conn,
+            job_id,
+            post_id,
+            "share/video.mp4",
+            "share/video.webm",
+            "video/webm",
+            &"c".repeat(64),
+            5,
+        )?;
+        ensure!(finish.applied);
+        ensure!(finish.cleanup.paths.is_empty());
+        conn.execute_batch("COMMIT")?;
+        let shared_path: String = conn.query_row(
+            "SELECT file_path FROM posts WHERE id = ?1",
+            rusqlite::params![shared_post_id],
+            |row| row.get(0),
+        )?;
+        ensure!(shared_path == "share/video.mp4");
+        ensure!(crate::db::list_pending_fs_ops(&conn)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn durable_video_source_cleanup_replays_after_interruption() -> anyhow::Result<()> {
+        let upload_root = tempfile::tempdir()?;
+        let board_dir = upload_root.path().join("clean");
+        std::fs::create_dir_all(&board_dir)?;
+        let source = board_dir.join("video.mp4");
+        let output = board_dir.join("video.webm");
+        std::fs::write(&source, b"original")?;
+        std::fs::write(&output, b"derived")?;
+
+        let pool = crate::db::init_test_pool()?;
+        let post_id = seed_media_job_post(&pool, "clean", "clean/video.mp4", "")?;
+        let queue = JobQueue::new(pool.clone());
+        let job = Job::VideoTranscode {
+            post_id,
+            file_path: "clean/video.mp4".to_owned(),
+            board_short: "clean".to_owned(),
+        };
+        let job_id = match queue.enqueue(&job)? {
+            EnqueueOutcome::Enqueued(job_id) => job_id,
+            EnqueueOutcome::DroppedAtCapacity => bail!("cleanup fixture dropped"),
+        };
+        {
+            let conn = pool.get()?;
+            claim_job(&queue, &conn, job_id);
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            let finish = crate::db::finish_video_media_job_in_tx(
+                &conn,
+                job_id,
+                post_id,
+                "clean/video.mp4",
+                "clean/video.webm",
+                "video/webm",
+                &"d".repeat(64),
+                7,
+            )?;
+            ensure!(finish.cleanup.paths == ["clean/video.mp4"]);
+            conn.execute_batch("COMMIT")?;
+            ensure!(crate::db::list_pending_fs_ops(&conn)?.len() == 1);
+        }
+        ensure!(source.exists(), "simulated interruption precedes cleanup");
+
+        let upload_dir = upload_root.path().to_str().context("UTF-8 upload root")?;
+        crate::pending_fs::reconcile_pending_fs_ops(&pool, upload_dir)?;
+        ensure!(!source.exists());
+        ensure!(output.exists());
+        let conn = pool.get()?;
+        ensure!(crate::db::list_pending_fs_ops(&conn)?.is_empty());
+        drop(conn);
+        crate::pending_fs::reconcile_pending_fs_ops(&pool, upload_dir)?;
+        ensure!(
+            output.exists(),
+            "idempotent replay must retain referenced output"
+        );
+        Ok(())
     }
 
     #[test]
@@ -2734,6 +3792,172 @@ mod tests {
             |row| row.get(0),
         )?;
         ensure!(missing_status == "done");
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the legacy reconciliation matrix remains explicit in one fixed-point test"
+    )]
+    fn media_reconciliation_repairs_legacy_matrix_and_reaches_fixed_point() -> anyhow::Result<()> {
+        fn insert_job(conn: &rusqlite::Connection, job: &Job, status: &str) -> anyhow::Result<i64> {
+            let id = crate::db::enqueue_job(conn, job.type_str(), &serde_json::to_string(job)?)?;
+            conn.execute(
+                "UPDATE background_jobs SET status = ?2 WHERE id = ?1",
+                rusqlite::params![id, status],
+            )?;
+            Ok(id)
+        }
+
+        let pool = crate::db::init_test_pool()?;
+        let no_job = seed_media_job_post(
+            &pool,
+            "noj",
+            "noj/video.mp4",
+            crate::db::MEDIA_PROCESSING_PENDING,
+        )?;
+        let completed = seed_media_job_post(
+            &pool,
+            "done",
+            "done/video.mp4",
+            crate::db::MEDIA_PROCESSING_PENDING,
+        )?;
+        let normal = seed_media_job_post(&pool, "norm", "norm/video.mp4", "")?;
+        let failed = seed_media_job_post(
+            &pool,
+            "fail",
+            "fail/video.mp4",
+            crate::db::MEDIA_PROCESSING_FAILED,
+        )?;
+        let duplicate = seed_media_job_post(
+            &pool,
+            "dup",
+            "dup/video.mp4",
+            crate::db::MEDIA_PROCESSING_PENDING,
+        )?;
+        let changed = seed_media_job_post(
+            &pool,
+            "chg",
+            "chg/new.mp4",
+            crate::db::MEDIA_PROCESSING_PENDING,
+        )?;
+        let valid = seed_media_job_post(
+            &pool,
+            "valid",
+            "valid/video.mp4",
+            crate::db::MEDIA_PROCESSING_PENDING,
+        )?;
+        let conn = pool.get()?;
+        insert_job(
+            &conn,
+            &Job::VideoTranscode {
+                post_id: completed,
+                file_path: "done/video.mp4".to_owned(),
+                board_short: "done".to_owned(),
+            },
+            "done",
+        )?;
+        let normal_job = insert_job(
+            &conn,
+            &Job::VideoTranscode {
+                post_id: normal,
+                file_path: "norm/video.mp4".to_owned(),
+                board_short: "norm".to_owned(),
+            },
+            "pending",
+        )?;
+        let missing_job = insert_job(
+            &conn,
+            &Job::VideoTranscode {
+                post_id: 999_999,
+                file_path: "gone/video.mp4".to_owned(),
+                board_short: "gone".to_owned(),
+            },
+            "pending",
+        )?;
+        let failed_job = insert_job(
+            &conn,
+            &Job::VideoTranscode {
+                post_id: failed,
+                file_path: "fail/video.mp4".to_owned(),
+                board_short: "fail".to_owned(),
+            },
+            "pending",
+        )?;
+        let duplicate_job = Job::VideoTranscode {
+            post_id: duplicate,
+            file_path: "dup/video.mp4".to_owned(),
+            board_short: "dup".to_owned(),
+        };
+        let kept_duplicate = insert_job(&conn, &duplicate_job, "pending")?;
+        let resolved_duplicate = insert_job(&conn, &duplicate_job, "pending")?;
+        let changed_job = insert_job(
+            &conn,
+            &Job::VideoTranscode {
+                post_id: changed,
+                file_path: "chg/old.mp4".to_owned(),
+                board_short: "chg".to_owned(),
+            },
+            "pending",
+        )?;
+        crate::db::enqueue_job(&conn, "video_transcode", "{malformed")?;
+        let valid_job = insert_job(
+            &conn,
+            &Job::VideoTranscode {
+                post_id: valid,
+                file_path: "valid/video.mp4".to_owned(),
+                board_short: "valid".to_owned(),
+            },
+            "pending",
+        )?;
+        drop(conn);
+
+        let first = reconcile_media_job_states(&pool, 0, 0, 128)?;
+        ensure!(first.jobs_resolved >= 6);
+        ensure!(first.posts_repaired >= 3);
+        ensure!(first.malformed_jobs == 1);
+        let conn = pool.get()?;
+        for job_id in [
+            normal_job,
+            missing_job,
+            failed_job,
+            resolved_duplicate,
+            changed_job,
+        ] {
+            let status: String = conn.query_row(
+                "SELECT status FROM background_jobs WHERE id = ?1",
+                rusqlite::params![job_id],
+                |row| row.get(0),
+            )?;
+            ensure!(status == "done");
+        }
+        for job_id in [kept_duplicate, valid_job] {
+            let status: String = conn.query_row(
+                "SELECT status FROM background_jobs WHERE id = ?1",
+                rusqlite::params![job_id],
+                |row| row.get(0),
+            )?;
+            ensure!(status == "pending");
+        }
+        let no_job_state: String = conn.query_row(
+            "SELECT media_processing_state FROM posts WHERE id = ?1",
+            rusqlite::params![no_job],
+            |row| row.get(0),
+        )?;
+        let completed_state: String = conn.query_row(
+            "SELECT media_processing_state FROM posts WHERE id = ?1",
+            rusqlite::params![completed],
+            |row| row.get(0),
+        )?;
+        ensure!(no_job_state == crate::db::MEDIA_PROCESSING_FAILED);
+        ensure!(completed_state.is_empty());
+        drop(conn);
+
+        let second = reconcile_media_job_states(&pool, 0, 0, 128)?;
+        ensure!(second.jobs_resolved == 0);
+        ensure!(second.posts_repaired == 0);
+        ensure!(second.malformed_jobs == 0);
         Ok(())
     }
 
@@ -3004,14 +4228,14 @@ mod tests {
                   is_op, file_path, media_processing_state)
                  VALUES (?1, ?2, 'anon', 'body', 'body', 'token', 1,
                          'finished/final.webm', ?3)",
-                rusqlite::params![thread_id, board_id, crate::db::MEDIA_PROCESSING_PENDING],
+                rusqlite::params![thread_id, board_id, ""],
             )
             .context("insert terminal-state media post")?;
             conn.last_insert_rowid()
         };
         let job = Job::VideoTranscode {
             post_id,
-            file_path: "finished/source.mp4".to_owned(),
+            file_path: "finished/final.webm".to_owned(),
             board_short: "finished".to_owned(),
         };
         let job_id = match queue.enqueue(&job).context("enqueue completed media job")? {
@@ -3043,7 +4267,7 @@ mod tests {
                 0,
                 pool.clone(),
                 job_id,
-                Some(post_id),
+                Some(media_job_identity(&job).context("media job identity")?),
                 JobCompletion::Done,
                 tokio_util::sync::CancellationToken::new(),
             ),
@@ -3183,16 +4407,18 @@ mod tests {
             file_path: "media/old.mp4".to_owned(),
             board_short: "media".to_owned(),
         };
-        let job_id = match queue.enqueue(&job).context("enqueue stale media job")? {
-            EnqueueOutcome::Enqueued(id) => id,
-            EnqueueOutcome::DroppedAtCapacity => bail!("stale media job was dropped"),
+        let payload = serde_json::to_string(&job)?;
+        let job_id = {
+            let conn = pool.get().context("get legacy enqueue connection")?;
+            crate::db::enqueue_job(&conn, job.type_str(), &payload)?
         };
         {
             let conn = pool.get().context("get claim connection")?;
             claim_job(&queue, &conn, job_id);
         }
 
-        persist_job_completion_once(&pool, job_id, Some(post_id), &JobCompletion::Stale)
+        let identity = media_job_identity(&job).context("media job identity")?;
+        persist_job_completion_once(&pool, job_id, Some(&identity), &JobCompletion::Stale)
             .context("persist stale completion")?;
 
         let conn = pool.get().context("get verification connection")?;
@@ -3231,6 +4457,7 @@ mod tests {
         let pool = crate::db::init_test_pool().expect("test pool");
 
         let error = persist_transcoded_webm(
+            998,
             999,
             "b/video.mp4",
             &src,
@@ -3269,6 +4496,7 @@ mod tests {
         let pool = crate::db::init_test_pool().expect("test pool");
 
         transcode_video_finalise(
+            998,
             999,
             "b/video.mp4",
             &src,
@@ -3503,6 +4731,7 @@ mod tests {
         let pool = crate::db::init_test_pool().expect("test pool");
 
         let error = waveform_finalise(
+            998,
             999,
             &png_abs,
             "b/thumbs/audio.png",
@@ -3572,7 +4801,22 @@ mod tests {
             post_id
         };
 
+        let queue = JobQueue::new(pool.clone());
+        let job = Job::AudioWaveform {
+            post_id,
+            file_path: "b/audio.mp3".to_owned(),
+            board_short: "b".to_owned(),
+        };
+        let job_id = match queue.enqueue(&job)? {
+            EnqueueOutcome::Enqueued(job_id) => job_id,
+            EnqueueOutcome::DroppedAtCapacity => bail!("waveform fixture dropped at capacity"),
+        };
+        {
+            let conn = pool.get()?;
+            claim_job(&queue, &conn, job_id);
+        }
         waveform_finalise(
+            job_id,
             post_id,
             &png_abs,
             "b/thumbs/audio.png",
