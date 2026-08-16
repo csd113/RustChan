@@ -1,28 +1,46 @@
-// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
-#![allow(clippy::wildcard_imports)]
-
-use super::*;
+use super::{
+    admin_panel_redirect_anchor, checkbox_is_on, require_admin_post_origin_and_csrf,
+    require_admin_session_sid, AppError, AppState, CookieJar, Form, HeaderMap, Response, Result,
+    State, CONFIG, SESSION_COOKIE,
+};
+use axum::response::IntoResponse as _;
+use serde::Deserialize;
 
 #[derive(Deserialize)]
-pub struct FullBackupSettingsForm {
+/// Form fields accepted by the full backup settings request.
+pub(crate) struct FullBackupSettingsForm {
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
+    /// The optional auto full backup interval hours.
     pub auto_full_backup_interval_hours: Option<String>,
+    /// The optional auto full backup copies to keep.
     pub auto_full_backup_copies_to_keep: Option<String>,
+    /// The optional auto full backup include Tor hidden service keys.
     pub auto_full_backup_include_tor_hidden_service_keys: Option<String>,
+    /// The optional auto full backup storage mode.
     pub auto_full_backup_storage_mode: Option<String>,
+    /// The optional auto full backup split ZIP part size GiB.
     pub auto_full_backup_split_zip_part_size_gib: Option<String>,
 }
 
+/// Data used by the parsed full backup settings workflow.
 struct ParsedFullBackupSettings {
+    /// The interval hours.
     interval_hours: u64,
+    /// The copies to keep.
     copies_to_keep: u64,
+    /// Whether to include Tor hidden service keys.
     include_tor_hidden_service_keys: bool,
+    /// The storage mode value.
     storage_mode_value: &'static str,
+    /// The split ZIP part size.
     split_zip_part_size: u64,
+    /// The split ZIP part size GiB.
     split_zip_part_size_gib: u64,
 }
 
+/// Parses full backup settings form.
 fn parse_full_backup_settings_form(
     form: &FullBackupSettingsForm,
 ) -> Result<ParsedFullBackupSettings> {
@@ -38,7 +56,7 @@ fn parse_full_backup_settings_form(
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(CONFIG.auto_full_backup_copies_to_keep)
         .clamp(1, 1_000);
-    let include_tor_hidden_service_keys = super::checkbox_is_on(
+    let include_tor_hidden_service_keys = checkbox_is_on(
         form.auto_full_backup_include_tor_hidden_service_keys
             .as_deref(),
     );
@@ -73,15 +91,16 @@ fn parse_full_backup_settings_form(
     })
 }
 
-pub async fn update_full_backup_settings(
+/// Handles the update full backup settings request.
+pub(crate) async fn update_full_backup_settings(
     State(state): State<AppState>,
     jar: CookieJar,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<FullBackupSettingsForm>,
 ) -> Result<Response> {
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let settings = parse_full_backup_settings_form(&form)?;
     let interval_hours = settings.interval_hours;
@@ -96,7 +115,7 @@ pub async fn update_full_backup_settings(
         let auto_backup_settings = state.auto_full_backup_settings.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             auto_backup_settings.update(
                 interval_hours,
                 copies_to_keep,
@@ -126,7 +145,7 @@ pub async fn update_full_backup_settings(
     .await
     .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
 
-    Ok(super::admin_panel_redirect_anchor(
+    Ok(admin_panel_redirect_anchor(
         "Automatic full-backup settings saved.",
         "full-backup-restore",
     )
@@ -136,9 +155,10 @@ pub async fn update_full_backup_settings(
 #[cfg(test)]
 mod tests {
     use super::{parse_full_backup_settings_form, FullBackupSettingsForm};
+    use anyhow::ensure;
 
     #[test]
-    fn automatic_backup_settings_parse_directory_output_mode() {
+    fn automatic_backup_settings_parse_directory_output_mode() -> anyhow::Result<()> {
         let parsed = parse_full_backup_settings_form(&FullBackupSettingsForm {
             csrf: None,
             auto_full_backup_interval_hours: Some("12".to_owned()),
@@ -146,19 +166,37 @@ mod tests {
             auto_full_backup_include_tor_hidden_service_keys: None,
             auto_full_backup_storage_mode: Some("directory".to_owned()),
             auto_full_backup_split_zip_part_size_gib: Some("8".to_owned()),
-        })
-        .expect("directory settings");
+        })?;
 
-        assert_eq!(parsed.interval_hours, 12);
-        assert_eq!(parsed.copies_to_keep, 3);
-        assert!(!parsed.include_tor_hidden_service_keys);
-        assert_eq!(parsed.storage_mode_value, "directory");
-        assert_eq!(parsed.split_zip_part_size_gib, 8);
-        assert_eq!(parsed.split_zip_part_size, 8 * 1024 * 1024 * 1024);
+        ensure!(
+            parsed.interval_hours == 12,
+            "interval was parsed incorrectly"
+        );
+        ensure!(
+            parsed.copies_to_keep == 3,
+            "retention was parsed incorrectly"
+        );
+        ensure!(
+            !parsed.include_tor_hidden_service_keys,
+            "an absent Tor-key checkbox was treated as enabled"
+        );
+        ensure!(
+            parsed.storage_mode_value == "directory",
+            "directory storage mode was parsed incorrectly"
+        );
+        ensure!(
+            parsed.split_zip_part_size_gib == 8,
+            "split ZIP display size was parsed incorrectly"
+        );
+        ensure!(
+            parsed.split_zip_part_size == 8 * 1024 * 1024 * 1024,
+            "split ZIP byte size was parsed incorrectly"
+        );
+        Ok(())
     }
 
     #[test]
-    fn automatic_backup_settings_parse_split_zip_output_mode() {
+    fn automatic_backup_settings_parse_split_zip_output_mode() -> anyhow::Result<()> {
         let parsed = parse_full_backup_settings_form(&FullBackupSettingsForm {
             csrf: None,
             auto_full_backup_interval_hours: Some("24".to_owned()),
@@ -166,12 +204,24 @@ mod tests {
             auto_full_backup_include_tor_hidden_service_keys: Some("1".to_owned()),
             auto_full_backup_storage_mode: Some("split_zip".to_owned()),
             auto_full_backup_split_zip_part_size_gib: Some("2".to_owned()),
-        })
-        .expect("split ZIP settings");
+        })?;
 
-        assert_eq!(parsed.storage_mode_value, "split_zip");
-        assert_eq!(parsed.split_zip_part_size_gib, 2);
-        assert_eq!(parsed.split_zip_part_size, 2 * 1024 * 1024 * 1024);
-        assert!(parsed.include_tor_hidden_service_keys);
+        ensure!(
+            parsed.storage_mode_value == "split_zip",
+            "split ZIP storage mode was parsed incorrectly"
+        );
+        ensure!(
+            parsed.split_zip_part_size_gib == 2,
+            "split ZIP display size was parsed incorrectly"
+        );
+        ensure!(
+            parsed.split_zip_part_size == 2 * 1024 * 1024 * 1024,
+            "split ZIP byte size was parsed incorrectly"
+        );
+        ensure!(
+            parsed.include_tor_hidden_service_keys,
+            "the Tor-key checkbox was not parsed as enabled"
+        );
+        Ok(())
     }
 }

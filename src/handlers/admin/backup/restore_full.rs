@@ -1,11 +1,28 @@
-// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
-#![allow(clippy::wildcard_imports)]
-
-use super::*;
+use super::{
+    archive, banner, canonicalize_restored_banner_dir, common, create_staging_dir,
+    create_temp_legacy_full_backup_from_v4_path,
+    create_temp_legacy_full_backup_from_v4_transfer_zip, db, full_backup_dir, is_xml_http_request,
+    log_restore_upload_started, new_session_id, remove_path_if_exists, render_restored_body_html,
+    require_admin_post_origin_and_csrf, require_admin_session_sid, restore_auth_preflight,
+    restore_error_redirect_target, restore_failure_response,
+    restore_safe_relative_path_under_prefix, restore_start_response,
+    restore_success_redirect_target, restore_upload_parse_response, sanitize_saved_backup_ref,
+    should_set_secure_cookie, stream_restore_upload_to_tempfile, validate_board_short_name,
+    validate_full_restore_archive_layout, validate_restore_safe_entry_name,
+    validate_streamed_restore_upload, verify_full_backup_archive, AppError, AppState, Backup,
+    Cookie, CookieJar, Duration, Form, HashMap, HeaderMap, Multipart, Path, PathBuf, Redirect,
+    Request, Response, RestoreKind, RestoreSavedForm, Result, Seek, State, Utc,
+    ADMIN_COOKIE_SAME_SITE, BANNER_RESTORE_ENTRY_MAX_BYTES, CONFIG, SESSION_COOKIE, SQLITE_HEADER,
+    ZIP_ENTRY_MAX_BYTES,
+};
 use crate::handlers::admin::backup::common::{
     copy_limited_with_total_budget, RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
 };
+use axum::{extract::FromRequest as _, response::IntoResponse as _};
+use rusqlite::params;
+use tracing::warn;
 
+/// Restores database from snapshot.
 pub(super) fn restore_db_from_snapshot(
     live_conn: &mut rusqlite::Connection,
     snapshot_path: &Path,
@@ -21,13 +38,14 @@ pub(super) fn restore_db_from_snapshot(
         AppError::Internal(anyhow::anyhow!("{context}: rollback init: {restore_err}"))
     })?;
     backup
-        .run_to_completion(100, std::time::Duration::from_millis(0), None)
+        .run_to_completion(100, Duration::from_millis(0), None)
         .map_err(|restore_err| {
             AppError::Internal(anyhow::anyhow!("{context}: rollback copy: {restore_err}"))
         })?;
     Ok(())
 }
 
+/// Refreshes live site state from database.
 pub(super) fn refresh_live_site_state_from_db(conn: &rusqlite::Connection) -> Result<()> {
     crate::templates::set_live_site_name(&db::get_site_name(conn));
     crate::templates::set_live_site_subtitle(&db::get_site_subtitle(conn));
@@ -36,9 +54,14 @@ pub(super) fn refresh_live_site_state_from_db(conn: &rusqlite::Connection) -> Re
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "all restored-database trust checks remain contiguous before any live-state mutation"
+)]
+/// Validates full restore database trust boundary.
 fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Result<()> {
     let mut valid_board_shorts = std::collections::HashSet::new();
-    let mut board_ids_to_shorts = std::collections::HashMap::new();
+    let mut board_ids_to_shorts = HashMap::new();
     let mut stmt = conn
         .prepare("SELECT id, short_name FROM boards")
         .map_err(|error| AppError::BadRequest(format!("Restored database is invalid: {error}")))?;
@@ -97,7 +120,7 @@ fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Resul
             let Some(path) = path else {
                 continue;
             };
-            let board_short = super::common::validate_restored_media_path(
+            let board_short = common::validate_restored_media_path(
                 path,
                 &format!("Restored post {post_id} {label}"),
             )?;
@@ -133,7 +156,7 @@ fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Resul
                 "Restored database has an invalid file_hash row: {error}"
             ))
         })?;
-        let file_board_short = super::common::validate_restored_media_path(
+        let file_board_short = common::validate_restored_media_path(
             &file_path,
             &format!("Restored file_hash {sha256} file_path"),
         )?;
@@ -143,7 +166,7 @@ fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Resul
             )));
         }
         if !thumb_path.is_empty() {
-            let thumb_board_short = super::common::validate_restored_media_path(
+            let thumb_board_short = common::validate_restored_media_path(
                 &thumb_path,
                 &format!("Restored file_hash {sha256} thumb_path"),
             )?;
@@ -163,6 +186,7 @@ fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Resul
     Ok(())
 }
 
+/// Performs the recompute restored post body HTML handler operation.
 fn recompute_restored_post_body_html(conn: &rusqlite::Connection) -> Result<()> {
     let posts = {
         let mut stmt = conn
@@ -205,14 +229,18 @@ fn recompute_restored_post_body_html(conn: &rusqlite::Connection) -> Result<()> 
     Ok(())
 }
 
+/// Performs the scrub full restore runtime state handler operation.
 fn scrub_full_restore_runtime_state(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute("DELETE FROM admin_sessions", [])
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Clear restored sessions: {error}")))?;
     Ok(())
 }
 
+/// Data used by the full restore temp paths workflow.
 struct FullRestoreTempPaths {
+    /// The temp database.
     temp_db: PathBuf,
+    /// The database snapshot.
     db_snapshot: PathBuf,
 }
 
@@ -234,15 +262,19 @@ fn full_restore_runtime_tmp_dir() -> PathBuf {
 }
 
 #[cfg(not(test))]
+/// Performs the full restore runtime tmp dir handler operation.
 fn full_restore_runtime_tmp_dir() -> PathBuf {
     crate::config::runtime_tmp_dir()
 }
 
+/// Data used by the full restore temp cleanup guard workflow.
 struct FullRestoreTempCleanupGuard {
+    /// The database paths.
     db_paths: [PathBuf; 2],
 }
 
 impl FullRestoreTempCleanupGuard {
+    /// Creates a new value.
     fn new(paths: &FullRestoreTempPaths) -> Self {
         Self {
             db_paths: [paths.temp_db.clone(), paths.db_snapshot.clone()],
@@ -258,6 +290,7 @@ impl Drop for FullRestoreTempCleanupGuard {
     }
 }
 
+/// Performs the `SQLite` database and sidecar paths handler operation.
 fn sqlite_db_and_sidecar_paths(path: &Path) -> Vec<PathBuf> {
     let mut paths = vec![path.to_path_buf()];
     let Some(file_name) = path.file_name() else {
@@ -272,6 +305,7 @@ fn sqlite_db_and_sidecar_paths(path: &Path) -> Vec<PathBuf> {
     paths
 }
 
+/// Removes `SQLite` database and sidecars.
 fn remove_sqlite_db_and_sidecars(path: &Path) {
     for candidate in sqlite_db_and_sidecar_paths(path) {
         if let Err(error) = std::fs::remove_file(&candidate) {
@@ -286,10 +320,12 @@ fn remove_sqlite_db_and_sidecars(path: &Path) {
     }
 }
 
+/// Performs the prepare full restore temp paths handler operation.
 fn prepare_full_restore_temp_paths(tmp_id: &str) -> Result<FullRestoreTempPaths> {
     prepare_full_restore_temp_paths_in(&full_restore_runtime_tmp_dir(), tmp_id)
 }
 
+/// Performs the prepare full restore temp paths in handler operation.
 fn prepare_full_restore_temp_paths_in(
     runtime_tmp_root: &Path,
     tmp_id: &str,
@@ -307,6 +343,7 @@ fn prepare_full_restore_temp_paths_in(
     })
 }
 
+/// Performs the restrict restore temp file handler operation.
 fn restrict_restore_temp_file(path: &Path) -> Result<()> {
     crate::config::restrict_private_file_permissions(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
@@ -316,6 +353,7 @@ fn restrict_restore_temp_file(path: &Path) -> Result<()> {
     })
 }
 
+/// Creates private restore temp database.
 fn create_private_restore_temp_db(path: &Path) -> Result<std::fs::File> {
     #[cfg(unix)]
     {
@@ -353,6 +391,7 @@ fn create_private_restore_temp_db(path: &Path) -> Result<std::fs::File> {
     }
 }
 
+/// Creates live restore snapshot.
 fn create_live_restore_snapshot(
     live_conn: &rusqlite::Connection,
     db_snapshot: &Path,
@@ -369,8 +408,17 @@ fn create_live_restore_snapshot(
 }
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "full restore validation, replacement, and rollback remain one fail-closed operation"
+)]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "full restore inputs and ordered rollback phases must remain visible at one trust boundary"
+)]
+/// Performs the execute full restore handler operation.
+pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
     live_conn: &mut rusqlite::Connection,
     admin_id: i64,
     upload_dir: &str,
@@ -390,13 +438,13 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         ));
     }
     let live_tor_hidden_service_keys_dir =
-        match super::common::resolve_tor_hidden_service_keys_restore_target(
+        match common::resolve_tor_hidden_service_keys_restore_target(
             restore_tor_hidden_service_keys,
             live_tor_hidden_service_keys_dir.map(Path::to_path_buf),
             "Tor hidden service key restore is not available with the current configuration.",
         )? {
-            super::common::TorHiddenServiceKeysAvailability::Skipped => None,
-            super::common::TorHiddenServiceKeysAvailability::Available(dir) => Some(dir),
+            common::TorHiddenServiceKeysAvailability::Skipped => None,
+            common::TorHiddenServiceKeysAvailability::Available(dir) => Some(dir),
         };
 
     let tmp_id = uuid::Uuid::new_v4().simple().to_string();
@@ -410,7 +458,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     let staged_upload_root = create_staging_dir(&upload_root, "restore-stage")?;
     let live_global_favicon_dir = crate::favicon::global_backup_source_dir();
     let staged_global_favicon_dir = create_staging_dir(&live_global_favicon_dir, "restore-stage")?;
-    let live_global_banner_dir = crate::banner::backup_source_dir();
+    let live_global_banner_dir = banner::backup_source_dir();
     let staged_global_banner_dir = create_staging_dir(&live_global_banner_dir, "restore-stage")?;
     let staged_tor_hidden_service_keys_dir = live_tor_hidden_service_keys_dir
         .as_deref()
@@ -504,14 +552,14 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
                     AppError::Internal(anyhow::anyhow!("Magic check open: {error}"))
                 })?;
                 if file.read_exact(&mut header).is_err() {
-                    let _ = std::fs::remove_file(&temp_db);
+                    drop(std::fs::remove_file(&temp_db));
                     return Err(AppError::BadRequest(
                         "Uploaded chan.db is not a valid SQLite database (file too small).".into(),
                     ));
                 }
             }
             if &header != SQLITE_HEADER {
-                let _ = std::fs::remove_file(&temp_db);
+                drop(std::fs::remove_file(&temp_db));
                 return Err(AppError::BadRequest(
                     "Uploaded chan.db is not a valid SQLite database (invalid magic bytes).".into(),
                 ));
@@ -611,7 +659,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         } else if let (Some(rel_path), Some(staged_tor_hidden_service_keys_dir)) = (
             restore_safe_relative_path_under_prefix(
                 &name,
-                super::common::FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX,
+                common::FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX,
             )?,
             staged_tor_hidden_service_keys_dir.as_ref(),
         ) {
@@ -661,15 +709,15 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         if tor_hidden_service_key_files_extracted != manifest.tor_hidden_service_key_file_count
             || tor_hidden_service_key_files_extracted == 0
         {
-            let _ = remove_path_if_exists(&staged_upload_root);
-            let _ = remove_path_if_exists(&staged_global_favicon_dir);
-            let _ = remove_path_if_exists(&staged_global_banner_dir);
+            drop(remove_path_if_exists(&staged_upload_root));
+            drop(remove_path_if_exists(&staged_global_favicon_dir));
+            drop(remove_path_if_exists(&staged_global_banner_dir));
             if let Some(staged_tor_hidden_service_keys_dir) =
                 staged_tor_hidden_service_keys_dir.as_ref()
             {
-                let _ = remove_path_if_exists(staged_tor_hidden_service_keys_dir);
+                drop(remove_path_if_exists(staged_tor_hidden_service_keys_dir));
             }
-            let _ = std::fs::remove_file(&temp_db);
+            drop(std::fs::remove_file(&temp_db));
             return Err(AppError::BadRequest(
                 "This backup does not contain a complete Tor hidden service identity.".into(),
             ));
@@ -753,7 +801,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         let backup = Backup::new(&src, live_conn)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Backup init: {error}")))?;
         backup
-            .run_to_completion(100, std::time::Duration::from_millis(0), None)
+            .run_to_completion(100, Duration::from_millis(0), None)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Backup copy: {error}")))?;
         drop(backup);
         db::verify_pending_fs_op_present(live_conn, &pending_restore_id)?;
@@ -762,15 +810,15 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
 
     if let Err(error) = backup_result {
         let restore_db_result = restore_db_from_snapshot(live_conn, &db_snapshot, restore_label);
-        let _ = std::fs::remove_file(&temp_db);
-        let _ = std::fs::remove_file(&db_snapshot);
-        let _ = remove_path_if_exists(&staged_upload_root);
-        let _ = remove_path_if_exists(&staged_global_favicon_dir);
-        let _ = remove_path_if_exists(&staged_global_banner_dir);
+        drop(std::fs::remove_file(&temp_db));
+        drop(std::fs::remove_file(&db_snapshot));
+        drop(remove_path_if_exists(&staged_upload_root));
+        drop(remove_path_if_exists(&staged_global_favicon_dir));
+        drop(remove_path_if_exists(&staged_global_banner_dir));
         if let Some(staged_tor_hidden_service_keys_dir) =
             staged_tor_hidden_service_keys_dir.as_ref()
         {
-            let _ = remove_path_if_exists(staged_tor_hidden_service_keys_dir);
+            drop(remove_path_if_exists(staged_tor_hidden_service_keys_dir));
         }
         if let Err(restore_err) = restore_db_result {
             return Err(AppError::Internal(anyhow::anyhow!(
@@ -785,8 +833,8 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
         &upload_root,
         live_tor_hidden_service_keys_dir.as_deref(),
     ) {
-        let _ = std::fs::remove_file(&temp_db);
-        let _ = std::fs::remove_file(&db_snapshot);
+        drop(std::fs::remove_file(&temp_db));
+        drop(std::fs::remove_file(&db_snapshot));
         return Err(AppError::Internal(anyhow::anyhow!(
             "{restore_label} filesystem swap failed and remains pending for startup reconciliation: {error}"
         )));
@@ -794,17 +842,17 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
     db::delete_pending_fs_op(live_conn, &pending_restore_id)?;
 
     if !favicon_extracted {
-        let _ = remove_path_if_exists(&staged_global_favicon_dir);
+        drop(remove_path_if_exists(&staged_global_favicon_dir));
     }
     if !banner_extracted {
-        let _ = remove_path_if_exists(&staged_global_banner_dir);
+        drop(remove_path_if_exists(&staged_global_banner_dir));
     }
-    let _ = std::fs::remove_file(&temp_db);
-    let _ = std::fs::remove_file(&db_snapshot);
+    drop(std::fs::remove_file(&temp_db));
+    drop(std::fs::remove_file(&db_snapshot));
 
     let fresh_sid = new_session_id();
     let expires_at = Utc::now().timestamp() + CONFIG.session_duration;
-    match db::create_session(live_conn, &fresh_sid, admin_id, expires_at) {
+    let session_result = match db::create_session(live_conn, &fresh_sid, admin_id, expires_at) {
         Ok(()) => {
             tracing::info!(target: "admin", admin_id = admin_id, "{completion_log}");
             if let Err(error) = refresh_live_site_state_from_db(live_conn) {
@@ -820,9 +868,11 @@ pub(super) fn execute_full_restore<R: std::io::Read + std::io::Seek>(
             warn!("{session_warning_log}: could not create session: {error}");
             Ok(String::new())
         }
-    }
+    };
+    session_result
 }
 
+/// Performs the restrict private key material permissions handler operation.
 fn restrict_private_key_material_permissions(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -857,6 +907,7 @@ fn restrict_private_key_material_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Builds the full restore success response.
 fn full_restore_success_response(
     jar: CookieJar,
     headers: &HeaderMap,
@@ -864,18 +915,18 @@ fn full_restore_success_response(
     fresh_sid: String,
     xhr_request: bool,
 ) -> Response {
-    let mut new_cookie = Cookie::new(super::SESSION_COOKIE, fresh_sid);
+    let mut new_cookie = Cookie::new(SESSION_COOKIE, fresh_sid);
     new_cookie.set_http_only(true);
-    new_cookie.set_same_site(super::ADMIN_COOKIE_SAME_SITE);
+    new_cookie.set_same_site(ADMIN_COOKIE_SAME_SITE);
     new_cookie.set_path("/");
-    new_cookie.set_secure(super::should_set_secure_cookie(headers, secure_context));
+    new_cookie.set_secure(should_set_secure_cookie(headers, secure_context));
     new_cookie.set_max_age(time::Duration::seconds(CONFIG.session_duration));
 
     if xhr_request {
         let response = crate::handlers::board::xhr_redirect_response(
             &restore_success_redirect_target(RestoreKind::Full, None),
         )
-        .unwrap_or_else(|error| error.into_response());
+        .unwrap_or_else(axum::response::IntoResponse::into_response);
         return (jar.add(new_cookie), response).into_response();
     }
 
@@ -887,7 +938,12 @@ fn full_restore_success_response(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-pub async fn admin_restore(
+#[expect(
+    clippy::too_many_lines,
+    reason = "authentication, upload validation, job execution, and failure responses form one restore request"
+)]
+/// Handles the admin restore request.
+pub(crate) async fn admin_restore(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -931,11 +987,11 @@ pub async fn admin_restore(
         let live_tor_hidden_service_keys_dir =
             crate::config::configured_tor_hidden_service_keys_dir();
 
-        tokio::task::spawn_blocking({
+        let restore_result = tokio::task::spawn_blocking({
             let pool = state.db.clone();
             move || -> Result<String> {
                 let mut live_conn = pool.get()?;
-                let admin_id = super::require_admin_session_sid(&live_conn, session_id.as_deref())?;
+                let admin_id = require_admin_session_sid(&live_conn, session_id.as_deref())?;
 
                 let zip_file = zip_tmp
                     .reopen()
@@ -948,9 +1004,8 @@ pub async fn admin_restore(
                     if archive.by_name("db/rustchan.sqlite3").is_ok() {
                         let legacy_path =
                             create_temp_legacy_full_backup_from_v4_transfer_zip(&mut archive)?;
-                        temp_v4_transfer_zip_guard = Some(
-                            super::archive::TempZipCleanupGuard::new(legacy_path.clone()),
-                        );
+                        temp_v4_transfer_zip_guard =
+                            Some(archive::TempZipCleanupGuard::new(legacy_path.clone()));
                         let legacy_file = std::fs::File::open(&legacy_path).map_err(|error| {
                             AppError::Internal(anyhow::anyhow!(
                                 "Open converted Backup v4 transfer zip: {error}"
@@ -992,17 +1047,18 @@ pub async fn admin_restore(
             }
         })
         .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+        restore_result
     }
     .await;
 
     match result {
         Ok(fresh_sid) => {
             if fresh_sid.is_empty() {
-                let jar = jar.remove(Cookie::from(super::SESSION_COOKIE));
+                let jar = jar.remove(Cookie::from(SESSION_COOKIE));
                 if xhr_request {
                     let response = crate::handlers::board::xhr_redirect_response("/admin")
-                        .unwrap_or_else(|error| error.into_response());
+                        .unwrap_or_else(axum::response::IntoResponse::into_response);
                     return (jar, response).into_response();
                 }
                 return (jar, Redirect::to("/admin")).into_response();
@@ -1024,20 +1080,19 @@ pub async fn admin_restore(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-pub async fn restore_saved_full_backup(
+/// Handles the restore saved full backup request.
+pub(crate) async fn restore_saved_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
     secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(
-        &jar,
-        &headers,
-        secure_context.peer,
-        form.csrf.as_deref(),
-    )?;
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context.peer, form.csrf.as_deref())?;
+    let _maintenance_guard = state
+        .maintenance_gate
+        .try_begin(RestoreKind::Full.maintenance_label())?;
 
     let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
     let upload_dir = CONFIG.upload_dir.clone();
@@ -1048,7 +1103,7 @@ pub async fn restore_saved_full_backup(
         let pool = state.db.clone();
         move || -> Result<String> {
             let mut live_conn = pool.get()?;
-            let admin_id = super::require_admin_session_sid(&live_conn, session_id.as_deref())?;
+            let admin_id = require_admin_session_sid(&live_conn, session_id.as_deref())?;
             let root_dir = crate::config::backups_dir().join(&safe_filename);
             let legacy_zip_path = full_backup_dir().join(&safe_filename);
             let temp_v4_zip = if root_dir.is_dir() {
@@ -1058,7 +1113,7 @@ pub async fn restore_saved_full_backup(
             };
             let _temp_v4_zip_guard = temp_v4_zip
                 .as_ref()
-                .map(|path| super::archive::TempZipCleanupGuard::new(path.clone()));
+                .map(|path| archive::TempZipCleanupGuard::new(path.clone()));
             let archive_path = temp_v4_zip.as_deref().unwrap_or(&legacy_zip_path);
 
             let zip_file = std::fs::File::open(archive_path)
@@ -1102,7 +1157,7 @@ pub async fn restore_saved_full_backup(
     };
 
     if fresh_sid.is_empty() {
-        let jar = jar.remove(Cookie::from(super::SESSION_COOKIE));
+        let jar = jar.remove(Cookie::from(SESSION_COOKIE));
         return Ok((jar, Redirect::to("/admin")).into_response());
     }
 
@@ -1121,6 +1176,7 @@ mod tests {
         execute_full_restore, full_restore_success_response,
         validate_full_restore_db_trust_boundary,
     };
+    use anyhow::{bail, ensure, Context as _, Result as TestResult};
     use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
     use axum_extra::extract::cookie::CookieJar;
     use std::collections::BTreeMap;
@@ -1155,145 +1211,152 @@ mod tests {
         }
     }
 
-    fn create_snapshot_db() -> std::path::PathBuf {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn create_snapshot_db() -> TestResult<std::path::PathBuf> {
+        let temp_dir = tempfile::tempdir().context("create snapshot fixture directory")?;
         let db_path = temp_dir.path().join("snapshot.db");
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("db conn");
-        crate::db::create_board(&conn, "tech", "Technology", "", false).expect("create board");
-        let db_path_str = db_path.to_str().expect("db path").replace('\'', "''");
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let conn = pool.get().context("get test database connection")?;
+        crate::db::create_board(&conn, "tech", "Technology", "", false)
+            .context("create fixture board")?;
+        let db_path_str = db_path
+            .to_str()
+            .context("snapshot fixture path is not UTF-8")?
+            .replace('\'', "''");
         conn.execute_batch(&format!("VACUUM INTO '{db_path_str}'"))
-            .expect("vacuum snapshot");
-        temp_dir.keep().join("snapshot.db")
+            .context("create database snapshot")?;
+        Ok(temp_dir.keep().join("snapshot.db"))
     }
 
-    fn write_sqlite_sidecars(path: &std::path::Path) {
+    fn write_sqlite_sidecars(path: &std::path::Path) -> TestResult<()> {
         for sidecar in super::sqlite_db_and_sidecar_paths(path).into_iter().skip(1) {
-            std::fs::write(sidecar, b"sqlite sidecar").expect("write SQLite sidecar");
+            std::fs::write(sidecar, b"sqlite sidecar").context("write SQLite sidecar")?;
         }
+        Ok(())
     }
 
-    fn assert_sqlite_db_and_sidecars_absent(path: &std::path::Path) {
+    fn ensure_sqlite_db_and_sidecars_absent(path: &std::path::Path) -> TestResult<()> {
         for candidate in super::sqlite_db_and_sidecar_paths(path) {
             let display = candidate.display();
-            assert!(
+            ensure!(
                 !candidate.exists(),
                 "temporary SQLite file should be removed: {display}"
             );
         }
+        Ok(())
     }
 
-    fn assert_full_restore_temp_dir_empty(runtime_tmp_root: &std::path::Path) {
+    fn ensure_full_restore_temp_dir_empty(runtime_tmp_root: &std::path::Path) -> TestResult<()> {
         let full_restore_dir = runtime_tmp_root.join("full-restore");
         if !full_restore_dir.exists() {
-            return;
+            return Ok(());
         }
 
         let mut leftovers = Vec::new();
-        for entry in std::fs::read_dir(&full_restore_dir).expect("read full restore temp dir") {
-            leftovers.push(entry.expect("full restore temp dir entry").path());
+        for entry in
+            std::fs::read_dir(&full_restore_dir).context("read full-restore temporary directory")?
+        {
+            leftovers.push(entry.context("read full-restore temporary entry")?.path());
         }
         let display = leftovers
             .iter()
             .map(|path| path.display().to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        assert!(
+        ensure!(
             leftovers.is_empty(),
             "full restore temp dir should be empty, found: {display}"
         );
+        Ok(())
     }
 
     #[cfg(unix)]
-    fn unix_mode(path: &std::path::Path) -> u32 {
+    fn unix_mode(path: &std::path::Path) -> TestResult<u32> {
         use std::os::unix::fs::PermissionsExt as _;
 
-        std::fs::metadata(path)
-            .expect("metadata")
+        Ok(std::fs::metadata(path)
+            .context("read filesystem metadata")?
             .permissions()
             .mode()
-            & 0o777
+            & 0o777)
     }
 
     #[cfg(unix)]
     #[test]
-    fn full_restore_temp_db_files_are_private() {
-        let runtime_tmp_root = tempfile::tempdir().expect("tempdir");
+    fn full_restore_temp_db_files_are_private() -> TestResult<()> {
+        let runtime_tmp_root = tempfile::tempdir().context("create runtime temporary root")?;
         let tmp_id = format!("test_{}", uuid::Uuid::new_v4().simple());
-        let paths = super::prepare_full_restore_temp_paths_in(runtime_tmp_root.path(), &tmp_id)
-            .expect("prepare temp paths");
-        let temp_parent = paths.temp_db.parent().expect("temp db parent");
+        let paths = super::prepare_full_restore_temp_paths_in(runtime_tmp_root.path(), &tmp_id)?;
+        let temp_parent = paths
+            .temp_db
+            .parent()
+            .context("temporary DB has no parent")?;
 
-        assert_eq!(unix_mode(temp_parent), 0o700);
+        ensure!(unix_mode(temp_parent)? == 0o700);
 
         {
-            let mut file =
-                super::create_private_restore_temp_db(&paths.temp_db).expect("create temp db");
+            let mut file = super::create_private_restore_temp_db(&paths.temp_db)?;
             file.write_all(b"uploaded database bytes")
-                .expect("write temp db");
+                .context("write temporary database")?;
         }
-        super::restrict_restore_temp_file(&paths.temp_db).expect("restrict copied temp db");
-        assert_eq!(unix_mode(&paths.temp_db), 0o600);
+        super::restrict_restore_temp_file(&paths.temp_db)?;
+        ensure!(unix_mode(&paths.temp_db)? == 0o600);
 
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("db conn");
-        super::create_live_restore_snapshot(&conn, &paths.db_snapshot)
-            .expect("create live snapshot");
-        assert_eq!(unix_mode(&paths.db_snapshot), 0o600);
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let conn = pool.get().context("get test database connection")?;
+        super::create_live_restore_snapshot(&conn, &paths.db_snapshot)?;
+        ensure!(unix_mode(&paths.db_snapshot)? == 0o600);
+        Ok(())
     }
 
     #[test]
-    fn full_restore_failure_after_extracted_db_creation_removes_temp_db_and_sidecars() {
-        let runtime_tmp_root = tempfile::tempdir().expect("tempdir");
+    fn full_restore_failure_after_extracted_db_creation_removes_temp_db_and_sidecars(
+    ) -> TestResult<()> {
+        let runtime_tmp_root = tempfile::tempdir().context("create runtime temporary root")?;
         let tmp_id = format!("test_{}", uuid::Uuid::new_v4().simple());
-        let paths = super::prepare_full_restore_temp_paths_in(runtime_tmp_root.path(), &tmp_id)
-            .expect("prepare temp paths");
+        let paths = super::prepare_full_restore_temp_paths_in(runtime_tmp_root.path(), &tmp_id)?;
 
         {
             let _cleanup = super::FullRestoreTempCleanupGuard::new(&paths);
-            let mut file =
-                super::create_private_restore_temp_db(&paths.temp_db).expect("create temp db");
+            let mut file = super::create_private_restore_temp_db(&paths.temp_db)?;
             file.write_all(b"uploaded database bytes")
-                .expect("write temp db");
-            write_sqlite_sidecars(&paths.temp_db);
+                .context("write temporary database")?;
+            write_sqlite_sidecars(&paths.temp_db)?;
         }
 
-        assert_sqlite_db_and_sidecars_absent(&paths.temp_db);
+        ensure_sqlite_db_and_sidecars_absent(&paths.temp_db)
     }
 
     #[test]
-    fn full_restore_failure_after_snapshot_creation_removes_snapshot_and_sidecars() {
-        let runtime_tmp_root = tempfile::tempdir().expect("tempdir");
+    fn full_restore_failure_after_snapshot_creation_removes_snapshot_and_sidecars() -> TestResult<()>
+    {
+        let runtime_tmp_root = tempfile::tempdir().context("create runtime temporary root")?;
         let tmp_id = format!("test_{}", uuid::Uuid::new_v4().simple());
-        let paths = super::prepare_full_restore_temp_paths_in(runtime_tmp_root.path(), &tmp_id)
-            .expect("prepare temp paths");
+        let paths = super::prepare_full_restore_temp_paths_in(runtime_tmp_root.path(), &tmp_id)?;
 
         {
             let _cleanup = super::FullRestoreTempCleanupGuard::new(&paths);
-            let mut file =
-                super::create_private_restore_temp_db(&paths.temp_db).expect("create temp db");
+            let mut file = super::create_private_restore_temp_db(&paths.temp_db)?;
             file.write_all(b"uploaded database bytes")
-                .expect("write temp db");
-            write_sqlite_sidecars(&paths.temp_db);
+                .context("write temporary database")?;
+            write_sqlite_sidecars(&paths.temp_db)?;
 
-            let pool = crate::db::init_test_pool().expect("test pool");
-            let conn = pool.get().expect("db conn");
-            super::create_live_restore_snapshot(&conn, &paths.db_snapshot)
-                .expect("create live snapshot");
-            write_sqlite_sidecars(&paths.db_snapshot);
+            let pool = crate::db::init_test_pool().context("create test database pool")?;
+            let conn = pool.get().context("get test database connection")?;
+            super::create_live_restore_snapshot(&conn, &paths.db_snapshot)?;
+            write_sqlite_sidecars(&paths.db_snapshot)?;
         }
 
-        assert_sqlite_db_and_sidecars_absent(&paths.temp_db);
-        assert_sqlite_db_and_sidecars_absent(&paths.db_snapshot);
+        ensure_sqlite_db_and_sidecars_absent(&paths.temp_db)?;
+        ensure_sqlite_db_and_sidecars_absent(&paths.db_snapshot)
     }
 
     fn write_full_backup_zip(
         zip_path: &std::path::Path,
         backup_tor_keys: Option<&[(&str, &str)]>,
         legacy_manifest: bool,
-    ) {
-        let db_path = create_snapshot_db();
-        write_full_backup_zip_from_db(zip_path, &db_path, backup_tor_keys, legacy_manifest);
+    ) -> TestResult<()> {
+        let db_path = create_snapshot_db()?;
+        write_full_backup_zip_from_db(zip_path, &db_path, backup_tor_keys, legacy_manifest)
     }
 
     fn write_full_backup_zip_from_db(
@@ -1301,10 +1364,12 @@ mod tests {
         db_path: &std::path::Path,
         backup_tor_keys: Option<&[(&str, &str)]>,
         legacy_manifest: bool,
-    ) {
-        let db_bytes = std::fs::read(db_path).expect("read db");
-        let (tor_hidden_service_keys_included, tor_hidden_service_key_file_count) =
-            backup_tor_keys.map_or((false, 0_u64), |files| (true, files.len() as u64));
+    ) -> TestResult<()> {
+        let db_bytes = std::fs::read(db_path).context("read database snapshot")?;
+        let (tor_hidden_service_keys_included, tor_hidden_service_key_file_count) = backup_tor_keys
+            .map_or((false, 0_u64), |files| {
+                (true, u64::try_from(files.len()).unwrap_or(u64::MAX))
+            });
         let manifest_json = if legacy_manifest {
             serde_json::json!({
                 "version": 2,
@@ -1331,15 +1396,18 @@ mod tests {
             })
         };
 
-        let file = std::fs::File::create(zip_path).expect("zip file");
+        let file = std::fs::File::create(zip_path).context("create backup ZIP")?;
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
         zip.start_file(super::super::common::FULL_BACKUP_MANIFEST_NAME, options)
-            .expect("start manifest");
-        zip.write_all(&serde_json::to_vec(&manifest_json).expect("serialize full backup manifest"))
-            .expect("write manifest");
-        zip.start_file("chan.db", options).expect("start db");
-        zip.write_all(&db_bytes).expect("write db");
+            .context("start backup manifest entry")?;
+        let manifest_bytes =
+            serde_json::to_vec(&manifest_json).context("serialize full-backup manifest")?;
+        zip.write_all(&manifest_bytes)
+            .context("write backup manifest entry")?;
+        zip.start_file("chan.db", options)
+            .context("start database entry")?;
+        zip.write_all(&db_bytes).context("write database entry")?;
         if let Some(files) = backup_tor_keys {
             for (name, contents) in files {
                 zip.start_file(
@@ -1350,27 +1418,29 @@ mod tests {
                     ),
                     options,
                 )
-                .expect("start tor key file");
+                .context("start Tor key entry")?;
                 zip.write_all(contents.as_bytes())
-                    .expect("write tor key file");
+                    .context("write Tor key entry")?;
             }
         }
-        zip.finish().expect("finish zip");
+        zip.finish().context("finish backup ZIP")?;
+        Ok(())
     }
 
-    fn restore_zip_into_temp_site(zip_path: &std::path::Path) -> (String, Vec<String>) {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let mut live_conn = pool.get().expect("db conn");
-        let file = std::fs::File::open(zip_path).expect("open zip");
-        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+    fn restore_zip_into_temp_site(zip_path: &std::path::Path) -> TestResult<(String, Vec<String>)> {
+        let temp_dir = tempfile::tempdir().context("create restore fixture directory")?;
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let mut live_conn = pool.get().context("get test database connection")?;
+        let file = std::fs::File::open(zip_path).context("open backup ZIP")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse backup ZIP")?;
         let upload_dir = temp_dir.path().join("uploads");
-        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        std::fs::create_dir_all(&upload_dir).context("create uploads directory")?;
+        let upload_dir_str = upload_dir.to_str().context("upload path is not UTF-8")?;
 
         let fresh_sid = execute_full_restore(
             &mut live_conn,
             1,
-            upload_dir.to_str().expect("upload dir"),
+            upload_dir_str,
             None,
             false,
             &mut archive,
@@ -1378,39 +1448,39 @@ mod tests {
             "Test restore completed",
             "Test restore",
             "Test restore",
-        )
-        .expect("restore should succeed");
+        )?;
 
         let session_ids = live_conn
             .prepare("SELECT id FROM admin_sessions ORDER BY id")
-            .expect("prepare session query")
+            .context("prepare session query")?
             .query_map([], |row| row.get::<_, String>(0))
-            .expect("query sessions")
+            .context("query sessions")?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .expect("collect sessions");
+            .context("collect sessions")?;
 
-        (fresh_sid, session_ids)
+        Ok((fresh_sid, session_ids))
     }
 
     #[test]
-    fn full_restore_success_removes_restore_temp_db_files_after_completion() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn full_restore_success_removes_restore_temp_db_files_after_completion() -> TestResult<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let runtime_tmp_root = temp_dir.path().join("runtime-tmp");
         let _runtime_tmp_root_override = FullRestoreRuntimeTmpRootOverride::new(&runtime_tmp_root);
         let zip_path = temp_dir.path().join("backup.zip");
-        write_full_backup_zip(&zip_path, None, false);
+        write_full_backup_zip(&zip_path, None, false)?;
 
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let mut live_conn = pool.get().expect("db conn");
-        let file = std::fs::File::open(&zip_path).expect("open zip");
-        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let mut live_conn = pool.get().context("get test database connection")?;
+        let file = std::fs::File::open(&zip_path).context("open backup ZIP")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse backup ZIP")?;
         let upload_dir = temp_dir.path().join("uploads");
-        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        std::fs::create_dir_all(&upload_dir).context("create uploads directory")?;
+        let upload_dir_str = upload_dir.to_str().context("upload path is not UTF-8")?;
 
         execute_full_restore(
             &mut live_conn,
             1,
-            upload_dir.to_str().expect("upload dir"),
+            upload_dir_str,
             None,
             false,
             &mut archive,
@@ -1418,45 +1488,47 @@ mod tests {
             "Test restore completed",
             "Test restore",
             "Test restore",
-        )
-        .expect("restore should succeed");
+        )?;
 
-        assert_full_restore_temp_dir_empty(&runtime_tmp_root);
+        ensure_full_restore_temp_dir_empty(&runtime_tmp_root)
     }
 
-    fn read_tree(root: &std::path::Path) -> BTreeMap<String, String> {
+    fn read_tree(root: &std::path::Path) -> TestResult<BTreeMap<String, String>> {
         fn visit(
             root: &std::path::Path,
             dir: &std::path::Path,
             out: &mut BTreeMap<String, String>,
-        ) {
-            let entries = std::fs::read_dir(dir).expect("read dir");
+        ) -> TestResult<()> {
+            let entries = std::fs::read_dir(dir).context("read tree directory")?;
             for entry in entries {
-                let entry = entry.expect("dir entry");
+                let entry = entry.context("read tree directory entry")?;
                 let path = entry.path();
                 if path.is_dir() {
-                    visit(root, &path, out);
+                    visit(root, &path, out)?;
                 } else if path.is_file() {
                     let rel = path
                         .strip_prefix(root)
-                        .expect("relative path")
+                        .context("tree entry is outside fixture root")?
                         .to_string_lossy()
                         .replace('\\', "/");
-                    let contents = std::fs::read_to_string(&path).expect("read file");
+                    let contents = std::fs::read_to_string(&path)
+                        .with_context(|| format!("read tree file {}", path.display()))?;
                     out.insert(rel, contents);
                 }
             }
+            Ok(())
         }
 
         let mut out = BTreeMap::new();
         if root.exists() {
-            visit(root, root, &mut out);
+            visit(root, root, &mut out)?;
         }
-        out
+        Ok(out)
     }
 
     #[test]
-    fn saved_full_restore_success_response_sets_session_cookie_and_reopens_section() {
+    fn saved_full_restore_success_response_sets_session_cookie_and_reopens_section(
+    ) -> TestResult<()> {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, HeaderValue::from_static("localhost"));
 
@@ -1471,13 +1543,13 @@ mod tests {
             false,
         );
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
+        ensure!(response.status() == StatusCode::SEE_OTHER);
+        ensure!(
             response
                 .headers()
                 .get(header::LOCATION)
-                .and_then(|value| value.to_str().ok()),
-            Some("/admin/panel?restored=1&open=full-backup-restore#full-backup-restore")
+                .and_then(|value| value.to_str().ok())
+                == Some("/admin/panel?restored=1&open=full-backup-restore#full-backup-restore")
         );
 
         let set_cookie = response
@@ -1486,13 +1558,14 @@ mod tests {
             .iter()
             .filter_map(|value| value.to_str().ok())
             .find(|value| value.contains(super::super::SESSION_COOKIE))
-            .expect("session cookie");
-        assert!(set_cookie.contains("chan_admin_session=fresh-session"));
+            .context("response has no admin session cookie")?;
+        ensure!(set_cookie.contains("chan_admin_session=fresh-session"));
+        Ok(())
     }
 
     #[test]
-    fn full_restore_without_tor_key_opt_in_leaves_live_tor_identity_untouched() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn full_restore_without_tor_key_opt_in_leaves_live_tor_identity_untouched() -> TestResult<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("backup.zip");
         write_full_backup_zip(
             &zip_path,
@@ -1501,26 +1574,27 @@ mod tests {
                 ("hs_ed25519_public_key", "backup-public"),
             ]),
             false,
-        );
+        )?;
 
         let tor_keys_dir = temp_dir.path().join("live-tor-keys");
-        std::fs::create_dir_all(&tor_keys_dir).expect("create live tor dir");
+        std::fs::create_dir_all(&tor_keys_dir).context("create live Tor directory")?;
         std::fs::write(tor_keys_dir.join("hs_ed25519_secret_key"), "live-secret")
-            .expect("write live secret");
+            .context("write live secret key")?;
         std::fs::write(tor_keys_dir.join("hs_ed25519_public_key"), "live-public")
-            .expect("write live public");
+            .context("write live public key")?;
 
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let mut live_conn = pool.get().expect("db conn");
-        let file = std::fs::File::open(&zip_path).expect("open zip");
-        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let mut live_conn = pool.get().context("get test database connection")?;
+        let file = std::fs::File::open(&zip_path).context("open backup ZIP")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse backup ZIP")?;
         let upload_dir = temp_dir.path().join("uploads");
-        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        std::fs::create_dir_all(&upload_dir).context("create uploads directory")?;
+        let upload_dir_str = upload_dir.to_str().context("upload path is not UTF-8")?;
 
         execute_full_restore(
             &mut live_conn,
             1,
-            upload_dir.to_str().expect("upload dir"),
+            upload_dir_str,
             Some(&tor_keys_dir),
             false,
             &mut archive,
@@ -1528,22 +1602,23 @@ mod tests {
             "Test restore completed",
             "Test restore",
             "Test restore",
-        )
-        .expect("restore should succeed");
+        )?;
 
-        let live_tree = read_tree(&tor_keys_dir);
-        assert_eq!(
-            live_tree,
-            BTreeMap::from([
-                ("hs_ed25519_public_key".to_owned(), "live-public".to_owned()),
-                ("hs_ed25519_secret_key".to_owned(), "live-secret".to_owned()),
-            ])
+        let live_tree = read_tree(&tor_keys_dir)?;
+        ensure!(
+            live_tree
+                == BTreeMap::from([
+                    ("hs_ed25519_public_key".to_owned(), "live-public".to_owned()),
+                    ("hs_ed25519_secret_key".to_owned(), "live-secret".to_owned()),
+                ])
         );
+        Ok(())
     }
 
     #[test]
-    fn full_restore_without_tor_key_opt_in_succeeds_without_any_tor_configuration() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn full_restore_without_tor_key_opt_in_succeeds_without_any_tor_configuration() -> TestResult<()>
+    {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("backup.zip");
         write_full_backup_zip(
             &zip_path,
@@ -1552,19 +1627,20 @@ mod tests {
                 ("hs_ed25519_public_key", "backup-public"),
             ]),
             false,
-        );
+        )?;
 
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let mut live_conn = pool.get().expect("db conn");
-        let file = std::fs::File::open(&zip_path).expect("open zip");
-        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let mut live_conn = pool.get().context("get test database connection")?;
+        let file = std::fs::File::open(&zip_path).context("open backup ZIP")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse backup ZIP")?;
         let upload_dir = temp_dir.path().join("uploads");
-        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        std::fs::create_dir_all(&upload_dir).context("create uploads directory")?;
+        let upload_dir_str = upload_dir.to_str().context("upload path is not UTF-8")?;
 
         execute_full_restore(
             &mut live_conn,
             1,
-            upload_dir.to_str().expect("upload dir"),
+            upload_dir_str,
             None,
             false,
             &mut archive,
@@ -1572,50 +1648,51 @@ mod tests {
             "Test restore completed",
             "Test restore",
             "Test restore",
-        )
-        .expect("restore should succeed without tor configuration");
+        )?;
+        Ok(())
     }
 
     #[test]
-    fn full_restore_purges_restored_admin_sessions_before_issuing_new_session() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        let db_path = create_snapshot_db();
+    fn full_restore_purges_restored_admin_sessions_before_issuing_new_session() -> TestResult<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
+        let db_path = create_snapshot_db()?;
         {
-            let conn = rusqlite::Connection::open(&db_path).expect("open snapshot");
+            let conn = rusqlite::Connection::open(&db_path).context("open database snapshot")?;
             conn.execute(
                 "INSERT INTO admin_users (id, username, password_hash)
                  VALUES (1, 'restored-admin', 'restored-hash')",
                 [],
             )
-            .expect("seed restored admin");
+            .context("seed restored administrator")?;
             conn.execute(
                 "INSERT INTO admin_sessions (id, admin_id, expires_at)
                  VALUES ('stale-session-from-backup', 1, unixepoch() + 86400)",
                 [],
             )
-            .expect("seed stale session");
+            .context("seed stale session")?;
         }
         let zip_path = temp_dir.path().join("backup.zip");
-        write_full_backup_zip_from_db(&zip_path, &db_path, None, false);
+        write_full_backup_zip_from_db(&zip_path, &db_path, None, false)?;
 
-        let (fresh_sid, session_ids) = restore_zip_into_temp_site(&zip_path);
+        let (fresh_sid, session_ids) = restore_zip_into_temp_site(&zip_path)?;
 
-        assert_eq!(session_ids, vec![fresh_sid]);
+        ensure!(session_ids == vec![fresh_sid]);
+        Ok(())
     }
 
     #[test]
-    fn full_restore_recomputes_untrusted_body_html() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        let db_path = create_snapshot_db();
+    fn full_restore_recomputes_untrusted_body_html() -> TestResult<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
+        let db_path = create_snapshot_db()?;
         let post_id = {
-            let conn = rusqlite::Connection::open(&db_path).expect("open snapshot");
+            let conn = rusqlite::Connection::open(&db_path).context("open database snapshot")?;
             let board_id = conn
                 .query_row(
                     "SELECT id FROM boards WHERE short_name = 'tech'",
                     [],
                     |row| row.get::<_, i64>(0),
                 )
-                .expect("board id");
+                .context("query fixture board ID")?;
             let post = crate::db::NewPost {
                 thread_id: 0,
                 board_id,
@@ -1647,22 +1724,23 @@ mod tests {
                 None,
                 None,
             )
-            .expect("create restored thread")
+            .context("create restored thread")?
             .1
         };
         let zip_path = temp_dir.path().join("backup.zip");
-        write_full_backup_zip_from_db(&zip_path, &db_path, None, false);
+        write_full_backup_zip_from_db(&zip_path, &db_path, None, false)?;
 
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let mut live_conn = pool.get().expect("db conn");
-        let file = std::fs::File::open(&zip_path).expect("open zip");
-        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let mut live_conn = pool.get().context("get test database connection")?;
+        let file = std::fs::File::open(&zip_path).context("open backup ZIP")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse backup ZIP")?;
         let upload_dir = temp_dir.path().join("uploads");
-        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        std::fs::create_dir_all(&upload_dir).context("create uploads directory")?;
+        let upload_dir_str = upload_dir.to_str().context("upload path is not UTF-8")?;
         execute_full_restore(
             &mut live_conn,
             1,
-            upload_dir.to_str().expect("upload dir"),
+            upload_dir_str,
             None,
             false,
             &mut archive,
@@ -1670,8 +1748,7 @@ mod tests {
             "Test restore completed",
             "Test restore",
             "Test restore",
-        )
-        .expect("restore should succeed");
+        )?;
 
         let body_html: String = live_conn
             .query_row(
@@ -1679,34 +1756,36 @@ mod tests {
                 rusqlite::params![post_id],
                 |row| row.get(0),
             )
-            .expect("restored body_html");
-        assert!(body_html.contains("plain restored body"));
-        assert!(!body_html.contains("<img"));
+            .context("query restored body HTML")?;
+        ensure!(body_html.contains("plain restored body"));
+        ensure!(!body_html.contains("<img"));
+        Ok(())
     }
 
     #[test]
-    fn full_restore_rejects_restored_board_short_name_that_would_escape_routes() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        let db_path = create_snapshot_db();
+    fn full_restore_rejects_restored_board_short_name_that_would_escape_routes() -> TestResult<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
+        let db_path = create_snapshot_db()?;
         {
-            let conn = rusqlite::Connection::open(&db_path).expect("open snapshot");
+            let conn = rusqlite::Connection::open(&db_path).context("open database snapshot")?;
             conn.execute("UPDATE boards SET short_name = '../admin'", [])
-                .expect("seed invalid board short name");
+                .context("seed invalid board short name")?;
         }
         let zip_path = temp_dir.path().join("backup.zip");
-        write_full_backup_zip_from_db(&zip_path, &db_path, None, false);
+        write_full_backup_zip_from_db(&zip_path, &db_path, None, false)?;
 
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let mut live_conn = pool.get().expect("db conn");
-        let file = std::fs::File::open(&zip_path).expect("open zip");
-        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let mut live_conn = pool.get().context("get test database connection")?;
+        let file = std::fs::File::open(&zip_path).context("open backup ZIP")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse backup ZIP")?;
         let upload_dir = temp_dir.path().join("uploads");
-        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        std::fs::create_dir_all(&upload_dir).context("create uploads directory")?;
+        let upload_dir_str = upload_dir.to_str().context("upload path is not UTF-8")?;
 
         let error = execute_full_restore(
             &mut live_conn,
             1,
-            upload_dir.to_str().expect("upload dir"),
+            upload_dir_str,
             None,
             false,
             &mut archive,
@@ -1715,35 +1794,37 @@ mod tests {
             "Test restore",
             "Test restore",
         )
-        .expect_err("restore should reject invalid restored board short name");
+        .err()
+        .context("invalid restored board short name was unexpectedly accepted")?;
 
         match error {
             crate::error::AppError::BadRequest(message) => {
-                assert!(message.contains("Invalid board short name"));
+                ensure!(message.contains("Invalid board short name"));
             }
-            other => panic!("expected BadRequest, got {other:?}"),
+            other => bail!("expected BadRequest, got {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn full_restore_rejects_restored_post_media_path_pointing_to_unknown_board() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        let db_path = create_snapshot_db();
+    fn full_restore_rejects_restored_post_media_path_pointing_to_unknown_board() -> TestResult<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
+        let db_path = create_snapshot_db()?;
         {
-            let conn = rusqlite::Connection::open(&db_path).expect("open snapshot");
+            let conn = rusqlite::Connection::open(&db_path).context("open database snapshot")?;
             let board_id: i64 = conn
                 .query_row(
                     "SELECT id FROM boards WHERE short_name = 'tech'",
                     [],
                     |row| row.get(0),
                 )
-                .expect("tech board id");
+                .context("query tech board ID")?;
             conn.execute(
                 "INSERT INTO threads (id, board_id, subject, created_at, bumped_at, locked, sticky, archived, reply_count)
                  VALUES (1, ?1, 'ghost', unixepoch(), unixepoch(), 0, 0, 0, 0)",
                 [board_id],
             )
-            .expect("seed thread");
+            .context("seed thread")?;
             conn.execute(
                 "INSERT INTO posts
                  (id, thread_id, board_id, name, body, body_html, file_path, file_name, file_size,
@@ -1753,28 +1834,29 @@ mod tests {
                   'ghost/thumbs/doc.svg', 'application/pdf', 'pdf', unixepoch(), 'token', 1)",
                 [board_id],
             )
-            .expect("seed invalid restored media path");
+            .context("seed invalid restored media path")?;
             conn.execute(
                 "INSERT INTO file_hashes (sha256, file_path, thumb_path, mime_type, created_at)
                  VALUES ('ghost-hash', 'ghost/doc.pdf', 'ghost/thumbs/doc.svg', 'application/pdf', unixepoch())",
                 [],
             )
-            .expect("seed invalid restored file hash path");
+            .context("seed invalid restored file-hash path")?;
         }
         let zip_path = temp_dir.path().join("backup.zip");
-        write_full_backup_zip_from_db(&zip_path, &db_path, None, false);
+        write_full_backup_zip_from_db(&zip_path, &db_path, None, false)?;
 
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let mut live_conn = pool.get().expect("db conn");
-        let file = std::fs::File::open(&zip_path).expect("open zip");
-        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let mut live_conn = pool.get().context("get test database connection")?;
+        let file = std::fs::File::open(&zip_path).context("open backup ZIP")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse backup ZIP")?;
         let upload_dir = temp_dir.path().join("uploads");
-        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        std::fs::create_dir_all(&upload_dir).context("create uploads directory")?;
+        let upload_dir_str = upload_dir.to_str().context("upload path is not UTF-8")?;
 
         let error = execute_full_restore(
             &mut live_conn,
             1,
-            upload_dir.to_str().expect("upload dir"),
+            upload_dir_str,
             None,
             false,
             &mut archive,
@@ -1783,36 +1865,39 @@ mod tests {
             "Test restore",
             "Test restore",
         )
-        .expect_err("restore should reject invalid restored media paths");
+        .err()
+        .context("unknown-board restored media paths were unexpectedly accepted")?;
 
         match error {
             crate::error::AppError::BadRequest(message) => {
-                assert!(message.contains("points to unknown board /ghost/"));
+                ensure!(message.contains("points to unknown board /ghost/"));
             }
-            other => panic!("expected BadRequest, got {other:?}"),
+            other => bail!("expected BadRequest, got {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn full_restore_rejects_cross_board_thumb_path_on_restored_post() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        let db_path = create_snapshot_db();
+    fn full_restore_rejects_cross_board_thumb_path_on_restored_post() -> TestResult<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
+        let db_path = create_snapshot_db()?;
         {
-            let conn = rusqlite::Connection::open(&db_path).expect("open snapshot");
-            crate::db::create_board(&conn, "b", "Random", "", false).expect("create second board");
+            let conn = rusqlite::Connection::open(&db_path).context("open database snapshot")?;
+            crate::db::create_board(&conn, "b", "Random", "", false)
+                .context("create second board")?;
             let tech_board_id: i64 = conn
                 .query_row(
                     "SELECT id FROM boards WHERE short_name = 'tech'",
                     [],
                     |row| row.get(0),
                 )
-                .expect("tech board id");
+                .context("query tech board ID")?;
             conn.execute(
                 "INSERT INTO threads (id, board_id, subject, created_at, bumped_at, locked, sticky, archived, reply_count)
                  VALUES (1, ?1, 'doc', unixepoch(), unixepoch(), 0, 0, 0, 0)",
                 [tech_board_id],
             )
-            .expect("seed thread");
+            .context("seed thread")?;
             conn.execute(
                 "INSERT INTO posts
                  (id, thread_id, board_id, name, body, body_html, file_path, file_name, file_size,
@@ -1822,28 +1907,29 @@ mod tests {
                   'b/thumbs/doc.svg', 'application/pdf', 'pdf', unixepoch(), 'token', 1)",
                 [tech_board_id],
             )
-            .expect("seed cross-board thumb path");
+            .context("seed cross-board thumbnail path")?;
             conn.execute(
                 "INSERT INTO file_hashes (sha256, file_path, thumb_path, mime_type, created_at)
                  VALUES ('cross-board-hash', 'tech/doc.pdf', 'b/thumbs/doc.svg', 'application/pdf', unixepoch())",
                 [],
             )
-            .expect("seed cross-board file hash");
+            .context("seed cross-board file hash")?;
         }
         let zip_path = temp_dir.path().join("backup.zip");
-        write_full_backup_zip_from_db(&zip_path, &db_path, None, false);
+        write_full_backup_zip_from_db(&zip_path, &db_path, None, false)?;
 
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let mut live_conn = pool.get().expect("db conn");
-        let file = std::fs::File::open(&zip_path).expect("open zip");
-        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let mut live_conn = pool.get().context("get test database connection")?;
+        let file = std::fs::File::open(&zip_path).context("open backup ZIP")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse backup ZIP")?;
         let upload_dir = temp_dir.path().join("uploads");
-        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        std::fs::create_dir_all(&upload_dir).context("create uploads directory")?;
+        let upload_dir_str = upload_dir.to_str().context("upload path is not UTF-8")?;
 
         let error = execute_full_restore(
             &mut live_conn,
             1,
-            upload_dir.to_str().expect("upload dir"),
+            upload_dir_str,
             None,
             false,
             &mut archive,
@@ -1852,57 +1938,61 @@ mod tests {
             "Test restore",
             "Test restore",
         )
-        .expect_err("restore should reject cross-board thumb paths");
+        .err()
+        .context("cross-board thumbnail path was unexpectedly accepted")?;
 
         match error {
             crate::error::AppError::BadRequest(message) => {
-                assert!(message.contains("escapes its board /tech/"));
+                ensure!(message.contains("escapes its board /tech/"));
             }
-            other => panic!("expected BadRequest, got {other:?}"),
+            other => bail!("expected BadRequest, got {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn full_restore_trust_boundary_allows_empty_file_hash_thumb_path() {
-        let db_path = create_snapshot_db();
-        let conn = rusqlite::Connection::open(&db_path).expect("open snapshot");
+    fn full_restore_trust_boundary_allows_empty_file_hash_thumb_path() -> TestResult<()> {
+        let db_path = create_snapshot_db()?;
+        let conn = rusqlite::Connection::open(&db_path).context("open database snapshot")?;
         conn.execute(
             "INSERT INTO file_hashes (sha256, file_path, thumb_path, mime_type, created_at)
              VALUES ('generic-hash', 'tech/file.bin', '', 'application/octet-stream', unixepoch())",
             [],
         )
-        .expect("seed generic file hash");
+        .context("seed generic file hash")?;
 
-        validate_full_restore_db_trust_boundary(&conn)
-            .expect("empty file-hash thumb path should remain allowed");
+        validate_full_restore_db_trust_boundary(&conn)?;
+        Ok(())
     }
 
     #[test]
-    fn full_restore_trust_boundary_rejects_cross_board_file_hash_pairing() {
-        let db_path = create_snapshot_db();
-        let conn = rusqlite::Connection::open(&db_path).expect("open snapshot");
-        crate::db::create_board(&conn, "b", "Random", "", false).expect("create second board");
+    fn full_restore_trust_boundary_rejects_cross_board_file_hash_pairing() -> TestResult<()> {
+        let db_path = create_snapshot_db()?;
+        let conn = rusqlite::Connection::open(&db_path).context("open database snapshot")?;
+        crate::db::create_board(&conn, "b", "Random", "", false).context("create second board")?;
         conn.execute(
             "INSERT INTO file_hashes (sha256, file_path, thumb_path, mime_type, created_at)
              VALUES ('cross-board-hash', 'tech/doc.pdf', 'b/thumbs/doc.svg', 'application/pdf', unixepoch())",
             [],
         )
-        .expect("seed cross-board file hash");
+        .context("seed cross-board file hash")?;
 
         let error = validate_full_restore_db_trust_boundary(&conn)
-            .expect_err("cross-board file_hash should be rejected");
+            .err()
+            .context("cross-board file-hash pairing was unexpectedly accepted")?;
 
         match error {
             crate::error::AppError::BadRequest(message) => {
-                assert!(message.contains("mixes boards between file_path and thumb_path"));
+                ensure!(message.contains("mixes boards between file_path and thumb_path"));
             }
-            other => panic!("expected BadRequest, got {other:?}"),
+            other => bail!("expected BadRequest, got {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn full_restore_rejects_tor_key_opt_in_when_tor_is_unconfigured() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn full_restore_rejects_tor_key_opt_in_when_tor_is_unconfigured() -> TestResult<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("backup.zip");
         write_full_backup_zip(
             &zip_path,
@@ -1911,19 +2001,20 @@ mod tests {
                 ("hs_ed25519_public_key", "backup-public"),
             ]),
             false,
-        );
+        )?;
 
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let mut live_conn = pool.get().expect("db conn");
-        let file = std::fs::File::open(&zip_path).expect("open zip");
-        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let mut live_conn = pool.get().context("get test database connection")?;
+        let file = std::fs::File::open(&zip_path).context("open backup ZIP")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse backup ZIP")?;
         let upload_dir = temp_dir.path().join("uploads");
-        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        std::fs::create_dir_all(&upload_dir).context("create uploads directory")?;
+        let upload_dir_str = upload_dir.to_str().context("upload path is not UTF-8")?;
 
         let error = execute_full_restore(
             &mut live_conn,
             1,
-            upload_dir.to_str().expect("upload dir"),
+            upload_dir_str,
             None,
             true,
             &mut archive,
@@ -1932,22 +2023,24 @@ mod tests {
             "Test restore",
             "Test restore",
         )
-        .expect_err("restore should reject tor opt-in without configuration");
+        .err()
+        .context("Tor-key opt-in without configuration was unexpectedly accepted")?;
 
         match error {
             crate::error::AppError::BadRequest(message) => {
-                assert!(message.contains("Tor hidden service key restore is not available"));
+                ensure!(message.contains("Tor hidden service key restore is not available"));
             }
-            other => panic!("expected BadRequest, got {other:?}"),
+            other => bail!("expected BadRequest, got {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn full_restore_with_tor_key_opt_in_creates_missing_live_identity_dir() {
+    fn full_restore_with_tor_key_opt_in_creates_missing_live_identity_dir() -> TestResult<()> {
         let _tor_permission_failure_guard = TOR_PERMISSION_FAILURE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("backup.zip");
         write_full_backup_zip(
             &zip_path,
@@ -1956,20 +2049,21 @@ mod tests {
                 ("hs_ed25519_public_key", "backup-public"),
             ]),
             false,
-        );
+        )?;
 
         let tor_keys_dir = temp_dir.path().join("runtime/tor/state/keystore");
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let mut live_conn = pool.get().expect("db conn");
-        let file = std::fs::File::open(&zip_path).expect("open zip");
-        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let mut live_conn = pool.get().context("get test database connection")?;
+        let file = std::fs::File::open(&zip_path).context("open backup ZIP")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse backup ZIP")?;
         let upload_dir = temp_dir.path().join("uploads");
-        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        std::fs::create_dir_all(&upload_dir).context("create uploads directory")?;
+        let upload_dir_str = upload_dir.to_str().context("upload path is not UTF-8")?;
 
         execute_full_restore(
             &mut live_conn,
             1,
-            upload_dir.to_str().expect("upload dir"),
+            upload_dir_str,
             Some(&tor_keys_dir),
             true,
             &mut archive,
@@ -1977,30 +2071,30 @@ mod tests {
             "Test restore completed",
             "Test restore",
             "Test restore",
-        )
-        .expect("restore should create missing Tor identity dir");
+        )?;
 
-        assert_eq!(
-            read_tree(&tor_keys_dir),
-            BTreeMap::from([
-                (
-                    "hs_ed25519_public_key".to_owned(),
-                    "backup-public".to_owned()
-                ),
-                (
-                    "hs_ed25519_secret_key".to_owned(),
-                    "backup-secret".to_owned()
-                ),
-            ])
+        ensure!(
+            read_tree(&tor_keys_dir)?
+                == BTreeMap::from([
+                    (
+                        "hs_ed25519_public_key".to_owned(),
+                        "backup-public".to_owned()
+                    ),
+                    (
+                        "hs_ed25519_secret_key".to_owned(),
+                        "backup-secret".to_owned()
+                    ),
+                ])
         );
+        Ok(())
     }
 
     #[test]
-    fn full_restore_with_tor_key_opt_in_replaces_live_identity_without_merging() {
+    fn full_restore_with_tor_key_opt_in_replaces_live_identity_without_merging() -> TestResult<()> {
         let _tor_permission_failure_guard = TOR_PERMISSION_FAILURE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("backup.zip");
         write_full_backup_zip(
             &zip_path,
@@ -2009,27 +2103,29 @@ mod tests {
                 ("hs_ed25519_public_key", "backup-public"),
             ]),
             false,
-        );
+        )?;
 
         let tor_keys_dir = temp_dir.path().join("live-tor-keys");
-        std::fs::create_dir_all(&tor_keys_dir).expect("create live tor dir");
+        std::fs::create_dir_all(&tor_keys_dir).context("create live Tor directory")?;
         std::fs::write(tor_keys_dir.join("hs_ed25519_secret_key"), "live-secret")
-            .expect("write live secret");
+            .context("write live secret key")?;
         std::fs::write(tor_keys_dir.join("hs_ed25519_public_key"), "live-public")
-            .expect("write live public");
-        std::fs::write(tor_keys_dir.join("stale-file.txt"), "stale").expect("write stale");
+            .context("write live public key")?;
+        std::fs::write(tor_keys_dir.join("stale-file.txt"), "stale")
+            .context("write stale Tor file")?;
 
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let mut live_conn = pool.get().expect("db conn");
-        let file = std::fs::File::open(&zip_path).expect("open zip");
-        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let mut live_conn = pool.get().context("get test database connection")?;
+        let file = std::fs::File::open(&zip_path).context("open backup ZIP")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse backup ZIP")?;
         let upload_dir = temp_dir.path().join("uploads");
-        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        std::fs::create_dir_all(&upload_dir).context("create uploads directory")?;
+        let upload_dir_str = upload_dir.to_str().context("upload path is not UTF-8")?;
 
         execute_full_restore(
             &mut live_conn,
             1,
-            upload_dir.to_str().expect("upload dir"),
+            upload_dir_str,
             Some(&tor_keys_dir),
             true,
             &mut archive,
@@ -2037,32 +2133,33 @@ mod tests {
             "Test restore completed",
             "Test restore",
             "Test restore",
-        )
-        .expect("restore should succeed");
+        )?;
 
-        let live_tree = read_tree(&tor_keys_dir);
-        assert_eq!(
-            live_tree,
-            BTreeMap::from([
-                (
-                    "hs_ed25519_public_key".to_owned(),
-                    "backup-public".to_owned()
-                ),
-                (
-                    "hs_ed25519_secret_key".to_owned(),
-                    "backup-secret".to_owned()
-                ),
-            ])
+        let live_tree = read_tree(&tor_keys_dir)?;
+        ensure!(
+            live_tree
+                == BTreeMap::from([
+                    (
+                        "hs_ed25519_public_key".to_owned(),
+                        "backup-public".to_owned()
+                    ),
+                    (
+                        "hs_ed25519_secret_key".to_owned(),
+                        "backup-secret".to_owned()
+                    ),
+                ])
         );
-        assert!(!tor_keys_dir.join("stale-file.txt").exists());
+        ensure!(!tor_keys_dir.join("stale-file.txt").exists());
+        Ok(())
     }
 
     #[test]
-    fn full_restore_tor_key_finalize_failure_keeps_pending_restore_for_reconciliation() {
+    fn full_restore_tor_key_finalize_failure_keeps_pending_restore_for_reconciliation(
+    ) -> TestResult<()> {
         let _tor_permission_failure_guard = TOR_PERMISSION_FAILURE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("backup.zip");
         write_full_backup_zip(
             &zip_path,
@@ -2071,19 +2168,20 @@ mod tests {
                 ("hs_ed25519_public_key", "backup-public"),
             ]),
             false,
-        );
+        )?;
 
         let tor_keys_dir = temp_dir.path().join("live-tor-keys");
-        std::fs::create_dir_all(&tor_keys_dir).expect("create live tor dir");
+        std::fs::create_dir_all(&tor_keys_dir).context("create live Tor directory")?;
         std::fs::write(tor_keys_dir.join("hs_ed25519_secret_key"), "live-secret")
-            .expect("write live secret");
+            .context("write live secret key")?;
 
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let mut live_conn = pool.get().expect("db conn");
-        let file = std::fs::File::open(&zip_path).expect("open zip");
-        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let mut live_conn = pool.get().context("get test database connection")?;
+        let file = std::fs::File::open(&zip_path).context("open backup ZIP")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse backup ZIP")?;
         let upload_dir = temp_dir.path().join("uploads");
-        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        std::fs::create_dir_all(&upload_dir).context("create uploads directory")?;
+        let upload_dir_str = upload_dir.to_str().context("upload path is not UTF-8")?;
 
         crate::pending_fs::set_private_permission_failure_for_test(Some(
             "simulated Tor key permission failure".to_owned(),
@@ -2092,7 +2190,7 @@ mod tests {
         let error = execute_full_restore(
             &mut live_conn,
             1,
-            upload_dir.to_str().expect("upload dir"),
+            upload_dir_str,
             Some(&tor_keys_dir),
             true,
             &mut archive,
@@ -2101,73 +2199,72 @@ mod tests {
             "Test restore",
             "Test restore",
         )
-        .expect_err("restore should report failed Tor key finalization");
+        .err()
+        .context("simulated Tor key finalization failure unexpectedly succeeded")?;
 
-        assert!(error
+        ensure!(error
             .to_string()
             .contains("remains pending for startup reconciliation"));
-        let pending_ops =
-            crate::db::list_pending_fs_ops(&live_conn).expect("list pending fs ops after failure");
+        let pending_ops = crate::db::list_pending_fs_ops(&live_conn)?;
         let [pending_op] = pending_ops.as_slice() else {
-            panic!("expected exactly one pending restore op");
+            bail!("expected exactly one pending restore op");
         };
-        assert_eq!(pending_op.kind, crate::pending_fs::FULL_RESTORE_SWAP_KIND);
+        ensure!(pending_op.kind == crate::pending_fs::FULL_RESTORE_SWAP_KIND);
         let payload: crate::pending_fs::FullRestoreSwapPayload =
-            serde_json::from_str(&pending_op.payload_json).expect("restore payload json");
+            serde_json::from_str(&pending_op.payload_json).context("parse restore payload JSON")?;
         let [tor_swap] = payload.additional_swaps.as_slice() else {
-            panic!("expected one additional Tor key swap");
+            bail!("expected one additional Tor key swap");
         };
-        assert_eq!(tor_swap.live, tor_keys_dir.display().to_string());
-        assert!(tor_swap.restrict_private_permissions);
+        ensure!(tor_swap.live == tor_keys_dir.display().to_string());
+        ensure!(tor_swap.restrict_private_permissions);
 
         crate::pending_fs::set_private_permission_failure_for_test(None);
         crate::pending_fs::finalize_full_restore_payload(
             &payload,
             &upload_dir,
             Some(&tor_keys_dir),
-        )
-        .expect("finalize pending restore after failure clears");
-        crate::db::delete_pending_fs_op(&live_conn, &pending_op.id).expect("delete pending op");
-        assert!(
-            crate::db::list_pending_fs_ops(&live_conn)
-                .expect("list pending ops after finalization")
-                .is_empty(),
+        )?;
+        crate::db::delete_pending_fs_op(&live_conn, &pending_op.id)?;
+        ensure!(
+            crate::db::list_pending_fs_ops(&live_conn)?.is_empty(),
             "pending restore op should clear only after finalization completes"
         );
-        assert_eq!(
-            read_tree(&tor_keys_dir),
-            BTreeMap::from([
-                (
-                    "hs_ed25519_public_key".to_owned(),
-                    "backup-public".to_owned()
-                ),
-                (
-                    "hs_ed25519_secret_key".to_owned(),
-                    "backup-secret".to_owned()
-                ),
-            ])
+        ensure!(
+            read_tree(&tor_keys_dir)?
+                == BTreeMap::from([
+                    (
+                        "hs_ed25519_public_key".to_owned(),
+                        "backup-public".to_owned()
+                    ),
+                    (
+                        "hs_ed25519_secret_key".to_owned(),
+                        "backup-secret".to_owned()
+                    ),
+                ])
         );
+        Ok(())
     }
 
     #[test]
-    fn full_restore_rejects_requested_tor_key_restore_when_backup_has_none() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn full_restore_rejects_requested_tor_key_restore_when_backup_has_none() -> TestResult<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("backup.zip");
-        write_full_backup_zip(&zip_path, None, false);
+        write_full_backup_zip(&zip_path, None, false)?;
 
         let tor_keys_dir = temp_dir.path().join("live-tor-keys");
-        std::fs::create_dir_all(&tor_keys_dir).expect("create live tor dir");
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let mut live_conn = pool.get().expect("db conn");
-        let file = std::fs::File::open(&zip_path).expect("open zip");
-        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        std::fs::create_dir_all(&tor_keys_dir).context("create live Tor directory")?;
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let mut live_conn = pool.get().context("get test database connection")?;
+        let file = std::fs::File::open(&zip_path).context("open backup ZIP")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse backup ZIP")?;
         let upload_dir = temp_dir.path().join("uploads");
-        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        std::fs::create_dir_all(&upload_dir).context("create uploads directory")?;
+        let upload_dir_str = upload_dir.to_str().context("upload path is not UTF-8")?;
 
         let error = execute_full_restore(
             &mut live_conn,
             1,
-            upload_dir.to_str().expect("upload dir"),
+            upload_dir_str,
             Some(&tor_keys_dir),
             true,
             &mut archive,
@@ -2176,37 +2273,40 @@ mod tests {
             "Test restore",
             "Test restore",
         )
-        .expect_err("restore should reject missing Tor identity");
+        .err()
+        .context("requested absent Tor identity was unexpectedly accepted")?;
 
         match error {
             crate::error::AppError::BadRequest(message) => {
-                assert!(message.contains("does not include Tor hidden service keys"));
+                ensure!(message.contains("does not include Tor hidden service keys"));
             }
-            other => panic!("expected BadRequest, got {other:?}"),
+            other => bail!("expected BadRequest, got {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn full_restore_accepts_legacy_full_backup_without_tor_metadata() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn full_restore_accepts_legacy_full_backup_without_tor_metadata() -> TestResult<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("legacy.zip");
-        write_full_backup_zip(&zip_path, None, true);
+        write_full_backup_zip(&zip_path, None, true)?;
 
         let tor_keys_dir = temp_dir.path().join("live-tor-keys");
-        std::fs::create_dir_all(&tor_keys_dir).expect("create live tor dir");
+        std::fs::create_dir_all(&tor_keys_dir).context("create live Tor directory")?;
         std::fs::write(tor_keys_dir.join("hs_ed25519_secret_key"), "live-secret")
-            .expect("write live secret");
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let mut live_conn = pool.get().expect("db conn");
-        let file = std::fs::File::open(&zip_path).expect("open zip");
-        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+            .context("write live secret key")?;
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let mut live_conn = pool.get().context("get test database connection")?;
+        let file = std::fs::File::open(&zip_path).context("open backup ZIP")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse backup ZIP")?;
         let upload_dir = temp_dir.path().join("uploads");
-        std::fs::create_dir_all(&upload_dir).expect("create uploads");
+        std::fs::create_dir_all(&upload_dir).context("create uploads directory")?;
+        let upload_dir_str = upload_dir.to_str().context("upload path is not UTF-8")?;
 
         execute_full_restore(
             &mut live_conn,
             1,
-            upload_dir.to_str().expect("upload dir"),
+            upload_dir_str,
             Some(&tor_keys_dir),
             false,
             &mut archive,
@@ -2214,12 +2314,12 @@ mod tests {
             "Test restore completed",
             "Test restore",
             "Test restore",
-        )
-        .expect("legacy restore should succeed");
+        )?;
 
-        assert_eq!(
-            read_tree(&tor_keys_dir),
-            BTreeMap::from([("hs_ed25519_secret_key".to_owned(), "live-secret".to_owned())])
+        ensure!(
+            read_tree(&tor_keys_dir)?
+                == BTreeMap::from([("hs_ed25519_secret_key".to_owned(), "live-secret".to_owned())])
         );
+        Ok(())
     }
 }

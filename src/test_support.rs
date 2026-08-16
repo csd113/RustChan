@@ -1,6 +1,11 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-pub fn app_state() -> crate::middleware::AppState {
+/// Creates a fully initialized application state for handler tests.
+#[expect(
+    clippy::expect_used,
+    reason = "shared test fixture construction must fail immediately when its isolated filesystem or database cannot be initialized"
+)]
+pub(crate) fn app_state() -> crate::middleware::AppState {
     crate::config::generate_settings_file_if_missing();
     std::fs::create_dir_all(&crate::config::CONFIG.upload_dir).expect("create test upload dir");
     std::fs::create_dir_all(crate::config::full_backups_dir())
@@ -9,7 +14,7 @@ pub fn app_state() -> crate::middleware::AppState {
         .expect("create test board backup dir");
     let pool = crate::db::init_test_pool().expect("test pool");
     if let Ok(conn) = pool.get() {
-        let _ = crate::db::sync_live_theme_state(&conn);
+        drop(crate::db::sync_live_theme_state(&conn));
         crate::templates::set_live_boards(crate::db::get_all_boards(&conn).unwrap_or_default());
     }
     let job_queue = std::sync::Arc::new(crate::workers::JobQueue::new(pool.clone()));
@@ -38,11 +43,13 @@ pub fn app_state() -> crate::middleware::AppState {
     }
 }
 
-pub fn connect_info() -> axum::extract::ConnectInfo<SocketAddr> {
+/// Returns deterministic loopback connection metadata for request tests.
+pub(crate) fn connect_info() -> axum::extract::ConnectInfo<SocketAddr> {
     axum::extract::ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000))
 }
 
-pub fn multipart_body(
+/// Encodes text fields and an optional file as a multipart test request body.
+pub(crate) fn multipart_body(
     fields: &[(&str, &str)],
     file: Option<(&str, &str, &[u8], &str)>,
 ) -> (String, Vec<u8>) {

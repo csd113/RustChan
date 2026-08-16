@@ -1,12 +1,15 @@
-// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
-#![allow(clippy::wildcard_imports)]
-
-use super::*;
+use super::{
+    board_access_cookie_from_jar, db, load_board_access_context, templates, unlock_redirect_url,
+    user_preferences_from_jar, AppError, AppState, BoardAccessContext, CookieJar, HeaderMap, Html,
+    Path, Redirect, Response, Result, State, StatusCode, ADMIN_SESSION_COOKIE, CONFIG,
+};
 use axum::http::header::{
     HeaderValue, CONTENT_DISPOSITION, CONTENT_SECURITY_POLICY, CONTENT_TYPE,
     X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
 };
+use axum::response::IntoResponse as _;
 
+/// Performs the media content type handler operation.
 fn media_content_type(path: &std::path::Path) -> Option<&'static str> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("ico") => Some("image/x-icon"),
@@ -37,6 +40,7 @@ fn media_content_type(path: &std::path::Path) -> Option<&'static str> {
     }
 }
 
+/// Returns whether generated svg placeholder thumb.
 fn is_generated_svg_placeholder_thumb(media_path: &str) -> bool {
     let path = std::path::Path::new(media_path);
     path.extension()
@@ -48,6 +52,7 @@ fn is_generated_svg_placeholder_thumb(media_path: &str) -> bool {
             .is_some_and(|part| part.as_os_str() == "thumbs")
 }
 
+/// Performs the safe board media file handler operation.
 fn safe_board_media_file(
     base: &std::path::Path,
     media_path: &str,
@@ -55,6 +60,7 @@ fn safe_board_media_file(
     crate::utils::fs_security::existing_regular_file_child(base, media_path)
 }
 
+/// Returns whether not found error.
 fn is_not_found_error(error: &anyhow::Error) -> bool {
     error
         .chain()
@@ -62,6 +68,7 @@ fn is_not_found_error(error: &anyhow::Error) -> bool {
         .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
+/// Performs the stale webm redirect path handler operation.
 fn stale_webm_redirect_path(base: &std::path::Path, media_path: &str) -> Option<String> {
     let path = std::path::Path::new(media_path);
     if !path
@@ -70,7 +77,8 @@ fn stale_webm_redirect_path(base: &std::path::Path, media_path: &str) -> Option<
     {
         return None;
     }
-    let webm_path = format!("{}.webm", &media_path[..media_path.len().saturating_sub(4)]);
+    let stem = media_path.get(..media_path.len().saturating_sub(4))?;
+    let webm_path = format!("{stem}.webm");
     safe_board_media_file(base, &webm_path).ok()?;
     Some(format!("/boards/{webm_path}"))
 }
@@ -80,7 +88,12 @@ fn stale_webm_redirect_path(base: &std::path::Path, media_path: &str) -> Option<
 // links (created before the background transcoder replaced them with .webm)
 // and issue a permanent redirect. All other paths are served via ServeFile.
 
-pub async fn serve_board_media(
+#[expect(
+    clippy::too_many_lines,
+    reason = "path validation, access policy, legacy redirect handling, and file response form one request"
+)]
+/// Handles the serve board media request.
+pub(crate) async fn serve_board_media(
     State(state): State<AppState>,
     Path(media_path): Path<String>,
     jar: CookieJar,
@@ -218,6 +231,7 @@ pub async fn serve_board_media(
     }
 }
 
+/// Performs the board media cache control handler operation.
 const fn board_media_cache_control(
     is_protected_board: bool,
     is_replaceable_asset: bool,
@@ -233,7 +247,8 @@ const fn board_media_cache_control(
     }
 }
 
-fn apply_pdf_embed_headers(headers: &mut axum::http::HeaderMap) {
+/// Performs the apply PDF embed headers handler operation.
+fn apply_pdf_embed_headers(headers: &mut HeaderMap) {
     headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("SAMEORIGIN"));
     headers.insert(
         CONTENT_SECURITY_POLICY,
@@ -259,7 +274,8 @@ fn apply_pdf_embed_headers(headers: &mut axum::http::HeaderMap) {
 //
 // Response on failure: 404 { "error": "not found" }
 
-pub async fn api_post_preview(
+/// Handles the API post preview request.
+pub(crate) async fn api_post_preview(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
@@ -272,7 +288,7 @@ pub async fn api_post_preview(
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
-        move || -> crate::error::Result<Option<(String, i64)>> {
+        move || -> Result<Option<(String, i64)>> {
             let conn = pool.get()?;
             let access_context = load_board_access_context(
                 &conn,
@@ -291,11 +307,11 @@ pub async fn api_post_preview(
                 None => Ok(None),
                 Some(p) => {
                     let thread_id = p.thread_id;
-                    let html = crate::templates::render_post(
+                    let html = templates::render_post(
                         &p,
                         &board_short,
                         "",
-                        crate::templates::thread::RenderPostOpts {
+                        templates::thread::RenderPostOpts {
                             show_delete: false,
                             is_admin: false,
                             admin_csrf_token: None,
@@ -318,22 +334,22 @@ pub async fn api_post_preview(
     })
     .await;
 
-    let json_ct = [(header::CONTENT_TYPE, "application/json")];
+    let json_ct = [(CONTENT_TYPE, "application/json")];
 
     match result {
         Ok(Ok(Some((html, thread_id)))) => {
             let body =
                 serde_json::to_string(&serde_json::json!({ "html": html, "thread_id": thread_id }))
                     .unwrap_or_else(|_| r#"{"html":"","thread_id":0}"#.to_owned());
-            (axum::http::StatusCode::OK, json_ct, body).into_response()
+            (StatusCode::OK, json_ct, body).into_response()
         }
         Ok(Ok(None)) => {
             let body = r#"{"error":"not found"}"#.to_owned();
-            (axum::http::StatusCode::NOT_FOUND, json_ct, body).into_response()
+            (StatusCode::NOT_FOUND, json_ct, body).into_response()
         }
         _ => {
             let body = r#"{"error":"internal error"}"#.to_owned();
-            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, json_ct, body).into_response()
+            (StatusCode::INTERNAL_SERVER_ERROR, json_ct, body).into_response()
         }
     }
 }
@@ -347,7 +363,8 @@ pub async fn api_post_preview(
 // the first hover preview the JS upgrades the href in-place so subsequent
 // clicks go directly to the thread anchor without a server round-trip.
 
-pub async fn redirect_to_post(
+/// Handles the redirect to post request.
+pub(crate) async fn redirect_to_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
@@ -361,7 +378,7 @@ pub async fn redirect_to_post(
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> crate::error::Result<(Option<i64>, bool)> {
+        move || -> Result<(Option<i64>, bool)> {
             let conn = pool.get()?;
             let access_context = load_board_access_context(
                 &conn,
@@ -393,15 +410,11 @@ pub async fn redirect_to_post(
         // This is the fallback path when JavaScript is disabled or when
         // a user manually navigates to a quotelink URL after a board
         // restore that assigned new IDs to the restored posts.
-        let html = crate::templates::error_page(
+        let html = templates::error_page(
             404,
             &format!("Post #{post_id} not found. It may have been deleted or the board was restored from a backup."),
         );
-        (
-            axum::http::StatusCode::NOT_FOUND,
-            axum::response::Html(html),
-        )
-            .into_response()
+        (StatusCode::NOT_FOUND, Html(html)).into_response()
     }
 }
 
@@ -411,53 +424,59 @@ pub async fn redirect_to_post(
 
 #[cfg(test)]
 mod tests {
-    use super::{safe_board_media_file, stale_webm_redirect_path};
+    #[cfg(unix)]
+    use super::safe_board_media_file;
+    use super::stale_webm_redirect_path;
+    use anyhow::{ensure, Context as _, Result as AnyResult};
 
     #[test]
-    fn stale_mp4_redirect_path_accepts_valid_webm_sibling() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    fn stale_mp4_redirect_path_accepts_valid_webm_sibling() -> AnyResult<()> {
+        let tempdir = tempfile::tempdir().context("create temporary upload root")?;
         let upload_root = tempdir.path().join("uploads");
         let board_dir = upload_root.join("test");
-        std::fs::create_dir_all(&board_dir).expect("create board dir");
-        std::fs::write(board_dir.join("clip.webm"), b"webm").expect("write webm");
+        std::fs::create_dir_all(&board_dir).context("create board directory")?;
+        std::fs::write(board_dir.join("clip.webm"), b"webm").context("write WebM fixture")?;
 
-        assert_eq!(
-            stale_webm_redirect_path(&upload_root, "test/clip.mp4").as_deref(),
-            Some("/boards/test/clip.webm")
+        ensure!(
+            stale_webm_redirect_path(&upload_root, "test/clip.mp4").as_deref()
+                == Some("/boards/test/clip.webm")
         );
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn stale_mp4_redirect_path_rejects_symlink_fallback_escape() {
+    fn stale_mp4_redirect_path_rejects_symlink_fallback_escape() -> AnyResult<()> {
         use std::os::unix::fs as unix_fs;
 
-        let tempdir = tempfile::tempdir().expect("tempdir");
+        let tempdir = tempfile::tempdir().context("create temporary upload root")?;
         let upload_root = tempdir.path().join("uploads");
         let board_dir = upload_root.join("test");
         let outside = tempdir.path().join("outside");
-        std::fs::create_dir_all(&board_dir).expect("create board dir");
-        std::fs::create_dir_all(&outside).expect("create outside dir");
-        std::fs::write(outside.join("clip.webm"), b"webm").expect("write outside webm");
-        unix_fs::symlink(&outside, board_dir.join("link")).expect("symlink");
+        std::fs::create_dir_all(&board_dir).context("create board directory")?;
+        std::fs::create_dir_all(&outside).context("create outside directory")?;
+        std::fs::write(outside.join("clip.webm"), b"webm").context("write outside WebM fixture")?;
+        unix_fs::symlink(&outside, board_dir.join("link")).context("create escaping symlink")?;
 
-        assert!(stale_webm_redirect_path(&upload_root, "test/link/clip.mp4").is_none());
+        ensure!(stale_webm_redirect_path(&upload_root, "test/link/clip.mp4").is_none());
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn board_media_file_rejects_symlink_original_escape() {
+    fn board_media_file_rejects_symlink_original_escape() -> AnyResult<()> {
         use std::os::unix::fs as unix_fs;
 
-        let tempdir = tempfile::tempdir().expect("tempdir");
+        let tempdir = tempfile::tempdir().context("create temporary upload root")?;
         let upload_root = tempdir.path().join("uploads");
         let board_dir = upload_root.join("test");
         let outside = tempdir.path().join("outside");
-        std::fs::create_dir_all(&board_dir).expect("create board dir");
-        std::fs::create_dir_all(&outside).expect("create outside dir");
-        std::fs::write(outside.join("clip.mp4"), b"mp4").expect("write outside mp4");
-        unix_fs::symlink(&outside, board_dir.join("link")).expect("symlink");
+        std::fs::create_dir_all(&board_dir).context("create board directory")?;
+        std::fs::create_dir_all(&outside).context("create outside directory")?;
+        std::fs::write(outside.join("clip.mp4"), b"mp4").context("write outside MP4 fixture")?;
+        unix_fs::symlink(&outside, board_dir.join("link")).context("create escaping symlink")?;
 
-        assert!(safe_board_media_file(&upload_root, "test/link/clip.mp4").is_err());
+        ensure!(safe_board_media_file(&upload_root, "test/link/clip.mp4").is_err());
+        Ok(())
     }
 }

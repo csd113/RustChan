@@ -18,14 +18,19 @@ use serde::Deserialize;
 use tower::ServiceExt as _;
 use tower_http::services::ServeFile;
 
+/// Versioned cache control used by this handler.
 const VERSIONED_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA;
+/// Unversioned cache control used by this handler.
 const UNVERSIONED_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_STATIC_SHORT;
 
 #[derive(Deserialize, Default)]
-pub struct ExternalBannerQuery {
+/// Query parameters accepted by the external banner request.
+pub(crate) struct ExternalBannerQuery {
+    /// The optional return to.
     pub return_to: Option<String>,
 }
 
+/// Loads accessible banner asset.
 fn load_accessible_banner_asset(
     conn: &rusqlite::Connection,
     banner_id: i64,
@@ -57,7 +62,8 @@ fn load_accessible_banner_asset(
     Ok((asset, false))
 }
 
-pub async fn serve_banner_asset(
+/// Handles the serve banner asset request.
+pub(crate) async fn serve_banner_asset(
     State(state): State<AppState>,
     Path(banner_id): Path<i64>,
     jar: CookieJar,
@@ -110,7 +116,7 @@ pub async fn serve_banner_asset(
     let content_type = banner::banner_asset_content_type(&path);
 
     let req = req.map(|_| axum::body::Body::empty());
-    ServeFile::new(path).oneshot(req).await.map_or_else(
+    let response = ServeFile::new(path).oneshot(req).await.map_or_else(
         |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         |resp| {
             let mut resp = resp.map(axum::body::Body::new);
@@ -128,10 +134,12 @@ pub async fn serve_banner_asset(
             );
             resp.into_response()
         },
-    )
+    );
+    response
 }
 
-pub async fn external_banner_warning_page(
+/// Handles the external banner warning page request.
+pub(crate) async fn external_banner_warning_page(
     State(state): State<AppState>,
     Path(banner_id): Path<i64>,
     Query(query): Query<ExternalBannerQuery>,
@@ -192,7 +200,7 @@ pub async fn external_banner_warning_page(
         None,
         &body,
         &csrf,
-        boards.as_slice(),
+        boards.as_ref(),
         current_theme.as_deref(),
         None,
         false,
@@ -206,7 +214,8 @@ pub async fn external_banner_warning_page(
     Ok((jar, response).into_response())
 }
 
-pub async fn external_banner_continue(
+/// Handles the external banner continue request.
+pub(crate) async fn external_banner_continue(
     State(state): State<AppState>,
     Path(banner_id): Path<i64>,
     Query(_query): Query<ExternalBannerQuery>,
@@ -243,6 +252,7 @@ pub async fn external_banner_continue(
 
 #[cfg(test)]
 mod tests {
+    use anyhow::{ensure, Context as _, Result as AnyResult};
     use axum::{
         body::Body,
         http::{header, Request, StatusCode},
@@ -251,18 +261,21 @@ mod tests {
     };
     use tower::ServiceExt as _;
 
-    fn insert_external_board_banner(state: &crate::middleware::AppState, board_short: &str) -> i64 {
-        let conn = state.db.get().expect("db connection");
-        let board_id =
-            crate::db::create_board(&conn, board_short, "Secret", "", false).expect("create board");
+    fn insert_external_board_banner(
+        state: &crate::middleware::AppState,
+        board_short: &str,
+    ) -> AnyResult<i64> {
+        let conn = state.db.get().context("get database connection")?;
+        let board_id = crate::db::create_board(&conn, board_short, "Secret", "", false)
+            .context("create protected board")?;
         let password_hash =
-            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+            crate::utils::crypto::hash_password("swordfish").context("hash board password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE id = ?3",
             rusqlite::params!["view_password", password_hash, board_id],
         )
-        .expect("update board access");
-        crate::db::insert_banner_asset(
+        .context("protect board")?;
+        let banner_id = crate::db::insert_banner_asset(
             &conn,
             crate::models::BannerScope::Board,
             Some(board_id),
@@ -277,12 +290,13 @@ mod tests {
             true,
             true,
         )
-        .expect("insert banner asset")
+        .context("insert external board banner")?;
+        Ok(banner_id)
     }
 
-    fn insert_missing_global_banner(state: &crate::middleware::AppState) -> i64 {
-        let conn = state.db.get().expect("db connection");
-        crate::db::insert_banner_asset(
+    fn insert_missing_global_banner(state: &crate::middleware::AppState) -> AnyResult<i64> {
+        let conn = state.db.get().context("get database connection")?;
+        let banner_id = crate::db::insert_banner_asset(
             &conn,
             crate::models::BannerScope::Global,
             None,
@@ -297,24 +311,25 @@ mod tests {
             true,
             true,
         )
-        .expect("insert banner asset")
+        .context("insert missing global banner fixture")?;
+        Ok(banner_id)
     }
 
     fn insert_existing_global_banner(
         state: &crate::middleware::AppState,
-    ) -> (i64, std::path::PathBuf) {
+    ) -> AnyResult<(i64, std::path::PathBuf)> {
         let storage_key = uuid::Uuid::new_v4().simple().to_string();
         let path = crate::banner::banner_storage_path(
             crate::models::BannerScope::Global,
             None,
             &storage_key,
         )
-        .expect("banner path");
+        .context("build global banner path")?;
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("create banner dir");
+            std::fs::create_dir_all(parent).context("create global banner directory")?;
         }
-        std::fs::write(&path, b"banner bytes").expect("write banner file");
-        let conn = state.db.get().expect("db connection");
+        std::fs::write(&path, b"banner bytes").context("write global banner fixture")?;
+        let conn = state.db.get().context("get database connection")?;
         let banner_id = crate::db::insert_banner_asset(
             &conn,
             crate::models::BannerScope::Global,
@@ -330,26 +345,29 @@ mod tests {
             true,
             true,
         )
-        .expect("insert banner asset");
-        (banner_id, path)
+        .context("insert global banner fixture")?;
+        Ok((banner_id, path))
     }
 
     fn insert_existing_protected_board_banner(
         state: &crate::middleware::AppState,
-    ) -> (i64, std::path::PathBuf, String) {
-        let conn = state.db.get().expect("db connection");
-        let board_id =
-            crate::db::create_board(&conn, "securebanner", "Secret", "", false).expect("board");
+    ) -> AnyResult<(i64, std::path::PathBuf, String)> {
+        let conn = state.db.get().context("get database connection")?;
+        let board_id = crate::db::create_board(&conn, "securebanner", "Secret", "", false)
+            .context("create protected board")?;
         let password_hash =
-            crate::utils::crypto::hash_password("swordfish").expect("hash password");
+            crate::utils::crypto::hash_password("swordfish").context("hash board password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE id = ?3",
             rusqlite::params!["view_password", password_hash, board_id],
         )
-        .expect("protect board");
-        let admin_hash = crate::utils::crypto::hash_password("hunter2").expect("hash admin");
-        let admin_id = crate::db::create_admin(&conn, "admin", &admin_hash).expect("admin");
-        crate::db::create_session(&conn, "banner-session", admin_id, i64::MAX).expect("session");
+        .context("protect board")?;
+        let admin_hash =
+            crate::utils::crypto::hash_password("hunter2").context("hash admin password")?;
+        let admin_id =
+            crate::db::create_admin(&conn, "admin", &admin_hash).context("create admin")?;
+        crate::db::create_session(&conn, "banner-session", admin_id, i64::MAX)
+            .context("create admin session")?;
 
         let storage_key = uuid::Uuid::new_v4().simple().to_string();
         let path = crate::banner::banner_storage_path(
@@ -357,11 +375,11 @@ mod tests {
             Some("securebanner"),
             &storage_key,
         )
-        .expect("banner path");
+        .context("build protected board banner path")?;
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("create banner dir");
+            std::fs::create_dir_all(parent).context("create board banner directory")?;
         }
-        std::fs::write(&path, b"banner bytes").expect("write banner file");
+        std::fs::write(&path, b"banner bytes").context("write protected banner fixture")?;
         let banner_id = crate::db::insert_banner_asset(
             &conn,
             crate::models::BannerScope::Board,
@@ -377,19 +395,19 @@ mod tests {
             true,
             true,
         )
-        .expect("insert banner asset");
-        (
+        .context("insert protected board banner fixture")?;
+        Ok((
             banner_id,
             path,
             format!(
                 "{}=banner-session",
                 crate::handlers::board::ADMIN_SESSION_COOKIE
             ),
-        )
+        ))
     }
 
     #[tokio::test]
-    async fn serve_banner_asset_returns_not_found_for_missing_banner_id() {
+    async fn serve_banner_asset_returns_not_found_for_missing_banner_id() -> AnyResult<()> {
         let router = Router::new()
             .route("/banner/assets/{id}", get(super::serve_banner_asset))
             .with_state(crate::test_support::app_state());
@@ -399,18 +417,19 @@ mod tests {
                 Request::builder()
                     .uri("/banner/assets/999")
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build missing-banner request")?,
             )
             .await
-            .expect("response");
+            .context("serve missing-banner request")?;
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        ensure!(response.status() == StatusCode::NOT_FOUND);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn serve_banner_asset_returns_not_found_for_missing_file() {
+    async fn serve_banner_asset_returns_not_found_for_missing_file() -> AnyResult<()> {
         let state = crate::test_support::app_state();
-        let banner_id = insert_missing_global_banner(&state);
+        let banner_id = insert_missing_global_banner(&state)?;
         let router = Router::new()
             .route("/banner/assets/{id}", get(super::serve_banner_asset))
             .with_state(state);
@@ -420,19 +439,20 @@ mod tests {
                 Request::builder()
                     .uri(format!("/banner/assets/{banner_id}?v=1"))
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build missing-file request")?,
             )
             .await
-            .expect("response");
+            .context("serve missing-file request")?;
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert!(response.headers().get(header::CACHE_CONTROL).is_none());
+        ensure!(response.status() == StatusCode::NOT_FOUND);
+        ensure!(response.headers().get(header::CACHE_CONTROL).is_none());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn serve_banner_asset_sets_cache_control_by_version_query() {
+    async fn serve_banner_asset_sets_cache_control_by_version_query() -> AnyResult<()> {
         let state = crate::test_support::app_state();
-        let (banner_id, path) = insert_existing_global_banner(&state);
+        let (banner_id, path) = insert_existing_global_banner(&state)?;
         let router = Router::new()
             .route("/banner/assets/{id}", get(super::serve_banner_asset))
             .with_state(state);
@@ -443,17 +463,17 @@ mod tests {
                 Request::builder()
                     .uri(format!("/banner/assets/{banner_id}"))
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build unversioned request")?,
             )
             .await
-            .expect("response");
-        assert_eq!(unversioned.status(), StatusCode::OK);
-        assert_eq!(
+            .context("serve unversioned banner request")?;
+        ensure!(unversioned.status() == StatusCode::OK);
+        ensure!(
             unversioned
                 .headers()
                 .get(header::CACHE_CONTROL)
-                .and_then(|value| value.to_str().ok()),
-            Some(super::UNVERSIONED_CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok())
+                == Some(super::UNVERSIONED_CACHE_CONTROL)
         );
 
         let versioned = router
@@ -461,26 +481,27 @@ mod tests {
                 Request::builder()
                     .uri(format!("/banner/assets/{banner_id}?v=123"))
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build versioned request")?,
             )
             .await
-            .expect("response");
-        assert_eq!(versioned.status(), StatusCode::OK);
-        assert_eq!(
+            .context("serve versioned banner request")?;
+        ensure!(versioned.status() == StatusCode::OK);
+        ensure!(
             versioned
                 .headers()
                 .get(header::CACHE_CONTROL)
-                .and_then(|value| value.to_str().ok()),
-            Some(super::VERSIONED_CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok())
+                == Some(super::VERSIONED_CACHE_CONTROL)
         );
 
-        let _ = std::fs::remove_file(path);
+        std::fs::remove_file(path).context("remove global banner fixture")?;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn protected_board_banner_asset_is_not_public_cacheable() {
+    async fn protected_board_banner_asset_is_not_public_cacheable() -> AnyResult<()> {
         let state = crate::test_support::app_state();
-        let (banner_id, path, cookie) = insert_existing_protected_board_banner(&state);
+        let (banner_id, path, cookie) = insert_existing_protected_board_banner(&state)?;
         let router = Router::new()
             .route("/banner/assets/{id}", get(super::serve_banner_asset))
             .with_state(state);
@@ -491,25 +512,26 @@ mod tests {
                     .uri(format!("/banner/assets/{banner_id}?v=123"))
                     .header(header::COOKIE, cookie)
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build protected-banner request")?,
             )
             .await
-            .expect("response");
+            .context("serve protected-banner request")?;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
+        ensure!(response.status() == StatusCode::OK);
+        ensure!(
             response
                 .headers()
                 .get(header::CACHE_CONTROL)
-                .and_then(|value| value.to_str().ok()),
-            Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE)
+                .and_then(|value| value.to_str().ok())
+                == Some(crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE)
         );
 
-        let _ = std::fs::remove_file(path);
+        std::fs::remove_file(path).context("remove protected banner fixture")?;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn serve_banner_asset_rejects_malformed_id_path() {
+    async fn serve_banner_asset_rejects_malformed_id_path() -> AnyResult<()> {
         let router = Router::new()
             .route("/banner/assets/{id}", get(super::serve_banner_asset))
             .with_state(crate::test_support::app_state());
@@ -519,18 +541,19 @@ mod tests {
                 Request::builder()
                     .uri("/banner/assets/not-a-number")
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build malformed-id request")?,
             )
             .await
-            .expect("response");
+            .context("serve malformed-id request")?;
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        ensure!(response.status() == StatusCode::BAD_REQUEST);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn protected_board_banner_external_routes_require_board_access() {
+    async fn protected_board_banner_external_routes_require_board_access() -> AnyResult<()> {
         let state = crate::test_support::app_state();
-        let banner_id = insert_external_board_banner(&state, "secret");
+        let banner_id = insert_external_board_banner(&state, "secret")?;
 
         let router = Router::new()
             .route(
@@ -553,12 +576,13 @@ mod tests {
                     Request::builder()
                         .uri(uri)
                         .body(Body::empty())
-                        .expect("request"),
+                        .context("build protected external-banner request")?,
                 )
                 .await
-                .expect("response");
+                .context("serve protected external-banner request")?;
 
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            ensure!(response.status() == StatusCode::FORBIDDEN);
         }
+        Ok(())
     }
 }

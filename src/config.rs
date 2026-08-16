@@ -1,100 +1,225 @@
-// Runtime configuration and settings-file loading.
+//! Runtime configuration and settings-file loading.
 use anyhow::Context as _;
 use serde::Deserialize;
 use std::env;
-use std::io::Write as _;
+use std::io::{stderr, stdout, Write as _};
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::LazyLock;
+#[cfg(test)]
+use std::sync::Mutex;
+use std::sync::{LazyLock, OnceLock};
 
+/// Settings-file template rendering.
 mod template;
 
 #[cfg(test)]
-pub static RUNTIME_LAYOUT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Serializes tests that mutate the process-wide runtime directory layout.
+pub static RUNTIME_LAYOUT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Explicit process-wide data-directory override.
+static DATA_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
 /// Absolute path to the directory the running binary lives in.
 fn binary_dir() -> PathBuf {
-    std::env::current_exe()
+    env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .and_then(|p| p.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| {
-            let _ = writeln!(
-                std::io::stderr().lock(),
+            drop(writeln!(
+                stderr().lock(),
                 "Warning: could not determine binary directory; \
                  using current working directory for data storage. \
-                 Set CHAN_DB and CHAN_UPLOADS env vars to override."
-            );
+                 Pass --data-dir with an absolute path to override."
+            ));
             PathBuf::from(".")
         })
 }
 
+/// Return the active settings-file path.
 fn settings_file_path() -> PathBuf {
-    // Resolve settings.toml next to the running executable, inside
-    // <exe-dir>/rustchan-data/. This is the config source of truth for the live
-    // process; `CHAN_*` environment variables still override selected fields
-    // after the file is loaded.
-    // rustchan-data/ is created by run_server before CONFIG is first accessed,
-    // so this directory always exists by the time settings are read.
-    let data_dir = binary_dir().join("rustchan-data");
-    data_dir.join("settings.toml")
+    // Resolve settings.toml inside the configured data directory. By default
+    // that remains <exe-dir>/rustchan-data/; service installations can select
+    // an explicit writable directory with --data-dir.
+    // The selected directory is created during CLI startup before CONFIG is
+    // first accessed, so it exists by the time settings are read.
+    data_dir().join("settings.toml")
+}
+
+/// Resolve and validate an operator-provided data-directory override.
+fn resolve_data_dir_override(path: &Path) -> anyhow::Result<PathBuf> {
+    if !path.is_absolute() {
+        anyhow::bail!("--data-dir must be an absolute path");
+    }
+    if path
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        anyhow::bail!("--data-dir must not contain '..' components");
+    }
+
+    let mut existing_ancestor = path;
+    let mut missing_components = Vec::new();
+    let mut resolved = loop {
+        match std::fs::canonicalize(existing_ancestor) {
+            Ok(resolved) => {
+                if resolved.parent().is_none() && existing_ancestor.parent().is_some() {
+                    anyhow::bail!(
+                        "--data-dir ancestor must not resolve to a filesystem root: {}",
+                        existing_ancestor.display()
+                    );
+                }
+                if !resolved.is_dir() {
+                    anyhow::bail!(
+                        "--data-dir ancestor is not a directory: {}",
+                        existing_ancestor.display()
+                    );
+                }
+                break resolved;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(existing_ancestor) {
+                    Ok(_) => {
+                        return Err(error).with_context(|| {
+                            format!(
+                                "could not resolve --data-dir path {}",
+                                existing_ancestor.display()
+                            )
+                        });
+                    }
+                    Err(metadata_error)
+                        if metadata_error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(metadata_error) => {
+                        return Err(metadata_error).with_context(|| {
+                            format!(
+                                "could not inspect --data-dir path {}",
+                                existing_ancestor.display()
+                            )
+                        });
+                    }
+                }
+
+                let component = existing_ancestor.file_name().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "could not find an existing parent for --data-dir {}",
+                        path.display()
+                    )
+                })?;
+                missing_components.push(component.to_os_string());
+                existing_ancestor = existing_ancestor.parent().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "could not find an existing parent for --data-dir {}",
+                        path.display()
+                    )
+                })?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "could not resolve --data-dir path {}",
+                        existing_ancestor.display()
+                    )
+                });
+            }
+        }
+    };
+
+    for component in missing_components.iter().rev() {
+        resolved.push(component);
+    }
+    if resolved.parent().is_none() {
+        anyhow::bail!("--data-dir must not resolve to a filesystem root");
+    }
+    Ok(resolved)
+}
+
+/// Configure an explicit runtime data directory before configuration is loaded.
+///
+/// # Errors
+/// Returns an error when the path is relative, is a filesystem root, contains
+/// parent-directory traversal, cannot be resolved safely, or an override was
+/// already configured.
+pub fn configure_data_dir(path: Option<&Path>) -> anyhow::Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let resolved = resolve_data_dir_override(path)?;
+    DATA_DIR_OVERRIDE
+        .set(resolved)
+        .map_err(|_| anyhow::anyhow!("runtime data directory was already configured"))
 }
 
 #[must_use]
+/// Return the configured root directory for mutable `RustChan` data.
 pub fn data_dir() -> PathBuf {
-    binary_dir().join("rustchan-data")
+    DATA_DIR_OVERRIDE
+        .get()
+        .cloned()
+        .unwrap_or_else(|| binary_dir().join("rustchan-data"))
 }
 
 #[must_use]
+/// Return the root for generated runtime state.
 pub fn runtime_dir() -> PathBuf {
     data_dir().join("runtime")
 }
 
 #[must_use]
+/// Return the directory containing application log files.
 pub fn logs_dir() -> PathBuf {
     data_dir().join("logs")
 }
 
 #[must_use]
+/// Return the root directory for all backups.
 pub fn backups_dir() -> PathBuf {
     data_dir().join("backups")
 }
 
 #[must_use]
+/// Return the directory containing full-site backups.
 pub fn full_backups_dir() -> PathBuf {
     backups_dir().join("full")
 }
 
 #[must_use]
+/// Return the directory containing board-scoped backups.
 pub fn board_backups_dir() -> PathBuf {
     backups_dir().join("boards")
 }
 
 #[must_use]
+/// Return the directory for ephemeral runtime files.
 pub fn runtime_tmp_dir() -> PathBuf {
     runtime_dir().join("tmp")
 }
 
 #[must_use]
+/// Return the directory for temporary board-backup downloads.
 pub fn runtime_temp_board_downloads_dir() -> PathBuf {
     runtime_tmp_dir().join("board-downloads")
 }
 
 #[must_use]
+/// Return the root directory for Arti runtime state.
 pub fn runtime_tor_dir() -> PathBuf {
     runtime_dir().join("tor")
 }
 
 #[must_use]
+/// Return the persistent Arti state directory.
 pub fn runtime_tor_state_dir() -> PathBuf {
     runtime_tor_dir().join("state")
 }
 
 #[must_use]
+/// Return the keystore that holds the onion-service identity.
 pub fn runtime_tor_hidden_service_keys_dir() -> PathBuf {
     runtime_tor_state_dir().join("keystore")
 }
 
 #[must_use]
+/// Return the onion-service keystore when Tor support is enabled.
 pub fn configured_tor_hidden_service_keys_dir() -> Option<PathBuf> {
     CONFIG
         .enable_tor_support
@@ -102,21 +227,25 @@ pub fn configured_tor_hidden_service_keys_dir() -> Option<PathBuf> {
 }
 
 #[must_use]
+/// Return the Arti directory-cache path.
 pub fn runtime_tor_cache_dir() -> PathBuf {
     runtime_tor_dir().join("cache")
 }
 
 #[must_use]
+/// Return the runtime directory for TLS material.
 pub fn runtime_tls_dir() -> PathBuf {
     runtime_dir().join("tls")
 }
 
 #[must_use]
+/// Return the directory containing the global generated favicon set.
 pub fn runtime_favicon_dir() -> PathBuf {
     runtime_dir().join("favicon")
 }
 
 #[must_use]
+/// Return the directory containing non-board banner assets.
 pub fn runtime_banner_dir() -> PathBuf {
     runtime_dir().join("banner")
 }
@@ -197,8 +326,10 @@ pub fn write_private_file(path: &Path, contents: impl AsRef<[u8]>) -> anyhow::Re
     Ok(())
 }
 
+/// Legacy directory name and its current destination resolver.
 type RuntimeDirMigration = (&'static str, fn() -> PathBuf);
 
+/// Legacy runtime directories migrated into the grouped layout.
 const RUNTIME_LAYOUT_MIGRATIONS: &[RuntimeDirMigration] = &[
     ("full-backups", full_backups_dir),
     ("board-backups", board_backups_dir),
@@ -210,6 +341,7 @@ const RUNTIME_LAYOUT_MIGRATIONS: &[RuntimeDirMigration] = &[
     ("banner", runtime_banner_dir),
 ];
 
+/// Recursively migrate one legacy runtime path when it exists.
 fn migrate_dir_if_present(old_path: &Path, new_path: &Path) -> anyhow::Result<()> {
     if !old_path.exists() {
         return Ok(());
@@ -268,7 +400,9 @@ pub fn migrate_runtime_layout_if_needed() -> anyhow::Result<()> {
 
 // ─── Settings file structure ──────────────────────────────────────────────────
 #[derive(Deserialize, Default)]
+/// Optional values deserialized from `settings.toml`.
 struct SettingsFile {
+    /// Public forum name.
     forum_name: Option<String>,
     /// Home page subtitle shown below the site name.
     site_subtitle: Option<String>,
@@ -285,18 +419,26 @@ struct SettingsFile {
     default_theme: Option<String>,
     /// Built-in theme whitelist applied when seeding the themes table.
     enabled_builtin_themes: Option<Vec<String>>,
+    /// Primary HTTP listener port.
     port: Option<u16>,
+    /// Maximum image upload size in mebibytes.
     max_image_size_mb: Option<u32>,
+    /// Maximum video upload size in mebibytes.
     max_video_size_mb: Option<u32>,
+    /// Maximum audio upload size in mebibytes.
     max_audio_size_mb: Option<u32>,
+    /// Secret used for authentication cookies and privacy-preserving hashes.
     cookie_secret: Option<String>,
+    /// Whether trusted reverse-proxy forwarding headers are enabled.
     behind_proxy: Option<bool>,
+    /// Whether authentication cookies carry the `Secure` attribute.
     https_cookies: Option<bool>,
     /// Expose detailed `/readyz` internals such as schema, backup, media queue,
     /// maintenance, and Tor readiness to unauthenticated clients. Default: false.
     public_readiness_details: Option<bool>,
     /// Expose unauthenticated Prometheus metrics at `/metrics`. Default: false.
     public_metrics_enabled: Option<bool>,
+    /// Whether the built-in Arti onion service is enabled.
     enable_tor_support: Option<bool>,
     /// When true, the HTTP server binds exclusively to 127.0.0.1 so it is
     /// reachable only through the Tor hidden service. Overrides the host
@@ -317,9 +459,13 @@ struct SettingsFile {
     /// multiple instances that share the same storage to avoid key collisions.
     /// Default: "rustchan".
     tor_service_nickname: Option<String>,
+    /// Whether startup fails when `FFmpeg` or `FFprobe` is unavailable.
     require_ffmpeg: Option<bool>,
+    /// Configured `FFmpeg` executable path.
     ffmpeg_path: Option<String>,
+    /// Configured `FFprobe` executable path.
     ffprobe_path: Option<String>,
+    /// Whether boards may enable arbitrary-file uploads.
     enable_any_file_uploads_feature: Option<bool>,
     /// How often to run PRAGMA `wal_checkpoint(TRUNCATE)`, in seconds.
     /// Set to 0 to disable. Default: 3600 (hourly).
@@ -397,6 +543,7 @@ struct SettingsFile {
     tls: Option<TlsConfig>,
 }
 
+/// Load the settings file or return defaults when it does not exist.
 fn load_settings_file() -> SettingsFile {
     let path = settings_file_path();
     let Ok(raw) = std::fs::read_to_string(&path) else {
@@ -405,23 +552,26 @@ fn load_settings_file() -> SettingsFile {
     parse_settings_file_str(&raw).unwrap_or_else(|_| settings_file_parse_error(&path))
 }
 
+/// Print a secret-safe parse failure and terminate with `EX_CONFIG`.
 #[expect(
     clippy::exit,
     reason = "invalid configuration must terminate with the standard EX_CONFIG status"
 )]
 fn settings_file_parse_error(path: &Path) -> ! {
-    let _ = writeln!(
-        std::io::stderr().lock(),
+    drop(writeln!(
+        stderr().lock(),
         "CONFIG ERROR: could not parse {}. Refusing to start with fallback defaults; fix or remove settings.toml. Details are omitted to avoid leaking secrets.",
         path.display()
-    );
+    ));
     std::process::exit(78);
 }
 
+/// Deserialize a settings file from TOML text.
 fn parse_settings_file_str(raw: &str) -> Result<SettingsFile, toml::de::Error> {
     toml::from_str(raw)
 }
 
+/// Return whether a listener address is a valid loopback endpoint.
 fn bind_addr_is_loopback(bind_addr: &str) -> bool {
     if let Ok(addr) = bind_addr.parse::<std::net::SocketAddr>() {
         return addr.ip().is_loopback();
@@ -442,10 +592,10 @@ pub fn generate_settings_file_if_missing() {
     let path = settings_file_path();
     if path.exists() {
         if let Err(error) = restrict_private_file_permissions(&path) {
-            let _ = writeln!(
-                std::io::stderr().lock(),
+            drop(writeln!(
+                stderr().lock(),
                 "Warning: could not repair settings.toml permissions: {error}"
-            );
+            ));
         }
         return;
     }
@@ -459,34 +609,44 @@ pub fn generate_settings_file_if_missing() {
     let content = template::settings_template(&secret);
     match write_private_file(&path, content) {
         Ok(()) => {
-            let _ = writeln!(
-                std::io::stdout().lock(),
+            drop(writeln!(
+                stdout().lock(),
                 "Created settings.toml ({})",
                 path.display()
-            );
+            ));
         }
         Err(e) => {
-            let _ = writeln!(
-                std::io::stderr().lock(),
+            drop(writeln!(
+                stderr().lock(),
                 "Warning: could not write settings.toml: {e}"
-            );
+            ));
         }
     }
 }
 
 // ─── TLS configuration ───────────────────────────────────────────────────────
 #[derive(Debug, Clone, serde::Deserialize)]
+/// HTTPS listener and certificate-source configuration.
 pub struct TlsConfig {
     #[serde(default)]
+    /// Whether the HTTPS listener is enabled.
     pub enabled: bool,
+    #[serde(default)]
+    /// Whether enabling HTTPS also disables public plaintext application access.
+    pub require_https: bool,
     #[serde(default = "default_https_port")]
+    /// HTTPS listener port.
     pub port: u16,
     #[serde(default)]
+    /// Whether a companion HTTP listener redirects to HTTPS.
     pub redirect_http: bool,
     #[serde(default = "default_http_port")]
+    /// HTTP redirect-listener port.
     pub http_port: u16,
     #[serde(default)]
+    /// ACME certificate settings.
     pub acme: AcmeConfig,
+    /// Optional explicit certificate and private-key paths.
     pub manual_cert: Option<ManualCertConfig>,
 }
 
@@ -494,6 +654,7 @@ impl Default for TlsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            require_https: false,
             port: default_https_port(),
             redirect_http: false,
             http_port: default_http_port(),
@@ -503,10 +664,11 @@ impl Default for TlsConfig {
     }
 }
 
-#[cfg_attr(not(feature = "tls-acme"), allow(dead_code))]
 #[derive(Debug, Clone, serde::Deserialize, Default)]
+/// Automatic Certificate Management Environment settings.
 pub struct AcmeConfig {
     #[serde(default)]
+    /// Whether ACME certificate acquisition is enabled.
     pub enabled: bool,
 
     // These fields are only read when the `tls-acme` Cargo feature is enabled
@@ -517,50 +679,67 @@ pub struct AcmeConfig {
     // this build cannot act on the fields.
     #[serde(default)]
     // Feature-gated, but still part of the stable settings shape.
+    /// DNS names requested in the ACME certificate.
     pub domains: Vec<String>,
     #[serde(default)]
     // Feature-gated, but still part of the stable settings shape.
+    /// Optional ACME account contact email.
     pub email: Option<String>,
     #[serde(default = "default_true")]
     // Feature-gated, but still part of the stable settings shape.
+    /// Whether to use the ACME staging directory.
     pub staging: bool,
     #[serde(default = "default_acme_dir")]
     // Feature-gated, but still part of the stable settings shape.
+    /// Directory used to cache ACME account and certificate state.
     pub cache_dir: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+/// Paths to an operator-managed TLS certificate and private key.
 pub struct ManualCertConfig {
+    /// PEM certificate-chain path.
     pub cert_path: String,
+    /// PEM private-key path.
     pub key_path: String,
 }
 
+/// Return the default HTTPS listener port.
 const fn default_https_port() -> u16 {
     8443
 }
 
+/// Return the default HTTP listener port.
 const fn default_http_port() -> u16 {
     8080
 }
 
+/// Return `true` for Serde defaults.
 const fn default_true() -> bool {
     true
 }
 
+/// Return the default ACME state directory.
 fn default_acme_dir() -> String {
     "runtime/tls/acme".into()
 }
 
 // ─── Runtime config ───────────────────────────────────────────────────────────
+/// Lazily loaded process-wide runtime configuration.
 pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::from_env);
+/// Runtime-adjustable `FFmpeg` timeout.
 static LIVE_FFMPEG_TIMEOUT_SECS: LazyLock<AtomicU64> =
     LazyLock::new(|| AtomicU64::new(CONFIG.ffmpeg_timeout_secs));
 
+/// Default upper bound for one `FFmpeg` subprocess.
 pub const DEFAULT_FFMPEG_TIMEOUT_SECS: u64 = 600;
+/// Minimum configurable `FFmpeg` subprocess timeout.
 pub const MIN_FFMPEG_TIMEOUT_SECS: u64 = 30;
+/// Maximum configurable `FFmpeg` subprocess timeout.
 pub const MAX_FFMPEG_TIMEOUT_SECS: u64 = 86_400;
 
 #[must_use]
+/// Return the current live `FFmpeg` timeout in seconds.
 pub fn ffmpeg_timeout_secs() -> u64 {
     LIVE_FFMPEG_TIMEOUT_SECS.load(Ordering::Relaxed)
 }
@@ -585,6 +764,7 @@ pub fn validate_ffmpeg_timeout_secs(timeout_secs: u64) -> anyhow::Result<u64> {
 }
 
 #[must_use]
+/// Format a timeout as a compact human-readable duration.
 pub fn describe_timeout_secs(timeout_secs: u64) -> String {
     let minutes = timeout_secs / 60;
     let seconds = timeout_secs % 60;
@@ -598,9 +778,14 @@ pub fn describe_timeout_secs(timeout_secs: u64) -> String {
 }
 
 // This type mirrors serialized or render state, so the boolean count is an intentional tradeoff.
-#[expect(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "runtime configuration intentionally models independent operator-controlled feature switches"
+)]
+/// Fully resolved runtime configuration.
 pub struct Config {
     // ── Loaded from settings.toml (env vars still override) ──────────────────
+    /// Public forum name.
     pub forum_name: String,
     /// Initial subtitle shown on the home page; seeds the DB on first run and
     /// then the Admin -> Site Settings DB value becomes the live source of truth.
@@ -624,9 +809,13 @@ pub struct Config {
     /// Built-in themes enabled by default when the site seeds its theme catalog.
     /// After seeding, the theme catalog in the DB owns the enabled/disabled set.
     pub initial_enabled_builtin_themes: Vec<String>,
+    /// Primary HTTP listener port.
     pub port: u16,
+    /// Maximum accepted image upload size in bytes.
     pub max_image_size: usize, // bytes
+    /// Maximum accepted video upload size in bytes.
     pub max_video_size: usize, // bytes
+    /// Maximum accepted audio upload size in bytes.
     pub max_audio_size: usize, // bytes,
     // ── External tool settings ────────────────────────────────────────────────
     /// When true, Tor is probed at startup and hints are printed.
@@ -650,18 +839,27 @@ pub struct Config {
     /// per-board toggle when this is true.
     pub enable_any_file_uploads_feature: bool,
     // ── Internal / env-only settings ─────────────────────────────────────────
+    /// Interface or host used by the primary listener.
     pub bind_addr: String,
+    /// `SQLite` database file path.
     pub database_path: String,
+    /// Root directory for board uploads.
     pub upload_dir: String,
+    /// Maximum generated thumbnail dimension in pixels.
     pub thumb_size: u32,
     /// Maximum GET requests per IP per `rate_limit_window`.
     pub rate_limit_gets: u32,
+    /// Rate-limit window duration in seconds.
     pub rate_limit_window: u64,
+    /// Secret used for cookies, CSRF signatures, and privacy-preserving hashes.
     pub cookie_secret: String,
+    /// Administrator session lifetime in seconds.
     pub session_duration: i64,
+    /// Whether trusted reverse-proxy forwarding headers are enabled.
     pub behind_proxy: bool,
     /// Trusted proxy CIDR allowlist for forwarding headers.
     pub trusted_proxy_cidrs: Vec<String>,
+    /// Whether authentication cookies carry the `Secure` attribute.
     pub https_cookies: bool,
     /// When true, `/readyz` includes detailed operational internals for public clients.
     pub public_readiness_details: bool,
@@ -702,6 +900,18 @@ pub struct Config {
     pub archive_before_prune: bool,
     /// Total thumbnail/waveform cache size limit in bytes. 0 = disabled.
     pub waveform_cache_max_bytes: u64,
+    /// Explicitly permit managed-media reconciliation to schedule safe repairs.
+    pub media_reconcile_repair_enabled: bool,
+    /// Hours between bounded managed-media audit pages. 0 disables periodic passes.
+    pub media_reconcile_interval_hours: u64,
+    /// Maximum managed filesystem entries inspected per reconciliation pass.
+    pub media_reconcile_files_per_pass: usize,
+    /// Maximum database rows loaded into one authoritative reference snapshot.
+    pub media_reconcile_database_rows_per_pass: usize,
+    /// Maximum file bytes hashed during one reconciliation pass.
+    pub media_reconcile_hash_bytes_per_pass: u64,
+    /// Maximum safe repair attempts during one reconciliation pass.
+    pub media_reconcile_repairs_per_pass: usize,
     /// Number of threads in Tokio's blocking pool. Default: logical CPUs × 4.
     pub blocking_threads: usize,
     /// `SQLite` `r2d2` connection pool size (default 8).
@@ -714,8 +924,9 @@ pub struct Config {
     /// Only used when the server is started with `--chan-net`.
     pub chan_net_bind: String,
     /// Maximum request body size for `/chan/import` (ZIP snapshots). Default: 10 MiB.
+    /// Maximum request body size for non-command `ChanNet` endpoints.
     pub chan_net_max_body: usize,
-    /// Maximum request body size for `/chan/command` (raw JSON). Default: 8 KiB.
+    /// Maximum request body size for `/chan/command` (raw JSON). Default: 512 KiB.
     pub chan_net_command_max_body: usize,
     /// Pre-shared key required on X-ChanNet-Key header for /chan/refresh and
     /// /chan/poll. An empty string means those endpoints are disabled entirely.
@@ -725,10 +936,155 @@ pub struct Config {
     pub tls: TlsConfig,
 }
 
+impl std::fmt::Debug for Config {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "listing every configuration field keeps secret redaction and Debug completeness auditable"
+    )]
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Config")
+            .field("forum_name", &self.forum_name)
+            .field("initial_site_subtitle", &self.initial_site_subtitle)
+            .field(
+                "initial_homepage_new_thread_badges_enabled",
+                &self.initial_homepage_new_thread_badges_enabled,
+            )
+            .field(
+                "initial_homepage_new_reply_badges_enabled",
+                &self.initial_homepage_new_reply_badges_enabled,
+            )
+            .field(
+                "initial_thread_new_reply_badges_enabled",
+                &self.initial_thread_new_reply_badges_enabled,
+            )
+            .field("initial_default_theme", &self.initial_default_theme)
+            .field(
+                "initial_enabled_builtin_themes",
+                &self.initial_enabled_builtin_themes,
+            )
+            .field("port", &self.port)
+            .field("max_image_size", &self.max_image_size)
+            .field("max_video_size", &self.max_video_size)
+            .field("max_audio_size", &self.max_audio_size)
+            .field("enable_tor_support", &self.enable_tor_support)
+            .field("tor_only", &self.tor_only)
+            .field(
+                "tor_bootstrap_timeout_secs",
+                &self.tor_bootstrap_timeout_secs,
+            )
+            .field(
+                "tor_max_concurrent_streams",
+                &self.tor_max_concurrent_streams,
+            )
+            .field("tor_service_nickname", &self.tor_service_nickname)
+            .field("require_ffmpeg", &self.require_ffmpeg)
+            .field("ffmpeg_path", &self.ffmpeg_path)
+            .field("ffprobe_path", &self.ffprobe_path)
+            .field(
+                "enable_any_file_uploads_feature",
+                &self.enable_any_file_uploads_feature,
+            )
+            .field("bind_addr", &self.bind_addr)
+            .field("database_path", &self.database_path)
+            .field("upload_dir", &self.upload_dir)
+            .field("thumb_size", &self.thumb_size)
+            .field("rate_limit_gets", &self.rate_limit_gets)
+            .field("rate_limit_window", &self.rate_limit_window)
+            .field("cookie_secret", &"[REDACTED]")
+            .field("session_duration", &self.session_duration)
+            .field("behind_proxy", &self.behind_proxy)
+            .field("trusted_proxy_cidrs", &self.trusted_proxy_cidrs)
+            .field("https_cookies", &self.https_cookies)
+            .field("public_readiness_details", &self.public_readiness_details)
+            .field("public_metrics_enabled", &self.public_metrics_enabled)
+            .field("public_hosts", &self.public_hosts)
+            .field("wal_checkpoint_interval", &self.wal_checkpoint_interval)
+            .field(
+                "auto_vacuum_interval_hours",
+                &self.auto_vacuum_interval_hours,
+            )
+            .field(
+                "auto_full_backup_interval_hours",
+                &self.auto_full_backup_interval_hours,
+            )
+            .field(
+                "auto_full_backup_copies_to_keep",
+                &self.auto_full_backup_copies_to_keep,
+            )
+            .field(
+                "auto_full_backup_include_tor_hidden_service_keys",
+                &self.auto_full_backup_include_tor_hidden_service_keys,
+            )
+            .field(
+                "auto_full_backup_storage_mode",
+                &self.auto_full_backup_storage_mode,
+            )
+            .field(
+                "auto_full_backup_split_zip_part_size_bytes",
+                &self.auto_full_backup_split_zip_part_size_bytes,
+            )
+            .field(
+                "poll_cleanup_interval_hours",
+                &self.poll_cleanup_interval_hours,
+            )
+            .field("db_warn_threshold_bytes", &self.db_warn_threshold_bytes)
+            .field("job_queue_capacity", &self.job_queue_capacity)
+            .field("ffmpeg_timeout_secs", &self.ffmpeg_timeout_secs)
+            .field(
+                "initial_media_auto_prune_enabled",
+                &self.initial_media_auto_prune_enabled,
+            )
+            .field(
+                "initial_media_max_active_content_size_bytes",
+                &self.initial_media_max_active_content_size_bytes,
+            )
+            .field("archive_before_prune", &self.archive_before_prune)
+            .field("waveform_cache_max_bytes", &self.waveform_cache_max_bytes)
+            .field(
+                "media_reconcile_repair_enabled",
+                &self.media_reconcile_repair_enabled,
+            )
+            .field(
+                "media_reconcile_interval_hours",
+                &self.media_reconcile_interval_hours,
+            )
+            .field(
+                "media_reconcile_files_per_pass",
+                &self.media_reconcile_files_per_pass,
+            )
+            .field(
+                "media_reconcile_database_rows_per_pass",
+                &self.media_reconcile_database_rows_per_pass,
+            )
+            .field(
+                "media_reconcile_hash_bytes_per_pass",
+                &self.media_reconcile_hash_bytes_per_pass,
+            )
+            .field(
+                "media_reconcile_repairs_per_pass",
+                &self.media_reconcile_repairs_per_pass,
+            )
+            .field("blocking_threads", &self.blocking_threads)
+            .field("db_pool_size", &self.db_pool_size)
+            .field("rustwave_url", &"[REDACTED]")
+            .field("chan_net_bind", &self.chan_net_bind)
+            .field("chan_net_max_body", &self.chan_net_max_body)
+            .field("chan_net_command_max_body", &self.chan_net_command_max_body)
+            .field("chan_net_api_key", &"[REDACTED]")
+            .field("tls", &self.tls)
+            .finish()
+    }
+}
+
 impl Config {
+    /// Load settings and environment overrides into one validated runtime shape.
     #[must_use]
     // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "configuration loading keeps precedence and defaults together for auditability"
+    )]
     pub fn from_env() -> Self {
         let s = load_settings_file();
         let tls = s.tls.clone().unwrap_or_default();
@@ -821,12 +1177,12 @@ impl Config {
         } else if let Some(v) = s.cookie_secret {
             v
         } else {
-            let _ = writeln!(
-                std::io::stderr().lock(),
+            drop(writeln!(
+                stderr().lock(),
                 "SECURITY WARNING: No cookie_secret found in environment or settings.toml. \
                  IP hashing is using an empty secret. Run the server once to auto-generate, \
                  or set CHAN_COOKIE_SECRET."
-            );
+            ));
             // Random in-memory secret so each restart invalidates hashes
             // (better than a known empty string, worse than a persisted one).
             let mut b = [0u8; 32];
@@ -857,7 +1213,9 @@ impl Config {
         let chan_net_command_max_body: usize = env::var("CHAN_NET_COMMAND_MAX_BODY")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(8 * 1024); // 8 KiB default — commands are raw JSON, never ZIPs
+            // The legal 32,768-character reply envelope can approach 384 KiB
+            // when four-byte Unicode scalar values use JSON surrogate escapes.
+            .unwrap_or(512 * 1024);
         Self {
             forum_name,
             initial_site_subtitle,
@@ -867,15 +1225,9 @@ impl Config {
             initial_default_theme,
             initial_enabled_builtin_themes,
             port,
-            max_image_size: (max_image_mb as usize)
-                .saturating_mul(1024)
-                .saturating_mul(1024),
-            max_video_size: (max_video_mb as usize)
-                .saturating_mul(1024)
-                .saturating_mul(1024),
-            max_audio_size: (max_audio_mb as usize)
-                .saturating_mul(1024)
-                .saturating_mul(1024),
+            max_image_size: mebibytes_to_bytes(max_image_mb),
+            max_video_size: mebibytes_to_bytes(max_video_mb),
+            max_audio_size: mebibytes_to_bytes(max_audio_mb),
             enable_tor_support,
             tor_only,
             tor_bootstrap_timeout_secs: env_parse(
@@ -886,7 +1238,7 @@ impl Config {
                 "CHAN_TOR_MAX_STREAMS",
                 s.tor_max_concurrent_streams.unwrap_or(512),
             ),
-            tor_service_nickname: std::env::var("CHAN_TOR_NICKNAME")
+            tor_service_nickname: env::var("CHAN_TOR_NICKNAME")
                 .ok()
                 .or(s.tor_service_nickname)
                 .unwrap_or_else(|| "rustchan".to_owned()),
@@ -1000,6 +1352,21 @@ impl Config {
                 );
                 mb.saturating_mul(1024).saturating_mul(1024)
             },
+            media_reconcile_repair_enabled: env_bool("CHAN_MEDIA_RECONCILE_REPAIR_ENABLED", false),
+            media_reconcile_interval_hours: env_parse("CHAN_MEDIA_RECONCILE_INTERVAL_HOURS", 24),
+            media_reconcile_files_per_pass: env_parse("CHAN_MEDIA_RECONCILE_FILES_PER_PASS", 512),
+            media_reconcile_database_rows_per_pass: env_parse(
+                "CHAN_MEDIA_RECONCILE_DATABASE_ROWS_PER_PASS",
+                16_384,
+            ),
+            media_reconcile_hash_bytes_per_pass: env_parse(
+                "CHAN_MEDIA_RECONCILE_HASH_BYTES_PER_PASS",
+                64 * 1024 * 1024,
+            ),
+            media_reconcile_repairs_per_pass: env_parse(
+                "CHAN_MEDIA_RECONCILE_REPAIRS_PER_PASS",
+                32,
+            ),
             blocking_threads: {
                 let cpus = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
                 let configured =
@@ -1016,7 +1383,7 @@ impl Config {
             chan_net_bind,
             chan_net_max_body,
             chan_net_command_max_body,
-            chan_net_api_key: std::env::var("CHAN_NET_API_KEY")
+            chan_net_api_key: env::var("CHAN_NET_API_KEY")
                 .ok()
                 .or(s.chan_net_api_key)
                 .unwrap_or_default(),
@@ -1032,7 +1399,10 @@ impl Config {
     /// # Errors
     /// Returns an error if any configuration value is out of an acceptable range,
     /// or if the upload directory is not writable.
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "startup validation keeps the complete fail-closed configuration audit in one routine"
+    )]
     pub fn validate(&self) -> anyhow::Result<()> {
         fn url_host_is_loopback(url: &str) -> bool {
             reqwest::Url::parse(url).ok().is_some_and(|parsed| {
@@ -1135,7 +1505,7 @@ impl Config {
             })?;
         }
         // Verify the upload directory is writable.
-        let upload_path = std::path::Path::new(&self.upload_dir);
+        let upload_path = Path::new(&self.upload_dir);
         if upload_path.exists() {
             let probe = upload_path.join(".write_probe");
             if std::fs::write(&probe, b"").is_err() {
@@ -1144,7 +1514,7 @@ impl Config {
                     self.upload_dir
                 );
             }
-            let _ = std::fs::remove_file(probe);
+            drop(std::fs::remove_file(probe));
         }
         // F-13: Pre-flight writability check for Arti data directories.
         // Without this, a permissions error on these dirs only surfaces ~30 s
@@ -1161,7 +1531,7 @@ impl Config {
                         dir.display()
                     )
                 })?;
-                let _ = std::fs::remove_file(probe);
+                drop(std::fs::remove_file(probe));
             }
         }
         // Validate rustwave_url at startup rather than at first federation call.
@@ -1222,11 +1592,13 @@ impl Config {
     }
 
     #[must_use]
+    /// Format the primary listener address with a replacement port.
     pub fn bind_addr_with_port(&self, port: u16) -> String {
         bind_addr_for_port(&self.bind_addr, port)
     }
 
     #[must_use]
+    /// Format the matching loopback address family with a replacement port.
     pub fn loopback_addr_with_port(&self, port: u16) -> String {
         loopback_addr_for_family(&self.bind_addr, port)
     }
@@ -1242,11 +1614,13 @@ impl Config {
 /// If a key is not yet present in the file, it is inserted before the requested
 /// anchor section. On a fresh install `generate_settings_file_if_missing`
 /// already writes these keys, so insertion mainly covers manually-crafted files.
+/// Quote and escape one TOML basic string.
 fn toml_quote(s: &str) -> String {
     let inner = s.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{inner}\"")
 }
 
+/// Rewrite selected root settings while preserving unrelated text and comments.
 fn rewrite_settings_file_lines(
     content: &str,
     updates: &[(&str, String)],
@@ -1309,6 +1683,7 @@ fn rewrite_settings_file_lines(
     out
 }
 
+/// Atomically persist selected root settings.
 fn update_settings_file_entries_result(
     updates: &[(&str, String)],
     insert_missing_before: Option<&str>,
@@ -1325,7 +1700,7 @@ fn update_settings_file_entries_result(
     // Atomic write: write to a temp file in the same directory, then rename
     // over the target. This prevents a partial write from corrupting settings.toml
     // if the process is killed mid-write (rename(2) is atomic on POSIX).
-    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let mut tmp = tempfile::Builder::new()
         .prefix(".settings_")
         .suffix(".tmp")
@@ -1342,6 +1717,7 @@ fn update_settings_file_entries_result(
     Ok(())
 }
 
+/// Persist selected root settings and log failures.
 fn update_settings_file_entries(updates: &[(&str, String)], insert_missing_before: Option<&str>) {
     if let Err(error) = update_settings_file_entries_result(updates, insert_missing_before) {
         tracing::warn!(
@@ -1352,6 +1728,7 @@ fn update_settings_file_entries(updates: &[(&str, String)], insert_missing_befor
     }
 }
 
+/// Persist site identity, activity-badge, and default-theme settings.
 pub fn update_settings_file_site_settings(
     forum_name: &str,
     site_subtitle: &str,
@@ -1382,6 +1759,7 @@ pub fn update_settings_file_site_settings(
     );
 }
 
+/// Persist automatic full-backup scheduling and retention settings.
 pub fn update_settings_file_auto_full_backup(
     interval_hours: u64,
     copies_to_keep: u64,
@@ -1413,37 +1791,59 @@ pub fn update_settings_file_auto_full_backup(
     );
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "settings update mirrors independent runtime setup toggles"
 )]
+/// Runtime toggles and upload limits collected by the setup flow.
 pub struct SetupRuntimeSettingsUpdate {
+    /// Whether to start the Tor onion service.
     pub enable_tor_support: bool,
+    /// Whether the primary listener must remain loopback-only.
     pub tor_only: bool,
+    /// Whether trusted reverse-proxy forwarding headers are enabled.
     pub behind_proxy: bool,
+    /// Whether authentication cookies carry the `Secure` attribute.
     pub https_cookies: bool,
+    /// Maximum image upload size in mebibytes.
     pub max_image_size_mb: u64,
+    /// Maximum video upload size in mebibytes.
     pub max_video_size_mb: u64,
+    /// Maximum audio upload size in mebibytes.
     pub max_audio_size_mb: u64,
 }
 
+#[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "settings update mirrors independent first-run setup toggles"
 )]
+/// Complete settings-file update collected by first-run setup.
 pub struct SetupSettingsFileUpdate<'a> {
+    /// Public forum name.
     pub forum_name: &'a str,
+    /// Public home-page subtitle.
     pub site_subtitle: &'a str,
+    /// Initial home-page new-thread badge state.
     pub homepage_new_thread_badges_enabled: bool,
+    /// Initial home-page new-reply badge state.
     pub homepage_new_reply_badges_enabled: bool,
+    /// Initial thread-card new-reply badge state.
     pub thread_new_reply_badges_enabled: bool,
+    /// Initial default theme slug.
     pub default_theme: &'a str,
+    /// Automatic full-backup interval in hours.
     pub auto_full_backup_interval_hours: u64,
+    /// Number of automatic full backups retained.
     pub auto_full_backup_copies_to_keep: u64,
+    /// Whether automatic full backups contain onion-service identity keys.
     pub auto_full_backup_include_tor_hidden_service_keys: bool,
+    /// Saved-backup storage mode.
     pub auto_full_backup_storage_mode: &'a str,
+    /// Maximum split-archive part size in gibibytes.
     pub auto_full_backup_split_zip_part_size_gib: u64,
+    /// Runtime-specific setup values.
     pub runtime: SetupRuntimeSettingsUpdate,
 }
 
@@ -1515,6 +1915,7 @@ pub fn update_settings_file_setup(update: &SetupSettingsFileUpdate<'_>) -> anyho
     )
 }
 
+/// Persist the configured `FFmpeg` subprocess timeout.
 pub fn update_settings_file_ffmpeg_timeout(timeout_secs: u64) {
     let timeout_secs = timeout_secs.clamp(MIN_FFMPEG_TIMEOUT_SECS, MAX_FFMPEG_TIMEOUT_SECS);
     update_settings_file_entries(
@@ -1523,6 +1924,7 @@ pub fn update_settings_file_ffmpeg_timeout(timeout_secs: u64) {
     );
 }
 
+/// Persist active-media pruning enablement and size limit.
 pub fn update_settings_file_media_pruning(enabled: bool, max_size_bytes: u64) {
     update_settings_file_entries(
         &[
@@ -1571,18 +1973,20 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
         );
     }
     // First run (None) or rotated secret (Some) — store the current hash.
-    let _ = conn.execute(
+    drop(conn.execute(
         "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         rusqlite::params![KEY, current_hash],
-    );
+    ));
 }
 
 // ─── Env helpers ──────────────────────────────────────────────────────────────
+/// Read a string environment override or clone its default.
 fn env_str(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_owned())
 }
 
+/// Parse an environment override or retain its typed default.
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
     env::var(key)
         .ok()
@@ -1590,10 +1994,12 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
+/// Read a boolean environment override using the accepted truthy spellings.
 fn env_bool(key: &str, default: bool) -> bool {
     env::var(key).map_or(default, |v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
+/// Resolve a comma-separated list from environment, file, or defaults.
 fn env_list(key: &str, file_value: Option<Vec<String>>, default: &[&str]) -> Vec<String> {
     env::var(key)
         .ok()
@@ -1602,6 +2008,7 @@ fn env_list(key: &str, file_value: Option<Vec<String>>, default: &[&str]) -> Vec
         .unwrap_or_else(|| default.iter().map(|value| (*value).to_owned()).collect())
 }
 
+/// Split a comma-separated setting, trimming and discarding empty values.
 fn split_list(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(str::trim)
@@ -1610,6 +2017,15 @@ fn split_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Convert a mebibyte setting to the platform's byte-count type without wrapping.
+fn mebibytes_to_bytes(mebibytes: u32) -> usize {
+    usize::try_from(mebibytes)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(1024)
+        .saturating_mul(1024)
+}
+
+/// Validate and normalize a public host name or IP literal.
 pub fn normalize_public_host(host: &str) -> Option<String> {
     let trimmed = host.trim();
     if trimmed.is_empty() || trimmed.contains('/') || trimmed.contains('@') {
@@ -1632,6 +2048,7 @@ pub fn normalize_public_host(host: &str) -> Option<String> {
     Some(unbracketed.to_owned())
 }
 
+/// Split an IPv4, hostname, or bracketed-IPv6 listener address.
 fn split_bind_addr(addr: &str) -> Option<(&str, &str)> {
     if let Some(rest) = addr.strip_prefix('[') {
         let (host, port) = rest.split_once("]:")?;
@@ -1641,14 +2058,17 @@ fn split_bind_addr(addr: &str) -> Option<(&str, &str)> {
     }
 }
 
+/// Extract the listener host, defaulting to an IPv4 wildcard.
 fn bind_host_for_family(addr: &str) -> &str {
     split_bind_addr(addr).map_or("0.0.0.0", |(host, _)| host)
 }
 
+/// Return whether a host string uses IPv6 notation.
 fn host_is_ipv6(host: &str) -> bool {
     host.contains(':')
 }
 
+/// Format a host and port, adding IPv6 brackets when necessary.
 fn format_bind_addr(host: &str, port: u16) -> String {
     if host_is_ipv6(host) {
         format!("[{host}]:{port}")
@@ -1657,10 +2077,12 @@ fn format_bind_addr(host: &str, port: u16) -> String {
     }
 }
 
+/// Reuse a listener's address family and host with another port.
 fn bind_addr_for_port(addr: &str, port: u16) -> String {
     format_bind_addr(bind_host_for_family(addr), port)
 }
 
+/// Format a loopback listener matching an address's IP family.
 fn loopback_addr_for_family(addr: &str, port: u16) -> String {
     let host = if host_is_ipv6(bind_host_for_family(addr)) {
         "::1"
@@ -1670,26 +2092,253 @@ fn loopback_addr_for_family(addr: &str, port: u16) -> String {
     format_bind_addr(host, port)
 }
 
+/// Parse the port from a listener address.
 fn port_from_bind_addr(addr: &str) -> Option<u16> {
     let (_, port) = split_bind_addr(addr)?;
     port.parse().ok()
 }
 
 #[cfg(test)]
+/// Configuration unit tests.
 mod tests {
     use super::{
-        describe_timeout_secs, ffmpeg_timeout_secs, rewrite_settings_file_lines,
-        runtime_tor_hidden_service_keys_dir, set_live_ffmpeg_timeout_secs, settings_file_path,
-        template::settings_template, update_settings_file_ffmpeg_timeout,
-        validate_ffmpeg_timeout_secs, Config, TlsConfig, DEFAULT_FFMPEG_TIMEOUT_SECS,
-        MAX_FFMPEG_TIMEOUT_SECS, MIN_FFMPEG_TIMEOUT_SECS,
+        describe_timeout_secs, ffmpeg_timeout_secs, resolve_data_dir_override,
+        rewrite_settings_file_lines, runtime_tor_hidden_service_keys_dir,
+        set_live_ffmpeg_timeout_secs, settings_file_path, template::settings_template,
+        update_settings_file_ffmpeg_timeout, validate_ffmpeg_timeout_secs, Config, TlsConfig,
+        DEFAULT_FFMPEG_TIMEOUT_SECS, MAX_FFMPEG_TIMEOUT_SECS, MIN_FFMPEG_TIMEOUT_SECS,
     };
-    use std::sync::Mutex;
+    use anyhow::Context as _;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard, PoisonError};
 
+    /// Serializes tests that replace the process-wide settings file.
     static SETTINGS_FILE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Standard fallible test result.
+    type TestResult = anyhow::Result<()>;
+
+    /// Original settings-file state restored after a mutating test.
+    #[derive(Debug)]
+    struct SettingsFileSnapshot {
+        /// Settings-file path being protected.
+        path: PathBuf,
+        /// Original file bytes, or `None` when no file existed.
+        previous: Option<Vec<u8>>,
+        /// Whether explicit restoration already succeeded.
+        restored: bool,
+    }
+
+    impl SettingsFileSnapshot {
+        /// Capture the current settings-file state.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error when an existing settings file cannot be read.
+        fn capture(path: PathBuf) -> anyhow::Result<Self> {
+            let previous = match std::fs::read(&path) {
+                Ok(contents) => Some(contents),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("could not capture settings fixture {}", path.display())
+                    });
+                }
+            };
+            Ok(Self {
+                path,
+                previous,
+                restored: false,
+            })
+        }
+
+        /// Restore the captured settings-file state.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error when the original file cannot be restored or a
+        /// test-created file cannot be removed.
+        fn restore(mut self) -> TestResult {
+            self.restore_inner()?;
+            self.restored = true;
+            Ok(())
+        }
+
+        /// Perform restoration without changing the completion flag.
+        fn restore_inner(&self) -> TestResult {
+            if let Some(contents) = &self.previous {
+                std::fs::write(&self.path, contents).with_context(|| {
+                    format!("could not restore settings file {}", self.path.display())
+                })?;
+            } else if let Err(error) = std::fs::remove_file(&self.path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(error).with_context(|| {
+                        format!("could not remove settings fixture {}", self.path.display())
+                    });
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for SettingsFileSnapshot {
+        fn drop(&mut self) {
+            if !self.restored {
+                drop(self.restore_inner());
+            }
+        }
+    }
+
+    /// Live timeout value restored after a mutating test.
+    #[derive(Debug)]
+    struct LiveFfmpegTimeoutSnapshot(u64);
+
+    impl LiveFfmpegTimeoutSnapshot {
+        /// Capture the current live timeout.
+        fn capture() -> Self {
+            Self(ffmpeg_timeout_secs())
+        }
+    }
+
+    impl Drop for LiveFfmpegTimeoutSnapshot {
+        fn drop(&mut self) {
+            super::LIVE_FFMPEG_TIMEOUT_SECS.store(self.0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Hold the settings-file test lock, recovering after a prior test panic.
+    fn lock_settings_file() -> MutexGuard<'static, ()> {
+        SETTINGS_FILE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Accepts scoped absolute data paths and rejects unsafe path shapes.
+    fn data_dir_override_requires_a_scoped_absolute_path() -> TestResult {
+        let absolute = std::env::current_dir()
+            .context("could not read current directory")?
+            .join("rustchan-test-data");
+        let filesystem_root = absolute
+            .ancestors()
+            .last()
+            .context("absolute path did not have a filesystem root")?;
+        let with_parent = absolute.join("nested").join("..").join("data");
+
+        assert!(
+            resolve_data_dir_override(&absolute).is_ok(),
+            "scoped absolute paths should be accepted"
+        );
+        assert!(
+            resolve_data_dir_override(Path::new("relative/data")).is_err(),
+            "relative paths should be rejected"
+        );
+        assert!(
+            resolve_data_dir_override(filesystem_root).is_err(),
+            "filesystem roots should be rejected"
+        );
+        assert!(
+            resolve_data_dir_override(&with_parent).is_err(),
+            "parent-directory components should be rejected"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Rejects root symlinks without changing the containing directory.
+    fn data_dir_override_rejects_symlink_to_root_without_mutation() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().context("could not create temporary directory")?;
+        let root_link = temp_dir.path().join("root-link");
+        symlink("/", &root_link).context("could not create root symlink")?;
+        let entries_before = std::fs::read_dir(temp_dir.path())
+            .context("could not read temporary directory before validation")?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Result<Vec<_>, _>>()
+            .context("could not read a temporary-directory entry before validation")?;
+
+        let error = resolve_data_dir_override(&root_link)
+            .err()
+            .context("root symlink should have been rejected")?;
+        let nested_error = resolve_data_dir_override(&root_link.join("new-data"))
+            .err()
+            .context("root symlink ancestor should have been rejected")?;
+
+        assert!(
+            error.to_string().contains("filesystem root"),
+            "direct root symlink error should identify the filesystem root"
+        );
+        assert!(
+            nested_error.to_string().contains("filesystem root"),
+            "nested root symlink error should identify the filesystem root"
+        );
+        assert_eq!(
+            std::fs::read_link(&root_link).context("root symlink should remain")?,
+            Path::new("/"),
+            "validation should not replace the root symlink"
+        );
+        let entries_after = std::fs::read_dir(temp_dir.path())
+            .context("could not read temporary directory after validation")?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Result<Vec<_>, _>>()
+            .context("could not read a temporary-directory entry after validation")?;
+        assert_eq!(
+            entries_after, entries_before,
+            "validation should not mutate the temporary directory"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Resolves an existing symlink ancestor before appending missing components.
+    fn data_dir_override_resolves_existing_symlink_ancestor_before_new_components() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().context("could not create temporary directory")?;
+        let actual_parent = temp_dir.path().join("actual");
+        std::fs::create_dir(&actual_parent).context("could not create actual parent")?;
+        let parent_link = temp_dir.path().join("parent-link");
+        symlink(&actual_parent, &parent_link).context("could not create parent symlink")?;
+        let requested = parent_link.join("nested").join("data");
+
+        let resolved =
+            resolve_data_dir_override(&requested).context("could not resolve data directory")?;
+
+        assert_eq!(
+            resolved,
+            actual_parent
+                .canonicalize()
+                .context("could not canonicalize actual parent")?
+                .join("nested")
+                .join("data"),
+            "missing components should be appended to the canonical ancestor"
+        );
+        assert!(
+            !actual_parent.join("nested").exists(),
+            "validation should not create missing components"
+        );
+        Ok(())
+    }
+
+    /// Build a complete configuration that passes validation.
     fn valid_config() -> Config {
         const MIB: usize = 1024 * 1024;
+        const MIB_U64: u64 = 1024 * 1024;
         Config {
             forum_name: "RustChan".to_owned(),
             initial_site_subtitle: "select board to proceed".to_owned(),
@@ -1736,37 +2385,79 @@ mod tests {
             auto_full_backup_storage_mode: "directory".to_owned(),
             auto_full_backup_split_zip_part_size_bytes: 4 * 1024 * 1024 * 1024,
             poll_cleanup_interval_hours: 72,
-            db_warn_threshold_bytes: 2048 * MIB as u64,
+            db_warn_threshold_bytes: 2_048 * MIB_U64,
             job_queue_capacity: 1000,
             ffmpeg_timeout_secs: 120,
             initial_media_auto_prune_enabled: false,
             initial_media_max_active_content_size_bytes: 0,
             archive_before_prune: true,
-            waveform_cache_max_bytes: 200 * MIB as u64,
+            waveform_cache_max_bytes: 200 * MIB_U64,
+            media_reconcile_repair_enabled: false,
+            media_reconcile_interval_hours: 24,
+            media_reconcile_files_per_pass: 512,
+            media_reconcile_database_rows_per_pass: 16_384,
+            media_reconcile_hash_bytes_per_pass: 64 * MIB_U64,
+            media_reconcile_repairs_per_pass: 32,
             blocking_threads: 4,
             db_pool_size: 8,
             rustwave_url: "http://localhost:7071".to_owned(),
             chan_net_bind: "127.0.0.1:7070".to_owned(),
             chan_net_max_body: 10 * MIB,
-            chan_net_command_max_body: 8 * 1024,
+            chan_net_command_max_body: 512 * 1024,
             chan_net_api_key: String::new(),
             tls: TlsConfig::default(),
         }
     }
 
-    fn validation_error(config: &Config) -> String {
-        config
-            .validate()
-            .expect_err("config should fail validation")
-            .to_string()
+    #[test]
+    /// Redacts authentication secrets while retaining useful configuration context.
+    fn config_debug_redacts_secrets() -> TestResult {
+        const COOKIE_SECRET: &str = "cookie-secret-debug-sentinel";
+        const CHAN_NET_API_KEY: &str = "chan-net-key-debug-sentinel";
+        const RUSTWAVE_URL: &str = "http://debug-user:rw-secret-sentinel@localhost:7071";
+        const RUSTWAVE_CREDENTIAL: &str = "rw-secret-sentinel";
+        let mut config = valid_config();
+        config.cookie_secret = COOKIE_SECRET.to_owned();
+        config.chan_net_api_key = CHAN_NET_API_KEY.to_owned();
+        config.rustwave_url = RUSTWAVE_URL.to_owned();
+        let rendered = format!("{config:?}");
+        anyhow::ensure!(
+            !rendered.contains(COOKIE_SECRET),
+            "Config Debug output must not expose the cookie secret"
+        );
+        anyhow::ensure!(
+            !rendered.contains(CHAN_NET_API_KEY) && !rendered.contains(RUSTWAVE_CREDENTIAL),
+            "Config Debug output must not expose the ChanNet API key or RustWave URL credentials"
+        );
+        anyhow::ensure!(
+            rendered.contains("cookie_secret: \"[REDACTED]\"")
+                && rendered.contains("chan_net_api_key: \"[REDACTED]\"")
+                && rendered.contains("rustwave_url: \"[REDACTED]\""),
+            "Config Debug output should identify redacted fields"
+        );
+        anyhow::ensure!(
+            rendered.contains("forum_name: \"RustChan\""),
+            "Config Debug output should retain useful nonsecret context"
+        );
+        Ok(())
+    }
+
+    /// Return a configuration validation failure as text.
+    fn validation_error(config: &Config) -> Option<String> {
+        config.validate().err().map(|error| error.to_string())
     }
 
     #[test]
+    /// Uses the Arti-native keystore location for onion-service identity keys.
     fn tor_hidden_service_keys_dir_matches_arti_native_keystore_location() {
-        assert!(runtime_tor_hidden_service_keys_dir().ends_with("runtime/tor/state/keystore"));
+        assert!(
+            runtime_tor_hidden_service_keys_dir().ends_with("runtime/tor/state/keystore"),
+            "the identity path should match Arti's native keystore layout"
+        );
     }
 
     #[test]
+    /// Updates selected root keys without disturbing comments or other values.
     fn rewrite_settings_file_lines_updates_requested_keys_and_preserves_comments() {
         let input = r#"# RustChan settings.toml
 forum_name = "RustChan"
@@ -1796,22 +2487,36 @@ auto_full_backup_copies_to_keep = 1
             None,
         );
 
-        assert!(output.starts_with("# RustChan settings.toml\n"));
-        assert!(output.contains("forum_name = \"BackupChan\"\n"));
-        assert!(output.contains("site_subtitle = \"select board to proceed\"\n"));
-        assert!(output.contains("homepage_new_thread_badges_enabled = true\n"));
-        assert!(output.contains("homepage_new_reply_badges_enabled = true\n"));
-        assert!(output.contains("thread_new_reply_badges_enabled = true\n"));
-        assert!(output.contains("default_theme = \"terminal\"\n"));
-        assert!(output.contains("auto_full_backup_interval_hours = 12\n"));
-        assert!(output.contains("auto_full_backup_copies_to_keep = 3\n"));
-        assert!(output.contains("auto_full_backup_include_tor_hidden_service_keys = true\n"));
-        assert!(output.contains("auto_full_backup_storage_mode = \"split_zip\"\n"));
-        assert!(output.contains("auto_full_backup_split_zip_part_size_gib = 8\n"));
-        assert!(output.ends_with('\n'));
+        assert!(
+            output.starts_with("# RustChan settings.toml\n"),
+            "the leading comment should be preserved"
+        );
+        for expected in [
+            "forum_name = \"BackupChan\"\n",
+            "site_subtitle = \"select board to proceed\"\n",
+            "homepage_new_thread_badges_enabled = true\n",
+            "homepage_new_reply_badges_enabled = true\n",
+            "thread_new_reply_badges_enabled = true\n",
+            "default_theme = \"terminal\"\n",
+            "auto_full_backup_interval_hours = 12\n",
+            "auto_full_backup_copies_to_keep = 3\n",
+            "auto_full_backup_include_tor_hidden_service_keys = true\n",
+            "auto_full_backup_storage_mode = \"split_zip\"\n",
+            "auto_full_backup_split_zip_part_size_gib = 8\n",
+        ] {
+            assert!(
+                output.contains(expected),
+                "rewritten settings should contain {expected:?}"
+            );
+        }
+        assert!(
+            output.ends_with('\n'),
+            "the trailing newline should be preserved"
+        );
     }
 
     #[test]
+    /// Inserts missing backup keys before the requested root-section anchor.
     fn rewrite_settings_file_lines_inserts_missing_root_keys_before_anchor_section() {
         let input = r#"# RustChan settings.toml
 forum_name = "RustChan"
@@ -1836,35 +2541,30 @@ enabled = false
             Some("# ── Federation / ChanNet gateway"),
         );
 
-        let backup_hours_idx = output
-            .find("auto_full_backup_interval_hours = 24")
-            .expect("backup hours key inserted");
-        let backup_copies_idx = output
-            .find("auto_full_backup_copies_to_keep = 1")
-            .expect("backup copies key inserted");
-        let backup_tor_idx = output
-            .find("auto_full_backup_include_tor_hidden_service_keys = true")
-            .expect("backup Tor key option inserted");
-        let backup_storage_idx = output
-            .find("auto_full_backup_storage_mode = \"directory\"")
-            .expect("backup storage mode inserted");
-        let backup_part_size_idx = output
-            .find("auto_full_backup_split_zip_part_size_gib = 4")
-            .expect("backup split ZIP part size inserted");
-        let anchor_idx = output
-            .find("# ── Federation / ChanNet gateway")
-            .expect("anchor comment present");
-        let tls_idx = output.find("[tls]").expect("tls section present");
+        let positions = [
+            output.find("auto_full_backup_interval_hours = 24"),
+            output.find("auto_full_backup_copies_to_keep = 1"),
+            output.find("auto_full_backup_include_tor_hidden_service_keys = true"),
+            output.find("auto_full_backup_storage_mode = \"directory\""),
+            output.find("auto_full_backup_split_zip_part_size_gib = 4"),
+            output.find("# ── Federation / ChanNet gateway"),
+            output.find("[tls]"),
+        ];
 
-        assert!(backup_hours_idx < anchor_idx);
-        assert!(backup_copies_idx < anchor_idx);
-        assert!(backup_tor_idx < anchor_idx);
-        assert!(backup_storage_idx < anchor_idx);
-        assert!(backup_part_size_idx < anchor_idx);
-        assert!(anchor_idx < tls_idx);
+        assert!(
+            positions.iter().all(Option::is_some),
+            "all inserted keys, the anchor, and the TLS section should be present"
+        );
+        assert!(
+            positions
+                .windows(2)
+                .all(|pair| matches!(pair, [Some(left), Some(right)] if left < right)),
+            "inserted backup keys should retain request order before the anchor and TLS section"
+        );
     }
 
     #[test]
+    /// Inserts a missing default theme before the network section.
     fn rewrite_settings_file_lines_inserts_missing_default_theme_before_network_section() {
         let input = r#"# RustChan settings.toml
 forum_name = "RustChan"
@@ -1890,98 +2590,124 @@ port = 8080
             Some("# ── Network / web server"),
         );
 
-        let theme_idx = output
-            .find("default_theme = \"terminal\"")
-            .expect("default_theme inserted");
-        let homepage_activity_idx = output
-            .find("homepage_new_thread_badges_enabled = false")
-            .expect("homepage_new_thread_badges_enabled inserted");
-        let thread_activity_idx = output
-            .find("thread_new_reply_badges_enabled = true")
-            .expect("thread_new_reply_badges_enabled inserted");
-        let homepage_reply_activity_idx = output
-            .find("homepage_new_reply_badges_enabled = true")
-            .expect("homepage_new_reply_badges_enabled inserted");
-        let network_idx = output
-            .find("# ── Network / web server")
-            .expect("network section present");
+        let positions = [
+            output.find("homepage_new_thread_badges_enabled = false"),
+            output.find("homepage_new_reply_badges_enabled = true"),
+            output.find("thread_new_reply_badges_enabled = true"),
+            output.find("default_theme = \"terminal\""),
+            output.find("# ── Network / web server"),
+        ];
 
-        assert!(homepage_activity_idx < network_idx);
-        assert!(homepage_reply_activity_idx < network_idx);
-        assert!(thread_activity_idx < network_idx);
-        assert!(theme_idx < network_idx);
-        assert!(output.contains("forum_name = \"NewChan\"\n"));
-        assert!(output.contains("site_subtitle = \"new subtitle\"\n"));
+        assert!(
+            positions.iter().all(Option::is_some),
+            "updated activity keys, the inserted theme, and the network section should be present"
+        );
+        assert!(
+            positions
+                .windows(2)
+                .all(|pair| matches!(pair, [Some(left), Some(right)] if left < right)),
+            "activity settings and the inserted theme should precede the network section"
+        );
+        assert!(
+            output.contains("forum_name = \"NewChan\"\n"),
+            "forum name should be updated"
+        );
+        assert!(
+            output.contains("site_subtitle = \"new subtitle\"\n"),
+            "site subtitle should be updated"
+        );
     }
 
     #[test]
+    /// Rejects an `FFmpeg` timeout below the supported minimum.
     fn validate_rejects_ffmpeg_timeout_below_minimum() {
         let error = validate_ffmpeg_timeout_secs(MIN_FFMPEG_TIMEOUT_SECS - 1)
-            .expect_err("timeout below minimum should fail")
-            .to_string();
+            .err()
+            .map(|error| error.to_string());
+        let expected = format!(
+            "CONFIG ERROR: ffmpeg_timeout_secs must be between {MIN_FFMPEG_TIMEOUT_SECS} and {MAX_FFMPEG_TIMEOUT_SECS} seconds."
+        );
         assert_eq!(
-            error,
-            format!(
-                "CONFIG ERROR: ffmpeg_timeout_secs must be between {MIN_FFMPEG_TIMEOUT_SECS} and {MAX_FFMPEG_TIMEOUT_SECS} seconds."
-            )
+            error.as_deref(),
+            Some(expected.as_str()),
+            "a below-minimum timeout should return the bounded-range error"
         );
     }
 
     #[test]
+    /// Rejects an `FFmpeg` timeout above the supported maximum.
     fn validate_rejects_ffmpeg_timeout_above_maximum() {
         let error = validate_ffmpeg_timeout_secs(MAX_FFMPEG_TIMEOUT_SECS + 1)
-            .expect_err("timeout above maximum should fail")
-            .to_string();
+            .err()
+            .map(|error| error.to_string());
+        let expected = format!(
+            "CONFIG ERROR: ffmpeg_timeout_secs must be between {MIN_FFMPEG_TIMEOUT_SECS} and {MAX_FFMPEG_TIMEOUT_SECS} seconds."
+        );
         assert_eq!(
-            error,
-            format!(
-                "CONFIG ERROR: ffmpeg_timeout_secs must be between {MIN_FFMPEG_TIMEOUT_SECS} and {MAX_FFMPEG_TIMEOUT_SECS} seconds."
-            )
+            error.as_deref(),
+            Some(expected.as_str()),
+            "an above-maximum timeout should return the bounded-range error"
         );
     }
 
     #[test]
-    fn update_settings_file_ffmpeg_timeout_persists_and_reloads() {
-        let _guard = SETTINGS_FILE_TEST_LOCK.lock().expect("settings test lock");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Persists a live timeout update and reloads the written value.
+    fn update_settings_file_ffmpeg_timeout_persists_and_reloads() -> TestResult {
+        let _settings_lock = lock_settings_file();
         let path = settings_file_path();
-        let previous = std::fs::read_to_string(&path).ok();
-        let parent = path.parent().expect("settings parent").to_path_buf();
-        std::fs::create_dir_all(&parent).expect("create settings dir");
+        let snapshot = SettingsFileSnapshot::capture(path.clone())?;
+        let parent = path
+            .parent()
+            .context("settings path should have a parent directory")?;
+        std::fs::create_dir_all(parent).context("could not create settings directory")?;
         std::fs::write(
             &path,
             format!(
                 "forum_name = \"RustChan\"\nffmpeg_timeout_secs = {DEFAULT_FFMPEG_TIMEOUT_SECS}\n"
             ),
         )
-        .expect("write settings fixture");
+        .context("could not write settings fixture")?;
 
         update_settings_file_ffmpeg_timeout(1_800);
-        let updated = std::fs::read_to_string(&path).expect("read updated settings");
-        assert!(updated.contains("ffmpeg_timeout_secs = 1800\n"));
+        let updated =
+            std::fs::read_to_string(&path).context("could not read updated settings file")?;
+        assert!(
+            updated.contains("ffmpeg_timeout_secs = 1800\n"),
+            "the persisted settings should contain the updated timeout"
+        );
 
         let reloaded = Config::from_env();
-        assert_eq!(reloaded.ffmpeg_timeout_secs, 1_800);
+        assert_eq!(
+            reloaded.ffmpeg_timeout_secs, 1_800,
+            "configuration reload should observe the persisted timeout"
+        );
 
-        match previous {
-            Some(contents) => std::fs::write(&path, contents).expect("restore settings file"),
-            None => {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
+        snapshot.restore()
     }
 
     #[test]
-    fn update_settings_file_site_settings_persists_homepage_reply_badge_toggle() {
-        let _guard = SETTINGS_FILE_TEST_LOCK.lock().expect("settings test lock");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Persists the distinct homepage reply-badge toggle.
+    fn update_settings_file_site_settings_persists_homepage_reply_badge_toggle() -> TestResult {
+        let _settings_lock = lock_settings_file();
         let path = settings_file_path();
-        let previous = std::fs::read_to_string(&path).ok();
-        let parent = path.parent().expect("settings parent").to_path_buf();
-        std::fs::create_dir_all(&parent).expect("create settings dir");
+        let snapshot = SettingsFileSnapshot::capture(path.clone())?;
+        let parent = path
+            .parent()
+            .context("settings path should have a parent directory")?;
+        std::fs::create_dir_all(parent).context("could not create settings directory")?;
         std::fs::write(
             &path,
             "forum_name = \"RustChan\"\nsite_subtitle = \"select board to proceed\"\nhomepage_new_thread_badges_enabled = true\nhomepage_new_reply_badges_enabled = true\nthread_new_reply_badges_enabled = true\ndefault_theme = \"forest\"\n",
         )
-        .expect("write settings fixture");
+        .context("could not write settings fixture")?;
 
         super::update_settings_file_site_settings(
             "RustChan",
@@ -1991,29 +2717,46 @@ port = 8080
             true,
             "forest",
         );
-        let updated = std::fs::read_to_string(&path).expect("read updated settings");
-        assert!(updated.contains("homepage_new_thread_badges_enabled = true\n"));
-        assert!(updated.contains("homepage_new_reply_badges_enabled = false\n"));
-        assert!(updated.contains("thread_new_reply_badges_enabled = true\n"));
-
-        match previous {
-            Some(contents) => std::fs::write(&path, contents).expect("restore settings file"),
-            None => {
-                let _ = std::fs::remove_file(&path);
-            }
+        let updated =
+            std::fs::read_to_string(&path).context("could not read updated settings file")?;
+        for expected in [
+            "homepage_new_thread_badges_enabled = true\n",
+            "homepage_new_reply_badges_enabled = false\n",
+            "thread_new_reply_badges_enabled = true\n",
+        ] {
+            assert!(
+                updated.contains(expected),
+                "updated site settings should contain {expected:?}"
+            );
         }
+
+        snapshot.restore()
     }
 
     #[test]
-    fn live_ffmpeg_timeout_setting_updates_and_formats_human_text() {
-        let original = ffmpeg_timeout_secs();
-        set_live_ffmpeg_timeout_secs(90).expect("set live timeout");
-        assert_eq!(ffmpeg_timeout_secs(), 90);
-        assert_eq!(describe_timeout_secs(90), "1 minute 30 seconds");
-        set_live_ffmpeg_timeout_secs(original).expect("restore live timeout");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Updates the live timeout and formats a mixed-minute duration.
+    fn live_ffmpeg_timeout_setting_updates_and_formats_human_text() -> TestResult {
+        let _snapshot = LiveFfmpegTimeoutSnapshot::capture();
+        set_live_ffmpeg_timeout_secs(90).context("could not set live timeout")?;
+        assert_eq!(
+            ffmpeg_timeout_secs(),
+            90,
+            "live timeout should reflect the accepted update"
+        );
+        assert_eq!(
+            describe_timeout_secs(90),
+            "1 minute 30 seconds",
+            "mixed-minute durations should use compact human text"
+        );
+        Ok(())
     }
 
     #[test]
+    /// Rejects an HTTPS port that matches the primary HTTP listener.
     fn validate_rejects_tls_port_matching_main_http_port() {
         let mut config = valid_config();
         config.tls.enabled = true;
@@ -2022,12 +2765,14 @@ port = 8080
         let error = validation_error(&config);
 
         assert_eq!(
-            error,
-            "CONFIG ERROR: tls.port (8080) must differ from the main HTTP port (8080)."
+            error.as_deref(),
+            Some("CONFIG ERROR: tls.port (8080) must differ from the main HTTP port (8080)."),
+            "matching primary and HTTPS ports should fail validation"
         );
     }
 
     #[test]
+    /// Rejects a redirect port that matches the primary HTTP listener.
     fn validate_rejects_redirect_http_port_matching_main_http_port() {
         let mut config = valid_config();
         config.tls.enabled = true;
@@ -2038,12 +2783,16 @@ port = 8080
         let error = validation_error(&config);
 
         assert_eq!(
-            error,
-            "CONFIG ERROR: tls.http_port (8080) must differ from the main HTTP port (8080) when tls.redirect_http=true."
+            error.as_deref(),
+            Some(
+                "CONFIG ERROR: tls.http_port (8080) must differ from the main HTTP port (8080) when tls.redirect_http=true."
+            ),
+            "matching primary and redirect ports should fail validation"
         );
     }
 
     #[test]
+    /// Rejects a redirect port that matches the HTTPS listener.
     fn validate_rejects_redirect_http_port_matching_tls_port() {
         let mut config = valid_config();
         config.tls.enabled = true;
@@ -2054,23 +2803,30 @@ port = 8080
         let error = validation_error(&config);
 
         assert_eq!(
-            error,
-            "CONFIG ERROR: tls.http_port (8443) must differ from tls.port (8443) when tls.redirect_http=true."
+            error.as_deref(),
+            Some(
+                "CONFIG ERROR: tls.http_port (8443) must differ from tls.port (8443) when tls.redirect_http=true."
+            ),
+            "matching HTTPS and redirect ports should fail validation"
         );
     }
 
     #[test]
-    fn validate_accepts_distinct_tls_and_redirect_ports() {
+    /// Accepts distinct primary, HTTPS, and redirect ports.
+    fn validate_accepts_distinct_tls_and_redirect_ports() -> TestResult {
         let mut config = valid_config();
         config.tls.enabled = true;
         config.tls.port = 8443;
         config.tls.redirect_http = true;
         config.tls.http_port = 8081;
 
-        config.validate().expect("config should validate");
+        config
+            .validate()
+            .context("distinct TLS and redirect ports should validate")
     }
 
     #[test]
+    /// Rejects an enabled `ChanNet` API key below the minimum length.
     fn validate_rejects_short_chan_net_api_key() {
         let mut config = valid_config();
         config.chan_net_api_key = "short-key".to_owned();
@@ -2078,22 +2834,31 @@ port = 8080
         let error = validation_error(&config);
 
         assert_eq!(
-            error,
-            "CONFIG ERROR: chan_net_api_key must be empty to disable ChanNet auth-protected endpoints or at least 32 characters long."
+            error.as_deref(),
+            Some(
+                "CONFIG ERROR: chan_net_api_key must be empty to disable ChanNet auth-protected endpoints or at least 32 characters long."
+            ),
+            "a short ChanNet API key should fail validation"
         );
     }
 
     #[test]
-    fn validate_accepts_empty_or_long_chan_net_api_key() {
+    /// Accepts either a disabled or sufficiently long `ChanNet` API key.
+    fn validate_accepts_empty_or_long_chan_net_api_key() -> TestResult {
         let mut config = valid_config();
         config.chan_net_api_key.clear();
-        config.validate().expect("empty key disables endpoints");
+        config
+            .validate()
+            .context("an empty key should disable protected endpoints")?;
 
         config.chan_net_api_key = "x".repeat(32);
-        config.validate().expect("32-char key is accepted");
+        config
+            .validate()
+            .context("a 32-character key should be accepted")
     }
 
     #[test]
+    /// Requires an API key only when `ChanNet` listens outside loopback.
     fn validate_chan_net_listener_requires_key_for_non_loopback_bind() {
         let mut config = valid_config();
         config.chan_net_api_key.clear();
@@ -2101,60 +2866,76 @@ port = 8080
 
         let error = config
             .validate_chan_net_listener()
-            .expect_err("non-loopback bind without key should fail")
-            .to_string();
+            .err()
+            .map(|error| error.to_string());
         assert_eq!(
-            error,
-            "CONFIG ERROR: --chan-net with chan_net_bind '0.0.0.0:7070' requires chan_net_api_key when binding outside loopback."
+            error.as_deref(),
+            Some(
+                "CONFIG ERROR: --chan-net with chan_net_bind '0.0.0.0:7070' requires chan_net_api_key when binding outside loopback."
+            ),
+            "a non-loopback listener without a key should fail validation"
         );
 
         config.chan_net_bind = "127.0.0.1:7070".to_owned();
-        config
-            .validate_chan_net_listener()
-            .expect("loopback bind may disable endpoints");
+        assert!(
+            config.validate_chan_net_listener().is_ok(),
+            "an IPv4 loopback listener may disable protected endpoints"
+        );
 
         config.chan_net_bind = "localhost:7070".to_owned();
-        config
-            .validate_chan_net_listener()
-            .expect("localhost bind may disable endpoints");
+        assert!(
+            config.validate_chan_net_listener().is_ok(),
+            "a localhost listener may disable protected endpoints"
+        );
 
         config.chan_net_bind = "0.0.0.0:7070".to_owned();
         config.chan_net_api_key = "x".repeat(32);
-        config
-            .validate_chan_net_listener()
-            .expect("non-loopback bind with key is accepted");
+        assert!(
+            config.validate_chan_net_listener().is_ok(),
+            "a non-loopback listener with a sufficiently long key should validate"
+        );
     }
 
     #[cfg(unix)]
     #[test]
-    fn private_file_helpers_set_owner_only_modes() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Applies owner-only modes to private directories and files on Unix.
+    fn private_file_helpers_set_owner_only_modes() -> TestResult {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let temp_dir = tempfile::tempdir().context("could not create temporary directory")?;
         let private_dir = temp_dir.path().join("private");
-        super::ensure_private_dir(&private_dir).expect("private dir");
+        super::ensure_private_dir(&private_dir).context("could not create private directory")?;
         assert_eq!(
             std::fs::metadata(&private_dir)
-                .expect("dir metadata")
+                .context("could not read private-directory metadata")?
                 .permissions()
                 .mode()
                 & 0o777,
-            0o700
+            0o700,
+            "private directories should be owner-accessible only"
         );
 
         let private_file = private_dir.join("settings.toml");
-        super::write_private_file(&private_file, b"secret").expect("private file");
+        super::write_private_file(&private_file, b"secret")
+            .context("could not write private file")?;
         assert_eq!(
             std::fs::metadata(&private_file)
-                .expect("file metadata")
+                .context("could not read private-file metadata")?
                 .permissions()
                 .mode()
                 & 0o777,
-            0o600
+            0o600,
+            "private files should be owner-readable and owner-writable only"
         );
+        Ok(())
     }
 
     #[test]
+    /// Rejects Tor-only mode when the onion service is disabled.
     fn validate_rejects_tor_only_without_tor_support() {
         let mut config = valid_config();
         config.enable_tor_support = false;
@@ -2163,87 +2944,182 @@ port = 8080
         let error = validation_error(&config);
 
         assert_eq!(
-            error,
-            "CONFIG ERROR: tor_only=true requires enable_tor_support=true. Tor-only mode needs the built-in onion service to be active."
+            error.as_deref(),
+            Some(
+                "CONFIG ERROR: tor_only=true requires enable_tor_support=true. Tor-only mode needs the built-in onion service to be active."
+            ),
+            "Tor-only mode without Tor support should fail validation"
         );
     }
 
     #[test]
-    fn settings_template_uses_forest_and_featured_theme_order() {
-        let template = settings_template("secret");
+    /// Keeps plaintext application access enabled for pre-setting TLS configurations.
+    fn tls_config_without_require_https_defaults_to_optional_https() -> TestResult {
+        let parsed = super::parse_settings_file_str(
+            "[tls]\nenabled = true\nport = 8443\nredirect_http = false\nhttp_port = 8081\n",
+        )
+        .context("could not parse legacy TLS settings")?;
+        let tls = parsed.tls.context("TLS settings should be present")?;
 
-        assert!(template.contains("homepage_new_thread_badges_enabled = true"));
-        assert!(template.contains("homepage_new_reply_badges_enabled = true"));
-        assert!(template.contains("thread_new_reply_badges_enabled = true"));
-        assert!(template.contains("media_auto_prune_enabled = false"));
-        assert!(template.contains("media_max_active_content_size_bytes = 0"));
-        assert!(template.contains(r#"default_theme = "forest""#));
-        assert!(template.contains("enabled = false\nport = 8443"));
-        assert!(template.contains("auto_full_backup_include_tor_hidden_service_keys = true"));
-        assert!(template.contains(r#"auto_full_backup_storage_mode = "directory""#));
-        assert!(template.contains("auto_full_backup_split_zip_part_size_gib = 4"));
-        assert!(template.contains("public_readiness_details = false"));
-        assert!(template.contains("public_metrics_enabled = false"));
-        assert!(template.contains(
-            r#"enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]"#
-        ));
+        anyhow::ensure!(
+            !tls.require_https,
+            "omitting tls.require_https must preserve the plaintext listener"
+        );
+        Ok(())
     }
 
     #[test]
+    /// Renders the expected first-run defaults and featured-theme order.
+    fn settings_template_uses_forest_and_featured_theme_order() {
+        let template = settings_template("secret");
+
+        for expected in [
+            "homepage_new_thread_badges_enabled = true",
+            "homepage_new_reply_badges_enabled = true",
+            "thread_new_reply_badges_enabled = true",
+            "media_auto_prune_enabled = false",
+            "media_max_active_content_size_bytes = 0",
+            r#"default_theme = "forest""#,
+            "require_https = false",
+            "auto_full_backup_include_tor_hidden_service_keys = true",
+            r#"auto_full_backup_storage_mode = "directory""#,
+            "auto_full_backup_split_zip_part_size_gib = 4",
+            "public_readiness_details = false",
+            "public_metrics_enabled = false",
+            r#"enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]"#,
+        ] {
+            assert!(
+                template.contains(expected),
+                "generated settings should contain {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    /// Explains that enabled built-ins seed only the first-start theme catalog.
     fn settings_template_marks_enabled_builtins_as_first_start_seeded() {
         let template = settings_template("secret");
 
         assert!(
-            template.contains("# Built-in themes enabled when the theme catalog is first seeded.")
+            template.contains("# Built-in themes enabled when the theme catalog is first seeded."),
+            "template should explain when the enabled built-ins are seeded"
         );
-        assert!(template.contains(
-            "# After first startup, Admin -> Theme Catalog owns the live enabled/disabled state."
-        ));
+        assert!(
+            template.contains(
+                "# After first startup, Admin -> Theme Catalog owns the live enabled/disabled state."
+            ),
+            "template should explain post-startup theme ownership"
+        );
     }
 
     #[test]
-    fn generated_settings_template_round_trips_root_and_tls_values() {
-        let _guard = SETTINGS_FILE_TEST_LOCK.lock().expect("settings test lock");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Round-trips generated root and TLS settings through parsing and reload.
+    fn generated_settings_template_round_trips_root_and_tls_values() -> TestResult {
+        let _settings_lock = lock_settings_file();
         let path = settings_file_path();
-        let previous = std::fs::read_to_string(&path).ok();
-        let parent = path.parent().expect("settings parent").to_path_buf();
+        let snapshot = SettingsFileSnapshot::capture(path.clone())?;
+        let parent = path
+            .parent()
+            .context("settings path should have a parent directory")?;
         let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned();
         let template = settings_template(&secret);
 
-        std::fs::create_dir_all(&parent).expect("create settings dir");
-        std::fs::write(&path, &template).expect("write generated settings template");
+        std::fs::create_dir_all(parent).context("could not create settings directory")?;
+        std::fs::write(&path, &template).context("could not write generated settings template")?;
 
-        let parsed = super::parse_settings_file_str(&template).expect("parse generated template");
-        assert_eq!(parsed.cookie_secret.as_deref(), Some(secret.as_str()));
-        assert_eq!(parsed.enable_tor_support, Some(true));
-        assert_eq!(parsed.tor_only, Some(false));
-        assert_eq!(parsed.public_readiness_details, Some(false));
-        assert_eq!(parsed.public_metrics_enabled, Some(false));
-        assert!(parsed.public_hosts.is_none());
-        assert_eq!(parsed.tls.as_ref().map(|tls| tls.enabled), Some(false));
-        assert_eq!(parsed.tls.as_ref().map(|tls| tls.port), Some(8443));
+        let parsed = super::parse_settings_file_str(&template)
+            .context("could not parse generated settings template")?;
+        assert_eq!(
+            parsed.cookie_secret.as_deref(),
+            Some(secret.as_str()),
+            "generated cookie secret should parse unchanged"
+        );
+        assert_eq!(
+            parsed.enable_tor_support,
+            Some(true),
+            "generated settings should enable Tor support"
+        );
+        assert_eq!(
+            parsed.tor_only,
+            Some(false),
+            "generated settings should retain clearnet access"
+        );
+        assert_eq!(
+            parsed.public_readiness_details,
+            Some(false),
+            "generated settings should keep readiness details private"
+        );
+        assert_eq!(
+            parsed.public_metrics_enabled,
+            Some(false),
+            "generated settings should keep metrics private"
+        );
+        assert!(
+            parsed.public_hosts.is_none(),
+            "commented public hosts should not deserialize"
+        );
+        assert_eq!(
+            parsed.tls.as_ref().map(|tls| tls.enabled),
+            Some(false),
+            "generated settings should disable TLS by default"
+        );
+        assert_eq!(
+            parsed.tls.as_ref().map(|tls| tls.port),
+            Some(8443),
+            "generated settings should retain the default HTTPS port"
+        );
         assert_eq!(
             parsed.tls.as_ref().map(|tls| tls.redirect_http),
-            Some(false)
+            Some(false),
+            "generated settings should disable HTTP redirection by default"
         );
-        assert!(template.contains("runtime/tor/state/keystore/"));
+        assert!(
+            template.contains("runtime/tor/state/keystore/"),
+            "template should document the Arti-native keystore path"
+        );
 
         let reloaded = Config::from_env();
-        assert_eq!(reloaded.cookie_secret, secret);
-        assert!(reloaded.enable_tor_support);
-        assert!(!reloaded.tor_only);
-        assert!(!reloaded.public_readiness_details);
-        assert!(!reloaded.public_metrics_enabled);
-        assert!(reloaded.public_hosts.is_empty());
-        assert!(!reloaded.tls.enabled);
-        assert_eq!(reloaded.tls.port, 8443);
-        assert!(!reloaded.tls.redirect_http);
+        assert_eq!(
+            reloaded.cookie_secret, secret,
+            "runtime reload should retain the generated cookie secret"
+        );
+        assert!(
+            reloaded.enable_tor_support,
+            "runtime reload should enable Tor support"
+        );
+        assert!(
+            !reloaded.tor_only,
+            "runtime reload should retain clearnet access"
+        );
+        assert!(
+            !reloaded.public_readiness_details,
+            "runtime reload should keep readiness details private"
+        );
+        assert!(
+            !reloaded.public_metrics_enabled,
+            "runtime reload should keep metrics private"
+        );
+        assert!(
+            reloaded.public_hosts.is_empty(),
+            "runtime reload should not add commented public hosts"
+        );
+        assert!(
+            !reloaded.tls.enabled,
+            "runtime reload should keep TLS disabled"
+        );
+        assert_eq!(
+            reloaded.tls.port, 8443,
+            "runtime reload should retain the HTTPS port"
+        );
+        assert!(
+            !reloaded.tls.redirect_http,
+            "runtime reload should keep HTTP redirection disabled"
+        );
 
-        match previous {
-            Some(contents) => std::fs::write(&path, contents).expect("restore settings file"),
-            None => {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
+        snapshot.restore()
     }
 }

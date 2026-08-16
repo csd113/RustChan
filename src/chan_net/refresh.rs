@@ -1,4 +1,4 @@
-// chan_net/refresh.rs — Federation outgoing handler.
+//! Federation outgoing handler.
 //
 // POST /chan/refresh builds a full snapshot and pushes it to RustWave
 // /broadcast/transmit as multipart. Holds the shared HTTP_CLIENT static
@@ -39,6 +39,11 @@ pub static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 ///
 /// Returns `500 Internal Server Error` if the snapshot build fails, if
 /// `RustWave` is unreachable, or if `RustWave` responds with a non-2xx status.
+///
+/// # Errors
+///
+/// Returns a [`super::ChanError`] for database, snapshot, multipart, transport,
+/// peer-status, or response-decoding failures.
 pub async fn chan_refresh(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, super::ChanError> {
@@ -50,7 +55,7 @@ pub async fn chan_refresh(
         tokio::task::spawn_blocking(move || super::snapshot::build_snapshot(&conn))
             .await
             .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))? // JoinError
-            .map_err(AppError::Internal)?; // anyhow::Error from build_snapshot
+            .map_err(AppError::from)?; // anyhow::Error from build_snapshot
 
     // ── Assemble multipart form ───────────────────────────────────────────
     let part = reqwest::multipart::Part::bytes(zip_bytes)

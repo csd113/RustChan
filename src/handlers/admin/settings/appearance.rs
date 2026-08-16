@@ -1,30 +1,39 @@
-// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
-#![allow(clippy::wildcard_imports)]
-
-use super::*;
+use super::{
+    admin_panel_error_redirect_anchor, admin_panel_redirect_anchor,
+    admin_panel_redirect_anchor_open, check_admin_csrf_jar, format_favicon_upload_error,
+    read_limited_upload_bytes, read_text_field, require_admin_post_origin_and_csrf,
+    require_admin_session_sid, require_same_origin_request, AppError, AppState, CookieJar, Form,
+    HeaderMap, Multipart, Response, Result, State, MAX_FAVICON_UPLOAD_BYTES, SESSION_COOKIE,
+};
+use axum::response::IntoResponse as _;
+use serde::Deserialize;
 
 #[derive(Deserialize)]
-pub struct ClearBoardFaviconForm {
+/// Form fields accepted by the clear board favicon request.
+pub(crate) struct ClearBoardFaviconForm {
+    /// The board identifier.
     board_id: i64,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-pub async fn clear_board_favicon_override(
+/// Handles the clear board favicon override request.
+pub(crate) async fn clear_board_favicon_override(
     State(state): State<AppState>,
     jar: CookieJar,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<ClearBoardFaviconForm>,
 ) -> Result<Response> {
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let board_short = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             let board_short: String = conn.query_row(
                 "SELECT short_name FROM boards WHERE id = ?1",
                 rusqlite::params![form.board_id],
@@ -37,7 +46,7 @@ pub async fn clear_board_favicon_override(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok(super::admin_panel_redirect_anchor_open(
+    Ok(admin_panel_redirect_anchor_open(
         &format!("Board /{board_short}/ favicon override cleared."),
         &format!("board-appearance-{board_short}"),
         "board-banners",
@@ -45,24 +54,28 @@ pub async fn clear_board_favicon_override(
     .into_response())
 }
 
-pub async fn update_site_favicon(
+/// Handles the update site favicon request.
+pub(crate) async fn update_site_favicon(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     mut multipart: Multipart,
 ) -> Result<Response> {
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_same_origin_request(&headers, Some(peer))?;
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_same_origin_request(&headers, Some(peer))?;
 
     let mut csrf = None;
     let mut favicon_bytes: Option<Vec<u8>> = None;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::BadRequest(e.to_string()))?
-    {
+    loop {
+        let next_field = multipart
+            .next_field()
+            .await
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        let Some(field) = next_field else {
+            break;
+        };
         match field.name() {
             Some("_csrf") => csrf = Some(read_text_field(field).await?),
             Some("favicon") => {
@@ -75,7 +88,7 @@ pub async fn update_site_favicon(
         }
     }
 
-    super::check_admin_csrf_jar(&jar, csrf.as_deref())?;
+    check_admin_csrf_jar(&jar, csrf.as_deref())?;
     let favicon_bytes =
         favicon_bytes.ok_or_else(|| AppError::BadRequest("No favicon file uploaded.".into()))?;
 
@@ -83,7 +96,7 @@ pub async fn update_site_favicon(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             crate::favicon::write_favicon_set(
                 crate::favicon::FaviconScope::Global,
                 &favicon_bytes,
@@ -95,12 +108,10 @@ pub async fn update_site_favicon(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
     match favicon_result {
-        Ok(()) => Ok(super::admin_panel_redirect_anchor(
-            "Global favicon updated.",
-            "site-settings",
-        )
-        .into_response()),
-        Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor(
+        Ok(()) => Ok(
+            admin_panel_redirect_anchor("Global favicon updated.", "site-settings").into_response(),
+        ),
+        Err(AppError::Internal(error)) => Ok(admin_panel_error_redirect_anchor(
             &format_favicon_upload_error(&error),
             "site-settings",
         )
@@ -109,25 +120,29 @@ pub async fn update_site_favicon(
     }
 }
 
-pub async fn update_board_favicon(
+/// Handles the update board favicon request.
+pub(crate) async fn update_board_favicon(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     mut multipart: Multipart,
 ) -> Result<Response> {
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_same_origin_request(&headers, Some(peer))?;
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_same_origin_request(&headers, Some(peer))?;
 
     let mut csrf = None;
     let mut board_id = None;
     let mut favicon_bytes: Option<Vec<u8>> = None;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::BadRequest(e.to_string()))?
-    {
+    loop {
+        let next_field = multipart
+            .next_field()
+            .await
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        let Some(field) = next_field else {
+            break;
+        };
         match field.name() {
             Some("_csrf") => csrf = Some(read_text_field(field).await?),
             Some("board_id") => {
@@ -143,7 +158,7 @@ pub async fn update_board_favicon(
         }
     }
 
-    super::check_admin_csrf_jar(&jar, csrf.as_deref())?;
+    check_admin_csrf_jar(&jar, csrf.as_deref())?;
     let board_id = board_id.ok_or_else(|| AppError::BadRequest("Missing board id.".into()))?;
     let favicon_bytes =
         favicon_bytes.ok_or_else(|| AppError::BadRequest("No favicon file uploaded.".into()))?;
@@ -152,7 +167,7 @@ pub async fn update_board_favicon(
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             let board_short: String = conn.query_row(
                 "SELECT short_name FROM boards WHERE id = ?1",
                 rusqlite::params![board_id],
@@ -169,13 +184,13 @@ pub async fn update_board_favicon(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
     match favicon_result {
-        Ok(board_short) => Ok(super::admin_panel_redirect_anchor_open(
+        Ok(board_short) => Ok(admin_panel_redirect_anchor_open(
             &format!("Board /{board_short}/ favicon updated."),
             &format!("board-appearance-{board_short}"),
             "board-banners",
         )
         .into_response()),
-        Err(AppError::Internal(error)) => Ok(super::admin_panel_error_redirect_anchor(
+        Err(AppError::Internal(error)) => Ok(admin_panel_error_redirect_anchor(
             &format_favicon_upload_error(&error),
             "site-settings",
         )

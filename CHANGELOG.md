@@ -2,6 +2,68 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## RustChan 1.4.0
+
+### Added
+
+- Added an explicit `--data-dir` option with fail-closed validation for absolute paths, root directories, parent traversal, and symlink-resolved locations.
+- Added durable ChanNet reply idempotency through optional stable message IDs and a transactional replay ledger.
+
+### Improved
+
+- Streamlined user preferences so changes save immediately without a redundant submit control, added clear save status, and provided equivalent immediate-action controls when JavaScript is disabled.
+- Moved the public admin-login entry point from the site header to a discreet accessible footer link while preserving the existing `/admin` route and authentication flow.
+- Refreshed the setup wizard with responsive step cards, clearer field guidance and validation summaries, a more structured review page, and polished authenticated setup-reopen messaging.
+- Enlarged board banners and admin previews from `468x60` to `585x75` display size while preserving the supported aspect ratio, responsive scaling, and existing upload pipeline.
+- Improved background-job reliability under database pressure by retrying completion persistence for the same claimed job, applying media and terminal-state updates atomically, and reconciling completed, stale, failed, and retryable work correctly during startup recovery.
+- Reduced overload stalls with a bounded database-pool acquisition timeout and consistent short-retry behavior for transient SQLite and pool exhaustion.
+- Improved server lifecycle handling by supervising the main HTTP, HTTPS, ACME, redirect, ChanNet, and Tor-backend listeners together and shutting peer listeners down when one exits unexpectedly.
+- Improved ChanNet validation and interoperability with a legal default body envelope, Unicode scalar-value character limits, consistent JSON errors for oversized imports, and explicit exact-boundary handling.
+- Refreshed all safely compatible direct and transitive Rust dependencies for Rust 1.91, including Tokio `1.53.1`, Hyper `1.11.0`, Tower HTTP `0.7.0`, Rustls `0.23.43`, Serde `1.0.229`, Clap `4.6.4`, UUID `1.24.0`, and `time` `0.3.54`; retained `rusqlite` `0.39` and `r2d2_sqlite` `0.34` as the newest pair compatible with Arti's SQLite constraint.
+- Standardized Rustls, Tokio Rustls, and Rustls ACME on the Ring cryptography provider while preserving TLS 1.2, logging, ACME support, and ACME root certificates, eliminating the unused AWS-LC build toolchain from the dependency graph.
+- Updated self-signed certificate validity handling for `x509-cert` `0.3.0` and adopted Tower HTTP `0.7.0` compression negotiation, including a `406 Not Acceptable` response when a client rejects every supported content coding.
+
+### Fixed
+
+- Fixed concurrent public thread and reply submissions reusing the same submission token so the token lookup, post creation, reply-counter update, pending filesystem operation, and canonical token mapping are committed atomically; concurrent and sequential replays now resolve to the same post without duplicate content, consumed tokens after rollback, or orphaned media.
+- Fixed admin job status semantics so a healthy idle queue reports `OK` and `idle — ready`, while warnings are reserved for failed or blocked work.
+- Fixed public preference cookies on plain-HTTP onion requests so their `Secure` attribute follows the actual request transport and preferences remain usable over Tor.
+- Fixed upgrades with native TLS enabled so they no longer force HTTPS unexpectedly; HTTPS-only access is now an explicit opt-in through `[tls].require_https`.
+- Fixed direct HTTPS session and CSRF cookies so they remain `Secure` independently of trusted-proxy compatibility settings.
+- Fixed destructive saved-backup operations so delete, full restore, board restore, and board extraction all honor the shared maintenance gate and cannot race active maintenance work.
+- Fixed ChanNet reply replays inserting duplicate posts and prevented view-password-protected boards from being exposed through selective exports.
+- Fixed database-busy `503 Service Unavailable` responses so they include a bounded `Retry-After` header.
+- Fixed `--help` and `--version` so informational CLI invocations do not initialize configuration or mutate the filesystem.
+- Fixed Linux service setup instructions and runtime data placement so an unprivileged systemd service uses its configured writable data directory.
+- Fixed Windows GNU target warnings caused by imports that were not guarded by the same target configuration as their call sites.
+
+### Security
+
+- Rejects requests containing `Transfer-Encoding`, including ambiguous `Transfer-Encoding` plus `Content-Length` framing, at the outer HTTP boundary before they can reach application handlers.
+- Added conservative HTTP header limits of 32 KiB per value and 64 KiB for the parser/aggregate boundary across public and internal listeners.
+- Corrected dependency auditing so CI scans `Cargo.lock` and verifies that the resolved dependency graph is non-empty instead of treating the audit policy file as a lockfile.
+- Upgraded all 38 Arti/Tor crates to `0.44.0`, explicitly enabled its now-default stable congestion control, and incorporated the medium-severity TROVE-2026-24 and TROVE-2026-27 denial-of-service fixes; this raises the project MSRV to Rust 1.91.
+- Upgraded the Arti/Tor stack to `0.45.0`, retaining the Rustls-only TLS configuration and explicit stable congestion-control feature.
+- Updated `anyhow` to `1.0.104` and `memmap2` to `0.9.11` to resolve denied unsoundness advisories, and updated `getset` to remove the unmaintained, future-incompatible `proc-macro-error2` dependency.
+- Removed the yanked `spin` `0.9.8` release while refreshing the transitive graph; the resulting lockfile contains no yanked, pre-release, or non-registry dependencies.
+
+### Documentation
+
+- Added RustChan-specific community standards, contribution and support guidance,
+  a security disclosure policy, pull request guidance, and structured GitHub
+  issue forms with privacy-conscious reporting requirements.
+- Corrected HTTPS documentation to state that TLS is disabled by default and clarified the distinction between self-signed certificate support and automatic HTTPS enablement.
+- Updated deployment documentation for the explicit writable data-directory workflow.
+
+### Internal
+
+- Added deterministic submission-token race regressions covering shared and distinct tokens, sequential reuse, rollback and corrected retry behavior, staged-media cleanup, canonical redirects, and SQLite integrity checks across fresh disposable databases; documented the canonical replay helper for strict Quality lint compliance.
+- Restored warning-clean strict Clippy coverage on the current Rust toolchain, the Rust 1.91 MSRV, and supported cross-compilation targets.
+- Reduced the resolved dependency graph from 666 to 653 packages, removed stale duplicate exceptions from the dependency-audit policy, and corrected the documented rationale for Arti's RSA advisory exception.
+- Added deterministic offline regressions for Arti state, cache, and native-keystore initialization, plus focused coverage for certificate validity accessors and compression negotiation.
+- Replaced equivalent minute and hour duration calculations with Rust 1.91's dedicated constructors to remain warning-clean under current strict Clippy without changing timing behavior.
+- Kept local browser-testing and Node/Playwright artifacts excluded from version control so they do not add repository or release-package bloat.
+
 ## RustChan 1.3.0
 
 ### Added

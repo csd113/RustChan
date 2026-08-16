@@ -1,44 +1,80 @@
-// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
-#![allow(clippy::wildcard_imports)]
-
-use super::*;
+use super::{
+    admin_panel_redirect_anchor_open, db, hash_password, require_admin_post_origin_and_csrf,
+    require_admin_session_sid, AppError, AppState, BoardAccessMode, BoardBannerMode, CookieJar,
+    Form, HeaderMap, Response, Result, State, CONFIG, SESSION_COOKIE,
+};
+use axum::response::IntoResponse as _;
+use serde::Deserialize;
 
 #[derive(Deserialize)]
-pub struct BoardSettingsForm {
+/// Form fields accepted by the board settings request.
+pub(crate) struct BoardSettingsForm {
+    /// The board identifier.
     board_id: i64,
+    /// The name.
     name: String,
+    /// The description.
     description: String,
+    /// The optional default theme.
     default_theme: Option<String>,
+    /// The optional bump limit.
     bump_limit: Option<String>,
+    /// The optional max threads.
     max_threads: Option<String>,
+    /// The optional max archived threads.
     max_archived_threads: Option<String>,
+    /// The optional NSFW.
     nsfw: Option<String>,
+    /// The optional allow images.
     allow_images: Option<String>,
+    /// The optional allow video.
     allow_video: Option<String>,
+    /// The optional allow audio.
     allow_audio: Option<String>,
+    /// The optional max image size MB.
     max_image_size_mb: Option<String>,
+    /// The optional max video size MB.
     max_video_size_mb: Option<String>,
+    /// The optional max audio size MB.
     max_audio_size_mb: Option<String>,
+    /// The optional max PDF size MB.
     max_pdf_size_mb: Option<String>,
+    /// The optional allow PDF.
     allow_pdf: Option<String>,
+    /// The optional allow any files.
     allow_any_files: Option<String>,
+    /// The optional allow tripcodes.
     allow_tripcodes: Option<String>,
+    /// The optional allow editing.
     allow_editing: Option<String>,
+    /// The optional allow self delete.
     allow_self_delete: Option<String>,
+    /// The optional allow archive.
     allow_archive: Option<String>,
+    /// The optional allow video embeds.
     allow_video_embeds: Option<String>,
+    /// The optional allow captcha.
     allow_captcha: Option<String>,
+    /// The show poster identifiers.
     show_poster_ids: Option<String>,
+    /// The optional collapse greentext.
     collapse_greentext: Option<String>,
+    /// The post cooldown duration in seconds.
     post_cooldown_secs: Option<String>,
+    /// The optional access mode.
     access_mode: Option<String>,
+    /// The optional access password.
     access_password: Option<String>,
+    /// The optional clear access password.
     clear_access_password: Option<String>,
+    /// The optional banner mode.
     banner_mode: Option<String>,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
+/// Parses board upload limit bytes.
 fn parse_board_upload_limit_bytes(raw_value: Option<&str>, fallback_bytes: i64) -> Result<i64> {
     const MIB: i64 = 1024 * 1024;
     // Deliberate site maximum for each per-board media cap. Aggregate public
@@ -71,6 +107,7 @@ fn parse_board_upload_limit_bytes(raw_value: Option<&str>, fallback_bytes: i64) 
         .ok_or_else(|| AppError::BadRequest("Board upload size limit is too large.".into()))
 }
 
+/// Resolves board access password hash.
 fn resolve_board_access_password_hash(
     access_mode: BoardAccessMode,
     existing_password_hash: String,
@@ -102,15 +139,20 @@ fn resolve_board_access_password_hash(
     Ok(access_password_hash)
 }
 
-pub async fn update_board_settings(
+#[expect(
+    clippy::too_many_lines,
+    reason = "cross-field board validation and the atomic settings update share one request boundary"
+)]
+/// Handles the update board settings request.
+pub(crate) async fn update_board_settings(
     State(state): State<AppState>,
     jar: CookieJar,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<BoardSettingsForm>,
 ) -> Result<Response> {
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     let bump_limit = form
         .bump_limit
@@ -157,7 +199,7 @@ pub async fn update_board_settings(
         let pool = state.db.clone();
         move || -> Result<String> {
             let mut conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             let board_short: String = conn.query_row(
                 "SELECT short_name FROM boards WHERE id = ?1",
                 rusqlite::params![board_id],
@@ -250,10 +292,8 @@ pub async fn update_board_settings(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     let board_anchor = format!("board-{board_short}");
-    Ok(super::admin_panel_redirect_anchor_open(
-        "Board settings saved.",
-        &board_anchor,
-        &board_anchor,
+    Ok(
+        admin_panel_redirect_anchor_open("Board settings saved.", &board_anchor, &board_anchor)
+            .into_response(),
     )
-    .into_response())
 }

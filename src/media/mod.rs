@@ -1,13 +1,62 @@
 // Media processing pipeline helpers.
 
+/// Uploaded-image format conversion.
 pub mod convert;
+/// EXIF orientation extraction and correction.
 pub mod exif;
+/// Bounded `FFmpeg` and `FFprobe` subprocess helpers.
 pub mod ffmpeg;
+pub mod process;
+/// Active-media size pruning.
 pub mod prune;
+/// Managed-media reference auditing and conservative orphan reconciliation.
+pub mod reconcile;
+/// Image, video, audio, and PDF thumbnail generation.
 pub mod thumbnail;
 
 use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+static THUMBNAIL_FAILURE_TEST_MODE: std::sync::RwLock<Option<TestThumbnailFailure>> =
+    std::sync::RwLock::new(None);
+#[cfg(test)]
+static THUMBNAIL_FAILURE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TestThumbnailFailure {
+    OutputCreation,
+    Encoder,
+    TempRename,
+    InvalidDerivedOutput,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct ThumbnailFailureTestGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for ThumbnailFailureTestGuard {
+    fn drop(&mut self) {
+        *THUMBNAIL_FAILURE_TEST_MODE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn override_thumbnail_failure(mode: TestThumbnailFailure) -> ThumbnailFailureTestGuard {
+    let guard = THUMBNAIL_FAILURE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *THUMBNAIL_FAILURE_TEST_MODE
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(mode);
+    ThumbnailFailureTestGuard { _lock: guard }
+}
 
 // ─── ProcessedMedia ───────────────────────────────────────────────────────────
 
@@ -19,7 +68,11 @@ pub struct ProcessedMedia {
     /// Absolute path to the (possibly converted) file on disk.
     pub file_path: PathBuf,
     /// Absolute path to the generated thumbnail (WebP) or SVG placeholder.
-    pub thumbnail_path: PathBuf,
+    ///
+    /// `None` means thumbnail generation failed after the original was
+    /// processed successfully. Callers must not persist an expected path in
+    /// that case.
+    pub thumbnail_path: Option<PathBuf>,
     /// MIME type of the final stored file.  May differ from the uploaded
     /// MIME when conversion changes the format (e.g. `image/gif` → `video/webm`).
     pub mime_type: String,
@@ -153,31 +206,73 @@ impl MediaProcessor {
         );
 
         // ── Step 2: Generate thumbnail ────────────────────────────────────
-        let thumb_path = thumbnail::thumbnail_output_path(
-            thumb_dir,
-            file_stem,
-            conv.final_mime,
-            self.ffmpeg_available,
-            self.ffmpeg_webp_available,
-        );
-
         // generate_thumbnail returns the actual path written, which may differ
         // from thumb_path when a video thumbnail falls back to an SVG placeholder
         // (the pre-selected .webp extension would mismatch the SVG content).
-        let actual_thumb_path = match self.generate_thumbnail(
-            &conv.final_path,
-            conv.final_mime,
-            thumb_dir,
-            file_stem,
-            thumb_max,
-        ) {
-            Ok(p) => p,
+        let generated_thumbnail = {
+            #[cfg(test)]
+            {
+                let mode = *THUMBNAIL_FAILURE_TEST_MODE
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match mode {
+                    Some(TestThumbnailFailure::OutputCreation) => Err(anyhow::anyhow!(
+                        "injected thumbnail output creation failure"
+                    )),
+                    Some(TestThumbnailFailure::Encoder) => {
+                        Err(anyhow::anyhow!("injected thumbnail encoder failure"))
+                    }
+                    Some(TestThumbnailFailure::TempRename) => Err(anyhow::anyhow!(
+                        "injected thumbnail temporary rename failure"
+                    )),
+                    Some(TestThumbnailFailure::InvalidDerivedOutput) => {
+                        Ok(thumbnail::thumbnail_output_path(
+                            thumb_dir,
+                            file_stem,
+                            conv.final_mime,
+                            self.ffmpeg_available,
+                            self.ffmpeg_webp_available,
+                        ))
+                    }
+                    None => self.generate_thumbnail(
+                        &conv.final_path,
+                        conv.final_mime,
+                        thumb_dir,
+                        file_stem,
+                        thumb_max,
+                    ),
+                }
+            }
+            #[cfg(not(test))]
+            self.generate_thumbnail(
+                &conv.final_path,
+                conv.final_mime,
+                thumb_dir,
+                file_stem,
+                thumb_max,
+            )
+        };
+        let actual_thumb_path = match generated_thumbnail {
+            Ok(path)
+                if std::fs::symlink_metadata(&path)
+                    .is_ok_and(|metadata| metadata.file_type().is_file()) =>
+            {
+                Some(path)
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    media_mime = conv.final_mime,
+                    "thumbnail generator returned no regular output; preserving original without a thumbnail"
+                );
+                None
+            }
             Err(e) => {
-                // Thumbnail failure must never abort an upload.  Log and fall
-                // back to the pre-computed path (the thumbnail will be missing,
-                // but the upload still succeeds).
-                tracing::warn!("thumbnail generation failed: {e}");
-                thumb_path
+                tracing::warn!(
+                    error = %e,
+                    media_mime = conv.final_mime,
+                    "thumbnail generation failed; preserving original without a thumbnail"
+                );
+                None
             }
         };
 

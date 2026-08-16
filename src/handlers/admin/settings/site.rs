@@ -1,11 +1,16 @@
-// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
-#![allow(clippy::wildcard_imports)]
-
-use super::*;
+use super::{
+    admin_panel_redirect_anchor_open, checkbox_is_on, db, require_admin_post_origin_and_csrf,
+    require_admin_session_sid, AppError, AppState, CookieJar, Form, HeaderMap, Redirect, Response,
+    Result, State, SESSION_COOKIE,
+};
+use axum::response::IntoResponse as _;
+use serde::Deserialize;
 
 #[derive(Deserialize)]
-pub struct SiteSettingsForm {
+/// Form fields accepted by the site settings request.
+pub(crate) struct SiteSettingsForm {
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
     /// Custom site name (replaces [ `RustChan` ] on home page and footer).
     pub site_name: Option<String>,
@@ -19,10 +24,13 @@ pub struct SiteSettingsForm {
     pub thread_new_reply_badges_enabled: Option<String>,
     /// Default theme served to first-time visitors.
     pub default_theme: Option<String>,
+    /// The optional banner rotation interval minutes.
     pub banner_rotation_interval_minutes: Option<String>,
+    /// Whether banner external links is enabled.
     pub banner_external_links_enabled: Option<String>,
 }
 
+/// Resolves a submitted checkbox while optionally preserving a missing value.
 fn resolved_checkbox_setting(
     field: Option<&str>,
     current: bool,
@@ -40,15 +48,24 @@ fn resolved_checkbox_setting(
     )
 }
 
-pub async fn update_site_settings(
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "site setting validation and persistence remain together to avoid partial updates"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "cross-field site validation and the atomic settings update share one request boundary"
+)]
+/// Handles the update site settings request.
+pub(crate) async fn update_site_settings(
     State(state): State<AppState>,
     jar: CookieJar,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<SiteSettingsForm>,
 ) -> Result<Response> {
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let is_banner_settings_only = form.site_name.is_none()
         && form.site_subtitle.is_none()
         && form.homepage_new_thread_badges_enabled.is_none()
@@ -71,7 +88,7 @@ pub async fn update_site_settings(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             let homepage_new_thread_badges_enabled = resolved_checkbox_setting(
                 form.homepage_new_thread_badges_enabled.as_deref(),
                 db::get_homepage_new_thread_badges_enabled(&conn),
@@ -188,7 +205,7 @@ pub async fn update_site_settings(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     if is_banner_settings_only {
-        Ok(super::admin_panel_redirect_anchor_open(
+        Ok(admin_panel_redirect_anchor_open(
             "Banner settings saved.",
             "board-banners",
             "board-banners",

@@ -8,14 +8,18 @@ use anyhow::{Context as _, Result};
 use rusqlite::{params, OptionalExtension as _};
 use std::collections::{HashMap, HashSet};
 
+/// Stable ordering for all boards across safe-for-work and adult groups.
 const BOARD_ORDER_SQL: &str = "nsfw ASC, display_order ASC, id ASC";
+/// Stable ordering within one board content-rating group.
 const BOARD_GROUP_ORDER_SQL: &str = "display_order ASC, id ASC";
+/// Shared projection used to decode a board without a table alias.
 const BOARD_SELECT_COLUMNS: &str = "id, display_order, short_name, name, description, nsfw, \
     max_threads, max_archived_threads, bump_limit, allow_images, allow_video, allow_audio, \
     max_image_size, max_video_size, max_audio_size, max_pdf_size, allow_pdf, allow_any_files, allow_tripcodes, \
     edit_window_secs, allow_editing, allow_self_delete, allow_archive, \
     allow_video_embeds, allow_captcha, show_poster_ids, collapse_greentext, \
     post_cooldown_secs, default_theme, banner_mode, access_mode, access_password_hash, created_at";
+/// Shared projection used to decode a board selected with alias `b`.
 const BOARD_SELECT_COLUMNS_WITH_ALIAS: &str = "b.id, b.display_order, b.short_name, b.name, \
     b.description, b.nsfw, b.max_threads, b.max_archived_threads, b.bump_limit, \
     b.allow_images, b.allow_video, b.allow_audio, b.max_image_size, b.max_video_size, b.max_audio_size, \
@@ -26,6 +30,7 @@ const BOARD_SELECT_COLUMNS_WITH_ALIAS: &str = "b.id, b.display_order, b.short_na
 
 // ─── Row mapper ───────────────────────────────────────────────────────────────
 
+/// Decode a board from the shared board-column projection.
 pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
     let short_name: String = row.get(2)?;
     let banner_mode_raw: String = row.get(29)?;
@@ -85,6 +90,7 @@ pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
     })
 }
 
+/// Compute the next display order within a content-rating group.
 fn next_board_display_order(
     conn: &rusqlite::Connection,
     nsfw: bool,
@@ -111,6 +117,7 @@ fn next_board_display_order(
     Ok(next)
 }
 
+/// Rewrite one content-rating group's display order into a contiguous sequence.
 fn normalize_board_group_order(
     conn: &rusqlite::Connection,
     nsfw: bool,
@@ -180,9 +187,13 @@ pub fn set_site_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> 
     Ok(())
 }
 
+/// Site-setting key controlling automatic media pruning.
 pub const MEDIA_AUTO_PRUNE_ENABLED_KEY: &str = "media_auto_prune_enabled";
+/// Site-setting key containing the active-media byte limit.
 pub const MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY: &str = "media_max_active_content_size_bytes";
 
+/// Return whether automatic media pruning is enabled.
+#[must_use]
 pub fn get_media_auto_prune_enabled(conn: &rusqlite::Connection) -> bool {
     parse_site_bool(
         get_site_setting(conn, MEDIA_AUTO_PRUNE_ENABLED_KEY)
@@ -192,6 +203,8 @@ pub fn get_media_auto_prune_enabled(conn: &rusqlite::Connection) -> bool {
     .unwrap_or(crate::config::CONFIG.initial_media_auto_prune_enabled)
 }
 
+/// Return the configured maximum active-media size in bytes.
+#[must_use]
 pub fn get_media_max_active_content_size_bytes(conn: &rusqlite::Connection) -> u64 {
     get_site_setting(conn, MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY)
         .ok()
@@ -226,6 +239,8 @@ pub fn get_site_name(conn: &rusqlite::Connection) -> String {
         .unwrap_or_else(|| crate::config::CONFIG.forum_name.clone())
 }
 
+/// Return the configured site subtitle or its default.
+#[must_use]
 pub fn get_site_subtitle(conn: &rusqlite::Connection) -> String {
     get_site_setting(conn, "site_subtitle")
         .unwrap_or_else(|error| {
@@ -246,6 +261,7 @@ pub fn get_default_user_theme(conn: &rusqlite::Connection) -> String {
         .unwrap_or_default()
 }
 
+/// Parse the accepted textual site-setting boolean forms.
 fn parse_site_bool(value: Option<String>) -> Option<bool> {
     let value = value?;
     let trimmed = value.trim();
@@ -256,6 +272,7 @@ fn parse_site_bool(value: Option<String>) -> Option<bool> {
     }
 }
 
+/// Read a boolean setting, falling back through its legacy key and a default.
 fn get_site_bool_with_legacy_fallback(
     conn: &rusqlite::Connection,
     key: &str,
@@ -280,6 +297,8 @@ fn get_site_bool_with_legacy_fallback(
     .unwrap_or(default)
 }
 
+/// Return whether new-thread badges are enabled on the homepage.
+#[must_use]
 pub fn get_homepage_new_thread_badges_enabled(conn: &rusqlite::Connection) -> bool {
     get_site_bool_with_legacy_fallback(
         conn,
@@ -289,6 +308,8 @@ pub fn get_homepage_new_thread_badges_enabled(conn: &rusqlite::Connection) -> bo
     )
 }
 
+/// Return whether new-reply badges are enabled on the homepage.
+#[must_use]
 pub fn get_homepage_new_reply_badges_enabled(conn: &rusqlite::Connection) -> bool {
     get_site_bool_with_legacy_fallback(
         conn,
@@ -298,6 +319,8 @@ pub fn get_homepage_new_reply_badges_enabled(conn: &rusqlite::Connection) -> boo
     )
 }
 
+/// Return whether new-reply badges are enabled on thread pages.
+#[must_use]
 pub fn get_thread_new_reply_badges_enabled(conn: &rusqlite::Connection) -> bool {
     get_site_bool_with_legacy_fallback(
         conn,
@@ -352,9 +375,13 @@ pub fn get_all_boards_with_stats(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Last-seen marker used to count newly created threads for one board.
 pub struct BoardActivityCountInput {
+    /// Board whose threads should be counted.
     pub board_id: i64,
+    /// Creation timestamp of the newest previously seen thread.
     pub seen_thread_created_at: i64,
+    /// Identifier used to break equal-timestamp ties.
     pub seen_thread_id: i64,
 }
 
@@ -425,8 +452,11 @@ pub fn count_new_threads_for_boards(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Last-seen marker used to count new replies for one thread.
 pub struct BoardReplyActivityCountInput {
+    /// Thread whose replies should be counted.
     pub thread_id: i64,
+    /// Reply count previously observed by the user.
     pub seen_reply_count: i64,
 }
 
@@ -549,9 +579,14 @@ pub fn create_board(
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-#[expect(clippy::fn_params_excessive_bools)]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the signature mirrors independent media toggles stored on a board"
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the signature mirrors data passed between the existing route and CLI layers"
+)]
 pub fn create_board_with_media_flags(
     conn: &rusqlite::Connection,
     short: &str,
@@ -662,11 +697,18 @@ pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Re
 ///
 /// # Errors
 /// Returns an error if the database operation fails or the board id is not found.
-#[expect(clippy::fn_params_excessive_bools)]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
-// Keeping the SQL branches inline makes the nsfw reorder/update behavior easier to verify in one place.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the signature mirrors independent boolean fields in the admin edit form"
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the signature mirrors the existing admin form and persisted board columns"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeping the SQL branches together makes the reorder transaction auditable"
+)]
 pub fn update_board_settings(
     conn: &mut rusqlite::Connection,
     id: i64,
@@ -855,7 +897,7 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<super::Delet
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin delete_board transaction")?;
 
-    let result: anyhow::Result<super::DeletePathsResult> = (|| {
+    let result: Result<super::DeletePathsResult> = (|| {
         let board_short: String = conn
             .query_row(
                 "SELECT short_name FROM boards WHERE id = ?1",
@@ -922,7 +964,7 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<super::Delet
             Ok(safe)
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(e)
         }
     }
@@ -1064,6 +1106,7 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
     .context("Failed to query site stats")
 }
 
+/// Read the column names currently present on an `SQLite` table.
 fn table_columns(conn: &rusqlite::Connection, table_name: &str) -> Result<HashSet<String>> {
     let mut stmt = conn
         .prepare(&format!("PRAGMA table_info({table_name})"))
@@ -1075,6 +1118,7 @@ fn table_columns(conn: &rusqlite::Connection, table_name: &str) -> Result<HashSe
     Ok(columns)
 }
 
+/// Read the column names currently present on the posts table.
 fn post_table_columns(conn: &rusqlite::Connection) -> Result<HashSet<String>> {
     table_columns(conn, "posts")
 }
@@ -1085,52 +1129,61 @@ mod tests {
         create_board, create_board_with_media_flags, delete_board, get_all_boards_with_stats,
         get_board_by_short, get_site_stats,
     };
+    use anyhow::{Context as _, Result};
     use rusqlite::Connection;
 
     #[test]
-    fn board_stats_use_live_thread_count_instead_of_board_timestamp() {
-        let pool = crate::db::init_test_pool().expect("init test pool");
-        let conn = pool.get().expect("get test connection");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn board_stats_use_live_thread_count_instead_of_board_timestamp() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
 
         conn.execute(
             "INSERT INTO boards (id, short_name, name, created_at)
              VALUES (1, 'test', 'Test', 1_700_000_000)",
             [],
-        )
-        .expect("insert board");
+        )?;
         conn.execute(
             "INSERT INTO threads (id, board_id, subject, archived) VALUES
              (1, 1, 'visible one', 0),
              (2, 1, 'visible two', 0),
              (3, 1, 'archived', 1)",
             [],
-        )
-        .expect("insert threads");
+        )?;
 
-        let stats = get_all_boards_with_stats(&conn).expect("load board stats");
+        let stats = get_all_boards_with_stats(&conn)?;
         let board_stats = stats
             .first()
-            .expect("board stats should include test board");
+            .context("board stats should include test board")?;
 
-        assert_eq!(stats.len(), 1);
-        assert_eq!(board_stats.thread_count, 2);
+        assert_eq!(stats.len(), 1, "exactly one board should be returned");
+        assert_eq!(
+            board_stats.thread_count, 2,
+            "only visible threads should be counted"
+        );
+        Ok(())
     }
 
     #[test]
-    fn site_stats_count_audio_primary_and_combo_uploads() {
-        let pool = crate::db::init_test_pool().expect("init test pool");
-        let conn = pool.get().expect("get test connection");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn site_stats_count_audio_primary_and_combo_uploads() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
 
         conn.execute(
             "INSERT INTO boards (id, short_name, name) VALUES (1, 'test', 'Test')",
             [],
-        )
-        .expect("insert board");
+        )?;
         conn.execute(
             "INSERT INTO threads (id, board_id, subject) VALUES (1, 1, 'test thread')",
             [],
-        )
-        .expect("insert thread");
+        )?;
 
         conn.execute(
             "INSERT INTO posts (
@@ -1142,8 +1195,7 @@ mod tests {
              (2, 1, 1, 'combo post', '<p>combo</p>', 'tok2', 0,
               'test/cover.png', 'cover.png', 4321, 'image/png', 'image')",
             [],
-        )
-        .expect("insert primary posts");
+        )?;
         conn.execute(
             "UPDATE posts
              SET audio_file_path = 'test/track.flac',
@@ -1152,30 +1204,35 @@ mod tests {
                  audio_mime_type = 'audio/flac'
              WHERE id = 2",
             [],
-        )
-        .expect("add combo audio");
+        )?;
 
-        let stats = get_site_stats(&conn).expect("load stats");
-        assert_eq!(stats.total_audio, 2);
+        let stats = get_site_stats(&conn)?;
+        assert_eq!(
+            stats.total_audio, 2,
+            "primary and companion audio should both be counted"
+        );
+        Ok(())
     }
 
     #[test]
-    fn site_stats_active_bytes_exclude_archived_thread_media() {
-        let pool = crate::db::init_test_pool().expect("init test pool");
-        let conn = pool.get().expect("get test connection");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn site_stats_active_bytes_exclude_archived_thread_media() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
 
         conn.execute(
             "INSERT INTO boards (id, short_name, name) VALUES (1, 'test', 'Test')",
             [],
-        )
-        .expect("insert board");
+        )?;
         conn.execute(
             "INSERT INTO threads (id, board_id, subject, archived) VALUES
              (1, 1, 'live thread', 0),
              (2, 1, 'archived thread', 1)",
             [],
-        )
-        .expect("insert threads");
+        )?;
         conn.execute(
             "INSERT INTO posts (
                  id, thread_id, board_id, body, body_html, deletion_token, is_op,
@@ -1184,16 +1241,23 @@ mod tests {
              (1, 1, 1, 'live', '<p>live</p>', 'tok1', 0, 'live.webp', 'live.webp', 100),
              (2, 2, 1, 'archived', '<p>archived</p>', 'tok2', 0, 'archived.webp', 'archived.webp', 900)",
             [],
-        )
-        .expect("insert posts");
+        )?;
 
-        let stats = get_site_stats(&conn).expect("load stats");
-        assert_eq!(stats.active_bytes, 100);
+        let stats = get_site_stats(&conn)?;
+        assert_eq!(
+            stats.active_bytes, 100,
+            "archived-thread media should not contribute active bytes"
+        );
+        Ok(())
     }
 
     #[test]
-    fn site_stats_fall_back_when_audio_columns_are_missing() {
-        let conn = Connection::open_in_memory().expect("open in-memory db");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn site_stats_fall_back_when_audio_columns_are_missing() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
         conn.execute_batch(
             "CREATE TABLE posts (
                 id INTEGER PRIMARY KEY,
@@ -1204,21 +1268,37 @@ mod tests {
             INSERT INTO posts (id, file_path, file_size, mime_type) VALUES
                 (1, 'a.webp', 123, 'image/webp'),
                 (2, 'b.mp3', 456, 'audio/mpeg');",
-        )
-        .expect("seed posts");
+        )?;
 
-        let stats = get_site_stats(&conn).expect("load stats");
-        assert_eq!(stats.total_posts, 2);
-        assert_eq!(stats.total_images, 0);
-        assert_eq!(stats.total_videos, 0);
-        assert_eq!(stats.total_audio, 1);
-        assert_eq!(stats.active_bytes, 579);
+        let stats = get_site_stats(&conn)?;
+        assert_eq!(stats.total_posts, 2, "both legacy posts should be counted");
+        assert_eq!(
+            stats.total_images, 0,
+            "legacy schema should use the conservative image fallback"
+        );
+        assert_eq!(
+            stats.total_videos, 0,
+            "legacy schema should use the conservative video fallback"
+        );
+        assert_eq!(
+            stats.total_audio, 1,
+            "primary audio should still be identified by MIME type"
+        );
+        assert_eq!(
+            stats.active_bytes, 579,
+            "all primary-media bytes should remain countable"
+        );
+        Ok(())
     }
 
     #[test]
-    fn create_board_with_media_flags_persists_audio_toggle() {
-        let pool = crate::db::init_test_pool().expect("init test pool");
-        let conn = pool.get().expect("get test connection");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn create_board_with_media_flags_persists_audio_toggle() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
 
         create_board_with_media_flags(
             &conn,
@@ -1229,95 +1309,121 @@ mod tests {
             true,
             true,
             true,
-        )
-        .expect("create board");
+        )?;
 
-        let board = get_board_by_short(&conn, "audio")
-            .expect("load board")
-            .expect("board exists");
-        assert!(board.allow_images);
-        assert!(board.allow_video);
-        assert!(board.allow_audio);
-        assert!(!board.allow_pdf);
+        let board = get_board_by_short(&conn, "audio")?.context("audio board should exist")?;
+        assert!(board.allow_images, "image uploads should be enabled");
+        assert!(board.allow_video, "video uploads should be enabled");
+        assert!(board.allow_audio, "audio uploads should be enabled");
+        assert!(!board.allow_pdf, "PDF uploads should retain their default");
         assert_eq!(
             board.max_pdf_size,
-            i64::try_from(crate::config::CONFIG.max_image_size).expect("pdf size fits in i64")
+            i64::try_from(crate::config::CONFIG.max_image_size)?,
+            "the default PDF limit should follow the image limit"
         );
-        assert!(board.allow_video_embeds);
-        assert!(board.show_poster_ids);
-        assert!(board.allow_editing);
-        assert!(board.allow_self_delete);
+        assert!(
+            board.allow_video_embeds,
+            "standard video-embed default should be enabled"
+        );
+        assert!(
+            board.show_poster_ids,
+            "standard poster-ID default should be enabled"
+        );
+        assert!(
+            board.allow_editing,
+            "standard editing default should be enabled"
+        );
+        assert!(
+            board.allow_self_delete,
+            "standard self-delete default should be enabled"
+        );
+        Ok(())
     }
 
     #[test]
-    fn create_board_uses_standardized_defaults() {
-        let pool = crate::db::init_test_pool().expect("init test pool");
-        let conn = pool.get().expect("get test connection");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn create_board_uses_standardized_defaults() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
 
-        create_board(&conn, "fresh", "Fresh", "", false).expect("create board");
+        create_board(&conn, "fresh", "Fresh", "", false)?;
 
-        let board = get_board_by_short(&conn, "fresh")
-            .expect("load board")
-            .expect("board exists");
+        let board = get_board_by_short(&conn, "fresh")?.context("fresh board should exist")?;
         assert_eq!(
             board.allow_audio,
-            crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_AUDIO
+            crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_AUDIO,
+            "audio default should match the shared fixture"
         );
         assert_eq!(
             board.allow_video_embeds,
-            crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_VIDEO_EMBEDS
+            crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_VIDEO_EMBEDS,
+            "video-embed default should match the shared fixture"
         );
         assert_eq!(
             board.show_poster_ids,
-            crate::test_fixtures::DEFAULT_NEW_BOARD_SHOW_POSTER_IDS
+            crate::test_fixtures::DEFAULT_NEW_BOARD_SHOW_POSTER_IDS,
+            "poster-ID default should match the shared fixture"
         );
         assert_eq!(
             board.allow_editing,
-            crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_EDITING
+            crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_EDITING,
+            "editing default should match the shared fixture"
         );
         assert_eq!(
             board.allow_self_delete,
-            crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_SELF_DELETE
+            crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_SELF_DELETE,
+            "self-delete default should match the shared fixture"
         );
         assert_eq!(
             board.max_image_size,
-            i64::try_from(crate::config::CONFIG.max_image_size).expect("image size fits in i64")
+            i64::try_from(crate::config::CONFIG.max_image_size)?,
+            "image limit should match configuration"
         );
         assert_eq!(
             board.max_video_size,
-            i64::try_from(crate::config::CONFIG.max_video_size).expect("video size fits in i64")
+            i64::try_from(crate::config::CONFIG.max_video_size)?,
+            "video limit should match configuration"
         );
         assert_eq!(
             board.max_audio_size,
-            i64::try_from(crate::config::CONFIG.max_audio_size).expect("audio size fits in i64")
+            i64::try_from(crate::config::CONFIG.max_audio_size)?,
+            "audio limit should match configuration"
         );
         assert_eq!(
             board.max_pdf_size,
-            i64::try_from(crate::config::CONFIG.max_image_size).expect("pdf size fits in i64")
+            i64::try_from(crate::config::CONFIG.max_image_size)?,
+            "PDF limit should match the configured image limit"
         );
+        Ok(())
     }
 
     #[test]
-    fn delete_board_records_durable_board_directory_cleanup() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn delete_board_records_durable_board_directory_cleanup() -> Result<()> {
         let _runtime_guard = crate::config::RUNTIME_LAYOUT_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let temp_dir = tempfile::tempdir()?;
         let upload_dir = temp_dir.path().join("uploads");
         let board_dir = upload_dir.join("gone");
-        std::fs::create_dir_all(board_dir.join("thumbs")).expect("create board dirs");
-        std::fs::write(board_dir.join("file.webp"), b"file").expect("write file");
-        std::fs::write(board_dir.join("thumbs/file.webp"), b"thumb").expect("write thumb");
-        std::fs::write(board_dir.join("orphan.bin"), b"orphan").expect("write orphan");
+        std::fs::create_dir_all(board_dir.join("thumbs"))?;
+        std::fs::write(board_dir.join("file.webp"), b"file")?;
+        std::fs::write(board_dir.join("thumbs/file.webp"), b"thumb")?;
+        std::fs::write(board_dir.join("orphan.bin"), b"orphan")?;
 
-        let pool = crate::db::init_test_pool().expect("init test pool");
-        let conn = pool.get().expect("get test connection");
-        let board_id = create_board(&conn, "gone", "Gone", "", false).expect("create board");
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        let board_id = create_board(&conn, "gone", "Gone", "", false)?;
         conn.execute(
             "INSERT INTO threads (id, board_id, subject) VALUES (1, ?1, 'delete me')",
             rusqlite::params![board_id],
-        )
-        .expect("insert thread");
+        )?;
         conn.execute(
             "INSERT INTO posts (
                  id, thread_id, board_id, body, body_html, deletion_token, is_op,
@@ -1326,32 +1432,48 @@ mod tests {
              (1, 1, ?1, 'body', '<p>body</p>', 'tok', 1,
               'gone/file.webp', 'file.webp', 4, 'gone/thumbs/file.webp')",
             rusqlite::params![board_id],
-        )
-        .expect("insert post");
+        )?;
 
-        let deleted = delete_board(&conn, board_id).expect("delete board");
-        assert_eq!(deleted.paths.len(), 2);
-        assert!(deleted.pending_fs_op_id.is_some());
+        let deleted = delete_board(&conn, board_id)?;
+        assert_eq!(
+            deleted.paths.len(),
+            2,
+            "both referenced media paths should be returned"
+        );
+        assert!(
+            deleted.pending_fs_op_id.is_some(),
+            "board deletion should enqueue durable cleanup"
+        );
         assert!(
             board_dir.exists(),
             "simulated crash window leaves directory for startup cleanup"
         );
 
-        let pending = crate::db::list_pending_fs_ops(&conn).expect("list pending ops");
-        assert_eq!(pending.len(), 1);
-        let pending_op = pending.first().expect("pending op");
+        let pending = crate::db::list_pending_fs_ops(&conn)?;
+        assert_eq!(pending.len(), 1, "one cleanup operation should be queued");
+        let pending_op = pending.first().context("cleanup operation should exist")?;
         let payload: crate::pending_fs::DeleteFilesPayload =
-            serde_json::from_str(&pending_op.payload_json).expect("pending payload");
-        assert_eq!(payload.dirs, vec!["gone".to_owned()]);
+            serde_json::from_str(&pending_op.payload_json)?;
+        assert_eq!(
+            payload.dirs,
+            vec!["gone".to_owned()],
+            "cleanup payload should include the board directory"
+        );
 
         crate::pending_fs::reconcile_pending_fs_ops(
             &pool,
-            upload_dir.to_str().expect("utf8 upload dir"),
-        )
-        .expect("startup cleanup");
-        assert!(!board_dir.exists());
-        assert!(crate::db::list_pending_fs_ops(&conn)
-            .expect("list pending ops")
-            .is_empty());
+            upload_dir
+                .to_str()
+                .context("temporary path should be UTF-8")?,
+        )?;
+        assert!(
+            !board_dir.exists(),
+            "startup reconciliation should remove the board directory"
+        );
+        assert!(
+            crate::db::list_pending_fs_ops(&conn)?.is_empty(),
+            "completed cleanup should be removed from the durable queue"
+        );
+        Ok(())
     }
 }

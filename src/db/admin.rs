@@ -9,25 +9,36 @@ use anyhow::{Context as _, Result};
 use rusqlite::{params, OptionalExtension as _};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Outcome of submitting a ban appeal.
 pub enum BanAppealSubmission {
+    /// A new appeal was recorded.
     Filed,
+    /// A recent appeal already exists.
     AlreadyFiled,
+    /// The submitting address is not currently banned.
     NotBanned,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Outcome of submitting a post report.
 pub enum ReportSubmission {
+    /// A new report was recorded.
     Filed,
+    /// The reporter already has an open report for the post.
     AlreadyFiled,
 }
 
 #[derive(Debug, Clone)]
+/// Result of one database health check.
 pub struct DbCheckResult {
+    /// Whether the check passed.
     pub ok: bool,
+    /// Human-readable check results.
     pub messages: Vec<String>,
 }
 
 impl DbCheckResult {
+    /// Join the check messages into an operator-facing status string.
     #[must_use]
     pub fn output(&self) -> String {
         if self.messages.is_empty() {
@@ -38,13 +49,18 @@ impl DbCheckResult {
 }
 
 #[derive(Debug, Clone)]
+/// Results of all database health checks at one point in time.
 pub struct DbHealthSnapshot {
+    /// Baseline-schema verification result.
     pub schema: DbCheckResult,
+    /// `SQLite` integrity-check result.
     pub integrity: DbCheckResult,
+    /// `SQLite` foreign-key-check result.
     pub foreign_keys: DbCheckResult,
 }
 
 impl DbHealthSnapshot {
+    /// Return whether every health check passed.
     #[must_use]
     pub const fn ok(&self) -> bool {
         self.schema.ok && self.integrity.ok && self.foreign_keys.ok
@@ -52,21 +68,34 @@ impl DbHealthSnapshot {
 }
 
 #[derive(Debug, Clone)]
+/// Verified backup created before a database repair attempt.
 pub struct DbRepairBackup {
+    /// Stable backup identifier.
     pub backup_id: String,
+    /// Backup format or scope label.
     pub backup_type: String,
+    /// Filesystem path containing the backup.
     pub backup_path: String,
+    /// Whether backup verification succeeded.
     pub verified: bool,
 }
 
 #[derive(Debug, Clone)]
+/// Operator-facing report for a database health or repair run.
 pub struct DbHealthReport {
+    /// Health snapshot captured before repair.
     pub before: DbHealthSnapshot,
+    /// Whether repair actions were attempted.
     pub repair_attempted: bool,
+    /// Verified pre-repair backup, when available.
     pub repair_backup: Option<DbRepairBackup>,
+    /// Backup failure that prevented repair, when applicable.
     pub repair_backup_error: Option<String>,
+    /// High-level outcome messages.
     pub repair_summary: Vec<String>,
+    /// Individual maintenance and repair actions.
     pub repair_steps: Vec<String>,
+    /// Health snapshot captured after repair, when repair ran.
     pub after: Option<DbHealthSnapshot>,
 }
 
@@ -355,6 +384,7 @@ pub fn remove_word_filter(conn: &rusqlite::Connection, id: i64) -> Result<()> {
 
 // ─── Reports ──────────────────────────────────────────────────────────────────
 
+/// Return whether an `SQLite` error represents the open-report uniqueness guard.
 fn is_open_report_unique_violation(error: &rusqlite::Error) -> bool {
     match error {
         rusqlite::Error::SqliteFailure(inner, message) => {
@@ -470,7 +500,10 @@ pub fn resolve_report(conn: &rusqlite::Connection, report_id: i64, admin_id: i64
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the audit-log row is intentionally written as one atomic record"
+)]
 pub fn log_mod_action(
     conn: &rusqlite::Connection,
     admin_id: i64,
@@ -581,7 +614,7 @@ pub fn file_ban_appeal(
             Ok(outcome)
         }
         Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(error)
         }
     }
@@ -640,7 +673,7 @@ pub fn accept_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64, ip_hash: &
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin accept-appeal transaction")?;
 
-    let result: anyhow::Result<()> = (|| {
+    let result: Result<()> = (|| {
         let n = conn
             .execute(
                 "UPDATE ban_appeals SET status='accepted' WHERE id=?1",
@@ -662,7 +695,7 @@ pub fn accept_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64, ip_hash: &
             Ok(())
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(e)
         }
     }
@@ -804,6 +837,7 @@ pub fn run_vacuum(conn: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
+/// Run `SQLite`'s full integrity check and collect every diagnostic row.
 fn integrity_check_status(conn: &rusqlite::Connection) -> DbCheckResult {
     let mut stmt = match conn.prepare("PRAGMA integrity_check") {
         Ok(stmt) => stmt,
@@ -847,6 +881,7 @@ fn integrity_check_status(conn: &rusqlite::Connection) -> DbCheckResult {
     DbCheckResult { ok, messages }
 }
 
+/// Run `SQLite`'s foreign-key check and collect every violation.
 fn foreign_key_check_status(conn: &rusqlite::Connection) -> DbCheckResult {
     let mut stmt = match conn.prepare("PRAGMA foreign_key_check") {
         Ok(stmt) => stmt,
@@ -901,6 +936,7 @@ fn foreign_key_check_status(conn: &rusqlite::Connection) -> DbCheckResult {
     }
 }
 
+/// Capture the current schema, integrity, and foreign-key health.
 fn db_health_snapshot(conn: &rusqlite::Connection) -> DbHealthSnapshot {
     DbHealthSnapshot {
         schema: schema_check_status(conn),
@@ -909,6 +945,7 @@ fn db_health_snapshot(conn: &rusqlite::Connection) -> DbHealthSnapshot {
     }
 }
 
+/// Verify the `RustChan` schema baseline as a health-check result.
 fn schema_check_status(conn: &rusqlite::Connection) -> DbCheckResult {
     match super::schema::verify_database_schema(conn) {
         Ok(()) => DbCheckResult {
@@ -928,6 +965,7 @@ fn schema_check_status(conn: &rusqlite::Connection) -> DbCheckResult {
     }
 }
 
+/// Recreate the full-text search table and its synchronization triggers.
 fn rebuild_posts_fts(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch(
         r"
@@ -958,6 +996,8 @@ fn rebuild_posts_fts(conn: &rusqlite::Connection) -> Result<()> {
     .context("Failed to recreate posts_fts search index")
 }
 
+/// Check database health without making repairs.
+#[must_use]
 pub fn check_db_health(conn: &rusqlite::Connection) -> DbHealthReport {
     let before = db_health_snapshot(conn);
     DbHealthReport {
@@ -971,6 +1011,8 @@ pub fn check_db_health(conn: &rusqlite::Connection) -> DbHealthReport {
     }
 }
 
+/// Attempt safe database maintenance and return before-and-after health.
+#[must_use]
 pub fn attempt_db_repair(
     conn: &rusqlite::Connection,
     repair_backup: Option<DbRepairBackup>,
@@ -1048,6 +1090,8 @@ pub fn attempt_db_repair(
     }
 }
 
+/// Build a report for a repair aborted because its safety backup failed.
+#[must_use]
 pub fn db_repair_aborted_for_backup_failure(
     conn: &rusqlite::Connection,
     backup_error: &str,
@@ -1073,46 +1117,95 @@ mod tests {
         get_posts_by_ip_hash, BanAppealSubmission, DbRepairBackup,
     };
     use crate::db::{create_board, create_thread_with_optional_poll, get_board_by_short, NewPost};
+    use anyhow::{Context as _, Result};
 
     #[test]
-    fn ban_appeal_submission_is_deduplicated_within_window() {
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("db connection");
-        crate::db::add_ban(&conn, "hash1", "reason", None).expect("add ban");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn ban_appeal_submission_is_deduplicated_within_window() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        crate::db::add_ban(&conn, "hash1", "reason", None)?;
 
-        let first = file_ban_appeal(&conn, "hash1", "please unban").expect("first appeal");
-        let second = file_ban_appeal(&conn, "hash1", "second try").expect("second appeal");
+        let first = file_ban_appeal(&conn, "hash1", "please unban")?;
+        let second = file_ban_appeal(&conn, "hash1", "second try")?;
 
-        assert_eq!(first, BanAppealSubmission::Filed);
-        assert_eq!(second, BanAppealSubmission::AlreadyFiled);
+        assert_eq!(
+            first,
+            BanAppealSubmission::Filed,
+            "the first active-ban appeal should be filed"
+        );
+        assert_eq!(
+            second,
+            BanAppealSubmission::AlreadyFiled,
+            "a second appeal in the window should be deduplicated"
+        );
+        Ok(())
     }
 
     #[test]
-    fn ban_appeal_submission_requires_active_ban() {
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("db connection");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn ban_appeal_submission_requires_active_ban() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
 
-        let result = file_ban_appeal(&conn, "hash2", "please unban").expect("appeal result");
-        assert_eq!(result, BanAppealSubmission::NotBanned);
+        let result = file_ban_appeal(&conn, "hash2", "please unban")?;
+        assert_eq!(
+            result,
+            BanAppealSubmission::NotBanned,
+            "unbanned addresses should not create appeals"
+        );
+        Ok(())
     }
 
     #[test]
-    fn db_health_check_reports_ok_for_clean_test_db() {
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("db connection");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn db_health_check_reports_ok_for_clean_test_db() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
 
         let report = check_db_health(&conn);
-        assert!(report.before.ok());
-        assert_eq!(report.before.integrity.output(), "ok");
-        assert_eq!(report.before.foreign_keys.output(), "ok");
-        assert!(!report.repair_attempted);
-        assert!(report.repair_summary.is_empty());
+        assert!(
+            report.before.ok(),
+            "a clean test database should be healthy"
+        );
+        assert_eq!(
+            report.before.integrity.output(),
+            "ok",
+            "integrity check should pass"
+        );
+        assert_eq!(
+            report.before.foreign_keys.output(),
+            "ok",
+            "foreign-key check should pass"
+        );
+        assert!(
+            !report.repair_attempted,
+            "a health check should not attempt repair"
+        );
+        assert!(
+            report.repair_summary.is_empty(),
+            "a health check should not create a repair summary"
+        );
+        Ok(())
     }
 
     #[test]
-    fn db_health_repair_noops_when_db_is_already_clean() {
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("db connection");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn db_health_repair_noops_when_db_is_already_clean() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
 
         let report = attempt_db_repair(
             &conn,
@@ -1124,45 +1217,74 @@ mod tests {
                 verified: true,
             }),
         );
-        assert!(report.before.ok());
+        assert!(report.before.ok(), "pre-repair health should pass");
         assert_eq!(
             report.after.as_ref().map(|after| after.integrity.output()),
-            Some("ok".to_owned())
+            Some("ok".to_owned()),
+            "post-maintenance integrity should pass"
         );
         assert_eq!(
             report.after.as_ref().map(super::DbHealthSnapshot::ok),
-            Some(true)
+            Some(true),
+            "post-maintenance health should pass"
         );
         assert_eq!(
             report
                 .repair_backup
                 .as_ref()
                 .map(|backup| backup.backup_id.as_str()),
-            Some("2026-05-06_1215_pre-repair-db_c81f20")
+            Some("2026-05-06_1215_pre-repair-db_c81f20"),
+            "repair report should retain its safety backup"
         );
-        assert!(report
-            .repair_summary
-            .iter()
-            .any(|line| line.contains("No corruption-specific fixes were required")));
+        assert!(
+            report
+                .repair_summary
+                .iter()
+                .any(|line| line.contains("No corruption-specific fixes were required")),
+            "a clean database should report that no corruption repair was needed"
+        );
+        Ok(())
     }
 
     #[test]
-    fn db_health_repair_aborts_when_backup_fails() {
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("db connection");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn db_health_repair_aborts_when_backup_fails() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
 
         let report = db_repair_aborted_for_backup_failure(&conn, "disk full");
 
-        assert!(!report.repair_attempted);
-        assert_eq!(report.repair_backup_error.as_deref(), Some("disk full"));
-        assert!(report.after.is_none());
-        assert!(report.repair_steps.is_empty());
+        assert!(
+            !report.repair_attempted,
+            "repair must not run without a safety backup"
+        );
+        assert_eq!(
+            report.repair_backup_error.as_deref(),
+            Some("disk full"),
+            "the backup failure should be retained"
+        );
+        assert!(
+            report.after.is_none(),
+            "an aborted repair should have no after snapshot"
+        );
+        assert!(
+            report.repair_steps.is_empty(),
+            "an aborted repair should run no steps"
+        );
+        Ok(())
     }
 
     #[test]
-    fn db_health_check_reports_foreign_key_violations() {
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("db connection");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn db_health_check_reports_foreign_key_violations() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
         conn.execute_batch(
             r"
             CREATE TABLE fk_health_parent(id INTEGER PRIMARY KEY);
@@ -1174,31 +1296,45 @@ mod tests {
             INSERT INTO fk_health_child(id, parent_id) VALUES (1, 999);
             PRAGMA foreign_keys = ON;
             ",
-        )
-        .expect("create fk violation");
+        )?;
 
         let report = check_db_health(&conn);
 
-        assert!(report.before.integrity.ok);
-        assert!(!report.before.foreign_keys.ok);
-        assert!(report
-            .before
-            .foreign_keys
-            .output()
-            .contains("fk_health_child"));
-        assert!(!report.before.ok());
+        assert!(
+            report.before.integrity.ok,
+            "the structural integrity check should still pass"
+        );
+        assert!(
+            !report.before.foreign_keys.ok,
+            "the foreign-key check should report the injected violation"
+        );
+        assert!(
+            report
+                .before
+                .foreign_keys
+                .output()
+                .contains("fk_health_child"),
+            "the violation should identify the child table"
+        );
+        assert!(
+            !report.before.ok(),
+            "a foreign-key violation should fail aggregate health"
+        );
+        Ok(())
     }
 
     #[test]
-    fn get_posts_by_ip_hash_maps_posts_with_media_processing_columns() {
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("db connection");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn get_posts_by_ip_hash_maps_posts_with_media_processing_columns() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
         let ip_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-        create_board(&conn, "test", "Test", "", false).expect("create board");
-        let board = get_board_by_short(&conn, "test")
-            .expect("load board")
-            .expect("board exists");
+        create_board(&conn, "test", "Test", "", false)?;
+        let board = get_board_by_short(&conn, "test")?.context("test board should exist")?;
         let post = NewPost {
             thread_id: 0,
             board_id: board.id,
@@ -1223,23 +1359,32 @@ mod tests {
         };
 
         let (_, post_id, _) =
-            create_thread_with_optional_poll(&conn, board.id, None, &post, "", None, None)
-                .expect("create thread");
+            create_thread_with_optional_poll(&conn, board.id, None, &post, "", None, None)?;
         crate::db::set_post_media_processing_state(
             &conn,
             post_id,
             Some("pending"),
             Some("transcoding"),
-        )
-        .expect("set media processing state");
+        )?;
 
-        let posts = get_posts_by_ip_hash(&conn, ip_hash, 25, 0).expect("load ip history");
-        let (post, board_short) = posts.first().expect("ip history entry");
+        let posts = get_posts_by_ip_hash(&conn, ip_hash, 25, 0)?;
+        let (post, board_short) = posts
+            .first()
+            .context("IP history should contain the post")?;
 
-        assert_eq!(posts.len(), 1);
-        assert_eq!(post.id, post_id);
-        assert_eq!(post.media_processing_state.as_deref(), Some("pending"));
-        assert_eq!(post.media_processing_error.as_deref(), Some("transcoding"));
-        assert_eq!(board_short, "test");
+        assert_eq!(posts.len(), 1, "exactly one post should match the IP hash");
+        assert_eq!(post.id, post_id, "the created post should be returned");
+        assert_eq!(
+            post.media_processing_state.as_deref(),
+            Some("pending"),
+            "media processing state should be decoded"
+        );
+        assert_eq!(
+            post.media_processing_error.as_deref(),
+            Some("transcoding"),
+            "media processing error should be decoded"
+        );
+        assert_eq!(board_short, "test", "the board slug should be included");
+        Ok(())
     }
 }

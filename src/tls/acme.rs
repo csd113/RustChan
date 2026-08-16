@@ -1,4 +1,4 @@
-//! src/tls/acme.rs
+//! ACME certificate provisioning and renewal.
 use crate::error::Result;
 use crate::{config::AcmeConfig, error::AppError};
 use rustls::ServerConfig;
@@ -31,7 +31,7 @@ use std::os::unix::fs::PermissionsExt as _;
 /// - [`validate_acme_config`] rejects the provided [`AcmeConfig`] (e.g.
 ///   empty or invalid domains, empty email string), or
 /// - the ACME cache directory cannot be created on disk.
-pub fn build_acme_acceptor(
+pub(super) fn build_acme_acceptor(
     cfg: &AcmeConfig,
     data_dir: &Path,
 ) -> Result<(Arc<AcmeAcceptor>, Arc<ServerConfig>)> {
@@ -106,7 +106,10 @@ pub fn build_acme_acceptor(
     // The `acceptor()` method is marked deprecated in favor of framework
     // helpers (e.g. `axum_acceptor`) or the high-level API, but it remains
     // the supported path for per-acceptor / manual rustls setups.
-    #[expect(deprecated)]
+    #[expect(
+        deprecated,
+        reason = "rustls-acme's low-level acceptor remains required by RustChan's manual server loop"
+    )]
     let acme_acceptor = Arc::new(state.acceptor());
 
     // Spawn the event loop. This task must stay alive for the lifetime of
@@ -129,6 +132,10 @@ pub fn build_acme_acceptor(
 ///
 /// The loop exits only when the underlying stream closes, which normally
 /// only happens when the process shuts down.
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "the ACME stream loop directly models all terminal and retryable event states"
+)]
 async fn run_acme_event_loop<EC, EA>(mut state: rustls_acme::AcmeState<EC, EA>, env_label: String)
 where
     EC: Debug + Send + 'static,
@@ -137,7 +144,8 @@ where
     use futures::StreamExt as _;
     tracing::info!("TLS/ACME: event loop started ({env_label})");
     loop {
-        match state.next().await {
+        let event = state.next().await;
+        match event {
             Some(Ok(event)) => {
                 tracing::info!("TLS/ACME [{env_label}]: {event:?}");
             }
@@ -193,10 +201,11 @@ fn validate_acme_config(cfg: &AcmeConfig) -> Result<()> {
 // Tests
 // ---------------------------------------------------------------------------
 #[cfg(test)]
+/// Validation tests for ACME configuration inputs.
 mod tests {
     use super::*;
-    use crate::config::AcmeConfig;
 
+    /// Builds a minimally valid ACME configuration.
     fn valid_cfg() -> AcmeConfig {
         AcmeConfig {
             enabled: true,
@@ -207,51 +216,79 @@ mod tests {
         }
     }
 
+    /// Rejects configurations without any domains.
     #[test]
     fn rejects_empty_domains() {
         let mut cfg = valid_cfg();
         cfg.domains = vec![];
-        assert!(validate_acme_config(&cfg).is_err());
+        assert!(
+            validate_acme_config(&cfg).is_err(),
+            "an empty domain list must be rejected"
+        );
     }
 
+    /// Rejects raw IP addresses as ACME identifiers.
     #[test]
     fn rejects_ip_address_domain() {
         let mut cfg = valid_cfg();
         cfg.domains = vec!["1.2.3.4".into()];
-        assert!(validate_acme_config(&cfg).is_err());
+        assert!(
+            validate_acme_config(&cfg).is_err(),
+            "ACME must reject raw IP addresses"
+        );
     }
 
+    /// Rejects hostnames that are not fully qualified.
     #[test]
     fn rejects_bare_hostname() {
         let mut cfg = valid_cfg();
         cfg.domains = vec!["localhost".into()];
-        assert!(validate_acme_config(&cfg).is_err());
+        assert!(
+            validate_acme_config(&cfg).is_err(),
+            "ACME must reject a bare hostname"
+        );
     }
 
+    /// Rejects an explicitly empty contact email.
     #[test]
     fn rejects_empty_email_string() {
         let mut cfg = valid_cfg();
         cfg.email = Some(String::new());
-        assert!(validate_acme_config(&cfg).is_err());
+        assert!(
+            validate_acme_config(&cfg).is_err(),
+            "ACME must reject an empty email address"
+        );
     }
 
+    /// Allows contact email to be omitted.
     #[test]
     fn accepts_none_email() {
         let mut cfg = valid_cfg();
         cfg.email = None;
         // None is allowed (just a warning at runtime)
-        assert!(validate_acme_config(&cfg).is_ok());
+        assert!(
+            validate_acme_config(&cfg).is_ok(),
+            "ACME must allow an omitted email address"
+        );
     }
 
+    /// Accepts the baseline valid configuration.
     #[test]
     fn accepts_valid_config() {
-        assert!(validate_acme_config(&valid_cfg()).is_ok());
+        assert!(
+            validate_acme_config(&valid_cfg()).is_ok(),
+            "baseline ACME configuration must be valid"
+        );
     }
 
+    /// Accepts multiple fully qualified domain names.
     #[test]
     fn accepts_multiple_domains() {
         let mut cfg = valid_cfg();
         cfg.domains = vec!["example.com".into(), "www.example.com".into()];
-        assert!(validate_acme_config(&cfg).is_ok());
+        assert!(
+            validate_acme_config(&cfg).is_ok(),
+            "ACME must allow multiple valid domains"
+        );
     }
 }

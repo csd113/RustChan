@@ -23,9 +23,9 @@ pub fn extract_video_embed(url: &str) -> Option<(&'static str, String)> {
     None
 }
 
+/// Extract a validated `YouTube` video identifier from a supported URL.
 fn extract_yt_id(url: &str) -> Option<String> {
-    if let Some(pos) = url.find("youtu.be/") {
-        let rest = &url[pos + 9..];
+    if let Some(rest) = suffix_after(url, "youtu.be/") {
         let id: String = rest.chars().take(11).collect();
         if id.len() == 11
             && id
@@ -35,8 +35,7 @@ fn extract_yt_id(url: &str) -> Option<String> {
             return Some(id);
         }
     }
-    if let Some(pos) = url.find("/shorts/") {
-        let rest = &url[pos + 8..];
+    if let Some(rest) = suffix_after(url, "/shorts/") {
         let id: String = rest.chars().take(11).collect();
         if id.len() == 11
             && id
@@ -46,8 +45,7 @@ fn extract_yt_id(url: &str) -> Option<String> {
             return Some(id);
         }
     }
-    if let Some(pos) = url.find("/embed/") {
-        let rest = &url[pos + 7..];
+    if let Some(rest) = suffix_after(url, "/embed/") {
         let id: String = rest.chars().take(11).collect();
         if id.len() == 11
             && id
@@ -60,10 +58,10 @@ fn extract_yt_id(url: &str) -> Option<String> {
     extract_yt_id_from_watch_param(url)
 }
 
+/// Extract the `v` parameter from a `YouTube` watch URL.
 fn extract_yt_id_from_watch_param(url: &str) -> Option<String> {
     for prefix in ["?v=", "&v="] {
-        if let Some(pos) = url.find(prefix) {
-            let rest = &url[pos + prefix.len()..];
+        if let Some(rest) = suffix_after(url, prefix) {
             let id: String = rest.chars().take(11).collect();
             if id.len() == 11
                 && id
@@ -77,9 +75,9 @@ fn extract_yt_id_from_watch_param(url: &str) -> Option<String> {
     None
 }
 
+/// Extract a validated `Streamable` video identifier from a supported URL.
 fn extract_streamable_id(url: &str) -> Option<String> {
-    if let Some(pos) = url.find("streamable.com/") {
-        let rest = &url[pos + 15..];
+    if let Some(rest) = suffix_after(url, "streamable.com/") {
         let code: String = rest
             .chars()
             .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
@@ -91,6 +89,13 @@ fn extract_streamable_id(url: &str) -> Option<String> {
     None
 }
 
+/// Returns the suffix after the first exact marker occurrence.
+fn suffix_after<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
+    let suffix_start = text.find(marker)?.checked_add(marker.len())?;
+    text.get(suffix_start..)
+}
+
+/// Maps a six-sided die value to its Unicode face.
 const fn d6_face(n: u32) -> char {
     match n {
         1 => '⚀',
@@ -103,8 +108,9 @@ const fn d6_face(n: u32) -> char {
     }
 }
 
+/// Roll a bounded dice expression with operating-system randomness.
 fn roll_dice(count: u32, sides: u32) -> (Vec<u32>, u32) {
-    let mut rolls = Vec::with_capacity(count as usize);
+    let mut rolls = Vec::new();
     let mut sum = 0u32;
     for _ in 0..count {
         let roll = (crate::utils::crypto::os_random_u32_or_exit("rolling dice markup") % sides) + 1;
@@ -114,9 +120,10 @@ fn roll_dice(count: u32, sides: u32) -> (Vec<u32>, u32) {
     (rolls, sum)
 }
 
+/// Replace validated dice expressions with a rendered roll result.
 pub(super) fn apply_dice(text: &str, re_dice: &regex::Regex) -> String {
     re_dice
-        .replace_all(text, |caps: &regex::Captures| {
+        .replace_all(text, |caps: &regex::Captures<'_>| {
             let count: u32 = caps[1].parse().unwrap_or(1).clamp(1, 20);
             let sides: u32 = caps[2].parse().unwrap_or(6).clamp(2, 999);
             let (rolls, sum) = roll_dice(count, sides);
@@ -145,6 +152,7 @@ pub(super) fn apply_dice(text: &str, re_dice: &regex::Regex) -> String {
         .into_owned()
 }
 
+/// Replace recognized emoji shortcodes outside protected markup.
 fn replace_emoji_shortcodes(text: &str) -> String {
     const CODES: &[(&str, &str)] = &[
         (":smile:", "😊"),
@@ -186,20 +194,27 @@ fn replace_emoji_shortcodes(text: &str) -> String {
     out
 }
 
+/// Apply emoji replacements only outside existing HTML tags.
 pub(super) fn apply_emoji(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
 
     while let Some(start) = rest.find('<') {
-        out.push_str(&replace_emoji_shortcodes(&rest[..start]));
+        let Some((before_tag, after_tag)) = rest.split_at_checked(start) else {
+            break;
+        };
+        out.push_str(&replace_emoji_shortcodes(before_tag));
 
-        let after_tag = &rest[start..];
         let Some(end) = after_tag.find('>') else {
             out.push_str(&replace_emoji_shortcodes(after_tag));
             return out;
         };
-        out.push_str(&after_tag[..=end]);
-        rest = &after_tag[end + 1..];
+        let Some((tag, after_tag)) = after_tag.split_at_checked(end + 1) else {
+            out.push_str(&replace_emoji_shortcodes(after_tag));
+            return out;
+        };
+        out.push_str(tag);
+        rest = after_tag;
     }
 
     out.push_str(&replace_emoji_shortcodes(rest));
@@ -214,7 +229,8 @@ mod tests {
     fn extracts_youtube_embed() {
         assert_eq!(
             extract_video_embed("https://youtu.be/dQw4w9WgXcQ?t=43"),
-            Some(("youtube", "dQw4w9WgXcQ".to_owned()))
+            Some(("youtube", "dQw4w9WgXcQ".to_owned())),
+            "supported YouTube short URL was not recognized"
         );
     }
 

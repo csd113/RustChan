@@ -2,11 +2,12 @@ use crate::config::CONFIG;
 use anyhow::{Context as _, Result};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use super::schema::install_or_migrate_schema;
 use super::types::DbPool;
 
+/// Pragmas applied to every pooled `SQLite` connection.
 const CONNECTION_PRAGMAS: &str = "
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
@@ -14,8 +15,11 @@ const CONNECTION_PRAGMAS: &str = "
     PRAGMA cache_size = -32000;
     PRAGMA temp_store = MEMORY;
     PRAGMA mmap_size = 67108864;
-    PRAGMA busy_timeout = 10000;
+    PRAGMA busy_timeout = 1000;
 ";
+
+/// Maximum time callers wait for a pooled connection.
+const POOL_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Initialise the `SQLite` connection pool and ensure the schema exists.
 ///
@@ -35,7 +39,7 @@ pub fn init_pool() -> Result<DbPool> {
     let pool_size = CONFIG.db_pool_size;
     let pool = Pool::builder()
         .max_size(pool_size)
-        .connection_timeout(std::time::Duration::from_secs(5))
+        .connection_timeout(POOL_CONNECTION_TIMEOUT)
         .build(manager)
         .context("Failed to build database pool")?;
 
@@ -61,7 +65,7 @@ pub fn init_test_pool() -> Result<DbPool> {
 
     let pool = Pool::builder()
         .max_size(4)
-        .connection_timeout(std::time::Duration::from_secs(5))
+        .connection_timeout(POOL_CONNECTION_TIMEOUT)
         .build(manager)
         .context("Failed to build test database pool")?;
 
@@ -75,7 +79,7 @@ pub fn init_test_pool() -> Result<DbPool> {
 ///
 /// # Errors
 /// Returns an error if the database cannot be queried for board or admin counts.
-pub fn first_run_check(pool: &DbPool) -> anyhow::Result<()> {
+pub fn first_run_check(pool: &DbPool) -> Result<()> {
     let conn = pool.get()?;
     let board_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM boards", [], |r| r.get(0))
@@ -95,6 +99,7 @@ pub fn first_run_check(pool: &DbPool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Return whether the database currently has no administrator accounts.
 #[must_use]
 pub fn has_no_admin(pool: &DbPool) -> bool {
     pool.get()
@@ -106,4 +111,31 @@ pub fn has_no_admin(pool: &DbPool) -> bool {
             .ok()
         })
         .is_some_and(|count| count == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn sqlite_busy_wait_is_bounded_for_overload_responses() -> Result<()> {
+        let pool = super::init_test_pool()?;
+        let conn = pool.get()?;
+        let busy_timeout_ms: i64 = conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+
+        assert_eq!(
+            busy_timeout_ms, 1_000,
+            "SQLite busy timeout should match the configured one-second bound"
+        );
+        assert_eq!(
+            super::POOL_CONNECTION_TIMEOUT,
+            std::time::Duration::from_secs(1),
+            "pool checkout timeout should remain one second"
+        );
+        Ok(())
+    }
 }

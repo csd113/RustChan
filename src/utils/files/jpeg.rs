@@ -3,6 +3,7 @@
 use anyhow::{Context as _, Result};
 use std::path::Path;
 
+/// Decode a JPEG, strip EXIF metadata, and write the normalized image.
 pub(super) fn strip_jpeg_exif_file(input_path: &Path, output_path: &Path) -> Result<()> {
     let data = std::fs::read(input_path).context("Failed to read JPEG for EXIF strip")?;
     let clean = strip_jpeg_exif(&data)?;
@@ -10,11 +11,13 @@ pub(super) fn strip_jpeg_exif_file(input_path: &Path, output_path: &Path) -> Res
     Ok(())
 }
 
+/// Read the EXIF orientation value from a JPEG file.
 pub(super) fn read_exif_orientation_from_file(path: &Path) -> Result<u32> {
     let data = std::fs::read(path).context("Failed to read JPEG EXIF data")?;
     Ok(crate::media::exif::read_exif_orientation(&data))
 }
 
+/// Re-encode JPEG bytes without metadata segments.
 fn strip_jpeg_exif(data: &[u8]) -> Result<Vec<u8>> {
     use std::io::Cursor;
 

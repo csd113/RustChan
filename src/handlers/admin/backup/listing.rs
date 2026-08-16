@@ -1,22 +1,30 @@
-// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
-#![allow(clippy::wildcard_imports)]
-
-use super::*;
+use super::{
+    board_backup_dir, common, full_backup_dir, saved_backup, AppError, BackupInfo,
+    BackupStorageMode, Duration, HashMap, Instant, LazyLock, Local, Path, PathBuf, Result,
+    SystemTime,
+};
 use chrono::TimeZone as _;
 use std::collections::HashSet;
 
+/// Backup list cache TTL used by this handler.
 const BACKUP_LIST_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
+/// Data used by the backup list cache entry workflow.
 struct BackupListCacheEntry {
+    /// The generated timestamp.
     generated_at: Instant,
+    /// The optional source modified.
     source_modified: Option<SystemTime>,
+    /// The files collection.
     files: Vec<BackupInfo>,
 }
 
+/// Shared state for backup list cache.
 static BACKUP_LIST_CACHE: LazyLock<parking_lot::Mutex<HashMap<String, BackupListCacheEntry>>> =
     LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
+/// Performs the latest saved board backup filename handler operation.
 pub(super) fn latest_saved_board_backup_filename(board_short: &str) -> Option<String> {
     list_backup_files(&board_backup_dir(), BackupListKind::Board)
         .into_iter()
@@ -29,11 +37,15 @@ pub(super) fn latest_saved_board_backup_filename(board_short: &str) -> Option<St
 }
 
 #[derive(Clone, Copy)]
-pub enum BackupListKind {
+/// Variants supported by the backup list kind workflow.
+pub(crate) enum BackupListKind {
+    /// Represents the full case.
     Full,
+    /// Represents the board case.
     Board,
 }
 
+/// Performs the backup cache key handler operation.
 fn backup_cache_key(kind: BackupListKind) -> String {
     match kind {
         BackupListKind::Full => "full".to_owned(),
@@ -41,10 +53,12 @@ fn backup_cache_key(kind: BackupListKind) -> String {
     }
 }
 
+/// Performs the current dir modified handler operation.
 fn current_dir_modified(dir: &Path) -> Option<SystemTime> {
     std::fs::metadata(dir).ok()?.modified().ok()
 }
 
+/// Performs the current source modified handler operation.
 fn current_source_modified(dir: &Path) -> Option<SystemTime> {
     let mut modified = current_dir_modified(dir);
     let root_modified = current_dir_modified(&saved_backup::backups_root_dir());
@@ -54,10 +68,12 @@ fn current_source_modified(dir: &Path) -> Option<SystemTime> {
     modified
 }
 
-pub fn invalidate_backup_list_cache(_dir: &Path, kind: BackupListKind) {
+/// Performs the invalidate backup list cache handler operation.
+pub(crate) fn invalidate_backup_list_cache(_dir: &Path, kind: BackupListKind) {
     BACKUP_LIST_CACHE.lock().remove(&backup_cache_key(kind));
 }
 
+/// Performs the modified string from epoch handler operation.
 fn modified_string_from_epoch(epoch: Option<i64>) -> String {
     epoch
         .and_then(|secs| {
@@ -69,6 +85,7 @@ fn modified_string_from_epoch(epoch: Option<i64>) -> String {
         .unwrap_or_default()
 }
 
+/// Performs the metadata scope matches handler operation.
 const fn metadata_scope_matches(kind: BackupListKind, scope: saved_backup::BackupScope) -> bool {
     match kind {
         BackupListKind::Full => matches!(
@@ -81,6 +98,7 @@ const fn metadata_scope_matches(kind: BackupListKind, scope: saved_backup::Backu
     }
 }
 
+/// Performs the scope label handler operation.
 fn scope_label(scope: saved_backup::BackupScope) -> String {
     match scope {
         saved_backup::BackupScope::FullSite => "Full site".to_owned(),
@@ -90,6 +108,7 @@ fn scope_label(scope: saved_backup::BackupScope) -> String {
     }
 }
 
+/// Validates v4 listing metadata.
 fn validate_v4_listing_metadata(
     layout: &saved_backup::SavedBackupLayout,
     metadata: &saved_backup::BackupMetadata,
@@ -121,7 +140,7 @@ fn validate_v4_listing_metadata(
     }
     if !matches!(
         metadata.storage_mode,
-        saved_backup::BackupStorageMode::Directory | saved_backup::BackupStorageMode::SplitZip
+        BackupStorageMode::Directory | BackupStorageMode::SplitZip
     ) {
         return Err(AppError::BadRequest(format!(
             "Saved backup {} uses unsupported saved-v4 storage mode '{}'.",
@@ -170,17 +189,15 @@ fn validate_v4_listing_metadata(
     }
 
     match metadata.storage_mode {
-        saved_backup::BackupStorageMode::Directory if !manifest.parts.is_empty() => {
+        BackupStorageMode::Directory if !manifest.parts.is_empty() => {
             Err(AppError::BadRequest(format!(
                 "Saved backup {} is directory mode but contains split ZIP metadata.",
                 layout.backup_ref
             )))
         }
-        saved_backup::BackupStorageMode::SplitZip => {
-            validate_split_zip_listing_metadata(layout, manifest)
-        }
-        saved_backup::BackupStorageMode::Directory => Ok(()),
-        saved_backup::BackupStorageMode::SingleZip | saved_backup::BackupStorageMode::LegacyZip => {
+        BackupStorageMode::SplitZip => validate_split_zip_listing_metadata(layout, manifest),
+        BackupStorageMode::Directory => Ok(()),
+        BackupStorageMode::SingleZip | BackupStorageMode::LegacyZip => {
             Err(AppError::BadRequest(format!(
                 "Saved backup {} uses unsupported saved-v4 storage mode '{}'.",
                 layout.backup_ref,
@@ -190,6 +207,7 @@ fn validate_v4_listing_metadata(
     }
 }
 
+/// Validates split ZIP listing metadata.
 fn validate_split_zip_listing_metadata(
     layout: &saved_backup::SavedBackupLayout,
     manifest: &saved_backup::BackupManifest,
@@ -286,6 +304,7 @@ fn validate_split_zip_listing_metadata(
     Ok(())
 }
 
+/// Lists v4 backups.
 fn list_v4_backups(kind: BackupListKind) -> Vec<BackupInfo> {
     let mut backups = Vec::new();
     for layout in saved_backup::iter_saved_backup_layouts() {
@@ -344,15 +363,15 @@ fn list_v4_backups(kind: BackupListKind) -> Vec<BackupInfo> {
             boards: metadata.included_boards.clone(),
             server_path: layout.root_dir.display().to_string(),
             manifest_path: layout.manifest_path.display().to_string(),
-            downloadable_archive: metadata.storage_mode
-                == saved_backup::BackupStorageMode::SingleZip,
+            downloadable_archive: metadata.storage_mode == BackupStorageMode::SingleZip,
         });
 
-        let _ = manifest;
+        drop(manifest);
     }
     backups
 }
 
+/// Lists legacy ZIP backups.
 fn list_legacy_zip_backups(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> {
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -438,7 +457,7 @@ fn list_legacy_zip_backups(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> 
 }
 
 /// List saved backups for the requested kind, newest-first.
-pub fn list_backup_files(dir: &std::path::Path, kind: BackupListKind) -> Vec<BackupInfo> {
+pub(crate) fn list_backup_files(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> {
     let cache_key = backup_cache_key(kind);
     let source_modified = current_source_modified(dir);
     if let Some(entry) = BACKUP_LIST_CACHE.lock().get(&cache_key).cloned() {
@@ -469,6 +488,7 @@ pub fn list_backup_files(dir: &std::path::Path, kind: BackupListKind) -> Vec<Bac
     files
 }
 
+/// Performs the safe saved backup dir for delete handler operation.
 pub(super) fn safe_saved_backup_dir_for_delete(path: &Path) -> Result<()> {
     let backup_root = saved_backup::backups_root_dir();
     crate::utils::fs_security::assert_dir_no_symlink(path).map_err(|error| {
@@ -499,6 +519,7 @@ pub(super) fn safe_saved_backup_dir_for_delete(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Prunes full backup dir to limit.
 pub(super) fn prune_full_backup_dir_to_limit(dir: &Path, keep_limit: usize) -> Result<Vec<String>> {
     let keep_limit = keep_limit.max(1);
     let mut backups = list_backup_files(dir, BackupListKind::Full)
@@ -542,10 +563,13 @@ pub(super) fn prune_full_backup_dir_to_limit(dir: &Path, keep_limit: usize) -> R
     Ok(removed)
 }
 
+/// Performs the enforce full backup retention handler operation.
 pub(crate) fn enforce_full_backup_retention(copies_to_keep: u64) -> Result<Vec<String>> {
-    prune_full_backup_dir_to_limit(&full_backup_dir(), copies_to_keep.max(1) as usize)
+    let keep_limit = usize::try_from(copies_to_keep.max(1)).unwrap_or(usize::MAX);
+    prune_full_backup_dir_to_limit(&full_backup_dir(), keep_limit)
 }
 
+/// Performs the latest verified full backup modified time in dir handler operation.
 pub(super) fn latest_verified_full_backup_modified_time_in_dir(dir: &Path) -> Option<SystemTime> {
     let mut latest = None;
     let backups = if dir == full_backup_dir().as_path() {
@@ -567,6 +591,7 @@ pub(super) fn latest_verified_full_backup_modified_time_in_dir(dir: &Path) -> Op
     latest
 }
 
+/// Performs the latest verified full backup modified time handler operation.
 pub(crate) fn latest_verified_full_backup_modified_time() -> Option<SystemTime> {
     latest_verified_full_backup_modified_time_in_dir(&full_backup_dir())
 }
@@ -574,18 +599,23 @@ pub(crate) fn latest_verified_full_backup_modified_time() -> Option<SystemTime> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{ensure, Context as _, Result};
 
     #[test]
-    fn safe_saved_backup_dir_for_delete_rejects_paths_outside_backup_root() {
+    fn safe_saved_backup_dir_for_delete_rejects_paths_outside_backup_root() -> Result<()> {
         let backup_root = saved_backup::backups_root_dir();
-        std::fs::create_dir_all(&backup_root).expect("backup root");
-        let data_dir = backup_root.parent().expect("backup root has parent");
+        std::fs::create_dir_all(&backup_root).context("create backup root")?;
+        let data_dir = backup_root
+            .parent()
+            .context("backup root has no parent directory")?;
         let outside = tempfile::Builder::new()
             .prefix("outside-backup-root-")
             .tempdir_in(data_dir)
-            .expect("outside tempdir");
+            .context("create outside temporary directory")?;
         let error = safe_saved_backup_dir_for_delete(outside.path())
-            .expect_err("outside path should be rejected");
-        assert!(error.to_string().contains("outside the backup root"));
+            .err()
+            .context("outside path was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("outside the backup root"));
+        Ok(())
     }
 }

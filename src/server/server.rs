@@ -13,14 +13,18 @@
 //   • hsts_middleware         — HSTS header (HTTPS-only)
 //   • shutdown_signal()       — Ctrl-C / SIGTERM waiter
 
+use anyhow::Context as _;
 use axum::{
     http::header,
     response::{IntoResponse as _, Redirect},
 };
 use dashmap::DashMap;
+use std::future::pending;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::LazyLock;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, LazyLock,
+};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::config::{
@@ -33,20 +37,35 @@ mod assets;
 mod headers;
 mod lifecycle;
 mod observability;
+/// HTTP route construction and handler wiring.
 mod router;
 
+use super::console::input::KeyEvent;
+use super::console::{ConsoleMode, WizardKind};
 use lifecycle::shutdown_signal;
 use router::build_router;
 
+/// Apply the primary request-boundary checks to a secondary listener request.
+pub(super) async fn secondary_listener_request_boundary(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    headers::request_boundary_middleware(request, next).await
+}
+
+/// Return whether background maintenance can safely start at the current load.
 fn should_run_background_maintenance(state: &AppState, max_in_flight: u64) -> bool {
     !state.maintenance_gate.is_active()
         && ACTIVE_UPLOADS.load(Ordering::Relaxed) == 0
         && IN_FLIGHT.load(Ordering::Relaxed) <= max_in_flight
 }
 
+/// Initial retry delay for a failed scheduled full backup.
 const SCHEDULED_FULL_BACKUP_RETRY_BASE_SECS: u64 = 15 * 60;
+/// Maximum retry delay for a failed scheduled full backup.
 const SCHEDULED_FULL_BACKUP_RETRY_MAX_SECS: u64 = 6 * 60 * 60;
 
+/// Calculate the capped exponential retry delay after a scheduled backup failure.
 fn scheduled_full_backup_failure_retry_delay(
     backup_interval: Duration,
     failure_streak: u32,
@@ -92,12 +111,13 @@ pub static ACTIVE_IPS: LazyLock<DashMap<String, Instant>> = LazyLock::new(DashMa
 // `ScopedDecrement` ties the decrement to the guard's lifetime so it fires
 // unconditionally via `Drop`, even when the future is dropped mid-flight.
 // The decrement is saturating to prevent underflow on `AtomicU64`.
+/// RAII guard that saturating-decrements an atomic counter when dropped.
 pub(super) struct ScopedDecrement<'a>(pub(super) &'a AtomicU64);
 
 impl Drop for ScopedDecrement<'_> {
     fn drop(&mut self) {
         // Saturating decrement: fetch_update retries on spurious failure.
-        let _ = self
+        let _previous_value = self
             .0
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(1))
@@ -107,12 +127,103 @@ impl Drop for ScopedDecrement<'_> {
 
 // ─── Server mode ─────────────────────────────────────────────────────────────
 
-#[expect(clippy::too_many_lines)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Plaintext application listener mode selected from the TLS and Tor settings.
+enum PlaintextAppListener {
+    /// Expose the application over the configured public plaintext listener.
+    Public,
+    /// Restrict plaintext application traffic to the local Tor backend.
+    TorBackend,
+    /// Do not start a plaintext application listener.
+    Disabled,
+}
+
+/// Select the plaintext listener mode for the current TLS and Tor configuration.
+const fn plaintext_app_listener(
+    tls_enabled: bool,
+    require_https: bool,
+    tor_enabled: bool,
+) -> PlaintextAppListener {
+    match (tls_enabled && require_https, tor_enabled) {
+        (false, _) => PlaintextAppListener::Public,
+        (true, true) => PlaintextAppListener::TorBackend,
+        (true, false) => PlaintextAppListener::Disabled,
+    }
+}
+
+/// Admit authenticated Tor backend traffic and reject or redirect other plaintext traffic.
+async fn tls_plaintext_backend_gate(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+    https_port: u16,
+    redirect_http: bool,
+) -> axum::response::Response {
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|connect_info| connect_info.0);
+    if crate::detect::tor_stream_token_identity(peer, true).is_some() {
+        return next.run(req).await;
+    }
+
+    if redirect_http {
+        return build_redirect_response(&req, https_port).unwrap_or_else(|| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                "Refusing HTTP redirect for untrusted host header",
+            )
+                .into_response()
+        });
+    }
+
+    let mut response = (
+        axum::http::StatusCode::UPGRADE_REQUIRED,
+        "HTTPS is required",
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::CONNECTION,
+        header::HeaderValue::from_static("close"),
+    );
+    response
+}
+
+/// Wrap the Tor plaintext backend with its admission gate and request boundary.
+fn protect_tls_plaintext_backend(
+    app: axum::Router,
+    https_port: u16,
+    redirect_http: bool,
+) -> axum::Router {
+    app.layer(axum::middleware::from_fn(move |req, next| {
+        tls_plaintext_backend_gate(req, next, https_port, redirect_http)
+    }))
+    // build_router already has this boundary for requests that pass the gate.
+    // Keep a second, outer boundary so malformed direct traffic is rejected
+    // before redirect or upgrade handling as well.
+    .layer(axum::middleware::from_fn(
+        headers::request_boundary_middleware,
+    ))
+}
+
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "startup, listener selection, and coordinated shutdown form one server lifecycle"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "startup ordering and shutdown ownership are one cohesive server lifecycle"
+)]
+/// Initialize and run the configured HTTP, HTTPS, Tor, and background services.
+///
+/// # Errors
+///
+/// Returns an error when configuration validation, filesystem or database
+/// initialization, listener startup, or coordinated listener execution fails.
 pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::Result<()> {
     // rustls 0.23 requires an explicit process-wide crypto provider.
     // install_default() is idempotent — a second call (e.g. in tests) returns
     // Err but never panics, so the let _ discard is intentional.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    drop(rustls::crypto::ring::default_provider().install_default());
 
     let early_data_dir = data_dir();
     std::fs::create_dir_all(&early_data_dir)?;
@@ -142,11 +253,81 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     {
         let reconcile_pool = pool.clone();
         let upload_dir = CONFIG.upload_dir.clone();
-        tokio::task::spawn_blocking(move || {
+        let reconciliation = tokio::task::spawn_blocking(move || {
             crate::pending_fs::reconcile_pending_fs_ops(&reconcile_pool, &upload_dir)
         })
         .await
-        .map_err(|error| anyhow::anyhow!("pending_fs_ops reconciliation task failed: {error}"))??;
+        .map_err(|error| anyhow::anyhow!("pending_fs_ops reconciliation task failed: {error}"))?;
+        if let Err(error) = reconciliation {
+            tracing::warn!(
+                target: "pending_fs",
+                error = %error,
+                "startup filesystem reconciliation left quarantined operations for retry"
+            );
+        }
+    }
+    let startup_managed_media_cursor = {
+        let reconcile_pool = pool.clone();
+        let upload_dir = CONFIG.upload_dir.clone();
+        let reconciliation = tokio::task::spawn_blocking(move || {
+            crate::media::reconcile::reconcile_managed_media(
+                &reconcile_pool,
+                &upload_dir,
+                crate::media::reconcile::configured_mode(),
+                &crate::media::reconcile::ReconcileCursor::default(),
+                crate::media::reconcile::configured_limits(),
+            )
+        })
+        .await;
+        match reconciliation {
+            Ok(Ok(report)) => report.next_cursor,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    target: "media_reconcile",
+                    error = %error,
+                    "startup managed-media audit failed; periodic recovery remains enabled"
+                );
+                crate::media::reconcile::ReconcileCursor::default()
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "media_reconcile",
+                    error = %error,
+                    "startup managed-media audit task failed; periodic recovery remains enabled"
+                );
+                crate::media::reconcile::ReconcileCursor::default()
+            }
+        }
+    };
+    let startup_media_reconciliation = match crate::workers::reconcile_media_job_states(
+        &pool,
+        0,
+        0,
+        crate::workers::MEDIA_RECONCILE_BATCH,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::error!(
+                target: "workers",
+                error = %error,
+                "startup media reconciliation failed; periodic recovery remains enabled"
+            );
+            crate::workers::MediaReconciliation::default()
+        }
+    };
+    if startup_media_reconciliation.jobs_resolved > 0
+        || startup_media_reconciliation.posts_repaired > 0
+        || startup_media_reconciliation.malformed_jobs > 0
+    {
+        tracing::warn!(
+            target: "workers",
+            jobs_scanned = startup_media_reconciliation.jobs_scanned,
+            posts_scanned = startup_media_reconciliation.posts_scanned,
+            jobs_resolved = startup_media_reconciliation.jobs_resolved,
+            posts_repaired = startup_media_reconciliation.posts_repaired,
+            malformed_jobs = startup_media_reconciliation.malformed_jobs,
+            "startup media reconciliation repaired legacy state"
+        );
     }
 
     // Check whether cookie_secret has changed since the last run (#19).
@@ -169,7 +350,11 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 .filter(|v| !v.trim().is_empty());
             let name = name_in_db.unwrap_or_else(|| {
                 // Seed DB from settings.toml so get_site_name is always consistent.
-                let _ = crate::db::set_site_setting(&conn, "site_name", &CONFIG.forum_name);
+                drop(crate::db::set_site_setting(
+                    &conn,
+                    "site_name",
+                    &CONFIG.forum_name,
+                ));
                 CONFIG.forum_name.clone()
             });
             crate::templates::set_live_site_name(&name);
@@ -188,7 +373,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 } else {
                     CONFIG.initial_site_subtitle.clone()
                 };
-                let _ = crate::db::set_site_setting(&conn, "site_subtitle", &seed);
+                drop(crate::db::set_site_setting(&conn, "site_subtitle", &seed));
                 seed
             });
             crate::templates::set_live_site_subtitle(&subtitle);
@@ -209,8 +394,11 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                         "0"
                     },
                 );
-                let _ =
-                    crate::db::set_site_setting(&conn, "homepage_new_thread_badges_enabled", value);
+                drop(crate::db::set_site_setting(
+                    &conn,
+                    "homepage_new_thread_badges_enabled",
+                    value,
+                ));
             }
             if crate::db::get_site_setting(&conn, "homepage_new_reply_badges_enabled")
                 .ok()
@@ -224,8 +412,11 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                         "0"
                     },
                 );
-                let _ =
-                    crate::db::set_site_setting(&conn, "homepage_new_reply_badges_enabled", value);
+                drop(crate::db::set_site_setting(
+                    &conn,
+                    "homepage_new_reply_badges_enabled",
+                    value,
+                ));
             }
             if crate::db::get_site_setting(&conn, "thread_new_reply_badges_enabled")
                 .ok()
@@ -239,8 +430,11 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                         "0"
                     },
                 );
-                let _ =
-                    crate::db::set_site_setting(&conn, "thread_new_reply_badges_enabled", value);
+                drop(crate::db::set_site_setting(
+                    &conn,
+                    "thread_new_reply_badges_enabled",
+                    value,
+                ));
             }
 
             seed_initial_default_theme(&conn, &CONFIG.initial_default_theme);
@@ -249,11 +443,11 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 .flatten()
                 .is_none()
             {
-                let _ = crate::db::set_site_setting(
+                drop(crate::db::set_site_setting(
                     &conn,
                     crate::db::MEDIA_AUTO_PRUNE_ENABLED_KEY,
                     &CONFIG.initial_media_auto_prune_enabled.to_string(),
-                );
+                ));
             }
             if crate::db::get_site_setting(
                 &conn,
@@ -263,15 +457,15 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             .flatten()
             .is_none()
             {
-                let _ = crate::db::set_site_setting(
+                drop(crate::db::set_site_setting(
                     &conn,
                     crate::db::MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY,
                     &CONFIG
                         .initial_media_max_active_content_size_bytes
                         .to_string(),
-                );
+                ));
             }
-            let _ = crate::db::sync_live_theme_state(&conn);
+            drop(crate::db::sync_live_theme_state(&conn));
 
             // Seed the live board list used by error pages and ban pages.
             if let Ok(boards) = crate::db::get_all_boards(&conn) {
@@ -325,16 +519,59 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     {
         let conn = pool.get()?;
         let recovery = crate::db::recover_interrupted_background_jobs(&conn)?;
-        if recovery.jobs_reset > 0 {
+        crate::workers::cleanup_recovered_waveform_placeholders(
+            &conn,
+            std::path::Path::new(&CONFIG.upload_dir),
+        )?;
+        if recovery.jobs_reset > 0 || recovery.jobs_resolved > 0 {
             tracing::warn!(
                 target: "workers",
                 jobs_reset = recovery.jobs_reset,
+                jobs_resolved = recovery.jobs_resolved,
                 media_posts_reset = recovery.media_posts_reset,
                 "Recovered interrupted background jobs from previous shutdown"
             );
         }
     }
-    let worker_queue = std::sync::Arc::new(crate::workers::JobQueue::new(pool.clone()));
+    if let Err(error) = crate::workers::normalize_legacy_thread_prune_jobs(
+        &pool,
+        crate::workers::THREAD_PRUNE_RECONCILE_BATCH,
+    ) {
+        tracing::error!(
+            target: "workers",
+            error = %error,
+            "startup legacy thread-prune normalization failed; periodic recovery remains enabled"
+        );
+    }
+    let startup_prune_reconciliation = match crate::workers::reconcile_thread_prune_intents(
+        &pool,
+        0,
+        crate::workers::THREAD_PRUNE_RECONCILE_BATCH,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::error!(
+                target: "workers",
+                error = %error,
+                "startup thread-retention reconciliation failed; periodic recovery remains enabled"
+            );
+            crate::workers::ThreadPruneReconciliation::default()
+        }
+    };
+    if startup_prune_reconciliation.inserted > 0
+        || startup_prune_reconciliation.coalesced > 0
+        || startup_prune_reconciliation.failures > 0
+    {
+        tracing::info!(
+            target: "workers",
+            boards_scanned = startup_prune_reconciliation.scanned,
+            intents_inserted = startup_prune_reconciliation.inserted,
+            intents_coalesced = startup_prune_reconciliation.coalesced,
+            failures = startup_prune_reconciliation.failures,
+            "startup thread-retention reconciliation completed"
+        );
+    }
+    let worker_queue = Arc::new(crate::workers::JobQueue::new(pool.clone()));
     let worker_handles = crate::workers::start_worker_pool(
         &worker_queue,
         ffmpeg_available,
@@ -347,7 +584,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         let ledger = crate::db::chan_net::load_import_ledger(&conn)?
             .into_iter()
             .collect::<crate::chan_net::ledger::TxLedger>();
-        Some(std::sync::Arc::new(parking_lot::Mutex::new(ledger)))
+        Some(Arc::new(parking_lot::Mutex::new(ledger)))
     } else {
         None
     };
@@ -364,7 +601,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             .first()
             .map(|renderer| renderer.binary_name()),
         job_queue: worker_queue,
-        backup_progress: std::sync::Arc::new(crate::middleware::BackupProgress::new()),
+        backup_progress: Arc::new(crate::middleware::BackupProgress::new()),
         auto_full_backup_settings: crate::middleware::AutoFullBackupSettings::new(
             CONFIG.auto_full_backup_interval_hours,
             CONFIG.auto_full_backup_copies_to_keep,
@@ -375,7 +612,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
         db_maintenance_jobs: crate::middleware::DbMaintenanceJobs::new(),
         chan_ledger,
-        onion_address: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        onion_address: Arc::new(tokio::sync::RwLock::new(None)),
     };
 
     // worker_cancel is the shutdown token threaded through all background tasks
@@ -384,17 +621,188 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     let worker_cancel = state.job_queue.cancel.clone();
     let start_time = Instant::now();
 
+    // Media reconciliation is deliberately paged and periodic: workers poll
+    // durable pending rows independently, while this pass repairs only bounded
+    // legacy inconsistencies without scanning the whole table on each loop.
+    {
+        let reconcile_pool = pool.clone();
+        let reconcile_queue = Arc::clone(&state.job_queue);
+        let cancel_clone = worker_cancel.clone();
+        tokio::spawn(async move {
+            let mut job_cursor = startup_media_reconciliation.next_job_id;
+            let mut post_cursor = startup_media_reconciliation.next_post_id;
+            let mut interval = tokio::time::interval(Duration::from_mins(1));
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let pass_pool = reconcile_pool.clone();
+                        let pass = tokio::task::spawn_blocking(move || {
+                            crate::workers::reconcile_media_job_states(
+                                &pass_pool,
+                                job_cursor,
+                                post_cursor,
+                                crate::workers::MEDIA_RECONCILE_BATCH,
+                            )
+                        }).await;
+                        match pass {
+                            Ok(Ok(report)) => {
+                                job_cursor = report.next_job_id;
+                                post_cursor = report.next_post_id;
+                                if report.jobs_resolved > 0 || report.posts_repaired > 0 {
+                                    tracing::info!(
+                                        target: "workers",
+                                        jobs_scanned = report.jobs_scanned,
+                                        posts_scanned = report.posts_scanned,
+                                        jobs_resolved = report.jobs_resolved,
+                                        posts_repaired = report.posts_repaired,
+                                        malformed_jobs = report.malformed_jobs,
+                                        "periodic media reconciliation repaired legacy state"
+                                    );
+                                    reconcile_queue.notify.notify_waiters();
+                                }
+                            }
+                            Ok(Err(error)) => tracing::error!(
+                                target: "workers",
+                                error = %error,
+                                "periodic media reconciliation failed"
+                            ),
+                            Err(error) => tracing::error!(
+                                target: "workers",
+                                error = %error,
+                                "periodic media reconciliation task failed"
+                            ),
+                        }
+                    }
+                    () = cancel_clone.cancelled() => break,
+                }
+            }
+        });
+    }
+
+    // Managed-media auditing advances one bounded filesystem page per interval.
+    // Audit mode is the default; the internal repair switch only enables the
+    // reconciler's transactionally revalidated, journal-first repair subset.
+    if CONFIG.media_reconcile_interval_hours > 0 {
+        let reconcile_pool = pool.clone();
+        let cancel_clone = worker_cancel.clone();
+        let interval_hours = CONFIG.media_reconcile_interval_hours;
+        tokio::spawn(async move {
+            let mut cursor = startup_managed_media_cursor;
+            let mut interval = tokio::time::interval(Duration::from_hours(interval_hours));
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let pass_pool = reconcile_pool.clone();
+                        let upload_dir = CONFIG.upload_dir.clone();
+                        let pass_cursor = cursor.clone();
+                        let pass = tokio::task::spawn_blocking(move || {
+                            crate::media::reconcile::reconcile_managed_media(
+                                &pass_pool,
+                                &upload_dir,
+                                crate::media::reconcile::configured_mode(),
+                                &pass_cursor,
+                                crate::media::reconcile::configured_limits(),
+                            )
+                        }).await;
+                        match pass {
+                            Ok(Ok(report)) => cursor = report.next_cursor,
+                            Ok(Err(error)) => tracing::warn!(
+                                target: "media_reconcile",
+                                error = %error,
+                                "periodic managed-media audit failed"
+                            ),
+                            Err(error) => tracing::warn!(
+                                target: "media_reconcile",
+                                error = %error,
+                                "periodic managed-media audit task failed"
+                            ),
+                        }
+                    }
+                    () = cancel_clone.cancelled() => {
+                        tracing::debug!(
+                            target: "media_reconcile",
+                            "managed-media audit task shutting down"
+                        );
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    // Required thread-retention work is repaired independently of new posts.
+    // Each pass inspects one bounded board-id page and carries its cursor into
+    // the next pass, wrapping only after reaching the end.
+    {
+        let reconcile_pool = pool.clone();
+        let reconcile_queue = Arc::clone(&state.job_queue);
+        let cancel_clone = worker_cancel.clone();
+        tokio::spawn(async move {
+            let mut cursor = startup_prune_reconciliation.next_board_id;
+            let mut interval = tokio::time::interval(Duration::from_mins(1));
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let pass_pool = reconcile_pool.clone();
+                        let pass = tokio::task::spawn_blocking(move || {
+                            crate::workers::reconcile_thread_prune_intents(
+                                &pass_pool,
+                                cursor,
+                                crate::workers::THREAD_PRUNE_RECONCILE_BATCH,
+                            )
+                        }).await;
+                        match pass {
+                            Ok(Ok(report)) => {
+                                cursor = report.next_board_id;
+                                if report.inserted > 0 {
+                                    reconcile_queue.notify.notify_waiters();
+                                }
+                                if report.failures > 0 {
+                                    tracing::warn!(
+                                        target: "workers",
+                                        boards_scanned = report.scanned,
+                                        failures = report.failures,
+                                        "periodic thread-retention reconciliation had board failures"
+                                    );
+                                }
+                            }
+                            Ok(Err(error)) => tracing::error!(
+                                target: "workers",
+                                error = %error,
+                                "periodic thread-retention reconciliation failed"
+                            ),
+                            Err(error) => tracing::error!(
+                                target: "workers",
+                                error = %error,
+                                "periodic thread-retention reconciliation task failed"
+                            ),
+                        }
+                    }
+                    () = cancel_clone.cancelled() => {
+                        tracing::debug!("Thread-retention reconciliation task shutting down");
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
     // Background: purge expired sessions hourly
     {
         let bg = pool.clone();
         let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
-            let mut iv = tokio::time::interval(Duration::from_secs(3600));
+            let mut iv = tokio::time::interval(Duration::from_hours(1));
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
-                        if let Ok(conn) = bg.get() {
-                            match crate::db::purge_expired_sessions(&conn) {
+                        let connection = bg.get();
+                        if let Ok(conn) = connection {
+                            let purge_result = crate::db::purge_expired_sessions(&conn);
+                            match purge_result {
                                 Ok(n) if n > 0 => {
                                     tracing::info!(target: "sessions", purged = n, "Expired sessions purged");
                                 }
@@ -441,7 +849,8 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                             );
                             continue;
                         }
-                        if let Ok(conn) = bg.get() {
+                        let connection = bg.get();
+                        if let Ok(conn) = connection {
                             match crate::db::run_wal_checkpoint(&conn) {
                                 Ok((pages, moved, backfill)) => {
                                     tracing::debug!("WAL checkpoint: {pages} pages total, {moved} moved, {backfill} backfilled");
@@ -451,7 +860,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                             // Fix #7: reuse `conn` instead of calling bg.get() again.
                             // A second acquire while the first is still alive deadlocks
                             // with a pool size of 1.
-                            let _ = conn.execute_batch("PRAGMA optimize;");
+                            drop(conn.execute_batch("PRAGMA optimize;"));
                         }
                     }
                     () = cancel_clone.cancelled() => {
@@ -467,12 +876,12 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     {
         let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
-            let mut iv = tokio::time::interval(Duration::from_secs(300));
+            let mut iv = tokio::time::interval(Duration::from_mins(5));
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
                         let cutoff = Instant::now()
-                            .checked_sub(Duration::from_secs(300))
+                            .checked_sub(Duration::from_mins(5))
                             .unwrap_or_else(Instant::now);
                         ACTIVE_IPS.retain(|_, last_seen| *last_seen > cutoff);
                     }
@@ -492,7 +901,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     {
         let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
-            let mut iv = tokio::time::interval(Duration::from_secs(300));
+            let mut iv = tokio::time::interval(Duration::from_mins(5));
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
@@ -583,10 +992,10 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             let mut failure_streak = 0u32;
             let mut retry_not_before: Option<SystemTime> = None;
             tokio::select! {
-                () = tokio::time::sleep(Duration::from_secs(60)) => {}
+                () = tokio::time::sleep(Duration::from_mins(1)) => {}
                 () = cancel_clone.cancelled() => { return; }
             }
-            let mut iv = tokio::time::interval(Duration::from_secs(60));
+            let mut iv = tokio::time::interval(Duration::from_mins(1));
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
@@ -627,7 +1036,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                         };
 
                         let bg2 = bg.clone();
-                        let progress = std::sync::Arc::clone(&maintenance_state.backup_progress);
+                        let progress = Arc::clone(&maintenance_state.backup_progress);
                         let attempt_result = tokio::task::spawn_blocking(move || {
                             let storage_mode = crate::handlers::admin::backup::parse_backup_storage_mode_value(
                                 Some(&settings.storage_mode),
@@ -703,7 +1112,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
             tokio::select! {
-                () = tokio::time::sleep(Duration::from_secs(600)) => {} // initial delay
+                () = tokio::time::sleep(Duration::from_mins(10)) => {} // initial delay
                 () = cancel_clone.cancelled() => { return; }
             }
             let mut iv = tokio::time::interval(Duration::from_secs(interval_secs));
@@ -736,26 +1145,76 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         });
     }
 
-    // 2.6: Waveform/thumbnail cache eviction — keep total size of all thumbs
-    // directories under CONFIG.waveform_cache_max_bytes by deleting the oldest
-    // files when the threshold is exceeded.  Waveform PNGs can be regenerated
-    // by re-enqueueing the AudioWaveform job; image thumbnails can be
-    // regenerated from the originals.  Uses 1-hour intervals.
-    if CONFIG.waveform_cache_max_bytes > 0 {
-        let max_bytes = CONFIG.waveform_cache_max_bytes;
+    // 2.6: Retry durable filesystem operations independently of request traffic.
+    // Each pass is bounded by the finite queue snapshot loaded by the reconciler.
+    {
+        let bg = pool.clone();
         let cancel_clone = worker_cancel.clone();
         tokio::spawn(async move {
             tokio::select! {
-                () = tokio::time::sleep(Duration::from_secs(1800)) => {} // initial stagger
+                () = tokio::time::sleep(Duration::from_mins(5)) => {}
                 () = cancel_clone.cancelled() => { return; }
             }
-            let mut iv = tokio::time::interval(Duration::from_secs(3600));
+            let mut iv = tokio::time::interval(Duration::from_mins(15));
+            loop {
+                tokio::select! {
+                    _ = iv.tick() => {
+                        let retry_pool = bg.clone();
+                        let upload_dir = CONFIG.upload_dir.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if let Err(error) = crate::pending_fs::reconcile_pending_fs_ops(
+                                &retry_pool,
+                                &upload_dir,
+                            ) {
+                                tracing::warn!(
+                                    target: "pending_fs",
+                                    error = %error,
+                                    "periodic filesystem reconciliation left quarantined operations"
+                                );
+                            }
+                        })
+                        .await
+                        .ok();
+                    }
+                    () = cancel_clone.cancelled() => {
+                        tracing::debug!("Filesystem reconciliation task shutting down");
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    // 2.7: Waveform/thumbnail cache eviction — keep total size of all thumbs
+    // directories under CONFIG.waveform_cache_max_bytes by deleting only the
+    // oldest files that have no post reference. Uses 1-hour intervals.
+    if CONFIG.waveform_cache_max_bytes > 0 {
+        let max_bytes = CONFIG.waveform_cache_max_bytes;
+        let cancel_clone = worker_cancel.clone();
+        let bg = pool.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_mins(30)) => {} // initial stagger
+                () = cancel_clone.cancelled() => { return; }
+            }
+            let mut iv = tokio::time::interval(Duration::from_hours(1));
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
                         let upload_dir = CONFIG.upload_dir.clone();
+                        let eviction_pool = bg.clone();
                         tokio::task::spawn_blocking(move || {
-                            crate::workers::evict_thumb_cache(&upload_dir, max_bytes);
+                            let Ok(conn) = eviction_pool.get() else {
+                                return;
+                            };
+                            let eviction_result = crate::workers::evict_thumb_cache(
+                                &conn,
+                                &upload_dir,
+                                max_bytes,
+                            );
+                            if let Err(error) = eviction_result {
+                                tracing::warn!(error = %error, "Thumbnail cache eviction failed");
+                            }
                         })
                         .await
                         .ok();
@@ -769,10 +1228,49 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         });
     }
 
-    let app = build_router(state.clone(), false);
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    tracing::info!(target: "server", addr = %bind_addr, "HTTP server listening");
-    tracing::info!(target: "server", url = %format!("http://{bind_addr}/admin"), "Admin panel");
+    let plaintext_server = match plaintext_app_listener(
+        CONFIG.tls.enabled,
+        CONFIG.tls.require_https,
+        CONFIG.enable_tor_support,
+    ) {
+        PlaintextAppListener::Public => {
+            let app = build_router(state.clone(), false);
+            let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+            tracing::info!(target: "server", addr = %bind_addr, "HTTP server listening");
+            tracing::info!(target: "server", url = %format!("http://{bind_addr}/admin"), "Admin panel");
+            Some((listener, app))
+        }
+        PlaintextAppListener::TorBackend => {
+            let backend_addr = CONFIG.loopback_addr_with_port(bind_port);
+            let https_port = CONFIG.tls.port;
+            let redirect_http = CONFIG.tls.redirect_http;
+            let app = protect_tls_plaintext_backend(
+                build_router(state.clone(), false),
+                https_port,
+                redirect_http,
+            );
+            let listener = tokio::net::TcpListener::bind(&backend_addr)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Failed to bind internal Tor HTTP backend on {backend_addr}: {error}"
+                    )
+                })?;
+            tracing::info!(
+                target: "server",
+                addr = %backend_addr,
+                "HTTPS-only mode enabled; internal Tor HTTP backend listening"
+            );
+            Some((listener, app))
+        }
+        PlaintextAppListener::Disabled => {
+            tracing::info!(
+                target: "server",
+                "HTTPS-only mode enabled; plaintext application listener disabled"
+            );
+            None
+        }
+    };
     tracing::info!(target: "server", path = %data_dir.display(), "Data directory");
 
     // First-run admin wizard: if no admin accounts exist and stdout is a TTY,
@@ -797,27 +1295,26 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 
     // ── Full-screen TUI console ───────────────────────────────────────────────
     // Build shared state for the TUI.
-    let shared_stats: super::console::SharedStats = std::sync::Arc::new(tokio::sync::RwLock::new(
+    let shared_stats: super::console::SharedStats = Arc::new(tokio::sync::RwLock::new(
         super::console::ChanStats::default(),
     ));
-    let shared_mode: super::console::SharedConsoleMode = std::sync::Arc::new(
-        tokio::sync::RwLock::new(super::console::ConsoleMode::Dashboard),
-    );
+    let shared_mode: super::console::SharedConsoleMode =
+        Arc::new(tokio::sync::RwLock::new(ConsoleMode::Dashboard));
     // Stats refresh task — polls DB every 3 s (or immediately on [R]).
     // block_in_place keeps &mut delta locals on the same stack frame so
     // req/s and other deltas are correctly accumulated across calls.
-    let force_reload_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let force_reload_notify = Arc::new(tokio::sync::Notify::new());
     {
         let pool_stats = pool.clone();
-        let worker_queue_stats = std::sync::Arc::clone(&state.job_queue);
-        let stats_w = std::sync::Arc::clone(&shared_stats);
+        let worker_queue_stats = Arc::clone(&state.job_queue);
+        let stats_w = Arc::clone(&shared_stats);
         let cancel_stats = worker_cancel.clone();
-        let onion_addr = std::sync::Arc::clone(&state.onion_address);
-        let force_reload = std::sync::Arc::clone(&force_reload_notify);
+        let onion_addr = Arc::clone(&state.onion_address);
+        let force_reload = Arc::clone(&force_reload_notify);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(3));
-            let mut prev_req = REQUEST_COUNT.load(std::sync::atomic::Ordering::Relaxed);
-            let mut prev_tick = std::time::Instant::now();
+            let mut prev_req = REQUEST_COUNT.load(Ordering::Relaxed);
+            let mut prev_tick = Instant::now();
             let mut prev_threads: i64 = 0;
             let mut prev_posts: i64 = 0;
             loop {
@@ -860,22 +1357,23 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         CONFIG.enable_tor_support,
         bind_port,
         &data_dir,
-        std::sync::Arc::clone(&state.onion_address),
+        Arc::clone(&state.onion_address),
         worker_cancel.clone(),
     );
 
     // Event dispatch — translate KeyEvents into mode changes and wizard launches.
     {
-        let mode_d = std::sync::Arc::clone(&shared_mode);
+        let mode_d = Arc::clone(&shared_mode);
         let pool_d = pool.clone();
         let cancel_d = worker_cancel.clone();
         let shutdown_tx = worker_cancel.clone();
-        let force_reload = std::sync::Arc::clone(&force_reload_notify);
+        let force_reload = Arc::clone(&force_reload_notify);
         tokio::spawn(async move {
-            while let Some(key) = key_rx.recv().await {
-                use super::console::input::KeyEvent;
-                use super::console::{ConsoleMode, WizardKind};
-
+            loop {
+                let next_key = key_rx.recv().await;
+                let Some(key) = next_key else {
+                    break;
+                };
                 let current = mode_d.read().await.clone();
 
                 match key {
@@ -929,7 +1427,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     KeyEvent::CreateBoard => {
                         *mode_d.write().await = ConsoleMode::Wizard(WizardKind::CreateBoard);
                         let pool_w = pool_d.clone();
-                        let mode_w = std::sync::Arc::clone(&mode_d);
+                        let mode_w = Arc::clone(&mode_d);
                         tokio::task::spawn_blocking(move || {
                             super::console::wizard::run_wizard(
                                 &WizardKind::CreateBoard,
@@ -941,7 +1439,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     KeyEvent::CreateAdmin => {
                         *mode_d.write().await = ConsoleMode::Wizard(WizardKind::CreateAdmin);
                         let pool_w = pool_d.clone();
-                        let mode_w = std::sync::Arc::clone(&mode_d);
+                        let mode_w = Arc::clone(&mode_d);
                         tokio::task::spawn_blocking(move || {
                             super::console::wizard::run_wizard(
                                 &WizardKind::CreateAdmin,
@@ -953,7 +1451,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     KeyEvent::DeleteThread => {
                         *mode_d.write().await = ConsoleMode::Wizard(WizardKind::DeleteThread);
                         let pool_w = pool_d.clone();
-                        let mode_w = std::sync::Arc::clone(&mode_d);
+                        let mode_w = Arc::clone(&mode_d);
                         tokio::task::spawn_blocking(move || {
                             super::console::wizard::run_wizard(
                                 &WizardKind::DeleteThread,
@@ -972,21 +1470,22 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         });
     }
 
+    let mut listener_tasks: tokio::task::JoinSet<ListenerTaskResult> = tokio::task::JoinSet::new();
     if chan_net {
-        let chan_addr = crate::config::CONFIG.chan_net_bind.clone();
+        let chan_addr = CONFIG.chan_net_bind.clone();
         let chan_app = crate::chan_net::chan_router(state.clone());
         let chan_listener = tokio::net::TcpListener::bind(&chan_addr).await?;
+        let chan_cancel = worker_cancel.clone();
         tracing::info!(target: "chan_net", addr = %chan_addr, "ChanNet API listening");
-        // requests are drained before the runtime is dropped. Without this the
-        // ChanNet task was detached and forcibly killed on SIGTERM, potentially
-        // corrupting a streaming snapshot response mid-transfer.
-        tokio::spawn(async move {
-            if let Err(e) = axum::serve(chan_listener, chan_app.into_make_service())
-                .with_graceful_shutdown(shutdown_signal())
-                .await
-            {
-                tracing::error!(target: "chan_net", error = %e, "ChanNet server error");
-            }
+        // Reuse the bounded HTTP server so this secondary listener gets the
+        // same protocol-level header cap and graceful shutdown as the forum.
+        listener_tasks.spawn(async move {
+            (
+                "ChanNet",
+                run_plain_http(chan_listener, chan_app, chan_cancel)
+                    .await
+                    .map_err(anyhow::Error::from),
+            )
         });
     }
 
@@ -1015,7 +1514,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         let cancel_tls = worker_cancel.clone();
         let app_tls = build_router(state.clone(), true);
 
-        let https_addr: std::net::SocketAddr = CONFIG
+        let https_addr: SocketAddr = CONFIG
             .bind_addr_with_port(CONFIG.tls.port)
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid HTTPS bind address: {e}"))?;
@@ -1044,8 +1543,13 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     "Admin panel available over HTTPS"
                 );
 
-                tokio::spawn(async move {
-                    run_https_static(https_tcp, rustls_cfg, app_tls, cancel_tls).await;
+                listener_tasks.spawn(async move {
+                    (
+                        "HTTPS",
+                        run_https_static(https_tcp, rustls_cfg, app_tls, cancel_tls)
+                            .await
+                            .map_err(anyhow::Error::from),
+                    )
                 });
             }
 
@@ -1064,19 +1568,19 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     "Admin panel available over HTTPS (ACME)"
                 );
 
-                tokio::spawn(async move {
-                    run_https_acme(https_tcp, acme_acceptor, server_cfg, app_tls, cancel_tls).await;
+                listener_tasks.spawn(async move {
+                    (
+                        "HTTPS/ACME",
+                        run_https_acme(https_tcp, acme_acceptor, server_cfg, app_tls, cancel_tls)
+                            .await
+                            .map_err(anyhow::Error::from),
+                    )
                 });
             }
 
-            None => { /* tls.enabled = false — unreachable here but exhaustive */ }
-
-            // Suppress unreachable-pattern warning when tls-acme feature is off.
-            #[expect(unreachable_patterns)]
-            Some(_) => {
+            None => {
                 return Err(anyhow::anyhow!(
-                    "ACME acceptor built but tls-acme feature is not enabled — \
-                     rebuild with: cargo build --features tls-acme"
+                    "TLS is enabled but no HTTPS acceptor was constructed"
                 ));
             }
         }
@@ -1084,7 +1588,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 
     // ── HTTP→HTTPS redirect listener (optional) ───────────────────────────────
     if CONFIG.tls.enabled && CONFIG.tls.redirect_http {
-        let http_addr: std::net::SocketAddr = CONFIG
+        let http_addr: SocketAddr = CONFIG
             .bind_addr_with_port(CONFIG.tls.http_port)
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid HTTP redirect bind address: {e}"))?;
@@ -1096,54 +1600,47 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                 anyhow::anyhow!("Failed to bind HTTP→HTTPS redirect listener on {http_addr}: {e}")
             })?;
         tracing::info!(target: "server", addr = %http_addr, "HTTP→HTTPS redirect listening");
-        tokio::spawn(async move {
-            run_http_redirect(http_listener, https_port, cancel_redirect).await;
+        listener_tasks.spawn(async move {
+            (
+                "HTTP redirect",
+                run_http_redirect(http_listener, https_port, cancel_redirect)
+                    .await
+                    .map_err(anyhow::Error::from),
+            )
         });
     }
 
-    let serve_cancel = worker_cancel.clone();
     let wait_shutdown = worker_cancel.clone();
-    let mut http_server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            serve_cancel.cancelled().await;
-        })
-        .await
-    });
-
-    tokio::select! {
-        () = shutdown_signal() => {
-            worker_cancel.cancel();
-        }
-        () = wait_shutdown.cancelled() => {}
+    if let Some((listener, app)) = plaintext_server {
+        let serve_cancel = worker_cancel.clone();
+        listener_tasks.spawn(async move {
+            (
+                "HTTP",
+                run_plain_http(listener, app, serve_cancel)
+                    .await
+                    .map_err(anyhow::Error::from),
+            )
+        });
     }
 
-    let server_result: anyhow::Result<()> =
-        match tokio::time::timeout(Duration::from_secs(1), &mut http_server).await {
-            Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(e))) => Err(e.into()),
-            Ok(Err(join_err)) => Err(anyhow::anyhow!("HTTP server task failed: {join_err}")),
-            Err(_) => {
-                tracing::warn!(
-                    target: "server",
-                    "Forcing disconnect of active HTTP clients during shutdown"
-                );
-                http_server.abort();
-                let _ = http_server.await;
-                Ok(())
-            }
-        };
-    server_result?;
+    let runtime_result = tokio::select! {
+        () = shutdown_signal() => {
+            worker_cancel.cancel();
+            Ok(())
+        }
+        () = wait_shutdown.cancelled() => Ok(()),
+        result = next_listener_exit(&mut listener_tasks, &worker_cancel) => result,
+    };
+    worker_cancel.cancel();
+    let listener_shutdown_result = finish_listener_tasks(&mut listener_tasks).await;
+
     // timeout, replacing the previous blind 10-second sleep. Each worker is
     // given up to (ffmpeg_timeout + 10)s to finish its in-flight job.
     tracing::info!(target: "server", "Signalling background workers to shut down…");
     worker_cancel.cancel();
     let shutdown_timeout = Duration::from_secs(crate::config::ffmpeg_timeout_secs() + 10);
     for handle in worker_handles {
-        let _ = tokio::time::timeout(shutdown_timeout, handle).await;
+        drop(tokio::time::timeout(shutdown_timeout, handle).await);
     }
     // CancellationToken, so it will exit its select! loop promptly instead of
     // sleeping through a multi-minute backoff. The 15-second safety-net timeout
@@ -1151,13 +1648,16 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // active stream — Arti sends RELAY_END cells synchronously on drop, which
     // completes well within this window under normal conditions.
     if let Some(h) = tor_handle {
-        let _ = tokio::time::timeout(Duration::from_secs(15), h).await;
+        drop(tokio::time::timeout(Duration::from_secs(15), h).await);
     }
 
+    runtime_result?;
+    listener_shutdown_result?;
     tracing::info!(target: "server", "Server shut down gracefully.");
     Ok(())
 }
 
+/// Seed the database default theme from the initial configuration when eligible.
 fn seed_initial_default_theme(conn: &rusqlite::Connection, initial_default_theme: &str) {
     let default_theme = crate::db::get_default_user_theme(conn);
     if !default_theme.is_empty()
@@ -1169,7 +1669,11 @@ fn seed_initial_default_theme(conn: &rusqlite::Connection, initial_default_theme
 
     match crate::db::get_theme(conn, initial_default_theme) {
         Ok(Some(theme)) if theme.enabled => {
-            let _ = crate::db::set_site_setting(conn, "default_theme", initial_default_theme);
+            drop(crate::db::set_site_setting(
+                conn,
+                "default_theme",
+                initial_default_theme,
+            ));
         }
         Ok(Some(_)) => {
             tracing::warn!(
@@ -1196,6 +1700,95 @@ fn seed_initial_default_theme(conn: &rusqlite::Connection, initial_default_theme
     }
 }
 
+/// Apply shared HTTP/1 and HTTP/2 request-head limits to a connection builder.
+fn configure_http_limits(
+    builder: &mut hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor>,
+) {
+    builder.http1().max_buf_size(headers::HTTP_MAX_HEADER_BYTES);
+    builder
+        .http2()
+        .max_header_list_size(u32::try_from(headers::HTTP_MAX_HEADER_BYTES).unwrap_or(u32::MAX));
+}
+
+/// Listener label paired with its task result.
+type ListenerTaskResult = (&'static str, anyhow::Result<()>);
+
+/// Wait for the next listener task to exit and classify its result.
+async fn next_listener_exit(
+    listeners: &mut tokio::task::JoinSet<ListenerTaskResult>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> anyhow::Result<()> {
+    match listeners.join_next().await {
+        Some(Ok((_, Ok(())))) if cancel.is_cancelled() => Ok(()),
+        Some(Ok((listener, Ok(())))) => {
+            anyhow::bail!("{listener} listener stopped unexpectedly")
+        }
+        Some(Ok((listener, Err(error)))) => {
+            Err(error).with_context(|| format!("{listener} listener failed"))
+        }
+        Some(Err(error)) => Err(anyhow::anyhow!("Listener task failed: {error}")),
+        None => pending().await,
+    }
+}
+
+/// Drain listener tasks, forcing shutdown after the graceful timeout.
+async fn finish_listener_tasks(
+    listeners: &mut tokio::task::JoinSet<ListenerTaskResult>,
+) -> anyhow::Result<()> {
+    let drain = async {
+        let mut first_error = None;
+        loop {
+            let next_result = listeners.join_next().await;
+            let Some(result) = next_result else {
+                break;
+            };
+            let result = match result {
+                Ok((_, Ok(()))) => Ok(()),
+                Ok((listener, Err(error))) => {
+                    Err(error).with_context(|| format!("{listener} listener failed"))
+                }
+                Err(error) => Err(anyhow::anyhow!("Listener task failed: {error}")),
+            };
+            if first_error.is_none() {
+                first_error = result.err();
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    };
+
+    if let Ok(result) = tokio::time::timeout(Duration::from_secs(3), drain).await {
+        return result;
+    }
+    tracing::warn!(
+        target: "server",
+        "Forcing disconnect of active listener clients during shutdown"
+    );
+    listeners.shutdown().await;
+    Ok(())
+}
+
+/// Serve a pre-bound plaintext listener until cancellation.
+async fn run_plain_http(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    cancel: tokio_util::sync::CancellationToken,
+) -> std::io::Result<()> {
+    let handle = axum_server::Handle::new();
+    let shutdown_handle = handle.clone();
+    tokio::spawn(async move {
+        cancel.cancelled().await;
+        shutdown_handle.graceful_shutdown(Some(Duration::from_secs(1)));
+    });
+
+    let std_listener = listener.into_std()?;
+    let mut server = axum_server::from_tcp(std_listener)?;
+    configure_http_limits(server.http_builder());
+    server
+        .handle(handle)
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        .await
+}
+
 // ── HTTPS listener (Static path: self-signed or manual PEM) ──────────────────
 //
 // Uses axum-server which preserves ConnectInfo<SocketAddr> so the IP-banning
@@ -1207,12 +1800,18 @@ fn seed_initial_default_theme(conn: &rusqlite::Connection, initial_default_theme
 // takes ownership of the already-bound std::TcpListener and does not re-bind.
 // The "HTTPS server listening" log is emitted by run_server() after the pre-bind
 // succeeds, so it is never printed for a socket that wasn't actually bound.
+/// Serve HTTPS on a pre-bound listener with a static Rustls configuration.
+///
+/// # Errors
+///
+/// Returns an I/O error when the listener conversion, server construction, or
+/// connection-serving loop fails.
 pub async fn run_https_static(
     listener: tokio::net::TcpListener,
     tls_config: axum_server::tls_rustls::RustlsConfig,
     app: axum::Router,
     cancel: tokio_util::sync::CancellationToken,
-) {
+) -> std::io::Result<()> {
     let handle = axum_server::Handle::new();
     let handle_clone = handle.clone();
 
@@ -1220,34 +1819,19 @@ pub async fn run_https_static(
     // background workers and the HTTP listener.
     tokio::spawn(async move {
         cancel.cancelled().await;
-        handle_clone.graceful_shutdown(Some(std::time::Duration::from_secs(1)));
+        handle_clone.graceful_shutdown(Some(Duration::from_secs(1)));
     });
 
     // Convert tokio TcpListener → std TcpListener for axum_server::from_tcp_rustls.
     // set_nonblocking(true) is required — axum-server expects a non-blocking socket.
-    let std_listener = match listener.into_std() {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!(target: "server", error = %e, "Failed to convert HTTPS listener");
-            return;
-        }
-    };
+    let std_listener = listener.into_std()?;
+    let mut server = axum_server::from_tcp_rustls(std_listener, tls_config)?;
+    configure_http_limits(server.http_builder());
 
-    let server = match axum_server::from_tcp_rustls(std_listener, tls_config) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(target: "server", error = %e, "Failed to create HTTPS server");
-            return;
-        }
-    };
-
-    if let Err(e) = server
+    server
         .handle(handle)
-        .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await
-    {
-        tracing::error!(target: "server", error = %e, "HTTPS server error");
-    }
 }
 
 // ── HTTPS listener (ACME / Let's Encrypt path) ────────────────────────────────
@@ -1259,17 +1843,23 @@ pub async fn run_https_static(
 // ConnectInfo<SocketAddr> is injected manually into each request so that the
 // IP-banning and rate-limiting middleware in middleware/mod.rs continues to work.
 #[cfg(feature = "tls-acme")]
+/// Serve HTTPS with the ACME TLS-ALPN acceptor until cancellation.
+///
+/// # Errors
+///
+/// Returns an I/O error when accepting a TCP connection fails.
 pub async fn run_https_acme(
     listener: tokio::net::TcpListener,
-    acme_acceptor: std::sync::Arc<rustls_acme::AcmeAcceptor>,
-    server_cfg: std::sync::Arc<rustls::ServerConfig>,
+    acme_acceptor: Arc<rustls_acme::AcmeAcceptor>,
+    server_cfg: Arc<rustls::ServerConfig>,
     app: axum::Router,
     cancel: tokio_util::sync::CancellationToken,
-) {
+) -> std::io::Result<()> {
     use hyper::server::conn::http1;
     use hyper_util::rt::TokioIo;
     use tower::Service as _;
 
+    let mut connections = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             () = cancel.cancelled() => {
@@ -1277,19 +1867,13 @@ pub async fn run_https_acme(
                 break;
             }
             result = listener.accept() => {
-                let (tcp, peer_addr) = match result {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!(target: "server", error = %e, "ACME TCP accept error");
-                        continue;
-                    }
-                };
+                let (tcp, peer_addr) = result?;
 
-                let acme_acceptor = std::sync::Arc::clone(&acme_acceptor);
-                let server_cfg = std::sync::Arc::clone(&server_cfg);
+                let acme_acceptor = Arc::clone(&acme_acceptor);
+                let server_cfg = Arc::clone(&server_cfg);
                 let svc           = app.clone();
 
-                tokio::spawn(async move {
+                connections.spawn(async move {
                     use tokio_util::compat::{TokioAsyncReadCompatExt as _, FuturesAsyncReadCompatExt as _};
                     // rustls-acme requires futures::{AsyncRead, AsyncWrite}; wrap
                     // the tokio TcpStream with the tokio-util compat shim.
@@ -1313,10 +1897,10 @@ pub async fn run_https_acme(
                                         );
                                         svc.clone().call(req)
                                     });
-                                    if let Err(e) = http1::Builder::new()
-                                        .serve_connection(io, svc)
-                                        .await
-                                    {
+                                    let mut builder = http1::Builder::new();
+                                    builder.max_buf_size(headers::HTTP_MAX_HEADER_BYTES);
+                                    let connection_result = builder.serve_connection(io, svc).await;
+                                    if let Err(e) = connection_result {
                                         tracing::debug!(
                                             target: "server",
                                             peer = %peer_addr,
@@ -1343,40 +1927,79 @@ pub async fn run_https_acme(
                     }
                 });
             }
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                if let Err(error) = result {
+                    tracing::warn!(
+                        target: "server",
+                        %error,
+                        "ACME HTTPS connection task failed"
+                    );
+                }
+            }
         }
     }
+
+    let drain_connections = async {
+        loop {
+            let next_result = connections.join_next().await;
+            let Some(result) = next_result else {
+                break;
+            };
+            if let Err(error) = result {
+                tracing::warn!(
+                    target: "server",
+                    %error,
+                    "ACME HTTPS connection task failed during shutdown"
+                );
+            }
+        }
+    };
+    if tokio::time::timeout(Duration::from_secs(1), drain_connections)
+        .await
+        .is_err()
+    {
+        connections.shutdown().await;
+    }
+    Ok(())
 }
 
 // ── HTTP→HTTPS redirect listener ─────────────────────────────────────────────
 //
 // Issues a 301 permanent redirect to the HTTPS equivalent of every request.
 // Only spawned when `tls.enabled = true` and `tls.redirect_http = true`.
+/// Serve the HTTP-to-HTTPS redirect listener until cancellation.
+///
+/// # Errors
+///
+/// Returns an I/O error when the listener cannot be served.
 pub async fn run_http_redirect(
     listener: tokio::net::TcpListener,
     https_port: u16,
     cancel: tokio_util::sync::CancellationToken,
-) {
+) -> std::io::Result<()> {
     use axum::{extract::Request, http::StatusCode, response::IntoResponse as _, routing::any};
 
-    let redirect_app = axum::Router::new().route(
-        "/{*path}",
-        any(move |req: Request| async move {
-            build_redirect_response(&req, https_port).unwrap_or_else(|| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    "Refusing HTTP redirect for untrusted host header",
-                )
-                    .into_response()
-            })
-        }),
-    );
+    let redirect_app = axum::Router::new()
+        .route(
+            "/{*path}",
+            any(move |req: Request| async move {
+                build_redirect_response(&req, https_port).unwrap_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "Refusing HTTP redirect for untrusted host header",
+                    )
+                        .into_response()
+                })
+            }),
+        )
+        .layer(axum::middleware::from_fn(
+            headers::request_boundary_middleware,
+        ));
 
-    axum::serve(listener, redirect_app)
-        .with_graceful_shutdown(async move { cancel.cancelled().await })
-        .await
-        .ok();
+    run_plain_http(listener, redirect_app, cancel).await
 }
 
+/// Build a trusted permanent HTTPS redirect for a request.
 fn build_redirect_response(
     req: &axum::extract::Request,
     https_port: u16,
@@ -1395,10 +2018,11 @@ fn build_redirect_response(
     )
 }
 
+/// Resolve a request host that is permitted as an HTTPS redirect destination.
 fn redirect_host(req: &axum::extract::Request) -> Option<String> {
     let authority = req
         .headers()
-        .get(axum::http::header::HOST)
+        .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .and_then(parse_authority_host);
     let trusted_hosts = redirect_trusted_hosts();
@@ -1419,6 +2043,7 @@ fn redirect_host(req: &axum::extract::Request) -> Option<String> {
     trusted_hosts.first().cloned()
 }
 
+/// Collect normalized redirect hosts from the active configuration.
 fn redirect_trusted_hosts() -> Vec<String> {
     redirect_trusted_hosts_with(
         &CONFIG.public_hosts,
@@ -1428,6 +2053,7 @@ fn redirect_trusted_hosts() -> Vec<String> {
     )
 }
 
+/// Collect and deduplicate redirect hosts from explicit configuration values.
 fn redirect_trusted_hosts_with(
     public_hosts: &[String],
     acme_enabled: bool,
@@ -1461,6 +2087,7 @@ fn redirect_trusted_hosts_with(
     hosts
 }
 
+/// Extract the host portion of a configured socket address.
 fn parse_bind_host(bind_addr: &str) -> Option<String> {
     if let Some(rest) = bind_addr.strip_prefix('[') {
         let (host, _) = rest.split_once("]:")?;
@@ -1472,11 +2099,13 @@ fn parse_bind_host(bind_addr: &str) -> Option<String> {
         .map(|(host, _port)| host.to_owned())
 }
 
+/// Parse and normalize the host component of an HTTP authority.
 fn parse_authority_host(value: &str) -> Option<String> {
     let authority = value.parse::<axum::http::uri::Authority>().ok()?;
     Some(authority.host().to_owned())
 }
 
+/// Format a host and HTTPS port as a redirect authority.
 fn format_redirect_authority(host: &str, https_port: u16) -> String {
     if host
         .parse::<IpAddr>()
@@ -1488,6 +2117,7 @@ fn format_redirect_authority(host: &str, https_port: u16) -> String {
     }
 }
 
+/// Return whether a redirect host is local and safe without an allowlist.
 fn is_local_redirect_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok()
 }
@@ -1511,7 +2141,7 @@ async fn onion_location_middleware(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     // Skip if Tor is not enabled.
-    if !crate::config::CONFIG.enable_tor_support {
+    if !CONFIG.enable_tor_support {
         return next.run(req).await;
     }
 
@@ -1552,92 +2182,368 @@ async fn onion_location_middleware(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_redirect_response, format_redirect_authority, redirect_host,
-        redirect_trusted_hosts_with, scheduled_full_backup_failure_retry_delay,
-        seed_initial_default_theme,
+        build_redirect_response, format_redirect_authority, next_listener_exit,
+        protect_tls_plaintext_backend, redirect_host, redirect_trusted_hosts_with, run_plain_http,
+        scheduled_full_backup_failure_retry_delay, seed_initial_default_theme,
+        PlaintextAppListener,
     };
-    use axum::{body::Body, extract::Request, http::header};
-    use std::time::Duration;
+    use axum::{
+        body::Body,
+        extract::{ConnectInfo, Request},
+        http::{header, StatusCode},
+        middleware::from_fn,
+        routing::any,
+        Router,
+    };
+    use std::{net::SocketAddr, sync::Arc, time::Duration};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tower::ServiceExt as _;
 
-    fn request_with_host(host: &str) -> Request {
+    /// Build a test request containing the supplied Host header.
+    fn request_with_host(host: &str) -> anyhow::Result<Request> {
         Request::builder()
             .uri("/demo?x=1")
             .header(header::HOST, host)
             .body(Body::empty())
-            .expect("request")
+            .map_err(|error| anyhow::anyhow!("build request: {error}"))
     }
 
-    fn test_conn() -> r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager> {
-        let pool = crate::db::init_test_pool().expect("test pool");
-        pool.get().expect("db connection")
+    /// Open an isolated test database connection.
+    fn test_conn() -> anyhow::Result<r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>> {
+        let pool = crate::db::init_test_pool()?;
+        pool.get().map_err(anyhow::Error::from)
+    }
+
+    /// Build the application used to exercise the plaintext Tor backend gate.
+    fn tls_backend_app(redirect_http: bool) -> Router {
+        protect_tls_plaintext_backend(
+            Router::new().route("/", any(|| async { StatusCode::NO_CONTENT })),
+            8443,
+            redirect_http,
+        )
+    }
+
+    /// Build a test request carrying the supplied connection peer.
+    fn request_from_peer(peer: SocketAddr) -> anyhow::Result<Request> {
+        Request::builder()
+            .uri("/")
+            .header(header::HOST, "127.0.0.1")
+            .extension(ConnectInfo(peer))
+            .body(Body::empty())
+            .map_err(|error| anyhow::anyhow!("build request: {error}"))
+    }
+
+    /// Send one raw HTTP request and collect its response bytes.
+    async fn raw_http_request(address: SocketAddr, request: &[u8]) -> anyhow::Result<Vec<u8>> {
+        let mut stream = tokio::net::TcpStream::connect(address).await?;
+        stream.write_all(request).await?;
+        let mut response = Vec::new();
+        let read_result =
+            tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut response))
+                .await
+                .map_err(|error| anyhow::anyhow!("response timeout: {error}"))?;
+        if let Err(error) = read_result {
+            anyhow::ensure!(
+                error.kind() == std::io::ErrorKind::ConnectionReset && !response.is_empty(),
+                "read response: {error}"
+            );
+        }
+        Ok(response)
+    }
+
+    /// Verify the status code fragment in a raw HTTP response.
+    fn ensure_raw_status(response: &[u8], expected: &[u8]) -> anyhow::Result<()> {
+        let status_line = response
+            .split(|byte| *byte == b'\n')
+            .next()
+            .unwrap_or_default();
+        anyhow::ensure!(
+            status_line
+                .windows(expected.len())
+                .any(|part| part == expected),
+            "unexpected response status: {}",
+            String::from_utf8_lossy(status_line)
+        );
+        Ok(())
     }
 
     #[test]
-    fn initial_default_theme_seeds_enabled_non_hard_default_theme() {
-        let conn = test_conn();
-
-        seed_initial_default_theme(&conn, "terminal");
-
+    fn native_tls_requires_explicit_https_only_mode_to_disable_plaintext() {
         assert_eq!(
-            crate::db::get_site_setting(&conn, "default_theme")
-                .expect("read default theme")
-                .as_deref(),
-            Some("terminal")
+            super::plaintext_app_listener(false, false, false),
+            PlaintextAppListener::Public
+        );
+        assert_eq!(
+            super::plaintext_app_listener(false, true, false),
+            PlaintextAppListener::Public
+        );
+        assert_eq!(
+            super::plaintext_app_listener(true, false, false),
+            PlaintextAppListener::Public
+        );
+        assert_eq!(
+            super::plaintext_app_listener(true, false, true),
+            PlaintextAppListener::Public
+        );
+        assert_eq!(
+            super::plaintext_app_listener(true, true, false),
+            PlaintextAppListener::Disabled
+        );
+        assert_eq!(
+            super::plaintext_app_listener(true, true, true),
+            PlaintextAppListener::TorBackend
         );
     }
 
-    #[test]
-    fn initial_default_theme_does_not_overwrite_existing_db_setting() {
-        let conn = test_conn();
-        crate::db::set_site_setting(&conn, "default_theme", "blue-sky").expect("set default");
+    #[tokio::test]
+    async fn tls_tor_backend_redirects_direct_plaintext_requests() -> anyhow::Result<()> {
+        let peer = "127.0.0.1:61001".parse()?;
+        let response = tls_backend_app(true)
+            .oneshot(request_from_peer(peer)?)
+            .await?;
 
-        seed_initial_default_theme(&conn, "terminal");
-
-        assert_eq!(
-            crate::db::get_site_setting(&conn, "default_theme")
-                .expect("read default theme")
-                .as_deref(),
-            Some("blue-sky")
+        anyhow::ensure!(response.status() == StatusCode::PERMANENT_REDIRECT);
+        anyhow::ensure!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                == Some("https://127.0.0.1:8443/"),
+            "redirect should point to the configured HTTPS port"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tls_tor_backend_rejects_direct_plaintext_without_redirect_listener(
+    ) -> anyhow::Result<()> {
+        let peer = "127.0.0.1:61003".parse()?;
+        let response = tls_backend_app(false)
+            .oneshot(request_from_peer(peer)?)
+            .await?;
+
+        anyhow::ensure!(response.status() == StatusCode::UPGRADE_REQUIRED);
+        anyhow::ensure!(
+            response.headers().get(header::CONNECTION)
+                == Some(&header::HeaderValue::from_static("close")),
+            "rejected plaintext connections should be closed"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tls_tor_backend_allows_only_registered_tor_proxy_peers() -> anyhow::Result<()> {
+        let peer: SocketAddr = "127.0.0.1:61002".parse()?;
+        let same_port_other_loopback: SocketAddr = "127.0.0.2:61002".parse()?;
+        crate::detect::TOR_STREAM_TOKENS.insert(peer, "tor:test".into());
+
+        let response = tls_backend_app(true)
+            .oneshot(request_from_peer(peer)?)
+            .await?;
+        let spoofed = tls_backend_app(true)
+            .oneshot(request_from_peer(same_port_other_loopback)?)
+            .await?;
+        crate::detect::TOR_STREAM_TOKENS.remove(&peer);
+
+        anyhow::ensure!(response.status() == StatusCode::NO_CONTENT);
+        anyhow::ensure!(spoofed.status() == StatusCode::PERMANENT_REDIRECT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tls_tor_backend_rejects_ambiguous_framing_before_redirect_gate() -> anyhow::Result<()>
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let server_cancel = cancel.clone();
+        let server = tokio::spawn(async move {
+            run_plain_http(listener, tls_backend_app(true), server_cancel).await
+        });
+
+        let ambiguous = raw_http_request(
+            address,
+            b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\nConnection: close\r\n\r\n4\r\ntest\r\n0\r\n\r\n",
+        )
+        .await?;
+        ensure_raw_status(&ambiguous, b"400")?;
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn listener_supervisor_reports_unexpected_listener_failure() -> anyhow::Result<()> {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut listeners: tokio::task::JoinSet<super::ListenerTaskResult> =
+            tokio::task::JoinSet::new();
+        listeners.spawn(async { ("HTTPS", Err(anyhow::anyhow!("injected listener failure"))) });
+
+        let Err(error) = next_listener_exit(&mut listeners, &cancel).await else {
+            anyhow::bail!("unexpected listener failure must stop the runtime");
+        };
+        let message = format!("{error:#}");
+        anyhow::ensure!(message.contains("HTTPS listener failed"));
+        anyhow::ensure!(message.contains("injected listener failure"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn plain_http_boundary_rejects_te_cl_and_large_request_heads() -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let app = Router::new()
+            .route("/", any(|| async { StatusCode::NO_CONTENT }))
+            .layer(from_fn(super::headers::request_boundary_middleware));
+        let server_cancel = cancel.clone();
+        let server =
+            tokio::spawn(async move { run_plain_http(listener, app, server_cancel).await });
+
+        let valid = raw_http_request(
+            address,
+            b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest",
+        )
+        .await?;
+        ensure_raw_status(&valid, b"204")?;
+
+        let exact_header_value = format!(
+            "GET / HTTP/1.1\r\nHost: localhost\r\nX-Boundary: {}\r\nConnection: close\r\n\r\n",
+            "a".repeat(super::headers::HTTP_MAX_HEADER_VALUE_BYTES)
+        );
+        let exact_header_value = raw_http_request(address, exact_header_value.as_bytes()).await?;
+        ensure_raw_status(&exact_header_value, b"204")?;
+
+        let ambiguous = raw_http_request(
+            address,
+            b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\nConnection: close\r\n\r\n4\r\ntest\r\n0\r\n\r\n",
+        )
+        .await?;
+        ensure_raw_status(&ambiguous, b"400")?;
+
+        let oversized = format!(
+            "GET / HTTP/1.1\r\nHost: localhost\r\nX-Large: {}\r\nConnection: close\r\n\r\n",
+            "a".repeat(super::headers::HTTP_MAX_HEADER_BYTES)
+        );
+        let oversized = raw_http_request(address, oversized.as_bytes()).await?;
+        ensure_raw_status(&oversized, b"431")?;
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn channet_listener_rejects_ambiguous_framing_and_large_request_heads(
+    ) -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let app = crate::chan_net::chan_router_with_auth(
+            crate::test_support::app_state(),
+            Arc::from("0123456789abcdef0123456789abcdef"),
+            512 * 1024,
+            10 * 1024 * 1024,
+        );
+        let server_cancel = cancel.clone();
+        let server =
+            tokio::spawn(async move { run_plain_http(listener, app, server_cancel).await });
+
+        let valid = raw_http_request(
+            address,
+            b"GET /chan/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await?;
+        ensure_raw_status(&valid, b"200")?;
+
+        let ambiguous = raw_http_request(
+            address,
+            b"GET /chan/status HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\nConnection: close\r\n\r\n0\r\n\r\n",
+        )
+        .await?;
+        ensure_raw_status(&ambiguous, b"400")?;
+
+        let oversized = format!(
+            "GET /chan/status HTTP/1.1\r\nHost: localhost\r\nX-Large: {}\r\nConnection: close\r\n\r\n",
+            "a".repeat(super::headers::HTTP_MAX_HEADER_BYTES)
+        );
+        let oversized = raw_http_request(address, oversized.as_bytes()).await?;
+        ensure_raw_status(&oversized, b"431")?;
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
+        Ok(())
     }
 
     #[test]
-    fn initial_default_theme_skips_invalid_theme() {
-        let conn = test_conn();
+    fn initial_default_theme_seeds_enabled_non_hard_default_theme() -> anyhow::Result<()> {
+        let conn = test_conn()?;
+
+        seed_initial_default_theme(&conn, "terminal");
+
+        anyhow::ensure!(
+            crate::db::get_site_setting(&conn, "default_theme")?.as_deref() == Some("terminal"),
+            "configured enabled theme should seed the default"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn initial_default_theme_does_not_overwrite_existing_db_setting() -> anyhow::Result<()> {
+        let conn = test_conn()?;
+        crate::db::set_site_setting(&conn, "default_theme", "blue-sky")?;
+
+        seed_initial_default_theme(&conn, "terminal");
+
+        anyhow::ensure!(
+            crate::db::get_site_setting(&conn, "default_theme")?.as_deref() == Some("blue-sky"),
+            "an existing database setting should take precedence"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn initial_default_theme_skips_invalid_theme() -> anyhow::Result<()> {
+        let conn = test_conn()?;
 
         seed_initial_default_theme(&conn, "missing-theme");
 
-        assert_eq!(
-            crate::db::get_site_setting(&conn, "default_theme").expect("read default theme"),
-            None
+        anyhow::ensure!(
+            crate::db::get_site_setting(&conn, "default_theme")?.is_none(),
+            "an unknown theme should not seed the default"
         );
+        Ok(())
     }
 
     #[test]
-    fn initial_default_theme_skips_disabled_theme() {
-        let conn = test_conn();
+    fn initial_default_theme_skips_disabled_theme() -> anyhow::Result<()> {
+        let conn = test_conn()?;
         conn.execute("UPDATE themes SET enabled = 0 WHERE slug = 'terminal'", [])
-            .expect("disable terminal");
+            .map_err(|error| anyhow::anyhow!("disable terminal theme: {error}"))?;
 
         seed_initial_default_theme(&conn, "terminal");
 
-        assert_eq!(
-            crate::db::get_site_setting(&conn, "default_theme").expect("read default theme"),
-            None
+        anyhow::ensure!(
+            crate::db::get_site_setting(&conn, "default_theme")?.is_none(),
+            "a disabled theme should not seed the default"
         );
+        Ok(())
     }
 
     #[test]
-    fn redirect_rejects_untrusted_hosts_without_allowlist() {
-        let request = request_with_host("evil.example");
-        assert!(redirect_host(&request).is_none());
-        assert!(build_redirect_response(&request, 8443).is_none());
+    fn redirect_rejects_untrusted_hosts_without_allowlist() -> anyhow::Result<()> {
+        let request = request_with_host("evil.example")?;
+        anyhow::ensure!(redirect_host(&request).is_none());
+        anyhow::ensure!(build_redirect_response(&request, 8443).is_none());
+        Ok(())
     }
 
     #[test]
-    fn redirect_allows_local_hosts_without_allowlist() {
-        let request = request_with_host("127.0.0.1");
-        assert_eq!(redirect_host(&request).as_deref(), Some("127.0.0.1"));
+    fn redirect_allows_local_hosts_without_allowlist() -> anyhow::Result<()> {
+        let request = request_with_host("127.0.0.1")?;
+        anyhow::ensure!(redirect_host(&request).as_deref() == Some("127.0.0.1"));
+        Ok(())
     }
 
     #[test]
@@ -1659,24 +2565,24 @@ mod tests {
 
     #[test]
     fn scheduled_full_backup_retry_delay_uses_exponential_backoff() {
-        let interval = Duration::from_secs(24 * 3600);
+        let interval = Duration::from_hours(24);
         assert_eq!(
             scheduled_full_backup_failure_retry_delay(interval, 1),
-            Duration::from_secs(15 * 60)
+            Duration::from_mins(15)
         );
         assert_eq!(
             scheduled_full_backup_failure_retry_delay(interval, 2),
-            Duration::from_secs(30 * 60)
+            Duration::from_mins(30)
         );
         assert_eq!(
             scheduled_full_backup_failure_retry_delay(interval, 3),
-            Duration::from_secs(60 * 60)
+            Duration::from_hours(1)
         );
     }
 
     #[test]
     fn scheduled_full_backup_retry_delay_caps_at_backup_interval() {
-        let interval = Duration::from_secs(3600);
+        let interval = Duration::from_hours(1);
         assert_eq!(
             scheduled_full_backup_failure_retry_delay(interval, 10),
             interval

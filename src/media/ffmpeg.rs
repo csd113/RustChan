@@ -16,37 +16,51 @@
 use anyhow::{Context as _, Result};
 use std::borrow::Cow;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::LazyLock;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::thread::available_parallelism;
+use std::time::Duration;
 
+/// Construct a command for the configured `FFmpeg` executable.
 fn ffmpeg_command() -> Command {
     Command::new(&crate::config::CONFIG.ffmpeg_path)
 }
 
+/// Construct a command for the configured `FFprobe` executable.
 fn ffprobe_command() -> Command {
     Command::new(&crate::config::CONFIG.ffprobe_path)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Broad media stream category reported by `FFprobe`.
 pub enum StreamKind {
+    /// The file contains audio but no video stream.
     AudioOnly,
+    /// The file contains at least one video stream.
     Video,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Host-tuned settings for VP9 background transcoding.
 pub struct Vp9EncodingProfile {
+    /// libvpx speed/quality trade-off selected for this host.
     pub cpu_used: u8,
+    /// Number of VP9 tile-column doublings.
     pub tile_columns: u8,
+    /// Maximum worker thread count supplied to `FFmpeg`.
     pub threads: usize,
+    /// Whether row-based multithreading is enabled.
     pub row_mt: bool,
+    /// Human-readable profile description for diagnostics.
     pub label: Cow<'static, str>,
 }
 
+/// Pixel format used for broadly compatible VP9 output.
 const VP9_COMPAT_PIXEL_FORMAT: &str = "yuv420p";
+/// Color metadata used for broadly compatible VP9 output.
 const VP9_COMPAT_COLOR_SPACE: &str = "bt709";
 
+/// Cached output from probing the configured encoder list.
 static ENCODER_LIST: LazyLock<Option<String>> = LazyLock::new(|| {
     output_stdout_with_timeout(&crate::config::CONFIG.ffmpeg_path, &["-encoders"])
 });
@@ -61,12 +75,10 @@ static ENCODER_LIST: LazyLock<Option<String>> = LazyLock::new(|| {
 /// unavailable; all callers must degrade gracefully.
 #[must_use]
 pub fn detect_ffmpeg() -> bool {
-    ffmpeg_command()
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    let mut command = ffmpeg_command();
+    command.arg("-version");
+    run_command_with_timeout(&mut command, &crate::config::CONFIG.ffmpeg_path, "ffmpeg")
+        .is_ok_and(|output| output.status.success())
 }
 
 /// Execute `ffmpeg` with the given argument slice.
@@ -254,6 +266,46 @@ pub fn probe_stream_kind(path: &Path) -> Result<StreamKind> {
     }
 }
 
+/// Uses the configured `FFmpeg` binary as a bounded stream-inspection fallback.
+///
+/// This is used only for an otherwise ambiguous `WebM` container when `FFprobe`
+/// is missing or fails. Explicit stream maps let `FFmpeg` validate whether a
+/// video or audio stream exists without decoding the upload.
+///
+/// # Errors
+/// Returns an error if `FFmpeg` cannot be run or neither stream kind is found.
+pub fn probe_stream_kind_with_ffmpeg(path: &Path) -> Result<StreamKind> {
+    let path_str = path_to_str(path)?;
+    if ffmpeg_has_stream(path_str, "0:v:0", "v")? {
+        return Ok(StreamKind::Video);
+    }
+    if ffmpeg_has_stream(path_str, "0:a:0", "a")? {
+        return Ok(StreamKind::AudioOnly);
+    }
+    anyhow::bail!("ffmpeg returned no audio or video streams for: {path_str}")
+}
+
+/// Tests one explicit stream mapping without decoding media frames.
+fn ffmpeg_has_stream(path: &str, selector: &str, stream_specifier: &str) -> Result<bool> {
+    let mut command = ffmpeg_command();
+    command.args([
+        "-v",
+        "error",
+        "-i",
+        path,
+        "-map",
+        selector,
+        &format!("-frames:{stream_specifier}"),
+        "0",
+        "-f",
+        "null",
+        "-",
+    ]);
+    let output =
+        run_command_with_timeout(&mut command, &crate::config::CONFIG.ffmpeg_path, "ffmpeg")?;
+    Ok(output.status.success())
+}
+
 /// Probe the primary video codec of a media file using `ffprobe`.
 ///
 /// Returns the lowercase codec name (e.g. `"vp9"`, `"av1"`, `"h264"`) on
@@ -279,6 +331,7 @@ pub fn probe_audio_codec(path: &Path) -> Result<String> {
     probe_codec(path_str, "a:0", "audio")
 }
 
+/// Probe a selected stream and return its normalized codec name.
 fn probe_codec(path: &str, stream_selector: &str, stream_label: &str) -> Result<String> {
     let output = run_command_with_timeout(
         ffprobe_command().args([
@@ -318,12 +371,14 @@ fn probe_codec(path: &str, stream_selector: &str, stream_label: &str) -> Result<
 }
 
 #[must_use]
+/// Return the lazily detected VP9 encoding profile for this host.
 pub fn vp9_encoding_profile() -> &'static Vp9EncodingProfile {
     static PROFILE: LazyLock<Vp9EncodingProfile> = LazyLock::new(detect_vp9_encoding_profile);
     &PROFILE
 }
 
 #[must_use]
+/// Construct `FFmpeg` arguments for a compatibility-oriented VP9/Opus transcode.
 pub fn build_vp9_transcode_args(input: &str, output: &str) -> Vec<String> {
     let profile = vp9_encoding_profile();
     let cpu_used = profile.cpu_used.to_string();
@@ -388,8 +443,9 @@ pub fn build_vp9_transcode_args(input: &str, output: &str) -> Vec<String> {
 }
 // ─── Internal helpers ──────────────────────────────────────────────────────────
 
+/// Choose bounded VP9 encoder settings from available host parallelism.
 fn detect_vp9_encoding_profile() -> Vp9EncodingProfile {
-    let threads = std::thread::available_parallelism()
+    let threads = available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .clamp(1, 16);
 
@@ -480,66 +536,37 @@ fn path_to_str(p: &Path) -> Result<&str> {
         .ok_or_else(|| anyhow::anyhow!("path contains non-UTF-8 characters: {}", p.display()))
 }
 
+/// Run a subprocess with the configured `FFmpeg` timeout and captured output.
 fn run_command_with_timeout(
     command: &mut Command,
     program: &str,
     label: &str,
 ) -> Result<std::process::Output> {
     let timeout = Duration::from_secs(crate::config::ffmpeg_timeout_secs());
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| {
-            format!("failed to spawn {label} binary '{program}' — is it installed and executable?")
-        })?;
-    let started = Instant::now();
-
-    loop {
-        if child.try_wait()?.is_some() {
-            return child
-                .wait_with_output()
-                .with_context(|| format!("{label} I/O error"));
-        }
-        if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(anyhow::anyhow!(
-                "{label} timed out after {}s",
-                timeout.as_secs()
-            ));
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
+    crate::media::process::run_std_command_with_timeout(
+        command,
+        timeout,
+        label,
+        || format!("failed to spawn {label} binary '{program}' — is it installed and executable?"),
+        || format!("{label} I/O error"),
+    )
 }
 
+/// Run a bounded command and return trimmed UTF-8 stdout on success.
 fn output_stdout_with_timeout(program: &str, args: &[&str]) -> Option<String> {
     let timeout = Duration::from_secs(10);
-    let mut child = Command::new(program)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let started = Instant::now();
-
-    loop {
-        if let Some(status) = child.try_wait().ok()? {
-            if status.success() {
-                return child
-                    .wait_with_output()
-                    .ok()
-                    .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
-            }
-            return None;
-        }
-        if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
+    let mut command = Command::new(program);
+    command.args(args);
+    crate::media::process::run_std_command_with_timeout(
+        &mut command,
+        timeout,
+        "media capability probe",
+        || format!("failed to spawn media capability probe '{program}'"),
+        || "media capability probe I/O error".to_owned(),
+    )
+    .ok()
+    .filter(|output| output.status.success())
+    .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Probe whether the current ffmpeg binary has the `libwebp` encoder compiled in.
@@ -588,6 +615,7 @@ pub fn check_opus_encoder() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{build_vp9_transcode_args, VP9_COMPAT_COLOR_SPACE, VP9_COMPAT_PIXEL_FORMAT};
+    use anyhow::{Context as _, Result};
 
     fn paired_arg_index(args: &[String], flag: &str, value: &str) -> Option<usize> {
         args.windows(2).position(|window| {
@@ -595,16 +623,20 @@ mod tests {
         })
     }
 
-    fn output_arg_index(args: &[String], flag: &str, value: &str) -> usize {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "the assertion reports an invalid ordering invariant in generated ffmpeg arguments"
+    )]
+    fn output_arg_index(args: &[String], flag: &str, value: &str) -> Result<usize> {
         let input_index = paired_arg_index(args, "-i", "input.mp4")
-            .unwrap_or_else(|| panic!("missing input marker in ffmpeg args: {args:?}"));
+            .with_context(|| format!("missing input marker in ffmpeg args: {args:?}"))?;
         let arg_index = paired_arg_index(args, flag, value)
-            .unwrap_or_else(|| panic!("missing ffmpeg arg pair {flag} {value}: {args:?}"));
+            .with_context(|| format!("missing ffmpeg arg pair {flag} {value}: {args:?}"))?;
         assert!(
             arg_index > input_index + 1,
             "{flag} {value} must be an output option after the input argument: {args:?}",
         );
-        arg_index
+        Ok(arg_index)
     }
 
     #[test]
@@ -630,13 +662,17 @@ mod tests {
     }
 
     #[test]
-    fn vp9_transcode_args_normalise_yuv420p_color_metadata() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn vp9_transcode_args_normalise_yuv420p_color_metadata() -> Result<()> {
         let args = build_vp9_transcode_args("input.mp4", "output.webm");
 
-        let pixel_format_index = output_arg_index(&args, "-pix_fmt", VP9_COMPAT_PIXEL_FORMAT);
-        let colorspace_index = output_arg_index(&args, "-colorspace", VP9_COMPAT_COLOR_SPACE);
-        let primaries_index = output_arg_index(&args, "-color_primaries", VP9_COMPAT_COLOR_SPACE);
-        let transfer_index = output_arg_index(&args, "-color_trc", VP9_COMPAT_COLOR_SPACE);
+        let pixel_format_index = output_arg_index(&args, "-pix_fmt", VP9_COMPAT_PIXEL_FORMAT)?;
+        let colorspace_index = output_arg_index(&args, "-colorspace", VP9_COMPAT_COLOR_SPACE)?;
+        let primaries_index = output_arg_index(&args, "-color_primaries", VP9_COMPAT_COLOR_SPACE)?;
+        let transfer_index = output_arg_index(&args, "-color_trc", VP9_COMPAT_COLOR_SPACE)?;
 
         assert!(
             pixel_format_index < colorspace_index
@@ -644,10 +680,15 @@ mod tests {
                 && primaries_index < transfer_index,
             "VP9 color metadata should be applied directly after the forced pixel format: {args:?}",
         );
+        Ok(())
     }
 
     #[test]
-    fn vp9_yuv420p_output_does_not_inherit_srgb_gbr_metadata() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn vp9_yuv420p_output_does_not_inherit_srgb_gbr_metadata() -> Result<()> {
         let args = build_vp9_transcode_args("input.mp4", "output.webm");
 
         for (flag, value) in [
@@ -655,7 +696,7 @@ mod tests {
             ("-color_primaries", VP9_COMPAT_COLOR_SPACE),
             ("-color_trc", VP9_COMPAT_COLOR_SPACE),
         ] {
-            let color_index = output_arg_index(&args, flag, value);
+            let color_index = output_arg_index(&args, flag, value)?;
             let audio_index = args
                 .windows(2)
                 .position(|window| matches!(window, [actual_flag, actual_value] if actual_flag == "-c:a" && actual_value == "libopus"))
@@ -665,10 +706,11 @@ mod tests {
                 "{flag} {value} should be part of the video output options before audio encoding options: {args:?}",
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn ffmpeg_builders_with_forced_compat_pixel_formats_normalise_color_metadata() {
+    fn ffmpeg_builders_with_forced_compat_pixel_formats_normalise_color_metadata() -> Result<()> {
         let args = build_vp9_transcode_args("input.mp4", "output.webm");
 
         // Other ffmpeg builders in this crate either produce WebP thumbnails/images
@@ -676,9 +718,10 @@ mod tests {
         // compatibility pixel formats. VP9 transcode is the path that combines
         // a forced yuv420p profile-0 output with potentially inherited source
         // color metadata, so it owns the explicit BT.709 normalization contract.
-        output_arg_index(&args, "-pix_fmt", VP9_COMPAT_PIXEL_FORMAT);
-        output_arg_index(&args, "-colorspace", VP9_COMPAT_COLOR_SPACE);
-        output_arg_index(&args, "-color_primaries", VP9_COMPAT_COLOR_SPACE);
-        output_arg_index(&args, "-color_trc", VP9_COMPAT_COLOR_SPACE);
+        output_arg_index(&args, "-pix_fmt", VP9_COMPAT_PIXEL_FORMAT)?;
+        output_arg_index(&args, "-colorspace", VP9_COMPAT_COLOR_SPACE)?;
+        output_arg_index(&args, "-color_primaries", VP9_COMPAT_COLOR_SPACE)?;
+        output_arg_index(&args, "-color_trc", VP9_COMPAT_COLOR_SPACE)?;
+        Ok(())
     }
 }

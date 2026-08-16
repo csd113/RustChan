@@ -1,0 +1,82 @@
+name: Documentation issue
+description: Report incorrect, missing, or unclear RustChan documentation.
+title: "[Docs]: "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for project documentation. For vulnerabilities, read the [security policy](https://github.com/csd113/RustChan/security/policy). Do not include illegal content, personal information, credentials, private keys, databases, backups, private media, onion private keys, or sensitive instance data.
+
+  - type: input
+    id: location
+    attributes:
+      label: Document or location
+      description: Link the file, heading, or line where possible.
+      placeholder: "SETUP.md — Reverse Proxy Notes"
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: RustChan version or commit
+      description: Enter Not version-specific if applicable.
+      placeholder: "1.4.0, commit SHA, or Not version-specific"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is incorrect, missing, or unclear?
+      description: Explain the reader's goal and where the current documentation fails.
+    validations:
+      required: true
+
+  - type: textarea
+    id: correction
+    attributes:
+      label: Suggested correction
+      description: Provide accurate replacement guidance or the source in the repository that establishes the behavior.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      multiple: true
+      options:
+        - Installation or update
+        - Configuration or deployment
+        - Public or admin UI
+        - Media processing
+        - Moderation
+        - Database, backup, or restore
+        - TLS or reverse proxy
+        - Tor or onion service
+        - ChanNet
+        - Contributor or community policy
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment context
+      description: If commands or platform behavior are involved, provide OS, architecture, installation method, Cargo features, and sanitized configuration. Otherwise enter Not applicable.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I removed credentials, personal information, private content, databases, backups, onion private keys, and sensitive instance data.
+          required: true
+        - label: This is not a vulnerability disclosure or an abuse/moderation report about an independently operated site.
+          required: true

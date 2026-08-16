@@ -1,6 +1,13 @@
-use super::*;
+use super::{
+    check_admin_csrf_jar, common, header, require_admin_session_sid, require_same_origin_request,
+    AdminPanelTarget, AppError, AppState, CookieJar, HeaderMap, HeaderValue, Multipart, Next, Path,
+    Request, Response, Result, Seek, StatusCode, BOARD_BACKUP_RESTORE_SECTION,
+    FULL_BACKUP_RESTORE_SECTION, SESSION_COOKIE,
+};
+use tokio::io::AsyncWriteExt as _;
 
-pub async fn backup_request_logging_middleware(req: Request, next: Next) -> Response {
+/// Handles the backup request logging middleware request.
+pub(crate) async fn backup_request_logging_middleware(req: Request, next: Next) -> Response {
     let method = req.method().clone();
     let uri = req.uri().clone();
     if uri.path() == "/admin/backup/progress" {
@@ -29,6 +36,7 @@ pub async fn backup_request_logging_middleware(req: Request, next: Next) -> Resp
     response
 }
 
+/// Returns whether xml HTTP request.
 pub(super) fn is_xml_http_request(headers: &HeaderMap) -> bool {
     headers
         .get("x-requested-with")
@@ -36,6 +44,7 @@ pub(super) fn is_xml_http_request(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("XMLHttpRequest"))
 }
 
+/// Handles the admin XHR error response request.
 pub(super) fn admin_xhr_error_response(error: &AppError) -> Response {
     let handled = match error {
         AppError::NotFound(message) => Some((StatusCode::NOT_FOUND, message.clone())),
@@ -66,7 +75,7 @@ pub(super) fn admin_xhr_error_response(error: &AppError) -> Response {
 
     if let Some((status, message)) = handled {
         return crate::handlers::board::xhr_handled_error_response(status, &message)
-            .unwrap_or_else(|response_error| response_error.into_response());
+            .unwrap_or_else(axum::response::IntoResponse::into_response);
     }
 
     let (status, message) = match error {
@@ -79,9 +88,10 @@ pub(super) fn admin_xhr_error_response(error: &AppError) -> Response {
     };
 
     crate::handlers::board::xhr_error_response(status, &message)
-        .unwrap_or_else(|response_error| response_error.into_response())
+        .unwrap_or_else(axum::response::IntoResponse::into_response)
 }
 
+/// Builds the redirect page response.
 pub(super) fn redirect_page_response(target: &str, message: &str) -> Response {
     let escaped_target = crate::utils::sanitize::escape_html(target);
     let escaped_message = crate::utils::sanitize::escape_html(message);
@@ -116,12 +126,16 @@ pub(super) fn redirect_page_response(target: &str, message: &str) -> Response {
 }
 
 #[derive(Clone, Copy)]
+/// Variants supported by the restore kind workflow.
 pub(super) enum RestoreKind {
+    /// Represents the full case.
     Full,
+    /// Represents the board case.
     Board,
 }
 
 impl RestoreKind {
+    /// Performs the title handler operation.
     pub(super) const fn title(self) -> &'static str {
         match self {
             Self::Full => "Full restore",
@@ -129,6 +143,7 @@ impl RestoreKind {
         }
     }
 
+    /// Performs the route handler operation.
     pub(super) const fn route(self) -> &'static str {
         match self {
             Self::Full => "/admin/restore",
@@ -136,6 +151,7 @@ impl RestoreKind {
         }
     }
 
+    /// Performs the maintenance label handler operation.
     pub(super) const fn maintenance_label(self) -> &'static str {
         match self {
             Self::Full => "Full restore",
@@ -143,6 +159,7 @@ impl RestoreKind {
         }
     }
 
+    /// Performs the start failure message handler operation.
     const fn start_failure_message(self) -> &'static str {
         match self {
             Self::Full => "Restore could not start.",
@@ -150,6 +167,7 @@ impl RestoreKind {
         }
     }
 
+    /// Performs the upload failure message handler operation.
     const fn upload_failure_message(self) -> &'static str {
         match self {
             Self::Full => "Restore upload failed.",
@@ -157,6 +175,7 @@ impl RestoreKind {
         }
     }
 
+    /// Performs the failure message handler operation.
     const fn failure_message(self) -> &'static str {
         match self {
             Self::Full => "Restore failed.",
@@ -164,6 +183,7 @@ impl RestoreKind {
         }
     }
 
+    /// Performs the open section handler operation.
     const fn open_section(self) -> &'static str {
         match self {
             Self::Full => FULL_BACKUP_RESTORE_SECTION,
@@ -171,20 +191,29 @@ impl RestoreKind {
         }
     }
 
+    /// Performs the anchor handler operation.
     const fn anchor(self) -> &'static str {
         self.open_section()
     }
 }
 
+/// Data used by the streamed restore upload workflow.
 pub(super) struct StreamedRestoreUpload {
+    /// The temp file.
     pub temp_file: tempfile::NamedTempFile,
+    /// The optional form CSRF.
     pub form_csrf: Option<String>,
+    /// Whether to restore Tor hidden service keys.
     pub restore_tor_hidden_service_keys: bool,
+    /// The optional uploaded filename.
     pub uploaded_filename: Option<String>,
+    /// The optional uploaded content type.
     pub uploaded_content_type: Option<String>,
+    /// The uploaded size in bytes.
     pub uploaded_bytes: u64,
 }
 
+/// Builds the restore start response.
 pub(super) fn restore_start_response(
     kind: RestoreKind,
     xhr_request: bool,
@@ -195,7 +224,7 @@ pub(super) fn restore_start_response(
             StatusCode::CONFLICT,
             &error.to_string(),
         )
-        .unwrap_or_else(|response_error| response_error.into_response());
+        .unwrap_or_else(axum::response::IntoResponse::into_response);
     }
     redirect_page_response(
         &restore_error_redirect_target(kind, &error.to_string()),
@@ -203,6 +232,7 @@ pub(super) fn restore_start_response(
     )
 }
 
+/// Builds the restore upload parse response.
 pub(super) fn restore_upload_parse_response(
     kind: RestoreKind,
     xhr_request: bool,
@@ -214,7 +244,7 @@ pub(super) fn restore_upload_parse_response(
             StatusCode::BAD_REQUEST,
             &message,
         )
-        .unwrap_or_else(|response_error| response_error.into_response());
+        .unwrap_or_else(axum::response::IntoResponse::into_response);
     }
     redirect_page_response(
         &restore_error_redirect_target(kind, &message),
@@ -222,6 +252,7 @@ pub(super) fn restore_upload_parse_response(
     )
 }
 
+/// Builds the restore failure response.
 pub(super) fn restore_failure_response(
     kind: RestoreKind,
     xhr_request: bool,
@@ -236,6 +267,7 @@ pub(super) fn restore_failure_response(
     )
 }
 
+/// Restores success redirect target.
 pub(super) fn restore_success_redirect_target(
     kind: RestoreKind,
     board_short: Option<&str>,
@@ -248,7 +280,14 @@ pub(super) fn restore_success_redirect_target(
             target.anchor_value().unwrap_or_default()
         ),
         RestoreKind::Board => {
-            let board_short = board_short.expect("board restore success requires board short");
+            let Some(board_short) = board_short else {
+                tracing::error!(
+                    "Board restore succeeded without a board name; using the generic restore target"
+                );
+                return format!(
+                    "/admin/panel?restored=1&open={BOARD_BACKUP_RESTORE_SECTION}#{BOARD_BACKUP_RESTORE_SECTION}"
+                );
+            };
             format!(
                 "/admin/panel?flash={}&open={}#board-backup-{}",
                 crate::utils::redirect::encode_form_query_component(&format!(
@@ -261,6 +300,7 @@ pub(super) fn restore_success_redirect_target(
     }
 }
 
+/// Restores error redirect target.
 pub(super) fn restore_error_redirect_target(kind: RestoreKind, message: &str) -> String {
     let target = restore_admin_panel_target(kind, None);
     format!(
@@ -271,27 +311,27 @@ pub(super) fn restore_error_redirect_target(kind: RestoreKind, message: &str) ->
     )
 }
 
+/// Restores admin panel target.
 fn restore_admin_panel_target(
     kind: RestoreKind,
     board_short: Option<&str>,
-) -> super::AdminPanelTarget<'_> {
+) -> AdminPanelTarget<'_> {
     match kind {
-        RestoreKind::Full => {
-            super::AdminPanelTarget::anchor_open(kind.anchor(), kind.open_section())
-        }
+        RestoreKind::Full => AdminPanelTarget::anchor_open(kind.anchor(), kind.open_section()),
         RestoreKind::Board => {
             if let Some(board_short) = board_short {
-                super::AdminPanelTarget::owned_anchor_open(
+                AdminPanelTarget::owned_anchor_open(
                     format!("board-backup-{board_short}"),
                     kind.open_section(),
                 )
             } else {
-                super::AdminPanelTarget::anchor_open(kind.anchor(), kind.open_section())
+                AdminPanelTarget::anchor_open(kind.anchor(), kind.open_section())
             }
         }
     }
 }
 
+/// Performs the log restore upload started handler operation.
 pub(super) fn log_restore_upload_started(kind: RestoreKind, headers: &HeaderMap, jar: &CookieJar) {
     let content_type = headers
         .get(header::CONTENT_TYPE)
@@ -305,13 +345,14 @@ pub(super) fn log_restore_upload_started(kind: RestoreKind, headers: &HeaderMap,
         route = kind.route(),
         content_type = content_type.unwrap_or(""),
         content_length = content_length.unwrap_or(""),
-        has_session_cookie = jar.get(super::SESSION_COOKIE).is_some(),
+        has_session_cookie = jar.get(SESSION_COOKIE).is_some(),
         has_csrf_cookie = jar.get("csrf_token").is_some(),
         "{} upload started",
         kind.title()
     );
 }
 
+/// Handles the restore auth preflight request.
 pub(super) async fn restore_auth_preflight(
     state: &AppState,
     headers: &HeaderMap,
@@ -319,16 +360,16 @@ pub(super) async fn restore_auth_preflight(
     peer: Option<std::net::SocketAddr>,
 ) -> Result<Option<String>> {
     let session_id = jar
-        .get(super::SESSION_COOKIE)
+        .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    super::require_same_origin_request(headers, peer)?;
+    require_same_origin_request(headers, peer)?;
 
     {
         let pool = state.db.clone();
         let session_id_for_task = session_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id_for_task.as_deref())?;
+            require_admin_session_sid(&conn, session_id_for_task.as_deref())?;
             Ok(())
         })
         .await
@@ -340,6 +381,15 @@ pub(super) async fn restore_auth_preflight(
     Ok(session_id)
 }
 
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "the multipart parser keeps all restore-field limits and duplicate checks at one boundary"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "multipart quotas, duplicate checks, temporary-file writes, and metadata parsing share one boundary"
+)]
+/// Handles the stream restore upload to tempfile request.
 pub(super) async fn stream_restore_upload_to_tempfile(
     kind: RestoreKind,
     multipart: &mut Multipart,
@@ -355,11 +405,14 @@ pub(super) async fn stream_restore_upload_to_tempfile(
     let mut uploaded_content_type: Option<String> = None;
     let mut uploaded_bytes = 0u64;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|error| AppError::BadRequest(format!("Multipart error: {error}")))?
-    {
+    loop {
+        let next_field = multipart
+            .next_field()
+            .await
+            .map_err(|error| AppError::BadRequest(format!("Multipart error: {error}")))?;
+        let Some(field) = next_field else {
+            break;
+        };
         let field_name = field.name().unwrap_or("<unnamed>").to_owned();
         match field.name() {
             Some("_csrf") => {
@@ -407,17 +460,20 @@ pub(super) async fn stream_restore_upload_to_tempfile(
                 let async_file = tokio::fs::File::from_std(std_clone);
                 let mut writer = tokio::io::BufWriter::new(async_file);
                 let mut field = field;
-                while let Some(chunk) = field
-                    .chunk()
-                    .await
-                    .map_err(|error| AppError::BadRequest(error.to_string()))?
-                {
+                loop {
+                    let next_chunk = field
+                        .chunk()
+                        .await
+                        .map_err(|error| AppError::BadRequest(error.to_string()))?;
+                    let Some(chunk) = next_chunk else {
+                        break;
+                    };
                     uploaded_bytes = uploaded_bytes
                         .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
                     ensure_restore_upload_within_budget(
                         kind,
                         uploaded_bytes,
-                        super::common::RESTORE_UPLOAD_MAX_BYTES,
+                        common::RESTORE_UPLOAD_MAX_BYTES,
                     )?;
                     writer.write_all(&chunk).await.map_err(|error| {
                         AppError::Internal(anyhow::anyhow!("Write chunk: {error}"))
@@ -455,16 +511,20 @@ pub(super) async fn stream_restore_upload_to_tempfile(
     })
 }
 
+/// Handles the read restore text field request.
 async fn read_restore_text_field(
     mut field: axum::extract::multipart::Field<'_>,
     max_bytes: usize,
 ) -> Result<String> {
     let mut bytes = Vec::new();
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|error| AppError::BadRequest(error.to_string()))?
-    {
+    loop {
+        let next_chunk = field
+            .chunk()
+            .await
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+        let Some(chunk) = next_chunk else {
+            break;
+        };
         if bytes.len().saturating_add(chunk.len()) > max_bytes {
             return Err(AppError::UploadTooLarge(
                 "Restore control field is too large.".into(),
@@ -476,13 +536,14 @@ async fn read_restore_text_field(
         .map_err(|_error| AppError::BadRequest("Restore control field is not valid UTF-8.".into()))
 }
 
+/// Validates streamed restore upload.
 pub(super) fn validate_streamed_restore_upload(
     kind: RestoreKind,
     jar: &CookieJar,
     upload: &StreamedRestoreUpload,
 ) -> Result<u64> {
     let has_csrf_cookie = jar.get("csrf_token").is_some();
-    if super::check_admin_csrf_jar(jar, upload.form_csrf.as_deref()).is_err() {
+    if check_admin_csrf_jar(jar, upload.form_csrf.as_deref()).is_err() {
         tracing::warn!(
             target: "admin",
             route = kind.route(),
@@ -504,7 +565,7 @@ pub(super) fn validate_streamed_restore_upload(
             "Uploaded backup file is empty.".into(),
         ));
     }
-    ensure_restore_upload_within_budget(kind, file_size, super::common::RESTORE_UPLOAD_MAX_BYTES)?;
+    ensure_restore_upload_within_budget(kind, file_size, common::RESTORE_UPLOAD_MAX_BYTES)?;
 
     tracing::info!(
         target: "admin",
@@ -520,6 +581,7 @@ pub(super) fn validate_streamed_restore_upload(
     Ok(file_size)
 }
 
+/// Sanitizes backup ZIP filename.
 pub(super) fn sanitize_backup_zip_filename(filename: &str) -> Result<String> {
     let safe_filename: String = filename
         .chars()
@@ -536,6 +598,7 @@ pub(super) fn sanitize_backup_zip_filename(filename: &str) -> Result<String> {
     Ok(safe_filename)
 }
 
+/// Sanitizes saved backup ref.
 pub(super) fn sanitize_saved_backup_ref(value: &str) -> Result<String> {
     let safe_value: String = value
         .chars()
@@ -547,6 +610,7 @@ pub(super) fn sanitize_saved_backup_ref(value: &str) -> Result<String> {
     Ok(safe_value)
 }
 
+/// Ensures restore upload within budget.
 fn ensure_restore_upload_within_budget(
     kind: RestoreKind,
     uploaded_bytes: u64,
@@ -563,6 +627,7 @@ fn ensure_restore_upload_within_budget(
     Ok(())
 }
 
+/// Sanitizes board short value.
 pub(super) fn sanitize_board_short_value(board_short: &str) -> Result<String> {
     let safe_board = board_short
         .chars()
@@ -580,6 +645,7 @@ mod tests {
     use super::{
         ensure_restore_upload_within_budget, stream_restore_upload_to_tempfile, RestoreKind,
     };
+    use anyhow::{ensure, Context as _, Result};
     use axum::{
         body::Body,
         extract::Multipart,
@@ -590,11 +656,13 @@ mod tests {
     use tower::ServiceExt as _;
 
     #[test]
-    fn restore_upload_budget_rejects_oversized_upload() {
+    fn restore_upload_budget_rejects_oversized_upload() -> Result<()> {
         let error = ensure_restore_upload_within_budget(RestoreKind::Full, 6, 5)
-            .expect_err("oversized restore upload rejected");
+            .err()
+            .context("oversized restore upload was unexpectedly accepted")?;
 
-        assert!(error.to_string().contains("restore budget"));
+        ensure!(error.to_string().contains("restore budget"));
+        Ok(())
     }
 
     async fn parse_full_restore_upload(
@@ -625,7 +693,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_upload_rejects_oversized_csrf_text_field() {
+    async fn restore_upload_rejects_oversized_csrf_text_field() -> Result<()> {
         let router = Router::new().route("/restore", post(parse_full_restore_upload));
         let oversized = "x".repeat(4097);
         let (boundary, body) = restore_multipart_body(&[("_csrf", &oversized)]);
@@ -640,16 +708,17 @@ mod tests {
                         format!("multipart/form-data; boundary={boundary}"),
                     )
                     .body(Body::from(body))
-                    .expect("request"),
+                    .context("build multipart request")?,
             )
             .await
-            .expect("response");
+            .context("send multipart request")?;
 
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        ensure!(response.status() == StatusCode::PAYLOAD_TOO_LARGE);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn restore_upload_rejects_duplicate_control_fields() {
+    async fn restore_upload_rejects_duplicate_control_fields() -> Result<()> {
         let router = Router::new().route("/restore", post(parse_full_restore_upload));
         let (boundary, body) = restore_multipart_body(&[("_csrf", "one"), ("_csrf", "two")]);
 
@@ -663,11 +732,12 @@ mod tests {
                         format!("multipart/form-data; boundary={boundary}"),
                     )
                     .body(Body::from(body))
-                    .expect("request"),
+                    .context("build multipart request")?,
             )
             .await
-            .expect("response");
+            .context("send multipart request")?;
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        ensure!(response.status() == StatusCode::BAD_REQUEST);
+        Ok(())
     }
 }

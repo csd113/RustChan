@@ -1,8 +1,17 @@
-// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
-#![allow(clippy::wildcard_imports)]
+use super::{
+    activity_html_cache_control, admin_scoped_csrf_token, board_access_cookie_from_jar,
+    board_access_denied_response, board_access_preflight, board_activity_markers_from_jar,
+    can_view_board, current_theme_from_jar, db, ensure_csrf_for_request, has_nsfw_consent, header,
+    latest_visible_thread_marker_tuple, optional_connect_info_peer, prune_board_activity_markers,
+    remember_board_activity, remember_visible_thread_activity, render, sha256_hex, templates,
+    thread_activity_markers_from_jar, user_preferences_from_jar, AppError, AppState,
+    BoardAccessDecision, BoardAccessRequirement, CookieJar, HashMap, HashSet, HeaderMap,
+    HeaderValue, Html, OptionalConnectInfoPeer, Path, Query, Redirect, Response, Result, State,
+    StatusCode, ADMIN_SESSION_COOKIE, CONFIG, PREVIEW_REPLIES, THREADS_PER_PAGE,
+};
+use axum::response::IntoResponse as _;
 
-use super::*;
-
+/// Composite value returned by home page load result.
 type HomePageLoadResult = (
     Vec<crate::models::BoardStats>,
     Option<crate::models::SiteStats>,
@@ -14,6 +23,7 @@ type HomePageLoadResult = (
     HashMap<i64, i64>,
 );
 
+/// Composite value returned by board index load result.
 type BoardIndexLoadResult = (
     String,
     render::BoardPageData,
@@ -24,7 +34,12 @@ type BoardIndexLoadResult = (
     Option<(i64, i64)>,
 );
 
-pub async fn index(
+#[expect(
+    clippy::too_many_lines,
+    reason = "home-page data loading, activity markers, banner selection, and rendering form one request"
+)]
+/// Handles the index request.
+pub(crate) async fn index(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
     jar: CookieJar,
@@ -60,7 +75,7 @@ pub async fn index(
             let conn = pool.get()?;
             let boards = db::get_all_boards_with_stats(&conn)?;
             let site_data = match db::get_site_stats(&conn) {
-                Ok(stats) => Some(stats),
+                Ok(site_stats) => Some(site_stats),
                 Err(error) => {
                     tracing::warn!(target: "db", %error, "Failed to load home page site stats");
                     None
@@ -81,7 +96,7 @@ pub async fn index(
                     .iter()
                     .filter_map(|stats| {
                         board_activity_markers.get(&stats.board.id).map(|marker| {
-                            crate::db::BoardActivityCountInput {
+                            db::BoardActivityCountInput {
                                 board_id: stats.board.id,
                                 seen_thread_created_at: marker.seen_thread_created_at,
                                 seen_thread_id: marker.seen_thread_id,
@@ -97,7 +112,7 @@ pub async fn index(
             let board_reply_badges = if homepage_reply_badges_enabled {
                 let inputs = thread_activity_markers
                     .values()
-                    .map(|marker| crate::db::BoardReplyActivityCountInput {
+                    .map(|marker| db::BoardReplyActivityCountInput {
                         thread_id: marker.thread_id,
                         seen_reply_count: marker.seen_reply_count,
                     })
@@ -155,12 +170,12 @@ pub async fn index(
         let known_board_ids = board_stats
             .iter()
             .map(|stats| stats.board.id)
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<HashSet<_>>();
         jar = prune_board_activity_markers(jar, &known_board_ids);
     }
 
     // Read the onion address from AppState (populated by the Arti task on startup).
-    let onion_address: Option<String> = if crate::config::CONFIG.enable_tor_support {
+    let onion_address: Option<String> = if CONFIG.enable_tor_support {
         state.onion_address.read().await.clone()
     } else {
         None
@@ -208,7 +223,12 @@ pub async fn index(
 
 // ─── GET /:board/ — board index ───────────────────────────────────────────────
 
-pub async fn board_index(
+#[expect(
+    clippy::too_many_lines,
+    reason = "board access, pagination, activity markers, banner selection, and rendering form one request"
+)]
+/// Handles the board index request.
+pub(crate) async fn board_index(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     Query(params): Query<HashMap<String, String>>,
@@ -327,7 +347,7 @@ pub async fn board_index(
     let admin_tag = admin_csrf.as_deref().map_or_else(String::new, |token| {
         format!(
             "-a{}",
-            crate::utils::crypto::sha256_hex(token.as_bytes())
+            sha256_hex(token.as_bytes())
                 .chars()
                 .take(12)
                 .collect::<String>()
@@ -339,7 +359,7 @@ pub async fn board_index(
     } else {
         "-cg0"
     };
-    let theme_tag = crate::templates::page_theme_etag_fragment(
+    let theme_tag = templates::page_theme_etag_fragment(
         current_theme.as_deref(),
         Some(&page_data.board.default_theme),
     );
@@ -350,10 +370,7 @@ pub async fn board_index(
             .map(|(thread_id, count)| format!("{thread_id}:{count}"))
             .collect::<Vec<_>>();
         badge_parts.sort();
-        format!(
-            "-na{}",
-            crate::utils::crypto::sha256_hex(badge_parts.join("|").as_bytes())
-        )
+        format!("-na{}", sha256_hex(badge_parts.join("|").as_bytes()))
     } else {
         "-na0".to_owned()
     };
@@ -394,13 +411,12 @@ pub async fn board_index(
         // StatusCode::NOT_MODIFIED and Body::empty() are always valid constants;
         // this builder call is infallible.
         let mut resp = axum::http::Response::builder()
-            .status(axum::http::StatusCode::NOT_MODIFIED)
+            .status(StatusCode::NOT_MODIFIED)
             .body(axum::body::Body::empty())
             .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
         resp.headers_mut().insert(
             "etag",
-            axum::http::HeaderValue::from_str(&etag)
-                .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"0\"")),
+            HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("\"0\"")),
         );
         resp.headers_mut().insert(
             header::CACHE_CONTROL,
@@ -429,7 +445,7 @@ pub async fn board_index(
         user_preferences,
     );
     let mut resp = Html(html).into_response();
-    if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
+    if let Ok(v) = HeaderValue::from_str(&etag) {
         resp.headers_mut().insert("etag", v);
     }
     resp.headers_mut().insert(

@@ -1,4 +1,4 @@
-// chan_net/command.rs — RustWave gateway handler.
+//! `RustWave` gateway handler.
 //
 // POST /chan/command accepts a raw JSON body (Content-Type: application/json),
 // deserialises it into the `Command` enum (dispatched via
@@ -50,6 +50,8 @@ use crate::{error::AppError, middleware::AppState};
 // `IntoResponse` impl renders the correct status code and JSON shape:
 //   { "error": "<message>" }
 
+/// JSON extractor that maps Axum rejections into the `ChanNet` error contract.
+#[derive(Debug)]
 pub struct ChanJson<T>(T);
 
 impl<T, S> FromRequest<S> for ChanJson<T>
@@ -76,13 +78,51 @@ where
                     }
                     _ => rejection.to_string(),
                 };
-                Err(AppError::BadRequest(msg).into())
+                if rejection.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+                    Err(AppError::UploadTooLarge("Request body too large".to_owned()).into())
+                } else {
+                    Err(AppError::BadRequest(msg).into())
+                }
             }
         }
     }
 }
 
 // ── Command enum ──────────────────────────────────────────────────────────────
+
+/// Maximum number of Unicode scalar values accepted in a gateway reply body.
+const MAX_REPLY_CONTENT_CHARS: usize = 32_768;
+/// Maximum number of Unicode scalar values accepted in a gateway author name.
+const MAX_REPLY_AUTHOR_CHARS: usize = 255;
+
+/// Validates the semantic text limits for an incoming gateway reply.
+fn validate_reply_text(author: &str, content: &str) -> anyhow::Result<()> {
+    if content.chars().count() > MAX_REPLY_CONTENT_CHARS {
+        anyhow::bail!("Reply content exceeds maximum length of 32,768 characters");
+    }
+    if author.chars().count() > MAX_REPLY_AUTHOR_CHARS {
+        anyhow::bail!("Author name exceeds maximum length of 255 characters");
+    }
+    Ok(())
+}
+
+/// Maps internal command errors onto the stable HTTP command contract.
+fn map_command_error(error: anyhow::Error) -> AppError {
+    if error
+        .downcast_ref::<crate::db::chan_net::ReplyReplayError>()
+        .is_some()
+    {
+        return AppError::Conflict(error.to_string());
+    }
+
+    match AppError::from(error) {
+        // Snapshot selection and command precondition errors historically use
+        // the command API's 400 contract. Preserve that contract while letting
+        // typed temporary database contention remain a retryable 503.
+        AppError::Internal(error) => AppError::BadRequest(error.to_string()),
+        other => other,
+    }
+}
 
 /// All commands accepted by `POST /chan/command`.
 ///
@@ -95,19 +135,35 @@ pub enum Command {
     /// Return all boards, all active (non-archived) threads, and all their
     /// posts. If `since` is provided, only posts newer than that Unix timestamp
     /// are included (delta mode). Thread metadata is always emitted in full.
-    FullExport { since: Option<u64> },
+    FullExport {
+        /// Optional exclusive lower bound for post creation timestamps.
+        since: Option<u64>,
+    },
 
     /// Return all active threads and posts for a single board.
     /// If `since` is provided, only newer posts are included.
-    BoardExport { board: String, since: Option<u64> },
+    BoardExport {
+        /// URL-facing name of the board to export.
+        board: String,
+        /// Optional exclusive lower bound for post creation timestamps.
+        since: Option<u64>,
+    },
 
     /// Return all posts for a single thread.
     /// If `since` is provided, only newer posts are included.
-    ThreadExport { thread_id: i64, since: Option<u64> },
+    ThreadExport {
+        /// Local identifier of the thread to export.
+        thread_id: i64,
+        /// Optional exclusive lower bound for post creation timestamps.
+        since: Option<u64>,
+    },
 
     /// Return all archived threads and their posts for a single board.
     /// `since` is not accepted — archives are static.
-    ArchiveExport { board: String },
+    ArchiveExport {
+        /// URL-facing name of the board whose archive is exported.
+        board: String,
+    },
 
     /// Return everything: all boards, all active threads, all archived threads,
     /// all posts. No timestamp filtering. Intended for initial sync and
@@ -127,12 +183,26 @@ pub enum Command {
     /// `content` must be ≤ 32,768 characters.
     /// `author`  must be ≤ 255 characters.
     /// These are validated before any DB write; violations return 400.
+    ///
+    /// New integrations should always provide a stable, globally unique
+    /// `message_id`. It is the durable idempotency key, so retrying the same
+    /// message is safe even if other fields change. The field remains optional
+    /// for compatibility with older gateways; legacy requests use the original
+    /// content-and-timestamp fingerprint and therefore cannot distinguish two
+    /// identical replies created within the same timestamp second.
     ReplyPush {
+        /// URL-facing name of the destination board.
         board: String,
+        /// Local identifier of the destination thread.
         thread_id: i64,
+        /// Displayed author name.
         author: String,
+        /// Plain reply content.
         content: String,
+        /// Source Unix timestamp used by legacy idempotency.
         timestamp: u64,
+        /// Stable idempotency key supplied by modern gateways.
+        message_id: Option<uuid::Uuid>,
     },
 }
 
@@ -159,6 +229,11 @@ pub enum Command {
 ///   Snapshot builder / DB errors → 400 Bad Request (anyhow errors from the
 ///   blocking task are mapped by `.map_err(|e| AppError::BadRequest(e.to_string()))`)
 ///   Tokio join errors            → 500 Internal Server Error
+///
+/// # Errors
+///
+/// Returns a [`super::ChanError`] when authentication-adjacent extraction,
+/// validation, database access, snapshot construction, or task execution fails.
 pub async fn chan_command(
     State(state): State<AppState>,
     ChanJson(cmd): ChanJson<Command>,
@@ -205,14 +280,10 @@ pub async fn chan_command(
                     author,
                     content,
                     timestamp,
+                    message_id,
                 } => {
                     // ── Input validation — must happen before any DB write ──
-                    if content.len() > 32_768 {
-                        anyhow::bail!("Reply content exceeds maximum length of 32,768 characters");
-                    }
-                    if author.len() > 255 {
-                        anyhow::bail!("Author name exceeds maximum length of 255 characters");
-                    }
+                    validate_reply_text(&author, &content)?;
 
                     // ── DB write ───────────────────────────────────────────
                     // insert_reply_into_thread validates thread existence,
@@ -224,6 +295,7 @@ pub async fn chan_command(
                         &author,
                         &content,
                         timestamp.cast_signed(),
+                        message_id.as_ref(),
                     )?;
 
                     // Return the updated thread as the confirmation payload.
@@ -239,7 +311,7 @@ pub async fn chan_command(
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))? // JoinError → 500
-        .map_err(|e| AppError::BadRequest(e.to_string()))?; // anyhow::Error → 400
+        .map_err(map_command_error)?;
 
     let disposition = format!("attachment; filename=\"{filename}\"");
 
@@ -251,4 +323,16 @@ pub async fn chan_command(
         ],
         zip_bytes,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_reply_text;
+
+    #[test]
+    fn reply_limits_count_unicode_scalar_values() {
+        assert!(validate_reply_text(&"🦀".repeat(255), &"🦀".repeat(32_768)).is_ok());
+        assert!(validate_reply_text(&"🦀".repeat(256), "valid").is_err());
+        assert!(validate_reply_text("valid", &"🦀".repeat(32_769)).is_err());
+    }
 }

@@ -1,13 +1,3 @@
-// The closure keeps the call-site shape aligned with the surrounding combinator chain.
-#![allow(
-    clippy::redundant_closure_for_method_calls,
-    clippy::needless_pass_by_value,
-    clippy::significant_drop_in_scrutinee,
-    clippy::redundant_pub_crate,
-    clippy::cast_possible_truncation,
-    clippy::too_many_lines
-)]
-
 // Backup and restore subsystem for the admin panel.
 // Covers full-site backups, board-level backups, streaming downloads,
 // saved-backup restoration, and live board.json restore.
@@ -22,7 +12,7 @@ use crate::{
     utils::crypto::{new_session_id, verify_password},
 };
 use axum::{
-    extract::{Form, FromRequest as _, Multipart, Query, Request, State},
+    extract::{Form, Multipart, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse as _, Redirect, Response},
@@ -30,9 +20,8 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use chrono::{Local, Utc};
 use futures::stream::Stream;
-use rusqlite::{backup::Backup, params, OptionalExtension as _};
+use rusqlite::{backup::Backup, params};
 use serde::Deserialize;
-use serde_json;
 use std::collections::HashMap;
 use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
@@ -41,10 +30,7 @@ use std::sync::atomic::Ordering;
 use std::sync::LazyLock;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
-use time;
-use tokio::io::AsyncWriteExt as _;
 use tokio_util::io::ReaderStream;
-use tracing::warn;
 
 use super::{
     admin_panel_redirect_anchor_open, check_admin_csrf_jar, require_admin_post_origin_and_csrf,
@@ -52,15 +38,24 @@ use super::{
     AdminPanelTarget, ADMIN_COOKIE_SAME_SITE, SESSION_COOKIE,
 };
 
+/// Implements archive handler support.
 mod archive;
+/// Implements common handler support.
 mod common;
+/// Implements create handler support.
 mod create;
+/// Implements downloads handler support.
 mod downloads;
+/// Implements HTTP handler support.
 mod http;
+/// Implements listing handler support.
 mod listing;
+/// Implements restore board handler support.
 mod restore_board;
+/// Implements restore full handler support.
 mod restore_full;
 mod saved_backup;
+/// Implements types handler support.
 mod types;
 pub(crate) use saved_backup::BackupStorageMode;
 
@@ -71,31 +66,39 @@ use common::{
     validate_restore_safe_entry_name, verify_full_backup_archive, BANNER_RESTORE_ENTRY_MAX_BYTES,
     BANNER_RESTORE_TOTAL_MAX_BYTES, BOARD_MANIFEST_MAX_BYTES, ZIP_ENTRY_MAX_BYTES,
 };
-pub use create::*;
-pub use downloads::{
+pub(crate) use create::*;
+pub(crate) use downloads::{
     backup_progress_json, delete_backup, download_backup, write_temp_board_download_token,
 };
-pub use http::backup_request_logging_middleware;
-pub use listing::{invalidate_backup_list_cache, list_backup_files, BackupListKind};
-pub use restore_board::{
+pub(crate) use http::backup_request_logging_middleware;
+pub(crate) use listing::{invalidate_backup_list_cache, list_backup_files, BackupListKind};
+pub(crate) use restore_board::{
     board_restore, extract_board_from_full_backup, restore_saved_board_backup,
 };
-pub use restore_full::{admin_restore, restore_saved_full_backup};
+pub(crate) use restore_full::{admin_restore, restore_saved_full_backup};
 use types::board_backup_types;
 
+/// Full backup restore section used by this handler.
 const FULL_BACKUP_RESTORE_SECTION: &str = "full-backup-restore";
+/// Board backup restore section used by this handler.
 const BOARD_BACKUP_RESTORE_SECTION: &str = "board-backup-restore";
+/// `SQLite` header used by this handler.
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 #[derive(Deserialize)]
-pub struct RestoreSavedForm {
+/// Form fields accepted by the restore saved request.
+pub(crate) struct RestoreSavedForm {
+    /// The filename.
     filename: String,
     #[serde(default, deserialize_with = "form_checkbox_bool")]
+    /// Whether to restore Tor hidden service keys.
     restore_tor_hidden_service_keys: bool,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
+/// Performs the form checkbox bool handler operation.
 fn form_checkbox_bool<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -104,6 +107,7 @@ where
     Ok(form_checkbox_value_is_on(value.as_deref()))
 }
 
+/// Performs the form checkbox value is on handler operation.
 fn form_checkbox_value_is_on(value: Option<&str>) -> bool {
     value == Some("1")
         || value.is_some_and(|item| item.eq_ignore_ascii_case("on"))
@@ -142,21 +146,28 @@ use restore_full::refresh_live_site_state_from_db;
 use restore_full::restore_db_from_snapshot;
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[expect(clippy::too_many_lines)]
-pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Result<Response> {
+#[expect(
+    clippy::too_many_lines,
+    reason = "database snapshotting, archive creation, and temporary-file cleanup form one operation"
+)]
+/// Handles the admin backup request.
+pub(crate) async fn admin_backup(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Response> {
     let _maintenance_guard = state.maintenance_gate.try_begin("Full backup download")?;
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     let upload_dir = CONFIG.upload_dir.clone();
     let global_favicon_dir = crate::favicon::global_backup_source_dir();
-    let global_banner_dir = crate::banner::backup_source_dir();
+    let global_banner_dir = banner::backup_source_dir();
     let progress = std::sync::Arc::clone(&state.backup_progress);
 
     let (tmp_path, filename, file_size) = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<(PathBuf, String, u64)> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
-            let uploads_base = std::path::Path::new(&upload_dir);
+            require_admin_session_sid(&conn, session_id.as_deref())?;
+            let uploads_base = Path::new(&upload_dir);
 
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
             log_backup_phase(crate::middleware::backup_phase::SNAPSHOT_DB);
@@ -189,7 +200,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
             let db_snapshot_size = std::fs::metadata(&temp_db)
                 .map(|metadata| metadata.len())
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {e}")))?;
-            let manifest = create::build_full_backup_manifest(
+            let manifest = build_full_backup_manifest(
                 &conn,
                 db_snapshot_size,
                 file_count
@@ -241,7 +252,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
                 let copied = std::io::copy(&mut db_src, &mut zip)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Stream DB to zip: {e}")))?;
                 drop(db_src);
-                let _ = std::fs::remove_file(&temp_db);
+                drop(std::fs::remove_file(&temp_db));
                 progress.files_done.fetch_add(1, Ordering::Relaxed);
                 progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
                 log_backup_progress(&progress);
@@ -285,16 +296,19 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
             })();
 
             if let Err(error) = build_result {
-                let _ = std::fs::remove_file(&temp_db);
+                drop(std::fs::remove_file(&temp_db));
                 return Err(error);
             }
 
             if let Err(error) = common::verify_full_backup_zip(zip_tmp.path()) {
-                let _ = std::fs::remove_file(&temp_db);
+                drop(std::fs::remove_file(&temp_db));
                 return Err(error);
             }
 
-            let file_size = zip_tmp.as_file().metadata().map(|m| m.len()).unwrap_or(0);
+            let file_size = zip_tmp
+                .as_file()
+                .metadata()
+                .map_or(0, |metadata| metadata.len());
 
             // Persist the temp file (prevents auto-delete on drop).
             // We delete it manually in the background after serving.
@@ -326,8 +340,8 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
     // Schedule temp-file cleanup after a generous window so even slow clients finish.
     let cleanup_path = tmp_path;
     tokio::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
-        let _ = tokio::fs::remove_file(cleanup_path).await;
+        tokio::time::sleep(Duration::from_mins(10)).await;
+        drop(tokio::fs::remove_file(cleanup_path).await);
     });
 
     let disposition = format!("attachment; filename=\"{filename}\"");
@@ -344,7 +358,7 @@ pub async fn admin_backup(State(state): State<AppState>, jar: CookieJar) -> Resu
 
 /// Count regular files (not directories) under `dir` recursively.
 /// Used to initialise the progress bar's `files_total` before compression starts.
-fn count_files_in_dir(dir: &std::path::Path) -> u64 {
+fn count_files_in_dir(dir: &Path) -> u64 {
     if crate::utils::fs_security::assert_dir_no_symlink(dir).is_err() {
         return 0;
     }
@@ -380,18 +394,19 @@ fn count_files_in_dir(dir: &std::path::Path) -> u64 {
 /// after each file is written to the zip.
 fn add_dir_to_zip<W: Write + Seek>(
     zip: &mut zip::ZipWriter<W>,
-    base: &std::path::Path,
-    dir: &std::path::Path,
+    base: &Path,
+    dir: &Path,
     opts: zip::write::SimpleFileOptions,
     progress: &crate::middleware::BackupProgress,
 ) -> Result<()> {
     add_dir_to_zip_with_prefix(zip, base, dir, "uploads", opts, progress)
 }
 
+/// Performs the add dir to ZIP with prefix handler operation.
 pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
     zip: &mut zip::ZipWriter<W>,
-    base: &std::path::Path,
-    dir: &std::path::Path,
+    base: &Path,
+    dir: &Path,
     prefix: &str,
     opts: zip::write::SimpleFileOptions,
     progress: &crate::middleware::BackupProgress,
@@ -442,6 +457,7 @@ pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
     Ok(())
 }
 
+/// Performs the ZIP file options for path handler operation.
 fn zip_file_options_for_path(path: &Path) -> zip::write::SimpleFileOptions {
     let method = if should_store_without_recompress(path) {
         zip::CompressionMethod::Stored
@@ -451,6 +467,7 @@ fn zip_file_options_for_path(path: &Path) -> zip::write::SimpleFileOptions {
     zip::write::SimpleFileOptions::default().compression_method(method)
 }
 
+/// Performs the should store without recompress handler operation.
 fn should_store_without_recompress(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -491,20 +508,22 @@ fn should_store_without_recompress(path: &Path) -> bool {
 }
 
 /// rustchan-data/backups/full/
-pub fn full_backup_dir() -> PathBuf {
+pub(crate) fn full_backup_dir() -> PathBuf {
     crate::config::full_backups_dir()
 }
 
 /// rustchan-data/backups/boards/
-pub fn board_backup_dir() -> PathBuf {
+pub(crate) fn board_backup_dir() -> PathBuf {
     crate::config::board_backups_dir()
 }
 
+/// Performs the local backup timestamp label handler operation.
 pub(super) fn local_backup_timestamp_label() -> String {
     Local::now().format("%Y%m%d_%H%M%S").to_string()
 }
 
-pub fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
+/// Performs the unique backup filename handler operation.
+pub(crate) fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
     let candidate = dir.join(base_name);
     if !candidate.exists() {
         return base_name.to_owned();
@@ -529,15 +548,17 @@ pub fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
 }
 
 /// rustchan-data/runtime/tmp/board-downloads/
-pub fn temp_board_download_dir() -> PathBuf {
+pub(crate) fn temp_board_download_dir() -> PathBuf {
     crate::config::runtime_temp_board_downloads_dir()
 }
 
 // ─── Board-level backup / restore ─────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct BoardBackupDownloadQuery {
+/// Query parameters accepted by the board backup download request.
+pub(crate) struct BoardBackupDownloadQuery {
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
@@ -545,7 +566,7 @@ pub struct BoardBackupDownloadQuery {
 ///
 /// MEM-FIX: Same approach as `admin_backup` — build zip into a `NamedTempFile` on
 /// disk, then stream the result in 64 KiB chunks.
-pub async fn board_backup(
+pub(crate) async fn board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     Query(query): Query<BoardBackupDownloadQuery>,
@@ -553,7 +574,7 @@ pub async fn board_backup(
 ) -> Result<Response> {
     check_admin_csrf_jar(&jar, query.csrf.as_deref())?;
 
-    let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
+    let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     let safe_board = board_short
         .chars()
         .filter(char::is_ascii_alphanumeric)
@@ -568,7 +589,7 @@ pub async fn board_backup(
         let safe_board = safe_board.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
             conn.query_row(
                 "SELECT 1 FROM boards WHERE short_name = ?1",
                 params![safe_board],
@@ -636,6 +657,7 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::models::BackupBoardSummary;
+    use anyhow::{bail, ensure, Context as _, Result as TestResult};
     use axum::{
         body::{to_bytes, Body},
         extract::Form,
@@ -649,19 +671,23 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tower::ServiceExt as _;
 
-    fn zip_with_entries(entries: &[(&str, &[u8])]) -> zip::ZipArchive<Cursor<Vec<u8>>> {
+    fn zip_with_entries(entries: &[(&str, &[u8])]) -> TestResult<zip::ZipArchive<Cursor<Vec<u8>>>> {
         let mut cursor = Cursor::new(Vec::new());
         {
             let mut writer = zip::ZipWriter::new(&mut cursor);
             let options = zip::write::SimpleFileOptions::default();
             for (name, body) in entries {
-                writer.start_file(*name, options).expect("start file");
-                writer.write_all(body).expect("write file");
+                writer
+                    .start_file(*name, options)
+                    .with_context(|| format!("start ZIP entry {name}"))?;
+                writer
+                    .write_all(body)
+                    .with_context(|| format!("write ZIP entry {name}"))?;
             }
-            writer.finish().expect("finish zip");
+            writer.finish().context("finish ZIP archive")?;
         }
         cursor.set_position(0);
-        zip::ZipArchive::new(cursor).expect("zip archive")
+        zip::ZipArchive::new(cursor).context("parse ZIP archive")
     }
 
     #[test]
@@ -681,7 +707,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_saved_form_accepts_checked_browser_checkbox_value() {
+    async fn restore_saved_form_accepts_checked_browser_checkbox_value() -> TestResult<()> {
         let app = Router::new().route("/parse", post(echo_restore_saved_form));
         let response = app
             .oneshot(
@@ -695,16 +721,17 @@ mod tests {
                     .body(Body::from(
                         "_csrf=test&filename=backup.zip&restore_tor_hidden_service_keys=1",
                     ))
-                    .expect("request"),
+                    .context("build restore form request")?,
             )
             .await
-            .expect("response");
+            .context("send restore form request")?;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        ensure!(response.status() == StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("body");
-        assert_eq!(&body[..], b"true");
+            .context("read response body")?;
+        ensure!(&body[..] == b"true");
+        Ok(())
     }
 
     fn sample_post(board_id: i64, thread_id: i64, body: &str, is_op: bool) -> crate::db::NewPost {
@@ -732,34 +759,36 @@ mod tests {
         }
     }
 
-    struct PathCleanup(std::path::PathBuf);
+    struct PathCleanup(PathBuf);
 
     impl Drop for PathCleanup {
         fn drop(&mut self) {
             match std::fs::metadata(&self.0) {
                 Ok(metadata) if metadata.is_dir() => {
-                    let _ = std::fs::remove_dir_all(&self.0);
+                    drop(std::fs::remove_dir_all(&self.0));
                 }
                 Ok(_) => {
-                    let _ = std::fs::remove_file(&self.0);
+                    drop(std::fs::remove_file(&self.0));
                 }
                 Err(_) => {}
             }
         }
     }
 
-    fn install_admin_session(state: &crate::middleware::AppState) {
-        let conn = state.db.get().expect("db connection");
-        let password_hash = crate::utils::crypto::hash_password("hunter2").expect("hash password");
+    fn install_admin_session(state: &crate::middleware::AppState) -> TestResult<()> {
+        let conn = state.db.get().context("get database connection")?;
+        let password_hash =
+            crate::utils::crypto::hash_password("hunter2").context("hash admin password")?;
         let admin_id =
-            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_admin(&conn, "admin", &password_hash).context("create test admin")?;
         crate::db::create_session(
             &conn,
             "session123",
             admin_id,
             chrono::Utc::now().timestamp() + 3600,
         )
-        .expect("create session");
+        .context("create test admin session")?;
+        Ok(())
     }
 
     fn admin_signed_csrf() -> String {
@@ -780,14 +809,40 @@ mod tests {
         format!("{prefix}-{}.zip", uuid::Uuid::new_v4().simple())
     }
 
+    fn admin_form_post(uri: &str, body: String) -> TestResult<Request<Body>> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::HOST, "localhost")
+            .header(header::ORIGIN, "http://localhost")
+            .header(
+                header::COOKIE,
+                "csrf_token=csrf123; chan_admin_session=session123",
+            )
+            .extension(crate::test_support::connect_info())
+            .body(Body::from(body))
+            .context("build admin form request")
+    }
+
+    async fn response_body_string(response: axum::response::Response) -> TestResult<String> {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .context("read response body")?;
+        String::from_utf8(body.to_vec()).context("decode UTF-8 response body")
+    }
+
     #[tokio::test]
-    async fn board_backup_get_requires_admin_csrf() {
+    async fn board_backup_get_requires_admin_csrf() -> TestResult<()> {
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
-        let board_short = format!("b{}", &uuid::Uuid::new_v4().simple().to_string()[..7]);
+        install_admin_session(&state)?;
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let suffix = unique.get(..7).unwrap_or(&unique);
+        let board_short = format!("b{suffix}");
         {
-            let conn = state.db.get().expect("db connection");
-            crate::db::create_board(&conn, &board_short, "Board", "", false).expect("create board");
+            let conn = state.db.get().context("get database connection")?;
+            crate::db::create_board(&conn, &board_short, "Board", "", false)
+                .context("create board")?;
         }
         let app = Router::new()
             .route("/admin/board/backup/{board}", get(super::board_backup))
@@ -802,12 +857,12 @@ mod tests {
                     .uri(format!("/admin/board/backup/{board_short}"))
                     .header(header::COOKIE, cookie)
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build rejected board-backup request")?,
             )
             .await
-            .expect("rejected response");
+            .context("send rejected board-backup request")?;
 
-        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        ensure!(rejected.status() == StatusCode::FORBIDDEN);
 
         let accepted = app
             .oneshot(
@@ -819,12 +874,13 @@ mod tests {
                     ))
                     .header(header::COOKIE, cookie)
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build accepted board-backup request")?,
             )
             .await
-            .expect("accepted response");
+            .context("send accepted board-backup request")?;
 
-        assert_eq!(accepted.status(), StatusCode::NOT_FOUND);
+        ensure!(accepted.status() == StatusCode::NOT_FOUND);
+        Ok(())
     }
 
     fn extract_location_query_param(location: &str, key: &str) -> Option<String> {
@@ -836,54 +892,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_xhr_bad_request_returns_handled_json_error() {
+    async fn admin_xhr_bad_request_returns_handled_json_error() -> TestResult<()> {
         let response = super::admin_xhr_error_response(&AppError::BadRequest("bad restore".into()));
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
+        ensure!(response.status() == StatusCode::OK);
+        ensure!(
             response
                 .headers()
                 .get("x-rustchan-error-status")
-                .and_then(|value| value.to_str().ok()),
-            Some(StatusCode::BAD_REQUEST.as_str())
+                .and_then(|value| value.to_str().ok())
+                == Some(StatusCode::BAD_REQUEST.as_str())
         );
 
-        let body = String::from_utf8(
-            to_bytes(response.into_body(), usize::MAX)
-                .await
-                .expect("response body")
-                .to_vec(),
-        )
-        .expect("utf8 body");
-        assert!(body.contains("bad restore"));
+        let body = response_body_string(response).await?;
+        ensure!(body.contains("bad restore"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn restore_upload_parse_xhr_returns_handled_json_error() {
+    async fn restore_upload_parse_xhr_returns_handled_json_error() -> TestResult<()> {
         let response = super::restore_upload_parse_response(
             RestoreKind::Full,
             true,
             &"missing multipart field",
         );
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
+        ensure!(response.status() == StatusCode::OK);
+        ensure!(
             response
                 .headers()
                 .get("x-rustchan-error-status")
-                .and_then(|value| value.to_str().ok()),
-            Some(StatusCode::BAD_REQUEST.as_str())
+                .and_then(|value| value.to_str().ok())
+                == Some(StatusCode::BAD_REQUEST.as_str())
         );
 
-        let body = String::from_utf8(
-            to_bytes(response.into_body(), usize::MAX)
-                .await
-                .expect("response body")
-                .to_vec(),
-        )
-        .expect("utf8 body");
-        assert!(body.contains("Upload parsing failed"));
-        assert!(body.contains("missing multipart field"));
+        let body = response_body_string(response).await?;
+        ensure!(body.contains("Upload parsing failed"));
+        ensure!(body.contains("missing multipart field"));
+        Ok(())
     }
 
     #[test]
@@ -907,15 +953,241 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn saved_full_restore_invalid_zip_redirects_back_to_full_backup_section() {
+    async fn saved_backup_delete_is_blocked_during_active_maintenance_without_mutation(
+    ) -> TestResult<()> {
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
 
-        std::fs::create_dir_all(super::full_backup_dir()).expect("create full backup dir");
-        let filename = unique_zip_name("saved-full-restore-invalid");
-        let backup_path = super::full_backup_dir().join(&filename);
+        let backup_ref = format!("delete-gate-{}", uuid::Uuid::new_v4().simple());
+        let backup_root = crate::config::backups_dir().join(&backup_ref);
+        let sentinel_path = backup_root.join("sentinel");
+        let _backup_cleanup = PathCleanup(backup_root.clone());
+        std::fs::create_dir_all(&backup_root).context("create saved backup")?;
+        std::fs::write(&sentinel_path, b"protected backup").context("write backup sentinel")?;
+
+        let app = Router::new()
+            .route("/admin/backup/delete", post(super::delete_backup))
+            .with_state(state.clone());
+        let form_body = format!(
+            "_csrf={}&kind=full&filename={backup_ref}",
+            admin_signed_csrf()
+        );
+
+        let active_guard = state
+            .maintenance_gate
+            .try_begin("Full backup creation")
+            .context("begin maintenance")?;
+        let blocked = app
+            .clone()
+            .oneshot(admin_form_post("/admin/backup/delete", form_body.clone())?)
+            .await
+            .context("send blocked delete request")?;
+
+        ensure!(blocked.status() == StatusCode::CONFLICT);
+        ensure!(response_body_string(blocked)
+            .await?
+            .contains("already running"));
+        let sentinel = std::fs::read(&sentinel_path).context("read protected backup sentinel")?;
+        ensure!(sentinel == b"protected backup");
+
+        drop(active_guard);
+        let allowed = app
+            .oneshot(admin_form_post("/admin/backup/delete", form_body)?)
+            .await
+            .context("send allowed delete request")?;
+
+        ensure!(allowed.status() == StatusCode::SEE_OTHER);
+        ensure!(!backup_root.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn saved_restore_routes_are_blocked_during_active_maintenance_without_mutation(
+    ) -> TestResult<()> {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state)?;
+
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let suffix = unique.get(..7).unwrap_or(&unique);
+        let marker_board = format!("m{suffix}");
+        {
+            let conn = state.db.get().context("get database connection")?;
+            crate::db::create_board(&conn, &marker_board, "Maintenance Marker", "", false)
+                .context("create marker board")?;
+        }
+
+        std::fs::create_dir_all(full_backup_dir()).context("create full backup directory")?;
+        std::fs::create_dir_all(super::board_backup_dir())
+            .context("create board backup directory")?;
+        let full_filename = unique_zip_name("saved-full-restore-gate");
+        let board_filename = unique_zip_name("saved-board-restore-gate");
+        let full_backup_path = full_backup_dir().join(&full_filename);
+        let board_backup_path = super::board_backup_dir().join(&board_filename);
+        let _full_backup_cleanup = PathCleanup(full_backup_path.clone());
+        let _board_backup_cleanup = PathCleanup(board_backup_path.clone());
+        std::fs::write(&full_backup_path, b"full backup marker")
+            .context("write full backup marker")?;
+        std::fs::write(&board_backup_path, b"board backup marker")
+            .context("write board backup marker")?;
+
+        let app = Router::new()
+            .route(
+                "/admin/backup/restore-saved",
+                post(super::restore_saved_full_backup),
+            )
+            .route(
+                "/admin/board/backup/restore-saved",
+                post(super::restore_saved_board_backup),
+            )
+            .with_state(state.clone());
+        let full_form_body = format!("_csrf={}&filename={full_filename}", admin_signed_csrf());
+        let board_form_body = format!("_csrf={}&filename={board_filename}", admin_signed_csrf());
+
+        let active_guard = state
+            .maintenance_gate
+            .try_begin("Full backup creation")
+            .context("begin maintenance")?;
+        for (route, form_body) in [
+            ("/admin/backup/restore-saved", full_form_body.clone()),
+            ("/admin/board/backup/restore-saved", board_form_body.clone()),
+        ] {
+            let blocked = app
+                .clone()
+                .oneshot(admin_form_post(route, form_body)?)
+                .await
+                .context("send blocked restore request")?;
+            ensure!(blocked.status() == StatusCode::CONFLICT);
+            ensure!(response_body_string(blocked)
+                .await?
+                .contains("already running"));
+        }
+
+        let full_marker = std::fs::read(&full_backup_path).context("read full backup marker")?;
+        ensure!(full_marker == b"full backup marker");
+        let board_marker = std::fs::read(&board_backup_path).context("read board backup marker")?;
+        ensure!(board_marker == b"board backup marker");
+        {
+            let conn = state.db.get().context("get database connection")?;
+            let marker_name: String = conn
+                .query_row(
+                    "SELECT name FROM boards WHERE short_name = ?1",
+                    [&marker_board],
+                    |row| row.get(0),
+                )
+                .context("query marker board")?;
+            ensure!(marker_name == "Maintenance Marker");
+        }
+
+        drop(active_guard);
+        for (route, form_body) in [
+            ("/admin/backup/restore-saved", full_form_body),
+            ("/admin/board/backup/restore-saved", board_form_body),
+        ] {
+            let control = app
+                .clone()
+                .oneshot(admin_form_post(route, form_body)?)
+                .await
+                .context("send ungated restore request")?;
+            ensure!(control.status() == StatusCode::SEE_OTHER);
+            let location = control
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .context("restore response has no valid redirect location")?;
+            ensure!(location.contains("/admin/panel?restore_error="));
+            ensure!(location.contains("Invalid+zip"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn extracted_board_restore_is_blocked_during_active_maintenance_without_mutation(
+    ) -> TestResult<()> {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state)?;
+
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let suffix = unique.get(..7).unwrap_or(&unique);
+        let board_short = format!("e{suffix}");
+        std::fs::create_dir_all(full_backup_dir()).context("create full backup directory")?;
+        let filename = unique_zip_name("extract-board-restore-gate");
+        let backup_path = full_backup_dir().join(&filename);
         let _backup_cleanup = PathCleanup(backup_path.clone());
-        std::fs::write(&backup_path, b"not-a-zip").expect("write invalid zip");
+        write_sample_full_backup_zip_for_board_at(&backup_path, true, &board_short)?;
+        let backup_before = std::fs::read(&backup_path).context("read original full backup")?;
+
+        let upload_board_dir = PathBuf::from(&crate::config::CONFIG.upload_dir).join(&board_short);
+        let upload_path = upload_board_dir.join("hello.txt");
+        let _upload_cleanup = PathCleanup(upload_board_dir.clone());
+        ensure!(!upload_board_dir.exists());
+
+        let app = Router::new()
+            .route(
+                "/admin/backup/extract-board",
+                post(super::extract_board_from_full_backup),
+            )
+            .with_state(state.clone());
+        let form_body = format!(
+            "filename={filename}&board_short={board_short}&action=restore&_csrf={}",
+            admin_signed_csrf()
+        );
+
+        let active_guard = state
+            .maintenance_gate
+            .try_begin("Full backup creation")
+            .context("begin maintenance")?;
+        let blocked = app
+            .clone()
+            .oneshot(admin_form_post(
+                "/admin/backup/extract-board",
+                form_body.clone(),
+            )?)
+            .await
+            .context("send blocked extracted-board restore request")?;
+
+        ensure!(blocked.status() == StatusCode::CONFLICT);
+        ensure!(response_body_string(blocked)
+            .await?
+            .contains("already running"));
+        {
+            let conn = state.db.get().context("get database connection")?;
+            ensure!(crate::db::get_board_by_short(&conn, &board_short)?.is_none());
+        }
+        ensure!(!upload_board_dir.exists());
+        ensure!(std::fs::read(&backup_path).context("read retained full backup")? == backup_before);
+
+        drop(active_guard);
+        let allowed = app
+            .oneshot(admin_form_post("/admin/backup/extract-board", form_body)?)
+            .await
+            .context("send allowed extracted-board restore request")?;
+
+        ensure!(allowed.status() == StatusCode::SEE_OTHER);
+        let location = allowed
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .context("restore response has no valid redirect location")?;
+        ensure!(location.contains(&format!("board-backup-{board_short}")));
+        {
+            let conn = state.db.get().context("get database connection")?;
+            ensure!(crate::db::get_board_by_short(&conn, &board_short)?.is_some());
+        }
+        ensure!(std::fs::read(&upload_path).context("read restored upload")? == b"hello");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn saved_full_restore_invalid_zip_redirects_back_to_full_backup_section() -> TestResult<()>
+    {
+        let state = crate::test_support::app_state();
+        install_admin_session(&state)?;
+
+        std::fs::create_dir_all(full_backup_dir()).context("create full backup directory")?;
+        let filename = unique_zip_name("saved-full-restore-invalid");
+        let backup_path = full_backup_dir().join(&filename);
+        let _backup_cleanup = PathCleanup(backup_path.clone());
+        std::fs::write(&backup_path, b"not-a-zip").context("write invalid ZIP")?;
 
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, HeaderValue::from_static("localhost"));
@@ -929,37 +1201,45 @@ mod tests {
                 Some(crate::test_support::connect_info().0),
                 false,
             ),
-            axum::extract::Form(super::RestoreSavedForm {
+            Form(super::RestoreSavedForm {
                 filename,
                 restore_tor_hidden_service_keys: false,
                 csrf: Some(admin_signed_csrf()),
             }),
         )
         .await
-        .expect("restore response");
+        .context("restore saved full backup")?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        ensure!(response.status() == StatusCode::SEE_OTHER);
         let location = response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .expect("redirect location");
-        assert!(location.contains("/admin/panel?restore_error="));
-        assert!(location.contains("Invalid+zip"));
-        assert!(location.contains("open=full-backup-restore"));
-        assert!(location.contains("#full-backup-restore"));
+            .context("restore response has no valid redirect location")?;
+        ensure!(location.contains("/admin/panel?restore_error="));
+        ensure!(location.contains("Invalid+zip"));
+        ensure!(location.contains("open=full-backup-restore"));
+        ensure!(location.contains("#full-backup-restore"));
+        Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the end-to-end test keeps its fixture setup and ordered assertions in one scenario"
+    )]
     #[tokio::test]
-    async fn saved_board_restore_success_redirects_back_to_restored_board_section() {
+    async fn saved_board_restore_success_redirects_back_to_restored_board_section() -> TestResult<()>
+    {
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
 
-        let board_short = format!("b{}", &uuid::Uuid::new_v4().simple().to_string()[..7]);
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let suffix = unique.get(..7).unwrap_or(&unique);
+        let board_short = format!("b{suffix}");
         let thread_id = {
-            let conn = state.db.get().expect("db connection");
+            let conn = state.db.get().context("get database connection")?;
             let board_id = crate::db::create_board(&conn, &board_short, "Restore Test", "", false)
-                .expect("create board");
+                .context("create restore test board")?;
             let post = sample_post(board_id, 0, "restored board body", true);
             let (thread_id, _, _) = crate::db::create_thread_with_optional_poll(
                 &conn,
@@ -970,14 +1250,14 @@ mod tests {
                 None,
                 None,
             )
-            .expect("create thread");
+            .context("create restore test thread")?;
             thread_id
         };
 
-        std::fs::create_dir_all(super::board_backup_dir()).expect("create board backup dir");
-        let _upload_cleanup = PathCleanup(
-            std::path::PathBuf::from(&crate::config::CONFIG.upload_dir).join(&board_short),
-        );
+        std::fs::create_dir_all(super::board_backup_dir())
+            .context("create board backup directory")?;
+        let _upload_cleanup =
+            PathCleanup(PathBuf::from(&crate::config::CONFIG.upload_dir).join(&board_short));
 
         let app = Router::new()
             .route(
@@ -1013,32 +1293,32 @@ mod tests {
                         "_csrf={}&board_short={board_short}",
                         admin_signed_csrf()
                     )))
-                    .expect("request"),
+                    .context("build board-backup create request")?,
             )
             .await
-            .expect("create response");
+            .context("send board-backup create request")?;
 
-        assert_eq!(create_response.status(), StatusCode::SEE_OTHER);
+        ensure!(create_response.status() == StatusCode::SEE_OTHER);
         let create_location = create_response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .expect("create redirect location");
-        assert!(create_location.contains("open=board-backup-restore"));
-        assert!(create_location.contains(&format!("#board-backup-{board_short}")));
+            .context("create response has no valid redirect location")?;
+        ensure!(create_location.contains("open=board-backup-restore"));
+        ensure!(create_location.contains(&format!("#board-backup-{board_short}")));
 
-        let filename =
-            super::latest_board_backup_filename(&board_short).expect("created backup filename");
+        let filename = super::latest_board_backup_filename(&board_short)
+            .context("created backup filename not found")?;
         let backup_path = crate::config::backups_dir().join(&filename);
         let _backup_cleanup = PathCleanup(backup_path.clone());
-        assert!(backup_path.exists());
+        ensure!(backup_path.exists());
 
         {
-            let conn = state.db.get().expect("db connection");
+            let conn = state.db.get().context("get database connection")?;
             conn.execute_batch(&format!(
                 "BEGIN; DELETE FROM boards WHERE short_name='{board_short}'; COMMIT;"
             ))
-            .expect("mutate board");
+            .context("remove board before restore")?;
         }
 
         let response = app
@@ -1059,19 +1339,19 @@ mod tests {
                         "_csrf={}&filename={filename}",
                         admin_signed_csrf()
                     )))
-                    .expect("request"),
+                    .context("build saved-board restore request")?,
             )
             .await
-            .expect("restore response");
+            .context("send saved-board restore request")?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        ensure!(response.status() == StatusCode::SEE_OTHER);
         let location = response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .expect("redirect location");
-        assert!(location.contains("/admin/panel?"));
-        assert!(location.contains("open=board-backup-restore"));
+            .context("restore response has no valid redirect location")?;
+        ensure!(location.contains("/admin/panel?"));
+        ensure!(location.contains("open=board-backup-restore"));
 
         let board_page = app
             .clone()
@@ -1081,17 +1361,18 @@ mod tests {
                     .uri(format!("/{board_short}"))
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build restored board-page request")?,
             )
             .await
-            .expect("board page response");
-        assert_eq!(board_page.status(), StatusCode::OK);
+            .context("send restored board-page request")?;
+        ensure!(board_page.status() == StatusCode::OK);
         let board_body = to_bytes(board_page.into_body(), usize::MAX)
             .await
-            .expect("board body");
-        let board_body = String::from_utf8(board_body.to_vec()).expect("utf8 board body");
-        assert!(board_body.contains("Restore Test"));
-        assert!(board_body.contains("restored board body"));
+            .context("read restored board-page body")?;
+        let board_body =
+            String::from_utf8(board_body.to_vec()).context("decode restored board-page body")?;
+        ensure!(board_body.contains("Restore Test"));
+        ensure!(board_body.contains("restored board body"));
 
         let thread_page = app
             .oneshot(
@@ -1100,28 +1381,32 @@ mod tests {
                     .uri(format!("/{board_short}/thread/{thread_id}"))
                     .extension(crate::test_support::connect_info())
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build restored thread-page request")?,
             )
             .await
-            .expect("thread page response");
-        assert_eq!(thread_page.status(), StatusCode::OK);
+            .context("send restored thread-page request")?;
+        ensure!(thread_page.status() == StatusCode::OK);
         let thread_body = to_bytes(thread_page.into_body(), usize::MAX)
             .await
-            .expect("thread body");
-        let thread_body = String::from_utf8(thread_body.to_vec()).expect("utf8 thread body");
-        assert!(thread_body.contains("restored board body"));
+            .context("read restored thread-page body")?;
+        let thread_body =
+            String::from_utf8(thread_body.to_vec()).context("decode restored thread-page body")?;
+        ensure!(thread_body.contains("restored board body"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn saved_board_restore_invalid_zip_redirects_back_to_board_restore_section() {
+    async fn saved_board_restore_invalid_zip_redirects_back_to_board_restore_section(
+    ) -> TestResult<()> {
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
 
-        std::fs::create_dir_all(super::board_backup_dir()).expect("create board backup dir");
+        std::fs::create_dir_all(super::board_backup_dir())
+            .context("create board backup directory")?;
         let filename = unique_zip_name("saved-board-restore-invalid");
         let backup_path = super::board_backup_dir().join(&filename);
         let _backup_cleanup = PathCleanup(backup_path.clone());
-        std::fs::write(&backup_path, b"not-a-zip").expect("write invalid zip");
+        std::fs::write(&backup_path, b"not-a-zip").context("write invalid ZIP")?;
 
         let response = super::restore_saved_board_backup(
             axum::extract::State(state),
@@ -1133,38 +1418,45 @@ mod tests {
                 headers
             },
             crate::test_support::connect_info(),
-            axum::extract::Form(super::RestoreSavedForm {
+            Form(super::RestoreSavedForm {
                 filename,
                 restore_tor_hidden_service_keys: false,
                 csrf: Some(admin_signed_csrf()),
             }),
         )
         .await
-        .expect("restore response");
+        .context("restore saved board backup")?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        ensure!(response.status() == StatusCode::SEE_OTHER);
         let location = response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .expect("redirect location");
-        assert!(location.contains("/admin/panel?restore_error="));
-        assert!(location.contains("Invalid+zip"));
-        assert!(location.contains("open=board-backup-restore"));
-        assert!(location.contains("#board-backup-restore"));
+            .context("restore response has no valid redirect location")?;
+        ensure!(location.contains("/admin/panel?restore_error="));
+        ensure!(location.contains("Invalid+zip"));
+        ensure!(location.contains("open=board-backup-restore"));
+        ensure!(location.contains("#board-backup-restore"));
+        Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the end-to-end test keeps its fixture setup and ordered assertions in one scenario"
+    )]
     #[tokio::test]
-    async fn extract_board_from_full_backup_download_redirects_and_cleans_up_temp_file() {
+    async fn extract_board_from_full_backup_download_redirects_and_cleans_up_temp_file(
+    ) -> TestResult<()> {
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
 
-        std::fs::create_dir_all(full_backup_dir()).expect("create full backup dir");
-        std::fs::create_dir_all(temp_board_download_dir()).expect("create temp board download dir");
+        std::fs::create_dir_all(full_backup_dir()).context("create full backup directory")?;
+        std::fs::create_dir_all(temp_board_download_dir())
+            .context("create temporary board-download directory")?;
         let filename = unique_zip_name("extract-board-download");
         let backup_path = full_backup_dir().join(&filename);
         let _backup_cleanup = PathCleanup(backup_path.clone());
-        write_sample_full_backup_zip_at(&backup_path, true);
+        write_sample_full_backup_zip_at(&backup_path, true)?;
 
         let kind_segment: String = ['{', 'k', 'i', 'n', 'd', '}'].into_iter().collect();
         let filename_segment: String = ['{', 'f', 'i', 'l', 'e', 'n', 'a', 'm', 'e', '}']
@@ -1187,6 +1479,10 @@ mod tests {
             )
             .with_state(state.clone());
 
+        let active_guard = state
+            .maintenance_gate
+            .try_begin("Full backup creation")
+            .context("begin concurrent maintenance")?;
         let response = app
             .clone()
             .oneshot(
@@ -1205,42 +1501,42 @@ mod tests {
                         "filename={filename}&board_short=tech&action=download&_csrf={}",
                         admin_signed_csrf()
                     )))
-                    .expect("request"),
+                    .context("build board-extraction request")?,
             )
             .await
-            .expect("extract response");
+            .context("send board-extraction request")?;
+        drop(active_guard);
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        ensure!(response.status() == StatusCode::SEE_OTHER);
         let location = response
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .expect("redirect location");
-        assert!(location.starts_with("/admin/backup/download/temp-board/"));
-        assert!(location.contains("cleanup=1"));
-        let token = extract_location_query_param(location, "token").expect("download token");
+            .context("extraction response has no valid redirect location")?;
+        ensure!(location.starts_with("/admin/backup/download/temp-board/"));
+        ensure!(location.contains("cleanup=1"));
+        let token = extract_location_query_param(location, "token")
+            .context("redirect location has no download token")?;
         let download_filename = location
             .split('/')
             .nth(5)
             .and_then(|segment| segment.split_once('?').map(|(name, _)| name))
-            .expect("download filename");
+            .context("redirect location has no download filename")?;
 
         let download_path = temp_board_download_dir().join(download_filename);
-        assert!(download_path.exists());
+        ensure!(download_path.exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
 
-            assert_eq!(
-                std::fs::metadata(&download_path)
-                    .expect("temp zip metadata")
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
+            let mode = std::fs::metadata(&download_path)
+                .context("read temporary ZIP metadata")?
+                .permissions()
+                .mode()
+                & 0o777;
+            ensure!(mode == 0o600);
         }
-        assert!(
+        ensure!(
             temp_board_download_token_path(download_filename).exists(),
             "download token should be written before the download"
         );
@@ -1258,29 +1554,29 @@ mod tests {
                         "csrf_token=csrf123; chan_admin_session=session123",
                     )
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build temporary board-download request")?,
             )
             .await
-            .expect("download response");
+            .context("send temporary board-download request")?;
 
-        assert_eq!(download_response.status(), StatusCode::OK);
+        ensure!(download_response.status() == StatusCode::OK);
         let expected_content_disposition = format!("attachment; filename=\"{download_filename}\"");
-        assert_eq!(
+        ensure!(
             download_response
                 .headers()
                 .get(header::CONTENT_DISPOSITION)
-                .and_then(|value| value.to_str().ok()),
-            Some(expected_content_disposition.as_str())
+                .and_then(|value| value.to_str().ok())
+                == Some(expected_content_disposition.as_str())
         );
         let body = to_bytes(download_response.into_body(), usize::MAX)
             .await
-            .expect("download body");
-        assert!(!body.is_empty());
-        assert!(
+            .context("read temporary board-download body")?;
+        ensure!(!body.is_empty());
+        ensure!(
             !download_path.exists(),
             "temp-board archive should be removed after cleanup stream is consumed"
         );
-        assert!(
+        ensure!(
             !temp_board_download_token_path(download_filename).exists(),
             "temp-board download token should be consumed"
         );
@@ -1297,16 +1593,17 @@ mod tests {
                         "csrf_token=csrf123; chan_admin_session=session123",
                     )
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build replayed board-download request")?,
             )
             .await
-            .expect("replay response");
+            .context("send replayed board-download request")?;
 
-        assert_eq!(replay_response.status(), StatusCode::FORBIDDEN);
+        ensure!(replay_response.status() == StatusCode::FORBIDDEN);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn temp_board_download_rejects_token_without_admin_session() {
+    async fn temp_board_download_rejects_token_without_admin_session() -> TestResult<()> {
         let state = crate::test_support::app_state();
         let filename = unique_zip_name("temp-token-only");
         let token = "token-only-test";
@@ -1315,8 +1612,8 @@ mod tests {
         let _download_cleanup = PathCleanup(download_path.clone());
         let _token_cleanup = PathCleanup(token_path.clone());
         crate::config::write_private_file(&download_path, b"temporary board backup")
-            .expect("write temp download");
-        write_temp_board_download_token(&filename, token).expect("write token");
+            .context("write temporary board download")?;
+        write_temp_board_download_token(&filename, token).context("write download token")?;
         let kind_segment: String = ['{', 'k', 'i', 'n', 'd', '}'].into_iter().collect();
         let filename_segment: String = ['{', 'f', 'i', 'l', 'e', 'n', 'a', 'm', 'e', '}']
             .into_iter()
@@ -1342,133 +1639,162 @@ mod tests {
                         "/admin/backup/download/temp-board/{filename}?cleanup=1&token={token}"
                     ))
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build unauthenticated board-download request")?,
             )
             .await
-            .expect("download response");
+            .context("send unauthenticated board-download request")?;
 
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert!(download_path.exists());
-        assert!(
+        ensure!(response.status() == StatusCode::FORBIDDEN);
+        ensure!(download_path.exists());
+        ensure!(
             token_path.exists(),
             "unauthenticated token attempts must not consume the one-time token"
         );
+        Ok(())
     }
 
     #[test]
-    fn board_restore_rejects_invalid_access_mode() {
-        let source_pool = crate::db::init_test_pool().expect("source pool");
-        let source_conn = source_pool.get().expect("source conn");
+    fn board_restore_rejects_invalid_access_mode() -> TestResult<()> {
+        let source_pool = crate::db::init_test_pool().context("create source database pool")?;
+        let source_conn = source_pool
+            .get()
+            .context("get source database connection")?;
         crate::db::create_board(&source_conn, "tech", "Technology", "", false)
-            .expect("create source board");
-        let mut manifest = build_board_backup_manifest(&source_conn, "tech").expect("manifest");
+            .context("create source board")?;
+        let mut manifest = build_board_backup_manifest(&source_conn, "tech")?;
         manifest.board.access_mode = "definitely_not_valid".to_owned();
 
-        let target_pool = crate::db::init_test_pool().expect("target pool");
-        let mut target_conn = target_pool.get().expect("target conn");
-        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let target_pool = crate::db::init_test_pool().context("create target database pool")?;
+        let mut target_conn = target_pool
+            .get()
+            .context("get target database connection")?;
+        let upload_dir = tempfile::tempdir().context("create upload directory")?;
+        let upload_dir_str = upload_dir
+            .path()
+            .to_str()
+            .context("upload directory path is not valid UTF-8")?;
         let error = execute_board_restore(
             &mut target_conn,
-            upload_dir.path().to_str().expect("upload dir path"),
+            upload_dir_str,
             manifest,
             |_| Ok(()),
             "Test invalid access mode restore",
             "Test invalid access mode restore completed",
         )
-        .expect_err("restore should reject invalid access mode");
+        .err()
+        .context("restore unexpectedly accepted invalid access mode")?;
 
-        match error {
-            AppError::BadRequest(message) => {
-                assert!(message.contains("invalid access mode"));
-            }
-            other => panic!("expected BadRequest, got {other:?}"),
-        }
+        let AppError::BadRequest(message) = error else {
+            bail!("expected BadRequest, got {error:?}");
+        };
+        ensure!(message.contains("invalid access mode"));
+        Ok(())
     }
 
     #[test]
-    fn board_restore_rejects_protected_board_without_password_hash() {
-        let source_pool = crate::db::init_test_pool().expect("source pool");
-        let source_conn = source_pool.get().expect("source conn");
+    fn board_restore_rejects_protected_board_without_password_hash() -> TestResult<()> {
+        let source_pool = crate::db::init_test_pool().context("create source database pool")?;
+        let source_conn = source_pool
+            .get()
+            .context("get source database connection")?;
         crate::db::create_board(&source_conn, "tech", "Technology", "", false)
-            .expect("create source board");
-        let mut manifest = build_board_backup_manifest(&source_conn, "tech").expect("manifest");
+            .context("create source board")?;
+        let mut manifest = build_board_backup_manifest(&source_conn, "tech")?;
         manifest.board.access_mode = "view_password".to_owned();
         manifest.board.access_password_hash.clear();
 
-        let target_pool = crate::db::init_test_pool().expect("target pool");
-        let mut target_conn = target_pool.get().expect("target conn");
-        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let target_pool = crate::db::init_test_pool().context("create target database pool")?;
+        let mut target_conn = target_pool
+            .get()
+            .context("get target database connection")?;
+        let upload_dir = tempfile::tempdir().context("create upload directory")?;
+        let upload_dir_str = upload_dir
+            .path()
+            .to_str()
+            .context("upload directory path is not valid UTF-8")?;
         let error = execute_board_restore(
             &mut target_conn,
-            upload_dir.path().to_str().expect("upload dir path"),
+            upload_dir_str,
             manifest,
             |_| Ok(()),
             "Test missing access hash restore",
             "Test missing access hash restore completed",
         )
-        .expect_err("restore should reject protected board without password hash");
+        .err()
+        .context("restore unexpectedly accepted protected board without password hash")?;
 
-        match error {
-            AppError::BadRequest(message) => {
-                assert!(message.contains("password hash"));
-            }
-            other => panic!("expected BadRequest, got {other:?}"),
-        }
+        let AppError::BadRequest(message) = error else {
+            bail!("expected BadRequest, got {error:?}");
+        };
+        ensure!(message.contains("password hash"));
+        Ok(())
     }
 
     #[test]
-    fn board_backup_manifest_preserves_pdf_upload_setting() {
-        let source_pool = crate::db::init_test_pool().expect("source pool");
-        let source_conn = source_pool.get().expect("source conn");
+    fn board_backup_manifest_preserves_pdf_upload_setting() -> TestResult<()> {
+        let source_pool = crate::db::init_test_pool().context("create source database pool")?;
+        let source_conn = source_pool
+            .get()
+            .context("get source database connection")?;
         let board_id = crate::db::create_board(&source_conn, "tech", "Technology", "", false)
-            .expect("create source board");
+            .context("create source board")?;
         source_conn
             .execute(
                 "UPDATE boards SET allow_pdf = 1 WHERE id = ?1",
                 params![board_id],
             )
-            .expect("enable pdf uploads");
+            .context("enable PDF uploads")?;
 
-        let manifest = build_board_backup_manifest(&source_conn, "tech").expect("manifest");
+        let manifest = build_board_backup_manifest(&source_conn, "tech")?;
 
-        assert!(manifest.board.allow_pdf);
+        ensure!(manifest.board.allow_pdf);
+        Ok(())
     }
 
     #[test]
-    fn board_restore_preserves_pdf_upload_setting() {
-        let source_pool = crate::db::init_test_pool().expect("source pool");
-        let source_conn = source_pool.get().expect("source conn");
+    fn board_restore_preserves_pdf_upload_setting() -> TestResult<()> {
+        let source_pool = crate::db::init_test_pool().context("create source database pool")?;
+        let source_conn = source_pool
+            .get()
+            .context("get source database connection")?;
         let board_id = crate::db::create_board(&source_conn, "tech", "Technology", "", false)
-            .expect("create source board");
+            .context("create source board")?;
         source_conn
             .execute(
                 "UPDATE boards SET allow_pdf = 1 WHERE id = ?1",
                 params![board_id],
             )
-            .expect("enable pdf uploads");
-        let manifest = build_board_backup_manifest(&source_conn, "tech").expect("manifest");
+            .context("enable PDF uploads")?;
+        let manifest = build_board_backup_manifest(&source_conn, "tech")?;
 
-        let target_pool = crate::db::init_test_pool().expect("target pool");
-        let mut target_conn = target_pool.get().expect("target conn");
-        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let target_pool = crate::db::init_test_pool().context("create target database pool")?;
+        let mut target_conn = target_pool
+            .get()
+            .context("get target database connection")?;
+        let upload_dir = tempfile::tempdir().context("create upload directory")?;
+        let upload_dir_str = upload_dir
+            .path()
+            .to_str()
+            .context("upload directory path is not valid UTF-8")?;
         execute_board_restore(
             &mut target_conn,
-            upload_dir.path().to_str().expect("upload dir path"),
+            upload_dir_str,
             manifest,
             |_| Ok(()),
             "Test PDF setting restore",
             "Test PDF setting restore completed",
         )
-        .expect("restore board");
+        .context("restore board")?;
 
         let restored = crate::db::get_board_by_short(&target_conn, "tech")
-            .expect("load restored board")
-            .expect("restored board");
-        assert!(restored.allow_pdf);
+            .context("load restored board")?
+            .context("restored board not found")?;
+        ensure!(restored.allow_pdf);
+        Ok(())
     }
 
     #[test]
-    fn older_board_restore_manifests_default_pdf_uploads_off() {
+    fn older_board_restore_manifests_default_pdf_uploads_off() -> TestResult<()> {
         let json = serde_json::json!({
             "version": 1,
             "board": {
@@ -1509,81 +1835,79 @@ mod tests {
         });
 
         let manifest: super::types::board_backup_types::BoardBackupManifest =
-            serde_json::from_value(json).expect("legacy manifest");
+            serde_json::from_value(json).context("deserialize legacy manifest")?;
 
-        assert!(!manifest.board.allow_pdf);
+        ensure!(!manifest.board.allow_pdf);
+        Ok(())
     }
 
     #[test]
-    fn full_restore_layout_accepts_full_backup_archive() {
-        let archive = zip_with_entries(&[("chan.db", b"SQLite format 3\0stub")]);
-        assert!(validate_full_restore_archive_layout(&archive).is_ok());
+    fn full_restore_layout_accepts_full_backup_archive() -> TestResult<()> {
+        let archive = zip_with_entries(&[("chan.db", b"SQLite format 3\0stub")])?;
+        ensure!(validate_full_restore_archive_layout(&archive).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn full_restore_layout_rejects_board_backup_archive_with_helpful_hint() {
-        let archive = zip_with_entries(&[("board.json", br#"{"version":1}"#)]);
-        let error = validate_full_restore_archive_layout(&archive).expect_err("should fail");
-        match error {
-            AppError::BadRequest(message) => {
-                assert!(message.contains("board backup"));
-                assert!(message.contains("Board restore"));
-            }
-            other => panic!("unexpected error: {other}"),
-        }
+    fn full_restore_layout_rejects_board_backup_archive_with_helpful_hint() -> TestResult<()> {
+        let archive = zip_with_entries(&[("board.json", br#"{"version":1}"#)])?;
+        let error = validate_full_restore_archive_layout(&archive)
+            .err()
+            .context("board backup was unexpectedly accepted as a full backup")?;
+        let AppError::BadRequest(message) = error else {
+            bail!("expected BadRequest, got {error}");
+        };
+        ensure!(message.contains("board backup"));
+        ensure!(message.contains("Board restore"));
+        Ok(())
     }
 
     #[test]
-    fn refresh_live_site_state_from_db_updates_banner_caches() {
+    fn refresh_live_site_state_from_db_updates_banner_caches() -> TestResult<()> {
         crate::templates::set_live_site_name("Before restore");
         crate::templates::set_live_site_subtitle("before subtitle");
 
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("db conn");
-        crate::db::set_site_setting(&conn, "site_name", "RestoredChan").expect("set site name");
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let conn = pool.get().context("get database connection")?;
+        crate::db::set_site_setting(&conn, "site_name", "RestoredChan").context("set site name")?;
         crate::db::set_site_setting(&conn, "site_subtitle", "restored subtitle")
-            .expect("set subtitle");
+            .context("set site subtitle")?;
 
-        refresh_live_site_state_from_db(&conn).expect("refresh live site state");
+        refresh_live_site_state_from_db(&conn).context("refresh live site state")?;
 
-        assert_eq!(&*crate::templates::live_site_name(), "RestoredChan");
-        assert_eq!(
-            &*crate::templates::live_site_subtitle(),
-            "restored subtitle"
-        );
+        ensure!(&*crate::templates::live_site_name() == "RestoredChan");
+        ensure!(&*crate::templates::live_site_subtitle() == "restored subtitle");
+        Ok(())
     }
 
     #[test]
-    fn temp_board_download_token_is_one_time_use() {
+    fn temp_board_download_token_is_one_time_use() -> TestResult<()> {
         let filename = "rustchan-board-test-20990101_000000.zip";
         let token = "token-123";
         let token_path = temp_board_download_token_path(filename);
-        let _ = std::fs::remove_file(&token_path);
+        drop(std::fs::remove_file(&token_path));
 
-        write_temp_board_download_token(filename, token).expect("write token");
+        write_temp_board_download_token(filename, token).context("write download token")?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
 
-            assert_eq!(
-                std::fs::metadata(&token_path)
-                    .expect("token metadata")
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
-            assert_eq!(
-                std::fs::metadata(temp_board_download_dir())
-                    .expect("download dir metadata")
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o700
-            );
+            let token_mode = std::fs::metadata(&token_path)
+                .context("read token metadata")?
+                .permissions()
+                .mode()
+                & 0o777;
+            ensure!(token_mode == 0o600);
+            let directory_mode = std::fs::metadata(temp_board_download_dir())
+                .context("read download-directory metadata")?
+                .permissions()
+                .mode()
+                & 0o777;
+            ensure!(directory_mode == 0o700);
         }
-        assert!(consume_temp_board_download_token(filename, token).expect("consume token"));
-        assert!(!consume_temp_board_download_token(filename, token).expect("token removed"));
+        ensure!(consume_temp_board_download_token(filename, token)?);
+        ensure!(!consume_temp_board_download_token(filename, token)?);
+        Ok(())
     }
 
     #[test]
@@ -1603,17 +1927,26 @@ mod tests {
         )));
     }
 
-    fn write_sample_full_backup_zip_at(zip_path: &std::path::Path, indexed_boards: bool) {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn write_sample_full_backup_zip_at(zip_path: &Path, indexed_boards: bool) -> TestResult<()> {
+        write_sample_full_backup_zip_for_board_at(zip_path, indexed_boards, "tech")
+    }
+
+    fn write_sample_full_backup_zip_for_board_at(
+        zip_path: &Path,
+        indexed_boards: bool,
+        board_short: &str,
+    ) -> TestResult<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let db_path = temp_dir.path().join("snapshot.db");
 
-        let pool = crate::db::init_test_pool().expect("test pool");
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
         {
-            let conn = pool.get().expect("db conn");
-            crate::db::create_board(&conn, "tech", "Technology", "", false).expect("create board");
-            let board = crate::db::get_board_by_short(&conn, "tech")
-                .expect("get board")
-                .expect("board exists");
+            let conn = pool.get().context("get database connection")?;
+            crate::db::create_board(&conn, board_short, "Technology", "", false)
+                .context("create fixture board")?;
+            let board = crate::db::get_board_by_short(&conn, board_short)
+                .context("load fixture board")?
+                .context("fixture board not found")?;
             let post = crate::db::NewPost {
                 thread_id: 0,
                 board_id: board.id,
@@ -1623,7 +1956,7 @@ mod tests {
                 body: "hello".into(),
                 body_html: "hello".into(),
                 ip_hash: Some("hash".into()),
-                file_path: Some("tech/hello.txt".into()),
+                file_path: Some(format!("{board_short}/hello.txt")),
                 file_name: Some("hello.txt".into()),
                 file_size: Some(5),
                 thumb_path: None,
@@ -1645,18 +1978,23 @@ mod tests {
                 None,
                 None,
             )
-            .expect("create thread");
+            .context("create fixture thread")?;
 
-            let db_path_str = db_path.to_str().expect("db path").replace('\'', "''");
+            let db_path_str = db_path
+                .to_str()
+                .context("database path is not valid UTF-8")?
+                .replace('\'', "''");
             conn.execute_batch(&format!("VACUUM INTO '{db_path_str}'"))
-                .expect("vacuum into snapshot");
+                .context("vacuum database into snapshot")?;
         }
 
         let manifest = super::common::FullBackupManifest {
             version: if indexed_boards { 2 } else { 1 },
             generated_at: 1_700_000_000,
             rustchan_version: "1.1.3".into(),
-            db_bytes: std::fs::metadata(&db_path).expect("db meta").len(),
+            db_bytes: std::fs::metadata(&db_path)
+                .context("read database snapshot metadata")?
+                .len(),
             upload_file_count: 1,
             favicon_file_count: 0,
             banner_file_count: 0,
@@ -1664,64 +2002,66 @@ mod tests {
             tor_hidden_service_key_file_count: 0,
             boards: if indexed_boards {
                 vec![BackupBoardSummary {
-                    short_name: "tech".into(),
+                    short_name: board_short.to_owned(),
                     name: "Technology".into(),
                 }]
             } else {
                 Vec::new()
             },
         };
-        let manifest_json = serde_json::to_vec(&manifest).expect("manifest json");
-        let db_bytes = std::fs::read(&db_path).expect("read db");
+        let manifest_json = serde_json::to_vec(&manifest).context("serialize manifest")?;
+        let db_bytes = std::fs::read(&db_path).context("read database snapshot")?;
 
         {
-            let file = std::fs::File::create(zip_path).expect("zip file");
+            let file = std::fs::File::create(zip_path).context("create backup ZIP")?;
             let mut zip = zip::ZipWriter::new(file);
             let options = zip::write::SimpleFileOptions::default();
             zip.start_file(super::common::FULL_BACKUP_MANIFEST_NAME, options)
-                .expect("start manifest");
-            zip.write_all(&manifest_json).expect("write manifest");
-            zip.start_file("chan.db", options).expect("start db");
-            zip.write_all(&db_bytes).expect("write db");
-            zip.start_file("uploads/tech/hello.txt", options)
-                .expect("start upload");
-            zip.write_all(b"hello").expect("write upload");
-            zip.finish().expect("finish zip");
+                .context("start manifest ZIP entry")?;
+            zip.write_all(&manifest_json)
+                .context("write manifest ZIP entry")?;
+            zip.start_file("chan.db", options)
+                .context("start database ZIP entry")?;
+            zip.write_all(&db_bytes)
+                .context("write database ZIP entry")?;
+            zip.start_file(format!("uploads/{board_short}/hello.txt"), options)
+                .context("start upload ZIP entry")?;
+            zip.write_all(b"hello").context("write upload ZIP entry")?;
+            zip.finish().context("finish backup ZIP")?;
         }
+        Ok(())
     }
 
-    fn build_sample_full_backup_zip(indexed_boards: bool) -> std::path::PathBuf {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn build_sample_full_backup_zip(indexed_boards: bool) -> TestResult<PathBuf> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("full.zip");
-        write_sample_full_backup_zip_at(&zip_path, indexed_boards);
+        write_sample_full_backup_zip_at(&zip_path, indexed_boards)?;
         let persisted = temp_dir.keep();
-        persisted.join("full.zip")
+        Ok(persisted.join("full.zip"))
     }
 
     #[test]
-    fn prune_full_backup_dir_to_limit_removes_oldest_saved_backups() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn prune_full_backup_dir_to_limit_removes_oldest_saved_backups() -> TestResult<()> {
+        let dir = tempfile::tempdir().context("create temporary directory")?;
         let oldest = dir.path().join("rustchan-backup-20260101_000000.zip");
         let middle = dir.path().join("rustchan-backup-20260102_000000.zip");
         let newest = dir.path().join("rustchan-backup-20260103_000000.zip");
-        write_sample_full_backup_zip_at(&oldest, true);
-        write_sample_full_backup_zip_at(&middle, true);
-        write_sample_full_backup_zip_at(&newest, true);
+        write_sample_full_backup_zip_at(&oldest, true)?;
+        write_sample_full_backup_zip_at(&middle, true)?;
+        write_sample_full_backup_zip_at(&newest, true)?;
 
-        let removed = super::prune_full_backup_dir_to_limit(dir.path(), 2).expect("prune");
+        let removed = super::prune_full_backup_dir_to_limit(dir.path(), 2)?;
 
-        assert_eq!(
-            removed,
-            vec!["rustchan-backup-20260101_000000.zip".to_owned()]
-        );
-        assert!(!oldest.exists());
-        assert!(middle.exists());
-        assert!(newest.exists());
+        ensure!(removed == vec!["rustchan-backup-20260101_000000.zip".to_owned()]);
+        ensure!(!oldest.exists());
+        ensure!(middle.exists());
+        ensure!(newest.exists());
+        Ok(())
     }
 
     #[test]
-    fn latest_verified_full_backup_modified_time_ignores_newer_invalid_zip() {
-        let backup_dir = tempfile::tempdir().expect("tempdir");
+    fn latest_verified_full_backup_modified_time_ignores_newer_invalid_zip() -> TestResult<()> {
+        let backup_dir = tempfile::tempdir().context("create temporary directory")?;
         let valid_path = backup_dir
             .path()
             .join("rustchan-backup-20990101_000001-valid.zip");
@@ -1729,41 +2069,43 @@ mod tests {
             .path()
             .join("rustchan-backup-20990101_000002-invalid.zip");
 
-        write_sample_full_backup_zip_at(&valid_path, true);
+        write_sample_full_backup_zip_at(&valid_path, true)?;
         std::thread::sleep(std::time::Duration::from_millis(20));
-        std::fs::write(&invalid_path, b"not a zip archive").expect("write invalid zip");
+        std::fs::write(&invalid_path, b"not a zip archive").context("write invalid ZIP")?;
 
         let modified = latest_verified_full_backup_modified_time_in_dir(backup_dir.path())
-            .expect("verified backup time");
+            .context("verified backup time not found")?;
         let valid_modified = std::fs::metadata(&valid_path)
-            .expect("valid metadata")
+            .context("read valid backup metadata")?
             .modified()
-            .expect("valid mtime");
+            .context("read valid backup modification time")?;
         let modified_epoch = modified
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("modified epoch")
+            .context("verified backup time precedes Unix epoch")?
             .as_secs();
         let valid_modified_epoch = valid_modified
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("valid modified epoch")
+            .context("valid backup time precedes Unix epoch")?
             .as_secs();
 
-        assert_eq!(modified_epoch, valid_modified_epoch);
+        ensure!(modified_epoch == valid_modified_epoch);
+        Ok(())
     }
 
     #[test]
-    fn latest_verified_full_backup_modified_time_prefers_verified_v4_completed_at_over_dir_mtime() {
+    fn latest_verified_full_backup_modified_time_prefers_verified_v4_completed_at_over_dir_mtime(
+    ) -> TestResult<()> {
         struct CleanupGuard(Vec<PathBuf>);
         impl Drop for CleanupGuard {
             fn drop(&mut self) {
                 for path in self.0.drain(..) {
-                    let _ = std::fs::remove_dir_all(path);
+                    drop(std::fs::remove_dir_all(path));
                 }
             }
         }
 
         let backup_root = crate::handlers::admin::backup::saved_backup::backups_root_dir();
-        std::fs::create_dir_all(&backup_root).expect("backup root");
+        std::fs::create_dir_all(&backup_root).context("create backup root")?;
         let older_completed_dir = backup_root.join("2099-01-01_000001_full-site-newer-mtime-test");
         let newer_dir_mtime_dir =
             backup_root.join("2099-01-01_000002_full-site-older-completed-test");
@@ -1777,7 +2119,7 @@ mod tests {
             crate::handlers::admin::backup::saved_backup::board_fixture_files_for_test(),
             Some(b"sqlite".to_vec()),
             4_102_444_800,
-        );
+        )?;
         std::thread::sleep(std::time::Duration::from_millis(20));
         crate::handlers::admin::backup::saved_backup::write_saved_v4_fixture_for_test(
             &newer_dir_mtime_dir,
@@ -1785,63 +2127,63 @@ mod tests {
             crate::handlers::admin::backup::saved_backup::board_fixture_files_for_test(),
             Some(b"sqlite".to_vec()),
             4_102_444_700,
-        );
+        )?;
         invalidate_backup_list_cache(&full_backup_dir(), BackupListKind::Full);
 
-        let modified =
-            latest_verified_full_backup_modified_time().expect("verified v4 backup time");
+        let modified = latest_verified_full_backup_modified_time()
+            .context("verified v4 backup time not found")?;
         let modified_epoch = modified
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("modified epoch")
+            .context("verified v4 backup time precedes Unix epoch")?
             .as_secs();
 
-        assert_eq!(modified_epoch, 4_102_444_800);
+        ensure!(modified_epoch == 4_102_444_800);
+        Ok(())
     }
 
     #[test]
-    fn full_backup_can_extract_board_backup() {
-        let zip_path = build_sample_full_backup_zip(true);
+    fn full_backup_can_extract_board_backup() -> TestResult<()> {
+        let zip_path = build_sample_full_backup_zip(true)?;
         let (board_zip_path, filename) =
-            create_temp_board_backup_from_full_backup_path(&zip_path, "tech")
-                .expect("extract board backup");
+            create_temp_board_backup_from_full_backup_path(&zip_path, "tech")?;
 
-        assert!(filename.contains("from-full"));
-        let manifest =
-            super::common::verify_board_backup_zip(&board_zip_path).expect("verify board zip");
-        assert_eq!(manifest.board.short_name, "tech");
+        ensure!(filename.contains("from-full"));
+        let manifest = super::common::verify_board_backup_zip(&board_zip_path)?;
+        ensure!(manifest.board.short_name == "tech");
 
-        let file = std::fs::File::open(&board_zip_path).expect("open board zip");
-        let mut archive = zip::ZipArchive::new(file).expect("archive");
-        assert!(archive.by_name("uploads/tech/hello.txt").is_ok());
+        let file = std::fs::File::open(&board_zip_path).context("open board ZIP")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse board ZIP")?;
+        ensure!(archive.by_name("uploads/tech/hello.txt").is_ok());
 
-        let _ = std::fs::remove_file(board_zip_path);
-        let _ = std::fs::remove_file(zip_path);
+        drop(std::fs::remove_file(board_zip_path));
+        drop(std::fs::remove_file(zip_path));
+        Ok(())
     }
 
     #[test]
-    fn older_full_backup_without_board_index_still_extracts_board_backup() {
-        let zip_path = build_sample_full_backup_zip(false);
-        let (board_zip_path, _) = create_temp_board_backup_from_full_backup_path(&zip_path, "tech")
-            .expect("extract board backup from legacy full backup");
+    fn older_full_backup_without_board_index_still_extracts_board_backup() -> TestResult<()> {
+        let zip_path = build_sample_full_backup_zip(false)?;
+        let (board_zip_path, _) =
+            create_temp_board_backup_from_full_backup_path(&zip_path, "tech")?;
 
-        let manifest =
-            super::common::verify_board_backup_zip(&board_zip_path).expect("verify board zip");
-        assert_eq!(manifest.board.short_name, "tech");
+        let manifest = super::common::verify_board_backup_zip(&board_zip_path)?;
+        ensure!(manifest.board.short_name == "tech");
 
-        let _ = std::fs::remove_file(board_zip_path);
-        let _ = std::fs::remove_file(zip_path);
+        drop(std::fs::remove_file(board_zip_path));
+        drop(std::fs::remove_file(zip_path));
+        Ok(())
     }
 
     #[test]
-    fn board_restore_preserves_original_post_ids_when_they_are_free() {
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let mut conn = pool.get().expect("db conn");
+    fn board_restore_preserves_original_post_ids_when_they_are_free() -> TestResult<()> {
+        let pool = crate::db::init_test_pool().context("create test database pool")?;
+        let upload_dir = tempfile::tempdir().context("create upload directory")?;
+        let mut conn = pool.get().context("get database connection")?;
 
-        crate::db::create_board(&conn, "tech", "Technology", "", false).expect("create board");
+        crate::db::create_board(&conn, "tech", "Technology", "", false).context("create board")?;
         let tech_board = crate::db::get_board_by_short(&conn, "tech")
-            .expect("load board")
-            .expect("tech board");
+            .context("load board")?
+            .context("tech board not found")?;
 
         let (thread_id, op_post_id, _) = crate::db::create_thread_with_optional_poll(
             &conn,
@@ -1852,7 +2194,7 @@ mod tests {
             None,
             None,
         )
-        .expect("create thread");
+        .context("create thread")?;
         let reply_body = format!(">>{op_post_id}\nreply body");
         let reply_post_id = crate::db::create_reply_with_thread_update(
             &conn,
@@ -1861,15 +2203,15 @@ mod tests {
             true,
             None,
         )
-        .expect("create reply");
+        .context("create reply")?;
 
-        let manifest = build_board_backup_manifest(&conn, "tech").expect("build manifest");
-        crate::db::delete_board(&conn, tech_board.id).expect("delete board");
+        let manifest = build_board_backup_manifest(&conn, "tech")?;
+        crate::db::delete_board(&conn, tech_board.id).context("delete board")?;
 
-        crate::db::create_board(&conn, "b", "Random", "", false).expect("create other board");
+        crate::db::create_board(&conn, "b", "Random", "", false).context("create other board")?;
         let other_board = crate::db::get_board_by_short(&conn, "b")
-            .expect("load other board")
-            .expect("other board");
+            .context("load other board")?
+            .context("other board not found")?;
         let (_, other_post_id, _) = crate::db::create_thread_with_optional_poll(
             &conn,
             other_board.id,
@@ -1879,47 +2221,58 @@ mod tests {
             None,
             None,
         )
-        .expect("create other thread");
-        assert!(other_post_id > reply_post_id);
+        .context("create other thread")?;
+        ensure!(other_post_id > reply_post_id);
+
+        let upload_dir_str = upload_dir
+            .path()
+            .to_str()
+            .context("upload directory path is not valid UTF-8")?;
 
         execute_board_restore(
             &mut conn,
-            upload_dir.path().to_str().expect("upload dir path"),
+            upload_dir_str,
             manifest,
             |_| Ok(()),
             "Test board restore",
             "Test board restore completed",
         )
-        .expect("restore board");
+        .context("restore board")?;
 
         let restored_op = crate::db::get_post_on_board(&conn, "tech", op_post_id)
-            .expect("load restored op")
-            .expect("restored op exists");
+            .context("load restored OP")?
+            .context("restored OP not found")?;
         let restored_reply = crate::db::get_post_on_board(&conn, "tech", reply_post_id)
-            .expect("load restored reply")
-            .expect("restored reply exists");
+            .context("load restored reply")?
+            .context("restored reply not found")?;
 
-        assert_eq!(restored_op.id, op_post_id);
-        assert_eq!(restored_op.thread_id, thread_id);
-        assert_eq!(restored_reply.id, reply_post_id);
-        assert_eq!(restored_reply.thread_id, thread_id);
-        assert_eq!(restored_reply.body, reply_body);
-        assert!(restored_reply
+        ensure!(restored_op.id == op_post_id);
+        ensure!(restored_op.thread_id == thread_id);
+        ensure!(restored_reply.id == reply_post_id);
+        ensure!(restored_reply.thread_id == thread_id);
+        ensure!(restored_reply.body == reply_body);
+        ensure!(restored_reply
             .body_html
             .contains(&format!("data-pid=\"{op_post_id}\"")));
-        assert!(crate::db::get_post_on_board(&conn, "b", other_post_id)
-            .expect("load other post")
-            .is_some());
+        ensure!(crate::db::get_post_on_board(&conn, "b", other_post_id)?.is_some());
+        Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the ID-sequence regression keeps source padding, restore, and post-restore allocation checks in one scenario"
+    )]
     #[test]
-    fn board_restore_preserves_free_ids_above_target_sequence() {
-        let source_pool = crate::db::init_test_pool().expect("source pool");
-        let source_conn = source_pool.get().expect("source conn");
-        crate::db::create_board(&source_conn, "pad", "Padding", "", false).expect("create pad");
+    fn board_restore_preserves_free_ids_above_target_sequence() -> TestResult<()> {
+        let source_pool = crate::db::init_test_pool().context("create source database pool")?;
+        let source_conn = source_pool
+            .get()
+            .context("get source database connection")?;
+        crate::db::create_board(&source_conn, "pad", "Padding", "", false)
+            .context("create padding board")?;
         let pad_board = crate::db::get_board_by_short(&source_conn, "pad")
-            .expect("load pad")
-            .expect("pad board");
+            .context("load padding board")?
+            .context("padding board not found")?;
         for idx in 0..5 {
             crate::db::create_thread_with_optional_poll(
                 &source_conn,
@@ -1930,13 +2283,13 @@ mod tests {
                 None,
                 None,
             )
-            .expect("create padding thread");
+            .context("create padding thread")?;
         }
         crate::db::create_board(&source_conn, "tech", "Technology", "", false)
-            .expect("create tech");
+            .context("create source tech board")?;
         let source_tech_board = crate::db::get_board_by_short(&source_conn, "tech")
-            .expect("load source tech")
-            .expect("source tech board");
+            .context("load source tech board")?
+            .context("source tech board not found")?;
         let (source_thread_id, source_op_id, _) = crate::db::create_thread_with_optional_poll(
             &source_conn,
             source_tech_board.id,
@@ -1946,7 +2299,7 @@ mod tests {
             None,
             None,
         )
-        .expect("create source thread");
+        .context("create source thread")?;
         let source_reply_id = crate::db::create_reply_with_thread_update(
             &source_conn,
             &sample_post(
@@ -1959,17 +2312,20 @@ mod tests {
             true,
             None,
         )
-        .expect("create source reply");
-        assert!(source_op_id > 5);
+        .context("create source reply")?;
+        ensure!(source_op_id > 5);
 
-        let manifest = build_board_backup_manifest(&source_conn, "tech").expect("build manifest");
+        let manifest = build_board_backup_manifest(&source_conn, "tech")?;
 
-        let target_pool = crate::db::init_test_pool().expect("target pool");
-        let mut target_conn = target_pool.get().expect("target conn");
-        crate::db::create_board(&target_conn, "b", "Random", "", false).expect("create target b");
+        let target_pool = crate::db::init_test_pool().context("create target database pool")?;
+        let mut target_conn = target_pool
+            .get()
+            .context("get target database connection")?;
+        crate::db::create_board(&target_conn, "b", "Random", "", false)
+            .context("create target board")?;
         let target_b = crate::db::get_board_by_short(&target_conn, "b")
-            .expect("load target b")
-            .expect("target b board");
+            .context("load target board")?
+            .context("target board not found")?;
         crate::db::create_thread_with_optional_poll(
             &target_conn,
             target_b.id,
@@ -1979,31 +2335,35 @@ mod tests {
             None,
             None,
         )
-        .expect("create target thread");
+        .context("create target thread")?;
 
-        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let upload_dir = tempfile::tempdir().context("create upload directory")?;
+        let upload_dir_str = upload_dir
+            .path()
+            .to_str()
+            .context("upload directory path is not valid UTF-8")?;
         execute_board_restore(
             &mut target_conn,
-            upload_dir.path().to_str().expect("upload dir path"),
+            upload_dir_str,
             manifest,
             |_| Ok(()),
             "Test board restore high ids",
             "Test board restore high ids completed",
         )
-        .expect("restore board with high ids");
+        .context("restore board with high IDs")?;
 
         let restored_op = crate::db::get_post_on_board(&target_conn, "tech", source_op_id)
-            .expect("load restored op")
-            .expect("restored op exists");
+            .context("load restored OP")?
+            .context("restored OP not found")?;
         let restored_reply = crate::db::get_post_on_board(&target_conn, "tech", source_reply_id)
-            .expect("load restored reply")
-            .expect("restored reply exists");
-        assert_eq!(restored_op.thread_id, source_thread_id);
-        assert_eq!(restored_reply.thread_id, source_thread_id);
+            .context("load restored reply")?
+            .context("restored reply not found")?;
+        ensure!(restored_op.thread_id == source_thread_id);
+        ensure!(restored_reply.thread_id == source_thread_id);
 
         let restored_board = crate::db::get_board_by_short(&target_conn, "tech")
-            .expect("load restored board")
-            .expect("restored board");
+            .context("load restored board")?
+            .context("restored board not found")?;
         let new_post_id = crate::db::create_reply_with_thread_update(
             &target_conn,
             &sample_post(
@@ -2016,19 +2376,26 @@ mod tests {
             true,
             None,
         )
-        .expect("create post after restore");
-        assert!(new_post_id > source_reply_id);
+        .context("create post after restore")?;
+        ensure!(new_post_id > source_reply_id);
+        Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the end-to-end test keeps its fixture setup and ordered assertions in one scenario"
+    )]
     #[test]
-    fn board_restore_fallback_remaps_same_board_crosslinks_when_ids_collide() {
-        let source_pool = crate::db::init_test_pool().expect("source pool");
-        let source_conn = source_pool.get().expect("source conn");
+    fn board_restore_fallback_remaps_same_board_crosslinks_when_ids_collide() -> TestResult<()> {
+        let source_pool = crate::db::init_test_pool().context("create source database pool")?;
+        let source_conn = source_pool
+            .get()
+            .context("get source database connection")?;
         crate::db::create_board(&source_conn, "tech", "Technology", "", false)
-            .expect("create source tech");
+            .context("create source tech board")?;
         let source_board = crate::db::get_board_by_short(&source_conn, "tech")
-            .expect("load source tech")
-            .expect("source tech board");
+            .context("load source tech board")?
+            .context("source tech board not found")?;
         let (source_thread_id, source_op_id, _) = crate::db::create_thread_with_optional_poll(
             &source_conn,
             source_board.id,
@@ -2038,7 +2405,7 @@ mod tests {
             None,
             None,
         )
-        .expect("create source thread");
+        .context("create source thread")?;
         let source_reply_id = crate::db::create_reply_with_thread_update(
             &source_conn,
             &sample_post(
@@ -2051,18 +2418,21 @@ mod tests {
             true,
             None,
         )
-        .expect("create source reply");
-        assert_eq!(source_op_id, 1);
-        assert_eq!(source_reply_id, 2);
+        .context("create source reply")?;
+        ensure!(source_op_id == 1);
+        ensure!(source_reply_id == 2);
 
-        let manifest = build_board_backup_manifest(&source_conn, "tech").expect("build manifest");
+        let manifest = build_board_backup_manifest(&source_conn, "tech")?;
 
-        let target_pool = crate::db::init_test_pool().expect("target pool");
-        let mut target_conn = target_pool.get().expect("target conn");
-        crate::db::create_board(&target_conn, "b", "Random", "", false).expect("create b");
+        let target_pool = crate::db::init_test_pool().context("create target database pool")?;
+        let mut target_conn = target_pool
+            .get()
+            .context("get target database connection")?;
+        crate::db::create_board(&target_conn, "b", "Random", "", false)
+            .context("create target board")?;
         let target_board = crate::db::get_board_by_short(&target_conn, "b")
-            .expect("load b")
-            .expect("target board");
+            .context("load target board")?
+            .context("target board not found")?;
         let (existing_thread_id, existing_op_id, _) = crate::db::create_thread_with_optional_poll(
             &target_conn,
             target_board.id,
@@ -2072,7 +2442,7 @@ mod tests {
             None,
             None,
         )
-        .expect("create existing thread");
+        .context("create existing thread")?;
         let existing_reply_id = crate::db::create_reply_with_thread_update(
             &target_conn,
             &sample_post(target_board.id, existing_thread_id, "existing reply", false),
@@ -2080,19 +2450,23 @@ mod tests {
             true,
             None,
         )
-        .expect("create existing reply");
-        assert_eq!((existing_op_id, existing_reply_id), (1, 2));
+        .context("create existing reply")?;
+        ensure!((existing_op_id, existing_reply_id) == (1, 2));
 
-        let upload_dir = tempfile::tempdir().expect("upload dir");
+        let upload_dir = tempfile::tempdir().context("create upload directory")?;
+        let upload_dir_str = upload_dir
+            .path()
+            .to_str()
+            .context("upload directory path is not valid UTF-8")?;
         execute_board_restore(
             &mut target_conn,
-            upload_dir.path().to_str().expect("upload dir path"),
+            upload_dir_str,
             manifest,
             |_| Ok(()),
             "Test board restore remap",
             "Test board restore remap completed",
         )
-        .expect("restore board with collisions");
+        .context("restore board with ID collisions")?;
 
         let restored_board_id: i64 = target_conn
             .query_row(
@@ -2100,14 +2474,14 @@ mod tests {
                 [],
                 |row| row.get(0),
             )
-            .expect("load restored board id");
+            .context("load restored board ID")?;
         let restored_op_id: i64 = target_conn
             .query_row(
                 "SELECT id FROM posts WHERE board_id = ?1 AND is_op = 1",
                 params![restored_board_id],
                 |row| row.get(0),
             )
-            .expect("load restored op id");
+            .context("load restored OP ID")?;
         let (restored_reply_id, restored_body, restored_body_html): (i64, String, String) =
             target_conn
                 .query_row(
@@ -2117,21 +2491,22 @@ mod tests {
                     params![restored_board_id],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
-                .expect("load restored reply");
+                .context("load restored reply")?;
 
-        assert!(restored_op_id > source_op_id);
-        assert!(restored_reply_id > source_reply_id);
-        assert!(restored_body.contains(&format!(">>{restored_op_id}")));
-        assert!(restored_body.contains(&format!(">>>/tech/{restored_op_id}")));
-        assert!(restored_body.contains(">>>/b/1"));
-        assert!(
+        ensure!(restored_op_id > source_op_id);
+        ensure!(restored_reply_id > source_reply_id);
+        ensure!(restored_body.contains(&format!(">>{restored_op_id}")));
+        ensure!(restored_body.contains(&format!(">>>/tech/{restored_op_id}")));
+        ensure!(restored_body.contains(">>>/b/1"));
+        ensure!(
             restored_body_html.contains(&format!("data-pid=\"{restored_op_id}\"")),
             "same-board quotelink should point at remapped post id"
         );
-        assert!(
+        ensure!(
             restored_body_html.contains(&format!("/tech/post/{restored_op_id}")),
             "same-board crosslink should point at remapped post id"
         );
-        assert!(restored_body_html.contains("/b/post/1"));
+        ensure!(restored_body_html.contains("/b/post/1"));
+        Ok(())
     }
 }

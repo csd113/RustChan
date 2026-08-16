@@ -1,14 +1,22 @@
+//! Shared, deterministic fixtures for crate-local tests.
+
 #[cfg(test)]
+/// Default audio-upload setting for a newly constructed test board.
 pub const DEFAULT_NEW_BOARD_ALLOW_AUDIO: bool = false;
 #[cfg(test)]
+/// Default post-editing setting for a newly constructed test board.
 pub const DEFAULT_NEW_BOARD_ALLOW_EDITING: bool = true;
 #[cfg(test)]
+/// Default self-deletion setting for a newly constructed test board.
 pub const DEFAULT_NEW_BOARD_ALLOW_SELF_DELETE: bool = true;
 #[cfg(test)]
+/// Default video-embed setting for a newly constructed test board.
 pub const DEFAULT_NEW_BOARD_ALLOW_VIDEO_EMBEDS: bool = true;
 #[cfg(test)]
+/// Default poster-ID setting for a newly constructed test board.
 pub const DEFAULT_NEW_BOARD_SHOW_POSTER_IDS: bool = true;
 
+/// Builds a representative board with stable defaults for tests.
 #[must_use]
 pub fn sample_board() -> crate::models::Board {
     crate::models::Board {

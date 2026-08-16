@@ -1,25 +1,45 @@
+//! Media-pipeline and database-maintenance sections of the admin panel.
+
 use super::{escape_html, format_file_size, AdminPanelViewModel};
 use std::fmt::Write as _;
 
+/// Pre-rendered values interpolated into the maintenance section.
 struct MaintenanceSectionView<'a> {
+    /// CSRF token for state-changing forms.
     csrf_token: &'a str,
+    /// Optional database-size warning banner.
     db_warn_banner: &'a str,
+    /// Human-readable database size.
     db_size_str: &'a str,
+    /// Optional Tor address details.
     tor_section: &'a str,
+    /// Configured external-media process timeout.
     ffmpeg_timeout_secs: u64,
+    /// Human-readable timeout help text.
     ffmpeg_timeout_help: &'a str,
+    /// Whether automatic media pruning is enabled.
     media_auto_prune_enabled: bool,
+    /// Numeric component of the active-media size threshold.
     media_max_active_content_size_value: u64,
+    /// Unit component of the active-media size threshold.
     media_max_active_content_size_unit: &'a str,
+    /// Pre-rendered media dependency cards.
     media_detection_cards: &'a str,
+    /// `open` attribute for the media settings disclosure.
     media_settings_open_attr: &'a str,
+    /// `open` attribute for the database maintenance disclosure.
     database_maintenance_open_attr: &'a str,
+    /// Short setup-state label.
     setup_status: &'a str,
+    /// Detailed setup-state explanation.
     setup_status_detail: &'a str,
+    /// Warning displayed before reopening setup.
     setup_reopen_warning: &'a str,
+    /// Optional form for closing a reopened setup wizard.
     setup_close_control: &'a str,
 }
 
+/// Renders the complete maintenance tab of the admin panel.
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let media_settings_open_attr = if view.open_section == Some("media-settings") {
         " open"
@@ -115,6 +135,7 @@ old boards to prevent query performance degradation.
     render_admin_maintenance_section(&section_view)
 }
 
+/// Splits a byte threshold into an exact mebibyte or gibibyte input value.
 const fn media_size_input_parts(bytes: u64) -> (u64, &'static str) {
     const MIB: u64 = 1024 * 1024;
     const GIB: u64 = 1024 * MIB;
@@ -125,6 +146,7 @@ const fn media_size_input_parts(bytes: u64) -> (u64, &'static str) {
     }
 }
 
+/// Renders startup detection cards for media-processing capabilities.
 fn render_media_detection_cards(view: &AdminPanelViewModel<'_>) -> String {
     let pdf_renderer = view
         .maintenance
@@ -196,7 +218,11 @@ fn render_media_detection_cards(view: &AdminPanelViewModel<'_>) -> String {
     cards
 }
 
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the maintenance controls form one stable server-rendered HTML fragment"
+)]
+/// Renders media settings, database tools, and setup controls.
 fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String {
     format!(
         r#"<div class="admin-panel-maintenance" id="maintenance">

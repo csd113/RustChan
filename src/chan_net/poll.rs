@@ -1,4 +1,4 @@
-// chan_net/poll.rs — Federation incoming handler.
+//! Federation incoming handler.
 //
 // POST /chan/poll drains RustWave's broadcast queue by fetching and importing
 // up to MAX_POLL_ITERATIONS (50) snapshots per call. Skips AppError::Conflict
@@ -17,6 +17,7 @@ use crate::{config::CONFIG, error::AppError, middleware::AppState};
 use axum::{extract::State, response::IntoResponse, Json};
 use serde_json::json;
 
+/// Maximum number of queue entries drained by one poll request.
 const MAX_POLL_ITERATIONS: usize = 50;
 
 /// POST /chan/poll
@@ -33,6 +34,11 @@ const MAX_POLL_ITERATIONS: usize = 50;
 /// across all snapshots in this drain cycle. Posts skipped by INSERT OR IGNORE
 /// are not counted. Snapshots whose `tx_id` was already recorded in the `TxLedger`
 /// contribute 0 to the count and are silently skipped.
+///
+/// # Errors
+///
+/// Returns a [`super::ChanError`] when the peer request, body read, or a
+/// non-duplicate snapshot import fails.
 pub async fn chan_poll(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, super::ChanError> {

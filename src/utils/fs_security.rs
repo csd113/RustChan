@@ -73,9 +73,14 @@ pub fn canonical_parent_for_new_child(root: &Path, path: &Path) -> Result<PathBu
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Runtime path has no parent."))?;
+    let relative_parent = parent
+        .strip_prefix(root)
+        .context("Runtime destination is not below its configured root.")?;
     let root = root
         .canonicalize()
         .with_context(|| format!("Canonicalize runtime root {}", root.display()))?;
+    let parent = root.join(relative_parent);
+    reject_symlink_components(&parent)?;
     let parent = parent
         .canonicalize()
         .with_context(|| format!("Canonicalize runtime parent {}", parent.display()))?;
@@ -134,6 +139,7 @@ pub fn assert_dir_no_symlink(path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
+/// Reject a regular file with additional hard links on Unix.
 fn reject_hardlinked_file_if_unix(metadata: &std::fs::Metadata) -> Result<()> {
     use std::os::unix::fs::MetadataExt as _;
     if metadata.nlink() != 1 {
@@ -143,6 +149,7 @@ fn reject_hardlinked_file_if_unix(metadata: &std::fs::Metadata) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+/// Keeps hard-link validation portable on platforms without link counts.
 fn reject_hardlinked_file_if_unix(_metadata: &std::fs::Metadata) -> Result<()> {
     // Portable Rust has no cross-platform link-count API; keep non-Unix builds
     // best-effort while preserving the symlink and canonical-root checks.
@@ -155,66 +162,81 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn regular_file_check_rejects_symlink_and_hardlink() {
+    fn regular_file_check_rejects_symlink_and_hardlink() -> Result<()> {
         use std::os::unix::fs as unix_fs;
 
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::tempdir()?;
         let target = dir.path().join("target.txt");
         let link = dir.path().join("link.txt");
-        std::fs::write(&target, b"ok").expect("write target");
-        unix_fs::symlink(&target, &link).expect("symlink");
-        assert!(assert_regular_file_no_symlink(&link).is_err());
+        std::fs::write(&target, b"ok")?;
+        unix_fs::symlink(&target, &link)?;
+        anyhow::ensure!(
+            assert_regular_file_no_symlink(&link).is_err(),
+            "symlinked files must fail regular-file validation"
+        );
 
         let hardlink = dir.path().join("hardlink.txt");
-        std::fs::hard_link(&target, &hardlink).expect("hardlink");
-        assert!(assert_regular_file_no_symlink(&target).is_err());
+        std::fs::hard_link(&target, &hardlink)?;
+        anyhow::ensure!(
+            assert_regular_file_no_symlink(&target).is_err(),
+            "multiply linked files must fail regular-file validation"
+        );
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn canonical_child_rejects_symlinked_parent_escape() {
+    fn canonical_child_rejects_symlinked_parent_escape() -> Result<()> {
         use std::os::unix::fs as unix_fs;
 
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::tempdir()?;
         let root = dir.path().join("root");
         let outside = dir.path().join("outside");
-        std::fs::create_dir_all(&root).expect("root");
-        std::fs::create_dir_all(&outside).expect("outside");
-        std::fs::write(outside.join("secret.txt"), b"secret").expect("secret");
-        unix_fs::symlink(&outside, root.join("alias")).expect("symlink");
+        std::fs::create_dir_all(&root)?;
+        std::fs::create_dir_all(&outside)?;
+        std::fs::write(outside.join("secret.txt"), b"secret")?;
+        unix_fs::symlink(&outside, root.join("alias"))?;
 
-        assert!(canonical_child_of(&root, &root.join("alias/secret.txt")).is_err());
+        anyhow::ensure!(
+            canonical_child_of(&root, &root.join("alias/secret.txt")).is_err(),
+            "a symlinked parent must not escape the canonical root"
+        );
+        Ok(())
     }
 
     #[test]
-    fn existing_regular_file_child_accepts_valid_relative_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn existing_regular_file_child_accepts_valid_relative_file() -> Result<()> {
+        let dir = tempfile::tempdir()?;
         let root = dir.path().join("root");
-        std::fs::create_dir_all(root.join("board")).expect("create board");
-        std::fs::write(root.join("board/file.txt"), b"ok").expect("write file");
+        std::fs::create_dir_all(root.join("board"))?;
+        std::fs::write(root.join("board/file.txt"), b"ok")?;
 
-        let path = existing_regular_file_child(&root, "board/file.txt").expect("valid file");
+        let path = existing_regular_file_child(&root, "board/file.txt")?;
+        let expected = root.join("board/file.txt").canonicalize()?;
 
-        assert_eq!(
-            path,
-            root.join("board/file.txt")
-                .canonicalize()
-                .expect("canonical file")
+        anyhow::ensure!(
+            path == expected,
+            "validated child path did not match its canonical location"
         );
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn existing_regular_file_child_rejects_final_symlink() {
+    fn existing_regular_file_child_rejects_final_symlink() -> Result<()> {
         use std::os::unix::fs as unix_fs;
 
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::tempdir()?;
         let root = dir.path().join("root");
         let outside = dir.path().join("outside.txt");
-        std::fs::create_dir_all(&root).expect("create root");
-        std::fs::write(&outside, b"secret").expect("write outside file");
-        unix_fs::symlink(&outside, root.join("link.txt")).expect("symlink");
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(&outside, b"secret")?;
+        unix_fs::symlink(&outside, root.join("link.txt"))?;
 
-        assert!(existing_regular_file_child(&root, "link.txt").is_err());
+        anyhow::ensure!(
+            existing_regular_file_child(&root, "link.txt").is_err(),
+            "a final symlink must fail regular-file child validation"
+        );
+        Ok(())
     }
 }

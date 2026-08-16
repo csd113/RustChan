@@ -1,26 +1,11 @@
-//! `src/tls/mod.rs`
-
-// The `tls` module is intentionally private in the crate root (`mod tls;` instead of `pub mod tls;`).
-// The only `pub(crate)` helper below must remain crate-visible so that:
-//   • `self_signed` submodule can call it
-//   • tests (unit + integration) can call it from outside the `tls` module
-//
-// This triggers *two* lints:
-//   1. rustc's `unreachable_pub`
-//   2. Clippy's `redundant_pub_crate` (the exact error you are seeing via `cargo clippy`)
-//
-// Both are suppressed at module level — this is the idiomatic, zero-overhead fix used across the Rust ecosystem
-// for internal helpers that need crate-wide visibility while living in a private module.
-#![allow(unreachable_pub)]
-// Public re-exports here match the module layout and keep paths stable for callers.
-#![allow(clippy::redundant_pub_crate)]
+//! TLS certificate loading and acceptor construction.
 
 #[cfg(feature = "tls-acme")]
-pub mod acme;
+mod acme;
 #[cfg(feature = "tls-self-signed")]
-pub mod self_signed;
+mod self_signed;
 
-use std::{path::Path, sync::Arc};
+use std::{fmt, path::Path, sync::Arc};
 use tokio_rustls::TlsAcceptor;
 
 use crate::error::Result;
@@ -35,7 +20,7 @@ use crate::{
 /// The ACME variant cannot be represented as a plain [`TlsAcceptor`] because
 /// the underlying certificate is rotated dynamically by the background renewal
 /// loop, which requires the `AcmeAcceptor` handle to remain live.
-pub enum Acceptor {
+pub(super) enum Acceptor {
     /// Static certificate — manual PEM files or a self-signed dev cert.
     ///
     /// Both the [`TlsAcceptor`] (for manual accept loops) and the underlying
@@ -54,6 +39,16 @@ pub enum Acceptor {
     Acme(Arc<rustls_acme::AcmeAcceptor>, Arc<rustls::ServerConfig>),
 }
 
+impl fmt::Debug for Acceptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Static(_, _) => formatter.write_str("Acceptor::Static(..)"),
+            #[cfg(feature = "tls-acme")]
+            Self::Acme(_, _) => formatter.write_str("Acceptor::Acme(..)"),
+        }
+    }
+}
+
 /// Construct an [`Acceptor`] from the provided [`TlsConfig`], or return
 /// `None` if TLS is disabled.
 ///
@@ -70,7 +65,7 @@ pub enum Acceptor {
 /// - The ACME config is invalid (empty domain list, IP address as domain, etc.).
 /// - The ACME cache directory cannot be created.
 /// - The self-signed certificate cannot be generated or written to disk.
-pub fn build_acceptor(cfg: &TlsConfig, data_dir: &Path) -> Result<Option<Acceptor>> {
+pub(super) fn build_acceptor(cfg: &TlsConfig, data_dir: &Path) -> Result<Option<Acceptor>> {
     if !cfg.enabled {
         return Ok(None);
     }
@@ -149,7 +144,7 @@ fn load_manual_cert(
 ///
 /// rustls defaults are intentionally left untouched — TLS 1.2+ and a safe
 /// cipher list are enforced automatically; no overrides required.
-pub(crate) fn load_pem_as_acceptor(
+fn load_pem_as_acceptor(
     cert_path: &Path,
     key_path: &Path,
 ) -> Result<(Arc<TlsAcceptor>, Arc<rustls::ServerConfig>)> {

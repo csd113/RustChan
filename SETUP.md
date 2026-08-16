@@ -2,7 +2,7 @@
 
 Current setup and deployment guide for Linux, macOS, and Windows.
 
-Current development version: `1.3.0`.
+Current development version: `1.4.0`.
 
 This guide reflects the current RustChan architecture:
 
@@ -34,7 +34,7 @@ This guide reflects the current RustChan architecture:
 RustChan is a single Rust binary. A basic install only needs:
 
 - Rust toolchain to build it
-- a writable working directory
+- a writable runtime data directory (next to the binary by default, or selected with `--data-dir`)
 - `ffmpeg` if you want the enhanced media pipeline
 
 RustChan does not require:
@@ -239,11 +239,16 @@ Binary:
 ```bash
 ./target/release/rustchan-cli --port 9090
 ./target/release/rustchan-cli serve --chan-net
+./target/release/rustchan-cli --data-dir /absolute/path/to/rustchan-data
 ```
 
 ## First-Run Files and Layout
 
-By default RustChan stores runtime state in `rustchan-data/` next to the binary:
+By default RustChan stores runtime state in `rustchan-data/` next to the binary.
+Pass `--data-dir` with an absolute, non-root path to place the complete runtime
+layout elsewhere. This is the supported layout for service installations; it
+includes `settings.toml`, the database, uploads, logs, backups, and runtime
+secrets. The selected data directory has this layout:
 
 ```text
 rustchan-data/
@@ -265,7 +270,7 @@ rustchan-data/
 
 ## Banner Artwork Requirements
 
-RustChan `1.3.0` includes board banners plus a separate home-page announcement banner.
+RustChan `1.4.0` includes board banners plus a separate home-page announcement banner.
 
 Banner upload requirements:
 
@@ -330,6 +335,7 @@ ffmpeg_timeout_secs = 600
 
 [tls]
 enabled = false
+require_https = false
 port = 8443
 # redirect_http = true
 # http_port = 8080
@@ -341,6 +347,7 @@ port = 8443
 - `tor_only = true`: bind RustChan to loopback and serve only through Tor
 - `require_ffmpeg = true`: fail startup if ffmpeg is missing
 - `[tls].enabled = true`: explicitly enable RustChan's native HTTPS listener
+- `[tls].require_https = true`: opt into disabling public plaintext application access
 - `ffmpeg_timeout_secs = 600`: max runtime for a single ffmpeg job
 
 ## Tor Onion Service
@@ -502,10 +509,10 @@ sudo chown -R rustchan:rustchan /var/lib/rustchan
 This creates `settings.toml` and the runtime layout:
 
 ```bash
-sudo -u rustchan -H sh -lc 'cd /var/lib/rustchan && /usr/local/bin/rustchan-cli'
+sudo -u rustchan -H /usr/local/bin/rustchan-cli --data-dir /var/lib/rustchan
 ```
 
-Stop it after the first start, edit `/var/lib/rustchan/rustchan-data/settings.toml`, then continue.
+Stop it after the first start, edit `/var/lib/rustchan/settings.toml`, then continue.
 
 ### 4. Create a systemd Unit
 
@@ -521,7 +528,9 @@ Wants=network-online.target
 User=rustchan
 Group=rustchan
 WorkingDirectory=/var/lib/rustchan
-ExecStart=/usr/local/bin/rustchan-cli
+StateDirectory=rustchan
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/rustchan-cli --data-dir /var/lib/rustchan serve
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -532,6 +541,10 @@ ProtectHome=true
 [Install]
 WantedBy=multi-user.target
 ```
+
+`StateDirectory=rustchan` asks systemd to keep `/var/lib/rustchan` writable by
+the unprivileged service account. The explicit `--data-dir` keeps all runtime
+state there even though the root-owned executable lives under `/usr/local/bin`.
 
 Then:
 
@@ -565,6 +578,19 @@ If you put nginx or Caddy in front of RustChan:
 - set `CHAN_BEHIND_PROXY=true` if you want proxy headers trusted
 - set `CHAN_TRUSTED_PROXY_CIDRS` to the proxy's loopback or private CIDR when the proxy is not on localhost
 - decide whether TLS terminates at the proxy or inside RustChan
+
+When RustChan's built-in TLS is enabled, HTTPS is an additional listener and the
+main HTTP application listener remains available by default. Set
+`require_https = true` under `[tls]` to opt into HTTPS-only access. Independently,
+`redirect_http = true` exposes `tls.http_port` as a redirect listener instead of
+serving application routes there. With the built-in Tor service enabled,
+HTTPS-only mode also keeps a loopback HTTP backend that accepts only connections
+registered by its in-process Tor proxy.
+
+RustChan accepts bounded `Content-Length` request bodies and rejects
+`Transfer-Encoding` at the application boundary. Configure a reverse proxy to
+dechunk request bodies before forwarding them. Request headers are limited to
+32 KiB per value and 64 KiB in aggregate.
 
 Typical loopback setup:
 
@@ -614,10 +640,10 @@ Before major updates, back up:
 
 Or use the built-in backup tools from the admin panel.
 
-RustChan `1.3.0` resets the database baseline: fresh installs create the
-current `1.3.0` schema directly instead of replaying pre-release internal
+RustChan `1.4.0` resets the database baseline: fresh installs create the
+current `1.4.0` schema directly instead of replaying pre-release internal
 migrations. Existing in-development databases that structurally match that
-schema are marked as database schema version `1.3.0`; partial, unknown, or
+schema are marked as database schema version `1.4.0`; partial, unknown, or
 corrupt schemas are rejected without deleting data. Future released schema
 changes should add normal forward migrations tied to RustChan release versions.
 

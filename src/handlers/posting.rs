@@ -16,77 +16,160 @@ use crate::{
 
 use crate::db::NewPost;
 
-pub enum SubmitPostMode {
+/// Variants supported by the submit post mode workflow.
+pub(crate) enum SubmitPostMode {
+    /// Represents the new thread case.
     NewThread {
+        /// The subject.
         subject: String,
+        /// The poll question.
         poll_question: String,
+        /// The poll options collection.
         poll_options: Vec<String>,
+        /// The poll duration duration in seconds.
         poll_duration_secs: Option<i64>,
     },
+    /// Represents the reply case.
     Reply {
+        /// The thread identifier.
         thread_id: i64,
+        /// Whether the sage setting is active.
         sage: bool,
     },
 }
 
-pub struct SubmitPostCommand {
+/// Data used by the submit post command workflow.
+pub(crate) struct SubmitPostCommand {
+    /// The mode.
     pub mode: SubmitPostMode,
+    /// The board short.
     pub board_short: String,
+    /// The identity key.
     pub identity_key: String,
+    /// The cookie secret.
     pub cookie_secret: String,
+    /// The admin session identifier.
     pub admin_session_id: Option<String>,
+    /// The ban CSRF token.
     pub ban_csrf_token: String,
+    /// The submission token.
     pub submission_token: String,
+    /// The name.
     pub name: String,
+    /// The body.
     pub body: String,
+    /// The deletion token.
     pub deletion_token: String,
+    /// The captcha identifier.
     pub captcha_id: String,
+    /// The captcha answer.
     pub captcha_answer: String,
+    /// The optional image file data.
     pub image_file_data: Option<(crate::handlers::TempUpload, String)>,
+    /// The optional file data.
     pub file_data: Option<(crate::handlers::TempUpload, String)>,
+    /// The optional audio file data.
     pub audio_file_data: Option<(crate::handlers::TempUpload, String)>,
+    /// The upload directory.
     pub upload_dir: String,
+    /// The thumb size.
     pub thumb_size: u32,
+    /// Whether the `FFmpeg` available setting is active.
     pub ffmpeg_available: bool,
+    /// Whether the `FFprobe` available setting is active.
     pub ffprobe_available: bool,
+    /// Whether the `FFmpeg` webp available setting is active.
     pub ffmpeg_webp_available: bool,
 }
 
-pub struct SubmitPostResult {
+/// Data used by the submit post result workflow.
+pub(crate) struct SubmitPostResult {
+    /// The redirect URL.
     pub redirect_url: String,
+    /// The board short.
     pub board_short: String,
+    /// The thread identifier.
     pub thread_id: i64,
+    /// The post identifier.
     pub post_id: i64,
+    /// The deletion token.
     pub deletion_token: String,
+    /// The created timestamp.
     pub created_at: i64,
 }
 
-pub struct UploadConfig<'a> {
+/// Resolve a committed submission token to its canonical public post response.
+///
+/// # Errors
+/// Returns an error if the canonical post cannot be loaded from the database.
+fn existing_submission_result(
+    conn: &rusqlite::Connection,
+    board_short: String,
+    existing: db::PostSubmissionRecord,
+) -> Result<SubmitPostResult> {
+    let stored_post = db::get_post(conn, existing.post_id)?
+        .ok_or_else(|| AppError::NotFound("Existing post submission target not found.".into()))?;
+    Ok(SubmitPostResult {
+        redirect_url: format!(
+            "/{board_short}/thread/{}#p{}",
+            existing.thread_id, existing.post_id
+        ),
+        board_short,
+        thread_id: existing.thread_id,
+        post_id: existing.post_id,
+        deletion_token: stored_post.deletion_token,
+        created_at: stored_post.created_at,
+    })
+}
+
+/// Data used by the upload config workflow.
+pub(crate) struct UploadConfig<'a> {
+    /// The upload directory.
     pub upload_dir: &'a str,
+    /// The thumb size.
     pub thumb_size: u32,
+    /// The max image size.
     pub max_image_size: usize,
+    /// The max video size.
     pub max_video_size: usize,
+    /// The max audio size.
     pub max_audio_size: usize,
+    /// The max PDF size.
     pub max_pdf_size: usize,
+    /// Whether the `FFmpeg` available setting is active.
     pub ffmpeg_available: bool,
+    /// Whether the `FFprobe` available setting is active.
     pub ffprobe_available: bool,
+    /// Whether the `FFmpeg` webp available setting is active.
     pub ffmpeg_webp_available: bool,
 }
 
 #[derive(Clone)]
-pub struct PendingUploadFinalize {
+/// Data used by the pending upload finalize workflow.
+pub(crate) struct PendingUploadFinalize {
+    /// The op identifier.
     pub op_id: String,
+    /// The payload.
     pub payload: crate::pending_fs::UploadFinalizePayload,
 }
 
-pub struct ProcessedUploads {
+/// Data used by the processed uploads workflow.
+pub(crate) struct ProcessedUploads {
+    /// The optional primary.
     pub primary: Option<crate::utils::files::UploadedFile>,
+    /// The optional audio.
     pub audio: Option<crate::utils::files::UploadedFile>,
+    /// The optional pending finalize.
     pub pending_finalize: Option<PendingUploadFinalize>,
 }
 
 impl ProcessedUploads {
-    pub fn rollback_new_files(&self, conn: &rusqlite::Connection, upload_dir: &str) -> Result<()> {
+    /// Performs the rollback new files handler operation.
+    pub(crate) fn rollback_new_files(
+        &self,
+        conn: &rusqlite::Connection,
+        upload_dir: &str,
+    ) -> Result<()> {
         if let Some(pending) = self.pending_finalize.as_ref() {
             let stage_dir = std::path::Path::new(&pending.payload.stage_dir);
             if stage_dir.exists() {
@@ -143,6 +226,7 @@ impl ProcessedUploads {
     }
 }
 
+/// Performs the cleanup unused upload stage handler operation.
 fn cleanup_unused_upload_stage(stage_root: Option<&std::path::Path>) {
     let Some(stage_dir) = stage_root else {
         return;
@@ -159,40 +243,117 @@ fn cleanup_unused_upload_stage(stage_root: Option<&std::path::Path>) {
     }
 }
 
+/// Builds upload finalize payload.
 fn build_upload_finalize_payload(
     stage_dir: &std::path::Path,
-    primary: Option<&crate::utils::files::UploadedFile>,
-    audio: Option<&crate::utils::files::UploadedFile>,
+    mut primary: Option<&mut crate::utils::files::UploadedFile>,
+    audio: Option<&mut crate::utils::files::UploadedFile>,
     primary_hash: Option<String>,
-) -> Option<crate::pending_fs::UploadFinalizePayload> {
+) -> Result<Option<crate::pending_fs::UploadFinalizePayload>> {
     let mut relative_paths = Vec::new();
+    let mut optional_paths = Vec::new();
+    let mut artifact_sha256 = std::collections::BTreeMap::new();
 
-    if let Some(file) = primary.filter(|file| !file.dedup_reused) {
+    if let Some(file) = primary.as_deref().filter(|file| !file.dedup_reused) {
         relative_paths.push(file.file_path.clone());
-        if !file.thumb_path.is_empty() {
-            relative_paths.push(file.thumb_path.clone());
-        }
     }
 
-    if let Some(file) = audio.filter(|file| !file.dedup_reused) {
+    if let Some(file) = audio.as_deref().filter(|file| !file.dedup_reused) {
         relative_paths.push(file.file_path.clone());
     }
 
     relative_paths.sort_unstable();
     relative_paths.dedup();
 
-    (!relative_paths.is_empty()).then(|| crate::pending_fs::UploadFinalizePayload {
+    for relative_path in &relative_paths {
+        artifact_sha256.insert(
+            relative_path.clone(),
+            crate::pending_fs::staged_upload_artifact_sha256(stage_dir, relative_path, "required")
+                .map_err(AppError::Internal)?,
+        );
+    }
+
+    if let Some(file) = primary.as_deref_mut().filter(|file| !file.dedup_reused) {
+        if !file.thumb_path.is_empty() {
+            let staged_path = stage_dir.join(&file.thumb_path);
+            match std::fs::symlink_metadata(&staged_path) {
+                Ok(metadata) if metadata.file_type().is_file() => {
+                    optional_paths.push(file.thumb_path.clone());
+                    artifact_sha256.insert(
+                        file.thumb_path.clone(),
+                        crate::pending_fs::staged_upload_artifact_sha256(
+                            stage_dir,
+                            &file.thumb_path,
+                            "optional",
+                        )
+                        .map_err(AppError::Internal)?,
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::warn!(
+                        artifact = "optional_thumbnail",
+                        outcome = "omitted_before_commit",
+                        "generated thumbnail was absent; preserving upload without it"
+                    );
+                    file.thumb_path.clear();
+                }
+                Ok(_) => {
+                    return Err(AppError::Internal(anyhow::anyhow!(
+                        "Optional staged upload artifact is not a regular file"
+                    )));
+                }
+                Err(error) => {
+                    return Err(AppError::Internal(anyhow::anyhow!(
+                        "Optional staged upload artifact cannot be inspected: {error}"
+                    )));
+                }
+            }
+        }
+    }
+
+    if primary
+        .as_deref()
+        .is_some_and(|primary| primary.thumb_path.is_empty())
+    {
+        if let Some(audio) = audio {
+            audio.thumb_path.clear();
+        }
+    }
+
+    let payload = (!relative_paths.is_empty()).then(|| crate::pending_fs::UploadFinalizePayload {
         stage_dir: stage_dir.display().to_string(),
         relative_paths,
+        optional_paths,
+        artifact_sha256,
         primary_hash,
-        primary_file_path: primary.map(|file| file.file_path.clone()),
+        primary_file_path: primary
+            .as_deref()
+            .filter(|file| !file.dedup_reused)
+            .map(|file| file.file_path.clone()),
         primary_thumb_path: primary
+            .as_deref()
+            .filter(|file| !file.dedup_reused)
             .and_then(|file| (!file.thumb_path.is_empty()).then(|| file.thumb_path.clone())),
-        primary_mime_type: primary.map(|file| file.mime_type.clone()),
-    })
+        primary_mime_type: primary
+            .as_deref()
+            .filter(|file| !file.dedup_reused)
+            .map(|file| file.mime_type.clone()),
+    });
+    if let Some(payload) = payload.as_ref() {
+        let upload_root = stage_dir
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or_else(|| {
+                AppError::Internal(anyhow::anyhow!("Upload stage has no managed root"))
+            })?;
+        crate::pending_fs::validate_upload_finalize_payload(upload_root, payload)
+            .map_err(AppError::Internal)?;
+    }
+    Ok(payload)
 }
 
-pub fn build_pending_upload_op(
+/// Builds pending upload op.
+pub(crate) fn build_pending_upload_op(
     uploads: &ProcessedUploads,
 ) -> Result<Option<crate::pending_fs::PendingFsOpInsert>> {
     let Some(pending) = uploads.pending_finalize.as_ref() else {
@@ -210,7 +371,8 @@ pub fn build_pending_upload_op(
     }))
 }
 
-pub fn finalize_pending_uploads(
+/// Performs the finalize pending uploads handler operation.
+pub(crate) fn finalize_pending_uploads(
     conn: &rusqlite::Connection,
     upload_dir: &str,
     uploads: &ProcessedUploads,
@@ -219,16 +381,13 @@ pub fn finalize_pending_uploads(
         return;
     };
 
-    match crate::pending_fs::finalize_upload_payload(conn, upload_dir, &pending.payload) {
-        Ok(()) => {
-            if let Err(error) = crate::db::delete_pending_fs_op(conn, &pending.op_id) {
-                tracing::error!(
-                    op_id = %pending.op_id,
-                    error = %error,
-                    "finalized upload files but failed to clear pending_fs_op"
-                );
-            }
-        }
+    match crate::pending_fs::finalize_upload_payload_for_op(
+        conn,
+        upload_dir,
+        Some(&pending.op_id),
+        &pending.payload,
+    ) {
+        Ok(()) => {}
         Err(error) => {
             tracing::error!(
                 op_id = %pending.op_id,
@@ -239,24 +398,34 @@ pub fn finalize_pending_uploads(
     }
 }
 
-pub fn is_admin_session(conn: &rusqlite::Connection, admin_session_id: Option<&str>) -> bool {
+/// Returns whether admin session.
+pub(crate) fn is_admin_session(
+    conn: &rusqlite::Connection,
+    admin_session_id: Option<&str>,
+) -> bool {
     admin_session_id.is_some_and(|sid| db::get_session(conn, sid).ok().flatten().is_some())
 }
 
-pub fn load_word_filters(conn: &rusqlite::Connection) -> Result<Vec<(String, String)>> {
+/// Loads word filters.
+pub(crate) fn load_word_filters(conn: &rusqlite::Connection) -> Result<Vec<(String, String)>> {
     Ok(db::get_word_filters(conn)?
         .into_iter()
         .map(|f| (f.pattern, f.replacement))
         .collect())
 }
 
-pub fn resolve_post_identity(raw_name: &str, allow_tripcodes: bool) -> (String, Option<String>) {
+/// Resolves post identity.
+pub(crate) fn resolve_post_identity(
+    raw_name: &str,
+    allow_tripcodes: bool,
+) -> (String, Option<String>) {
     let (name, tripcode) = parse_name_tripcode(&validate_name(raw_name));
     let tripcode = if allow_tripcodes { tripcode } else { None };
     (name, tripcode)
 }
 
-pub fn build_post_body(
+/// Builds post body.
+pub(crate) fn build_post_body(
     raw_body: &str,
     has_file: bool,
     board_allows_media: bool,
@@ -276,7 +445,8 @@ pub fn build_post_body(
     Ok((body_text, body_html))
 }
 
-pub fn resolve_deletion_token(raw_token: &str) -> String {
+/// Resolves deletion token.
+pub(crate) fn resolve_deletion_token(raw_token: &str) -> String {
     if raw_token.trim().is_empty() {
         new_deletion_token()
     } else {
@@ -284,7 +454,8 @@ pub fn resolve_deletion_token(raw_token: &str) -> String {
     }
 }
 
-pub fn process_uploads(
+/// Processes uploads.
+pub(crate) fn process_uploads(
     image_file_data: Option<(crate::handlers::TempUpload, String)>,
     file_data: Option<(crate::handlers::TempUpload, String)>,
     audio_file_data: Option<(crate::handlers::TempUpload, String)>,
@@ -322,7 +493,7 @@ pub fn process_uploads(
         config.ffmpeg_webp_available,
     );
 
-    let (primary, audio, primary_hash) = match processed {
+    let (mut primary, mut audio, primary_hash) = match processed {
         Ok(processed) => processed,
         Err(error) => {
             cleanup_unused_upload_stage(stage_root.as_deref());
@@ -330,13 +501,17 @@ pub fn process_uploads(
         }
     };
 
-    let pending_finalize = stage_root.as_ref().and_then(|stage_dir| {
-        build_upload_finalize_payload(stage_dir, primary.as_ref(), audio.as_ref(), primary_hash)
-            .map(|payload| PendingUploadFinalize {
-                op_id: uuid::Uuid::new_v4().to_string(),
-                payload,
-            })
-    });
+    let pending_finalize = stage_root
+        .as_ref()
+        .map(|stage_dir| {
+            build_upload_finalize_payload(stage_dir, primary.as_mut(), audio.as_mut(), primary_hash)
+        })
+        .transpose()?
+        .flatten()
+        .map(|payload| PendingUploadFinalize {
+            op_id: uuid::Uuid::new_v4().to_string(),
+            payload,
+        });
 
     if pending_finalize.is_none() {
         cleanup_unused_upload_stage(stage_root.as_deref());
@@ -350,8 +525,12 @@ pub fn process_uploads(
 }
 
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
-pub fn build_new_post(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the constructor mirrors the persisted post record assembled from validated form fields"
+)]
+/// Handles the build new post request.
+pub(crate) fn build_new_post(
     thread_id: i64,
     board_id: i64,
     name: String,
@@ -392,8 +571,16 @@ pub fn build_new_post(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[expect(clippy::too_many_lines)]
-pub fn submit_post(
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "post validation and transactional creation share one consistency boundary"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "validation, transactional insertion, attachment updates, and job enqueueing share one boundary"
+)]
+/// Handles the submit post request.
+pub(crate) fn submit_post(
     conn: &rusqlite::Connection,
     job_queue: &crate::workers::JobQueue,
     command: SubmitPostCommand,
@@ -460,20 +647,7 @@ pub fn submit_post(
         });
     }
     if let Some(existing) = db::get_post_submission(conn, &submission_token, &ip_hash, board.id)? {
-        let stored_post = db::get_post(conn, existing.post_id)?.ok_or_else(|| {
-            AppError::NotFound("Existing post submission target not found.".into())
-        })?;
-        return Ok(SubmitPostResult {
-            redirect_url: format!(
-                "/{}/thread/{}#p{}",
-                board.short_name, existing.thread_id, existing.post_id
-            ),
-            board_short: board.short_name,
-            thread_id: existing.thread_id,
-            post_id: existing.post_id,
-            deletion_token: stored_post.deletion_token,
-            created_at: stored_post.created_at,
-        });
+        return existing_submission_result(conn, board.short_name, existing);
     }
 
     let is_admin = is_admin_session(conn, admin_session_id.as_deref());
@@ -531,8 +705,14 @@ pub fn submit_post(
     )?;
     let deletion_token = resolve_deletion_token(&deletion_token);
     let pending_upload_op = build_pending_upload_op(&uploads)?;
+    let deduplicated_paths: Vec<&str> = uploads
+        .primary
+        .iter()
+        .filter(|upload| upload.dedup_reused)
+        .map(|upload| upload.file_path.as_str())
+        .collect();
 
-    let (post_id, thread_id, redirect_url, prune_job) = match mode {
+    let (post_id, thread_id, redirect_url, prune_board_id) = match mode {
         SubmitPostMode::NewThread {
             subject,
             poll_question,
@@ -588,34 +768,35 @@ pub fn submit_post(
                     expires_at,
                 })
             };
-            let create_result = db::create_thread_with_optional_poll(
+            let create_result = db::threads::create_thread_submission(
                 conn,
                 board.id,
                 subject.as_deref(),
                 &new_post,
                 &submission_token,
                 poll_insert.as_ref(),
-                pending_upload_op.as_ref(),
+                db::threads::PostFilesystemCommit::new(
+                    pending_upload_op.as_ref(),
+                    &deduplicated_paths,
+                    true,
+                ),
             );
             let (thread_id, post_id, _) = match create_result {
-                Ok(ids) => ids,
+                Ok(db::threads::PostCreationOutcome::Created(ids)) => ids,
+                Ok(db::threads::PostCreationOutcome::Replayed(existing)) => {
+                    uploads.rollback_new_files(conn, &upload_dir)?;
+                    return existing_submission_result(conn, board.short_name, existing);
+                }
                 Err(error) => {
                     uploads.rollback_new_files(conn, &upload_dir)?;
                     return Err(error.into());
                 }
             };
-            let prune_job = crate::workers::Job::ThreadPrune {
-                board_id: board.id,
-                board_short: board.short_name.clone(),
-                max_threads: board.max_threads,
-                max_archived_threads: board.max_archived_threads,
-                allow_archive: board.allow_archive,
-            };
             (
                 post_id,
                 thread_id,
-                format!("/{}/thread/{thread_id}", board.short_name),
-                Some(prune_job),
+                format!("/{}/thread/{thread_id}#p{post_id}", board.short_name),
+                Some(board.id),
             )
         }
         SubmitPostMode::Reply { .. } => {
@@ -635,14 +816,22 @@ pub fn submit_post(
                 deletion_token.clone(),
                 false,
             );
-            let post_id = match db::create_reply_with_thread_update(
+            let post_id = match db::threads::create_reply_submission(
                 conn,
                 &new_post,
                 &submission_token,
                 should_bump,
-                pending_upload_op.as_ref(),
+                db::threads::PostFilesystemCommit::new(
+                    pending_upload_op.as_ref(),
+                    &deduplicated_paths,
+                    false,
+                ),
             ) {
-                Ok(post_id) => post_id,
+                Ok(db::threads::PostCreationOutcome::Created(post_id)) => post_id,
+                Ok(db::threads::PostCreationOutcome::Replayed(existing)) => {
+                    uploads.rollback_new_files(conn, &upload_dir)?;
+                    return existing_submission_result(conn, board.short_name, existing);
+                }
                 Err(error) => {
                     let stale_state_error = error.to_string();
                     uploads.rollback_new_files(conn, &upload_dir)?;
@@ -673,9 +862,17 @@ pub fn submit_post(
         body_text.len(),
         uploads.primary.as_ref(),
         &board.short_name,
-    );
-    if let Some(prune_job) = prune_job.as_ref() {
-        let _ = job_queue.enqueue(prune_job);
+    )?;
+    if let Some(prune_board_id) = prune_board_id {
+        if let Err(error) = job_queue.notify_persisted_thread_prune(conn) {
+            tracing::warn!(
+                target: "workers",
+                board = %board.short_name,
+                board_id = prune_board_id,
+                error = %error,
+                "durable board prune intent persisted but worker notification accounting failed"
+            );
+        }
         tracing::info!(
             target: "board",
             board = %board.short_name,
@@ -712,7 +909,37 @@ mod tests {
     use super::{process_uploads, submit_post, SubmitPostCommand, SubmitPostMode, UploadConfig};
     use crate::error::AppError;
     use crate::handlers::TempUpload;
+    use anyhow::{bail, Context as _, Result};
     use sha2::Digest as _;
+
+    macro_rules! assert {
+        ($condition:expr_2021 $(,)?) => {
+            anyhow::ensure!(
+                $condition,
+                "assertion failed: {}",
+                stringify!($condition)
+            );
+        };
+        ($condition:expr_2021, $($message:tt)+) => {
+            anyhow::ensure!(
+                $condition,
+                "assertion failed: {}: {}",
+                stringify!($condition),
+                format_args!($($message)+)
+            );
+        };
+    }
+
+    macro_rules! assert_eq {
+        ($left:expr_2021, $right:expr_2021 $(,)?) => {{
+            match (&$left, &$right) {
+                (left, right) => anyhow::ensure!(
+                    left == right,
+                    "assertion failed: `(left == right)`\n  left: `{left:?}`\n right: `{right:?}`"
+                ),
+            }
+        }};
+    }
 
     const TEST_BOARD: &str = "test";
     const TEST_COOKIE_SECRET: &str = "cookie-secret";
@@ -856,83 +1083,200 @@ mod tests {
         }
     }
 
-    fn temp_upload(name: &str, bytes: &[u8]) -> (TempUpload, String) {
+    fn temp_upload(name: &str, bytes: &[u8]) -> Result<(TempUpload, String)> {
         let temp_file = tempfile::Builder::new()
             .prefix("rustchan-posting-test-upload-")
             .tempfile()
-            .expect("temp upload");
-        std::fs::write(temp_file.path(), bytes).expect("write temp upload");
-        (
+            .context("failed to create temporary upload")?;
+        std::fs::write(temp_file.path(), bytes).context("failed to write temporary upload")?;
+        Ok((
             TempUpload {
                 temp_file,
                 sniff_bytes: bytes.to_vec(),
                 size_bytes: bytes.len(),
             },
             name.to_owned(),
-        )
+        ))
     }
 
-    fn one_pixel_png() -> Vec<u8> {
+    fn one_pixel_png() -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         image::DynamicImage::new_rgba8(1, 1)
             .write_to(
                 &mut std::io::Cursor::new(&mut bytes),
                 image::ImageFormat::Png,
             )
-            .expect("encode png");
-        bytes
+            .context("failed to encode one-pixel PNG fixture")?;
+        Ok(bytes)
     }
 
     fn flac_header_bytes() -> Vec<u8> {
         b"fLaC\x00\x00\x00\x22tiny test flac bytes".to_vec()
     }
 
-    fn malformed_aac_bytes() -> Vec<u8> {
+    fn malformed_aac_bytes() -> Result<Vec<u8>> {
         let mut bytes = Vec::with_capacity(2_048);
         bytes.extend_from_slice(&[0xFF, 0xF1, 0x50, 0x80]);
         bytes.resize(2_048, 0);
         let mut state = 4_u32;
         for byte in bytes.iter_mut().skip(4) {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            *byte = u8::try_from(state & 0xFF).expect("masked byte fits in u8");
+            *byte = u8::try_from(state & 0xFF).context("masked AAC fixture byte did not fit")?;
         }
-        bytes
+        Ok(bytes)
     }
 
-    fn webm_header_bytes() -> Vec<u8> {
-        b"\x1a\x45\xdf\xa3\x00\x00\x00\x00\x00\x00\x42\x82\x84webm\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec()
+    fn mp4_header_bytes() -> Vec<u8> {
+        b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2mp41".to_vec()
     }
 
-    fn pending_upload_stage_count(upload_dir: &std::path::Path) -> usize {
+    fn pending_upload_stage_count(upload_dir: &std::path::Path) -> Result<usize> {
         let pending = upload_dir.join(".pending");
         if !pending.exists() {
-            return 0;
+            return Ok(0);
         }
-        std::fs::read_dir(pending)
-            .expect("read pending dir")
-            .count()
+        Ok(std::fs::read_dir(pending)
+            .context("failed to read pending-upload directory")?
+            .count())
     }
 
-    fn assert_no_partial_post_rows(conn: &rusqlite::Connection) {
+    fn assert_no_partial_post_rows(conn: &rusqlite::Connection) -> Result<()> {
         let thread_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))
-            .expect("thread count");
+            .context("failed to count threads")?;
         let post_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))
-            .expect("post count");
+            .context("failed to count posts")?;
         assert_eq!(thread_count, 0);
         assert_eq!(post_count, 0);
+        Ok(())
+    }
+
+    fn submit_concurrently(
+        state: &crate::middleware::AppState,
+        commands: Vec<SubmitPostCommand>,
+    ) -> Result<Vec<super::SubmitPostResult>> {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(commands.len()));
+        let job_queue = std::sync::Arc::new(crate::workers::JobQueue::new(
+            crate::db::init_test_pool().context("failed to create isolated test job queue")?,
+        ));
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(commands.len());
+            for command in commands {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let pool = state.db.clone();
+                let job_queue = std::sync::Arc::clone(&job_queue);
+                handles.push(scope.spawn(move || {
+                    barrier.wait();
+                    let conn = pool.get()?;
+                    submit_post(&conn, job_queue.as_ref(), command)
+                }));
+            }
+
+            let mut results = Vec::with_capacity(handles.len());
+            for handle in handles {
+                let result = handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("concurrent submission worker panicked"))?;
+                results.push(result.context("concurrent submission failed")?);
+            }
+            Ok(results)
+        })
+    }
+
+    fn assert_database_integrity(
+        conn: &rusqlite::Connection,
+        upload_dir: &std::path::Path,
+    ) -> Result<()> {
+        let quick_check: String = conn
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))
+            .context("quick_check failed")?;
+        assert_eq!(quick_check, "ok");
+
+        let foreign_key_failures: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .context("foreign_key_check failed")?;
+        assert_eq!(foreign_key_failures, 0);
+
+        let reply_counter_mismatches: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM threads AS thread
+                 WHERE thread.reply_count != (
+                     SELECT COUNT(*) FROM posts
+                     WHERE posts.thread_id = thread.id AND posts.is_op = 0
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .context("reply-counter consistency check failed")?;
+        assert_eq!(reply_counter_mismatches, 0);
+
+        let pending_fs_ops: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pending_fs_ops", [], |row| row.get(0))
+            .context("pending filesystem operation check failed")?;
+        assert_eq!(pending_fs_ops, 0);
+
+        let orphan_file_hashes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM file_hashes AS hash
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM posts
+                     WHERE posts.file_path = hash.file_path
+                        OR posts.thumb_path = hash.thumb_path
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .context("orphan media hash check failed")?;
+        assert_eq!(orphan_file_hashes, 0);
+        assert_eq!(pending_upload_stage_count(upload_dir)?, 0);
+        Ok(())
+    }
+
+    fn regular_files(
+        root: &std::path::Path,
+    ) -> Result<std::collections::HashSet<std::path::PathBuf>> {
+        fn visit(
+            directory: &std::path::Path,
+            files: &mut std::collections::HashSet<std::path::PathBuf>,
+        ) -> Result<()> {
+            if !directory.exists() {
+                return Ok(());
+            }
+            for entry in std::fs::read_dir(directory)? {
+                let path = entry?.path();
+                if path.is_dir() {
+                    visit(&path, files)?;
+                } else if path.is_file() {
+                    files.insert(path);
+                }
+            }
+            Ok(())
+        }
+
+        let mut files = std::collections::HashSet::new();
+        visit(root, &mut files)?;
+        Ok(files)
     }
 
     #[test]
-    fn submit_post_rejects_banned_user_before_creating_thread() {
+    fn submit_post_rejects_banned_user_before_creating_thread() -> Result<()> {
         let state = crate::test_support::app_state();
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
 
         let ip_hash = crate::utils::crypto::hash_ip(TEST_IDENTITY_KEY, TEST_COOKIE_SECRET);
-        crate::db::add_ban(&conn, &ip_hash, "posting blocked", None).expect("add ban");
+        crate::db::add_ban(&conn, &ip_hash, "posting blocked", None)
+            .context("failed to add ban")?;
 
         let error = match submit_post(
             &conn,
@@ -941,10 +1285,13 @@ mod tests {
                 TEST_BOARD,
                 "banned-thread",
                 "thread body",
-                upload_dir.path().to_str().expect("upload dir"),
+                upload_dir
+                    .path()
+                    .to_str()
+                    .context("upload directory was not valid UTF-8")?,
             ),
         ) {
-            Ok(result) => panic!(
+            Ok(result) => bail!(
                 "expected banned submission to fail, got {}",
                 result.redirect_url
             ),
@@ -956,27 +1303,31 @@ mod tests {
                 assert_eq!(reason, "posting blocked");
                 assert_eq!(csrf_token, "ban-csrf");
             }
-            other => panic!("expected BannedUser, got {other:?}"),
+            other => bail!("expected BannedUser, got {other:?}"),
         }
 
         let thread_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))
-            .expect("thread count");
+            .context("failed to count threads")?;
         assert_eq!(thread_count, 0);
+        Ok(())
     }
 
     #[test]
-    fn submit_post_enforces_board_cooldown_for_reply() {
+    fn submit_post_enforces_board_cooldown_for_reply() -> Result<()> {
         let state = crate::test_support::app_state();
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let conn = state.db.get().expect("db connection");
-        let board_id =
-            crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        let board_id = crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
         conn.execute(
             "UPDATE boards SET post_cooldown_secs = 60 WHERE short_name = ?1",
             rusqlite::params![TEST_BOARD],
         )
-        .expect("enable cooldown");
+        .context("failed to enable cooldown")?;
 
         let ip_hash = crate::utils::crypto::hash_ip(TEST_IDENTITY_KEY, TEST_COOKIE_SECRET);
         let (thread_id, _, _) = crate::db::create_thread_with_optional_poll(
@@ -988,7 +1339,7 @@ mod tests {
             None,
             None,
         )
-        .expect("create thread");
+        .context("failed to create thread")?;
 
         let error = match submit_post(
             &conn,
@@ -998,10 +1349,13 @@ mod tests {
                 thread_id,
                 "cooldown-reply",
                 "reply body",
-                upload_dir.path().to_str().expect("upload dir"),
+                upload_dir
+                    .path()
+                    .to_str()
+                    .context("upload directory was not valid UTF-8")?,
             ),
         ) {
-            Ok(result) => panic!("expected cooldown rejection, got {}", result.redirect_url),
+            Ok(result) => bail!("expected cooldown rejection, got {}", result.redirect_url),
             Err(error) => error,
         };
 
@@ -1010,21 +1364,26 @@ mod tests {
                 assert!(message.contains("Please wait"));
                 assert!(message.contains("before posting again."));
             }
-            other => panic!("expected BadRequest, got {other:?}"),
+            other => bail!("expected BadRequest, got {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn submit_post_rejects_captcha_failure_for_new_thread() {
+    fn submit_post_rejects_captcha_failure_for_new_thread() -> Result<()> {
         let state = crate::test_support::app_state();
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
         conn.execute(
             "UPDATE boards SET allow_captcha = 1 WHERE short_name = ?1",
             rusqlite::params![TEST_BOARD],
         )
-        .expect("enable captcha");
+        .context("failed to enable CAPTCHA")?;
 
         let error = match submit_post(
             &conn,
@@ -1033,10 +1392,13 @@ mod tests {
                 TEST_BOARD,
                 "captcha-thread",
                 "thread body",
-                upload_dir.path().to_str().expect("upload dir"),
+                upload_dir
+                    .path()
+                    .to_str()
+                    .context("upload directory was not valid UTF-8")?,
             ),
         ) {
-            Ok(result) => panic!("expected captcha rejection, got {}", result.redirect_url),
+            Ok(result) => bail!("expected captcha rejection, got {}", result.redirect_url),
             Err(error) => error,
         };
 
@@ -1047,21 +1409,26 @@ mod tests {
                     "CAPTCHA verification failed. Enter the text from the image and try again."
                 );
             }
-            other => panic!("expected BadRequest, got {other:?}"),
+            other => bail!("expected BadRequest, got {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn submit_post_accepts_valid_captcha_once() {
+    fn submit_post_accepts_valid_captcha_once() -> Result<()> {
         let state = crate::test_support::app_state();
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
         conn.execute(
             "UPDATE boards SET allow_captcha = 1 WHERE short_name = ?1",
             rusqlite::params![TEST_BOARD],
         )
-        .expect("enable captcha");
+        .context("failed to enable CAPTCHA")?;
         let captcha_id = "00000000000000000000000000000007";
         crate::captcha::testing::insert_challenge_for_test(
             TEST_BOARD,
@@ -1074,43 +1441,55 @@ mod tests {
             TEST_BOARD,
             "captcha-thread-success",
             "thread body",
-            upload_dir.path().to_str().expect("upload dir"),
+            upload_dir
+                .path()
+                .to_str()
+                .context("upload directory was not valid UTF-8")?,
         );
         command.captcha_id = captcha_id.to_owned();
         command.captcha_answer = "abc23".to_owned();
 
-        let result = submit_post(&conn, state.job_queue.as_ref(), command).expect("submit post");
+        let result = submit_post(&conn, state.job_queue.as_ref(), command)
+            .context("failed to submit post with valid CAPTCHA")?;
         assert_eq!(result.board_short, TEST_BOARD);
 
         let mut replay = thread_command(
             TEST_BOARD,
             "captcha-thread-replay",
             "thread body",
-            upload_dir.path().to_str().expect("upload dir"),
+            upload_dir
+                .path()
+                .to_str()
+                .context("upload directory was not valid UTF-8")?,
         );
         replay.captcha_id = captcha_id.to_owned();
         replay.captcha_answer = "ABC23".to_owned();
         let error = match submit_post(&conn, state.job_queue.as_ref(), replay) {
-            Ok(result) => panic!(
+            Ok(result) => bail!(
                 "expected captcha replay rejection, got {}",
                 result.redirect_url
             ),
             Err(error) => error,
         };
         assert!(matches!(error, AppError::BadRequest(message) if message.contains("expired")));
+        Ok(())
     }
 
     #[test]
-    fn submit_post_rejects_expired_captcha() {
+    fn submit_post_rejects_expired_captcha() -> Result<()> {
         let state = crate::test_support::app_state();
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
         conn.execute(
             "UPDATE boards SET allow_captcha = 1 WHERE short_name = ?1",
             rusqlite::params![TEST_BOARD],
         )
-        .expect("enable captcha");
+        .context("failed to enable CAPTCHA")?;
         let captcha_id = "00000000000000000000000000000008";
         crate::captcha::testing::insert_challenge_for_test(
             TEST_BOARD,
@@ -1122,27 +1501,35 @@ mod tests {
             TEST_BOARD,
             "captcha-thread-expired",
             "thread body",
-            upload_dir.path().to_str().expect("upload dir"),
+            upload_dir
+                .path()
+                .to_str()
+                .context("upload directory was not valid UTF-8")?,
         );
         command.captcha_id = captcha_id.to_owned();
         command.captcha_answer = "ABC23".to_owned();
 
         let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
-            Ok(result) => panic!(
+            Ok(result) => bail!(
                 "expected expired captcha rejection, got {}",
                 result.redirect_url
             ),
             Err(error) => error,
         };
         assert!(matches!(error, AppError::BadRequest(message) if message.contains("expired")));
+        Ok(())
     }
 
     #[test]
-    fn submit_post_rejects_partial_poll_submission() {
+    fn submit_post_rejects_partial_poll_submission() -> Result<()> {
         let state = crate::test_support::app_state();
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
 
         let error = match submit_post(
             &conn,
@@ -1151,13 +1538,16 @@ mod tests {
                 TEST_BOARD,
                 "poll-token",
                 "thread body",
-                upload_dir.path().to_str().expect("upload dir"),
+                upload_dir
+                    .path()
+                    .to_str()
+                    .context("upload directory was not valid UTF-8")?,
                 "pick one",
                 vec!["yes"],
                 Some(3600),
             ),
         ) {
-            Ok(result) => panic!(
+            Ok(result) => bail!(
                 "expected partial poll rejection, got {}",
                 result.redirect_url
             ),
@@ -1168,21 +1558,26 @@ mod tests {
             AppError::BadRequest(message) => {
                 assert_eq!(message, "Polls need a question and at least two options.");
             }
-            other => panic!("expected BadRequest, got {other:?}"),
+            other => bail!("expected BadRequest, got {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn process_uploads_cleans_staged_image_when_combo_audio_fails() {
+    fn process_uploads_cleans_staged_image_when_combo_audio_fails() -> Result<()> {
         let state = crate::test_support::app_state();
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
         let board = crate::db::get_board_by_short(&conn, TEST_BOARD)
-            .expect("load board")
-            .expect("board exists");
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let image = temp_upload("cover.png", &one_pixel_png());
-        let bad_audio = temp_upload("renamed.mp3", b"not really audio");
+            .context("failed to load board")?
+            .context("test board did not exist")?;
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let image = temp_upload("cover.png", &one_pixel_png()?)?;
+        let bad_audio = temp_upload("renamed.mp3", b"not really audio")?;
 
         let result = process_uploads(
             Some(image),
@@ -1191,7 +1586,10 @@ mod tests {
             &board,
             &conn,
             &UploadConfig {
-                upload_dir: upload_dir.path().to_str().expect("upload dir"),
+                upload_dir: upload_dir
+                    .path()
+                    .to_str()
+                    .context("upload directory was not valid UTF-8")?,
                 thumb_size: 64,
                 max_image_size: 1024 * 1024,
                 max_video_size: 1024 * 1024,
@@ -1204,30 +1602,38 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert_eq!(pending_upload_stage_count(upload_dir.path())?, 0);
+        Ok(())
     }
 
     #[test]
-    fn submit_post_enforces_board_specific_image_limit() {
+    fn submit_post_enforces_board_specific_image_limit() -> Result<()> {
         let state = crate::test_support::app_state();
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
         conn.execute(
             "UPDATE boards SET max_image_size = ?1 WHERE short_name = ?2",
             rusqlite::params![64_i64, TEST_BOARD],
         )
-        .expect("shrink image limit");
+        .context("failed to shrink image limit")?;
         let mut command = thread_command(
             TEST_BOARD,
             "board-image-cap",
             "thread body",
-            upload_dir.path().to_str().expect("upload dir"),
+            upload_dir
+                .path()
+                .to_str()
+                .context("upload directory was not valid UTF-8")?,
         );
-        command.file_data = Some(temp_upload("cover.png", &one_pixel_png()));
+        command.file_data = Some(temp_upload("cover.png", &one_pixel_png()?)?);
 
         let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
-            Ok(result) => panic!(
+            Ok(result) => bail!(
                 "board-specific image cap should reject upload, got {}",
                 result.redirect_url
             ),
@@ -1238,26 +1644,34 @@ mod tests {
             AppError::UploadTooLarge(message) => {
                 assert!(message.contains("Maximum image upload size is 64 B."));
             }
-            other => panic!("expected UploadTooLarge, got {other:?}"),
+            other => bail!("expected UploadTooLarge, got {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn submit_post_rejects_disabled_audio_without_stale_uploads_or_rows() {
+    fn submit_post_rejects_disabled_audio_without_stale_uploads_or_rows() -> Result<()> {
         let state = crate::test_support::app_state();
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
         let mut command = thread_command(
             TEST_BOARD,
             "audio-disabled",
             "thread body",
-            upload_dir.path().to_str().expect("upload dir"),
+            upload_dir
+                .path()
+                .to_str()
+                .context("upload directory was not valid UTF-8")?,
         );
-        command.file_data = Some(temp_upload("tiny.flac", &flac_header_bytes()));
+        command.file_data = Some(temp_upload("tiny.flac", &flac_header_bytes())?);
 
         let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
-            Ok(result) => panic!(
+            Ok(result) => bail!(
                 "audio-disabled board should reject, got {}",
                 result.redirect_url
             ),
@@ -1268,35 +1682,43 @@ mod tests {
             AppError::BadRequest(message) => {
                 assert!(message.contains("Audio uploads are disabled"));
             }
-            other => panic!("expected BadRequest, got {other:?}"),
+            other => bail!("expected BadRequest, got {other:?}"),
         }
-        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert_eq!(pending_upload_stage_count(upload_dir.path())?, 0);
         assert!(!upload_dir.path().join(TEST_BOARD).exists());
-        assert_no_partial_post_rows(&conn);
+        assert_no_partial_post_rows(&conn)?;
+        Ok(())
     }
 
     #[test]
-    fn submit_post_rejects_malformed_aac_without_jobs_or_rows() {
+    fn submit_post_rejects_malformed_aac_without_jobs_or_rows() -> Result<()> {
         let state = crate::test_support::app_state();
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
         conn.execute(
             "UPDATE boards SET allow_audio = 1 WHERE short_name = ?1",
             rusqlite::params![TEST_BOARD],
         )
-        .expect("enable audio");
+        .context("failed to enable audio")?;
         let mut command = thread_command(
             TEST_BOARD,
             "malformed-aac",
             "thread body",
-            upload_dir.path().to_str().expect("upload dir"),
+            upload_dir
+                .path()
+                .to_str()
+                .context("upload directory was not valid UTF-8")?,
         );
-        command.file_data = Some(temp_upload("broken.aac", &malformed_aac_bytes()));
+        command.file_data = Some(temp_upload("broken.aac", &malformed_aac_bytes()?)?);
         command.ffmpeg_available = true;
 
         let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
-            Ok(result) => panic!("malformed AAC should reject, got {}", result.redirect_url),
+            Ok(result) => bail!("malformed AAC should reject, got {}", result.redirect_url),
             Err(error) => error,
         };
 
@@ -1304,38 +1726,46 @@ mod tests {
             AppError::BadRequest(message) => {
                 assert!(message.contains("ADTS stream is malformed"));
             }
-            other => panic!("expected BadRequest, got {other:?}"),
+            other => bail!("expected BadRequest, got {other:?}"),
         }
-        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert_eq!(pending_upload_stage_count(upload_dir.path())?, 0);
         assert!(!upload_dir.path().join(TEST_BOARD).exists());
-        assert_no_partial_post_rows(&conn);
+        assert_no_partial_post_rows(&conn)?;
         let job_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row.get(0))
-            .expect("job count");
+            .context("failed to count background jobs")?;
         assert_eq!(job_count, 0);
+        Ok(())
     }
 
     #[test]
-    fn submit_post_rejects_disabled_video_without_stale_uploads_or_rows() {
+    fn submit_post_rejects_disabled_video_without_stale_uploads_or_rows() -> Result<()> {
         let state = crate::test_support::app_state();
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
         conn.execute(
             "UPDATE boards SET allow_video = 0 WHERE short_name = ?1",
             rusqlite::params![TEST_BOARD],
         )
-        .expect("disable video");
+        .context("failed to disable video")?;
         let mut command = thread_command(
             TEST_BOARD,
             "video-disabled",
             "thread body",
-            upload_dir.path().to_str().expect("upload dir"),
+            upload_dir
+                .path()
+                .to_str()
+                .context("upload directory was not valid UTF-8")?,
         );
-        command.file_data = Some(temp_upload("tiny.webm", &webm_header_bytes()));
+        command.file_data = Some(temp_upload("tiny.mp4", &mp4_header_bytes())?);
 
         let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
-            Ok(result) => panic!(
+            Ok(result) => bail!(
                 "video-disabled board should reject, got {}",
                 result.redirect_url
             ),
@@ -1346,34 +1776,42 @@ mod tests {
             AppError::BadRequest(message) => {
                 assert!(message.contains("Video uploads are disabled"));
             }
-            other => panic!("expected BadRequest, got {other:?}"),
+            other => bail!("expected BadRequest, got {other:?}"),
         }
-        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert_eq!(pending_upload_stage_count(upload_dir.path())?, 0);
         assert!(!upload_dir.path().join(TEST_BOARD).exists());
-        assert_no_partial_post_rows(&conn);
+        assert_no_partial_post_rows(&conn)?;
+        Ok(())
     }
 
     #[test]
-    fn submit_post_rejects_overlimit_audio_without_stale_uploads_or_rows() {
+    fn submit_post_rejects_overlimit_audio_without_stale_uploads_or_rows() -> Result<()> {
         let state = crate::test_support::app_state();
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
         conn.execute(
             "UPDATE boards SET allow_audio = 1, max_audio_size = 8 WHERE short_name = ?1",
             rusqlite::params![TEST_BOARD],
         )
-        .expect("shrink audio limit");
+        .context("failed to shrink audio limit")?;
         let mut command = thread_command(
             TEST_BOARD,
             "audio-overlimit",
             "thread body",
-            upload_dir.path().to_str().expect("upload dir"),
+            upload_dir
+                .path()
+                .to_str()
+                .context("upload directory was not valid UTF-8")?,
         );
-        command.file_data = Some(temp_upload("tiny.flac", &flac_header_bytes()));
+        command.file_data = Some(temp_upload("tiny.flac", &flac_header_bytes())?);
 
         let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
-            Ok(result) => panic!(
+            Ok(result) => bail!(
                 "over-limit audio should reject, got {}",
                 result.redirect_url
             ),
@@ -1384,34 +1822,42 @@ mod tests {
             AppError::UploadTooLarge(message) => {
                 assert!(message.contains("Maximum audio upload size is 8 B."));
             }
-            other => panic!("expected UploadTooLarge, got {other:?}"),
+            other => bail!("expected UploadTooLarge, got {other:?}"),
         }
-        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert_eq!(pending_upload_stage_count(upload_dir.path())?, 0);
         assert!(!upload_dir.path().join(TEST_BOARD).exists());
-        assert_no_partial_post_rows(&conn);
+        assert_no_partial_post_rows(&conn)?;
+        Ok(())
     }
 
     #[test]
-    fn submit_post_rejects_overlimit_video_without_stale_uploads_or_rows() {
+    fn submit_post_rejects_overlimit_video_without_stale_uploads_or_rows() -> Result<()> {
         let state = crate::test_support::app_state();
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
         conn.execute(
             "UPDATE boards SET max_video_size = 8 WHERE short_name = ?1",
             rusqlite::params![TEST_BOARD],
         )
-        .expect("shrink video limit");
+        .context("failed to shrink video limit")?;
         let mut command = thread_command(
             TEST_BOARD,
             "video-overlimit",
             "thread body",
-            upload_dir.path().to_str().expect("upload dir"),
+            upload_dir
+                .path()
+                .to_str()
+                .context("upload directory was not valid UTF-8")?,
         );
-        command.file_data = Some(temp_upload("tiny.webm", &webm_header_bytes()));
+        command.file_data = Some(temp_upload("tiny.mp4", &mp4_header_bytes())?);
 
         let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
-            Ok(result) => panic!(
+            Ok(result) => bail!(
                 "over-limit video should reject, got {}",
                 result.redirect_url
             ),
@@ -1422,33 +1868,41 @@ mod tests {
             AppError::UploadTooLarge(message) => {
                 assert!(message.contains("Maximum video upload size is 8 B."));
             }
-            other => panic!("expected UploadTooLarge, got {other:?}"),
+            other => bail!("expected UploadTooLarge, got {other:?}"),
         }
-        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert_eq!(pending_upload_stage_count(upload_dir.path())?, 0);
         assert!(!upload_dir.path().join(TEST_BOARD).exists());
-        assert_no_partial_post_rows(&conn);
+        assert_no_partial_post_rows(&conn)?;
+        Ok(())
     }
 
     #[test]
-    fn submit_post_cleans_staged_upload_when_poll_validation_fails() {
+    fn submit_post_cleans_staged_upload_when_poll_validation_fails() -> Result<()> {
         let state = crate::test_support::app_state();
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
 
         let mut command = thread_command_with_poll(
             TEST_BOARD,
             "poll-upload-token",
             "thread body",
-            upload_dir.path().to_str().expect("upload dir"),
+            upload_dir
+                .path()
+                .to_str()
+                .context("upload directory was not valid UTF-8")?,
             "pick one",
             vec!["only option"],
             Some(3600),
         );
-        command.file_data = Some(temp_upload("cover.png", &one_pixel_png()));
+        command.file_data = Some(temp_upload("cover.png", &one_pixel_png()?)?);
 
         let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
-            Ok(result) => panic!(
+            Ok(result) => bail!(
                 "poll validation should reject submission, got {}",
                 result.redirect_url
             ),
@@ -1459,58 +1913,73 @@ mod tests {
             AppError::BadRequest(message) => {
                 assert_eq!(message, "Polls need a question and at least two options.");
             }
-            other => panic!("expected BadRequest, got {other:?}"),
+            other => bail!("expected BadRequest, got {other:?}"),
         }
 
-        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert_eq!(pending_upload_stage_count(upload_dir.path())?, 0);
         assert!(!upload_dir.path().join(TEST_BOARD).exists());
         let post_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))
-            .expect("post count");
+            .context("failed to count posts")?;
         assert_eq!(post_count, 0);
+        Ok(())
     }
 
     #[test]
-    fn submit_post_uses_board_limit_for_upload_validation() {
+    fn submit_post_uses_board_limit_for_upload_validation() -> Result<()> {
         let state = crate::test_support::app_state();
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
         conn.execute(
             "UPDATE boards SET max_image_size = ?1 WHERE short_name = ?2",
             rusqlite::params![1024 * 1024_i64, TEST_BOARD],
         )
-        .expect("raise image limit");
+        .context("failed to raise image limit")?;
         let mut command = thread_command(
             TEST_BOARD,
             "board-image-raised-cap",
             "thread body",
-            upload_dir.path().to_str().expect("upload dir"),
+            upload_dir
+                .path()
+                .to_str()
+                .context("upload directory was not valid UTF-8")?,
         );
-        command.file_data = Some(temp_upload("cover.png", &one_pixel_png()));
+        command.file_data = Some(temp_upload("cover.png", &one_pixel_png()?)?);
 
         let result = submit_post(&conn, state.job_queue.as_ref(), command)
-            .expect("board-specific raised image cap should allow upload");
+            .context("board-specific raised image cap should allow upload")?;
 
         assert_eq!(result.board_short, TEST_BOARD);
+        Ok(())
     }
 
     #[test]
-    fn process_uploads_cleans_empty_stage_when_primary_upload_is_dedup_reused() {
+    fn process_uploads_cleans_empty_stage_when_primary_upload_is_dedup_reused() -> Result<()> {
         let state = crate::test_support::app_state();
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
         let board = crate::db::get_board_by_short(&conn, TEST_BOARD)
-            .expect("load board")
-            .expect("board exists");
-        let upload_dir = tempfile::tempdir().expect("upload dir");
+            .context("failed to load board")?
+            .context("test board did not exist")?;
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
         let board_dir = upload_dir.path().join(TEST_BOARD);
         let thumb_dir = board_dir.join("thumbs");
-        std::fs::create_dir_all(&thumb_dir).expect("create media dirs");
-        std::fs::write(board_dir.join("cached.png"), b"cached file").expect("cached file");
-        std::fs::write(thumb_dir.join("cached.webp"), b"cached thumb").expect("cached thumb");
+        std::fs::create_dir_all(&thumb_dir).context("failed to create media directories")?;
+        std::fs::write(board_dir.join("cached.png"), b"cached file")
+            .context("failed to write cached file")?;
+        std::fs::write(thumb_dir.join("cached.webp"), b"cached thumb")
+            .context("failed to write cached thumbnail")?;
 
-        let bytes = one_pixel_png();
+        let bytes = one_pixel_png()?;
         let hash = hex::encode(sha2::Sha256::digest(&bytes));
         crate::db::record_file_hash(
             &conn,
@@ -1519,16 +1988,19 @@ mod tests {
             "test/thumbs/cached.webp",
             "image/png",
         )
-        .expect("record file hash");
+        .context("failed to record file hash")?;
 
         let result = process_uploads(
             None,
-            Some(temp_upload("same-but-renamed.jpg", &bytes)),
+            Some(temp_upload("same-but-renamed.jpg", &bytes)?),
             None,
             &board,
             &conn,
             &UploadConfig {
-                upload_dir: upload_dir.path().to_str().expect("upload dir"),
+                upload_dir: upload_dir
+                    .path()
+                    .to_str()
+                    .context("upload directory was not valid UTF-8")?,
                 thumb_size: 64,
                 max_image_size: 1024 * 1024,
                 max_video_size: 1024 * 1024,
@@ -1539,7 +2011,7 @@ mod tests {
                 ffmpeg_webp_available: false,
             },
         )
-        .expect("dedup upload");
+        .context("failed to process deduplicated upload")?;
 
         assert!(result.pending_finalize.is_none());
         assert!(result
@@ -1548,14 +2020,20 @@ mod tests {
             .is_some_and(|file| file.dedup_reused));
         assert_eq!(
             result.primary.as_ref().map(|file| file.file_size),
-            Some(i64::try_from(b"cached file".len()).expect("cached size fits"))
+            Some(i64::try_from(b"cached file".len()).context("cached size did not fit in i64")?)
         );
-        assert_eq!(pending_upload_stage_count(upload_dir.path()), 0);
+        assert_eq!(pending_upload_stage_count(upload_dir.path())?, 0);
+        Ok(())
     }
 
     #[test]
-    fn upload_finalize_payload_omits_empty_generic_thumb_path() {
-        let primary = crate::utils::files::UploadedFile {
+    fn upload_finalize_payload_omits_empty_generic_thumb_path() -> Result<()> {
+        let upload_dir = tempfile::tempdir().context("create upload root")?;
+        let stage_dir = upload_dir.path().join(".pending/upload-test");
+        std::fs::create_dir_all(stage_dir.join("test")).context("create upload stage")?;
+        std::fs::write(stage_dir.join("test/file.bin"), b"file")
+            .context("write staged original")?;
+        let mut primary = crate::utils::files::UploadedFile {
             file_path: "test/file.bin".to_owned(),
             thumb_path: String::new(),
             original_name: "file.bin".to_owned(),
@@ -1567,24 +2045,101 @@ mod tests {
         };
 
         let payload = super::build_upload_finalize_payload(
-            std::path::Path::new("/tmp/rustchan-stage"),
-            Some(&primary),
+            &stage_dir,
+            Some(&mut primary),
             None,
-            None,
+            Some("original-upload-hash".to_owned()),
         )
-        .expect("generic upload payload");
+        .context("failed to build generic upload payload")?
+        .context("generic upload should require finalization")?;
 
         assert_eq!(payload.relative_paths, vec!["test/file.bin"]);
+        assert!(payload.optional_paths.is_empty());
         assert_eq!(payload.primary_file_path.as_deref(), Some("test/file.bin"));
         assert!(payload.primary_thumb_path.is_none());
+        Ok(())
     }
 
     #[test]
-    fn submit_post_returns_existing_op_redirect_for_duplicate_thread_submission() {
+    fn thumbnail_failures_preserve_original_and_omit_derived_intent_metadata() -> Result<()> {
         let state = crate::test_support::app_state();
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let conn = state.db.get().expect("db connection");
-        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let conn = state.db.get().context("get test database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)?;
+        let board = crate::db::get_board_by_short(&conn, TEST_BOARD)?
+            .context("test board did not exist")?;
+        let upload_dir = tempfile::tempdir().context("create upload directory")?;
+        let png = one_pixel_png()?;
+
+        for (index, mode) in [
+            crate::media::TestThumbnailFailure::OutputCreation,
+            crate::media::TestThumbnailFailure::Encoder,
+            crate::media::TestThumbnailFailure::TempRename,
+            crate::media::TestThumbnailFailure::InvalidDerivedOutput,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let _override = crate::media::override_thumbnail_failure(mode);
+            let uploads = process_uploads(
+                None,
+                Some(temp_upload(&format!("failure-{index}.png"), &png)?),
+                None,
+                &board,
+                &conn,
+                &UploadConfig {
+                    upload_dir: upload_dir.path().to_str().context("UTF-8 upload root")?,
+                    thumb_size: 64,
+                    max_image_size: 1024 * 1024,
+                    max_video_size: 1024 * 1024,
+                    max_audio_size: 1024 * 1024,
+                    max_pdf_size: 1024 * 1024,
+                    ffmpeg_available: false,
+                    ffprobe_available: false,
+                    ffmpeg_webp_available: false,
+                },
+            )?;
+
+            let primary = uploads
+                .primary
+                .as_ref()
+                .context("missing processed original")?;
+            let pending = uploads
+                .pending_finalize
+                .as_ref()
+                .context("missing original finalize intent")?;
+            assert!(primary.thumb_path.is_empty());
+            assert!(pending.payload.primary_thumb_path.is_none());
+            assert!(pending.payload.optional_paths.is_empty());
+            assert_eq!(
+                pending.payload.relative_paths,
+                vec![primary.file_path.clone()]
+            );
+            assert!(
+                std::path::Path::new(&pending.payload.stage_dir)
+                    .join(&primary.file_path)
+                    .is_file(),
+                "successfully processed original should remain staged"
+            );
+        }
+
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM file_hashes", [], |row| row
+                .get::<_, i64>(0))?,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn submit_post_returns_existing_op_redirect_for_duplicate_thread_submission() -> Result<()> {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
 
         submit_post(
             &conn,
@@ -1593,10 +2148,13 @@ mod tests {
                 TEST_BOARD,
                 "dup-thread",
                 "thread body",
-                upload_dir.path().to_str().expect("upload dir"),
+                upload_dir
+                    .path()
+                    .to_str()
+                    .context("upload directory was not valid UTF-8")?,
             ),
         )
-        .expect("first submission");
+        .context("failed to make first submission")?;
 
         let original_created_at =
             chrono::Utc::now().timestamp() - crate::handlers::board::SELF_DELETE_WINDOW_SECS - 1;
@@ -1604,7 +2162,7 @@ mod tests {
             "UPDATE posts SET created_at = ?1",
             rusqlite::params![original_created_at],
         )
-        .expect("age original post");
+        .context("failed to age original post")?;
 
         let duplicate = submit_post(
             &conn,
@@ -1613,10 +2171,13 @@ mod tests {
                 TEST_BOARD,
                 "dup-thread",
                 "thread body",
-                upload_dir.path().to_str().expect("upload dir"),
+                upload_dir
+                    .path()
+                    .to_str()
+                    .context("upload directory was not valid UTF-8")?,
             ),
         )
-        .expect("duplicate submission");
+        .context("failed to make duplicate submission")?;
 
         let (thread_id, op_post_id): (i64, i64) = conn
             .query_row(
@@ -1627,13 +2188,13 @@ mod tests {
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .expect("thread and op");
+            .context("failed to load thread and opening post")?;
         let thread_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))
-            .expect("thread count");
+            .context("failed to count threads")?;
         let post_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))
-            .expect("post count");
+            .context("failed to count posts")?;
 
         assert_eq!(
             duplicate.redirect_url,
@@ -1647,15 +2208,19 @@ mod tests {
         );
         assert_eq!(thread_count, 1);
         assert_eq!(post_count, 1);
+        Ok(())
     }
 
     #[test]
-    fn submit_post_returns_existing_reply_redirect_for_duplicate_reply_submission() {
+    fn submit_post_returns_existing_reply_redirect_for_duplicate_reply_submission() -> Result<()> {
         let state = crate::test_support::app_state();
-        let upload_dir = tempfile::tempdir().expect("upload dir");
-        let conn = state.db.get().expect("db connection");
-        let board_id =
-            crate::db::create_board(&conn, TEST_BOARD, "Test", "", false).expect("create board");
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        let board_id = crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
         let (thread_id, _, _) = crate::db::create_thread_with_optional_poll(
             &conn,
             board_id,
@@ -1665,7 +2230,7 @@ mod tests {
             None,
             None,
         )
-        .expect("create thread");
+        .context("failed to create thread")?;
 
         submit_post(
             &conn,
@@ -1675,10 +2240,13 @@ mod tests {
                 thread_id,
                 "dup-reply",
                 "reply body",
-                upload_dir.path().to_str().expect("upload dir"),
+                upload_dir
+                    .path()
+                    .to_str()
+                    .context("upload directory was not valid UTF-8")?,
             ),
         )
-        .expect("first reply");
+        .context("failed to create first reply")?;
 
         let duplicate = submit_post(
             &conn,
@@ -1688,10 +2256,13 @@ mod tests {
                 thread_id,
                 "dup-reply",
                 "reply body",
-                upload_dir.path().to_str().expect("upload dir"),
+                upload_dir
+                    .path()
+                    .to_str()
+                    .context("upload directory was not valid UTF-8")?,
             ),
         )
-        .expect("duplicate reply");
+        .context("failed to submit duplicate reply")?;
 
         let reply_post_id: i64 = conn
             .query_row(
@@ -1702,19 +2273,454 @@ mod tests {
                 rusqlite::params![thread_id],
                 |row| row.get(0),
             )
-            .expect("reply id");
+            .context("failed to load reply identifier")?;
         let reply_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM posts WHERE thread_id = ?1 AND is_op = 0",
                 rusqlite::params![thread_id],
                 |row| row.get(0),
             )
-            .expect("reply count");
+            .context("failed to count replies")?;
 
         assert_eq!(
             duplicate.redirect_url,
             format!("/{TEST_BOARD}/thread/{thread_id}#p{reply_post_id}")
         );
         assert_eq!(reply_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_thread_submissions_share_one_atomic_result_on_fresh_databases() -> Result<()> {
+        for repetition in 0..3 {
+            let state = crate::test_support::app_state();
+            let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+            let conn = state
+                .db
+                .get()
+                .context("failed to get setup database connection")?;
+            crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+                .context("failed to create board")?;
+            drop(conn);
+
+            let token = format!("thread-race-{repetition}");
+            let body = format!("thread race body {repetition}");
+            let upload_path = upload_dir
+                .path()
+                .to_str()
+                .context("upload directory was not valid UTF-8")?;
+            let commands = (0..8)
+                .map(|_| thread_command(TEST_BOARD, &token, &body, upload_path))
+                .collect();
+            let results = submit_concurrently(&state, commands)?;
+
+            let canonical_locations = results
+                .iter()
+                .map(|result| result.redirect_url.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let canonical_posts = results
+                .iter()
+                .map(|result| (result.thread_id, result.post_id))
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(canonical_locations.len(), 1);
+            assert_eq!(canonical_posts.len(), 1);
+
+            let conn = state
+                .db
+                .get()
+                .context("failed to get verification database connection")?;
+            let post_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM posts WHERE body = ?1",
+                rusqlite::params![body],
+                |row| row.get(0),
+            )?;
+            let thread_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM threads WHERE board_id = (
+                    SELECT id FROM boards WHERE short_name = ?1
+                 )",
+                rusqlite::params![TEST_BOARD],
+                |row| row.get(0),
+            )?;
+            let token_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM post_submissions WHERE submission_token = ?1",
+                rusqlite::params![token],
+                |row| row.get(0),
+            )?;
+            assert_eq!(post_count, 1);
+            assert_eq!(thread_count, 1);
+            assert_eq!(token_count, 1);
+            assert_database_integrity(&conn, upload_dir.path())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_reply_submissions_share_one_atomic_result_on_fresh_databases() -> Result<()> {
+        for repetition in 0..3 {
+            let state = crate::test_support::app_state();
+            let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+            let conn = state
+                .db
+                .get()
+                .context("failed to get setup database connection")?;
+            let board_id = crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+                .context("failed to create board")?;
+            let (thread_id, _, _) = crate::db::create_thread_with_optional_poll(
+                &conn,
+                board_id,
+                Some("reply target"),
+                &sample_post(board_id, 0, "op body", true, Some("other-ip".to_owned())),
+                "",
+                None,
+                None,
+            )?;
+            drop(conn);
+
+            let token = format!("reply-race-{repetition}");
+            let body = format!("reply race body {repetition}");
+            let upload_path = upload_dir
+                .path()
+                .to_str()
+                .context("upload directory was not valid UTF-8")?;
+            let commands = (0..8)
+                .map(|_| reply_command(TEST_BOARD, thread_id, &token, &body, upload_path))
+                .collect();
+            let results = submit_concurrently(&state, commands)?;
+
+            let canonical_locations = results
+                .iter()
+                .map(|result| result.redirect_url.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let canonical_posts = results
+                .iter()
+                .map(|result| (result.thread_id, result.post_id))
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(canonical_locations.len(), 1);
+            assert_eq!(canonical_posts.len(), 1);
+
+            let conn = state
+                .db
+                .get()
+                .context("failed to get verification database connection")?;
+            let reply_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM posts WHERE thread_id = ?1 AND is_op = 0",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )?;
+            let stored_reply_count: i64 = conn.query_row(
+                "SELECT reply_count FROM threads WHERE id = ?1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )?;
+            let token_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM post_submissions WHERE submission_token = ?1",
+                rusqlite::params![token],
+                |row| row.get(0),
+            )?;
+            assert_eq!(reply_count, 1);
+            assert_eq!(stored_reply_count, 1);
+            assert_eq!(token_count, 1);
+            assert_database_integrity(&conn, upload_dir.path())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_thread_replay_cleans_losing_staged_media() -> Result<()> {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get setup database connection")?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
+        drop(conn);
+
+        let png = one_pixel_png()?;
+        let upload_path = upload_dir
+            .path()
+            .to_str()
+            .context("upload directory was not valid UTF-8")?;
+        let commands = (0..8)
+            .map(|index| {
+                let mut command = thread_command(
+                    TEST_BOARD,
+                    "thread-media-race",
+                    "thread media race body",
+                    upload_path,
+                );
+                command.file_data = Some(temp_upload(&format!("race-{index}.png"), &png)?);
+                Ok(command)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let results = submit_concurrently(&state, commands)?;
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.redirect_url.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            1
+        );
+
+        let conn = state
+            .db
+            .get()
+            .context("failed to get verification database connection")?;
+        let (file_path, thumb_path): (String, String) = conn.query_row(
+            "SELECT file_path, thumb_path FROM posts WHERE body = 'thread media race body'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let post_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM posts WHERE body = 'thread media race body'",
+            [],
+            |row| row.get(0),
+        )?;
+        let token_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM post_submissions
+             WHERE submission_token = 'thread-media-race'",
+            [],
+            |row| row.get(0),
+        )?;
+        let file_hash_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM file_hashes", [], |row| row.get(0))?;
+        assert_eq!(post_count, 1);
+        assert_eq!(token_count, 1);
+        assert_eq!(file_hash_count, 1);
+
+        let expected_files = std::iter::once(file_path)
+            .chain(std::iter::once(thumb_path))
+            .filter(|path| !path.is_empty())
+            .map(|path| upload_dir.path().join(path))
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(regular_files(upload_dir.path())?, expected_files);
+        assert_database_integrity(&conn, upload_dir.path())?;
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one end-to-end token lifecycle test covers sequential, distinct, rollback, and retry invariants"
+    )]
+    fn submission_tokens_preserve_sequential_distinct_and_rollback_behavior() -> Result<()> {
+        let state = crate::test_support::app_state();
+        let upload_dir = tempfile::tempdir().context("failed to create upload directory")?;
+        let upload_path = upload_dir
+            .path()
+            .to_str()
+            .context("upload directory was not valid UTF-8")?;
+        let conn = state
+            .db
+            .get()
+            .context("failed to get setup database connection")?;
+        let board_id = crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)
+            .context("failed to create board")?;
+
+        let first_thread = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            thread_command(
+                TEST_BOARD,
+                "sequential-thread",
+                "sequential thread",
+                upload_path,
+            ),
+        )?;
+        let replayed_thread = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            thread_command(
+                TEST_BOARD,
+                "sequential-thread",
+                "sequential thread",
+                upload_path,
+            ),
+        )?;
+        assert_eq!(first_thread.redirect_url, replayed_thread.redirect_url);
+        assert_eq!(first_thread.post_id, replayed_thread.post_id);
+        drop(conn);
+
+        let distinct_threads = submit_concurrently(
+            &state,
+            (0..8)
+                .map(|index| {
+                    thread_command(
+                        TEST_BOARD,
+                        &format!("distinct-thread-{index}"),
+                        &format!("distinct thread body {index}"),
+                        upload_path,
+                    )
+                })
+                .collect(),
+        )?;
+        assert_eq!(
+            distinct_threads
+                .iter()
+                .map(|result| result.post_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            8
+        );
+
+        let conn = state
+            .db
+            .get()
+            .context("failed to get reply setup database connection")?;
+        let (reply_thread_id, _, _) = crate::db::create_thread_with_optional_poll(
+            &conn,
+            board_id,
+            Some("reply target"),
+            &sample_post(
+                board_id,
+                0,
+                "reply target op",
+                true,
+                Some("other-ip".to_owned()),
+            ),
+            "",
+            None,
+            None,
+        )?;
+        let first_reply = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            reply_command(
+                TEST_BOARD,
+                reply_thread_id,
+                "sequential-reply",
+                "sequential reply",
+                upload_path,
+            ),
+        )?;
+        let replayed_reply = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            reply_command(
+                TEST_BOARD,
+                reply_thread_id,
+                "sequential-reply",
+                "sequential reply",
+                upload_path,
+            ),
+        )?;
+        assert_eq!(first_reply.redirect_url, replayed_reply.redirect_url);
+        assert_eq!(first_reply.post_id, replayed_reply.post_id);
+        drop(conn);
+
+        let distinct_replies = submit_concurrently(
+            &state,
+            (0..8)
+                .map(|index| {
+                    reply_command(
+                        TEST_BOARD,
+                        reply_thread_id,
+                        &format!("distinct-reply-{index}"),
+                        &format!("distinct reply body {index}"),
+                        upload_path,
+                    )
+                })
+                .collect(),
+        )?;
+        assert_eq!(
+            distinct_replies
+                .iter()
+                .map(|result| result.post_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            8
+        );
+
+        let conn = state
+            .db
+            .get()
+            .context("failed to get rollback database connection")?;
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER fail_submission_post
+             BEFORE INSERT ON posts
+             WHEN NEW.body IN ('force thread rollback', 'force reply rollback')
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced submission rollback');
+             END;",
+        )?;
+        let failed_thread = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            thread_command(
+                TEST_BOARD,
+                "rollback-thread",
+                "force thread rollback",
+                upload_path,
+            ),
+        );
+        assert!(failed_thread.is_err());
+        let failed_reply = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            reply_command(
+                TEST_BOARD,
+                reply_thread_id,
+                "rollback-reply",
+                "force reply rollback",
+                upload_path,
+            ),
+        );
+        assert!(failed_reply.is_err());
+        let failed_token_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM post_submissions
+             WHERE submission_token IN ('rollback-thread', 'rollback-reply')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(failed_token_count, 0);
+        conn.execute_batch("DROP TRIGGER fail_submission_post")?;
+
+        let corrected_thread = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            thread_command(
+                TEST_BOARD,
+                "rollback-thread",
+                "corrected thread retry",
+                upload_path,
+            ),
+        )?;
+        let corrected_reply = submit_post(
+            &conn,
+            state.job_queue.as_ref(),
+            reply_command(
+                TEST_BOARD,
+                reply_thread_id,
+                "rollback-reply",
+                "corrected reply retry",
+                upload_path,
+            ),
+        )?;
+        assert!(corrected_thread.post_id > 0);
+        assert!(corrected_reply.post_id > 0);
+
+        let distinct_thread_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM posts WHERE body LIKE 'distinct thread body %'",
+            [],
+            |row| row.get(0),
+        )?;
+        let distinct_reply_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM posts WHERE body LIKE 'distinct reply body %'",
+            [],
+            |row| row.get(0),
+        )?;
+        let corrected_token_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM post_submissions
+             WHERE submission_token IN ('rollback-thread', 'rollback-reply')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(distinct_thread_count, 8);
+        assert_eq!(distinct_reply_count, 8);
+        assert_eq!(corrected_token_count, 2);
+        assert_database_integrity(&conn, upload_dir.path())?;
+        Ok(())
     }
 }

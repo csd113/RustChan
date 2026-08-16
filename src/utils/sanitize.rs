@@ -19,32 +19,68 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
+/// Inline markup, embed, emoji, and dice formatting helpers.
 mod formatting;
 
 pub use formatting::extract_video_embed;
 use formatting::{apply_dice, apply_emoji};
 
+/// Matches escaped same-board post references such as `&gt;&gt;123`.
+#[expect(
+    clippy::expect_used,
+    reason = "the reply-reference regex is a source literal covered by sanitizer tests"
+)]
 static RE_REPLY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"&gt;&gt;(\d+)").expect("RE_REPLY is valid"));
 
+/// Matches escaped cross-board links and optional thread identifiers.
+#[expect(
+    clippy::expect_used,
+    reason = "the cross-board-link regex is a source literal covered by sanitizer tests"
+)]
 static RE_CROSSLINK: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/(\d+)?").expect("RE_CROSSLINK is valid")
 });
 
+/// Matches HTTP(S) URLs after HTML escaping.
+#[expect(
+    clippy::expect_used,
+    reason = "the URL regex is a source literal covered by sanitizer tests"
+)]
 static RE_URL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(https?://(?:[^\s&<>"']|&amp;){3,300})"#).expect("RE_URL is valid")
 });
 
+/// Matches the supported bold markup delimiters.
+#[expect(
+    clippy::expect_used,
+    reason = "the bold-markup regex is a source literal covered by sanitizer tests"
+)]
 static RE_BOLD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\*\*([^*]+)\*\*").expect("RE_BOLD is valid"));
 
+/// Matches the supported italic markup delimiters.
+#[expect(
+    clippy::expect_used,
+    reason = "the italic-markup regex is a source literal covered by sanitizer tests"
+)]
 static RE_ITALIC: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"__([^_]+)__").expect("RE_ITALIC is valid"));
 
+/// Matches spoiler markup, including content spanning line breaks.
+#[expect(
+    clippy::expect_used,
+    reason = "the spoiler-markup regex is a source literal covered by sanitizer tests"
+)]
 static RE_SPOILER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\[spoiler\]([\s\S]*?)\[/spoiler\]").expect("RE_SPOILER is valid")
 });
 
+/// Matches bounded dice expressions such as `[dice 2d20]`.
+#[expect(
+    clippy::expect_used,
+    reason = "the dice-expression regex is a source literal covered by sanitizer tests"
+)]
 static RE_DICE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[dice (\d{1,2})d(\d{1,3})\]").expect("RE_DICE is valid"));
 
@@ -112,28 +148,18 @@ pub fn render_post_body(escaped: &str, collapse_greentext: bool) -> String {
     // Dice tags are resolved first — rolls are seeded from OsRng at post creation
     // time and stored in body_html, making them immutable for all future readers.
     let escaped = apply_dice(escaped, &RE_DICE);
-    let lines: Vec<&str> = escaped.lines().collect();
     let mut html = String::with_capacity(escaped.len() * 2);
-    let mut i = 0;
+    let mut lines = escaped.lines().peekable();
 
-    // Indexing is guarded by a surrounding invariant, so direct indexing is intentional here.
-    #[expect(clippy::indexing_slicing)] // i < lines.len() and j < lines.len() are invariants
-    while i < lines.len() {
-        let line = lines[i];
-
+    while let Some(line) = lines.next() {
         // Greentext block: lines starting with &gt; that aren't reply links
         if line.starts_with("&gt;") && !line.starts_with("&gt;&gt;") {
             // Collect all consecutive greentext lines
             let mut group = vec![line];
-            let mut j = i + 1;
-            while j < lines.len() {
-                let next = lines[j];
-                if next.starts_with("&gt;") && !next.starts_with("&gt;&gt;") {
-                    group.push(next);
-                    j += 1;
-                } else {
-                    break;
-                }
+            while let Some(next) =
+                lines.next_if(|next| next.starts_with("&gt;") && !next.starts_with("&gt;&gt;"))
+            {
+                group.push(next);
             }
 
             // 3+ consecutive greentext lines → collapsible block, open by default
@@ -159,11 +185,9 @@ pub fn render_post_body(escaped: &str, collapse_greentext: bool) -> String {
                     );
                 }
             }
-            i = j;
         } else {
             html.push_str(&render_inline(line));
             html.push_str("<br>");
-            i += 1;
         }
     }
 
@@ -192,23 +216,21 @@ pub fn normalize_greentext_blocks(body_html: &str, collapse_greentext: bool) -> 
     let mut out = String::with_capacity(body_html.len());
     let mut rest = body_html;
 
-    while let Some(start) = rest.find(OPEN_TAG) {
-        out.push_str(&rest[..start]);
+    while let Some((before_open, after_open)) = rest.split_once(OPEN_TAG) {
+        out.push_str(before_open);
 
-        let after_open = &rest[start + OPEN_TAG.len()..];
-        let Some(summary_end) = after_open.find(SUMMARY_SUFFIX) else {
-            out.push_str(&rest[start..]);
+        let Some((_summary, after_summary)) = after_open.split_once(SUMMARY_SUFFIX) else {
+            out.push_str(rest);
             return out;
         };
 
-        let inner_start = summary_end + SUMMARY_SUFFIX.len();
-        let Some(close_rel) = after_open[inner_start..].find(CLOSE_TAG) else {
-            out.push_str(&rest[start..]);
+        let Some((inner, after_close)) = after_summary.split_once(CLOSE_TAG) else {
+            out.push_str(rest);
             return out;
         };
 
-        out.push_str(&after_open[inner_start..inner_start + close_rel]);
-        rest = &after_open[inner_start + close_rel + CLOSE_TAG.len()..];
+        out.push_str(inner);
+        rest = after_close;
     }
 
     out.push_str(rest);
@@ -223,8 +245,12 @@ fn render_inline(text: &str) -> String {
     // >>>/board/        → board index link
     // Both handled in one pass by RE_CROSSLINK so there is no second-pass corruption.
     result = RE_CROSSLINK
-        .replace_all(&result, |caps: &regex::Captures| {
-            let board = &caps[1];
+        .replace_all(&result, |caps: &regex::Captures<'_>| {
+            let Some(board) = caps.get(1).map(|value| value.as_str()) else {
+                return caps
+                    .get(0)
+                    .map_or_else(String::new, |value| value.as_str().to_owned());
+            };
             caps.get(2).map_or_else(
                 || format!(r#"<a href="/{board}" class="quotelink crosslink">&gt;&gt;&gt;/{board}/</a>"#),
                 |pid| {
@@ -239,8 +265,12 @@ fn render_inline(text: &str) -> String {
 
     // >>N reply links
     result = RE_REPLY
-        .replace_all(&result, |caps: &regex::Captures| {
-            let n = &caps[1];
+        .replace_all(&result, |caps: &regex::Captures<'_>| {
+            let Some(n) = caps.get(1).map(|value| value.as_str()) else {
+                return caps
+                    .get(0)
+                    .map_or_else(String::new, |value| value.as_str().to_owned());
+            };
             format!(r##"<a href="#p{n}" class="quotelink" data-pid="{n}">&gt;&gt;{n}</a>"##)
         })
         .into_owned();
@@ -249,10 +279,14 @@ fn render_inline(text: &str) -> String {
     // The placeholder is an empty <span> with data attributes; the client-side embed
     // script replaces it with a thumbnail + iframe when embeds are enabled for the board.
     result = RE_URL
-        .replace_all(&result, |caps: &regex::Captures| {
-            let url = &caps[1];
+        .replace_all(&result, |caps: &regex::Captures<'_>| {
+            let Some(url) = caps.get(1).map(|value| value.as_str()) else {
+                return caps
+                    .get(0)
+                    .map_or_else(String::new, |value| value.as_str().to_owned());
+            };
             let clean_url = url.trim_end_matches(['.', ',', ')', ';', '\'']);
-            let trailing = &url[clean_url.len()..];
+            let trailing = url.strip_prefix(clean_url).unwrap_or_default();
             // render_post_body receives already-escaped text. RE_URL only admits
             // raw URL characters plus escaped ampersand separators, so clean_url
             // is safe to place directly in href/text without double-escaping
@@ -286,11 +320,9 @@ fn render_inline(text: &str) -> String {
 
     // [spoiler]…[/spoiler]
     result = RE_SPOILER
-        .replace_all(&result, |caps: &regex::Captures| {
-            format!(
-                r#"<span class="spoiler" data-action="toggle-spoiler">{}</span>"#,
-                &caps[1]
-            )
+        .replace_all(&result, |caps: &regex::Captures<'_>| {
+            let spoiler = caps.get(1).map_or("", |value| value.as_str());
+            format!(r#"<span class="spoiler" data-action="toggle-spoiler">{spoiler}</span>"#)
         })
         .into_owned();
 

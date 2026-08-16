@@ -1,22 +1,10 @@
-// server/console/mod.rs — Full-screen TUI console for RustChan.
-//
-// Architecture:
-//   • RAW_MODE_ACTIVE atomic    — safe cleanup from panic hooks / signal handlers
-//   • ConsoleMode enum          — drives which screen the render task draws
-//   • SharedStats / ChanStats   — snapshot written by the stats refresh task
-//   • start()                   — enters alternate screen, spawns render + input tasks
-//   • cleanup()                 — restores terminal; safe to call multiple times
-//   • render()                  — async, interval-driven, skips identical frames
-//   • collect_stats()           — pure DB+atomics snapshot, called from server.rs
-//   • prompt_create_first_admin() — first-run wizard (pre-TUI, normal terminal mode)
-//
-// Wizard flows (CreateBoard / CreateAdmin / DeleteThread) exit raw mode, run the
-// blocking interactive prompts from wizard.rs, then re-enter raw mode.
-// ConsoleMode::Wizard(_) causes render() to return immediately so no partial
-// frames race with the wizard's own output.
+//! Full-screen terminal console.
 
+/// Dashboard and secondary-screen rendering.
 pub mod dashboard;
+/// Blocking terminal-input adapter.
 pub mod input;
+/// Interactive administration wizards.
 pub mod wizard;
 
 use crossterm::{cursor, execute, terminal};
@@ -35,22 +23,34 @@ static RAW_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
 // ─── Console mode ─────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Active full-screen console view.
 pub enum ConsoleMode {
+    /// Main operational dashboard.
     Dashboard,
+    /// Live application log.
     LogView,
+    /// Keyboard reference.
     Help,
+    /// Per-board statistics.
     BoardList,
+    /// Graceful-shutdown confirmation.
     ConfirmQuit,
+    /// Blocking administration wizard.
     Wizard(WizardKind),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Interactive administration wizard.
 pub enum WizardKind {
+    /// Board-creation wizard.
     CreateBoard,
+    /// Administrator-creation wizard.
     CreateAdmin,
+    /// Thread-deletion wizard.
     DeleteThread,
 }
 
+/// Concurrently shared console view.
 pub type SharedConsoleMode = Arc<RwLock<ConsoleMode>>;
 
 // ─── Force-reload notifier ────────────────────────────────────────────────────
@@ -62,23 +62,41 @@ pub type ForceReload = Arc<Notify>;
 
 // ─── Shared stats ─────────────────────────────────────────────────────────────
 
+/// Concurrently shared console-statistics snapshot.
 pub type SharedStats = Arc<RwLock<ChanStats>>;
 
+/// Operational values rendered by the console dashboard.
+#[derive(Debug)]
 pub struct ChanStats {
+    /// Process uptime in seconds.
     pub uptime_secs: u64,
+    /// Total handled requests.
     pub req_count: u64,
+    /// Requests handled per second during the latest sample.
     pub rps: f64,
+    /// Requests currently in flight.
     pub in_flight: u64,
+    /// Recently active client IP count.
     pub online: usize,
+    /// Board count.
     pub boards: i64,
+    /// Active thread count.
     pub threads: i64,
+    /// Post count.
     pub posts: i64,
+    /// Database file size in bytes.
     pub db_bytes: i64,
+    /// Upload-tree size in bytes.
     pub upload_bytes: i64,
+    /// Resident memory in bytes.
     pub mem_bytes: i64,
-    pub board_rows: Vec<(String, i64, i64)>, // (short, threads, posts)
+    /// Per-board short name, thread count, and post count.
+    pub board_rows: Vec<(String, i64, i64)>,
+    /// Uploads currently being written.
     pub active_uploads: u64,
+    /// Video-processing jobs currently running.
     pub active_ffmpeg_videos: u64,
+    /// Current upload-spinner frame index.
     pub spinner_tick: u8,
     /// Live onion address once Tor has bootstrapped, None while bootstrapping.
     pub onion_address: Option<String>,
@@ -117,8 +135,12 @@ pub fn cleanup() {
         .is_ok()
     {
         crate::logging::set_tui_active(false);
-        let _ = terminal::disable_raw_mode();
-        let _ = execute!(stdout(), terminal::LeaveAlternateScreen, cursor::Show);
+        drop(terminal::disable_raw_mode());
+        drop(execute!(
+            stdout(),
+            terminal::LeaveAlternateScreen,
+            cursor::Show
+        ));
     }
 }
 
@@ -152,13 +174,13 @@ async fn render(mode: &SharedConsoleMode, stats: &SharedStats, last_rendered: &m
     // Every bare \n must become \r\n so lines start at the left edge.
     let frame_crlf = normalise_newlines(&frame);
 
-    let _ = execute!(
+    drop(execute!(
         stdout(),
         cursor::MoveTo(0, 0),
         terminal::Clear(terminal::ClearType::All),
-    );
-    let _ = stdout().write_all(frame_crlf.as_bytes());
-    let _ = stdout().flush();
+    ));
+    drop(stdout().write_all(frame_crlf.as_bytes()));
+    drop(stdout().flush());
 }
 
 /// Replace every bare `\n` (not already preceded by `\r`) with `\r\n`.
@@ -178,8 +200,9 @@ fn normalise_newlines(s: &str) -> String {
 
 // ─── start() ─────────────────────────────────────────────────────────────────
 
-/// Minimum terminal dimensions for the dashboard to render without wrapping.
+/// Minimum terminal width for the dashboard to render without wrapping.
 const MIN_COLS: u16 = 90;
+/// Minimum terminal height for the dashboard to render without wrapping.
 const MIN_ROWS: u16 = 36;
 
 /// Enter the full-screen TUI. Spawns:
@@ -192,9 +215,13 @@ pub fn start(
     stats: &SharedStats,
     mode: &SharedConsoleMode,
 ) -> (mpsc::UnboundedReceiver<input::KeyEvent>, ForceReload) {
-    let _ = terminal::enable_raw_mode();
+    drop(terminal::enable_raw_mode());
     RAW_MODE_ACTIVE.store(true, Ordering::SeqCst);
-    let _ = execute!(stdout(), terminal::EnterAlternateScreen, cursor::Hide);
+    drop(execute!(
+        stdout(),
+        terminal::EnterAlternateScreen,
+        cursor::Hide
+    ));
 
     // Ensure the window is wide and tall enough to display the dashboard
     // without wrapping or truncation.  Only resize if the current dimensions
@@ -203,7 +230,7 @@ pub fn start(
         let new_cols = cols.max(MIN_COLS);
         let new_rows = rows.max(MIN_ROWS);
         if new_cols != cols || new_rows != rows {
-            let _ = execute!(stdout(), terminal::SetSize(new_cols, new_rows));
+            drop(execute!(stdout(), terminal::SetSize(new_cols, new_rows)));
         }
     }
     // Signal to the rest of the codebase that the TUI owns the screen.
@@ -216,8 +243,8 @@ pub fn start(
         tracing::error!(target: "console", error = %e, "Failed to spawn console-input thread");
     }
 
-    let stats_r = std::sync::Arc::clone(stats);
-    let mode_r = std::sync::Arc::clone(mode);
+    let stats_r = Arc::clone(stats);
+    let mode_r = Arc::clone(mode);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         let mut last_rendered = String::new();
@@ -237,9 +264,16 @@ pub fn start(
 /// Mutates the delta-tracking locals in place so req/s and other deltas
 /// are accurate across calls. Runs on the calling thread — use
 /// `tokio::task::block_in_place` at the call site when inside an async context.
-#[expect(clippy::cast_precision_loss)]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "request-rate display intentionally converts a monotonic counter delta to floating point"
+)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the collector receives the complete sampling state maintained by its caller"
+)]
 pub fn collect_stats(
     pool: &crate::db::DbPool,
     job_queue: &crate::workers::JobQueue,
@@ -270,7 +304,9 @@ pub fn collect_stats(
     let active_uploads = crate::server::ACTIVE_UPLOADS.load(Ordering::Relaxed);
     let active_ffmpeg_videos = job_queue.active_video_count();
     let online = crate::server::ACTIVE_IPS.len();
-    let spinner_tick = (crate::server::SPINNER_TICK.fetch_add(1, Ordering::Relaxed) % 10) as u8;
+    let spinner_tick =
+        u8::try_from(crate::server::SPINNER_TICK.fetch_add(1, Ordering::Relaxed) % 10)
+            .unwrap_or_default();
 
     let (boards, threads, posts, db_bytes, board_rows) = pool.get().map_or_else(
         |_| (0i64, 0i64, 0i64, 0i64, vec![]),
@@ -328,10 +364,12 @@ pub fn collect_stats(
 
 // ─── Utility helpers ──────────────────────────────────────────────────────────
 
+/// Return a directory tree's total size as a signed display value.
 fn dir_size_bytes(path: &str) -> i64 {
     walkdir_size(std::path::Path::new(path)).cast_signed()
 }
 
+/// Recursively sum regular-file sizes beneath a path.
 fn walkdir_size(path: &std::path::Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(path) else {
         return 0;
@@ -348,6 +386,7 @@ fn walkdir_size(path: &std::path::Path) -> u64 {
         .sum()
 }
 
+/// Read the process resident-set size in kibibytes when supported.
 fn process_rss_kb() -> u64 {
     #[cfg(target_os = "linux")]
     {
@@ -385,6 +424,7 @@ fn process_rss_kb() -> u64 {
 // the `clippy::items_after_statements` lint is satisfied — inner `fn` items
 // defined after the first statement in a function body trigger that lint.
 
+/// Return an ANSI code only when colored output is enabled.
 fn first_admin_c(code: &'static str) -> &'static str {
     if crate::logging::ansi_enabled() {
         code
@@ -393,26 +433,31 @@ fn first_admin_c(code: &'static str) -> &'static str {
     }
 }
 
+/// Return the platform-appropriate success marker.
 #[cfg(windows)]
 const fn first_admin_ok() -> &'static str {
     "OK"
 }
 
+/// Return the platform-appropriate success marker.
 #[cfg(not(windows))]
 const fn first_admin_ok() -> &'static str {
     "\u{2713}"
 }
 
+/// Return the platform-appropriate error marker.
 #[cfg(windows)]
 const fn first_admin_err() -> &'static str {
     "x"
 }
 
+/// Return the platform-appropriate error marker.
 #[cfg(not(windows))]
 const fn first_admin_err() -> &'static str {
     "\u{2717}"
 }
 
+/// Prompt for and validate the first administrator username.
 fn first_admin_prompt_u(reader: &mut dyn std::io::BufRead) -> Option<String> {
     loop {
         crate::logging::console_prompt(&format!(
@@ -452,6 +497,7 @@ fn first_admin_prompt_u(reader: &mut dyn std::io::BufRead) -> Option<String> {
     }
 }
 
+/// Prompt for and validate the first administrator password.
 fn first_admin_prompt_p(reader: &mut dyn std::io::BufRead) -> Option<String> {
     loop {
         crate::logging::console_prompt(&format!(

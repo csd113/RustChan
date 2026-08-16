@@ -3,9 +3,10 @@
 use anyhow::{Context as _, Result};
 use rusqlite::OptionalExtension as _;
 
-/// Database schema version for the `RustChan` 1.3.0 release baseline.
-pub(super) const BASELINE_SCHEMA_VERSION: &str = "1.3.0";
+/// Database schema version for the `RustChan` 1.4.0 release baseline.
+pub(super) const BASELINE_SCHEMA_VERSION: &str = "1.4.0";
 
+/// Read the recorded schema version, if the version table exists.
 pub(super) fn read_schema_version(conn: &rusqlite::Connection) -> Result<Option<String>> {
     if !schema_version_table_exists(conn)? {
         return Ok(None);
@@ -20,9 +21,10 @@ pub(super) fn read_schema_version(conn: &rusqlite::Connection) -> Result<Option<
     .context("Failed to read schema_version")
 }
 
+/// Atomically replace the version table with the release baseline version.
 pub(super) fn stamp_schema_version(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")
-        .context("Failed to begin schema_version stamp to 1.3.0")?;
+        .context("Failed to begin schema_version stamp to 1.4.0")?;
 
     let result = (|| {
         conn.execute_batch(
@@ -36,21 +38,22 @@ pub(super) fn stamp_schema_version(conn: &rusqlite::Connection) -> Result<()> {
             "INSERT INTO schema_version (version) VALUES (?1)",
             rusqlite::params![BASELINE_SCHEMA_VERSION],
         )
-        .context("Failed to set schema_version to 1.3.0")?;
+        .context("Failed to set schema_version to 1.4.0")?;
         Ok(())
     })();
 
     match result {
         Ok(()) => conn
             .execute_batch("COMMIT")
-            .context("Failed to commit schema_version stamp to 1.3.0"),
+            .context("Failed to commit schema_version stamp to 1.4.0"),
         Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(error)
         }
     }
 }
 
+/// Return whether the schema-version table exists.
 fn schema_version_table_exists(conn: &rusqlite::Connection) -> Result<bool> {
     conn.query_row(
         "SELECT EXISTS (
@@ -67,39 +70,55 @@ fn schema_version_table_exists(conn: &rusqlite::Connection) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::{read_schema_version, stamp_schema_version, BASELINE_SCHEMA_VERSION};
+    use anyhow::Result;
 
     #[test]
-    fn missing_schema_version_reads_as_unversioned() {
-        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn missing_schema_version_reads_as_unversioned() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
 
         assert_eq!(
-            read_schema_version(&conn).expect("read schema version"),
-            None
+            read_schema_version(&conn)?,
+            None,
+            "a database without schema_version should be unversioned"
         );
+        Ok(())
     }
 
     #[test]
-    fn stamp_replaces_existing_version_with_release_baseline() {
-        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn stamp_replaces_existing_version_with_release_baseline() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
         conn.execute_batch(
             "CREATE TABLE schema_version (
                 version INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(version)
             );
             INSERT INTO schema_version (version) VALUES (41);",
-        )
-        .expect("create legacy schema_version");
+        )?;
 
-        stamp_schema_version(&conn).expect("stamp schema version");
+        stamp_schema_version(&conn)?;
 
         assert_eq!(
-            read_schema_version(&conn).expect("read stamped schema version"),
-            Some(BASELINE_SCHEMA_VERSION.to_owned())
+            read_schema_version(&conn)?,
+            Some(BASELINE_SCHEMA_VERSION.to_owned()),
+            "stamping should replace the legacy version"
         );
+        Ok(())
     }
 
     #[test]
     fn baseline_schema_version_matches_package_release() {
-        assert_eq!(BASELINE_SCHEMA_VERSION, env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            BASELINE_SCHEMA_VERSION,
+            env!("CARGO_PKG_VERSION"),
+            "the database baseline should match the package release"
+        );
     }
 }

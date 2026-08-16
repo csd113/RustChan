@@ -1,32 +1,47 @@
 use anyhow::{Context as _, Result};
 use rusqlite::{params, OptionalExtension as _};
 
+/// Site-setting key containing the initial setup completion timestamp.
 pub const SETUP_COMPLETED_AT_KEY: &str = "setup_completed_at";
+/// Site-setting key containing the most recent setup reopen timestamp.
 pub const SETUP_REOPENED_AT_KEY: &str = "setup_reopened_at";
+/// Site-setting key containing the administrator who reopened setup.
 pub const SETUP_REOPENED_BY_KEY: &str = "setup_reopened_by";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Access state of the setup wizard.
 pub enum SetupAccess {
+    /// No administrator exists and setup has never completed.
     Fresh,
+    /// An administrator explicitly reopened setup.
     Reopened,
+    /// Setup is complete and unavailable.
     Initialized,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Database-derived state used to authorize setup access.
 pub struct SetupState {
+    /// Current setup access classification.
     pub access: SetupAccess,
+    /// Number of configured administrator accounts.
     pub admin_count: i64,
+    /// Number of configured boards.
     pub board_count: i64,
+    /// Whether the setup completion marker exists.
     pub completed: bool,
+    /// Whether setup is currently marked as reopened.
     pub reopened: bool,
 }
 
 impl SetupState {
+    /// Return whether the setup wizard may currently be opened.
     #[must_use]
     pub const fn is_available(self) -> bool {
         matches!(self.access, SetupAccess::Fresh | SetupAccess::Reopened)
     }
 
+    /// Return whether entering setup requires administrator authentication.
     #[must_use]
     pub const fn requires_admin_auth(self) -> bool {
         matches!(self.access, SetupAccess::Reopened) || self.admin_count > 0
@@ -56,6 +71,7 @@ pub fn setup_state(conn: &rusqlite::Connection) -> Result<SetupState> {
     })
 }
 
+/// Read a boolean setup marker from site settings.
 fn setup_flag(conn: &rusqlite::Connection, key: &str) -> Result<bool> {
     let value = super::get_site_setting(conn, key)?;
     Ok(value
@@ -63,6 +79,7 @@ fn setup_flag(conn: &rusqlite::Connection, key: &str) -> Result<bool> {
         .is_some_and(|value| !value.trim().is_empty()))
 }
 
+/// Count rows in one of the setup-state tables.
 fn table_count(conn: &rusqlite::Connection, table: &str) -> Result<i64> {
     let sql = match table {
         "admin_users" => "SELECT COUNT(*) FROM admin_users",
@@ -142,70 +159,130 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fresh_database_allows_setup() {
-        let pool = crate::db::init_test_pool().expect("pool");
-        let conn = pool.get().expect("conn");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn fresh_database_allows_setup() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
 
-        let state = setup_state(&conn).expect("state");
+        let state = setup_state(&conn)?;
 
-        assert_eq!(state.access, SetupAccess::Fresh);
-        assert!(state.is_available());
-        assert!(!state.requires_admin_auth());
+        assert_eq!(
+            state.access,
+            SetupAccess::Fresh,
+            "a fresh database should expose the setup wizard"
+        );
+        assert!(
+            state.is_available(),
+            "fresh setup state should be available"
+        );
+        assert!(
+            !state.requires_admin_auth(),
+            "fresh setup should not require an administrator"
+        );
+        Ok(())
     }
 
     #[test]
-    fn admin_without_marker_blocks_setup_as_initialized() {
-        let pool = crate::db::init_test_pool().expect("pool");
-        let conn = pool.get().expect("conn");
-        crate::db::create_admin(&conn, "admin", "hash").expect("admin");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn admin_without_marker_blocks_setup_as_initialized() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        crate::db::create_admin(&conn, "admin", "hash")?;
 
-        let state = setup_state(&conn).expect("state");
+        let state = setup_state(&conn)?;
 
-        assert_eq!(state.access, SetupAccess::Initialized);
-        assert!(!state.is_available());
-        assert!(state.requires_admin_auth());
+        assert_eq!(
+            state.access,
+            SetupAccess::Initialized,
+            "an existing administrator should mark setup initialized"
+        );
+        assert!(
+            !state.is_available(),
+            "initialized setup should not be available"
+        );
+        assert!(
+            state.requires_admin_auth(),
+            "initialized setup should require administrator authentication"
+        );
+        Ok(())
     }
 
     #[test]
-    fn admin_reopen_makes_setup_available_but_admin_authenticated() {
-        let pool = crate::db::init_test_pool().expect("pool");
-        let conn = pool.get().expect("conn");
-        crate::db::create_admin(&conn, "admin", "hash").expect("admin");
-        reopen_setup(&conn, 1).expect("reopen");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn admin_reopen_makes_setup_available_but_admin_authenticated() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        crate::db::create_admin(&conn, "admin", "hash")?;
+        reopen_setup(&conn, 1)?;
 
-        let state = setup_state(&conn).expect("state");
+        let state = setup_state(&conn)?;
 
-        assert_eq!(state.access, SetupAccess::Reopened);
-        assert!(state.is_available());
-        assert!(state.requires_admin_auth());
+        assert_eq!(
+            state.access,
+            SetupAccess::Reopened,
+            "the reopen marker should override initialized state"
+        );
+        assert!(state.is_available(), "reopened setup should be available");
+        assert!(
+            state.requires_admin_auth(),
+            "reopened setup should remain administrator-authenticated"
+        );
+        Ok(())
     }
 
     #[test]
-    fn completion_marker_blocks_setup_after_reopen_is_cleared() {
-        let pool = crate::db::init_test_pool().expect("pool");
-        let conn = pool.get().expect("conn");
-        reopen_setup(&conn, 1).expect("reopen");
-        mark_setup_complete(&conn).expect("complete");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn completion_marker_blocks_setup_after_reopen_is_cleared() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        reopen_setup(&conn, 1)?;
+        mark_setup_complete(&conn)?;
 
-        let state = setup_state(&conn).expect("state");
+        let state = setup_state(&conn)?;
 
-        assert_eq!(state.access, SetupAccess::Initialized);
-        assert!(state.completed);
-        assert!(!state.reopened);
+        assert_eq!(
+            state.access,
+            SetupAccess::Initialized,
+            "completion should relock setup"
+        );
+        assert!(state.completed, "completion marker should remain set");
+        assert!(!state.reopened, "completion should clear the reopen marker");
+        Ok(())
     }
 
     #[test]
-    fn close_reopened_setup_relocks_completed_instance_without_clearing_completion() {
-        let pool = crate::db::init_test_pool().expect("pool");
-        let conn = pool.get().expect("conn");
-        mark_setup_complete(&conn).expect("complete");
-        reopen_setup(&conn, 1).expect("reopen");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn close_reopened_setup_relocks_completed_instance_without_clearing_completion() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        mark_setup_complete(&conn)?;
+        reopen_setup(&conn, 1)?;
 
-        close_reopened_setup(&conn).expect("close");
-        let state = setup_state(&conn).expect("state");
+        close_reopened_setup(&conn)?;
+        let state = setup_state(&conn)?;
 
-        assert_eq!(state.access, SetupAccess::Initialized);
-        assert!(state.completed);
-        assert!(!state.reopened);
+        assert_eq!(
+            state.access,
+            SetupAccess::Initialized,
+            "closing reopened setup should restore initialized state"
+        );
+        assert!(state.completed, "completion marker should be preserved");
+        assert!(!state.reopened, "reopen marker should be cleared");
+        Ok(())
     }
 }

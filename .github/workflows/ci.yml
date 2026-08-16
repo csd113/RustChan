@@ -33,6 +33,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.91.0
           components: clippy, rustfmt
 
       - name: Cache Rust artifacts
@@ -44,13 +45,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run Clippy
-        run: >-
-          cargo clippy --locked --workspace --all-targets --all-features --
-          -D warnings
-          -D clippy::all
-          -D clippy::pedantic
-          -D clippy::nursery
-          -D clippy::cargo
+        run: cargo clippy --locked --workspace --all-targets --all-features
 
   test:
     name: Tests
@@ -63,6 +58,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -98,6 +95,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.91.0
           targets: ${{ matrix.target }}
 
       - name: Cache Rust artifacts

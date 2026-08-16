@@ -9,25 +9,39 @@ use serde::{Deserialize, Serialize};
 use std::io::Seek;
 use std::path::{Path, PathBuf};
 
+/// ZIP entry max bytes used by this handler.
 pub(super) const ZIP_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+/// Board manifest max bytes used by this handler.
 pub(super) const BOARD_MANIFEST_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// Banner restore entry max bytes used by this handler.
 pub(super) const BANNER_RESTORE_ENTRY_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Banner restore total max bytes used by this handler.
 pub(super) const BANNER_RESTORE_TOTAL_MAX_BYTES: u64 = 64 * 1024 * 1024;
 // Keep restore writes within an application-level disk budget instead of relying
 // only on the router's coarse 20 GiB body cap.
+/// Restore upload max bytes used by this handler.
 pub(super) const RESTORE_UPLOAD_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// Restore total extracted max bytes used by this handler.
 pub(super) const RESTORE_TOTAL_EXTRACTED_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// Full backup manifest name used by this handler.
 pub(super) const FULL_BACKUP_MANIFEST_NAME: &str = "backup.json";
+/// Full backup Tor keys prefix used by this handler.
 pub(super) const FULL_BACKUP_TOR_KEYS_PREFIX: &str = "tor/keys";
+/// Full backup Tor keys entry prefix used by this handler.
 pub(super) const FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX: &str = "tor/keys/";
+/// `SQLite` header used by this handler.
 const SQLITE_HEADER: &[u8] = b"SQLite format 3\0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Variants supported by the Tor hidden service keys availability workflow.
 pub(super) enum TorHiddenServiceKeysAvailability {
+    /// Represents the skipped case.
     Skipped,
+    /// Represents the available case.
     Available(PathBuf),
 }
 
+/// Resolves Tor hidden service keys availability.
 pub(super) fn resolve_tor_hidden_service_keys_availability(
     requested: bool,
     configured_dir: Option<PathBuf>,
@@ -51,6 +65,7 @@ pub(super) fn resolve_tor_hidden_service_keys_availability(
     Ok(TorHiddenServiceKeysAvailability::Available(dir))
 }
 
+/// Resolves Tor hidden service keys restore target.
 pub(super) fn resolve_tor_hidden_service_keys_restore_target(
     requested: bool,
     configured_dir: Option<PathBuf>,
@@ -77,23 +92,35 @@ pub(super) fn resolve_tor_hidden_service_keys_restore_target(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Manifest data for full backup.
 pub(super) struct FullBackupManifest {
+    /// The version.
     pub version: u32,
+    /// The generated timestamp.
     pub generated_at: i64,
+    /// The rustchan version.
     pub rustchan_version: String,
+    /// The database size in bytes.
     pub db_bytes: u64,
+    /// The number of upload files.
     pub upload_file_count: u64,
+    /// The number of favicon files.
     pub favicon_file_count: u64,
     #[serde(default)]
+    /// The number of banner files.
     pub banner_file_count: u64,
     #[serde(default)]
+    /// Whether the Tor hidden service keys included setting is active.
     pub tor_hidden_service_keys_included: bool,
     #[serde(default)]
+    /// The number of Tor hidden service key files.
     pub tor_hidden_service_key_file_count: u64,
     #[serde(default)]
+    /// The boards collection.
     pub boards: Vec<BackupBoardSummary>,
 }
 
+/// Performs the log backup phase handler operation.
 pub(super) fn log_backup_phase(phase: u64) {
     let message = match phase {
         backup_phase::SNAPSHOT_DB => "Backup progress - snapshotting database",
@@ -105,6 +132,7 @@ pub(super) fn log_backup_phase(phase: u64) {
     tracing::info!(target: "admin", "{message}");
 }
 
+/// Performs the log backup progress handler operation.
 pub(super) fn log_backup_progress(progress: &BackupProgress) {
     use std::sync::atomic::Ordering::Relaxed;
 
@@ -136,6 +164,7 @@ pub(super) fn log_backup_progress(progress: &BackupProgress) {
     }
 }
 
+/// Validates board short name.
 pub(super) fn validate_board_short_name(short_name: &str) -> Result<()> {
     let valid = !short_name.is_empty()
         && short_name.len() <= 8
@@ -149,6 +178,7 @@ pub(super) fn validate_board_short_name(short_name: &str) -> Result<()> {
     }
 }
 
+/// Performs the validated media upload relative path handler operation.
 fn validated_media_upload_relative_path(path: &str, context: &str) -> Result<Vec<String>> {
     validate_restore_safe_entry_name(path)?;
     let components = path.split('/').map(str::to_owned).collect::<Vec<_>>();
@@ -160,6 +190,7 @@ fn validated_media_upload_relative_path(path: &str, context: &str) -> Result<Vec
     Ok(components)
 }
 
+/// Validates restored media path.
 pub(super) fn validate_restored_media_path(path: &str, context: &str) -> Result<String> {
     let components = validated_media_upload_relative_path(path, context)?;
     let board_short = components
@@ -169,6 +200,7 @@ pub(super) fn validate_restored_media_path(path: &str, context: &str) -> Result<
     Ok(board_short.clone())
 }
 
+/// Validates restored media path for board.
 pub(super) fn validate_restored_media_path_for_board(
     path: &str,
     expected_board_short: &str,
@@ -183,6 +215,7 @@ pub(super) fn validate_restored_media_path_for_board(
     Ok(())
 }
 
+/// Remaps numeric references.
 fn remap_numeric_references(body: &str, prefix: &str, pairs: &[(String, String)]) -> String {
     let mut result = body.to_owned();
     for (old, new) in pairs {
@@ -191,16 +224,22 @@ fn remap_numeric_references(body: &str, prefix: &str, pairs: &[(String, String)]
         let mut pos = 0;
         let bytes = result.as_bytes();
         while pos < bytes.len() {
-            match result[pos..].find(&needle) {
+            let Some(remaining) = result.get(pos..) else {
+                break;
+            };
+            match remaining.find(&needle) {
                 None => {
-                    out.push_str(&result[pos..]);
+                    out.push_str(remaining);
                     break;
                 }
                 Some(rel) => {
                     let abs = pos + rel;
                     let after = abs + needle.len();
                     let next_is_digit = bytes.get(after).is_some_and(u8::is_ascii_digit);
-                    out.push_str(&result[pos..abs]);
+                    let Some(before_match) = remaining.get(..rel) else {
+                        break;
+                    };
+                    out.push_str(before_match);
                     if next_is_digit {
                         out.push_str(&needle);
                     } else {
@@ -216,6 +255,7 @@ fn remap_numeric_references(body: &str, prefix: &str, pairs: &[(String, String)]
     result
 }
 
+/// Remaps body quotelinks.
 pub(super) fn remap_body_quotelinks(
     body: &str,
     board_short: &str,
@@ -230,11 +270,13 @@ pub(super) fn remap_body_quotelinks(
     remap_numeric_references(&result, &crosslink_prefix, pairs)
 }
 
+/// Renders restored body HTML.
 pub(super) fn render_restored_body_html(body: &str) -> String {
     let escaped = crate::utils::sanitize::escape_html(body);
     crate::utils::sanitize::render_post_body(&escaped, false)
 }
 
+/// Copies limited.
 pub(super) fn copy_limited<R: std::io::Read, W: std::io::Write>(
     reader: &mut R,
     writer: &mut W,
@@ -247,7 +289,18 @@ pub(super) fn copy_limited<R: std::io::Read, W: std::io::Write>(
         if n == 0 {
             break;
         }
-        total += n as u64;
+        let n_u64 = u64::try_from(n).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Read size does not fit the byte counter: {error}"),
+            )
+        })?;
+        total = total.checked_add(n_u64).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Decompressed byte count overflowed",
+            )
+        })?;
         if total > max_bytes {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -264,6 +317,7 @@ pub(super) fn copy_limited<R: std::io::Read, W: std::io::Write>(
     Ok(total)
 }
 
+/// Copies limited with total budget.
 pub(super) fn copy_limited_with_total_budget<R: std::io::Read, W: std::io::Write>(
     reader: &mut R,
     writer: &mut W,
@@ -286,6 +340,7 @@ pub(super) fn copy_limited_with_total_budget<R: std::io::Read, W: std::io::Write
     Ok(copied)
 }
 
+/// Creates staging dir.
 pub(super) fn create_staging_dir(base_path: &Path, label: &str) -> Result<PathBuf> {
     let parent = base_path
         .parent()
@@ -303,6 +358,7 @@ pub(super) fn create_staging_dir(base_path: &Path, label: &str) -> Result<PathBu
     Ok(staging)
 }
 
+/// Reads limited bytes.
 pub(super) fn read_limited_bytes<R: std::io::Read>(
     reader: &mut R,
     max_bytes: u64,
@@ -315,6 +371,7 @@ pub(super) fn read_limited_bytes<R: std::io::Read>(
     Ok(bytes)
 }
 
+/// Removes path if exists.
 pub(super) fn remove_path_if_exists(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
@@ -328,6 +385,7 @@ pub(super) fn remove_path_if_exists(path: &Path) -> Result<()> {
     }
 }
 
+/// Extracts uploads to dir.
 pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     destination_root: &Path,
@@ -368,6 +426,7 @@ pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(
     Ok(())
 }
 
+/// Validates restore safe entry name.
 pub(super) fn validate_restore_safe_entry_name(name: &str) -> Result<()> {
     let normalized = name.trim_end_matches('/');
     let suspicious = name.is_empty()
@@ -398,6 +457,7 @@ pub(super) fn validate_restore_safe_entry_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Restores safe relative path under prefix.
 pub(super) fn restore_safe_relative_path_under_prefix(
     name: &str,
     prefix: &str,
@@ -413,6 +473,7 @@ pub(super) fn restore_safe_relative_path_under_prefix(
     Ok(Some(rel.split('/').collect()))
 }
 
+/// Verifies full backup archive.
 pub(super) fn verify_full_backup_archive<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<FullBackupManifest> {
@@ -498,6 +559,7 @@ pub(super) fn verify_full_backup_archive<R: std::io::Read + Seek>(
     Ok(manifest)
 }
 
+/// Verifies full backup database schema.
 fn verify_full_backup_db_schema<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     expected_db_bytes: u64,
@@ -537,6 +599,7 @@ fn verify_full_backup_db_schema<R: std::io::Read + Seek>(
     Ok(())
 }
 
+/// Verifies full backup ZIP.
 pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> {
     let file = std::fs::File::open(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Open backup {}: {error}", path.display()))
@@ -546,6 +609,7 @@ pub(super) fn verify_full_backup_zip(path: &Path) -> Result<FullBackupManifest> 
     verify_full_backup_archive(&mut archive)
 }
 
+/// Reads full backup manifest from archive.
 pub(super) fn read_full_backup_manifest_from_archive<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<FullBackupManifest> {
@@ -568,6 +632,7 @@ pub(super) fn read_full_backup_manifest_from_archive<R: std::io::Read + Seek>(
     })
 }
 
+/// Verifies board backup ZIP.
 pub(super) fn verify_board_backup_zip(
     path: &Path,
 ) -> Result<super::types::board_backup_types::BoardBackupManifest> {
@@ -595,29 +660,33 @@ mod tests {
         validate_restored_media_path_for_board, verify_board_backup_zip, verify_full_backup_zip,
         FullBackupManifest, FULL_BACKUP_MANIFEST_NAME,
     };
+    use anyhow::{ensure, Context as _, Result};
     use serde_json::json;
     use std::io::Write as _;
     use std::path::Path;
 
-    fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
-        let file = std::fs::File::create(path).expect("zip file");
+    fn write_zip(path: &Path, entries: &[(&str, &[u8])]) -> Result<()> {
+        let file = std::fs::File::create(path).context("create ZIP file")?;
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
         for (name, bytes) in entries {
-            zip.start_file(name, options).expect("start zip entry");
-            zip.write_all(bytes).expect("write zip entry");
+            zip.start_file(name, options)
+                .with_context(|| format!("start ZIP entry {name}"))?;
+            zip.write_all(bytes)
+                .with_context(|| format!("write ZIP entry {name}"))?;
         }
-        zip.finish().expect("finish zip");
+        zip.finish().context("finish ZIP archive")?;
+        Ok(())
     }
 
-    fn partial_sqlite_db_bytes_for_test() -> Vec<u8> {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn partial_sqlite_db_bytes_for_test() -> Result<Vec<u8>> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let db_path = temp_dir.path().join("partial.sqlite3");
-        let conn = rusqlite::Connection::open(&db_path).expect("open sqlite");
+        let conn = rusqlite::Connection::open(&db_path).context("open SQLite database")?;
         conn.execute("CREATE TABLE boards (id INTEGER PRIMARY KEY)", [])
-            .expect("create partial table");
+            .context("create partial boards table")?;
         drop(conn);
-        std::fs::read(db_path).expect("read partial db")
+        std::fs::read(db_path).context("read partial SQLite database")
     }
 
     #[test]
@@ -655,36 +724,39 @@ mod tests {
     }
 
     #[test]
-    fn extract_uploads_to_dir_rejects_suspicious_entries() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn extract_uploads_to_dir_rejects_suspicious_entries() -> Result<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("uploads.zip");
         {
-            let file = std::fs::File::create(&zip_path).expect("zip file");
+            let file = std::fs::File::create(&zip_path).context("create ZIP file")?;
             let mut zip = zip::ZipWriter::new(file);
             let options = zip::write::SimpleFileOptions::default();
             zip.start_file("uploads/test/ok.txt", options)
-                .expect("start valid file");
-            std::io::Write::write_all(&mut zip, b"ok").expect("write valid file");
+                .context("start valid ZIP entry")?;
+            std::io::Write::write_all(&mut zip, b"ok").context("write valid ZIP entry")?;
             zip.start_file("uploads/../../escape.txt", options)
-                .expect("start invalid file");
-            std::io::Write::write_all(&mut zip, b"bad").expect("write invalid file");
-            zip.finish().expect("finish zip");
+                .context("start suspicious ZIP entry")?;
+            std::io::Write::write_all(&mut zip, b"bad").context("write suspicious ZIP entry")?;
+            zip.finish().context("finish ZIP archive")?;
         }
 
-        let file = std::fs::File::open(&zip_path).expect("open zip");
-        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let file = std::fs::File::open(&zip_path).context("open ZIP file")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse ZIP archive")?;
         let dest = temp_dir.path().join("dest");
-        std::fs::create_dir_all(&dest).expect("dest dir");
+        std::fs::create_dir_all(&dest).context("create extraction destination")?;
 
-        let error = extract_uploads_to_dir(&mut archive, &dest).expect_err("reject traversal");
+        let error = extract_uploads_to_dir(&mut archive, &dest)
+            .err()
+            .context("suspicious ZIP traversal was unexpectedly accepted")?;
 
-        assert!(dest.join("test/ok.txt").exists());
-        assert!(!dest.join("escape.txt").exists());
-        assert!(error.to_string().contains("suspicious path"));
+        ensure!(dest.join("test/ok.txt").exists());
+        ensure!(!dest.join("escape.txt").exists());
+        ensure!(error.to_string().contains("suspicious path"));
+        Ok(())
     }
 
     #[test]
-    fn restore_extraction_budget_rejects_archive_that_exceeds_total_limit() {
+    fn restore_extraction_budget_rejects_archive_that_exceeds_total_limit() -> Result<()> {
         let mut reader = std::io::Cursor::new(vec![b'x'; 6]);
         let mut writer = Vec::new();
         let mut total_written = 0;
@@ -697,36 +769,38 @@ mod tests {
             5,
             "Test restore archive",
         )
-        .expect_err("oversized extracted archive rejected");
+        .err()
+        .context("oversized extracted archive was unexpectedly accepted")?;
 
-        assert!(error.to_string().contains("extracted restore budget"));
+        ensure!(error.to_string().contains("extracted restore budget"));
+        Ok(())
     }
 
     #[test]
-    fn extract_uploads_to_dir_accepts_valid_archive_within_budget() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn extract_uploads_to_dir_accepts_valid_archive_within_budget() -> Result<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("uploads-ok.zip");
         {
-            let file = std::fs::File::create(&zip_path).expect("zip file");
+            let file = std::fs::File::create(&zip_path).context("create ZIP file")?;
             let mut zip = zip::ZipWriter::new(file);
             let options = zip::write::SimpleFileOptions::default();
             zip.start_file("uploads/test/ok.txt", options)
-                .expect("start valid file");
-            std::io::Write::write_all(&mut zip, b"ok").expect("write valid file");
-            zip.finish().expect("finish zip");
+                .context("start valid ZIP entry")?;
+            std::io::Write::write_all(&mut zip, b"ok").context("write valid ZIP entry")?;
+            zip.finish().context("finish ZIP archive")?;
         }
 
-        let file = std::fs::File::open(&zip_path).expect("open zip");
-        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let file = std::fs::File::open(&zip_path).context("open ZIP file")?;
+        let mut archive = zip::ZipArchive::new(file).context("parse ZIP archive")?;
         let dest = temp_dir.path().join("dest");
-        std::fs::create_dir_all(&dest).expect("dest dir");
+        std::fs::create_dir_all(&dest).context("create extraction destination")?;
 
-        extract_uploads_to_dir(&mut archive, &dest).expect("extract valid uploads archive");
+        extract_uploads_to_dir(&mut archive, &dest)?;
+        let extracted =
+            std::fs::read(dest.join("test/ok.txt")).context("read extracted valid file")?;
 
-        assert_eq!(
-            std::fs::read(dest.join("test/ok.txt")).expect("read extracted file"),
-            b"ok"
-        );
+        ensure!(extracted == b"ok");
+        Ok(())
     }
 
     #[test]
@@ -752,37 +826,34 @@ mod tests {
     }
 
     #[test]
-    fn restored_media_path_validation_requires_safe_board_scoped_paths() {
-        assert_eq!(
-            validate_restored_media_path("tech/thumbs/doc.svg", "test media path")
-                .expect("valid media path"),
-            "tech"
-        );
-        assert!(
+    fn restored_media_path_validation_requires_safe_board_scoped_paths() -> Result<()> {
+        ensure!(validate_restored_media_path("tech/thumbs/doc.svg", "test media path")? == "tech");
+        ensure!(
             validate_restored_media_path("../tech/doc.pdf", "test media path").is_err(),
             "parent traversal must be rejected"
         );
-        assert!(
+        ensure!(
             validate_restored_media_path("tech", "test media path").is_err(),
             "board-only path must be rejected"
         );
-        assert!(
+        ensure!(
             validate_restored_media_path_for_board("b/doc.pdf", "tech", "board restore path")
                 .is_err(),
             "cross-board media path must be rejected for board restores"
         );
+        Ok(())
     }
 
     #[test]
-    fn verify_full_backup_zip_accepts_manifest_backed_archive() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn verify_full_backup_zip_accepts_manifest_backed_archive() -> Result<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("full.zip");
-        let db_bytes = super::super::saved_backup::valid_db_snapshot_for_test();
+        let db_bytes = super::super::saved_backup::valid_db_snapshot_for_test()?;
         let manifest = FullBackupManifest {
             version: 1,
             generated_at: 1_700_000_000,
             rustchan_version: "1.1.3".into(),
-            db_bytes: u64::try_from(db_bytes.len()).expect("db size"),
+            db_bytes: u64::try_from(db_bytes.len()).context("convert database size")?,
             upload_file_count: 1,
             favicon_file_count: 1,
             banner_file_count: 0,
@@ -793,7 +864,7 @@ mod tests {
                 name: "Random".into(),
             }],
         };
-        let manifest_json = serde_json::to_vec(&manifest).expect("manifest json");
+        let manifest_json = serde_json::to_vec(&manifest).context("serialize manifest")?;
         write_zip(
             &zip_path,
             &[
@@ -802,24 +873,25 @@ mod tests {
                 ("uploads/b/test.webp", b"img"),
                 ("favicon/favicon-32x32.png", b"icon"),
             ],
-        );
+        )?;
 
-        let verified = verify_full_backup_zip(&zip_path).expect("verify full backup");
-        assert_eq!(verified.upload_file_count, 1);
-        assert_eq!(verified.favicon_file_count, 1);
-        assert_eq!(verified.boards.len(), 1);
+        let verified = verify_full_backup_zip(&zip_path)?;
+        ensure!(verified.upload_file_count == 1);
+        ensure!(verified.favicon_file_count == 1);
+        ensure!(verified.boards.len() == 1);
+        Ok(())
     }
 
     #[test]
-    fn verify_full_backup_zip_rejects_structurally_invalid_database() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn verify_full_backup_zip_rejects_structurally_invalid_database() -> Result<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("invalid-db.zip");
-        let db_bytes = partial_sqlite_db_bytes_for_test();
+        let db_bytes = partial_sqlite_db_bytes_for_test()?;
         let manifest = FullBackupManifest {
             version: 3,
             generated_at: 1_700_000_000,
-            rustchan_version: "1.3.0".into(),
-            db_bytes: u64::try_from(db_bytes.len()).expect("db size"),
+            rustchan_version: "1.4.0".into(),
+            db_bytes: u64::try_from(db_bytes.len()).context("convert database size")?,
             upload_file_count: 0,
             favicon_file_count: 0,
             banner_file_count: 0,
@@ -827,51 +899,57 @@ mod tests {
             tor_hidden_service_key_file_count: 0,
             boards: Vec::new(),
         };
-        let manifest_json = serde_json::to_vec(&manifest).expect("manifest json");
+        let manifest_json = serde_json::to_vec(&manifest).context("serialize manifest")?;
         write_zip(
             &zip_path,
             &[
                 (FULL_BACKUP_MANIFEST_NAME, &manifest_json),
                 ("chan.db", db_bytes.as_slice()),
             ],
-        );
+        )?;
 
-        let error = verify_full_backup_zip(&zip_path).expect_err("invalid db rejected");
-        assert!(
+        let error = verify_full_backup_zip(&zip_path)
+            .err()
+            .context("structurally invalid database was unexpectedly accepted")?;
+        ensure!(
             error
                 .to_string()
-                .contains("does not match the RustChan 1.3.0 database baseline"),
+                .contains("does not match the RustChan 1.4.0 database baseline"),
             "unexpected error: {error:#}"
         );
+        Ok(())
     }
 
     #[test]
-    fn verify_full_backup_zip_rejects_missing_manifest() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn verify_full_backup_zip_rejects_missing_manifest() -> Result<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("full.zip");
-        write_zip(&zip_path, &[("chan.db", b"SQLite format 3\0rest of db")]);
+        write_zip(&zip_path, &[("chan.db", b"SQLite format 3\0rest of db")])?;
 
-        let error = verify_full_backup_zip(&zip_path).expect_err("missing manifest rejected");
+        let error = verify_full_backup_zip(&zip_path)
+            .err()
+            .context("backup without manifest was unexpectedly accepted")?;
 
-        assert!(error.to_string().contains("missing backup.json"));
+        ensure!(error.to_string().contains("missing backup.json"));
+        Ok(())
     }
 
     #[test]
-    fn verify_full_backup_zip_defaults_legacy_tor_metadata_to_not_included() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn verify_full_backup_zip_defaults_legacy_tor_metadata_to_not_included() -> Result<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("legacy-full.zip");
-        let db_bytes = super::super::saved_backup::valid_db_snapshot_for_test();
+        let db_bytes = super::super::saved_backup::valid_db_snapshot_for_test()?;
         let manifest = json!({
             "version": 2,
             "generated_at": 1_700_000_000_i64,
             "rustchan_version": "1.1.3",
-            "db_bytes": u64::try_from(db_bytes.len()).expect("db size"),
+            "db_bytes": u64::try_from(db_bytes.len()).context("convert database size")?,
             "upload_file_count": 1_u64,
             "favicon_file_count": 0_u64,
             "banner_file_count": 0_u64,
             "boards": []
         });
-        let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest bytes");
+        let manifest_bytes = serde_json::to_vec(&manifest).context("serialize manifest")?;
         write_zip(
             &zip_path,
             &[
@@ -879,23 +957,24 @@ mod tests {
                 ("chan.db", db_bytes.as_slice()),
                 ("uploads/tech/file.txt", b"ok"),
             ],
-        );
+        )?;
 
-        let verified = verify_full_backup_zip(&zip_path).expect("verify legacy full backup");
-        assert!(!verified.tor_hidden_service_keys_included);
-        assert_eq!(verified.tor_hidden_service_key_file_count, 0);
+        let verified = verify_full_backup_zip(&zip_path)?;
+        ensure!(!verified.tor_hidden_service_keys_included);
+        ensure!(verified.tor_hidden_service_key_file_count == 0);
+        Ok(())
     }
 
     #[test]
-    fn verify_full_backup_zip_rejects_tor_manifest_mismatch() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn verify_full_backup_zip_rejects_tor_manifest_mismatch() -> Result<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("tor-mismatch.zip");
-        let db_bytes = super::super::saved_backup::valid_db_snapshot_for_test();
+        let db_bytes = super::super::saved_backup::valid_db_snapshot_for_test()?;
         let manifest = FullBackupManifest {
             version: 3,
             generated_at: 1_700_000_000,
             rustchan_version: "1.1.3".into(),
-            db_bytes: u64::try_from(db_bytes.len()).expect("db size"),
+            db_bytes: u64::try_from(db_bytes.len()).context("convert database size")?,
             upload_file_count: 0,
             favicon_file_count: 0,
             banner_file_count: 0,
@@ -903,22 +982,25 @@ mod tests {
             tor_hidden_service_key_file_count: 1,
             boards: Vec::new(),
         };
-        let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest bytes");
+        let manifest_bytes = serde_json::to_vec(&manifest).context("serialize manifest")?;
         write_zip(
             &zip_path,
             &[
                 (FULL_BACKUP_MANIFEST_NAME, &manifest_bytes),
                 ("chan.db", db_bytes.as_slice()),
             ],
-        );
+        )?;
 
-        let error = verify_full_backup_zip(&zip_path).expect_err("mismatched Tor metadata");
-        assert!(error.to_string().contains("manifest Tor key count 1"));
+        let error = verify_full_backup_zip(&zip_path)
+            .err()
+            .context("mismatched Tor metadata was unexpectedly accepted")?;
+        ensure!(error.to_string().contains("manifest Tor key count 1"));
+        Ok(())
     }
 
     #[test]
-    fn verify_board_backup_zip_rejects_suspicious_entries() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    fn verify_board_backup_zip_rejects_suspicious_entries() -> Result<()> {
+        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("board.zip");
         let manifest = json!({
             "version": 1,
@@ -953,15 +1035,16 @@ mod tests {
             "poll_votes": [],
             "file_hashes": []
         });
-        let manifest_json = serde_json::to_vec(&manifest).expect("board manifest json");
+        let manifest_json = serde_json::to_vec(&manifest).context("serialize board manifest")?;
         write_zip(
             &zip_path,
             &[
                 ("board.json", &manifest_json),
                 ("uploads/../../escape.txt", b"bad"),
             ],
-        );
+        )?;
 
-        assert!(verify_board_backup_zip(&zip_path).is_err());
+        ensure!(verify_board_backup_zip(&zip_path).is_err());
+        Ok(())
     }
 }

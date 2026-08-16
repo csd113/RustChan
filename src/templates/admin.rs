@@ -1,9 +1,4 @@
-// Page templates for the admin interface:
-//   admin_login_page        — login form
-//   admin_panel_page        — main control panel (boards, bans, reports, …)
-//   mod_log_page            — moderation history
-//   admin_vacuum_result_page — post-VACUUM feedback
-//   admin_ip_history_page   — posts by IP hash
+//! Page templates for the administrative interface.
 
 use crate::db::DbHealthReport;
 use crate::models::{
@@ -18,6 +13,7 @@ use super::{base_layout, fmt_ts, fmt_ts_short, render_pagination, urlencoding_si
 // ─── Admin login ──────────────────────────────────────────────────────────────
 
 #[must_use]
+/// Renders the administrator login form and an optional authentication error.
 pub fn admin_login_page(
     error: Option<&str>,
     csrf_token: &str,
@@ -71,189 +67,353 @@ pub fn admin_login_page(
 
 // ─── Admin panel ──────────────────────────────────────────────────────────────
 
+/// Appearance-section rendering.
 mod appearance;
+/// Backup-section rendering.
 mod backups;
+/// Board-section rendering.
 mod boards;
+/// Task-oriented Control Center rendering.
+mod control_center;
+/// Admin page layout and dashboard rendering.
 mod layout;
+/// Maintenance-section rendering.
 mod maintenance;
+/// Moderation-section rendering.
 mod moderation;
+/// Site-health rendering.
 mod site_health;
 
+/// Complete input model for the administrator control panel.
+#[derive(Debug)]
 pub struct AdminPanelViewModel<'a> {
+    /// CSRF token embedded in state-changing forms.
     pub csrf_token: &'a str,
+    /// Boards visible to administrative controls and global navigation.
     pub boards: &'a [Board],
+    /// Visitor-selected theme, when present.
     pub current_theme: Option<&'a str>,
+    /// Control-center dashboard data.
     pub dashboard: AdminPanelDashboardView<'a>,
+    /// Moderation data.
     pub moderation: AdminPanelModerationView<'a>,
+    /// Site appearance data.
     pub appearance: AdminPanelAppearanceView<'a>,
+    /// Runtime health data.
     pub site_health: AdminPanelSiteHealthView<'a>,
+    /// Backup configuration and saved backup data.
     pub backups: AdminPanelBackupsView<'a>,
+    /// Database and media maintenance data.
     pub maintenance: AdminPanelMaintenanceView,
+    /// Active onion address, when Tor is running.
     pub tor_address: Option<&'a str>,
+    /// Optional result message displayed above the panel.
     pub flash: Option<AdminPanelFlash<'a>>,
+    /// Section requested by the current URL fragment or redirect.
     pub open_section: Option<&'a str>,
 }
 
+/// Values displayed by the operational control-center dashboard.
+#[derive(Debug)]
 pub struct AdminPanelDashboardView<'a> {
+    /// Application version.
     pub version: &'a str,
+    /// Build identifier.
     pub build: &'a str,
+    /// Compact setup-state label.
     pub setup_status: &'a str,
+    /// Detailed setup-state explanation.
     pub setup_detail: &'a str,
+    /// Severity of the setup state.
     pub setup_state: AdminDashboardState,
+    /// Configured site title.
     pub site_title: &'a str,
+    /// Configured public entry point.
     pub public_url: &'a str,
+    /// Compact database-health label.
     pub db_status: &'a str,
+    /// Detailed database-health explanation.
     pub db_detail: &'a str,
+    /// Severity of the database state.
     pub db_state: AdminDashboardState,
+    /// Compact backup-health label.
     pub backup_status: &'a str,
+    /// Detailed backup-health explanation.
     pub backup_detail: &'a str,
+    /// Severity of the backup state.
     pub backup_state: AdminDashboardState,
+    /// Compact storage-health label.
     pub storage_status: &'a str,
+    /// Detailed storage-health explanation.
     pub storage_detail: &'a str,
+    /// Severity of the storage state.
     pub storage_state: AdminDashboardState,
+    /// Compact Tor-health label.
     pub tor_status: &'a str,
+    /// Detailed Tor-health explanation.
     pub tor_detail: &'a str,
+    /// Severity of the Tor state.
     pub tor_state: AdminDashboardState,
+    /// Compact media-dependency label.
     pub dependency_status: &'a str,
+    /// Detailed media-dependency explanation.
     pub dependency_detail: &'a str,
+    /// Severity of the dependency state.
     pub dependency_state: AdminDashboardState,
+    /// Compact background-job label.
     pub job_status: &'a str,
+    /// Detailed background-job explanation.
     pub job_detail: &'a str,
+    /// Severity of the background-job state.
     pub job_state: AdminDashboardState,
+    /// Human-readable board count.
     pub board_count: &'a str,
+    /// Human-readable thread count.
     pub thread_count: &'a str,
+    /// Human-readable post count.
     pub post_count: &'a str,
+    /// Recent posting activity summary.
     pub recent_activity: &'a str,
+    /// Active media summary.
     pub media_summary: &'a str,
+    /// Compact report-queue label.
     pub report_status: &'a str,
+    /// Detailed report-queue explanation.
     pub report_detail: &'a str,
+    /// Severity of the report-queue state.
     pub report_state: AdminDashboardState,
 }
 
+/// Severity used to style and order dashboard signals.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdminDashboardState {
+    /// Healthy or complete.
     Ok,
+    /// Neutral context that does not require administrator action.
+    Informational,
+    /// Normal work is actively progressing.
+    Pending,
+    /// Degraded or worth reviewing.
     Warning,
+    /// Requires administrator action.
     ActionNeeded,
+    /// An operation or required capability failed.
+    Failure,
+    /// Intentionally unavailable.
     Disabled,
+    /// State could not be determined.
     Unknown,
 }
 
+/// Moderation queues and rules displayed in the panel.
+#[derive(Debug)]
 pub struct AdminPanelModerationView<'a> {
+    /// Active bans.
     pub bans: &'a [Ban],
+    /// Configured word filters.
     pub filters: &'a [WordFilter],
+    /// Open reports enriched with post context.
     pub reports: &'a [crate::models::ReportWithContext],
+    /// Pending ban appeals.
     pub appeals: &'a [crate::models::BanAppeal],
 }
 
-#[expect(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the view mirrors independent administrator appearance toggles"
+)]
+/// Appearance settings and assets displayed in the panel.
+#[derive(Debug)]
 pub struct AdminPanelAppearanceView<'a> {
+    /// Configured site name.
     pub site_name: &'a str,
+    /// Configured site subtitle.
     pub site_subtitle: &'a str,
+    /// Whether homepage new-thread badges are enabled.
     pub homepage_new_thread_badges_enabled: bool,
+    /// Whether homepage new-reply badges are enabled.
     pub homepage_new_reply_badges_enabled: bool,
+    /// Whether thread-page new-reply badges are enabled.
     pub thread_new_reply_badges_enabled: bool,
+    /// Configured default theme slug.
     pub default_theme: &'a str,
+    /// Banner rotation interval in minutes.
     pub banner_rotation_interval_minutes: i64,
+    /// Whether banners may link to external sites.
     pub banner_external_links_enabled: bool,
+    /// Available themes.
     pub themes: &'a [crate::models::Theme],
+    /// Banners shared by board pages.
     pub global_banners: &'a [BannerAsset],
+    /// Banners displayed on the homepage.
     pub home_banners: &'a [BannerAsset],
+    /// Board-specific banners.
     pub board_banners: &'a [BannerAsset],
 }
 
+/// Backup settings and saved backup inventory displayed in the panel.
+#[derive(Debug)]
 pub struct AdminPanelBackupsView<'a> {
+    /// Saved full-site backups.
     pub full_backups: &'a [BackupInfo],
+    /// Saved board-only backups.
     pub board_backups: &'a [BackupInfo],
+    /// Current automatic-backup status.
     pub backup_status_line: &'a str,
+    /// Optional backup warning.
     pub backup_warning: Option<&'a str>,
+    /// Scheduled full-backup interval in hours.
     pub auto_full_backup_interval_hours: u64,
+    /// Number of scheduled full backups retained.
     pub auto_full_backup_copies_to_keep: u64,
+    /// Whether scheduled backups include onion-service keys.
     pub auto_full_backup_include_tor_hidden_service_keys: bool,
+    /// Storage mode for scheduled full backups.
     pub auto_full_backup_storage_mode: &'a str,
+    /// Part size used for split ZIP archives.
     pub auto_full_backup_split_zip_part_size_gib: u64,
+    /// Whether onion-service keys are available to back up.
     pub tor_hidden_service_key_backup_available: bool,
 }
 
+/// Runtime and dependency health values displayed in the panel.
+#[derive(Debug)]
 pub struct AdminPanelSiteHealthView<'a> {
+    /// Overall server status.
     pub server_status: &'a str,
+    /// Running `RustChan` version.
     pub rustchan_version: &'a str,
+    /// Database schema status.
     pub database_schema_status: &'a str,
+    /// Database integrity status.
     pub database_integrity_status: &'a str,
+    /// Time of the last successful backup.
     pub last_successful_backup: &'a str,
+    /// Time of the next scheduled backup.
     pub next_scheduled_backup: &'a str,
+    /// Data-directory disk usage.
     pub data_dir_usage: &'a str,
+    /// Upload-directory size.
     pub upload_dir_size: &'a str,
+    /// Overall Tor status.
     pub tor_status: &'a str,
+    /// Current onion address.
     pub tor_onion_address: Option<&'a str>,
+    /// Onion-service runtime status.
     pub tor_service_status: &'a str,
+    /// Configured Tor mode.
     pub tor_mode: &'a str,
+    /// Safe Tor configuration summary.
     pub tor_config_summary: &'a str,
+    /// Detailed Tor status.
     pub tor_detail: &'a str,
+    /// Optional media dependency detection summary.
     pub dependency_summary: AdminSiteHealthDependencySummary,
+    /// Number of currently running jobs.
     pub running_jobs: i64,
+    /// Number of queued jobs.
     pub queued_jobs: i64,
+    /// Number of recently completed jobs.
     pub recent_completed_jobs: i64,
+    /// Number of failed jobs awaiting dismissal.
     pub failed_jobs: i64,
+    /// Backup-job status summary.
     pub backup_jobs: &'a str,
+    /// Restore-job status summary.
     pub restore_jobs: &'a str,
+    /// Copyable diagnostic report.
     pub diagnostics_text: &'a str,
 }
 
-#[derive(Clone, Copy)]
+/// Detection summary for optional media-processing capabilities.
+#[derive(Clone, Copy, Debug)]
 pub struct AdminSiteHealthDependencySummary {
+    /// `ffmpeg` detection state.
     pub ffmpeg: AdminDetectionStatus,
+    /// `ffprobe` detection state.
     pub ffprobe: AdminDetectionStatus,
+    /// WebP encoder detection state.
     pub webp: AdminDetectionStatus,
+    /// VP9 pipeline detection state.
     pub vp9: AdminDetectionStatus,
+    /// Opus encoder detection state.
     pub opus: AdminDetectionStatus,
 }
 
+/// Database and media maintenance settings displayed in the panel.
+#[derive(Debug)]
 pub struct AdminPanelMaintenanceView {
+    /// Current database file size in bytes.
     pub db_size_bytes: i64,
+    /// Whether the database size exceeds its warning threshold.
     pub db_size_warning: bool,
+    /// Setup wizard availability state.
     pub setup_status: AdminPanelSetupStatus,
+    /// External media process timeout in seconds.
     pub ffmpeg_timeout_secs: u64,
+    /// Whether automatic active-media pruning is enabled.
     pub media_auto_prune_enabled: bool,
+    /// Maximum active database and media size before pruning.
     pub media_max_active_content_size_bytes: u64,
+    /// Detected media-processing capabilities.
     pub media_detection: AdminMediaDetectionView,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+/// Durable setup state relevant to administrator controls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdminPanelSetupStatus {
+    /// Initial setup remains publicly available.
     Available,
+    /// Initial setup completed normally.
     Complete,
+    /// An administrator temporarily reopened setup.
     Reopened,
+    /// Durable state exists even though no completion marker was found.
     Initialized,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+/// Whether an optional executable or pipeline was detected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdminDetectionStatus {
+    /// The capability is available.
     Detected,
+    /// The capability is unavailable.
     Missing,
 }
 
 impl AdminDetectionStatus {
+    /// Returns whether the capability was detected.
     #[must_use]
     pub const fn is_detected(self) -> bool {
         matches!(self, Self::Detected)
     }
 }
 
+/// Detailed media capability detection results.
+#[derive(Debug)]
 pub struct AdminMediaDetectionView {
+    /// `ffmpeg` detection state.
     pub ffmpeg: AdminDetectionStatus,
+    /// `ffprobe` detection state.
     pub ffprobe: AdminDetectionStatus,
+    /// WebP encoder detection state.
     pub webp_encoder: AdminDetectionStatus,
+    /// VP9 and Opus pipeline detection state.
     pub vp9_pipeline: AdminDetectionStatus,
+    /// Selected PDF thumbnail executable, when available.
     pub pdf_thumbnail_renderer: Option<String>,
 }
 
-#[derive(Clone, Copy)]
+/// Message displayed after an administrative action.
+#[derive(Clone, Copy, Debug)]
 pub struct AdminPanelFlash<'a> {
+    /// Whether the message represents an error.
     pub is_error: bool,
+    /// User-facing result text.
     pub message: &'a str,
 }
 
+/// Renders banner target-type options and marks the selected value.
 fn banner_target_type_options(selected: BannerTargetType) -> String {
     let options = [
         (BannerTargetType::None, "No link"),
@@ -274,6 +434,7 @@ fn banner_target_type_options(selected: BannerTargetType) -> String {
     out
 }
 
+/// Renders a normalized banner image preview.
 fn banner_preview_html(asset: &BannerAsset, alt: &str) -> String {
     format!(
         r#"<img class="board-banner-preview-image" src="{src}" alt="{alt}" width="{width}" height="{height}">"#,
@@ -284,6 +445,7 @@ fn banner_preview_html(asset: &BannerAsset, alt: &str) -> String {
     )
 }
 
+/// Renders board target options, retaining a missing saved target for repair.
 fn banner_board_options(boards: &[Board], selected_value: &str) -> String {
     let trimmed_selected = selected_value.trim().trim_matches('/');
     let mut out = String::new();
@@ -322,6 +484,7 @@ fn banner_board_options(boards: &[Board], selected_value: &str) -> String {
     out
 }
 
+/// Renders the target controls for one banner editor.
 fn render_banner_target_picker(
     boards: &[Board],
     selected: BannerTargetType,
@@ -350,6 +513,7 @@ fn render_banner_target_picker(
     )
 }
 
+/// Renders a banner upload form for the requested scope.
 fn render_banner_upload_form(
     action: &str,
     csrf_token: &str,
@@ -394,6 +558,7 @@ fn render_banner_upload_form(
     )
 }
 
+/// Renders one saved banner and its update, ordering, and delete controls.
 fn render_banner_asset_row(
     asset: &BannerAsset,
     csrf_token: &str,
@@ -465,6 +630,7 @@ fn render_banner_asset_row(
     )
 }
 
+/// Renders a collection of saved banners or an empty-state message.
 fn render_banner_asset_list(
     assets: &[BannerAsset],
     csrf_token: &str,
@@ -481,6 +647,7 @@ fn render_banner_asset_list(
         .collect::<String>()
 }
 
+/// Renders custom favicon controls for one board.
 fn render_board_favicon_controls(board: &Board, csrf_token: &str) -> String {
     let board_favicon_exists = crate::favicon::board_has_custom_favicon(&board.short_name);
     let board_favicon_version =
@@ -549,6 +716,7 @@ fn render_board_favicon_controls(board: &Board, csrf_token: &str) -> String {
     )
 }
 
+/// Renders banner mode, upload, and saved-banner controls for one board.
 fn render_board_banner_controls(
     board: &Board,
     boards: &[Board],
@@ -585,6 +753,7 @@ fn render_board_banner_controls(
     )
 }
 
+/// Renders backup creation and restore actions for one board.
 fn render_board_backup_actions(board: &Board, csrf_token: &str) -> String {
     format!(
         r#"<div class="board-card-footer-actions">
@@ -606,7 +775,11 @@ fn render_board_backup_actions(board: &Board, csrf_token: &str) -> String {
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the board settings card preserves one cohesive form and its stable field hooks"
+)]
+/// Renders the general settings card for one board.
 fn render_board_settings_card(
     board: &Board,
     index: usize,
@@ -868,6 +1041,7 @@ fn render_board_settings_card(
     )
 }
 
+/// Renders the appearance settings card for one board.
 fn render_board_appearance_card(
     board: &Board,
     boards: &[Board],
@@ -963,6 +1137,7 @@ fn render_board_appearance_card(
     )
 }
 
+/// Renders the backup tools card for one board.
 fn render_board_backup_card(board: &Board, csrf_token: &str, open_section: Option<&str>) -> String {
     let backup_section = format!("board-backup-{}", board.short_name);
     let open_attr = if open_section.is_some_and(|section| section == backup_section) {
@@ -989,6 +1164,7 @@ fn render_board_backup_card(board: &Board, csrf_token: &str, open_section: Optio
 }
 
 #[must_use]
+/// Renders the main administrator control panel.
 pub fn admin_panel_page(view: &AdminPanelViewModel<'_>) -> String {
     layout::render(view)
 }
@@ -996,6 +1172,7 @@ pub fn admin_panel_page(view: &AdminPanelViewModel<'_>) -> String {
 // ─── Moderation log ───────────────────────────────────────────────────────────
 
 #[must_use]
+/// Renders the paginated moderation log.
 pub fn mod_log_page(
     entries: &[crate::models::ModLogEntry],
     pagination: &crate::models::Pagination,
@@ -1077,6 +1254,7 @@ pub fn mod_log_page(
 // ─── VACUUM result ────────────────────────────────────────────────────────────
 
 #[must_use]
+/// Renders the space reclaimed by a completed `SQLite` `VACUUM`.
 pub fn admin_vacuum_result_page(
     size_before: i64,
     size_after: i64,
@@ -1084,14 +1262,12 @@ pub fn admin_vacuum_result_page(
     current_theme: Option<&str>,
 ) -> String {
     let saved = size_before.saturating_sub(size_after);
-    // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss
-    )]
     let pct = if size_before > 0 {
-        (saved as f64 / size_before as f64 * 100.0) as u64
+        saved
+            .max(0)
+            .saturating_mul(100)
+            .checked_div(size_before)
+            .unwrap_or(0)
     } else {
         0
     };
@@ -1135,8 +1311,12 @@ pub fn admin_vacuum_result_page(
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the health report keeps one cohesive diagnostic result document"
+)]
 #[must_use]
+/// Renders database health checks and an optional repair result.
 pub fn admin_db_health_result_page(
     report: &DbHealthReport,
     attempted_repair: bool,
@@ -1326,6 +1506,7 @@ pub fn admin_db_health_result_page(
 }
 
 #[must_use]
+/// Renders the database-repair status page when no job is active.
 pub fn admin_db_repair_idle_page(csrf_token: &str, current_theme: Option<&str>) -> String {
     let body = r#"<div class="admin-panel">
 <h1>[ database repair ]</h1>
@@ -1355,6 +1536,7 @@ pub fn admin_db_repair_idle_page(csrf_token: &str, current_theme: Option<&str>) 
 }
 
 #[must_use]
+/// Renders live progress for an active database-repair job.
 pub fn admin_db_repair_running_page(
     csrf_token: &str,
     job_id: u64,
@@ -1397,6 +1579,7 @@ pub fn admin_db_repair_running_page(
 }
 
 #[must_use]
+/// Renders a stale database-repair job status request.
 pub fn admin_db_repair_stale_page(
     csrf_token: &str,
     requested_job_id: u64,
@@ -1441,6 +1624,7 @@ pub fn admin_db_repair_stale_page(
 }
 
 #[must_use]
+/// Renders the terminal failure state of a database-repair job.
 pub fn admin_db_repair_failed_page(
     csrf_token: &str,
     message: &str,
@@ -1481,6 +1665,7 @@ pub fn admin_db_repair_failed_page(
     )
 }
 
+/// Renders schema, integrity, and foreign-key results for one health snapshot.
 fn render_db_health_snapshot(snapshot: &crate::db::DbHealthSnapshot) -> String {
     format!(
         "{schema}{integrity}{foreign_keys}",
@@ -1490,6 +1675,7 @@ fn render_db_health_snapshot(snapshot: &crate::db::DbHealthSnapshot) -> String {
     )
 }
 
+/// Renders one database check and its detailed output when needed.
 fn render_db_check_result(label: &str, result: &crate::db::DbCheckResult) -> String {
     let status = if result.ok {
         r#"<span class="admin-status-ok">Passed</span>"#
@@ -1521,8 +1707,12 @@ fn render_db_check_result(label: &str, result: &crate::db::DbCheckResult) -> Str
 
 // ─── IP history ───────────────────────────────────────────────────────────────
 
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the investigation page keeps its summary, results, and controls together"
+)]
 #[must_use]
+/// Renders posts and identity hints associated with a hashed IP.
 pub fn admin_ip_history_page(
     ip_hash: &str,
     posts_with_boards: &[(crate::models::Post, String)],
@@ -1747,7 +1937,10 @@ pub fn admin_ip_history_page(
     );
 
     base_layout(
-        &format!("Hashed IP — {}", &ip_hash[..ip_hash.len().min(12)]),
+        &format!(
+            "Hashed IP — {}",
+            ip_hash.get(..ip_hash.len().min(12)).unwrap_or(ip_hash)
+        ),
         None,
         &body,
         csrf_token,
@@ -1960,8 +2153,8 @@ mod tests {
     fn sample_site_health() -> AdminPanelSiteHealthView<'static> {
         AdminPanelSiteHealthView {
             server_status: "ready",
-            rustchan_version: "1.3.0",
-            database_schema_status: "1.3.0 baseline verified",
+            rustchan_version: "1.4.0",
+            database_schema_status: "1.4.0 baseline verified",
             database_integrity_status: "not checked",
             last_successful_backup: "none saved",
             next_scheduled_backup: "not scheduled",
@@ -1987,13 +2180,13 @@ mod tests {
             backup_jobs: "idle",
             restore_jobs: "not available",
             diagnostics_text:
-                "RustChan version: 1.3.0\nDatabase schema: 1.3.0 baseline verified\nRecent warnings:\n  none",
+                "RustChan version: 1.4.0\nDatabase schema: 1.4.0 baseline verified\nRecent warnings:\n  none",
         }
     }
 
     fn sample_dashboard() -> AdminPanelDashboardView<'static> {
         AdminPanelDashboardView {
-            version: "1.3.0",
+            version: "1.4.0",
             build: "test/test",
             setup_status: "complete",
             setup_detail: "Public setup routes are blocked.",
@@ -2290,17 +2483,18 @@ mod tests {
             "Track newly created threads on the home page, new replies on the home page, and new replies inside board index/catalog cards independently."
         ));
 
-        let theme_idx = html.find("Default theme").expect("theme control present");
-        let homepage_idx = html
-            .find("Homepage board-card new-thread badges")
-            .expect("homepage control present");
-        let thread_idx = html
-            .find("Board/catalog thread-card new-reply badges")
-            .expect("thread control present");
-        let homepage_reply_idx = html
-            .find("Show new reply badges on homepage")
-            .expect("homepage reply control present");
+        let theme_idx = html.find("Default theme");
+        let homepage_idx = html.find("Homepage board-card new-thread badges");
+        let thread_idx = html.find("Board/catalog thread-card new-reply badges");
+        let homepage_reply_idx = html.find("Show new reply badges on homepage");
 
+        assert!(theme_idx.is_some(), "theme control should be present");
+        assert!(homepage_idx.is_some(), "homepage control should be present");
+        assert!(thread_idx.is_some(), "thread control should be present");
+        assert!(
+            homepage_reply_idx.is_some(),
+            "homepage reply control should be present"
+        );
         assert!(theme_idx < homepage_idx);
         assert!(homepage_idx < homepage_reply_idx);
         assert!(homepage_reply_idx < thread_idx);
@@ -2328,31 +2522,45 @@ mod tests {
         <input type="checkbox" name="media_auto_prune_enabled""#
         ));
 
-        let timeout_section_idx = html
-            .find("// ffmpeg timeout")
-            .expect("timeout section present");
-        let pruning_section_idx = html
-            .find("// media pruning")
-            .expect("pruning section present");
-        let prune_toggle_idx = html
-            .find("Enable automatic active content pruning")
-            .expect("prune toggle present");
+        let timeout_section_idx = html.find("// ffmpeg timeout");
+        let pruning_section_idx = html.find("// media pruning");
+        let prune_toggle_idx = html.find("Enable automatic active content pruning");
+        assert!(
+            timeout_section_idx.is_some(),
+            "timeout section should be present"
+        );
+        assert!(
+            pruning_section_idx.is_some(),
+            "pruning section should be present"
+        );
+        assert!(prune_toggle_idx.is_some(), "prune toggle should be present");
         assert!(timeout_section_idx < pruning_section_idx);
         assert!(pruning_section_idx < prune_toggle_idx);
     }
 
+    #[expect(
+        clippy::cognitive_complexity,
+        reason = "the test intentionally checks a linear list of independent health-panel controls"
+    )]
     #[test]
     fn admin_panel_site_health_renders_after_site_settings_closed_by_default() {
         let board = sample_board();
         let themes = vec![sample_theme()];
         let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
 
-        let site_settings = html
-            .find("// site settings")
-            .expect("site settings section");
-        let site_health = html.find("// site health").expect("site health section");
-        let boards = html.find("// boards").expect("boards section");
+        let site_settings = html.find("// site settings");
+        let site_health = html.find("// site health");
+        let boards = html.find("// boards");
 
+        assert!(
+            site_settings.is_some(),
+            "site settings section should be present"
+        );
+        assert!(
+            site_health.is_some(),
+            "site health section should be present"
+        );
+        assert!(boards.is_some(), "boards section should be present");
         assert!(site_settings < site_health);
         assert!(site_health < boards);
         assert!(html.contains(r#"data-admin-dropdown-key="site-health""#));
@@ -2362,9 +2570,9 @@ mod tests {
         assert!(html.contains("Database integrity status"));
         assert!(html.contains("open media panel"));
         assert!(html.contains("copy diagnostics"));
-        assert!(html.contains("RustChan version: 1.3.0"));
+        assert!(html.contains("RustChan version: 1.4.0"));
         assert!(html.contains("Database schema"));
-        assert!(html.contains("1.3.0 baseline verified"));
+        assert!(html.contains("1.4.0 baseline verified"));
         assert!(html.contains(r#"data-admin-health-jobs-url="/admin/site-health/jobs""#));
         assert!(html.contains(r#"data-admin-health-job="running_jobs""#));
         assert!(html.contains(r#"data-admin-health-job="queued_jobs""#));
@@ -2400,7 +2608,7 @@ mod tests {
     }
 
     #[test]
-    fn admin_panel_control_center_uses_persistent_dropdown_pattern() {
+    fn admin_panel_control_center_defaults_open_with_task_oriented_groups() {
         let board = sample_board();
         let themes = vec![sample_theme()];
         let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
@@ -2409,13 +2617,50 @@ mod tests {
             r#"<section class="admin-section admin-section-collapsible" id="control-center""#
         ));
         assert!(html.contains(r#"data-admin-dropdown-key="control-center""#));
-        assert!(!html.contains(
-            r#"<details class="admin-dropdown" data-admin-dropdown-key="control-center" open>"#
+        assert!(html.contains(
+            r#"<details class="admin-dropdown" data-admin-dropdown-key="control-center" data-admin-dropdown-default-open open>"#
         ));
-        assert!(html.contains(r##"href="#public-url-settings""##));
-        assert!(html.contains(r##"href="#tor-status""##));
+        assert!(html.contains(r#"<h2 id="control-center-title">"#));
+        for title in [
+            "// site overview and health",
+            "// moderation and recent activity",
+            "// backups and recovery",
+            "// maintenance and background jobs",
+            "// network and Tor",
+            "// configuration shortcuts",
+        ] {
+            assert!(
+                html.contains(title),
+                "missing Control Center group: {title}"
+            );
+        }
+        assert!(html.contains(r#"href="/admin/panel?open=site-settings#public-url-settings""#));
+        assert!(html.contains(r#"href="/admin/panel?open=site-health#tor-status""#));
+        assert!(html.contains(r#"href="/admin/panel?open=theme-catalog#theme-catalog""#));
+        assert!(html.contains(r#"data-dashboard-status="jobs""#));
+        assert!(html.contains(r#"data-dashboard-state="ok""#));
+        assert!(html.contains("system details, logs, and diagnostics"));
         assert!(html.contains(r#"id="public-url-settings""#));
         assert!(html.contains("settings.toml public_hosts"));
+    }
+
+    #[test]
+    fn admin_panel_control_center_links_to_protected_setup_controls_without_duplicating_forms() {
+        let board = sample_board();
+        let themes = vec![sample_theme()];
+        let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
+        let control_center = html
+            .split_once(r#"id="control-center""#)
+            .map_or("", |(_, tail)| tail)
+            .split_once(r#"id="live-log""#)
+            .map_or("", |(control_center, _)| control_center);
+
+        assert!(control_center
+            .contains(r#"href="/admin/panel?open=database-maintenance#database-maintenance""#));
+        assert!(!control_center.contains(r#"action="/admin/setup/reopen""#));
+        assert!(!control_center.contains(r#"action="/admin/setup/close""#));
+        assert!(html.contains(r#"action="/admin/setup/reopen""#));
+        assert!(html.contains(r#"name="_csrf" value="csrf""#));
     }
 
     #[test]
@@ -2432,6 +2677,7 @@ mod tests {
         assert!(html.contains(
             r#"<details class="admin-dropdown" data-admin-dropdown-key="control-center" open>"#
         ));
+        assert!(!html.contains("data-admin-dropdown-default-open open"));
     }
 
     #[test]
@@ -2488,13 +2734,12 @@ mod tests {
         let themes = vec![sample_theme()];
         let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
 
-        let index = html
-            .find(r#"<nav class="admin-section-index" aria-label="Admin panel sections">"#)
-            .expect("section index");
-        let overview = html
-            .find(r#"class="admin-panel-overview" id="overview""#)
-            .expect("overview section");
+        let index =
+            html.find(r#"<nav class="admin-section-index" aria-label="Admin panel sections">"#);
+        let overview = html.find(r#"class="admin-panel-overview" id="overview""#);
 
+        assert!(index.is_some(), "section index should be present");
+        assert!(overview.is_some(), "overview section should be present");
         assert!(index < overview);
         for target in [
             "#site-settings",
@@ -2515,7 +2760,7 @@ mod tests {
             before: DbHealthSnapshot {
                 schema: DbCheckResult {
                     ok: true,
-                    messages: vec!["1.3.0 baseline verified".into()],
+                    messages: vec!["1.4.0 baseline verified".into()],
                 },
                 integrity: DbCheckResult {
                     ok: false,
@@ -2548,34 +2793,42 @@ mod tests {
             .contains(r#"<div class="page-box" style="margin-top:0.75rem;max-width:760px">"#));
     }
 
+    #[expect(
+        clippy::cognitive_complexity,
+        reason = "the test intentionally checks a linear list of independent panel groupings"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test keeps the complete administrator section-order contract in one scenario"
+    )]
     #[test]
     fn admin_panel_groups_board_and_backup_areas_by_task() {
         let board = sample_board();
         let themes = vec![sample_theme()];
         let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
 
-        let overview = html
-            .find(r#"class="admin-panel-overview" id="overview""#)
-            .expect("overview section");
-        let site_settings = html
-            .find(r#"class="admin-panel-site-settings" id="site-settings-panel""#)
-            .expect("site settings section");
-        let boards = html
-            .find(r#"class="admin-panel-boards" id="boards""#)
-            .expect("boards section");
-        let moderation = html
-            .find(r#"class="admin-panel-moderation" id="moderation""#)
-            .expect("moderation section");
-        let appearance = html
-            .find(r#"class="admin-panel-appearance" id="appearance""#)
-            .expect("appearance section");
-        let backups = html
-            .find(r#"class="admin-panel-backups" id="backups""#)
-            .expect("backups section");
-        let maintenance = html
-            .find(r#"class="admin-panel-maintenance" id="maintenance""#)
-            .expect("maintenance section");
+        let overview = html.find(r#"class="admin-panel-overview" id="overview""#);
+        let site_settings =
+            html.find(r#"class="admin-panel-site-settings" id="site-settings-panel""#);
+        let boards = html.find(r#"class="admin-panel-boards" id="boards""#);
+        let moderation = html.find(r#"class="admin-panel-moderation" id="moderation""#);
+        let appearance = html.find(r#"class="admin-panel-appearance" id="appearance""#);
+        let backups = html.find(r#"class="admin-panel-backups" id="backups""#);
+        let maintenance = html.find(r#"class="admin-panel-maintenance" id="maintenance""#);
 
+        assert!(overview.is_some(), "overview section should be present");
+        assert!(
+            site_settings.is_some(),
+            "site settings section should be present"
+        );
+        assert!(boards.is_some(), "boards section should be present");
+        assert!(moderation.is_some(), "moderation section should be present");
+        assert!(appearance.is_some(), "appearance section should be present");
+        assert!(backups.is_some(), "backups section should be present");
+        assert!(
+            maintenance.is_some(),
+            "maintenance section should be present"
+        );
         assert!(overview < site_settings);
         assert!(site_settings < boards);
         assert!(boards < moderation);
@@ -2630,14 +2883,21 @@ mod tests {
         assert!(html.contains("Maximum active content database/media size"));
         assert!(html.contains("save media settings"));
 
-        let full_backup_start = html
-            .find(r#"<section class="admin-section admin-section-collapsible" id="full-backup-restore">"#)
-            .expect("full backup section");
-        let full_backup_end = html[full_backup_start..]
-            .find(r"</section>")
-            .map(|offset| full_backup_start + offset)
-            .expect("full backup section closes");
-        let full_backup_html = &html[full_backup_start..full_backup_end];
+        let full_backup_start = html.find(
+            r#"<section class="admin-section admin-section-collapsible" id="full-backup-restore">"#,
+        );
+        let full_backup_html = full_backup_start
+            .and_then(|start| html.get(start..))
+            .and_then(|suffix| suffix.split_once(r"</section>").map(|(section, _)| section))
+            .unwrap_or_default();
+        assert!(
+            full_backup_start.is_some(),
+            "full backup section should be present"
+        );
+        assert!(
+            !full_backup_html.is_empty(),
+            "full backup section should have a closing tag"
+        );
         assert!(full_backup_html.contains(
             r#"<details class="admin-dropdown" data-admin-dropdown-key="full-backup-restore""#
         ));
@@ -2647,7 +2907,9 @@ mod tests {
         assert!(full_backup_html.contains(r#"name="split_zip_part_size_gib""#));
         assert!(full_backup_html.contains(r#"type="radio" name="storage_mode" value="split_zip""#));
 
-        let maintenance_html = &html[maintenance..];
+        let maintenance_html = maintenance
+            .and_then(|start| html.get(start..))
+            .unwrap_or_default();
         assert!(!maintenance_html.contains("advanced: board backup and restore"));
     }
 
@@ -2657,14 +2919,16 @@ mod tests {
         let html =
             render_admin_panel_for_test(std::slice::from_ref(&board), &[], &[sample_theme()], None);
 
-        let form_start = html
-            .find(r#"action="/admin/board/create""#)
-            .expect("quick-create form present");
-        let form_end = html[form_start..]
-            .find("</form>")
-            .map(|offset| form_start + offset)
-            .expect("quick-create form closes");
-        let form_html = &html[form_start..form_end];
+        let form_start = html.find(r#"action="/admin/board/create""#);
+        let form_html = form_start
+            .and_then(|start| html.get(start..))
+            .and_then(|suffix| suffix.split_once("</form>").map(|(form, _)| form))
+            .unwrap_or_default();
+        assert!(form_start.is_some(), "quick-create form should be present");
+        assert!(
+            !form_html.is_empty(),
+            "quick-create form should have a closing tag"
+        );
 
         assert!(form_html.contains(r#"name="allow_audio" value="1"> Enable audio uploads"#));
         assert!(!form_html.contains(r#"name="allow_audio" value="1" checked"#));
@@ -2711,13 +2975,14 @@ mod tests {
         let themes = vec![sample_theme()];
         let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
 
-        let media = html
-            .find("// media settings")
-            .expect("media settings section");
-        let database = html
-            .find("// database maintenance")
-            .expect("database maintenance section");
+        let media = html.find("// media settings");
+        let database = html.find("// database maintenance");
 
+        assert!(media.is_some(), "media settings section should be present");
+        assert!(
+            database.is_some(),
+            "database maintenance section should be present"
+        );
         assert!(media < database);
     }
 
@@ -2809,13 +3074,16 @@ mod tests {
     }
 
     #[test]
-    fn admin_panel_live_log_renders_connection_status_surface() {
+    fn admin_panel_live_log_renders_truthful_no_js_fallback() {
         let board = sample_board();
         let themes = vec![sample_theme()];
         let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
 
         assert!(html.contains(r#"id="admin-live-log-status""#));
-        assert!(html.contains("Connecting to live log"));
+        assert!(html.contains("JavaScript enables live updates"));
+        assert!(html.contains(r#"href="/admin/log/live?bytes=65536""#));
+        assert!(html.contains(r"data-admin-live-log-controls hidden"));
+        assert!(html.contains("Live updates start when JavaScript is available."));
     }
 
     #[test]
@@ -3045,7 +3313,8 @@ mod tests {
         let board = sample_board();
         let post = sample_ip_history_post();
         let pagination = crate::models::Pagination::new(1, 50, 1);
-        let ip_hash = post.ip_hash.clone().expect("hash");
+        let ip_hash = post.ip_hash.clone().unwrap_or_default();
+        assert!(!ip_hash.is_empty(), "sample post should have an IP hash");
         let html = super::admin_ip_history_page(
             &ip_hash,
             &[(post, "tech".into())],

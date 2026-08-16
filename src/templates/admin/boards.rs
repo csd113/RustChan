@@ -1,5 +1,8 @@
+//! Board-directory and board-creation sections of the admin panel.
+
 use super::{escape_html, render_board_settings_card, AdminPanelViewModel};
 
+/// Renders the complete boards tab of the admin panel.
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let boards_open_attr = if view.open_section == Some("boards")
         || view
@@ -35,6 +38,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     render_admin_boards_section(view.csrf_token, &board_cards, boards_open_attr)
 }
 
+/// Renders the board directory and quick-create form.
 fn render_admin_boards_section(
     csrf_token: &str,
     board_cards: &str,

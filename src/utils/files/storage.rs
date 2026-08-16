@@ -7,44 +7,80 @@ use uuid::Uuid;
 use super::disk_space::check_disk_space;
 use super::jpeg::{read_exif_orientation_from_file, strip_jpeg_exif_file};
 use super::mime::detect_mime_type;
+use super::AMBIGUOUS_WEBM_MIME;
 
+/// Metadata describing a persisted upload and its generated thumbnail.
+#[derive(Debug)]
 pub struct UploadedFile {
+    /// Board-relative path of the persisted original file.
     pub file_path: String,
+    /// Board-relative thumbnail path, or an empty string when none exists.
     pub thumb_path: String,
+    /// Sanitized original filename supplied by the uploader.
     pub original_name: String,
+    /// MIME type accepted after signature and optional probe validation.
     pub mime_type: String,
+    /// Persisted original size in bytes.
     pub file_size: i64,
+    /// Media category used by rendering and processing code.
     pub media_type: crate::models::MediaType,
+    /// Whether deferred media processing still needs to run.
     pub processing_pending: bool,
+    /// Whether an existing deduplicated file satisfied this upload.
     pub dedup_reused: bool,
 }
 
-#[expect(clippy::struct_excessive_bools)]
-// These booleans are independent upload policy and media capability flags.
+/// Inputs and board policy used while validating and storing an upload.
+#[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the booleans are independent upload-policy and media-capability flags"
+)]
 pub struct SaveUploadOptions<'a> {
+    /// Client-supplied filename before sanitization.
     pub original_filename: &'a str,
+    /// Root directory containing board media trees.
     pub boards_dir: &'a str,
+    /// Short name of the destination board.
     pub board_short: &'a str,
+    /// Maximum thumbnail dimension in pixels.
     pub thumb_size: u32,
+    /// Maximum accepted image size in bytes.
     pub max_image_size: usize,
+    /// Maximum accepted video size in bytes.
     pub max_video_size: usize,
+    /// Maximum accepted audio size in bytes.
     pub max_audio_size: usize,
+    /// Maximum accepted PDF size in bytes.
     pub max_pdf_size: usize,
+    /// Whether `ffmpeg` media conversion is available.
     pub ffmpeg_available: bool,
+    /// Whether `ffprobe` stream validation is available.
     pub ffprobe_available: bool,
+    /// Whether the installed `ffmpeg` supports WebP output.
     pub ffmpeg_webp_available: bool,
+    /// Whether otherwise-unrecognized files may be stored as downloads.
     pub allow_any_files: bool,
 }
 
+/// Derived storage and processing decisions for a validated upload.
+#[derive(Debug)]
 struct UploadPlan {
+    /// MIME type persisted for the upload.
     mime_type: String,
+    /// Media category derived from the MIME type.
     media_type: crate::models::MediaType,
+    /// JPEG EXIF orientation applied during processing.
     jpeg_orientation: u32,
+    /// Whether the worker queue must finish processing.
     processing_pending: bool,
+    /// Absolute destination directory for the original.
     dest_dir: PathBuf,
+    /// Absolute destination directory for thumbnails.
     thumbs_dir: PathBuf,
 }
 
+/// Maximum decoded image area accepted during upload validation.
 const MAX_UPLOAD_IMAGE_PIXELS: u64 = 100_000_000;
 
 /// Classify an uploaded file into the MIME type `RustChan` should persist.
@@ -97,7 +133,10 @@ pub fn save_upload_from_path(
 /// # Errors
 /// Returns an error if the audio MIME check fails, the file exceeds the board
 /// limit, disk-space checks fail, or the file cannot be persisted.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the arguments mirror independent upload metadata and board limits at the handler boundary"
+)]
 pub fn save_audio_with_image_thumb_from_path(
     input_path: &Path,
     sniff_bytes: &[u8],
@@ -166,6 +205,7 @@ pub fn save_audio_with_image_thumb_from_path(
 }
 
 #[must_use]
+/// Maps a supported MIME type to its canonical storage extension.
 pub fn mime_to_ext_pub(mime: &str) -> &'static str {
     mime_to_ext(mime)
 }
@@ -195,6 +235,7 @@ pub fn delete_file_checked(boards_dir: &str, relative_path: &str) -> Result<()> 
     }
 }
 
+/// Reports whether an error chain contains a filesystem not-found error.
 fn is_not_found_error(error: &anyhow::Error) -> bool {
     error
         .chain()
@@ -203,8 +244,12 @@ fn is_not_found_error(error: &anyhow::Error) -> bool {
 }
 
 #[must_use]
-// This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
-#[expect(clippy::cast_precision_loss)]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "human-readable size display intentionally rounds integral byte counts to one decimal place"
+)]
+/// Format a byte count using binary units suitable for display.
 pub fn format_file_size(bytes: i64) -> String {
     const KIB: i64 = 1024;
     const MIB: i64 = KIB * 1024;
@@ -221,6 +266,14 @@ pub fn format_file_size(bytes: i64) -> String {
     }
 }
 
+/// Copies an upload into a processor-compatible temporary file.
+///
+/// JPEG metadata is stripped when possible so private EXIF data is not
+/// persisted. If stripping fails, the original bytes are copied so the media
+/// processor can still validate and handle the upload.
+///
+/// # Errors
+/// Returns an error if the temporary file cannot be created or populated.
 fn prepare_processor_input(
     input_path: &Path,
     dest_dir: &Path,
@@ -249,6 +302,11 @@ fn prepare_processor_input(
     Ok(tmp)
 }
 
+/// Creates validated destination directories and derives processing decisions.
+///
+/// # Errors
+/// Returns an error if destination creation, safety checks, or disk-space
+/// validation fails.
 fn build_upload_plan(
     validated: ValidatedUpload,
     original_size: usize,
@@ -285,9 +343,14 @@ fn build_upload_plan(
     })
 }
 
+/// MIME, media, and orientation data accepted by upload validation.
+#[derive(Debug)]
 struct ValidatedUpload {
+    /// Canonical MIME type accepted for persistence.
     mime_type: String,
+    /// Media category derived from the canonical MIME type.
     media_type: crate::models::MediaType,
+    /// JPEG EXIF orientation to apply after processing.
     jpeg_orientation: u32,
 }
 
@@ -305,6 +368,11 @@ pub fn validate_upload_from_path(
     validate_upload(input_path, sniff_bytes, original_size, options).map(|_| ())
 }
 
+/// Validates upload contents and returns their canonical classification.
+///
+/// # Errors
+/// Returns an error when MIME detection, media policy, size validation, stream
+/// inspection, or file-format validation fails.
 fn validate_upload(
     input_path: &Path,
     sniff_bytes: &[u8],
@@ -324,7 +392,11 @@ fn validate_upload(
     }
 
     let media_type = crate::models::MediaType::from_mime(&mime_type);
-    let max_size = max_size_for_media(media_type, options);
+    let max_size = if mime_type == AMBIGUOUS_WEBM_MIME {
+        options.max_video_size.min(options.max_audio_size)
+    } else {
+        max_size_for_media(media_type, options)
+    };
     if original_size > max_size {
         anyhow::bail!(
             "File too large. Maximum {} upload size is {}.",
@@ -364,6 +436,10 @@ fn validate_upload(
     })
 }
 
+/// Persists an explicitly permitted arbitrary file using a neutral extension.
+///
+/// # Errors
+/// Returns an error if destination validation or atomic persistence fails.
 fn save_generic_upload(
     input_path: &Path,
     original_size: usize,
@@ -384,11 +460,16 @@ fn save_generic_upload(
     tmp.persist(&file_path_abs)
         .context("Failed to atomically rename generic upload temp file")?;
 
+    let persisted_mime = if plan.mime_type == AMBIGUOUS_WEBM_MIME {
+        super::fallback_download_mime_type()
+    } else {
+        &plan.mime_type
+    };
     Ok(UploadedFile {
         file_path: format!("{}/{filename}", options.board_short),
         thumb_path: String::new(),
         original_name: crate::utils::sanitize::sanitize_filename(options.original_filename),
-        mime_type: plan.mime_type.clone(),
+        mime_type: persisted_mime.to_owned(),
         file_size: i64::try_from(original_size).context("File size overflows i64")?,
         media_type: plan.media_type,
         processing_pending: false,
@@ -396,6 +477,11 @@ fn save_generic_upload(
     })
 }
 
+/// Runs the media pipeline and returns paths for its finalized outputs.
+///
+/// # Errors
+/// Returns an error if processing, post-processing size validation, output
+/// naming, or metadata conversion fails.
 fn save_processed_upload(
     input_path: &Path,
     options: &SaveUploadOptions<'_>,
@@ -422,15 +508,12 @@ fn save_processed_upload(
         apply_image_exif_orientation(&processed.file_path, plan.jpeg_orientation);
     }
 
-    if plan.jpeg_orientation > 1
-        && processed.thumbnail_path.exists()
-        && processed
-            .thumbnail_path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            == Some("webp")
-    {
-        apply_thumb_exif_orientation(&processed.thumbnail_path, plan.jpeg_orientation);
+    if let Some(thumbnail_path) = processed.thumbnail_path.as_ref().filter(|thumbnail_path| {
+        plan.jpeg_orientation > 1
+            && thumbnail_path.exists()
+            && thumbnail_path.extension().and_then(|ext| ext.to_str()) == Some("webp")
+    }) {
+        apply_thumb_exif_orientation(thumbnail_path, plan.jpeg_orientation);
     }
 
     let final_size = final_processed_size_within_limit(&processed, options)?;
@@ -440,15 +523,22 @@ fn save_processed_upload(
         .file_name()
         .and_then(|name| name.to_str())
         .context("Converted file has non-UTF-8 name")?;
-    let thumb_filename = processed
+    let thumb_path = processed
         .thumbnail_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("Thumbnail file has non-UTF-8 name")?;
+        .as_ref()
+        .map(|thumbnail_path| -> Result<String> {
+            let thumb_filename = thumbnail_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("Thumbnail file has non-UTF-8 name")?;
+            Ok(format!("{}/thumbs/{thumb_filename}", options.board_short))
+        })
+        .transpose()?
+        .unwrap_or_default();
 
     Ok(UploadedFile {
         file_path: format!("{}/{filename}", options.board_short),
-        thumb_path: format!("{}/thumbs/{thumb_filename}", options.board_short),
+        thumb_path,
         original_name: crate::utils::sanitize::sanitize_filename(options.original_filename),
         mime_type: processed.mime_type.clone(),
         file_size: i64::try_from(final_size).context("File size overflows i64")?,
@@ -462,6 +552,13 @@ fn save_processed_upload(
     })
 }
 
+/// Rechecks a processed file's on-disk size against its media-specific limit.
+///
+/// Oversized outputs and their thumbnails are removed before an error is
+/// returned, preventing partially accepted uploads.
+///
+/// # Errors
+/// Returns an error if the final file cannot be inspected or exceeds its limit.
 fn final_processed_size_within_limit(
     processed: &crate::media::ProcessedMedia,
     options: &SaveUploadOptions<'_>,
@@ -497,8 +594,9 @@ fn final_processed_size_within_limit(
     );
 }
 
+/// Best-effort removes both outputs from a failed processed upload.
 fn cleanup_processed_outputs(processed: &crate::media::ProcessedMedia) {
-    for path in [&processed.file_path, &processed.thumbnail_path] {
+    for path in std::iter::once(&processed.file_path).chain(processed.thumbnail_path.iter()) {
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -513,15 +611,18 @@ fn cleanup_processed_outputs(processed: &crate::media::ProcessedMedia) {
     }
 }
 
+/// Formats a platform-sized upload limit for display in validation errors.
 fn format_upload_limit(max_bytes: usize) -> String {
     format_upload_limit_u64(u64::try_from(max_bytes).unwrap_or(u64::MAX))
 }
 
+/// Formats a 64-bit upload limit for display in validation errors.
 fn format_upload_limit_u64(max_bytes: u64) -> String {
     let display_bytes = i64::try_from(max_bytes).unwrap_or(i64::MAX);
     format_file_size(display_bytes)
 }
 
+/// Selects the configured byte limit for a media category.
 fn max_size_for_media(
     media_type: crate::models::MediaType,
     options: &SaveUploadOptions<'_>,
@@ -539,6 +640,7 @@ fn max_size_for_media(
     }
 }
 
+/// Returns the user-facing label for a media category.
 const fn media_label(media_type: crate::models::MediaType) -> &'static str {
     match media_type {
         crate::models::MediaType::Video => "video",
@@ -549,6 +651,11 @@ const fn media_label(media_type: crate::models::MediaType) -> &'static str {
     }
 }
 
+/// Validates that a supported image is structurally sound and decodable.
+///
+/// # Errors
+/// Returns an error if the file cannot be read, has invalid structure, exceeds
+/// the decoded pixel limit, or cannot be decoded as its declared format.
 fn validate_decodable_image(input_path: &Path, mime_type: &str) -> Result<()> {
     let Some(format) = mime_to_image_format(mime_type) else {
         return Ok(());
@@ -577,6 +684,11 @@ fn validate_decodable_image(input_path: &Path, mime_type: &str) -> Result<()> {
     Ok(())
 }
 
+/// Verifies the required PDF header and trailer markers.
+///
+/// # Errors
+/// Returns an error if the file cannot be read or lacks a valid header or EOF
+/// marker.
 fn validate_pdf_structure(input_path: &Path) -> Result<()> {
     use std::io::{Read as _, Seek as _, SeekFrom};
 
@@ -608,6 +720,10 @@ fn validate_pdf_structure(input_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Verifies a PNG signature and bounded chunk structure through `IEND`.
+///
+/// # Errors
+/// Returns an error for truncated, malformed, or dimensionless PNG data.
 fn validate_png_structure(data: &[u8]) -> Result<()> {
     const MALFORMED_PNG_ERROR: &str =
         "File appears to be image/png, but its image header is malformed or incomplete.";
@@ -628,7 +744,8 @@ fn validate_png_structure(data: &[u8]) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?
             .try_into()
             .map_err(|error| anyhow::anyhow!("{MALFORMED_PNG_ERROR}: {error}"))?;
-        let length = u32::from_be_bytes(length_bytes) as usize;
+        let length = usize::try_from(u32::from_be_bytes(length_bytes))
+            .context("PNG chunk length overflows usize")?;
         let chunk_type = data
             .get(offset + 4..offset + 8)
             .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
@@ -669,6 +786,7 @@ fn validate_png_structure(data: &[u8]) -> Result<()> {
     anyhow::bail!(MALFORMED_PNG_ERROR);
 }
 
+/// Maps a supported image MIME type to the image decoder format.
 fn mime_to_image_format(mime_type: &str) -> Option<image::ImageFormat> {
     match mime_type {
         "image/jpeg" => Some(image::ImageFormat::Jpeg),
@@ -681,7 +799,21 @@ fn mime_to_image_format(mime_type: &str) -> Option<image::ImageFormat> {
     }
 }
 
+/// Refines a sniffed audio/video MIME type using validated stream metadata.
+///
+/// # Errors
+/// Returns an error when required `ffprobe` validation fails or the detected
+/// stream kind conflicts with the container policy.
 fn refine_probe_mime(input_path: &Path, detected: &str, ffprobe_available: bool) -> Result<String> {
+    if detected == "video/webm" {
+        return Ok(refine_webm_mime(
+            input_path,
+            ffprobe_available,
+            || crate::media::ffmpeg::probe_stream_kind(input_path),
+            || crate::media::ffmpeg::probe_stream_kind_with_ffmpeg(input_path),
+        ));
+    }
+
     let media_type = crate::models::MediaType::from_mime(detected);
     let should_probe = matches!(
         media_type,
@@ -695,12 +827,6 @@ fn refine_probe_mime(input_path: &Path, detected: &str, ffprobe_available: bool)
         if is_matroska_mime(detected) {
             anyhow::bail!(
                 "File appears to be Matroska/MKV, but ffprobe is required to validate MKV uploads."
-            );
-        }
-        if detected == "video/webm" {
-            tracing::debug!(
-                path = %input_path.display(),
-                "ffprobe unavailable; treating WebM upload as video/webm"
             );
         }
         return Ok(detected.to_owned());
@@ -742,6 +868,48 @@ fn refine_probe_mime(input_path: &Path, detected: &str, ffprobe_available: bool)
     }
 }
 
+/// Refines `WebM` with `FFprobe`, falls back to `FFmpeg`, and selects a neutral
+/// download classification when neither configured tool establishes its kind.
+fn refine_webm_mime(
+    input_path: &Path,
+    ffprobe_available: bool,
+    ffprobe: impl FnOnce() -> Result<crate::media::ffmpeg::StreamKind>,
+    ffmpeg: impl FnOnce() -> Result<crate::media::ffmpeg::StreamKind>,
+) -> String {
+    if ffprobe_available {
+        match ffprobe() {
+            Ok(crate::media::ffmpeg::StreamKind::Video) => return "video/webm".to_owned(),
+            Ok(crate::media::ffmpeg::StreamKind::AudioOnly) => {
+                return "audio/webm".to_owned();
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %input_path.display(),
+                    error = %error,
+                    "ffprobe could not inspect WebM; trying bounded ffmpeg fallback"
+                );
+            }
+        }
+    }
+
+    match ffmpeg() {
+        Ok(crate::media::ffmpeg::StreamKind::Video) => "video/webm".to_owned(),
+        Ok(crate::media::ffmpeg::StreamKind::AudioOnly) => "audio/webm".to_owned(),
+        Err(error) => {
+            tracing::warn!(
+                path = %input_path.display(),
+                error = %error,
+                "WebM stream kind is ambiguous; storing as a neutral download"
+            );
+            AMBIGUOUS_WEBM_MIME.to_owned()
+        }
+    }
+}
+
+/// Resolves an audio MIME type from its probed codec and container.
+///
+/// # Errors
+/// Returns an error if `ffprobe` cannot identify the audio codec.
 fn canonical_audio_mime(input_path: &Path, detected: &str) -> Result<String> {
     let codec = crate::media::ffmpeg::probe_audio_codec(input_path).with_context(|| {
         format!("File appears to be {detected}, but ffprobe could not identify its audio codec")
@@ -770,6 +938,7 @@ fn canonical_audio_mime(input_path: &Path, detected: &str) -> Result<String> {
     Ok(canonical_audio_mime_variant(mime).to_owned())
 }
 
+/// Normalizes equivalent audio MIME spellings.
 fn canonical_audio_mime_variant(mime: &str) -> &str {
     match mime {
         "audio/mp3" => "audio/mpeg",
@@ -782,6 +951,7 @@ fn canonical_audio_mime_variant(mime: &str) -> &str {
     }
 }
 
+/// Normalizes equivalent video MIME spellings.
 fn canonical_video_mime(mime: &str) -> &str {
     match mime {
         "video/matroska" => "video/x-matroska",
@@ -789,10 +959,16 @@ fn canonical_video_mime(mime: &str) -> &str {
     }
 }
 
+/// Reports whether a MIME type denotes a Matroska video container.
 fn is_matroska_mime(mime: &str) -> bool {
     matches!(mime, "video/x-matroska" | "video/matroska")
 }
 
+/// Confirms that an audio/video MIME type matches the probed stream kind.
+///
+/// # Errors
+/// Returns an error if probing fails or the file contains an incompatible
+/// stream kind.
 fn validate_av_stream_kind(
     input_path: &Path,
     mime_type: &str,
@@ -822,12 +998,20 @@ fn validate_av_stream_kind(
     anyhow::bail!("File appears to be {mime_type}, but contains only audio streams.");
 }
 
+/// Reads and validates an ADTS AAC stream.
+///
+/// # Errors
+/// Returns an error if the file cannot be read or its ADTS framing is invalid.
 fn validate_adts_aac_structure(input_path: &Path) -> Result<()> {
     let data = std::fs::read(input_path)
         .with_context(|| format!("Failed to read {} for AAC validation", input_path.display()))?;
     validate_adts_aac_bytes(&data)
 }
 
+/// Validates that bytes contain one or more complete ADTS AAC frames.
+///
+/// # Errors
+/// Returns an error for malformed headers or incomplete frame sequences.
 fn validate_adts_aac_bytes(data: &[u8]) -> Result<()> {
     const MALFORMED_AAC_ERROR: &str =
         "File appears to be audio/aac, but its ADTS stream is malformed or incomplete.";
@@ -890,6 +1074,7 @@ fn validate_adts_aac_bytes(data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Best-effort applies EXIF orientation to a generated WebP thumbnail.
 fn apply_thumb_exif_orientation(thumb_path: &Path, orientation: u32) {
     if orientation <= 1 {
         return;
@@ -907,6 +1092,7 @@ fn apply_thumb_exif_orientation(thumb_path: &Path, orientation: u32) {
     }
 }
 
+/// Best-effort applies EXIF orientation to a processed image.
 fn apply_image_exif_orientation(image_path: &Path, orientation: u32) {
     if orientation <= 1 {
         return;
@@ -927,6 +1113,11 @@ fn apply_image_exif_orientation(image_path: &Path, orientation: u32) {
     }
 }
 
+/// Writes a transformed image to a temporary file and atomically replaces it.
+///
+/// # Errors
+/// Returns an error if the destination has no parent or if temporary-file
+/// creation, encoding, or persistence fails.
 fn write_image_atomic(
     output_path: &Path,
     image: &image::DynamicImage,
@@ -954,6 +1145,7 @@ fn write_image_atomic(
     Ok(())
 }
 
+/// Maps a canonical MIME type to its storage extension.
 fn mime_to_ext(mime: &str) -> &'static str {
     match mime {
         "image/jpeg" => "jpg",
@@ -983,30 +1175,33 @@ fn mime_to_ext(mime: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        delete_file_checked, save_audio_with_image_thumb_from_path, save_upload_from_path,
-        validate_adts_aac_bytes, SaveUploadOptions,
+        delete_file_checked, refine_webm_mime, save_audio_with_image_thumb_from_path,
+        save_upload_from_path, validate_adts_aac_bytes, SaveUploadOptions, AMBIGUOUS_WEBM_MIME,
     };
+    use anyhow::{Context as _, Result};
     use std::path::Path;
     use std::process::{Command, Stdio};
 
-    fn one_pixel_png() -> Vec<u8> {
+    /// Encodes a minimal valid PNG fixture.
+    fn one_pixel_png() -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         image::DynamicImage::new_rgba8(1, 1)
             .write_to(
                 &mut std::io::Cursor::new(&mut bytes),
                 image::ImageFormat::Png,
             )
-            .expect("encode png");
-        bytes
+            .context("encode one-pixel PNG fixture")?;
+        Ok(bytes)
     }
 
+    /// Creates restrictive default upload options rooted in a test directory.
     fn test_upload_options<'a>(
-        root: &'a std::path::Path,
+        root: &'a Path,
         original_filename: &'a str,
-    ) -> SaveUploadOptions<'a> {
-        SaveUploadOptions {
+    ) -> Result<SaveUploadOptions<'a>> {
+        Ok(SaveUploadOptions {
             original_filename,
-            boards_dir: root.to_str().expect("utf8 root"),
+            boards_dir: root.to_str().context("test root is not valid UTF-8")?,
             board_short: "test",
             thumb_size: 64,
             max_image_size: 1024 * 1024,
@@ -1017,19 +1212,21 @@ mod tests {
             ffprobe_available: false,
             ffmpeg_webp_available: false,
             allow_any_files: false,
-        }
+        })
     }
 
+    /// Creates upload options that permit arbitrary downloadable files.
     fn arbitrary_upload_options<'a>(
-        root: &'a std::path::Path,
+        root: &'a Path,
         original_filename: &'a str,
-    ) -> SaveUploadOptions<'a> {
-        SaveUploadOptions {
+    ) -> Result<SaveUploadOptions<'a>> {
+        Ok(SaveUploadOptions {
             allow_any_files: true,
-            ..test_upload_options(root, original_filename)
-        }
+            ..test_upload_options(root, original_filename)?
+        })
     }
 
+    /// Returns a minimal structurally valid PDF fixture.
     fn valid_pdf() -> &'static [u8] {
         b"%PDF-1.4
 1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
@@ -1044,104 +1241,125 @@ trailer << /Root 1 0 R >>
     }
 
     #[test]
-    fn final_processed_size_validation_removes_oversized_outputs() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    fn final_processed_size_validation_removes_oversized_outputs() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         let board_dir = tempdir.path().join("test");
         let thumb_dir = board_dir.join("thumbs");
-        std::fs::create_dir_all(&thumb_dir).expect("create dirs");
+        std::fs::create_dir_all(&thumb_dir)?;
         let file_path = board_dir.join("stored.png");
         let thumbnail_path = thumb_dir.join("stored.webp");
-        std::fs::write(&file_path, b"too large").expect("write output");
-        std::fs::write(&thumbnail_path, b"thumb").expect("write thumb");
+        std::fs::write(&file_path, b"too large")?;
+        std::fs::write(&thumbnail_path, b"thumb")?;
 
-        let mut options = test_upload_options(tempdir.path(), "stored.png");
+        let mut options = test_upload_options(tempdir.path(), "stored.png")?;
         options.max_image_size = 4;
         let processed = crate::media::ProcessedMedia {
             file_path: file_path.clone(),
-            thumbnail_path: thumbnail_path.clone(),
+            thumbnail_path: Some(thumbnail_path.clone()),
             mime_type: "image/png".to_owned(),
             was_converted: false,
             final_size: 9,
         };
 
         let error = super::final_processed_size_within_limit(&processed, &options)
-            .expect_err("oversized processed output should be rejected");
+            .err()
+            .context("oversized processed output was accepted")?;
 
-        assert!(error
-            .to_string()
-            .contains("Maximum image upload size is 4 B"));
-        assert!(!file_path.exists());
-        assert!(!thumbnail_path.exists());
+        anyhow::ensure!(
+            error
+                .to_string()
+                .contains("Maximum image upload size is 4 B"),
+            "oversize error omitted the configured image limit"
+        );
+        anyhow::ensure!(!file_path.exists(), "oversized original was not removed");
+        anyhow::ensure!(
+            !thumbnail_path.exists(),
+            "oversized upload thumbnail was not removed"
+        );
+        Ok(())
     }
 
     #[test]
-    fn pdf_size_limit_is_inclusive_for_original_payload() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    fn pdf_size_limit_is_inclusive_for_original_payload() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         let input_path = tempdir.path().join("exact.pdf");
         let pdf = valid_pdf();
-        std::fs::write(&input_path, pdf).expect("write pdf");
-        let mut options = test_upload_options(tempdir.path(), "exact.pdf");
+        std::fs::write(&input_path, pdf)?;
+        let mut options = test_upload_options(tempdir.path(), "exact.pdf")?;
         options.max_pdf_size = pdf.len();
 
-        let uploaded = save_upload_from_path(&input_path, sniff(pdf), pdf.len(), &options)
-            .expect("PDF exactly at limit should upload");
-        assert_eq!(uploaded.mime_type, "application/pdf");
+        let uploaded = save_upload_from_path(&input_path, sniff(pdf), pdf.len(), &options)?;
+        anyhow::ensure!(
+            uploaded.mime_type == "application/pdf",
+            "PDF at the exact size limit received the wrong MIME type"
+        );
 
         let over_path = tempdir.path().join("over.pdf");
         let mut over_pdf = pdf.to_vec();
         over_pdf.push(b'\n');
-        std::fs::write(&over_path, &over_pdf).expect("write over-limit pdf");
-        let Err(error) =
-            save_upload_from_path(&over_path, sniff(&over_pdf), over_pdf.len(), &options)
-        else {
-            panic!("PDF over limit should be rejected");
-        };
-        assert!(error.to_string().contains("Maximum PDF upload size is"));
+        std::fs::write(&over_path, &over_pdf)?;
+        let error = save_upload_from_path(&over_path, sniff(&over_pdf), over_pdf.len(), &options)
+            .err()
+            .context("PDF over its exact limit was accepted")?;
+        anyhow::ensure!(
+            error.to_string().contains("Maximum PDF upload size is"),
+            "oversize error omitted the configured PDF limit"
+        );
+        Ok(())
     }
 
+    /// Returns a minimal `WebM` header accepted by signature detection.
     fn valid_webm_header() -> &'static [u8] {
         b"\x1a\x45\xdf\xa3\x00\x00\x00\x00\x00\x00\x42\x82\x84webm\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
     }
 
+    /// Restricts fixture bytes to the upload sniffer window.
     fn sniff(bytes: &[u8]) -> &[u8] {
         bytes.get(..bytes.len().min(512)).unwrap_or(bytes)
     }
 
-    fn adts_aac_fixture(size: usize) -> Vec<u8> {
-        assert!(size >= 7);
-        assert!(size <= 0x1FFF);
+    /// Builds a complete single-frame ADTS AAC fixture of the requested size.
+    fn adts_aac_fixture(size: usize) -> Result<Vec<u8>> {
+        anyhow::ensure!(size >= 7, "ADTS fixture must fit its header");
+        anyhow::ensure!(size <= 0x1FFF, "ADTS frame length exceeds its field");
         let header = [
             0xFF,
             0xF1,
             0x50,
-            0x80 | u8::try_from((size >> 11) & 0x03).expect("frame length high bits"),
-            u8::try_from((size >> 3) & 0xFF).expect("frame length middle bits"),
-            u8::try_from((size & 0x07) << 5).expect("frame length low bits") | 0x1F,
+            0x80 | u8::try_from((size >> 11) & 0x03).context("frame length high bits")?,
+            u8::try_from((size >> 3) & 0xFF).context("frame length middle bits")?,
+            u8::try_from((size & 0x07) << 5).context("frame length low bits")? | 0x1F,
             0xFC,
         ];
         let mut bytes = Vec::with_capacity(size);
         bytes.extend_from_slice(&header);
         bytes.resize(size, 0);
         for (idx, byte) in bytes.iter_mut().enumerate().skip(7) {
-            *byte = u8::try_from(idx % 251).expect("payload byte");
+            *byte = u8::try_from(idx % 251).context("AAC fixture payload byte")?;
         }
-        bytes
+        Ok(bytes)
     }
 
     #[test]
-    fn adts_aac_validation_rejects_prefix_only_payload() {
+    fn adts_aac_validation_rejects_prefix_only_payload() -> Result<()> {
         let malformed = [0xFF, 0xF1, 0x50, 0x80, 0x93, 0xD6, 0x3D, 0x78, 0x77, 0x6A];
         let error = validate_adts_aac_bytes(&malformed)
-            .expect_err("random bytes with an AAC prefix should be rejected");
-        assert!(error.to_string().contains("ADTS stream is malformed"));
+            .err()
+            .context("random bytes with an AAC prefix were accepted")?;
+        anyhow::ensure!(
+            error.to_string().contains("ADTS stream is malformed"),
+            "malformed ADTS error omitted its structural cause"
+        );
+        Ok(())
     }
 
     #[test]
-    fn adts_aac_validation_accepts_complete_frame_sequence() {
-        let aac = adts_aac_fixture(128);
-        validate_adts_aac_bytes(&aac).expect("complete ADTS frame should validate");
+    fn adts_aac_validation_accepts_complete_frame_sequence() -> Result<()> {
+        let aac = adts_aac_fixture(128)?;
+        validate_adts_aac_bytes(&aac)
     }
 
+    /// Reports whether the configured `ffmpeg` executable can run.
     fn ffmpeg_available() -> bool {
         Command::new(&crate::config::CONFIG.ffmpeg_path)
             .arg("-version")
@@ -1151,6 +1369,7 @@ trailer << /Root 1 0 R >>
             .is_ok_and(|status| status.success())
     }
 
+    /// Reports whether the configured `ffprobe` executable can run.
     fn ffprobe_available() -> bool {
         Command::new(&crate::config::CONFIG.ffprobe_path)
             .arg("-version")
@@ -1160,6 +1379,7 @@ trailer << /Root 1 0 R >>
             .is_ok_and(|status| status.success())
     }
 
+    /// Asks `ffmpeg` to generate a fixture, returning none when unsupported.
     fn generate_ffmpeg_fixture(output: &Path, args: &[&str]) -> Option<Vec<u8>> {
         let mut command = Command::new(&crate::config::CONFIG.ffmpeg_path);
         command
@@ -1177,12 +1397,18 @@ trailer << /Root 1 0 R >>
         std::fs::read(output).ok()
     }
 
+    /// An audio container/codec fixture generated by `ffmpeg`.
+    #[derive(Debug)]
     struct AudioFixtureCase<'a> {
+        /// Filename used to select the generated container.
         file_name: &'a str,
+        /// Canonical MIME type expected after probing.
         expected_mime: &'a str,
+        /// `ffmpeg` arguments that synthesize the fixture.
         args: &'a [&'a str],
     }
 
+    /// Common audio formats expected to pass upload validation.
     const AUDIO_FIXTURE_CASES: &[AudioFixtureCase<'static>] = &[
         AudioFixtureCase {
             file_name: "tiny.flac",
@@ -1329,13 +1555,13 @@ trailer << /Root 1 0 R >>
         clippy::print_stderr,
         reason = "test skip diagnostics must remain visible when optional ffmpeg fixtures are unavailable"
     )]
-    fn valid_audio_uploads_accept_common_formats_with_ffprobe() {
+    fn valid_audio_uploads_accept_common_formats_with_ffprobe() -> Result<()> {
         if !ffmpeg_available() || !ffprobe_available() {
             eprintln!("skipping ffmpeg audio fixture test; ffmpeg/ffprobe unavailable");
-            return;
+            return Ok(());
         }
 
-        let tempdir = tempfile::tempdir().expect("tempdir");
+        let tempdir = tempfile::tempdir()?;
         let mut checked = 0usize;
         for case in AUDIO_FIXTURE_CASES {
             let input_path = tempdir.path().join(case.file_name);
@@ -1346,19 +1572,37 @@ trailer << /Root 1 0 R >>
                 );
                 continue;
             };
-            let mut options = test_upload_options(tempdir.path(), case.file_name);
+            let mut options = test_upload_options(tempdir.path(), case.file_name)?;
             options.ffprobe_available = true;
 
             let uploaded = save_upload_from_path(&input_path, sniff(&bytes), bytes.len(), &options)
-                .unwrap_or_else(|error| panic!("{} should upload: {error:#}", case.file_name));
+                .with_context(|| format!("{} should upload", case.file_name))?;
 
-            assert_eq!(uploaded.mime_type, case.expected_mime, "{}", case.file_name);
-            assert_eq!(uploaded.media_type, crate::models::MediaType::Audio);
-            assert!(tempdir.path().join(&uploaded.file_path).exists());
+            anyhow::ensure!(
+                uploaded.mime_type == case.expected_mime,
+                "{} received MIME {}; expected {}",
+                case.file_name,
+                uploaded.mime_type,
+                case.expected_mime
+            );
+            anyhow::ensure!(
+                uploaded.media_type == crate::models::MediaType::Audio,
+                "{} was not categorized as audio",
+                case.file_name
+            );
+            anyhow::ensure!(
+                tempdir.path().join(&uploaded.file_path).exists(),
+                "{} was not persisted",
+                case.file_name
+            );
             checked = checked.saturating_add(1);
         }
 
-        assert!(checked >= 8, "expected most audio fixtures to be generated");
+        anyhow::ensure!(
+            checked >= 8,
+            "expected most audio fixtures to be generated; only generated {checked}"
+        );
+        Ok(())
     }
 
     #[test]
@@ -1366,13 +1610,13 @@ trailer << /Root 1 0 R >>
         clippy::print_stderr,
         reason = "test skip diagnostics must remain visible when optional ffmpeg fixtures are unavailable"
     )]
-    fn valid_mkv_uploads_save_as_video_with_probe() {
+    fn valid_mkv_uploads_save_as_video_with_probe() -> Result<()> {
         if !ffmpeg_available() || !ffprobe_available() {
             eprintln!("skipping MKV fixture test; ffmpeg/ffprobe unavailable");
-            return;
+            return Ok(());
         }
 
-        let tempdir = tempfile::tempdir().expect("tempdir");
+        let tempdir = tempfile::tempdir()?;
         let input_path = tempdir.path().join("tiny.mkv");
         let bytes = generate_ffmpeg_fixture(
             &input_path,
@@ -1388,293 +1632,509 @@ trailer << /Root 1 0 R >>
                 "matroska",
             ],
         )
-        .expect("generate mkv fixture");
-        let mut options = test_upload_options(tempdir.path(), "browser-octet-stream.bin");
+        .context("generate MKV fixture")?;
+        let mut options = test_upload_options(tempdir.path(), "browser-octet-stream.bin")?;
         options.ffprobe_available = true;
 
-        let uploaded = save_upload_from_path(&input_path, sniff(&bytes), bytes.len(), &options)
-            .expect("valid MKV upload should save");
+        let uploaded = save_upload_from_path(&input_path, sniff(&bytes), bytes.len(), &options)?;
 
-        assert_eq!(uploaded.mime_type, "video/x-matroska");
-        assert_eq!(uploaded.media_type, crate::models::MediaType::Video);
-        assert!(std::path::Path::new(&uploaded.file_path)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("mkv")));
-        assert!(tempdir.path().join(&uploaded.file_path).exists());
-        assert!(tempdir.path().join(&uploaded.thumb_path).exists());
+        anyhow::ensure!(
+            uploaded.mime_type == "video/x-matroska",
+            "valid MKV upload received the wrong MIME type"
+        );
+        anyhow::ensure!(
+            uploaded.media_type == crate::models::MediaType::Video,
+            "valid MKV upload was not categorized as video"
+        );
+        anyhow::ensure!(
+            Path::new(&uploaded.file_path)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("mkv")),
+            "valid MKV upload did not receive an MKV extension"
+        );
+        anyhow::ensure!(
+            tempdir.path().join(&uploaded.file_path).exists(),
+            "valid MKV upload was not persisted"
+        );
+        anyhow::ensure!(
+            tempdir.path().join(&uploaded.thumb_path).exists(),
+            "valid MKV thumbnail was not persisted"
+        );
+        Ok(())
     }
 
     #[test]
-    fn fake_mkv_is_rejected_without_outputs() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    fn fake_mkv_is_rejected_without_outputs() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         let input_path = tempdir.path().join("fake.mkv");
         let fake_mkv = b"\x1a\x45\xdf\xa3\xa3\x42\x86\x81\x01\x42\xf7\x81\x01\x42\xf2\x81\x04\x42\xf3\x81\x08\x42\x82\x88matroska\x42\x87\x81\x04not real media";
-        std::fs::write(&input_path, fake_mkv).expect("write fake mkv");
-        let mut options = test_upload_options(tempdir.path(), "fake.mkv");
+        std::fs::write(&input_path, fake_mkv)?;
+        let mut options = test_upload_options(tempdir.path(), "fake.mkv")?;
         options.ffprobe_available = true;
 
-        let Err(error) =
-            save_upload_from_path(&input_path, sniff(fake_mkv), fake_mkv.len(), &options)
-        else {
-            panic!("fake MKV should be rejected");
-        };
+        let error = save_upload_from_path(&input_path, sniff(fake_mkv), fake_mkv.len(), &options)
+            .err()
+            .context("fake MKV was accepted")?;
 
-        assert!(error
-            .to_string()
-            .contains("ffprobe could not validate its streams"));
-        assert!(!tempdir.path().join("test").exists());
+        anyhow::ensure!(
+            error
+                .to_string()
+                .contains("ffprobe could not validate its streams"),
+            "fake MKV error omitted the failed stream validation"
+        );
+        anyhow::ensure!(
+            !tempdir.path().join("test").exists(),
+            "fake MKV created output directories"
+        );
+        Ok(())
     }
 
     #[test]
-    fn delete_file_checked_removes_valid_in_tree_file() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    fn delete_file_checked_removes_valid_in_tree_file() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         let upload_root = tempdir.path().join("uploads");
         let board_dir = upload_root.join("test");
-        std::fs::create_dir_all(&board_dir).expect("create board dir");
-        std::fs::write(board_dir.join("file.txt"), b"ok").expect("write file");
+        std::fs::create_dir_all(&board_dir)?;
+        std::fs::write(board_dir.join("file.txt"), b"ok")?;
 
         delete_file_checked(
-            upload_root.to_str().expect("utf8 upload root"),
+            upload_root
+                .to_str()
+                .context("upload root is not valid UTF-8")?,
             "test/file.txt",
-        )
-        .expect("delete file");
+        )?;
 
-        assert!(!board_dir.join("file.txt").exists());
+        anyhow::ensure!(
+            !board_dir.join("file.txt").exists(),
+            "checked deletion left the in-tree file behind"
+        );
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn delete_file_checked_rejects_symlink_parent_escape() {
+    fn delete_file_checked_rejects_symlink_parent_escape() -> Result<()> {
         use std::os::unix::fs as unix_fs;
 
-        let tempdir = tempfile::tempdir().expect("tempdir");
+        let tempdir = tempfile::tempdir()?;
         let upload_root = tempdir.path().join("uploads");
         let board_dir = upload_root.join("test");
         let outside = tempdir.path().join("outside");
-        std::fs::create_dir_all(&board_dir).expect("create board dir");
-        std::fs::create_dir_all(&outside).expect("create outside dir");
+        std::fs::create_dir_all(&board_dir)?;
+        std::fs::create_dir_all(&outside)?;
         let outside_file = outside.join("secret.txt");
-        std::fs::write(&outside_file, b"secret").expect("write outside file");
-        unix_fs::symlink(&outside, board_dir.join("link")).expect("symlink");
+        std::fs::write(&outside_file, b"secret")?;
+        unix_fs::symlink(&outside, board_dir.join("link"))?;
 
-        assert!(delete_file_checked(
-            upload_root.to_str().expect("utf8 upload root"),
-            "test/link/secret.txt",
-        )
-        .is_err());
-        assert!(outside_file.exists());
+        anyhow::ensure!(
+            delete_file_checked(
+                upload_root
+                    .to_str()
+                    .context("upload root is not valid UTF-8")?,
+                "test/link/secret.txt",
+            )
+            .is_err(),
+            "checked deletion followed a symlinked parent"
+        );
+        anyhow::ensure!(
+            outside_file.exists(),
+            "checked deletion removed an out-of-tree file"
+        );
+        Ok(())
     }
 
     #[test]
-    fn webm_classification_skips_ffprobe_when_startup_marked_it_unavailable() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    fn webm_classification_skips_ffprobe_when_startup_marked_it_unavailable() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         let input = tempfile::Builder::new()
             .suffix(".webm")
-            .tempfile_in(tempdir.path())
-            .expect("temp file");
+            .tempfile_in(tempdir.path())?;
         let webm = valid_webm_header();
-        std::fs::write(input.path(), webm).expect("write webm");
+        std::fs::write(input.path(), webm)?;
 
-        let mime = super::classify_upload_mime(input.path(), webm, false, false)
-            .expect("classify webm without ffprobe");
+        let mime = super::classify_upload_mime(input.path(), webm, false, false)?;
 
-        assert_eq!(mime, "video/webm");
+        anyhow::ensure!(
+            mime == AMBIGUOUS_WEBM_MIME,
+            "uninspectable WebM should use the neutral classification"
+        );
+        Ok(())
     }
 
     #[test]
-    fn combo_flac_audio_is_saved_losslessly_without_pending_processing() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    fn uninspectable_webm_is_persisted_as_neutral_download() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let input = tempdir.path().join("ambiguous.webm");
+        let webm = valid_webm_header();
+        std::fs::write(&input, webm)?;
+        let options = test_upload_options(tempdir.path(), "ambiguous.webm")?;
+
+        let uploaded = save_upload_from_path(&input, webm, webm.len(), &options)?;
+
+        anyhow::ensure!(uploaded.mime_type == "application/octet-stream");
+        anyhow::ensure!(uploaded.media_type == crate::models::MediaType::Other);
+        anyhow::ensure!(
+            Path::new(&uploaded.file_path).extension() == Some(std::ffi::OsStr::new("bin"))
+        );
+        anyhow::ensure!(!uploaded.processing_pending);
+        Ok(())
+    }
+
+    #[test]
+    fn missing_ffprobe_uses_ffmpeg_stream_kind_for_webm() {
+        let input = Path::new("fixture.webm");
+        let missing_probe = || anyhow::bail!("ffprobe executable is missing");
+
+        let audio = refine_webm_mime(input, false, missing_probe, || {
+            Ok(crate::media::ffmpeg::StreamKind::AudioOnly)
+        });
+        let video = refine_webm_mime(
+            input,
+            false,
+            || anyhow::bail!("ffprobe executable is missing"),
+            || Ok(crate::media::ffmpeg::StreamKind::Video),
+        );
+
+        assert_eq!(audio, "audio/webm");
+        assert_eq!(video, "video/webm");
+    }
+
+    #[test]
+    fn failing_ffprobe_never_defaults_webm_to_video() {
+        let input = Path::new("fixture.webm");
+        let audio = refine_webm_mime(
+            input,
+            true,
+            || anyhow::bail!("ffprobe exited with status 1"),
+            || Ok(crate::media::ffmpeg::StreamKind::AudioOnly),
+        );
+        let ambiguous = refine_webm_mime(
+            input,
+            true,
+            || anyhow::bail!("ffprobe exited with status 1"),
+            || anyhow::bail!("ffmpeg stream fallback also failed"),
+        );
+
+        assert_eq!(audio, "audio/webm");
+        assert_eq!(ambiguous, AMBIGUOUS_WEBM_MIME);
+    }
+
+    #[test]
+    #[expect(
+        clippy::print_stderr,
+        reason = "test skip diagnostics must remain visible when optional ffmpeg fixtures are unavailable"
+    )]
+    fn ffmpeg_fallback_distinguishes_audio_only_and_av_webm() -> Result<()> {
+        if !ffmpeg_available() {
+            eprintln!("skipping WebM fallback fixtures; ffmpeg unavailable");
+            return Ok(());
+        }
+        let tempdir = tempfile::tempdir()?;
+        let audio_path = tempdir.path().join("audio.webm");
+        let audio = generate_ffmpeg_fixture(
+            &audio_path,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.05",
+                "-c:a",
+                "libopus",
+                "-f",
+                "webm",
+            ],
+        )
+        .context("generate audio-only WebM")?;
+        let video_path = tempdir.path().join("av.webm");
+        let av = generate_ffmpeg_fixture(
+            &video_path,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=16x16:d=0.1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.1",
+                "-c:v",
+                "libvpx-vp9",
+                "-c:a",
+                "libopus",
+                "-shortest",
+                "-f",
+                "webm",
+            ],
+        )
+        .context("generate A/V WebM")?;
+
+        let audio_mime = super::classify_upload_mime(&audio_path, sniff(&audio), false, false)?;
+        let video_mime = super::classify_upload_mime(&video_path, sniff(&av), false, false)?;
+
+        anyhow::ensure!(audio_mime == "audio/webm");
+        anyhow::ensure!(video_mime == "video/webm");
+        Ok(())
+    }
+
+    #[test]
+    fn combo_flac_audio_is_saved_losslessly_without_pending_processing() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         let board_dir = tempdir.path().join("test");
-        std::fs::create_dir_all(&board_dir).expect("create board dir");
+        std::fs::create_dir_all(&board_dir)?;
 
         let input = tempfile::Builder::new()
             .suffix(".flac")
-            .tempfile_in(tempdir.path())
-            .expect("temp file");
+            .tempfile_in(tempdir.path())?;
         let flac_bytes = b"fLaC\x00\x00\x00\x22test flac bytes";
-        std::fs::write(input.path(), flac_bytes).expect("write flac");
+        std::fs::write(input.path(), flac_bytes)?;
 
         let uploaded = save_audio_with_image_thumb_from_path(
             input.path(),
             flac_bytes,
             flac_bytes.len(),
             "track.flac",
-            tempdir.path().to_str().expect("utf8 path"),
+            tempdir
+                .path()
+                .to_str()
+                .context("test root is not valid UTF-8")?,
             "test",
             1024 * 1024,
             false,
-        )
-        .expect("save flac");
+        )?;
 
-        assert_eq!(uploaded.mime_type, "audio/flac");
-        assert_eq!(uploaded.file_path.split('.').next_back(), Some("flac"));
-        assert!(!uploaded.processing_pending);
+        anyhow::ensure!(
+            uploaded.mime_type == "audio/flac",
+            "FLAC combo upload received the wrong MIME type"
+        );
+        anyhow::ensure!(
+            uploaded.file_path.split('.').next_back() == Some("flac"),
+            "FLAC combo upload received the wrong extension"
+        );
+        anyhow::ensure!(
+            !uploaded.processing_pending,
+            "FLAC combo upload unexpectedly remained pending"
+        );
 
-        let stored_bytes =
-            std::fs::read(tempdir.path().join(&uploaded.file_path)).expect("read stored flac");
-        assert_eq!(stored_bytes, flac_bytes);
+        let stored_bytes = std::fs::read(tempdir.path().join(&uploaded.file_path))?;
+        anyhow::ensure!(
+            stored_bytes == flac_bytes,
+            "FLAC combo upload was not persisted losslessly"
+        );
+        Ok(())
     }
 
     #[test]
-    fn malformed_png_magic_is_rejected_before_storage() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    fn malformed_png_magic_is_rejected_before_storage() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         let input = tempfile::Builder::new()
             .suffix(".png")
-            .tempfile_in(tempdir.path())
-            .expect("temp file");
+            .tempfile_in(tempdir.path())?;
         let malformed = b"\x89PNG\r\n\x1a\nthis is not a complete png";
-        std::fs::write(input.path(), malformed).expect("write malformed png");
+        std::fs::write(input.path(), malformed)?;
 
-        let Err(error) = save_upload_from_path(
+        let error = save_upload_from_path(
             input.path(),
             malformed,
             malformed.len(),
-            &test_upload_options(tempdir.path(), "broken.png"),
-        ) else {
-            panic!("malformed png should be rejected");
-        };
+            &test_upload_options(tempdir.path(), "broken.png")?,
+        )
+        .err()
+        .context("malformed PNG was accepted")?;
 
-        assert!(error.to_string().contains("image header is malformed"));
-        assert!(!tempdir.path().join("test").exists());
+        anyhow::ensure!(
+            error.to_string().contains("image header is malformed"),
+            "malformed PNG error omitted its structural cause"
+        );
+        anyhow::ensure!(
+            !tempdir.path().join("test").exists(),
+            "malformed PNG created output directories"
+        );
+        Ok(())
     }
 
     #[test]
-    fn malformed_png_without_tempfile_suffix_is_rejected_before_storage() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let input = tempfile::Builder::new()
-            .tempfile_in(tempdir.path())
-            .expect("temp file");
+    fn malformed_png_without_tempfile_suffix_is_rejected_before_storage() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let input = tempfile::Builder::new().tempfile_in(tempdir.path())?;
         let malformed = b"\x89PNG\r\n\x1a\nthis is not a complete png";
-        std::fs::write(input.path(), malformed).expect("write malformed png");
+        std::fs::write(input.path(), malformed)?;
 
-        let Err(error) = save_upload_from_path(
+        let error = save_upload_from_path(
             input.path(),
             malformed,
             malformed.len(),
-            &test_upload_options(tempdir.path(), "broken.png"),
-        ) else {
-            panic!("malformed png should be rejected");
-        };
+            &test_upload_options(tempdir.path(), "broken.png")?,
+        )
+        .err()
+        .context("malformed suffixless PNG was accepted")?;
 
-        assert!(error.to_string().contains("image header is malformed"));
-        assert!(!tempdir.path().join("test").exists());
+        anyhow::ensure!(
+            error.to_string().contains("image header is malformed"),
+            "suffixless malformed PNG error omitted its structural cause"
+        );
+        anyhow::ensure!(
+            !tempdir.path().join("test").exists(),
+            "suffixless malformed PNG created output directories"
+        );
+        Ok(())
     }
 
     #[test]
-    fn arbitrary_file_upload_is_saved_when_opted_in() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    fn arbitrary_file_upload_is_saved_when_opted_in() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         let input = tempfile::Builder::new()
             .suffix(".txt")
-            .tempfile_in(tempdir.path())
-            .expect("temp file");
+            .tempfile_in(tempdir.path())?;
         let contents = b"plain text attachment\n";
-        std::fs::write(input.path(), contents).expect("write text");
+        std::fs::write(input.path(), contents)?;
 
         let uploaded = save_upload_from_path(
             input.path(),
             contents,
             contents.len(),
-            &arbitrary_upload_options(tempdir.path(), "notes.txt"),
-        )
-        .expect("save text upload");
+            &arbitrary_upload_options(tempdir.path(), "notes.txt")?,
+        )?;
 
-        assert_eq!(uploaded.mime_type, "application/octet-stream");
-        assert_eq!(uploaded.media_type, crate::models::MediaType::Other);
-        assert!(std::path::Path::new(&uploaded.file_path)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("bin")));
+        anyhow::ensure!(
+            uploaded.mime_type == "application/octet-stream",
+            "arbitrary upload received an unsafe inline MIME type"
+        );
+        anyhow::ensure!(
+            uploaded.media_type == crate::models::MediaType::Other,
+            "arbitrary upload was not categorized as other"
+        );
+        anyhow::ensure!(
+            Path::new(&uploaded.file_path)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("bin")),
+            "arbitrary upload did not receive a neutral extension"
+        );
 
-        let stored =
-            std::fs::read(tempdir.path().join(&uploaded.file_path)).expect("read stored upload");
-        assert_eq!(stored, contents);
+        let stored = std::fs::read(tempdir.path().join(&uploaded.file_path))?;
+        anyhow::ensure!(
+            stored == contents,
+            "arbitrary upload bytes changed during persistence"
+        );
+        Ok(())
     }
 
     #[test]
-    fn arbitrary_upload_uses_bin_extension_even_with_inline_media_names() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    fn arbitrary_upload_uses_bin_extension_even_with_inline_media_names() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         for original_name in ["renamed.pdf", "renamed.png"] {
-            let input = tempfile::Builder::new()
-                .tempfile_in(tempdir.path())
-                .expect("temp file");
+            let input = tempfile::Builder::new().tempfile_in(tempdir.path())?;
             let contents = b"arbitrary non-media bytes";
-            std::fs::write(input.path(), contents).expect("write arbitrary upload");
+            std::fs::write(input.path(), contents)?;
 
             let uploaded = save_upload_from_path(
                 input.path(),
                 contents,
                 contents.len(),
-                &arbitrary_upload_options(tempdir.path(), original_name),
-            )
-            .expect("save arbitrary upload");
+                &arbitrary_upload_options(tempdir.path(), original_name)?,
+            )?;
 
-            assert_eq!(uploaded.mime_type, "application/octet-stream");
-            assert_eq!(uploaded.media_type, crate::models::MediaType::Other);
-            assert!(std::path::Path::new(&uploaded.file_path)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("bin")));
+            anyhow::ensure!(
+                uploaded.mime_type == "application/octet-stream",
+                "{original_name} received an unsafe inline MIME type"
+            );
+            anyhow::ensure!(
+                uploaded.media_type == crate::models::MediaType::Other,
+                "{original_name} was not categorized as other"
+            );
+            anyhow::ensure!(
+                Path::new(&uploaded.file_path)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("bin")),
+                "{original_name} did not receive a neutral extension"
+            );
         }
+        Ok(())
     }
 
     #[test]
-    fn video_upload_saves_with_svg_placeholder_when_ffmpeg_is_missing() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    fn video_upload_saves_with_svg_placeholder_when_ffmpeg_is_missing() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         let input = tempfile::Builder::new()
-            .suffix(".webm")
-            .tempfile_in(tempdir.path())
-            .expect("temp file");
-        let webm = valid_webm_header();
-        std::fs::write(input.path(), webm).expect("write webm");
+            .suffix(".mp4")
+            .tempfile_in(tempdir.path())?;
+        let mp4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2mp41";
+        std::fs::write(input.path(), mp4)?;
 
         let uploaded = save_upload_from_path(
             input.path(),
-            webm,
-            webm.len(),
-            &test_upload_options(tempdir.path(), "clip.webm"),
-        )
-        .expect("video upload should save with fallback thumbnail");
+            mp4,
+            mp4.len(),
+            &test_upload_options(tempdir.path(), "clip.mp4")?,
+        )?;
 
-        assert_eq!(uploaded.mime_type, "video/webm");
-        assert_eq!(uploaded.media_type, crate::models::MediaType::Video);
-        assert!(tempdir.path().join(&uploaded.file_path).exists());
-        assert!(std::path::Path::new(&uploaded.thumb_path)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")));
-        assert!(tempdir.path().join(&uploaded.thumb_path).exists());
+        anyhow::ensure!(
+            uploaded.mime_type == "video/mp4",
+            "MP4 upload received the wrong MIME type"
+        );
+        anyhow::ensure!(
+            uploaded.media_type == crate::models::MediaType::Video,
+            "MP4 upload was not categorized as video"
+        );
+        anyhow::ensure!(
+            tempdir.path().join(&uploaded.file_path).exists(),
+            "MP4 upload was not persisted"
+        );
+        anyhow::ensure!(
+            Path::new(&uploaded.thumb_path)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")),
+            "MP4 fallback thumbnail did not use SVG"
+        );
+        anyhow::ensure!(
+            tempdir.path().join(&uploaded.thumb_path).exists(),
+            "MP4 fallback thumbnail was not persisted"
+        );
+        Ok(())
     }
 
     #[test]
-    fn decodable_png_upload_still_saves_and_thumbnails() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    fn decodable_png_upload_still_saves_and_thumbnails() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         let input = tempfile::Builder::new()
             .suffix(".png")
-            .tempfile_in(tempdir.path())
-            .expect("temp file");
-        let png = one_pixel_png();
-        std::fs::write(input.path(), &png).expect("write png");
+            .tempfile_in(tempdir.path())?;
+        let png = one_pixel_png()?;
+        std::fs::write(input.path(), &png)?;
 
         let uploaded = save_upload_from_path(
             input.path(),
             &png,
             png.len(),
-            &test_upload_options(tempdir.path(), "renamed.txt"),
-        )
-        .expect("valid png saves");
+            &test_upload_options(tempdir.path(), "renamed.txt")?,
+        )?;
 
-        assert_eq!(uploaded.mime_type, "image/png");
-        assert_eq!(uploaded.original_name, "renamed.txt");
-        assert!(tempdir.path().join(&uploaded.file_path).exists());
-        assert!(tempdir.path().join(&uploaded.thumb_path).exists());
+        anyhow::ensure!(
+            uploaded.mime_type == "image/png",
+            "decodable PNG received the wrong MIME type"
+        );
+        anyhow::ensure!(
+            uploaded.original_name == "renamed.txt",
+            "original client filename was not preserved"
+        );
+        anyhow::ensure!(
+            tempdir.path().join(&uploaded.file_path).exists(),
+            "decodable PNG was not persisted"
+        );
+        anyhow::ensure!(
+            tempdir.path().join(&uploaded.thumb_path).exists(),
+            "decodable PNG thumbnail was not persisted"
+        );
+        Ok(())
     }
 
     #[test]
-    fn valid_pdf_upload_saves_generic_thumbnail_when_renderer_is_unavailable() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    fn valid_pdf_upload_saves_generic_thumbnail_when_renderer_is_unavailable() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         let input = tempfile::Builder::new()
             .suffix(".pdf")
-            .tempfile_in(tempdir.path())
-            .expect("temp file");
+            .tempfile_in(tempdir.path())?;
         let pdf = valid_pdf();
-        std::fs::write(input.path(), pdf).expect("write pdf");
+        std::fs::write(input.path(), pdf)?;
         let _override = crate::media::thumbnail::override_pdf_renderer_mode(
             crate::media::thumbnail::TestPdfRendererMode::Unavailable,
         );
@@ -1683,34 +2143,53 @@ trailer << /Root 1 0 R >>
             input.path(),
             pdf,
             pdf.len(),
-            &test_upload_options(tempdir.path(), "doc.pdf"),
-        )
-        .expect("valid PDF saves");
+            &test_upload_options(tempdir.path(), "doc.pdf")?,
+        )?;
 
-        assert_eq!(uploaded.mime_type, "application/pdf");
-        assert_eq!(uploaded.media_type, crate::models::MediaType::Pdf);
-        assert!(std::path::Path::new(&uploaded.file_path)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")));
-        assert!(std::path::Path::new(&uploaded.thumb_path)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")));
-        assert!(tempdir.path().join(&uploaded.file_path).exists());
-        assert!(tempdir.path().join(&uploaded.thumb_path).exists());
-        let thumb = std::fs::read_to_string(tempdir.path().join(&uploaded.thumb_path))
-            .expect("read generic pdf thumbnail");
-        assert!(thumb.contains("PDF"));
+        anyhow::ensure!(
+            uploaded.mime_type == "application/pdf",
+            "valid PDF received the wrong MIME type"
+        );
+        anyhow::ensure!(
+            uploaded.media_type == crate::models::MediaType::Pdf,
+            "valid PDF was not categorized as PDF"
+        );
+        anyhow::ensure!(
+            Path::new(&uploaded.file_path)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")),
+            "valid PDF did not receive a PDF extension"
+        );
+        anyhow::ensure!(
+            Path::new(&uploaded.thumb_path)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")),
+            "generic PDF thumbnail did not use SVG"
+        );
+        anyhow::ensure!(
+            tempdir.path().join(&uploaded.file_path).exists(),
+            "valid PDF was not persisted"
+        );
+        anyhow::ensure!(
+            tempdir.path().join(&uploaded.thumb_path).exists(),
+            "generic PDF thumbnail was not persisted"
+        );
+        let thumb = std::fs::read_to_string(tempdir.path().join(&uploaded.thumb_path))?;
+        anyhow::ensure!(
+            thumb.contains("PDF"),
+            "generic PDF thumbnail omitted its media label"
+        );
+        Ok(())
     }
 
     #[test]
-    fn pdf_thumbnail_renderer_failure_keeps_pdf_and_uses_generic_thumbnail() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    fn pdf_thumbnail_renderer_failure_keeps_pdf_and_uses_generic_thumbnail() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         let input = tempfile::Builder::new()
             .suffix(".pdf")
-            .tempfile_in(tempdir.path())
-            .expect("temp file");
+            .tempfile_in(tempdir.path())?;
         let pdf = valid_pdf();
-        std::fs::write(input.path(), pdf).expect("write pdf");
+        std::fs::write(input.path(), pdf)?;
         let _override = crate::media::thumbnail::override_pdf_renderer_mode(
             crate::media::thumbnail::TestPdfRendererMode::Fail,
         );
@@ -1719,26 +2198,34 @@ trailer << /Root 1 0 R >>
             input.path(),
             pdf,
             pdf.len(),
-            &test_upload_options(tempdir.path(), "broken.pdf"),
-        )
-        .expect("save pdf with fallback thumbnail");
+            &test_upload_options(tempdir.path(), "broken.pdf")?,
+        )?;
 
-        assert!(tempdir.path().join(&uploaded.file_path).exists());
-        assert!(tempdir.path().join(&uploaded.thumb_path).exists());
-        assert!(std::path::Path::new(&uploaded.thumb_path)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")));
+        anyhow::ensure!(
+            tempdir.path().join(&uploaded.file_path).exists(),
+            "renderer failure removed the persisted PDF"
+        );
+        anyhow::ensure!(
+            tempdir.path().join(&uploaded.thumb_path).exists(),
+            "renderer failure did not persist a fallback thumbnail"
+        );
+        anyhow::ensure!(
+            Path::new(&uploaded.thumb_path)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")),
+            "renderer failure fallback did not use SVG"
+        );
+        Ok(())
     }
 
     #[test]
-    fn pdf_thumbnail_timeout_cleans_tempdirs_and_partial_files() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    fn pdf_thumbnail_timeout_cleans_tempdirs_and_partial_files() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         let input = tempfile::Builder::new()
             .suffix(".pdf")
-            .tempfile_in(tempdir.path())
-            .expect("temp file");
+            .tempfile_in(tempdir.path())?;
         let pdf = valid_pdf();
-        std::fs::write(input.path(), pdf).expect("write pdf");
+        std::fs::write(input.path(), pdf)?;
         let _override = crate::media::thumbnail::override_pdf_renderer_mode(
             crate::media::thumbnail::TestPdfRendererMode::Timeout,
         );
@@ -1747,46 +2234,60 @@ trailer << /Root 1 0 R >>
             input.path(),
             pdf,
             pdf.len(),
-            &test_upload_options(tempdir.path(), "slow.pdf"),
-        )
-        .expect("save pdf after thumbnail timeout");
+            &test_upload_options(tempdir.path(), "slow.pdf")?,
+        )?;
 
         let board_dir = tempdir.path().join("test");
         let thumb_path = tempdir.path().join(&uploaded.thumb_path);
-        assert!(tempdir.path().join(&uploaded.file_path).exists());
-        assert!(thumb_path.exists());
-        assert!(thumb_path.extension().is_some_and(|ext| ext == "svg"));
+        anyhow::ensure!(
+            tempdir.path().join(&uploaded.file_path).exists(),
+            "thumbnail timeout removed the persisted PDF"
+        );
+        anyhow::ensure!(
+            thumb_path.exists(),
+            "thumbnail timeout did not persist a fallback thumbnail"
+        );
+        anyhow::ensure!(
+            thumb_path.extension().is_some_and(|ext| ext == "svg"),
+            "thumbnail timeout fallback did not use SVG"
+        );
 
-        let stray_entries = std::fs::read_dir(board_dir.join("thumbs"))
-            .expect("read thumbs dir")
+        let stray_entries = std::fs::read_dir(board_dir.join("thumbs"))?
             .collect::<std::io::Result<Vec<_>>>()
-            .expect("collect thumbs entries");
-        assert!(stray_entries.iter().all(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            !name.starts_with("rustchan-pdf-thumb-")
-        }));
+            .context("read PDF thumbnail directory")?;
+        anyhow::ensure!(
+            stray_entries.iter().all(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                !name.starts_with("rustchan-pdf-thumb-")
+            }),
+            "thumbnail timeout left a temporary renderer artifact"
+        );
+        Ok(())
     }
 
     #[test]
-    fn pdf_without_eof_marker_is_rejected_before_storage() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    fn pdf_without_eof_marker_is_rejected_before_storage() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
         let input = tempfile::Builder::new()
             .suffix(".pdf")
-            .tempfile_in(tempdir.path())
-            .expect("temp file");
+            .tempfile_in(tempdir.path())?;
         let malformed_pdf = b"%PDF-1.4\n1 0 obj <<>> endobj\ntrailer <<>>\n";
-        std::fs::write(input.path(), malformed_pdf).expect("write malformed pdf");
+        std::fs::write(input.path(), malformed_pdf)?;
 
-        let Err(error) = save_upload_from_path(
+        let error = save_upload_from_path(
             input.path(),
             malformed_pdf,
             malformed_pdf.len(),
-            &test_upload_options(tempdir.path(), "broken.pdf"),
-        ) else {
-            panic!("missing EOF marker should be rejected");
-        };
+            &test_upload_options(tempdir.path(), "broken.pdf")?,
+        )
+        .err()
+        .context("PDF without EOF marker was accepted")?;
 
-        assert!(error.to_string().contains("trailer is missing"));
+        anyhow::ensure!(
+            error.to_string().contains("trailer is missing"),
+            "malformed PDF error omitted its missing trailer"
+        );
+        Ok(())
     }
 }

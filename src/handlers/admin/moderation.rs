@@ -19,15 +19,21 @@ use serde::Deserialize;
 // ─── POST /admin/ban/add ──────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct AddBanForm {
+/// Form fields accepted by the add ban request.
+pub(crate) struct AddBanForm {
+    /// The IP hash.
     ip_hash: String,
+    /// The reason.
     reason: String,
+    /// The optional duration hours.
     duration_hours: Option<i64>,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-pub async fn add_ban(
+/// Handles the add ban request.
+pub(crate) async fn add_ban(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -61,7 +67,7 @@ pub async fn add_ban(
                 "ban",
                 None,
                 "",
-                &format!("ip_hash={}… reason={}", &ip_hash_log, form.reason),
+                &format!("ip_hash={}… reason={}", ip_hash_log, form.reason),
             ) {
                 tracing::error!(
                     target: "admin",
@@ -84,13 +90,17 @@ pub async fn add_ban(
 // ─── POST /admin/ban/remove ───────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct BanIdForm {
+/// Form fields accepted by the ban ID request.
+pub(crate) struct BanIdForm {
+    /// The ban identifier.
     ban_id: i64,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-pub async fn remove_ban(
+/// Handles the remove ban request.
+pub(crate) async fn remove_ban(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -121,21 +131,38 @@ pub async fn remove_ban(
 // the thread (or the board index if the OP is deleted).
 
 #[derive(Deserialize)]
-pub struct BanDeleteForm {
+/// Form fields accepted by the ban delete request.
+pub(crate) struct BanDeleteForm {
+    /// The post identifier.
     post_id: i64,
+    /// The IP hash.
     ip_hash: String,
+    /// The board.
     board: String,
+    /// The thread identifier.
     thread_id: i64,
+    /// The optional is op.
     is_op: Option<String>,
+    /// The optional reason.
     reason: Option<String>,
+    /// The optional duration hours.
     duration_hours: Option<i64>,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[expect(clippy::too_many_lines)]
-pub async fn admin_ban_and_delete(
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "ban-and-delete keeps its authorization, mutation, cleanup, and audit steps together"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "authorization, ban creation, post deletion, media cleanup, and audit logging are one action"
+)]
+/// Handles the admin ban and delete request.
+pub(crate) async fn admin_ban_and_delete(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -155,7 +182,7 @@ pub async fn admin_ban_and_delete(
     let expires_at = form
         .duration_hours
         .filter(|&h| h > 0)
-        .map(|h| chrono::Utc::now().timestamp() + h.min(87_600).saturating_mul(3600));
+        .map(|h| Utc::now().timestamp() + h.min(87_600).saturating_mul(3600));
 
     let ip_hash_log = form.ip_hash.chars().take(8).collect::<String>();
     let post_id = form.post_id;
@@ -193,7 +220,7 @@ pub async fn admin_ban_and_delete(
                 "ban",
                 None,
                 &board_short,
-                &format!("inline ban — ip_hash={}… reason={reason}", &ip_hash_log),
+                &format!("inline ban — ip_hash={ip_hash_log}… reason={reason}"),
             ) {
                 tracing::error!(
                     target: "admin",
@@ -303,14 +330,19 @@ pub async fn admin_ban_and_delete(
 // ─── POST /admin/appeal/dismiss ───────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct AppealActionForm {
+/// Form fields accepted by the appeal action request.
+pub(crate) struct AppealActionForm {
+    /// The appeal identifier.
     appeal_id: i64,
+    /// The optional IP hash.
     ip_hash: Option<String>,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-pub async fn dismiss_appeal(
+/// Handles the dismiss appeal request.
+pub(crate) async fn dismiss_appeal(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -340,7 +372,8 @@ pub async fn dismiss_appeal(
 
 // ─── POST /admin/appeal/accept ────────────────────────────────────────────────
 
-pub async fn accept_appeal(
+/// Handles the accept appeal request.
+pub(crate) async fn accept_appeal(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -393,14 +426,19 @@ pub async fn accept_appeal(
 // ─── POST /admin/filter/add ───────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct AddFilterForm {
+/// Form fields accepted by the add filter request.
+pub(crate) struct AddFilterForm {
+    /// The pattern.
     pattern: String,
+    /// The replacement.
     replacement: String,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-pub async fn add_filter(
+/// Handles the add filter request.
+pub(crate) async fn add_filter(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -440,13 +478,17 @@ pub async fn add_filter(
 // ─── POST /admin/filter/remove ────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct FilterIdForm {
+/// Form fields accepted by the filter ID request.
+pub(crate) struct FilterIdForm {
+    /// The filter identifier.
     filter_id: i64,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-pub async fn remove_filter(
+/// Handles the remove filter request.
+pub(crate) async fn remove_filter(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -477,17 +519,22 @@ pub async fn remove_filter(
 // with pagination.  Requires an active admin session.
 
 #[derive(Deserialize)]
-pub struct IpHistoryQuery {
+/// Query parameters accepted by the IP history request.
+pub(crate) struct IpHistoryQuery {
     #[serde(default = "default_page")]
+    /// The page.
     pub page: i64,
+    /// The optional return to.
     pub return_to: Option<String>,
 }
 
+/// Returns the default page.
 const fn default_page() -> i64 {
     1
 }
 
-pub async fn admin_ip_history(
+/// Handles the admin IP history request.
+pub(crate) async fn admin_ip_history(
     State(state): State<AppState>,
     Path(ip_hash): Path<String>,
     Query(params): Query<IpHistoryQuery>,
@@ -553,13 +600,17 @@ pub async fn admin_ip_history(
 // ─── POST /admin/report/resolve ───────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct ResolveReportForm {
+/// Form fields accepted by the resolve report request.
+pub(crate) struct ResolveReportForm {
+    /// The report identifier.
     report_id: i64,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-pub async fn resolve_report(
+/// Handles the resolve report request.
+pub(crate) async fn resolve_report(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -612,17 +663,25 @@ pub async fn resolve_report(
 // ─── POST /admin/ip/report ──────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct IpReportForm {
+/// Form fields accepted by the IP report request.
+pub(crate) struct IpReportForm {
+    /// The post identifier.
     post_id: i64,
+    /// The thread identifier.
     thread_id: i64,
+    /// The board.
     board: String,
+    /// The IP hash.
     ip_hash: String,
+    /// The reason.
     reason: String,
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-pub async fn admin_ip_report(
+/// Handles the admin IP report request.
+pub(crate) async fn admin_ip_report(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -681,6 +740,7 @@ pub async fn admin_ip_report(
             let reporter_hash = format!("admin:{admin_id}");
             let submission = db::file_report(&conn, form.post_id, &report_reason, &reporter_hash)?;
             if matches!(submission, db::ReportSubmission::Filed) {
+                let ip_hash_prefix = form.ip_hash.chars().take(16).collect::<String>();
                 if let Err(error) = db::log_mod_action(
                     &conn,
                     admin_id,
@@ -689,10 +749,7 @@ pub async fn admin_ip_report(
                     "report",
                     Some(form.post_id),
                     &board.short_name,
-                    &format!(
-                        "ip_hash={} report filed",
-                        &form.ip_hash[..form.ip_hash.len().min(16)]
-                    ),
+                    &format!("ip_hash={ip_hash_prefix} report filed"),
                 ) {
                     tracing::error!(
                         target: "admin",
@@ -728,6 +785,7 @@ pub async fn admin_ip_report(
 mod tests {
     use super::super::{admin_panel_redirect_anchor_open, SESSION_COOKIE};
     use super::*;
+    use anyhow::{ensure, Context as _};
     use axum::extract::State;
     use axum_extra::extract::cookie::{Cookie, CookieJar};
 
@@ -763,8 +821,8 @@ mod tests {
         thread_id: i64,
         ip_hash: Option<&str>,
         is_op: bool,
-    ) -> crate::db::NewPost {
-        crate::db::NewPost {
+    ) -> db::NewPost {
+        db::NewPost {
             thread_id,
             board_id,
             name: "anon".to_owned(),
@@ -801,47 +859,50 @@ mod tests {
     }
 
     #[test]
-    fn resolve_report_redirect_reopens_moderation_section() {
+    fn resolve_report_redirect_reopens_moderation_section() -> anyhow::Result<()> {
         let response = admin_panel_redirect_anchor_open("Report resolved.", "reports", "reports")
             .into_response();
         let location = response
             .headers()
             .get(axum::http::header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .expect("location header");
+            .context("report redirect omitted a valid location header")?;
 
-        assert!(location.ends_with("#reports"));
-        assert!(location.contains("open=reports"));
+        ensure!(
+            location.ends_with("#reports"),
+            "report redirect did not target the reports anchor"
+        );
+        ensure!(
+            location.contains("open=reports"),
+            "report redirect did not reopen the reports section"
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn admin_ip_report_records_admin_as_reporter() {
+    async fn admin_ip_report_records_admin_as_reporter() -> anyhow::Result<()> {
         let state = crate::test_support::app_state();
         let target_ip =
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned();
-        let conn = state.db.get().expect("db connection");
-        let password_hash = crate::utils::crypto::hash_password("hunter2").expect("hash password");
+        let conn = state.db.get().context("get test database connection")?;
+        let password_hash =
+            crate::utils::crypto::hash_password("hunter2").context("hash admin password")?;
         let admin_id =
-            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
-        crate::db::create_session(
-            &conn,
-            "session123",
-            admin_id,
-            chrono::Utc::now().timestamp() + 3600,
-        )
-        .expect("create session");
-        crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
-        let board = crate::db::get_board_by_short(&conn, "test")
-            .expect("load board")
-            .expect("board exists");
+            db::create_admin(&conn, "admin", &password_hash).context("create test admin")?;
+        db::create_session(&conn, "session123", admin_id, Utc::now().timestamp() + 3600)
+            .context("create test admin session")?;
+        db::create_board(&conn, "test", "Test", "", false).context("create test board")?;
+        let board = db::get_board_by_short(&conn, "test")
+            .context("load test board")?
+            .context("test board was not persisted")?;
 
         let op = sample_new_post(board.id, 0, Some(&target_ip), true);
         let (thread_id, _, _) =
-            crate::db::create_thread_with_optional_poll(&conn, board.id, None, &op, "", None, None)
-                .expect("create thread");
+            db::create_thread_with_optional_poll(&conn, board.id, None, &op, "", None, None)
+                .context("create reported thread")?;
         let reply = sample_new_post(board.id, thread_id, Some(&target_ip), false);
-        let reply_id = crate::db::create_reply_with_thread_update(&conn, &reply, "", true, None)
-            .expect("create reply");
+        let reply_id = db::create_reply_with_thread_update(&conn, &reply, "", true, None)
+            .context("create reported reply")?;
         drop(conn);
 
         let response = admin_ip_report(
@@ -859,44 +920,67 @@ mod tests {
             }),
         )
         .await
-        .expect("admin ip report response");
+        .context("submit administrator IP report")?;
 
         let location = response
             .headers()
             .get(axum::http::header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .expect("location header");
-        assert!(location.contains("open=reports"));
-        assert!(location.ends_with("#reports"));
+            .context("administrator report redirect omitted a valid location")?;
+        ensure!(
+            location.contains("open=reports"),
+            "administrator report redirect did not reopen reports"
+        );
+        ensure!(
+            location.ends_with("#reports"),
+            "administrator report redirect did not target the reports anchor"
+        );
 
-        let conn = state.db.get().expect("db connection");
+        let conn = state.db.get().context("get verification connection")?;
         let (reporter_hash, reason): (String, String) = conn
             .query_row(
                 "SELECT reporter_hash, reason FROM reports WHERE post_id = ?1",
                 rusqlite::params![reply_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .expect("saved report");
-        assert_eq!(reporter_hash, format!("admin:{admin_id}"));
-        assert!(reason.contains("Needs review"));
-        assert!(reason.contains("Hashed IP:"));
-        assert!(reason.contains(&target_ip));
+            .context("load saved administrator report")?;
+        ensure!(
+            reporter_hash == format!("admin:{admin_id}"),
+            "administrator report stored the wrong reporter identity"
+        );
+        ensure!(
+            reason.contains("Needs review"),
+            "administrator report omitted its reason"
+        );
+        ensure!(
+            reason.contains("Hashed IP:"),
+            "administrator report omitted its hashed-IP label"
+        );
+        ensure!(
+            reason.contains(&target_ip),
+            "administrator report omitted the selected IP hash"
+        );
+        Ok(())
     }
 }
 
 // ─── GET /admin/mod-log ───────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct ModLogQuery {
+/// Query parameters accepted by the mod log request.
+pub(crate) struct ModLogQuery {
     #[serde(default = "default_mod_log_page")]
+    /// The page.
     page: i64,
 }
 
+/// Returns the default mod log page.
 const fn default_mod_log_page() -> i64 {
     1
 }
 
-pub async fn mod_log_page(
+/// Handles the mod log page request.
+pub(crate) async fn mod_log_page(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,

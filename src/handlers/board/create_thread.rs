@@ -1,18 +1,26 @@
-// Route modules use broad imports on purpose so the handler code stays compact and close to the module API.
-#![allow(clippy::wildcard_imports)]
-// The format string stays inline because the handler already has several
-// branching paths and this keeps the redirect target easy to scan.
-#![allow(clippy::uninlined_format_args)]
-
-use super::*;
+use super::{
+    board_access_cookie_from_jar, board_access_preflight, current_theme_from_jar,
+    handled_post_error_status, identity_key, is_xml_http_request, make_scoped_csrf_form_token,
+    parse_post_multipart, posting, remember_owned_post_until_with_secure, render,
+    should_set_public_secure_cookie, templates, unlock_redirect_url, user_preferences_from_jar,
+    xhr_error_response, xhr_post_error_response, xhr_redirect_response, AppError, AppState,
+    BoardAccessDecision, BoardAccessRequirement, CookieJar, HashMap, HeaderMap, Html, Multipart,
+    Path, Redirect, Response, Result, SecureCookieContext, State, ADMIN_SESSION_COOKIE, CONFIG,
+    PREVIEW_REPLIES, SELF_DELETE_WINDOW_SECS, THREADS_PER_PAGE,
+};
+use axum::response::IntoResponse as _;
 
 // ─── POST /:board/ — create new thread ───────────────────────────────────────
 
-#[expect(clippy::too_many_lines)]
-pub async fn create_thread(
+#[expect(
+    clippy::too_many_lines,
+    reason = "access checks, multipart validation, thread creation, and response cookies form one request"
+)]
+/// Handles the create thread request.
+pub(crate) async fn create_thread(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
-    secure_context: crate::middleware::SecureCookieContext,
+    secure_context: SecureCookieContext,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
@@ -61,7 +69,7 @@ pub async fn create_thread(
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
 
-    let post_form_state = crate::templates::forms::PostFormState {
+    let post_form_state = templates::forms::PostFormState {
         name: form.name.clone(),
         subject: form.subject.clone(),
         body: form.body.clone(),
@@ -156,7 +164,7 @@ pub async fn create_thread(
                     &conn,
                     &page_data.board,
                     crate::models::BannerPlacement::Index,
-                    &format!("/{}", board_short_render),
+                    &format!("/{board_short_render}"),
                 )?;
                 let banner_html = crate::banner::render_banner_html(
                     &banner_selection,
@@ -165,7 +173,7 @@ pub async fn create_thread(
                 );
                 let admin_csrf_for_error = if page_data.is_admin {
                     admin_session_err.as_deref().map(|session_id| {
-                        crate::utils::crypto::make_scoped_csrf_form_token(
+                        make_scoped_csrf_form_token(
                             &csrf_for_error,
                             &CONFIG.cookie_secret,
                             session_id,
@@ -180,7 +188,7 @@ pub async fn create_thread(
                     admin_csrf_for_error.as_deref(),
                     Some(&msg),
                     Some(&post_form_state),
-                    &std::collections::HashMap::new(),
+                    &HashMap::new(),
                     false,
                     &banner_html,
                     current_theme.as_deref(),

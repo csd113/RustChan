@@ -13,9 +13,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::ip::extract_ip;
 
+/// Per-client request count and window start, keyed by a client-address hash.
 static RATE_TABLE: LazyLock<DashMap<String, (u32, u64)>> = LazyLock::new(DashMap::new);
+/// Unix timestamp of the most recent rate-table cleanup.
 static LAST_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
 
+/// Returns the current Unix timestamp in whole seconds.
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -23,6 +26,7 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// Applies the configured GET request limit to dynamic routes.
 pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     let path = req.uri().path();
     if path.starts_with("/static/")
@@ -82,6 +86,7 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+/// Escapes text for inclusion in the rate-limit HTML response.
 fn html_escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -97,8 +102,9 @@ fn html_escape(value: &str) -> String {
     out
 }
 
+/// Builds the standalone rate-limit notification page.
 fn rate_limited_toast_page() -> String {
-    let forum_name_escaped = html_escape(&crate::config::CONFIG.forum_name);
+    let forum_name_escaped = html_escape(&CONFIG.forum_name);
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">

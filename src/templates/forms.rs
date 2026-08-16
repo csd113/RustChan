@@ -1,27 +1,37 @@
-// HTML form fragments injected into board and thread pages.
-// These are not full pages — they produce <div>…</div> snippets that
-// board.rs and thread.rs embed inside their own layouts.
+//! HTML form fragments injected into board and thread pages.
+//!
+//! These are not full pages: they produce `<div>` snippets that board and
+//! thread templates embed inside their layouts.
 
 use crate::config::CONFIG;
 use crate::models::Board;
 use crate::utils::sanitize::escape_html;
 
+/// User-entered fields preserved when a post form must be rendered again.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PostFormState {
+    /// Poster name field.
     pub name: String,
+    /// Thread subject field.
     pub subject: String,
+    /// Post body field.
     pub body: String,
+    /// Whether the reply should avoid bumping its thread.
     pub sage: bool,
 }
 
+/// Upload capabilities needed to choose the form's media controls.
 struct UploadFormPolicy {
+    /// Whether the board accepts at least one upload type.
     uploads_enabled: bool,
 }
 
+/// Creates the opaque token used to reject duplicate form submissions.
 fn new_submission_token() -> String {
     crate::utils::crypto::random_hex(16)
 }
 
+/// Renders the initially hidden upload progress row.
 const fn upload_progress_row() -> &'static str {
     r#"    <tr class="upload-progress-row" hidden>
         <td>upload</td>
@@ -33,14 +43,20 @@ const fn upload_progress_row() -> &'static str {
         </td></tr>"#
 }
 
+/// MIME types and extensions accepted by the audio input.
 const AUDIO_ACCEPT: &str =
     "audio/mpeg,audio/mp3,audio/ogg,application/ogg,audio/oga,audio/opus,audio/flac,audio/x-flac,audio/wav,audio/wave,audio/x-wav,audio/vnd.wave,audio/mp4,audio/m4a,audio/x-m4a,audio/aac,audio/x-aac,audio/webm,.mp3,.ogg,.oga,.opus,.flac,.wav,.m4a,.aac,.webm";
+/// MIME types and extensions accepted by the video input.
 const VIDEO_ACCEPT: &str = "video/mp4,video/webm,video/x-matroska,video/matroska,.mp4,.webm,.mkv";
+/// MIME types and extensions accepted by the image input.
 const IMAGE_ACCEPT: &str =
     "image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,.heic,.heif";
+/// Maximum number of characters in a poll option.
 const POLL_OPTION_MAX_LENGTH: usize = 200;
+/// Maximum number of options in a poll.
 const POLL_OPTION_MAX_COUNT: usize = 20;
 
+/// Derives upload-control visibility from the board configuration.
 fn build_upload_form_policy(board: &Board) -> UploadFormPolicy {
     let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
 
@@ -53,15 +69,18 @@ fn build_upload_form_policy(board: &Board) -> UploadFormPolicy {
     UploadFormPolicy { uploads_enabled }
 }
 
+/// Wraps explanatory copy in the standard form-help element.
 fn form_hint(text: &str) -> String {
     format!(r#"<span class="form-field-help">{text}</span>"#)
 }
 
+/// Renders the row shown when all upload types are disabled.
 const fn render_uploads_disabled_row() -> &'static str {
     r#"    <tr><td>uploads</td>
         <td><span class="post-form-mobile-label">Uploads</span><span class="form-field-help">uploads are disabled on this board</span></td></tr>"#
 }
 
+/// Renders a CAPTCHA challenge row with board-specific element identifiers.
 fn render_captcha_row(board_short: &str, reply_suffix: &str, refresh_href: &str) -> String {
     let captcha_id = crate::captcha::new_captcha_id();
     let board = escape_html(board_short);
@@ -88,14 +107,17 @@ fn render_captcha_row(board_short: &str, reply_suffix: &str, refresh_href: &str)
     )
 }
 
+/// Renders one numbered poll-option input row.
 fn render_poll_option_row(option_number: usize) -> String {
     format!(
         r#"<div class="poll-option-row"><input type="text" class="poll-option-input" name="poll_option" aria-label="poll option {option_number}" placeholder="Option {option_number}" maxlength="{POLL_OPTION_MAX_LENGTH}"><button type="button" class="poll-remove-btn" data-action="remove-poll-option" aria-label="Remove poll option" hidden>✕</button></div>"#
     )
 }
 
+/// Image, video, audio, PDF, and generic upload limits in mebibytes.
 type UploadSizeLimitsMb = (usize, usize, usize, usize, usize);
 
+/// Converts a board's byte limits to the mebibyte values displayed by forms.
 fn upload_size_limits_mb(board: &Board) -> UploadSizeLimitsMb {
     (
         board.max_image_size_bytes() / 1024 / 1024,
@@ -106,6 +128,7 @@ fn upload_size_limits_mb(board: &Board) -> UploadSizeLimitsMb {
     )
 }
 
+/// Builds the `accept` value and explanatory copy for a combined file input.
 fn single_upload_accept_and_hint(
     board: &Board,
     allow_any_files: bool,
@@ -158,6 +181,7 @@ fn single_upload_accept_and_hint(
     (file_accept, file_hint)
 }
 
+/// Renders the upload controls used when one primary file input is sufficient.
 fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
     let limits = upload_size_limits_mb(board);
     let (image_mb, _, audio_mb, _, _) = limits;
@@ -458,8 +482,10 @@ mod tests {
     #[test]
     fn audio_image_form_is_audio_first_and_cover_image_second() {
         let html = new_thread_form("test", "csrf", &audio_image_board(), None, "/test");
-        let audio_pos = html.find("name=\"audio_file\"").expect("audio row");
-        let image_pos = html.find("name=\"image_file\"").expect("image row");
+        let audio_pos = html.find("name=\"audio_file\"");
+        let image_pos = html.find("name=\"image_file\"");
+        assert!(audio_pos.is_some(), "audio row should be present");
+        assert!(image_pos.is_some(), "image row should be present");
         assert!(audio_pos < image_pos);
         assert!(html.contains(r#"<td><label for="post-form-audio-file">audio</label></td>"#));
         assert!(html.contains("Optional Image"));

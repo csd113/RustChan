@@ -7,39 +7,57 @@ use sha2::{Digest as _, Sha256};
 use std::sync::LazyLock;
 use subtle::ConstantTimeEq as _;
 
+/// Number of hexadecimal characters in a challenge identifier.
 const CAPTCHA_ID_LEN: usize = 32;
+/// Number of characters rendered in a generated challenge.
 const CAPTCHA_ANSWER_LEN: u32 = 5;
+/// Maximum accepted submitted-answer length.
 const CAPTCHA_MAX_ANSWER_LEN: usize = 16;
+/// Challenge lifetime in seconds.
 const CAPTCHA_TTL_SECS: i64 = 300;
+/// Unambiguous characters used to generate challenge answers.
 const CAPTCHA_CHARSET: &[char] = &[
     'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'U', 'V',
     'W', 'X', 'Y', 'Z', '2', '3', '4', '5', '6', '7', '8', '9',
 ];
 
+/// In-memory, single-use challenge store keyed by challenge identifier.
 static CAPTCHA_CHALLENGES: LazyLock<DashMap<String, StoredCaptchaChallenge>> =
     LazyLock::new(DashMap::new);
 
 #[derive(Clone)]
+/// Hashed server-side state for one outstanding CAPTCHA challenge.
 struct StoredCaptchaChallenge {
+    /// Board short name that owns the challenge.
     board_short: String,
+    /// Secret-bound hash of the normalized answer.
     answer_hash: [u8; 32],
+    /// Unix timestamp after which the challenge is invalid.
     expires_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Failures that can occur while producing a CAPTCHA image.
 pub enum CaptchaImageError {
+    /// The board name or challenge identifier was malformed.
     InvalidRequest,
+    /// The CAPTCHA backend failed to encode an image.
     GenerationFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Reasons a submitted CAPTCHA answer can be rejected.
 pub enum CaptchaValidationError {
+    /// The request omitted a valid challenge or answer.
     Missing,
+    /// The challenge was absent or past its expiration time.
     Expired,
+    /// The supplied answer or board scope did not match.
     Incorrect,
 }
 
 impl CaptchaValidationError {
+    /// Return the safe user-facing explanation for this failure.
     #[must_use]
     pub const fn user_message(self) -> &'static str {
         match self {
@@ -55,6 +73,7 @@ impl CaptchaValidationError {
 }
 
 #[must_use]
+/// Generate a cryptographically random CAPTCHA challenge identifier.
 pub fn new_captcha_id() -> String {
     crate::utils::crypto::random_hex(CAPTCHA_ID_LEN / 2)
 }
@@ -141,6 +160,7 @@ pub fn verify_captcha(
     }
 }
 
+/// Hash and store one challenge when its generated answer is valid.
 fn store_challenge(board_short: &str, captcha_id: &str, answer: &str, now: i64) {
     if let Some(answer_hash) = answer_hash(board_short, captcha_id, answer) {
         CAPTCHA_CHALLENGES.insert(
@@ -154,10 +174,12 @@ fn store_challenge(board_short: &str, captcha_id: &str, answer: &str, now: i64) 
     }
 }
 
+/// Remove challenges whose expiration time is at or before `now`.
 fn prune_expired(now: i64) {
     CAPTCHA_CHALLENGES.retain(|_, challenge| challenge.expires_at > now);
 }
 
+/// Compute the secret-bound answer hash for a scoped challenge.
 fn answer_hash(board_short: &str, captcha_id: &str, answer: &str) -> Option<[u8; 32]> {
     let normalized = normalize_answer(answer)?;
     let mut hasher = Sha256::new();
@@ -171,6 +193,7 @@ fn answer_hash(board_short: &str, captcha_id: &str, answer: &str) -> Option<[u8;
     Some(hasher.finalize().into())
 }
 
+/// Trim, validate, and case-normalize a submitted CAPTCHA answer.
 fn normalize_answer(answer: &str) -> Option<String> {
     let answer = answer.trim();
     if answer.is_empty()
@@ -182,10 +205,12 @@ fn normalize_answer(answer: &str) -> Option<String> {
     Some(answer.to_ascii_uppercase())
 }
 
+/// Return whether an identifier has the canonical random-hex shape.
 fn is_valid_captcha_id(id: &str) -> bool {
     id.len() == CAPTCHA_ID_LEN && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// Return whether a board short name is valid for challenge scoping.
 fn is_valid_board_short(board_short: &str) -> bool {
     !board_short.is_empty()
         && board_short.len() <= 32
@@ -195,7 +220,9 @@ fn is_valid_board_short(board_short: &str) -> bool {
 }
 
 #[cfg(test)]
+/// Test-only access to the in-memory CAPTCHA challenge store.
 pub mod testing {
+    /// Insert a challenge with a caller-selected answer and expiration time.
     pub fn insert_challenge_for_test(
         board_short: &str,
         captcha_id: &str,
@@ -215,6 +242,7 @@ pub mod testing {
         );
     }
 
+    /// Return whether a challenge identifier is currently stored.
     pub fn challenge_exists_for_test(captcha_id: &str) -> bool {
         super::CAPTCHA_CHALLENGES.contains_key(captcha_id)
     }
@@ -228,10 +256,23 @@ mod tests {
     fn generated_captcha_is_png_and_stores_server_side_answer() {
         let captcha_id = "00000000000000000000000000000001";
 
-        let png = generate_captcha_image("test", captcha_id).expect("captcha image");
+        let png_result = generate_captcha_image("test", captcha_id);
+        assert!(
+            png_result.is_ok(),
+            "valid fixture should generate a CAPTCHA image"
+        );
+        let Some(png) = png_result.ok() else {
+            return;
+        };
 
-        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
-        assert!(testing::challenge_exists_for_test(captcha_id));
+        assert!(
+            png.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "generated image must carry the PNG signature"
+        );
+        assert!(
+            testing::challenge_exists_for_test(captcha_id),
+            "generating an image must store its server-side challenge"
+        );
     }
 
     #[test]

@@ -9,4 +9,9 @@
 package-lock.json
 package.json
 playwright.config.ts
-/tests
+# Keep ad-hoc browser artifacts ignored while tracking the Rust CLI integration
+# test target used by the workspace validation matrix.
+/tests/*
+!/tests/cli_runtime.rs
+/.github/workflows/e2e.yml
+/.cargo/audit.toml

@@ -1,22 +1,26 @@
-// Public re-exports here match the module layout and keep paths stable for callers.
-#![allow(clippy::redundant_pub_crate)]
-
 // src/middleware/ip.rs
 
 use crate::config::CONFIG;
-use axum::extract::Request;
+use axum::{
+    extract::{ConnectInfo, FromRequestParts, Request},
+    http::request::Parts,
+};
 use ipnet::IpNet;
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 
+/// Returns the first non-empty address in a forwarded-for header.
 fn forwarded_client_ip(value: &str) -> Option<&str> {
     value.split(',').map(str::trim).find(|ip| !ip.is_empty())
 }
 
-pub(crate) fn trusted_proxy_peer(peer: Option<SocketAddr>) -> bool {
+/// Returns whether the peer belongs to a configured trusted proxy network.
+fn trusted_proxy_peer(peer: Option<SocketAddr>) -> bool {
     trusted_proxy_peer_with(peer, &CONFIG.trusted_proxy_cidrs)
 }
 
+/// Tests a peer against an explicit trusted-proxy CIDR list.
 fn trusted_proxy_peer_with(peer: Option<SocketAddr>, trusted_proxy_cidrs: &[String]) -> bool {
     peer.is_some_and(|addr| {
         trusted_proxy_cidrs.iter().any(|cidr| {
@@ -27,7 +31,8 @@ fn trusted_proxy_peer_with(peer: Option<SocketAddr>, trusted_proxy_cidrs: &[Stri
     })
 }
 
-pub(crate) fn forwarded_proto_is_https(
+/// Returns whether a trusted proxy reported HTTPS for the request.
+pub(super) fn forwarded_proto_is_https(
     headers: &axum::http::HeaderMap,
     peer: Option<SocketAddr>,
     behind_proxy: bool,
@@ -47,6 +52,7 @@ pub(crate) fn forwarded_proto_is_https(
         })
 }
 
+/// Extracts a forwarded client address when the immediate peer is trusted.
 fn forwarded_ip_from_headers_with(
     headers: &axum::http::HeaderMap,
     peer: Option<SocketAddr>,
@@ -73,6 +79,7 @@ fn forwarded_ip_from_headers_with(
         .map(str::to_owned)
 }
 
+/// Resolves the effective client identity from Tor, proxy, or peer metadata.
 fn resolved_client_ip(
     headers: &axum::http::HeaderMap,
     peer: Option<SocketAddr>,
@@ -93,10 +100,11 @@ fn resolved_client_ip(
     peer.map_or_else(|| "unknown".to_owned(), |addr| addr.ip().to_string())
 }
 
+/// Extracts the effective client identity from an Axum request.
 pub fn extract_ip(req: &Request) -> String {
     let peer = req
         .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .get::<ConnectInfo<SocketAddr>>()
         .map(|connect_info| connect_info.0);
 
     resolved_client_ip(
@@ -108,21 +116,20 @@ pub fn extract_ip(req: &Request) -> String {
     )
 }
 
+/// Axum extractor for the effective client identity.
+#[derive(Debug)]
 pub struct ClientIp(pub String);
 
-impl<S> axum::extract::FromRequestParts<S> for ClientIp
+impl<S> FromRequestParts<S> for ClientIp
 where
     S: Send + Sync,
 {
-    type Rejection = std::convert::Infallible;
+    type Rejection = Infallible;
 
-    async fn from_request_parts(
-        parts: &mut axum::http::request::Parts,
-        _state: &S,
-    ) -> std::result::Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let peer = parts
             .extensions
-            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .get::<ConnectInfo<SocketAddr>>()
             .map(|connect_info| connect_info.0);
 
         Ok(Self(resolved_client_ip(
@@ -210,7 +217,7 @@ mod tests {
     #[test]
     fn tor_stream_token_precedes_spoofed_forwarded_headers_for_loopback_peer() {
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 49_152);
-        crate::detect::TOR_STREAM_TOKENS.insert(peer.port(), Arc::from("tor:test-stream"));
+        crate::detect::TOR_STREAM_TOKENS.insert(peer, Arc::from("tor:test-stream"));
 
         let mut headers = HeaderMap::new();
         headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.10"));
@@ -222,7 +229,7 @@ mod tests {
 
         let resolved = resolved_client_ip(&headers, Some(peer), true, &trusted, true);
 
-        crate::detect::TOR_STREAM_TOKENS.remove(&peer.port());
+        crate::detect::TOR_STREAM_TOKENS.remove(&peer);
         assert_eq!(resolved, "tor:test-stream");
     }
 

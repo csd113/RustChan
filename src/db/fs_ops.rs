@@ -1,12 +1,17 @@
 use anyhow::{Context as _, Result};
 
 #[derive(Debug, Clone)]
+/// Durable filesystem operation read from the database queue.
 pub struct PendingFsOpRow {
+    /// Stable operation identifier.
     pub id: String,
+    /// Operation-kind discriminator.
     pub kind: String,
+    /// Serialized operation payload.
     pub payload_json: String,
 }
 
+/// Trusted schema used for the durable filesystem-operation queue.
 const CREATE_PENDING_FS_OPS_SQL: &str = r"
     CREATE TABLE IF NOT EXISTS pending_fs_ops (
         id           TEXT PRIMARY KEY,
@@ -58,6 +63,7 @@ pub fn delete_pending_fs_op(conn: &rusqlite::Connection, id: &str) -> Result<()>
     Ok(())
 }
 
+/// Quote an `SQLite` identifier by doubling embedded quotation marks.
 fn quote_sqlite_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
@@ -168,11 +174,17 @@ mod tests {
         insert_pending_fs_op, list_pending_fs_ops, rebuild_pending_fs_ops_for_restore,
         verify_pending_fs_op_present,
     };
+    use anyhow::Result;
     use std::collections::HashSet;
 
     #[test]
-    fn rebuild_pending_fs_ops_for_restore_discards_restored_rows_and_allows_restore_swap_insert() {
-        let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn rebuild_pending_fs_ops_for_restore_discards_restored_rows_and_allows_restore_swap_insert(
+    ) -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
         conn.execute_batch(
             r#"
             CREATE TABLE pending_fs_ops (
@@ -193,11 +205,10 @@ mod tests {
                 VALUES ('trigger-evil', 'delete_files', '{"paths":["uploads/trigger"]}');
             END;
             "#,
-        )
-        .expect("hostile schema");
+        )?;
 
-        rebuild_pending_fs_ops_for_restore(&conn).expect("rebuild trusted table");
-        let rebuilt_rows = list_pending_fs_ops(&conn).expect("list rebuilt ops");
+        rebuild_pending_fs_ops_for_restore(&conn)?;
+        let rebuilt_rows = list_pending_fs_ops(&conn)?;
         assert!(
             rebuilt_rows.is_empty(),
             "restored pending_fs_ops rows are untrusted and must be discarded"
@@ -208,25 +219,42 @@ mod tests {
             kind: crate::pending_fs::FULL_RESTORE_SWAP_KIND,
             payload_json: r#"{"staged":"stage","live":"live","previous":"old"}"#.into(),
         };
-        insert_pending_fs_op(&conn, &restore_op).expect("insert restore op");
+        insert_pending_fs_op(&conn, &restore_op)?;
 
-        verify_pending_fs_op_present(&conn, &restore_op.id).expect("restore op present");
-        let pending_ops = list_pending_fs_ops(&conn).expect("list ops");
-        assert_eq!(pending_ops.len(), 1);
+        verify_pending_fs_op_present(&conn, &restore_op.id)?;
+        let pending_ops = list_pending_fs_ops(&conn)?;
+        assert_eq!(
+            pending_ops.len(),
+            1,
+            "only the newly queued restore operation should remain"
+        );
         let unique_ids = pending_ops
             .iter()
             .map(|op| op.id.clone())
             .collect::<HashSet<_>>();
-        assert_eq!(unique_ids.len(), pending_ops.len());
+        assert_eq!(
+            unique_ids.len(),
+            pending_ops.len(),
+            "pending operation identifiers should be unique"
+        );
         assert!(pending_ops.iter().any(
             |op| op.id == restore_op.id && op.kind == crate::pending_fs::FULL_RESTORE_SWAP_KIND
         ));
-        assert!(!pending_ops.iter().any(|op| op.id == "trigger-evil"));
+        assert!(
+            !pending_ops.iter().any(|op| op.id == "trigger-evil"),
+            "hostile restored trigger should not be able to reseed the queue"
+        );
+        Ok(())
     }
 
     #[test]
-    fn rebuild_pending_fs_ops_for_restore_fails_closed_on_unexpected_schema_object_type() {
-        let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn rebuild_pending_fs_ops_for_restore_fails_closed_on_unexpected_schema_object_type(
+    ) -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
         conn.execute_batch(
             r"
             CREATE TABLE other_table (value INTEGER);
@@ -236,12 +264,19 @@ mod tests {
                 SELECT 1;
             END;
             ",
-        )
-        .expect("unexpected schema object");
+        )?;
 
-        let error = rebuild_pending_fs_ops_for_restore(&conn).expect_err("unexpected type fails");
-        assert!(error
-            .to_string()
-            .contains("Unexpected pending_fs_ops schema object type trigger"));
+        let result = rebuild_pending_fs_ops_for_restore(&conn);
+        assert!(
+            matches!(
+                result,
+                Err(error)
+                    if error
+                        .to_string()
+                        .contains("Unexpected pending_fs_ops schema object type trigger")
+            ),
+            "unexpected schema object types should fail closed"
+        );
+        Ok(())
     }
 }

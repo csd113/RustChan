@@ -13,13 +13,14 @@
 //   Internal          → 500
 
 use axum::{
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Response},
 };
 use thiserror::Error;
 use tracing::error;
 
 #[derive(Debug, Error)]
+/// Error returned by application operations and HTTP handlers.
 pub enum AppError {
     /// 404 — board or thread not found
     #[error("Not found: {0}")]
@@ -36,7 +37,12 @@ pub enum AppError {
     /// 403 — user is banned; carries the ban reason and CSRF token so the
     /// appeal form can be rendered with a valid token.
     #[error("You are banned. Reason: {reason}")]
-    BannedUser { reason: String, csrf_token: String },
+    BannedUser {
+        /// Moderation reason shown to the banned user.
+        reason: String,
+        /// Token used to protect the ban-appeal form.
+        csrf_token: String,
+    },
 
     /// 413 — upload body too large
     #[error("Upload too large: {0}")]
@@ -56,7 +62,7 @@ pub enum AppError {
 
     /// 500 — internal error (database failure, IO error, etc.)
     #[error("Internal error: {0}")]
-    Internal(#[from] anyhow::Error),
+    Internal(anyhow::Error),
 
     /// TLS initialisation or certificate error (startup-time only).
     #[error("TLS error: {0}")]
@@ -95,6 +101,39 @@ impl From<r2d2::Error> for AppError {
     }
 }
 
+impl From<anyhow::Error> for AppError {
+    fn from(error: anyhow::Error) -> Self {
+        let database_busy = error.chain().any(|cause| {
+            cause
+                .downcast_ref::<rusqlite::Error>()
+                .is_some_and(is_sqlite_busy)
+                || cause
+                    .downcast_ref::<r2d2::Error>()
+                    .is_some_and(|pool_error| {
+                        let message = pool_error.to_string();
+                        message.contains("timed out") || message.contains("Timeout")
+                    })
+        });
+        if database_busy {
+            Self::DbBusy
+        } else {
+            Self::Internal(error)
+        }
+    }
+}
+
+/// Return whether a low-level `SQLite` error represents transient contention.
+const fn is_sqlite_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if matches!(
+                code.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
 // Allow ? operator on std::io::Error inside the TLS module.
 // All IO errors at TLS startup are surfaced as Tls(msg) rather than Internal
 // so they produce a clear message without a full anyhow backtrace.
@@ -106,6 +145,7 @@ impl From<std::io::Error> for AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        let retry_after = matches!(&self, Self::DbBusy);
         let (status, message) = match &self {
             Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
@@ -138,26 +178,61 @@ impl IntoResponse for AppError {
         };
 
         let html = crate::templates::error_page(status.as_u16(), &message);
-        (status, Html(html)).into_response()
+        let mut response = (status, Html(html)).into_response();
+        if retry_after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+        }
+        response
     }
 }
 
+/// Application result type using [`AppError`].
 pub type Result<T> = std::result::Result<T, AppError>;
 
 #[cfg(test)]
 mod tests {
     use super::AppError;
+    use anyhow::Result;
     use axum::body::to_bytes;
+    use axum::http::{header, StatusCode};
     use axum::response::IntoResponse as _;
 
     #[test]
-    fn tls_errors_hide_internal_messages_from_users() {
-        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn tls_errors_hide_internal_messages_from_users() -> Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
         let response = AppError::Tls("secret cert path".to_owned()).into_response();
-        let body = runtime
-            .block_on(to_bytes(response.into_body(), usize::MAX))
-            .expect("body bytes");
-        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
-        assert!(!body.contains("secret cert path"));
+        let body = runtime.block_on(to_bytes(response.into_body(), usize::MAX))?;
+        let body = String::from_utf8(body.to_vec())?;
+        assert!(
+            !body.contains("secret cert path"),
+            "TLS internals must not be exposed in the HTTP response"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wrapped_sqlite_busy_errors_remain_temporary_overload_errors() {
+        let sqlite_error = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("database is busy".to_owned()),
+        );
+        let error = anyhow::Error::new(sqlite_error).context("write transaction failed");
+        assert!(matches!(AppError::from(error), AppError::DbBusy));
+    }
+
+    #[test]
+    fn database_busy_response_includes_retry_contract() {
+        let response = AppError::DbBusy.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get(header::RETRY_AFTER),
+            Some(&axum::http::HeaderValue::from_static("1"))
+        );
     }
 }

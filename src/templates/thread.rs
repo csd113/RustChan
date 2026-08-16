@@ -1,9 +1,4 @@
-// templates/thread.rs
-//
-// Page templates for thread-level views:
-//   thread_page  — full thread with all posts, reply form, poll
-//   render_post  — single post HTML (also used by board.rs for index previews)
-//   render_poll  — poll widget (private, embedded in thread_page)
+//! Page templates for thread-level views and individual posts.
 
 use crate::models::{Board, Post, Thread};
 use crate::utils::{
@@ -18,27 +13,37 @@ use super::{
     compress_modal_script, fmt_ts, fmt_ts_short, report_modal_script, thread_autoupdate_script,
 };
 
+/// Number of seconds during which a poster may edit or delete a new post.
 const SELF_ACTION_WINDOW_SECS: i64 = 60;
+/// User-facing explanation of the edit and delete window.
 const SELF_ACTION_WINDOW_HINT: &str = "available for up to 60 seconds after posting";
 
+/// Time-limited controls available to the author of a post.
 #[derive(Debug, Clone)]
 pub struct OwnedPostControls {
+    /// Unix timestamp at which the controls expire.
     pub expires_at: i64,
 }
 
+/// Values used to reopen the edit overlay after a validation error.
 #[derive(Debug, Clone)]
 pub struct EditOverlayState {
+    /// Identifier of the post being edited.
     pub post_id: i64,
+    /// Current body text shown in the editor.
     pub body: String,
+    /// Optional validation error.
     pub error: Option<String>,
 }
 
+/// Renders the live countdown note for edit and delete controls.
 fn render_self_action_window_hint(expires_at: i64) -> String {
     format!(
         r#"<span class="self-action-window-note self-delete-countdown" data-role="self-action-countdown" aria-live="polite" data-action-expiry="{expires_at}">{SELF_ACTION_WINDOW_HINT}</span>"#
     )
 }
 
+/// Renders a post without self-service or administrative controls.
 fn render_post_preview(
     post: &Post,
     board_short: &str,
@@ -68,6 +73,7 @@ fn render_post_preview(
 }
 
 #[must_use]
+/// Renders the standalone no-JavaScript edit-post page.
 pub fn edit_post_page(
     board: &Board,
     thread: &Thread,
@@ -129,6 +135,7 @@ pub fn edit_post_page(
 }
 
 #[must_use]
+/// Renders the standalone no-JavaScript delete-post confirmation page.
 pub fn delete_post_page(
     board: &Board,
     thread: &Thread,
@@ -184,6 +191,7 @@ pub fn delete_post_page(
     )
 }
 
+/// Renders the top or bottom thread navigation controls.
 fn render_thread_nav(board: &Board, reply_count: i64, is_bottom: bool) -> String {
     let jump_link = if is_bottom { "#top" } else { "#bottom" };
     let jump_label = if is_bottom { "Top" } else { "Bottom" };
@@ -221,6 +229,7 @@ fn render_thread_nav(board: &Board, reply_count: i64, is_bottom: bool) -> String
 }
 
 #[must_use]
+/// Renders sticky, locked, and archived state badges.
 pub fn render_thread_state_badges_full(sticky: bool, locked: bool, archived: bool) -> String {
     let mut badges = String::new();
 
@@ -248,11 +257,13 @@ pub fn render_thread_state_badges_full(sticky: bool, locked: bool, archived: boo
 }
 
 #[must_use]
+/// Renders sticky and locked state badges for a live thread.
 pub fn render_thread_state_badges(sticky: bool, locked: bool) -> String {
     render_thread_state_badges_full(sticky, locked, false)
 }
 
 #[must_use]
+/// Renders the archived state badge and an optional sticky badge.
 pub fn render_archive_state_badges(sticky: bool) -> String {
     let mut badges = String::new();
 
@@ -273,9 +284,16 @@ pub fn render_archive_state_badges(sticky: bool) -> String {
 
 #[must_use]
 // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the thread document keeps navigation, posts, poll, forms, and modals together"
+)]
 // The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "thread rendering consumes distinct moderation, poll, form, theme, and visitor contexts"
+)]
+/// Renders a complete thread page.
 pub fn thread_page(
     board: &Board,
     thread: &Thread,
@@ -545,6 +563,7 @@ pub fn thread_page(
 
 // ─── Poll renderer ────────────────────────────────────────────────────────────
 
+/// Renders a poll voting form or its results.
 fn render_poll(
     pd: &crate::models::PollData,
     thread_id: i64,
@@ -592,9 +611,13 @@ fn render_poll(
         let total = pd.total_votes.max(1);
         html.push_str(r#"<div class="poll-results">"#);
         for opt in &pd.options {
-            // This cast is a local display or math conversion, and the values are already bounded by surrounding invariants.
-            #[expect(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-            let pct = (opt.vote_count as f64 / total as f64 * 100.0).round() as i64;
+            let pct = opt
+                .vote_count
+                .max(0)
+                .saturating_mul(100)
+                .saturating_add(total / 2)
+                .checked_div(total)
+                .unwrap_or(0);
             let is_voted = pd.user_voted_option == Some(opt.id);
             let _ = write!(
                 html,
@@ -652,26 +675,43 @@ fn render_poll(
 // ─── Single post renderer ─────────────────────────────────────────────────────
 
 /// Options that control which controls are rendered for a post.
-#[expect(clippy::struct_excessive_bools)]
-#[derive(Clone, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag independently controls a post-rendering capability"
+)]
+#[derive(Clone, Debug, Default)]
 pub struct RenderPostOpts {
+    /// Whether to show the legacy delete control.
     pub show_delete: bool,
+    /// Whether administrative controls are available.
     pub is_admin: bool,
+    /// CSRF token used by administrative forms.
     pub admin_csrf_token: Option<String>,
+    /// Whether attached media should be displayed.
     pub show_media: bool,
+    /// Whether the author may edit the post.
     pub allow_editing: bool,
+    /// Whether the author may delete the post.
     pub allow_self_delete: bool,
+    /// Expiring author controls for this post.
     pub owned_post_controls: Option<OwnedPostControls>,
+    /// Whether to derive and display a per-thread poster ID.
     pub show_poster_ids: bool,
+    /// Whether greentext blocks start collapsed.
     pub collapse_greentext: bool,
+    /// Sticky, locked, and archived state for an opening post.
     pub thread_state: Option<(bool, bool, bool)>,
+    /// Opening-post identifier used to annotate replies directed at the author.
     pub thread_op_id: Option<i64>,
+    /// Whether video and audio elements start muted.
     pub video_audio_muted: bool,
 }
 
+/// Base64 alphabet used for compact poster identifiers.
 const POSTER_ID_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/// Resolves a six-bit value to the corresponding poster-ID character.
 fn poster_id_char(index: u8) -> char {
     POSTER_ID_ALPHABET
         .get(usize::from(index))
@@ -679,6 +719,7 @@ fn poster_id_char(index: u8) -> char {
         .map_or('A', char::from)
 }
 
+/// Encodes six hash bytes as an eight-character poster identifier.
 fn encode_poster_id(bytes: [u8; 6]) -> String {
     let mut out = String::with_capacity(8);
     let [b0, b1, b2, b3, b4, b5] = bytes;
@@ -693,6 +734,7 @@ fn encode_poster_id(bytes: [u8; 6]) -> String {
     out
 }
 
+/// Derives a thread-scoped poster identifier when the feature is enabled.
 fn render_poster_id(post: &Post, show_poster_ids: bool) -> Option<String> {
     if !show_poster_ids {
         return None;
@@ -711,6 +753,7 @@ fn render_poster_id(post: &Post, show_poster_ids: bool) -> Option<String> {
     Some(encode_poster_id(short))
 }
 
+/// Derives deterministic CSS colors for a poster-ID chip.
 fn poster_id_chip_style(poster_id: &str) -> String {
     const POSTER_CHIP_HUES: [u16; 18] = [
         0, 210, 122, 32, 282, 168, 338, 52, 196, 96, 16, 248, 146, 308, 72, 184, 228, 356,
@@ -738,6 +781,7 @@ fn poster_id_chip_style(poster_id: &str) -> String {
     )
 }
 
+/// Adds an `(OP)` label to same-thread links targeting the opening post.
 fn annotate_op_quotelinks(body_html: &str, thread_op_id: Option<i64>) -> String {
     let Some(op_id) = thread_op_id else {
         return body_html.to_owned();
@@ -751,9 +795,12 @@ fn annotate_op_quotelinks(body_html: &str, thread_op_id: Option<i64>) -> String 
     body_html.replace(&target, &replacement)
 }
 
+/// Number of filename stem characters displayed before truncation.
 const FILE_NAME_STEM_PREFIX_DISPLAY_CHARS: usize = 20;
+/// Marker inserted between a truncated filename stem and its extension.
 const FILE_NAME_TRUNCATION_MARKER: &str = "(...)";
 
+/// Renders a media thumbnail with a client-side fallback.
 fn render_media_thumb(
     img_class: &str,
     fallback_class: &str,
@@ -774,6 +821,7 @@ fn render_media_thumb(
     )
 }
 
+/// Truncates a filename stem without splitting Unicode scalar values.
 fn truncate_file_name_stem(input: &str) -> String {
     if input.chars().count() <= FILE_NAME_STEM_PREFIX_DISPLAY_CHARS {
         return input.to_owned();
@@ -786,6 +834,7 @@ fn truncate_file_name_stem(input: &str) -> String {
     format!("{prefix}{FILE_NAME_TRUNCATION_MARKER}")
 }
 
+/// Builds a bounded display filename while retaining its extension.
 fn display_file_name(name: &str) -> String {
     match name.rfind('.') {
         Some(dot_idx) if dot_idx > 0 => {
@@ -800,6 +849,7 @@ fn display_file_name(name: &str) -> String {
     }
 }
 
+/// Renders an escaped download link with the full filename in its tooltip.
 fn render_file_link(file_path: &str, file_name: &str) -> String {
     let display_name = display_file_name(file_name);
     format!(
@@ -810,6 +860,7 @@ fn render_file_link(file_path: &str, file_name: &str) -> String {
     )
 }
 
+/// Resolves media type from the normalized MIME type before stored metadata.
 fn effective_media_type(post: &Post) -> crate::models::MediaType {
     if let Some(mime_media) = post
         .mime_type
@@ -833,7 +884,14 @@ fn effective_media_type(post: &Post) -> crate::models::MediaType {
 /// user-supplied string in this function must continue to pass through
 /// `escape_html()`. Do not change the `body_html` insertion without ensuring
 /// the upstream sanitiser is still in place.
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "post rendering keeps its security-sensitive escaping and media branches together"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "post rendering keeps all media variants and security-sensitive escaping together"
+)]
 pub fn render_post(
     post: &Post,
     board_short: &str,
@@ -1346,6 +1404,7 @@ pub fn render_post(
     html
 }
 
+/// Renders the shared in-page edit dialog and optional validation state.
 fn render_edit_overlay(
     board: &Board,
     thread_id: i64,
@@ -1629,6 +1688,81 @@ mod tests {
         assert!(html.contains(r#"name="post_id" value="1""#));
         assert!(html.contains(r#"name="thread_id" value="1""#));
         assert!(html.contains(r#"name="board" value="test""#));
+    }
+
+    #[test]
+    fn render_post_uses_persisted_transcoded_file_size() {
+        let post = Post {
+            file_path: Some("test/video.webm".into()),
+            file_name: Some("video.mp4".into()),
+            file_size: Some(4),
+            thumb_path: Some("test/thumbs/video.webp".into()),
+            mime_type: Some("video/webm".into()),
+            media_type: Some(MediaType::Video),
+            ..sample_post()
+        };
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                admin_csrf_token: None,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+                video_audio_muted: false,
+            },
+            0,
+        );
+
+        assert!(html.contains("video-container"));
+        assert!(html.contains("(4 B)"));
+        assert!(!html.contains("(1.0 KiB)"));
+    }
+
+    #[test]
+    fn neutral_webm_fallback_never_renders_as_video() {
+        let post = Post {
+            file_path: Some("test/ambiguous.bin".into()),
+            file_name: Some("ambiguous.webm".into()),
+            thumb_path: None,
+            mime_type: Some("application/octet-stream".into()),
+            media_type: Some(MediaType::Other),
+            ..sample_post()
+        };
+
+        let html = render_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                admin_csrf_token: None,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: Some(1),
+                video_audio_muted: false,
+            },
+            0,
+        );
+
+        assert!(html.contains("file-download"));
+        assert!(!html.contains("video-container"));
+        assert!(!html.contains("<video"));
     }
 
     #[test]
@@ -2182,15 +2316,16 @@ mod tests {
         assert!(!html.contains("?token="));
 
         let expiry_attr = r#"data-action-expiry=""#;
-        let expiry_start = html.find(expiry_attr).expect("expiry attr");
-        let expiry_value_start = expiry_start + expiry_attr.len();
-        let expiry_value_end = html[expiry_value_start..]
-            .find('"')
-            .map(|offset| expiry_value_start + offset)
-            .expect("expiry attr closing quote");
-        let expiry_value = &html[expiry_value_start..expiry_value_end];
-        let expiry = expiry_value.parse::<i64>().expect("parseable expiry");
-        assert!(expiry > 0);
+        let expiry_value = html
+            .split_once(expiry_attr)
+            .and_then(|(_, suffix)| suffix.split_once('"').map(|(value, _)| value));
+        let expiry = expiry_value.and_then(|value| value.parse::<i64>().ok());
+        assert!(
+            expiry_value.is_some(),
+            "expiry attribute should have a closing quote"
+        );
+        assert!(expiry.is_some(), "expiry should be parseable");
+        assert!(expiry.is_some_and(|value| value > 0));
     }
 
     #[test]

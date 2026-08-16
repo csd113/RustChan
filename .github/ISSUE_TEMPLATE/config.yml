@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security policy
+    url: https://github.com/csd113/RustChan/security/policy
+    about: Read this before sharing any suspected vulnerability; do not disclose sensitive details publicly.
+  - name: Support boundaries
+    url: https://github.com/csd113/RustChan/blob/main/SUPPORT.md
+    about: Check what belongs in this repository and what remains an independent operator's responsibility.
+  - name: Setup and deployment guide
+    url: https://github.com/csd113/RustChan/blob/main/SETUP.md
+    about: Review installation, Tor, TLS, reverse proxy, backup, update, and troubleshooting guidance.

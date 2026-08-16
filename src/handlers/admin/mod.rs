@@ -1,12 +1,3 @@
-// These branches are clearer in this state module than the more compact Clippy-suggested form.
-#![allow(
-    clippy::option_if_let_else,
-    clippy::map_unwrap_or,
-    clippy::needless_pass_by_value,
-    clippy::assigning_clones,
-    clippy::useless_let_if_seq
-)]
-
 // handlers/admin/mod.rs
 //
 // Admin panel. All routes require a valid session cookie.
@@ -23,20 +14,25 @@
 // spawn_blocking to avoid blocking the Tokio event loop. Direct DB calls from
 // async context were stalling worker threads under concurrent load.
 
-pub mod auth;
-pub use auth::*;
+/// Implements auth handler support.
+pub(crate) mod auth;
+pub(crate) use auth::*;
 
-pub mod backup;
-pub use backup::*;
+/// Implements backup handler support.
+pub(crate) mod backup;
+pub(crate) use backup::*;
 
-pub mod content;
-pub use content::*;
+/// Implements content handler support.
+pub(crate) mod content;
+pub(crate) use content::*;
 
-pub mod moderation;
-pub use moderation::*;
+/// Implements moderation handler support.
+pub(crate) mod moderation;
+pub(crate) use moderation::*;
 
-pub mod settings;
-pub use settings::*;
+/// Implements settings handler support.
+pub(crate) mod settings;
+pub(crate) use settings::*;
 
 use crate::{
     config::CONFIG,
@@ -65,20 +61,28 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 // ─── Shared constant ──────────────────────────────────────────────────────────
 
+/// Session cookie used by this handler.
 const SESSION_COOKIE: &str = "chan_admin_session";
+/// Admin cookie same site used by this handler.
 const ADMIN_COOKIE_SAME_SITE: SameSite = SameSite::Lax;
+/// Admin bootstrap TTL secs used by this handler.
 const ADMIN_BOOTSTRAP_TTL_SECS: u64 = 120;
+/// Missing origin referer used by this handler.
 const MISSING_ORIGIN_REFERER: &str = "Missing Origin/Referer header.";
 
+/// Shared state for admin session bootstraps.
 static ADMIN_SESSION_BOOTSTRAPS: LazyLock<DashMap<String, (String, u64)>> =
     LazyLock::new(DashMap::new);
 
 // ─── Shared form type used by auth and backup ─────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct CsrfOnly {
+/// Data used by the CSRF only workflow.
+pub(crate) struct CsrfOnly {
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
+    /// The optional return to.
     pub return_to: Option<String>,
 }
 
@@ -108,6 +112,7 @@ pub(in crate::handlers) fn require_admin_session_sid(
     Ok(session.admin_id)
 }
 
+/// Requires same origin request.
 pub(super) fn require_same_origin_request(
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
@@ -187,6 +192,7 @@ pub(super) fn require_same_origin_request(
     ))
 }
 
+/// Performs the effective same origin source handler operation.
 fn effective_same_origin_source<'a>(headers: &'a HeaderMap, request_host: &str) -> Option<&'a str> {
     let origin = header_value_trimmed(headers, header::ORIGIN);
     let referer = header_value_trimmed(headers, header::REFERER);
@@ -198,6 +204,7 @@ fn effective_same_origin_source<'a>(headers: &'a HeaderMap, request_host: &str) 
     }
 }
 
+/// Performs the header value trimmed handler operation.
 fn header_value_trimmed(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
     headers
         .get(name)
@@ -206,6 +213,7 @@ fn header_value_trimmed(headers: &HeaderMap, name: header::HeaderName) -> Option
         .filter(|value| !value.is_empty())
 }
 
+/// Returns whether the request has same origin fetch metadata.
 fn request_has_same_origin_fetch_metadata(headers: &HeaderMap) -> bool {
     headers
         .get("sec-fetch-site")
@@ -213,6 +221,7 @@ fn request_has_same_origin_fetch_metadata(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("same-origin"))
 }
 
+/// Checks admin CSRF jar.
 pub(super) fn check_admin_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
     if admin_csrf_is_valid(jar, form_token) {
         Ok(())
@@ -221,16 +230,14 @@ pub(super) fn check_admin_csrf_jar(jar: &CookieJar, form_token: Option<&str>) ->
     }
 }
 
+/// Handles the admin CSRF is valid request.
 pub(super) fn admin_csrf_is_valid(jar: &CookieJar, form_token: Option<&str>) -> bool {
-    let csrf_cookie = jar
-        .get("csrf_token")
-        .map(axum_extra::extract::cookie::Cookie::value);
-    let session_id = jar
-        .get(SESSION_COOKIE)
-        .map(axum_extra::extract::cookie::Cookie::value);
+    let csrf_cookie = jar.get("csrf_token").map(Cookie::value);
+    let session_id = jar.get(SESSION_COOKIE).map(Cookie::value);
     validate_signed_csrf(csrf_cookie, session_id, form_token.unwrap_or(""))
 }
 
+/// Requires same origin or valid CSRF.
 pub(in crate::handlers) fn require_same_origin_or_valid_csrf(
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
@@ -249,6 +256,7 @@ pub(in crate::handlers) fn require_same_origin_or_valid_csrf(
     }
 }
 
+/// Requires admin post origin and CSRF.
 pub(in crate::handlers) fn require_admin_post_origin_and_csrf(
     jar: &CookieJar,
     headers: &HeaderMap,
@@ -264,6 +272,7 @@ pub(in crate::handlers) fn require_admin_post_origin_and_csrf(
     }
 }
 
+/// Handles the admin CSRF cookie request.
 fn admin_csrf_cookie(raw_token: String, secure: bool) -> Cookie<'static> {
     let mut cookie = Cookie::new("csrf_token", raw_token);
     cookie.set_http_only(false);
@@ -273,15 +282,17 @@ fn admin_csrf_cookie(raw_token: String, secure: bool) -> Cookie<'static> {
     cookie
 }
 
+/// Refreshes admin CSRF cookie.
 pub(super) fn refresh_admin_csrf_cookie(jar: CookieJar, secure: bool) -> CookieJar {
     let cookie = admin_csrf_cookie(new_csrf_token(), secure);
     jar.add(cookie)
 }
 
+/// Ensures admin CSRF.
 pub(super) fn ensure_admin_csrf(jar: CookieJar, secure: bool) -> Result<(CookieJar, String)> {
     let raw = jar
         .get("csrf_token")
-        .map(axum_extra::extract::cookie::Cookie::value)
+        .map(Cookie::value)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
     let mut jar = jar;
@@ -294,7 +305,7 @@ pub(super) fn ensure_admin_csrf(jar: CookieJar, secure: bool) -> Result<(CookieJ
     };
     let session_id = jar
         .get(SESSION_COOKIE)
-        .map(axum_extra::extract::cookie::Cookie::value)
+        .map(Cookie::value)
         .ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
     let session_id = session_id.to_owned();
     Ok((
@@ -305,6 +316,7 @@ pub(super) fn ensure_admin_csrf(jar: CookieJar, secure: bool) -> Result<(CookieJ
 
 pub(super) use crate::utils::redirect::encode_query_component;
 
+/// Performs the should set secure cookie handler operation.
 pub(in crate::handlers) fn should_set_secure_cookie(
     headers: &HeaderMap,
     context: crate::middleware::SecureCookieContext,
@@ -317,17 +329,19 @@ pub(in crate::handlers) fn should_set_secure_cookie(
     )
 }
 
+/// Performs the should set secure cookie with config handler operation.
 fn should_set_secure_cookie_with_config(
     headers: &HeaderMap,
     context: crate::middleware::SecureCookieContext,
     https_cookies: bool,
     behind_proxy: bool,
 ) -> bool {
-    https_cookies
-        && (context.direct_https
-            || crate::middleware::forwarded_proto_is_https(headers, context.peer, behind_proxy))
+    context.direct_https
+        || (https_cookies
+            && crate::middleware::forwarded_proto_is_https(headers, context.peer, behind_proxy))
 }
 
+/// Performs the request scheme for same origin handler operation.
 fn request_scheme_for_same_origin(
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
@@ -343,6 +357,7 @@ fn request_scheme_for_same_origin(
     )
 }
 
+/// Performs the request scheme for same origin with config handler operation.
 fn request_scheme_for_same_origin_with_config(
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
@@ -363,6 +378,7 @@ fn request_scheme_for_same_origin_with_config(
     }
 }
 
+/// Performs the host header uses HTTPS port with config handler operation.
 fn host_header_uses_https_port_with_config(headers: &HeaderMap, tls_port: u16) -> bool {
     let Some(host) = headers
         .get(header::HOST)
@@ -381,6 +397,7 @@ fn host_header_uses_https_port_with_config(headers: &HeaderMap, tls_port: u16) -
     }
 }
 
+/// Performs the request origin uses HTTPS handler operation.
 fn request_origin_uses_https(headers: &HeaderMap) -> bool {
     let request_host = headers
         .get(header::HOST)
@@ -410,6 +427,7 @@ fn request_origin_uses_https(headers: &HeaderMap) -> bool {
     hosts_match_for_same_origin(source_host, request_host)
 }
 
+/// Performs the hosts match for same origin handler operation.
 fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
     let source_host = normalize_same_origin_host(source_host);
     let request_host = normalize_same_origin_host(request_host);
@@ -421,6 +439,7 @@ fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
     is_loopback_alias(source_host) && is_loopback_alias(request_host)
 }
 
+/// Performs the normalize same origin host handler operation.
 fn normalize_same_origin_host(host: &str) -> &str {
     let Some(inner) = host
         .strip_prefix('[')
@@ -436,6 +455,7 @@ fn normalize_same_origin_host(host: &str) -> &str {
     }
 }
 
+/// Returns whether onion host.
 fn is_onion_host(host: &str) -> bool {
     let host = normalize_same_origin_host(host);
     let Some((label, suffix)) = host.rsplit_once('.') else {
@@ -445,6 +465,7 @@ fn is_onion_host(host: &str) -> bool {
     !label.is_empty() && suffix.eq_ignore_ascii_case("onion")
 }
 
+/// Returns whether loopback alias.
 fn is_loopback_alias(host: &str) -> bool {
     let host = normalize_same_origin_host(host);
 
@@ -456,10 +477,11 @@ fn is_loopback_alias(host: &str) -> bool {
         .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// Handles the admin panel redirect with status request.
 fn admin_panel_redirect_with_status(
     message: &str,
     is_error: bool,
-    target: AdminPanelTarget<'_>,
+    target: &AdminPanelTarget<'_>,
 ) -> Redirect {
     let key = if is_error { "flash_error" } else { "flash" };
     let mut url = format!("/admin/panel?{key}={}", encode_query_component(message));
@@ -475,12 +497,16 @@ fn admin_panel_redirect_with_status(
 }
 
 #[derive(Clone, Debug, Default)]
+/// Data used by the admin panel target workflow.
 pub(super) struct AdminPanelTarget<'a> {
+    /// The optional anchor.
     anchor: Option<Cow<'a, str>>,
+    /// The optional open section.
     open_section: Option<Cow<'a, str>>,
 }
 
 impl<'a> AdminPanelTarget<'a> {
+    /// Performs the none handler operation.
     pub(super) const fn none() -> Self {
         Self {
             anchor: None,
@@ -488,6 +514,7 @@ impl<'a> AdminPanelTarget<'a> {
         }
     }
 
+    /// Performs the anchor handler operation.
     pub(super) const fn anchor(anchor: &'a str) -> Self {
         Self {
             anchor: Some(Cow::Borrowed(anchor)),
@@ -495,6 +522,7 @@ impl<'a> AdminPanelTarget<'a> {
         }
     }
 
+    /// Performs the anchor open handler operation.
     pub(super) const fn anchor_open(anchor: &'a str, open_section: &'a str) -> Self {
         Self {
             anchor: Some(Cow::Borrowed(anchor)),
@@ -502,6 +530,7 @@ impl<'a> AdminPanelTarget<'a> {
         }
     }
 
+    /// Performs the owned anchor open handler operation.
     pub(super) const fn owned_anchor_open(anchor: String, open_section: &'a str) -> Self {
         Self {
             anchor: Some(Cow::Owned(anchor)),
@@ -509,10 +538,12 @@ impl<'a> AdminPanelTarget<'a> {
         }
     }
 
+    /// Performs the anchor value handler operation.
     pub(super) fn anchor_value(&self) -> Option<&str> {
         self.anchor.as_deref().filter(|value| !value.is_empty())
     }
 
+    /// Performs the open section value handler operation.
     pub(super) fn open_section_value(&self) -> Option<&str> {
         self.open_section
             .as_deref()
@@ -520,14 +551,17 @@ impl<'a> AdminPanelTarget<'a> {
     }
 }
 
+/// Handles the admin panel redirect request.
 pub(super) fn admin_panel_redirect(message: &str) -> Redirect {
-    admin_panel_redirect_with_status(message, false, AdminPanelTarget::none())
+    admin_panel_redirect_with_status(message, false, &AdminPanelTarget::none())
 }
 
+/// Handles the admin panel redirect anchor request.
 pub(super) fn admin_panel_redirect_anchor(message: &str, anchor: &str) -> Redirect {
-    admin_panel_redirect_with_status(message, false, AdminPanelTarget::anchor(anchor))
+    admin_panel_redirect_with_status(message, false, &AdminPanelTarget::anchor(anchor))
 }
 
+/// Handles the admin panel redirect anchor open request.
 pub(super) fn admin_panel_redirect_anchor_open(
     message: &str,
     anchor: &str,
@@ -536,14 +570,16 @@ pub(super) fn admin_panel_redirect_anchor_open(
     admin_panel_redirect_with_status(
         message,
         false,
-        AdminPanelTarget::anchor_open(anchor, open_section),
+        &AdminPanelTarget::anchor_open(anchor, open_section),
     )
 }
 
+/// Handles the admin panel error redirect anchor request.
 pub(super) fn admin_panel_error_redirect_anchor(message: &str, anchor: &str) -> Redirect {
-    admin_panel_redirect_with_status(message, true, AdminPanelTarget::anchor(anchor))
+    admin_panel_redirect_with_status(message, true, &AdminPanelTarget::anchor(anchor))
 }
 
+/// Handles the admin panel error redirect anchor open request.
 pub(super) fn admin_panel_error_redirect_anchor_open(
     message: &str,
     anchor: &str,
@@ -552,7 +588,7 @@ pub(super) fn admin_panel_error_redirect_anchor_open(
     admin_panel_redirect_with_status(
         message,
         true,
-        AdminPanelTarget::anchor_open(anchor, open_section),
+        &AdminPanelTarget::anchor_open(anchor, open_section),
     )
 }
 
@@ -561,13 +597,20 @@ pub(super) fn admin_panel_error_redirect_anchor_open(
 /// Query params accepted by GET /admin/panel.
 /// All fields are optional — missing = no flash message.
 #[derive(Deserialize, Default)]
-pub struct AdminPanelQuery {
+pub(crate) struct AdminPanelQuery {
+    /// The flash message, if any.
     pub flash: Option<String>,
+    /// The optional flash error.
     pub flash_error: Option<String>,
+    /// The optional open.
     pub open: Option<String>,
+    /// The optional bootstrap.
     pub bootstrap: Option<String>,
+    /// The optional backup created.
     pub backup_created: Option<String>,
+    /// The optional backup deleted.
     pub backup_deleted: Option<String>,
+    /// The optional restored.
     pub restored: Option<String>,
     /// Set by `board_restore` on success: the `short_name` of the restored board.
     pub board_restored: Option<String>,
@@ -578,244 +621,442 @@ pub struct AdminPanelQuery {
 }
 
 #[derive(Deserialize, Default)]
-pub struct LiveLogQuery {
+/// Query parameters controlling the live-log response size.
+pub(crate) struct LiveLogQuery {
+    /// The optional bytes.
     pub bytes: Option<usize>,
 }
 
-#[expect(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the snapshot carries independent feature and health flags into the admin template"
+)]
+/// Point-in-time data for admin panel.
 struct AdminPanelSnapshot {
+    /// The boards collection.
     boards: Vec<crate::models::Board>,
+    /// The bans collection.
     bans: Vec<crate::models::Ban>,
+    /// The filters collection.
     filters: Vec<crate::models::WordFilter>,
+    /// The reports collection.
     reports: Vec<crate::models::ReportWithContext>,
+    /// The appeals collection.
     appeals: Vec<crate::models::BanAppeal>,
+    /// The site name.
     site_name: String,
+    /// The site subtitle.
     site_subtitle: String,
+    /// Whether homepage new thread badges is enabled.
     homepage_new_thread_badges_enabled: bool,
+    /// Whether homepage new reply badges is enabled.
     homepage_new_reply_badges_enabled: bool,
+    /// Whether thread new reply badges is enabled.
     thread_new_reply_badges_enabled: bool,
+    /// The default theme.
     default_theme: String,
+    /// The banner rotation interval minutes.
     banner_rotation_interval_minutes: i64,
+    /// Whether banner external links is enabled.
     banner_external_links_enabled: bool,
+    /// The auto full backup interval hours.
     auto_full_backup_interval_hours: u64,
+    /// The auto full backup copies to keep.
     auto_full_backup_copies_to_keep: u64,
+    /// Whether the auto full backup include Tor hidden service keys setting is active.
     auto_full_backup_include_tor_hidden_service_keys: bool,
+    /// The auto full backup storage mode.
     auto_full_backup_storage_mode: String,
+    /// The auto full backup split ZIP part size size in bytes.
     auto_full_backup_split_zip_part_size_bytes: u64,
+    /// The themes collection.
     themes: Vec<crate::models::Theme>,
+    /// The global banners collection.
     global_banners: Vec<crate::models::BannerAsset>,
+    /// The home banners collection.
     home_banners: Vec<crate::models::BannerAsset>,
+    /// The board banners collection.
     board_banners: Vec<crate::models::BannerAsset>,
-    full_backups: Vec<crate::models::BackupInfo>,
-    board_backups: Vec<crate::models::BackupInfo>,
+    /// The full backups collection.
+    full_backups: Vec<BackupInfo>,
+    /// The board backups collection.
+    board_backups: Vec<BackupInfo>,
+    /// The database size size in bytes.
     db_size_bytes: i64,
+    /// Whether the database size warning setting is active.
     db_size_warning: bool,
+    /// The setup status.
     setup_status: crate::templates::AdminPanelSetupStatus,
+    /// The `FFmpeg` timeout duration in seconds.
     ffmpeg_timeout_secs: u64,
+    /// Whether media auto prune is enabled.
     media_auto_prune_enabled: bool,
+    /// The media max active content size size in bytes.
     media_max_active_content_size_bytes: u64,
+    /// Whether the `FFmpeg` available setting is active.
     ffmpeg_available: bool,
+    /// Whether the `FFprobe` available setting is active.
     ffprobe_available: bool,
+    /// Whether the `FFmpeg` webp available setting is active.
     ffmpeg_webp_available: bool,
+    /// Whether the `FFmpeg` VP9 available setting is active.
     ffmpeg_vp9_available: bool,
+    /// Whether the `FFmpeg` VP9 encoder available setting is active.
     ffmpeg_vp9_encoder_available: bool,
+    /// Whether the `FFmpeg` opus available setting is active.
     ffmpeg_opus_available: bool,
+    /// The optional PDF thumbnail renderer.
     pdf_thumbnail_renderer: Option<String>,
+    /// The backup summary.
     backup_summary: BackupSummary,
+    /// The site health.
     site_health: SiteHealthSnapshot,
+    /// The dashboard.
     dashboard: AdminDashboardSummary,
 }
 
 #[derive(Clone)]
+/// Data used by the backup summary workflow.
 struct BackupSummary {
+    /// The optional warning.
     warning: Option<String>,
+    /// The status line.
     status_line: String,
 }
 
+/// Data used by the overview domain data workflow.
 struct OverviewDomainData {
+    /// The backup summary.
     backup_summary: BackupSummary,
 }
 
 #[derive(Clone)]
+/// Data used by the admin dashboard summary workflow.
 struct AdminDashboardSummary {
+    /// The version.
     version: String,
+    /// The build.
     build: String,
+    /// The setup status.
     setup_status: String,
+    /// The setup detail.
     setup_detail: String,
+    /// The setup state.
     setup_state: crate::templates::AdminDashboardState,
+    /// The site title.
     site_title: String,
+    /// The public URL.
     public_url: String,
+    /// The database status.
     db_status: String,
+    /// The database detail.
     db_detail: String,
+    /// The database state.
     db_state: crate::templates::AdminDashboardState,
+    /// The backup status.
     backup_status: String,
+    /// The backup detail.
     backup_detail: String,
+    /// The backup state.
     backup_state: crate::templates::AdminDashboardState,
+    /// The storage status.
     storage_status: String,
+    /// The storage detail.
     storage_detail: String,
+    /// The storage state.
     storage_state: crate::templates::AdminDashboardState,
+    /// The Tor status.
     tor_status: String,
+    /// The Tor detail.
     tor_detail: String,
+    /// The Tor state.
     tor_state: crate::templates::AdminDashboardState,
+    /// The dependency status.
     dependency_status: String,
+    /// The dependency detail.
     dependency_detail: String,
+    /// The dependency state.
     dependency_state: crate::templates::AdminDashboardState,
+    /// The job status.
     job_status: String,
+    /// The job detail.
     job_detail: String,
+    /// The job state.
     job_state: crate::templates::AdminDashboardState,
+    /// The number of boards.
     board_count: String,
+    /// The number of threads.
     thread_count: String,
+    /// The number of posts.
     post_count: String,
+    /// The recent activity.
     recent_activity: String,
+    /// The media summary.
     media_summary: String,
+    /// The report status.
     report_status: String,
+    /// The report detail.
     report_detail: String,
+    /// The report state.
     report_state: crate::templates::AdminDashboardState,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Point-in-time data for dashboard activity.
 struct DashboardActivitySnapshot {
+    /// The number of boards.
     board_count: usize,
+    /// The optional active threads.
     active_threads: Option<i64>,
+    /// The optional total threads.
     total_threads: Option<i64>,
+    /// The optional total posts.
     total_posts: Option<i64>,
+    /// The optional posts 24h.
     posts_24h: Option<i64>,
+    /// The optional posts 7d.
     posts_7d: Option<i64>,
+    /// The optional upload posts.
     upload_posts: Option<i64>,
+    /// The optional total images.
     total_images: Option<i64>,
+    /// The optional total videos.
     total_videos: Option<i64>,
+    /// The optional total audio.
     total_audio: Option<i64>,
+    /// The active size in bytes.
     active_bytes: Option<i64>,
+    /// The optional recent reports 7d.
     recent_reports_7d: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Data used by the dashboard thread counts workflow.
 struct DashboardThreadCounts {
+    /// The active.
     active: i64,
+    /// The total.
     total: i64,
 }
 
+#[derive(Clone, Copy)]
+/// Data used by the dashboard summary inputs workflow.
 struct DashboardSummaryInputs<'a> {
+    /// The activity.
     activity: &'a DashboardActivitySnapshot,
+    /// The moderation.
     moderation: &'a ModerationDomainData,
+    /// The appearance.
     appearance: &'a AppearanceDomainData,
+    /// The backup summary.
     backup_summary: &'a BackupSummary,
+    /// The maintenance.
     maintenance: &'a MaintenanceDomainData,
+    /// The setup status.
     setup_status: crate::templates::AdminPanelSetupStatus,
+    /// The site health.
     site_health: &'a SiteHealthSnapshot,
+    /// The optional Tor address.
     tor_address: Option<&'a str>,
 }
 
+/// Point-in-time data for site health.
 struct SiteHealthSnapshot {
+    /// The server status.
     server_status: String,
+    /// The database schema status.
     database_schema_status: String,
+    /// The database integrity status.
     database_integrity_status: String,
+    /// The last successful backup.
     last_successful_backup: String,
+    /// The next scheduled backup.
     next_scheduled_backup: String,
+    /// The data dir usage.
     data_dir_usage: String,
+    /// The upload dir size.
     upload_dir_size: String,
+    /// The Tor status.
     tor_status: String,
+    /// The Tor service status.
     tor_service_status: String,
+    /// The Tor mode.
     tor_mode: String,
+    /// The Tor config summary.
     tor_config_summary: String,
+    /// The running jobs.
     running_jobs: i64,
+    /// The queued jobs.
     queued_jobs: i64,
+    /// The recent completed jobs.
     recent_completed_jobs: i64,
+    /// The failed jobs.
     failed_jobs: i64,
+    /// Whether the background-job summary query succeeded.
+    background_jobs_available: bool,
+    /// The backup jobs.
     backup_jobs: String,
+    /// The restore jobs.
     restore_jobs: String,
+    /// The recent warnings.
     recent_warnings: String,
 }
 
 #[derive(Serialize)]
+/// Point-in-time data for site health jobs.
 struct SiteHealthJobsSnapshot {
+    #[serde(skip)]
+    /// Whether the background-job summary query succeeded.
+    summary_available: bool,
     #[serde(rename = "running_jobs")]
+    /// The running.
     running: i64,
     #[serde(rename = "queued_jobs")]
+    /// The queued.
     queued: i64,
     #[serde(rename = "recent_completed_jobs")]
+    /// The recent completed.
     recent_completed: i64,
     #[serde(rename = "failed_jobs")]
+    /// The failed.
     failed: i64,
     #[serde(rename = "backup_jobs")]
+    /// The backup.
     backup: String,
     #[serde(rename = "restore_jobs")]
+    /// The restore.
     restore: String,
     #[serde(rename = "recent_failed_job_details")]
+    /// The recent failed collection.
     recent_failed: Vec<SiteHealthJobDetail>,
     #[serde(rename = "recent_completed_job_details")]
+    /// The recent completed details collection.
     recent_completed_details: Vec<SiteHealthJobDetail>,
 }
 
 #[derive(Clone, Serialize)]
+/// Data used by the site health job detail workflow.
 struct SiteHealthJobDetail {
+    /// The record identifier.
     id: i64,
     #[serde(rename = "type")]
+    /// The job type.
     job_type: String,
+    /// The name.
     name: String,
+    /// The post identifier.
     post_id: Option<i64>,
+    /// The post URL.
     post_url: Option<String>,
+    /// The status.
     status: String,
+    /// The attempts.
     attempts: i64,
+    /// The error message, if any.
     error: Option<String>,
+    /// The updated timestamp.
     updated_at: String,
 }
 
+/// Data used by the boards domain data workflow.
 struct BoardsDomainData {
+    /// The boards collection.
     boards: Vec<crate::models::Board>,
 }
 
+/// Data used by the moderation domain data workflow.
 struct ModerationDomainData {
+    /// The bans collection.
     bans: Vec<crate::models::Ban>,
+    /// The filters collection.
     filters: Vec<crate::models::WordFilter>,
+    /// The reports collection.
     reports: Vec<crate::models::ReportWithContext>,
+    /// The appeals collection.
     appeals: Vec<crate::models::BanAppeal>,
 }
 
-#[expect(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the fields mirror independent appearance toggles stored in site settings"
+)]
+/// Data used by the appearance domain data workflow.
 struct AppearanceDomainData {
+    /// The site name.
     site_name: String,
+    /// The site subtitle.
     site_subtitle: String,
+    /// Whether homepage new thread badges is enabled.
     homepage_new_thread_badges_enabled: bool,
+    /// Whether homepage new reply badges is enabled.
     homepage_new_reply_badges_enabled: bool,
+    /// Whether thread new reply badges is enabled.
     thread_new_reply_badges_enabled: bool,
+    /// The default theme.
     default_theme: String,
+    /// The banner rotation interval minutes.
     banner_rotation_interval_minutes: i64,
+    /// Whether banner external links is enabled.
     banner_external_links_enabled: bool,
+    /// The themes collection.
     themes: Vec<crate::models::Theme>,
+    /// The global banners collection.
     global_banners: Vec<crate::models::BannerAsset>,
+    /// The home banners collection.
     home_banners: Vec<crate::models::BannerAsset>,
+    /// The board banners collection.
     board_banners: Vec<crate::models::BannerAsset>,
 }
 
+/// Data used by the backups domain data workflow.
 struct BackupsDomainData {
+    /// The full backups collection.
     full_backups: Vec<BackupInfo>,
+    /// The board backups collection.
     board_backups: Vec<BackupInfo>,
 }
 
-#[expect(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the fields are independent maintenance capability flags read from application state"
+)]
 // This is a flat snapshot of independent maintenance capability flags read from app state.
+/// Data used by the maintenance domain data workflow.
 struct MaintenanceDomainData {
+    /// The database size size in bytes.
     db_size_bytes: i64,
+    /// Whether the database size warning setting is active.
     db_size_warning: bool,
+    /// The `FFmpeg` timeout duration in seconds.
     ffmpeg_timeout_secs: u64,
+    /// Whether media auto prune is enabled.
     media_auto_prune_enabled: bool,
+    /// The media max active content size size in bytes.
     media_max_active_content_size_bytes: u64,
+    /// Whether the `FFmpeg` available setting is active.
     ffmpeg_available: bool,
+    /// Whether the `FFprobe` available setting is active.
     ffprobe_available: bool,
+    /// Whether the `FFmpeg` webp available setting is active.
     ffmpeg_webp_available: bool,
+    /// Whether the `FFmpeg` VP9 available setting is active.
     ffmpeg_vp9_available: bool,
+    /// Whether the `FFmpeg` VP9 encoder available setting is active.
     ffmpeg_vp9_encoder_available: bool,
+    /// Whether the `FFmpeg` opus available setting is active.
     ffmpeg_opus_available: bool,
+    /// The optional PDF thumbnail renderer.
     pdf_thumbnail_renderer: Option<String>,
 }
 
+/// Loads overview domain data.
 fn load_overview_domain_data(full_backups: &[BackupInfo]) -> OverviewDomainData {
     OverviewDomainData {
         backup_summary: build_backup_summary(full_backups),
     }
 }
 
+/// Loads site health snapshot.
 fn load_site_health_snapshot(
     conn: &rusqlite::Connection,
     state: &AppState,
@@ -867,12 +1108,14 @@ fn load_site_health_snapshot(
         queued_jobs: jobs.queued,
         recent_completed_jobs: jobs.recent_completed,
         failed_jobs: jobs.failed,
+        background_jobs_available: jobs.summary_available,
         backup_jobs: jobs.backup,
         restore_jobs: jobs.restore,
         recent_warnings,
     }
 }
 
+/// Performs the Tor service status label handler operation.
 fn tor_service_status_label(onion_address: Option<&str>) -> String {
     if !CONFIG.enable_tor_support {
         "not started; enable Tor support in settings.toml and restart".to_owned()
@@ -883,6 +1126,7 @@ fn tor_service_status_label(onion_address: Option<&str>) -> String {
     }
 }
 
+/// Performs the Tor mode label handler operation.
 fn tor_mode_label() -> String {
     if !CONFIG.enable_tor_support {
         "clearnet only".to_owned()
@@ -893,6 +1137,7 @@ fn tor_mode_label() -> String {
     }
 }
 
+/// Loads dashboard activity snapshot.
 fn load_dashboard_activity_snapshot(
     conn: &rusqlite::Connection,
     board_count: usize,
@@ -920,6 +1165,7 @@ fn load_dashboard_activity_snapshot(
     }
 }
 
+/// Performs the dashboard thread counts handler operation.
 fn dashboard_thread_counts(conn: &rusqlite::Connection) -> Option<DashboardThreadCounts> {
     conn.query_row(
         "SELECT
@@ -937,6 +1183,7 @@ fn dashboard_thread_counts(conn: &rusqlite::Connection) -> Option<DashboardThrea
     .ok()
 }
 
+/// Performs the dashboard recent count handler operation.
 fn dashboard_recent_count(
     conn: &rusqlite::Connection,
     table_name: &str,
@@ -953,24 +1200,35 @@ fn dashboard_recent_count(
     .ok()
 }
 
+/// Performs the optional count query handler operation.
 fn optional_count_query(conn: &rusqlite::Connection, query: &str) -> Option<i64> {
     conn.query_row(query, [], |row| row.get(0)).ok()
 }
 
+/// Loads site health jobs snapshot.
 fn load_site_health_jobs_snapshot(
     conn: &rusqlite::Connection,
     state: &AppState,
 ) -> SiteHealthJobsSnapshot {
-    let job_summary =
-        db::background_job_summary(conn).unwrap_or_else(|_| db::BackgroundJobSummary {
-            running: 0,
-            queued: state.job_queue.pending_count(),
-            recent_completed: 0,
-            failed: 0,
-        });
+    let (job_summary, summary_available) = match db::background_job_summary(conn) {
+        Ok(summary) => (summary, true),
+        Err(error) => {
+            tracing::warn!(target: "admin", %error, "Could not load background-job summary");
+            (
+                db::BackgroundJobSummary {
+                    running: 0,
+                    queued: state.job_queue.pending_count(),
+                    recent_completed: 0,
+                    failed: 0,
+                },
+                false,
+            )
+        }
+    };
     let recent_failed = load_site_health_job_details(conn, "failed");
     let recent_completed_details = load_site_health_job_details(conn, "done");
     SiteHealthJobsSnapshot {
+        summary_available,
         running: job_summary.running,
         queued: job_summary.queued,
         recent_completed: job_summary.recent_completed,
@@ -982,6 +1240,7 @@ fn load_site_health_jobs_snapshot(
     }
 }
 
+/// Loads site health job details.
 fn load_site_health_job_details(
     conn: &rusqlite::Connection,
     status: &str,
@@ -995,6 +1254,7 @@ fn load_site_health_job_details(
         .collect()
 }
 
+/// Performs the site health job detail handler operation.
 fn site_health_job_detail(
     conn: &rusqlite::Connection,
     job: db::RecentBackgroundJob,
@@ -1017,11 +1277,13 @@ fn site_health_job_detail(
     }
 }
 
+/// Performs the job post ID handler operation.
 fn job_post_id(payload: &str) -> Option<i64> {
     let value = serde_json::from_str::<serde_json::Value>(payload).ok()?;
     value.get("d")?.get("post_id")?.as_i64()
 }
 
+/// Performs the post URL for job handler operation.
 fn post_url_for_job(conn: &rusqlite::Connection, post_id: i64) -> Option<String> {
     conn.query_row(
         "SELECT b.short_name, p.thread_id
@@ -1036,6 +1298,7 @@ fn post_url_for_job(conn: &rusqlite::Connection, post_id: i64) -> Option<String>
     .map(|(board_short, thread_id)| format!("/{board_short}/thread/{thread_id}#p{post_id}"))
 }
 
+/// Performs the background job display name handler operation.
 fn background_job_display_name(job_type: &str) -> &str {
     match job_type {
         "video_transcode" => "Video transcode",
@@ -1046,6 +1309,7 @@ fn background_job_display_name(job_type: &str) -> &str {
     }
 }
 
+/// Performs the sanitized job error snippet handler operation.
 fn sanitized_job_error_snippet(error: &str) -> Option<String> {
     let mut redacted = String::new();
     for token in error.split_whitespace() {
@@ -1083,12 +1347,14 @@ fn sanitized_job_error_snippet(error: &str) -> Option<String> {
     }
 }
 
+/// Formats backup time.
 fn format_backup_time(backup: &BackupInfo) -> String {
     backup
         .modified_epoch
         .map_or_else(|| backup.filename.clone(), fmt_epoch)
 }
 
+/// Performs the next scheduled backup label handler operation.
 fn next_scheduled_backup_label(full_backups: &[BackupInfo], interval_hours: u64) -> String {
     if interval_hours == 0 {
         return "not scheduled".to_owned();
@@ -1103,6 +1369,7 @@ fn next_scheduled_backup_label(full_backups: &[BackupInfo], interval_hours: u64)
     fmt_epoch(modified_epoch.saturating_add(interval_secs))
 }
 
+/// Performs the fmt epoch handler operation.
 fn fmt_epoch(timestamp: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0).map_or_else(
         || "unknown".to_owned(),
@@ -1110,6 +1377,7 @@ fn fmt_epoch(timestamp: i64) -> String {
     )
 }
 
+/// Performs the database integrity status handler operation.
 fn db_integrity_status(status: &crate::middleware::DbMaintenanceJobStatus) -> String {
     match status {
         crate::middleware::DbMaintenanceJobStatus::Finished { report, .. } => {
@@ -1125,6 +1393,7 @@ fn db_integrity_status(status: &crate::middleware::DbMaintenanceJobStatus) -> St
     }
 }
 
+/// Performs the backup jobs label handler operation.
 fn backup_jobs_label(progress: &crate::middleware::BackupProgress) -> String {
     use std::sync::atomic::Ordering;
     match progress.phase.load(Ordering::Relaxed) {
@@ -1145,6 +1414,7 @@ fn backup_jobs_label(progress: &crate::middleware::BackupProgress) -> String {
     }
 }
 
+/// Performs the safe dir size label handler operation.
 fn safe_dir_size_label(path: &Path) -> String {
     safe_dir_size(path).map_or_else(
         || "unknown".to_owned(),
@@ -1155,6 +1425,7 @@ fn safe_dir_size_label(path: &Path) -> String {
     )
 }
 
+/// Performs the safe dir size handler operation.
 fn safe_dir_size(root: &Path) -> Option<u64> {
     let metadata = std::fs::symlink_metadata(root).ok()?;
     if metadata.file_type().is_symlink() {
@@ -1191,6 +1462,7 @@ fn safe_dir_size(root: &Path) -> Option<u64> {
     Some(total)
 }
 
+/// Performs the recent warning lines handler operation.
 fn recent_warning_lines() -> Option<String> {
     let log_path = latest_log_file(&crate::config::logs_dir())?;
     let buf = std::fs::read(log_path).ok()?;
@@ -1214,12 +1486,14 @@ fn recent_warning_lines() -> Option<String> {
     }
 }
 
+/// Loads boards domain data.
 fn load_boards_domain_data(conn: &rusqlite::Connection) -> Result<BoardsDomainData> {
     Ok(BoardsDomainData {
         boards: db::get_all_boards(conn)?,
     })
 }
 
+/// Loads moderation domain data.
 fn load_moderation_domain_data(conn: &rusqlite::Connection) -> Result<ModerationDomainData> {
     Ok(ModerationDomainData {
         bans: db::list_bans(conn)?,
@@ -1229,6 +1503,7 @@ fn load_moderation_domain_data(conn: &rusqlite::Connection) -> Result<Moderation
     })
 }
 
+/// Loads appearance domain data.
 fn load_appearance_domain_data(
     conn: &rusqlite::Connection,
     boards: &[crate::models::Board],
@@ -1258,6 +1533,7 @@ fn load_appearance_domain_data(
     })
 }
 
+/// Loads backups domain data.
 fn load_backups_domain_data() -> BackupsDomainData {
     BackupsDomainData {
         full_backups: list_backup_files(&full_backup_dir(), BackupListKind::Full),
@@ -1265,6 +1541,7 @@ fn load_backups_domain_data() -> BackupsDomainData {
     }
 }
 
+/// Loads maintenance domain data.
 fn load_maintenance_domain_data(
     conn: &rusqlite::Connection,
     state: &AppState,
@@ -1294,6 +1571,7 @@ fn load_maintenance_domain_data(
     }
 }
 
+/// Loads admin panel snapshot.
 fn load_admin_panel_snapshot(
     conn: &rusqlite::Connection,
     state: &AppState,
@@ -1377,6 +1655,7 @@ fn load_admin_panel_snapshot(
     ))
 }
 
+/// Handles the admin panel setup status request.
 const fn admin_panel_setup_status(
     setup_state: db::SetupState,
 ) -> crate::templates::AdminPanelSetupStatus {
@@ -1391,6 +1670,7 @@ const fn admin_panel_setup_status(
     }
 }
 
+/// Builds backup summary.
 fn build_backup_summary(full_backups: &[BackupInfo]) -> BackupSummary {
     const BACKUP_WARN_AFTER_HOURS: i64 = 72;
 
@@ -1407,9 +1687,8 @@ fn build_backup_summary(full_backups: &[BackupInfo]) -> BackupSummary {
     let age_hours = latest
         .modified_epoch
         .map(|ts| now.saturating_sub(ts).max(0) / 3600);
-    let age_text = age_hours
-        .map(|hours| format!("{hours}h ago"))
-        .unwrap_or_else(|| "unknown age".to_owned());
+    let age_text =
+        age_hours.map_or_else(|| "unknown age".to_owned(), |hours| format!("{hours}h ago"));
     let status_line = format!(
         "Latest full backup: {} ({age_text}) — {}.",
         latest.filename, latest.verification_note
@@ -1435,6 +1714,7 @@ fn build_backup_summary(full_backups: &[BackupInfo]) -> BackupSummary {
     }
 }
 
+/// Builds admin dashboard summary.
 fn build_admin_dashboard_summary(inputs: DashboardSummaryInputs<'_>) -> AdminDashboardSummary {
     let (setup_status, setup_detail, setup_state) = dashboard_setup_status(inputs.setup_status);
     let (db_status, db_detail, db_state) = dashboard_database_status(inputs.site_health);
@@ -1442,12 +1722,16 @@ fn build_admin_dashboard_summary(inputs: DashboardSummaryInputs<'_>) -> AdminDas
         dashboard_backup_status(inputs.backup_summary);
     let (storage_status, storage_detail, storage_state) =
         dashboard_storage_status(inputs.activity, inputs.maintenance, inputs.site_health);
-    let (tor_status, tor_detail, tor_state) = dashboard_tor_status(inputs.tor_address);
+    let (tor_status, tor_detail, tor_state) =
+        dashboard_tor_status(CONFIG.enable_tor_support, inputs.tor_address);
     let (dependency_status, dependency_detail, dependency_state) =
-        dashboard_dependency_status(inputs.maintenance);
+        dashboard_dependency_status(inputs.maintenance, CONFIG.require_ffmpeg);
     let (job_status, job_detail, job_state) = dashboard_job_status(inputs.site_health);
-    let (report_status, report_detail, report_state) =
-        dashboard_report_status(inputs.activity, inputs.moderation);
+    let (report_status, report_detail, report_state) = dashboard_report_status(
+        inputs.activity.recent_reports_7d,
+        inputs.moderation.reports.len(),
+        inputs.moderation.appeals.len(),
+    );
 
     AdminDashboardSummary {
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -1486,6 +1770,7 @@ fn build_admin_dashboard_summary(inputs: DashboardSummaryInputs<'_>) -> AdminDas
     }
 }
 
+/// Performs the dashboard setup status handler operation.
 fn dashboard_setup_status(
     status: crate::templates::AdminPanelSetupStatus,
 ) -> (String, String, crate::templates::AdminDashboardState) {
@@ -1493,7 +1778,7 @@ fn dashboard_setup_status(
         crate::templates::AdminPanelSetupStatus::Reopened => (
             "reopened".to_owned(),
             "Setup wizard is admin-only and currently reopened.".to_owned(),
-            crate::templates::AdminDashboardState::Warning,
+            crate::templates::AdminDashboardState::Informational,
         ),
         crate::templates::AdminPanelSetupStatus::Complete => (
             "complete".to_owned(),
@@ -1513,6 +1798,7 @@ fn dashboard_setup_status(
     }
 }
 
+/// Performs the dashboard database status handler operation.
 fn dashboard_database_status(
     site_health: &SiteHealthSnapshot,
 ) -> (String, String, crate::templates::AdminDashboardState) {
@@ -1520,9 +1806,9 @@ fn dashboard_database_status(
         || site_health.database_schema_status.contains("mismatch")
         || site_health.database_integrity_status.contains("failed")
     {
-        crate::templates::AdminDashboardState::ActionNeeded
+        crate::templates::AdminDashboardState::Failure
     } else if site_health.database_integrity_status.contains("running") {
-        crate::templates::AdminDashboardState::Warning
+        crate::templates::AdminDashboardState::Pending
     } else if site_health.database_integrity_status == "not checked" {
         crate::templates::AdminDashboardState::Unknown
     } else {
@@ -1538,6 +1824,7 @@ fn dashboard_database_status(
     )
 }
 
+/// Performs the dashboard backup status handler operation.
 fn dashboard_backup_status(
     backup_summary: &BackupSummary,
 ) -> (String, String, crate::templates::AdminDashboardState) {
@@ -1557,7 +1844,7 @@ fn dashboard_backup_status(
     } else if warning.contains("failed verification") {
         (
             "verification failed",
-            crate::templates::AdminDashboardState::ActionNeeded,
+            crate::templates::AdminDashboardState::Failure,
         )
     } else {
         (
@@ -1568,6 +1855,7 @@ fn dashboard_backup_status(
     (status.to_owned(), warning.to_owned(), state)
 }
 
+/// Performs the dashboard storage status handler operation.
 fn dashboard_storage_status(
     activity: &DashboardActivitySnapshot,
     maintenance: &MaintenanceDomainData,
@@ -1606,10 +1894,12 @@ fn dashboard_storage_status(
     )
 }
 
+/// Performs the dashboard Tor status handler operation.
 fn dashboard_tor_status(
+    tor_enabled: bool,
     tor_address: Option<&str>,
 ) -> (String, String, crate::templates::AdminDashboardState) {
-    if !CONFIG.enable_tor_support {
+    if !tor_enabled {
         return (
             "disabled".to_owned(),
             "Set enable_tor_support = true in settings.toml, then restart RustChan.".to_owned(),
@@ -1627,26 +1917,28 @@ fn dashboard_tor_status(
             "enabled, address pending".to_owned(),
             "Wait for bootstrap, or check Site Health Tor diagnostics if no onion appears."
                 .to_owned(),
-            crate::templates::AdminDashboardState::Warning,
+            crate::templates::AdminDashboardState::Pending,
         )
     }
 }
 
+/// Performs the dashboard dependency status handler operation.
 fn dashboard_dependency_status(
     maintenance: &MaintenanceDomainData,
+    ffmpeg_required: bool,
 ) -> (String, String, crate::templates::AdminDashboardState) {
     let ffmpeg = detection_word(maintenance.ffmpeg_available);
     let ffprobe = detection_word(maintenance.ffprobe_available);
     let state = if maintenance.ffmpeg_available && maintenance.ffprobe_available {
         crate::templates::AdminDashboardState::Ok
-    } else if CONFIG.require_ffmpeg {
+    } else if ffmpeg_required {
         crate::templates::AdminDashboardState::ActionNeeded
     } else {
-        crate::templates::AdminDashboardState::Warning
+        crate::templates::AdminDashboardState::Informational
     };
     let status = if maintenance.ffmpeg_available && maintenance.ffprobe_available {
         "ready"
-    } else if CONFIG.require_ffmpeg {
+    } else if ffmpeg_required {
         "required tool missing"
     } else {
         "limited"
@@ -1663,52 +1955,63 @@ fn dashboard_dependency_status(
     )
 }
 
+/// Performs the dashboard job status handler operation.
 fn dashboard_job_status(
     site_health: &SiteHealthSnapshot,
 ) -> (String, String, crate::templates::AdminDashboardState) {
-    let state = if site_health.failed_jobs > 0 {
-        crate::templates::AdminDashboardState::ActionNeeded
-    } else if site_health.running_jobs > 0
-        || site_health.queued_jobs > 0
-        || site_health.backup_jobs != "idle"
-    {
-        crate::templates::AdminDashboardState::Warning
+    let backup_active = !matches!(
+        site_health.backup_jobs.as_str(),
+        "idle" | "last run complete" | "unknown"
+    );
+    let state = if !site_health.background_jobs_available {
+        crate::templates::AdminDashboardState::Unknown
+    } else if site_health.failed_jobs > 0 {
+        crate::templates::AdminDashboardState::Failure
     } else if site_health.backup_jobs == "unknown" {
         crate::templates::AdminDashboardState::Unknown
+    } else if site_health.running_jobs > 0 || site_health.queued_jobs > 0 || backup_active {
+        crate::templates::AdminDashboardState::Pending
     } else {
         crate::templates::AdminDashboardState::Ok
     };
-    let status = if site_health.failed_jobs > 0 {
+    let status = if !site_health.background_jobs_available {
+        "status unavailable".to_owned()
+    } else if site_health.failed_jobs > 0 {
         format!("{} failed", site_health.failed_jobs)
     } else if site_health.running_jobs > 0 || site_health.queued_jobs > 0 {
         format!(
             "{} running / {} queued",
             site_health.running_jobs, site_health.queued_jobs
         )
+    } else if backup_active {
+        format!("backup {}", site_health.backup_jobs)
     } else {
-        "idle".to_owned()
+        "idle — ready".to_owned()
     };
-    (
-        status,
+    let detail = if site_health.background_jobs_available {
         format!(
             "Recently completed {}; backup job {}; restore jobs {}.",
             site_health.recent_completed_jobs, site_health.backup_jobs, site_health.restore_jobs
-        ),
-        state,
-    )
+        )
+    } else {
+        format!(
+            "Background-job summary unavailable; backup job {}; restore jobs {}.",
+            site_health.backup_jobs, site_health.restore_jobs
+        )
+    };
+    (status, detail, state)
 }
 
+/// Performs the dashboard report status handler operation.
 fn dashboard_report_status(
-    activity: &DashboardActivitySnapshot,
-    moderation: &ModerationDomainData,
+    recent_reports: Option<i64>,
+    open_reports: usize,
+    open_appeals: usize,
 ) -> (String, String, crate::templates::AdminDashboardState) {
-    let open_reports = moderation.reports.len();
-    let open_appeals = moderation.appeals.len();
-    let recent_reports = activity.recent_reports_7d;
     let state = if open_reports > 0 || open_appeals > 0 {
         crate::templates::AdminDashboardState::ActionNeeded
     } else if recent_reports.is_some_and(|count| count > 0) {
-        crate::templates::AdminDashboardState::Warning
+        crate::templates::AdminDashboardState::Informational
     } else if recent_reports.is_some() {
         crate::templates::AdminDashboardState::Ok
     } else {
@@ -1727,6 +2030,7 @@ fn dashboard_report_status(
     )
 }
 
+/// Performs the public URL label handler operation.
 fn public_url_label() -> String {
     let Some(host) = CONFIG.public_hosts.first().filter(|host| !host.is_empty()) else {
         return "not configured".to_owned();
@@ -1735,6 +2039,7 @@ fn public_url_label() -> String {
     format!("{scheme}://{host}")
 }
 
+/// Counts label.
 fn count_label(count: usize, singular: &str, plural: &str) -> String {
     if count == 1 {
         format!("1 {singular}")
@@ -1743,6 +2048,7 @@ fn count_label(count: usize, singular: &str, plural: &str) -> String {
     }
 }
 
+/// Performs the optional count label handler operation.
 fn optional_count_label(count: Option<i64>, singular: &str, plural: &str) -> String {
     match count {
         Some(1) => format!("1 {singular}"),
@@ -1751,6 +2057,7 @@ fn optional_count_label(count: Option<i64>, singular: &str, plural: &str) -> Str
     }
 }
 
+/// Performs the thread count label handler operation.
 fn thread_count_label(activity: &DashboardActivitySnapshot) -> String {
     match (activity.active_threads, activity.total_threads) {
         (Some(active), Some(total)) => format!("{active} active / {total} total"),
@@ -1758,6 +2065,7 @@ fn thread_count_label(activity: &DashboardActivitySnapshot) -> String {
     }
 }
 
+/// Performs the recent activity label handler operation.
 fn recent_activity_label(activity: &DashboardActivitySnapshot) -> String {
     match (activity.posts_24h, activity.posts_7d) {
         (Some(day), Some(week)) => format!("{day} posts in 24h; {week} in 7d"),
@@ -1765,6 +2073,7 @@ fn recent_activity_label(activity: &DashboardActivitySnapshot) -> String {
     }
 }
 
+/// Performs the media summary label handler operation.
 fn media_summary_label(activity: &DashboardActivitySnapshot) -> String {
     match (
         activity.upload_posts,
@@ -1783,21 +2092,20 @@ fn media_summary_label(activity: &DashboardActivitySnapshot) -> String {
     }
 }
 
+/// Renders admin panel from snapshot.
 fn render_admin_panel_from_snapshot(
-    snapshot: AdminPanelSnapshot,
+    snapshot: &AdminPanelSnapshot,
     csrf_token: &str,
-    tor_address: Option<String>,
-    flash: Option<(bool, String)>,
+    tor_address: Option<&str>,
+    flash: Option<&(bool, String)>,
     open_section: Option<&str>,
     current_theme: Option<&str>,
 ) -> String {
-    let diagnostics_text = build_diagnostics_text(&snapshot, tor_address.as_deref());
-    let flash_ref = flash
-        .as_ref()
-        .map(|(is_error, message)| crate::templates::AdminPanelFlash {
-            is_error: *is_error,
-            message,
-        });
+    let diagnostics_text = build_diagnostics_text(snapshot, tor_address);
+    let flash_ref = flash.map(|(is_error, message)| crate::templates::AdminPanelFlash {
+        is_error: *is_error,
+        message,
+    });
     let view = crate::templates::AdminPanelViewModel {
         csrf_token,
         boards: &snapshot.boards,
@@ -1823,7 +2131,7 @@ fn render_admin_panel_from_snapshot(
             home_banners: &snapshot.home_banners,
             board_banners: &snapshot.board_banners,
         },
-        site_health: build_site_health_view(&snapshot, tor_address.as_deref(), &diagnostics_text),
+        site_health: build_site_health_view(snapshot, tor_address, &diagnostics_text),
         backups: crate::templates::AdminPanelBackupsView {
             full_backups: &snapshot.full_backups,
             board_backups: &snapshot.board_backups,
@@ -1834,10 +2142,9 @@ fn render_admin_panel_from_snapshot(
             auto_full_backup_include_tor_hidden_service_keys: snapshot
                 .auto_full_backup_include_tor_hidden_service_keys,
             auto_full_backup_storage_mode: &snapshot.auto_full_backup_storage_mode,
-            auto_full_backup_split_zip_part_size_gib:
-                crate::handlers::admin::backup::split_zip_part_size_gib(
-                    snapshot.auto_full_backup_split_zip_part_size_bytes,
-                ),
+            auto_full_backup_split_zip_part_size_gib: split_zip_part_size_gib(
+                snapshot.auto_full_backup_split_zip_part_size_bytes,
+            ),
             tor_hidden_service_key_backup_available:
                 crate::config::configured_tor_hidden_service_keys_dir().is_some(),
         },
@@ -1872,13 +2179,14 @@ fn render_admin_panel_from_snapshot(
                 pdf_thumbnail_renderer: snapshot.pdf_thumbnail_renderer.clone(),
             },
         },
-        tor_address: tor_address.as_deref(),
+        tor_address,
         flash: flash_ref,
         open_section,
     };
     crate::templates::admin_panel_page(&view)
 }
 
+/// Builds dashboard view.
 fn build_dashboard_view(
     dashboard: &AdminDashboardSummary,
 ) -> crate::templates::AdminPanelDashboardView<'_> {
@@ -1919,6 +2227,7 @@ fn build_dashboard_view(
     }
 }
 
+/// Builds site health view.
 fn build_site_health_view<'a>(
     snapshot: &'a AdminPanelSnapshot,
     tor_address: Option<&'a str>,
@@ -1956,6 +2265,7 @@ fn build_site_health_view<'a>(
     }
 }
 
+/// Performs the detection status handler operation.
 const fn detection_status(detected: bool) -> crate::templates::AdminDetectionStatus {
     if detected {
         crate::templates::AdminDetectionStatus::Detected
@@ -1964,6 +2274,7 @@ const fn detection_status(detected: bool) -> crate::templates::AdminDetectionSta
     }
 }
 
+/// Performs the detection word handler operation.
 const fn detection_word(detected: bool) -> &'static str {
     if detected {
         "found"
@@ -1972,6 +2283,7 @@ const fn detection_word(detected: bool) -> &'static str {
     }
 }
 
+/// Builds diagnostics text.
 fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&str>) -> String {
     let tor_enabled = if CONFIG.enable_tor_support {
         "yes"
@@ -2006,6 +2318,7 @@ fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&st
     )
 }
 
+/// Performs the indent diagnostics block handler operation.
 fn indent_diagnostics_block(text: &str) -> String {
     text.lines()
         .map(|line| format!("  {line}"))
@@ -2013,7 +2326,8 @@ fn indent_diagnostics_block(text: &str) -> String {
         .join("\n")
 }
 
-pub async fn admin_panel(
+/// Handles the admin panel request.
+pub(crate) async fn admin_panel(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -2029,10 +2343,7 @@ pub async fn admin_panel(
         if let Some(bootstrap_token) = params.bootstrap.as_deref() {
             if let Some(bootstrapped_session_id) = consume_admin_session_bootstrap(bootstrap_token)
             {
-                let mut cookie = axum_extra::extract::cookie::Cookie::new(
-                    SESSION_COOKIE,
-                    bootstrapped_session_id.clone(),
-                );
+                let mut cookie = Cookie::new(SESSION_COOKIE, bootstrapped_session_id.clone());
                 cookie.set_http_only(true);
                 cookie.set_same_site(ADMIN_COOKIE_SAME_SITE);
                 cookie.set_path("/");
@@ -2093,10 +2404,10 @@ pub async fn admin_panel(
                 auto_full_backup_settings,
             )?;
             Ok(render_admin_panel_from_snapshot(
-                snapshot,
+                &snapshot,
                 &csrf_clone,
-                tor_address,
-                flash,
+                tor_address.as_deref(),
+                flash.as_ref(),
                 open_section.as_deref(),
                 current_theme.as_deref(),
             ))
@@ -2108,7 +2419,8 @@ pub async fn admin_panel(
     Ok((jar, Html(html)))
 }
 
-pub async fn admin_site_health_jobs(
+/// Handles the admin site health jobs request.
+pub(crate) async fn admin_site_health_jobs(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Response> {
@@ -2148,16 +2460,19 @@ pub async fn admin_site_health_jobs(
 }
 
 #[derive(Deserialize)]
-pub struct DismissFailedJobsForm {
+/// Form fields accepted by the dismiss failed jobs request.
+pub(crate) struct DismissFailedJobsForm {
     #[serde(rename = "_csrf")]
+    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-pub async fn dismiss_failed_site_health_jobs(
+/// Handles the dismiss failed site health jobs request.
+pub(crate) async fn dismiss_failed_site_health_jobs(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
     axum::extract::Form(form): axum::extract::Form<DismissFailedJobsForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
@@ -2195,7 +2510,8 @@ pub async fn dismiss_failed_site_health_jobs(
     Ok(admin_panel_redirect_anchor_open(message, "site-health", "site-health").into_response())
 }
 
-pub async fn admin_live_log(
+/// Handles the admin live log request.
+pub(crate) async fn admin_live_log(
     State(state): State<AppState>,
     jar: CookieJar,
     Query(params): Query<LiveLogQuery>,
@@ -2259,6 +2575,7 @@ pub async fn admin_live_log(
         .into_response())
 }
 
+/// Performs the latest log file handler operation.
 fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
     let mut latest: Option<(SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(logs_dir).ok()?.flatten() {
@@ -2273,7 +2590,10 @@ fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
         let modified = metadata.modified().ok()?;
         if latest
             .as_ref()
-            .is_none_or(|(current, _)| modified > *current)
+            .is_none_or(|(current_modified, current_path)| {
+                modified > *current_modified
+                    || (modified == *current_modified && path > *current_path)
+            })
         {
             latest = Some((modified, path));
         }
@@ -2281,14 +2601,16 @@ fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
     latest.map(|(_, path)| path)
 }
 
-fn read_log_tail(path: &std::path::Path, max_bytes: usize) -> Result<(String, bool)> {
+/// Reads log tail.
+fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool)> {
     let mut file = std::fs::File::open(path)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Open log: {e}")))?;
     let len = file
         .metadata()
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Log metadata: {e}")))?
         .len();
-    let start = len.saturating_sub(max_bytes as u64);
+    let max_bytes = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    let start = len.saturating_sub(max_bytes);
     file.seek(SeekFrom::Start(start))
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Seek log: {e}")))?;
 
@@ -2299,7 +2621,9 @@ fn read_log_tail(path: &std::path::Path, max_bytes: usize) -> Result<(String, bo
     let truncated = start > 0;
     let content = if truncated {
         match text.find('\n') {
-            Some(pos) if pos + 1 < text.len() => text[pos + 1..].to_string(),
+            Some(pos) if pos + 1 < text.len() => {
+                text.get(pos + 1..).map_or_else(String::new, str::to_owned)
+            }
             _ => text,
         }
     } else {
@@ -2308,6 +2632,7 @@ fn read_log_tail(path: &std::path::Path, max_bytes: usize) -> Result<(String, bo
     Ok((content, truncated))
 }
 
+/// Handles the admin bootstrap now secs request.
 fn admin_bootstrap_now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2315,6 +2640,7 @@ fn admin_bootstrap_now_secs() -> u64 {
         .as_secs()
 }
 
+/// Creates admin session bootstrap.
 pub(super) fn create_admin_session_bootstrap(session_id: &str) -> String {
     let token = crate::utils::crypto::new_session_id();
     let expires_at = admin_bootstrap_now_secs().saturating_add(ADMIN_BOOTSTRAP_TTL_SECS);
@@ -2322,6 +2648,7 @@ pub(super) fn create_admin_session_bootstrap(session_id: &str) -> String {
     token
 }
 
+/// Consumes admin session bootstrap.
 pub(super) fn consume_admin_session_bootstrap(token: &str) -> Option<String> {
     let now = admin_bootstrap_now_secs();
     ADMIN_SESSION_BOOTSTRAPS.retain(|_, (_, expires_at)| *expires_at > now);
@@ -2334,17 +2661,19 @@ pub(super) fn consume_admin_session_bootstrap(token: &str) -> Option<String> {
 mod tests {
     use super::{
         admin_live_log, admin_site_health_jobs, consume_admin_session_bootstrap,
-        create_admin_session_bootstrap, dashboard_backup_status, dashboard_recent_count,
-        dashboard_thread_counts, dismiss_failed_site_health_jobs,
+        create_admin_session_bootstrap, dashboard_backup_status, dashboard_dependency_status,
+        dashboard_job_status, dashboard_recent_count, dashboard_report_status,
+        dashboard_thread_counts, dashboard_tor_status, dismiss_failed_site_health_jobs,
         host_header_uses_https_port_with_config, hosts_match_for_same_origin, latest_log_file,
         load_dashboard_activity_snapshot, optional_count_query, read_log_tail,
         request_origin_uses_https, request_scheme_for_same_origin_with_config,
         require_same_origin_or_valid_csrf, require_same_origin_request,
         should_set_secure_cookie_with_config, BackupSummary, DismissFailedJobsForm, LiveLogQuery,
-        SESSION_COOKIE,
+        MaintenanceDomainData, SiteHealthSnapshot, SESSION_COOKIE,
     };
     use crate::error::AppError;
     use crate::middleware::SecureCookieContext;
+    use anyhow::{bail, ensure, Context as _};
     use axum::{
         body::to_bytes,
         extract::{ConnectInfo, Form, Query, State},
@@ -2359,27 +2688,25 @@ mod tests {
         "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion";
 
     #[test]
-    fn dashboard_count_helpers_fail_closed_when_schema_is_missing() {
-        let conn = rusqlite::Connection::open_in_memory().expect("memory db");
+    fn dashboard_count_helpers_fail_closed_when_schema_is_missing() -> anyhow::Result<()> {
+        let conn = rusqlite::Connection::open_in_memory().context("open in-memory SQLite")?;
 
-        assert_eq!(
-            optional_count_query(&conn, "SELECT COUNT(*) FROM posts"),
-            None
+        ensure!(
+            optional_count_query(&conn, "SELECT COUNT(*) FROM posts").is_none(),
+            "missing posts table unexpectedly produced a count"
         );
-        assert_eq!(dashboard_thread_counts(&conn), None);
-        assert_eq!(dashboard_recent_count(&conn, "posts", 24 * 60 * 60), None);
-        assert_eq!(
-            dashboard_recent_count(&conn, "sqlite_master", 24 * 60 * 60),
-            None
-        );
+        ensure!(dashboard_thread_counts(&conn).is_none());
+        ensure!(dashboard_recent_count(&conn, "posts", 24 * 60 * 60).is_none());
+        ensure!(dashboard_recent_count(&conn, "sqlite_master", 24 * 60 * 60).is_none());
+        Ok(())
     }
 
     #[test]
-    fn dashboard_activity_snapshot_counts_existing_systems() {
-        let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("db connection");
-        let board_id =
-            crate::db::create_board(&conn, "dash", "Dashboard", "", false).expect("board");
+    fn dashboard_activity_snapshot_counts_existing_systems() -> anyhow::Result<()> {
+        let pool = crate::db::init_test_pool().context("create test pool")?;
+        let conn = pool.get().context("get database connection")?;
+        let board_id = crate::db::create_board(&conn, "dash", "Dashboard", "", false)
+            .context("create dashboard board")?;
         let now = chrono::Utc::now().timestamp();
 
         conn.execute(
@@ -2387,7 +2714,7 @@ mod tests {
              VALUES (?1, 'active', ?2, ?2, 0)",
             rusqlite::params![board_id, now],
         )
-        .expect("active thread");
+        .context("insert active thread")?;
         let active_thread_id = conn.last_insert_rowid();
         conn.execute(
             "INSERT INTO posts
@@ -2400,7 +2727,7 @@ mod tests {
               7, 'audio/ogg', ?3, 'delete-active', 1)",
             rusqlite::params![active_thread_id, board_id, now],
         )
-        .expect("active post");
+        .context("insert active post")?;
         let active_post_id = conn.last_insert_rowid();
 
         conn.execute(
@@ -2408,7 +2735,7 @@ mod tests {
              VALUES (?1, 'archived', ?2, ?2, 1)",
             rusqlite::params![board_id, now - (8 * 24 * 60 * 60)],
         )
-        .expect("archived thread");
+        .context("insert archived thread")?;
         let archived_thread_id = conn.last_insert_rowid();
         conn.execute(
             "INSERT INTO posts
@@ -2419,29 +2746,30 @@ mod tests {
               1000, 'dash/video-thumb.webp', 'video/webm', 'video', ?3, 'delete-archived', 1)",
             rusqlite::params![archived_thread_id, board_id, now - (8 * 24 * 60 * 60)],
         )
-        .expect("archived post");
+        .context("insert archived post")?;
 
         conn.execute(
             "INSERT INTO reports (post_id, thread_id, board_id, reason, reporter_hash, created_at)
              VALUES (?1, ?2, ?3, 'needs review', 'reporter', ?4)",
             rusqlite::params![active_post_id, active_thread_id, board_id, now],
         )
-        .expect("report");
+        .context("insert report")?;
 
         let activity = load_dashboard_activity_snapshot(&conn, 1);
 
-        assert_eq!(activity.board_count, 1);
-        assert_eq!(activity.active_threads, Some(1));
-        assert_eq!(activity.total_threads, Some(2));
-        assert_eq!(activity.total_posts, Some(2));
-        assert_eq!(activity.posts_24h, Some(1));
-        assert_eq!(activity.posts_7d, Some(1));
-        assert_eq!(activity.upload_posts, Some(2));
-        assert_eq!(activity.total_images, Some(1));
-        assert_eq!(activity.total_videos, Some(1));
-        assert_eq!(activity.total_audio, Some(1));
-        assert_eq!(activity.active_bytes, Some(18));
-        assert_eq!(activity.recent_reports_7d, Some(1));
+        ensure!(activity.board_count == 1);
+        ensure!(activity.active_threads == Some(1));
+        ensure!(activity.total_threads == Some(2));
+        ensure!(activity.total_posts == Some(2));
+        ensure!(activity.posts_24h == Some(1));
+        ensure!(activity.posts_7d == Some(1));
+        ensure!(activity.upload_posts == Some(2));
+        ensure!(activity.total_images == Some(1));
+        ensure!(activity.total_videos == Some(1));
+        ensure!(activity.total_audio == Some(1));
+        ensure!(activity.active_bytes == Some(18));
+        ensure!(activity.recent_reports_7d == Some(1));
+        Ok(())
     }
 
     #[test]
@@ -2464,6 +2792,12 @@ mod tests {
             warning: None,
             status_line: "Latest full backup: backup.zip (1h ago) - verified.".to_owned(),
         };
+        let failed = BackupSummary {
+            warning: Some(
+                "Latest full backup 'backup.zip' failed verification: digest mismatch".to_owned(),
+            ),
+            status_line: "Latest full backup: backup.zip - invalid.".to_owned(),
+        };
 
         assert_eq!(
             dashboard_backup_status(&missing).2,
@@ -2477,14 +2811,148 @@ mod tests {
             dashboard_backup_status(&ok).2,
             crate::templates::AdminDashboardState::Ok
         );
+        assert_eq!(
+            dashboard_backup_status(&failed).2,
+            crate::templates::AdminDashboardState::Failure
+        );
+    }
+
+    fn site_health_with_jobs(
+        running_jobs: i64,
+        queued_jobs: i64,
+        failed_jobs: i64,
+        backup_jobs: &str,
+    ) -> SiteHealthSnapshot {
+        SiteHealthSnapshot {
+            server_status: "running".to_owned(),
+            database_schema_status: "current".to_owned(),
+            database_integrity_status: "passed".to_owned(),
+            last_successful_backup: "today".to_owned(),
+            next_scheduled_backup: "tomorrow".to_owned(),
+            data_dir_usage: "1 MiB".to_owned(),
+            upload_dir_size: "1 MiB".to_owned(),
+            tor_status: "disabled".to_owned(),
+            tor_service_status: "not started".to_owned(),
+            tor_mode: "disabled".to_owned(),
+            tor_config_summary: "disabled".to_owned(),
+            running_jobs,
+            queued_jobs,
+            recent_completed_jobs: 0,
+            failed_jobs,
+            background_jobs_available: true,
+            backup_jobs: backup_jobs.to_owned(),
+            restore_jobs: "not available".to_owned(),
+            recent_warnings: "none".to_owned(),
+        }
+    }
+
+    #[test]
+    fn dashboard_job_status_treats_idle_as_healthy() {
+        let (status, _detail, state) =
+            dashboard_job_status(&site_health_with_jobs(0, 0, 0, "idle"));
+
+        assert_eq!(status, "idle — ready");
+        assert_eq!(state, crate::templates::AdminDashboardState::Ok);
+    }
+
+    #[test]
+    fn dashboard_job_status_treats_queued_work_as_pending() {
+        let (status, _detail, state) =
+            dashboard_job_status(&site_health_with_jobs(0, 3, 0, "idle"));
+
+        assert_eq!(status, "0 running / 3 queued");
+        assert_eq!(state, crate::templates::AdminDashboardState::Pending);
+    }
+
+    #[test]
+    fn dashboard_job_status_presents_routine_active_work_as_pending() {
+        let (status, _detail, state) =
+            dashboard_job_status(&site_health_with_jobs(0, 0, 0, "compressing (2/10 files)"));
+
+        assert_eq!(status, "backup compressing (2/10 files)");
+        assert_eq!(state, crate::templates::AdminDashboardState::Pending);
+    }
+
+    #[test]
+    fn dashboard_job_status_fails_closed_when_summary_is_unavailable() {
+        let mut health = site_health_with_jobs(0, 0, 0, "idle");
+        health.background_jobs_available = false;
+
+        let (status, detail, state) = dashboard_job_status(&health);
+
+        assert_eq!(status, "status unavailable");
+        assert!(detail.contains("Background-job summary unavailable"));
+        assert_eq!(state, crate::templates::AdminDashboardState::Unknown);
+    }
+
+    #[test]
+    fn dashboard_job_status_distinguishes_failures_from_action_queues() {
+        let (_status, _detail, state) =
+            dashboard_job_status(&site_health_with_jobs(0, 0, 2, "idle"));
+
+        assert_eq!(state, crate::templates::AdminDashboardState::Failure);
+    }
+
+    fn maintenance_with_media_tools(ffmpeg: bool, ffprobe: bool) -> MaintenanceDomainData {
+        MaintenanceDomainData {
+            db_size_bytes: 0,
+            db_size_warning: false,
+            ffmpeg_timeout_secs: 30,
+            media_auto_prune_enabled: false,
+            media_max_active_content_size_bytes: 0,
+            ffmpeg_available: ffmpeg,
+            ffprobe_available: ffprobe,
+            ffmpeg_webp_available: false,
+            ffmpeg_vp9_available: false,
+            ffmpeg_vp9_encoder_available: false,
+            ffmpeg_opus_available: false,
+            pdf_thumbnail_renderer: None,
+        }
+    }
+
+    #[test]
+    fn dashboard_optional_media_tools_are_informational_not_warning() {
+        let maintenance = maintenance_with_media_tools(false, false);
+
+        assert_eq!(
+            dashboard_dependency_status(&maintenance, false).2,
+            crate::templates::AdminDashboardState::Informational,
+        );
+        assert_eq!(
+            dashboard_dependency_status(&maintenance, true).2,
+            crate::templates::AdminDashboardState::ActionNeeded,
+        );
+    }
+
+    #[test]
+    fn dashboard_tor_bootstrap_is_pending_and_disabled_is_neutral() {
+        assert_eq!(
+            dashboard_tor_status(true, None).2,
+            crate::templates::AdminDashboardState::Pending,
+        );
+        assert_eq!(
+            dashboard_tor_status(false, None).2,
+            crate::templates::AdminDashboardState::Disabled,
+        );
+    }
+
+    #[test]
+    fn dashboard_resolved_report_history_is_informational() {
+        assert_eq!(
+            dashboard_report_status(Some(3), 0, 0).2,
+            crate::templates::AdminDashboardState::Informational,
+        );
+        assert_eq!(
+            dashboard_report_status(Some(3), 1, 0).2,
+            crate::templates::AdminDashboardState::ActionNeeded,
+        );
     }
 
     fn same_origin_headers(host: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            header::HOST,
-            HeaderValue::from_str(host).expect("host header"),
-        );
+        if let Ok(host) = HeaderValue::from_str(host) {
+            headers.insert(header::HOST, host);
+        }
         headers
     }
 
@@ -2804,17 +3272,18 @@ mod tests {
     }
 
     #[test]
-    fn https_host_port_marks_request_secure() {
+    fn https_host_port_marks_request_secure() -> anyhow::Result<()> {
         let mut headers = HeaderMap::new();
         let host = format!("example.test:{}", crate::config::CONFIG.tls.port);
         headers.insert(
             header::HOST,
-            HeaderValue::from_str(&host).expect("host header"),
+            HeaderValue::from_str(&host).context("build HTTPS host header")?,
         );
-        assert!(host_header_uses_https_port_with_config(
+        ensure!(host_header_uses_https_port_with_config(
             &headers,
             crate::config::CONFIG.tls.port
         ));
+        Ok(())
     }
 
     #[test]
@@ -2857,8 +3326,10 @@ mod tests {
             header::ORIGIN,
             HeaderValue::from_static("https://localhost:8080"),
         );
-        let context =
-            SecureCookieContext::new(Some("127.0.0.1:41000".parse().expect("peer")), false);
+        let context = SecureCookieContext::new(
+            Some(std::net::SocketAddr::from(([127, 0, 0, 1], 41_000))),
+            false,
+        );
 
         assert!(!should_set_secure_cookie_with_config(
             &headers, context, true, false,
@@ -2866,27 +3337,33 @@ mod tests {
     }
 
     #[test]
-    fn secure_cookie_decision_ignores_spoofed_https_host_port_on_plain_http() {
+    fn secure_cookie_decision_ignores_spoofed_https_host_port_on_plain_http() -> anyhow::Result<()>
+    {
         let mut headers = HeaderMap::new();
         let host = format!("example.test:{}", crate::config::CONFIG.tls.port);
         headers.insert(
             header::HOST,
-            HeaderValue::from_str(&host).expect("host header"),
+            HeaderValue::from_str(&host).context("build HTTPS-port host header")?,
         );
-        let context =
-            SecureCookieContext::new(Some("127.0.0.1:41000".parse().expect("peer")), false);
+        let context = SecureCookieContext::new(
+            Some(std::net::SocketAddr::from(([127, 0, 0, 1], 41_000))),
+            false,
+        );
 
-        assert!(!should_set_secure_cookie_with_config(
+        ensure!(!should_set_secure_cookie_with_config(
             &headers, context, true, false,
         ));
+        Ok(())
     }
 
     #[test]
     fn secure_cookie_decision_keeps_onion_plain_http_cookie_insecure() {
         let mut headers = same_origin_headers(TEST_ONION_HOST);
         headers.insert(header::ORIGIN, HeaderValue::from_static(TEST_ONION_ORIGIN));
-        let context =
-            SecureCookieContext::new(Some("127.0.0.1:41000".parse().expect("peer")), false);
+        let context = SecureCookieContext::new(
+            Some(std::net::SocketAddr::from(([127, 0, 0, 1], 41_000))),
+            false,
+        );
 
         assert!(!should_set_secure_cookie_with_config(
             &headers, context, true, false,
@@ -2900,8 +3377,10 @@ mod tests {
             header::ORIGIN,
             HeaderValue::from_static(TEST_ONION_HTTPS_ORIGIN),
         );
-        let context =
-            SecureCookieContext::new(Some("127.0.0.1:41000".parse().expect("peer")), true);
+        let context = SecureCookieContext::new(
+            Some(std::net::SocketAddr::from(([127, 0, 0, 1], 41_000))),
+            true,
+        );
 
         assert!(should_set_secure_cookie_with_config(
             &headers, context, true, false,
@@ -2913,10 +3392,14 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, HeaderValue::from_static("localhost:8080"));
         headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
-        let trusted =
-            SecureCookieContext::new(Some("127.0.0.1:41000".parse().expect("peer")), false);
-        let untrusted =
-            SecureCookieContext::new(Some("203.0.113.10:41000".parse().expect("peer")), false);
+        let trusted = SecureCookieContext::new(
+            Some(std::net::SocketAddr::from(([127, 0, 0, 1], 41_000))),
+            false,
+        );
+        let untrusted = SecureCookieContext::new(
+            Some(std::net::SocketAddr::from(([203, 0, 113, 10], 41_000))),
+            false,
+        );
 
         assert!(!should_set_secure_cookie_with_config(
             &headers, trusted, true, false,
@@ -2937,7 +3420,7 @@ mod tests {
         assert!(should_set_secure_cookie_with_config(
             &headers, context, true, false,
         ));
-        assert!(!should_set_secure_cookie_with_config(
+        assert!(should_set_secure_cookie_with_config(
             &headers, context, false, false,
         ));
     }
@@ -2953,44 +3436,63 @@ mod tests {
     }
 
     #[test]
-    fn picks_latest_log_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("rustchan.2026-04-01.log"), "old").expect("old");
-        std::fs::write(dir.path().join("rustchan.2026-04-02.log"), "new").expect("new");
+    fn picks_latest_log_file() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir().context("create log directory")?;
+        let older_path = dir.path().join("rustchan.2026-04-01.log");
+        let newer_path = dir.path().join("rustchan.2026-04-02.log");
+        std::fs::write(&older_path, "old").context("write older log")?;
+        std::fs::write(&newer_path, "new").context("write newer log")?;
+
+        let shared_modified =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        for path in [&older_path, &newer_path] {
+            let file = std::fs::File::options()
+                .write(true)
+                .open(path)
+                .with_context(|| format!("open log fixture {}", path.display()))?;
+            file.set_times(std::fs::FileTimes::new().set_modified(shared_modified))
+                .with_context(|| format!("set log fixture timestamp {}", path.display()))?;
+        }
+
         std::fs::write(
             dir.path().join(crate::logging::DEPENDENCY_LOG_FILE_NAME),
             "deps",
         )
-        .expect("deps");
-        let latest = latest_log_file(dir.path()).expect("latest");
-        assert_eq!(
-            latest.file_name().and_then(|name| name.to_str()),
-            Some("rustchan.2026-04-02.log")
+        .context("write dependency log")?;
+        let latest = latest_log_file(dir.path()).context("locate latest log")?;
+        ensure!(
+            latest.file_name().and_then(|name| name.to_str()) == Some("rustchan.2026-04-02.log"),
+            "latest log selection returned {}",
+            latest.display()
         );
+        Ok(())
     }
 
     #[test]
-    fn reads_tail_of_log_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn reads_tail_of_log_file() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir().context("create log directory")?;
         let path = dir.path().join("rustchan.2026-04-02.log");
-        std::fs::write(&path, "line1\nline2\nline3\n").expect("write");
-        let (content, truncated) = read_log_tail(&path, 8).expect("tail");
-        assert!(truncated);
-        assert!(content.contains("line3"));
+        std::fs::write(&path, "line1\nline2\nline3\n").context("write log fixture")?;
+        let (content, truncated) = read_log_tail(&path, 8).context("read log tail")?;
+        ensure!(truncated);
+        ensure!(content.contains("line3"));
+        Ok(())
     }
 
-    fn install_admin_session(state: &crate::middleware::AppState) {
-        let conn = state.db.get().expect("db connection");
-        let password_hash = crate::utils::crypto::hash_password("hunter2").expect("hash password");
+    fn install_admin_session(state: &crate::middleware::AppState) -> anyhow::Result<()> {
+        let conn = state.db.get().context("get database connection")?;
+        let password_hash =
+            crate::utils::crypto::hash_password("hunter2").context("hash admin password")?;
         let admin_id =
-            crate::db::create_admin(&conn, "admin", &password_hash).expect("create admin");
+            crate::db::create_admin(&conn, "admin", &password_hash).context("create admin")?;
         crate::db::create_session(
             &conn,
             "session123",
             admin_id,
             chrono::Utc::now().timestamp() + 3600,
         )
-        .expect("create session");
+        .context("create admin session")?;
+        Ok(())
     }
 
     fn admin_signed_csrf() -> String {
@@ -3002,49 +3504,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_log_requires_admin_auth() {
+    async fn live_log_requires_admin_auth() -> anyhow::Result<()> {
         let state = crate::test_support::app_state();
         let error = admin_live_log(
             State(state),
             CookieJar::new(),
             Query(LiveLogQuery { bytes: None }),
         )
-        .await
-        .expect_err("missing session should fail");
+        .await;
 
         match error {
-            AppError::Forbidden(message) => assert_eq!(message, "Not logged in."),
-            other => panic!("expected forbidden error, got {other:?}"),
+            Err(AppError::Forbidden(message)) => ensure!(message == "Not logged in."),
+            other => bail!("expected forbidden error, got {other:?}"),
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn site_health_jobs_requires_admin_auth() {
+    async fn site_health_jobs_requires_admin_auth() -> anyhow::Result<()> {
         let state = crate::test_support::app_state();
-        let error = admin_site_health_jobs(State(state), CookieJar::new())
-            .await
-            .expect_err("missing session should fail");
+        let error = admin_site_health_jobs(State(state), CookieJar::new()).await;
 
         match error {
-            AppError::Forbidden(message) => assert_eq!(message, "Not logged in."),
-            other => panic!("expected forbidden error, got {other:?}"),
+            Err(AppError::Forbidden(message)) => ensure!(message == "Not logged in."),
+            other => bail!("expected forbidden error, got {other:?}"),
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn site_health_jobs_returns_no_store_json_body() {
+    async fn site_health_jobs_returns_no_store_json_body() -> anyhow::Result<()> {
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
         let (expected_post_id, expected_post_url);
         {
-            let conn = state.db.get().expect("db connection");
-            let board_id =
-                crate::db::create_board(&conn, "test", "Test", "", false).expect("create board");
+            let conn = state.db.get().context("get database connection")?;
+            let board_id = crate::db::create_board(&conn, "test", "Test", "", false)
+                .context("create test board")?;
             conn.execute(
                 "INSERT INTO threads (board_id, subject) VALUES (?1, 'job thread')",
                 rusqlite::params![board_id],
             )
-            .expect("insert thread");
+            .context("insert job thread")?;
             let thread_id = conn.last_insert_rowid();
             conn.execute(
                 "INSERT INTO posts
@@ -3052,7 +3553,7 @@ mod tests {
                  VALUES (?1, ?2, 'job body', 'job body', 'delete-token', 1)",
                 rusqlite::params![thread_id, board_id],
             )
-            .expect("insert post");
+            .context("insert job post")?;
             let post_id = conn.last_insert_rowid();
             expected_post_id = post_id;
             expected_post_url = format!("/test/thread/{thread_id}#p{post_id}");
@@ -3076,69 +3577,71 @@ mod tests {
                     "failed reading /Users/example/private.txt with token=abc123 ".repeat(8)
                 ],
             )
-            .expect("insert background jobs");
+            .context("insert background jobs")?;
         }
         let response = admin_site_health_jobs(
             State(state),
             CookieJar::new().add(Cookie::new(SESSION_COOKIE, "session123")),
         )
         .await
-        .expect("handler response");
+        .context("receive site-health jobs response")?;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get(header::CONTENT_TYPE),
-            Some(&HeaderValue::from_static("application/json; charset=utf-8"))
+        ensure!(response.status() == StatusCode::OK);
+        ensure!(
+            response.headers().get(header::CONTENT_TYPE)
+                == Some(&HeaderValue::from_static("application/json; charset=utf-8"))
         );
-        assert_eq!(
-            response.headers().get(header::CACHE_CONTROL),
-            Some(&HeaderValue::from_static(
-                "private, no-cache, no-store, must-revalidate, no-transform"
-            ))
+        ensure!(
+            response.headers().get(header::CACHE_CONTROL)
+                == Some(&HeaderValue::from_static(
+                    "private, no-cache, no-store, must-revalidate, no-transform"
+                ))
         );
-        assert_eq!(
-            response.headers().get(header::VARY),
-            Some(&HeaderValue::from_static("Cookie"))
-        );
+        ensure!(response.headers().get(header::VARY) == Some(&HeaderValue::from_static("Cookie")));
 
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("body bytes");
-        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json payload");
-        assert_eq!(
+            .context("read site-health jobs body")?;
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).context("parse site-health jobs JSON")?;
+        ensure!(
             payload
                 .get("backup_jobs")
-                .and_then(serde_json::Value::as_str),
-            Some("idle")
+                .and_then(serde_json::Value::as_str)
+                == Some("idle")
         );
-        assert!(payload.get("running_jobs").is_some());
-        assert!(payload.get("queued_jobs").is_some());
-        assert!(payload.get("recent_failed_job_details").is_some());
-        assert!(payload.get("recent_completed_job_details").is_some());
-        assert!(payload.get("thumbnail_transcode_jobs").is_none());
-        assert!(payload.get("repair_vacuum_jobs").is_none());
+        ensure!(payload.get("running_jobs").is_some());
+        ensure!(payload.get("queued_jobs").is_some());
+        ensure!(payload.get("recent_failed_job_details").is_some());
+        ensure!(payload.get("recent_completed_job_details").is_some());
+        ensure!(payload.get("thumbnail_transcode_jobs").is_none());
+        ensure!(payload.get("repair_vacuum_jobs").is_none());
         let failed_job = payload
             .get("recent_failed_job_details")
             .and_then(serde_json::Value::as_array)
             .and_then(|jobs| jobs.first())
-            .expect("failed job detail");
-        assert_eq!(failed_job["name"], "Spam check");
-        assert_eq!(failed_job["attempts"], 3);
-        assert_eq!(failed_job["post_id"], expected_post_id);
-        assert_eq!(failed_job["post_url"], expected_post_url);
-        let error = failed_job["error"].as_str().expect("error snippet");
-        assert!(error.contains("[redacted]"));
-        assert!(!error.contains("/Users/example"));
-        assert!(!error.contains("abc123"));
-        assert!(error.chars().count() <= 183);
+            .context("site-health payload omitted failed job detail")?;
+        ensure!(failed_job["name"] == "Spam check");
+        ensure!(failed_job["attempts"] == 3);
+        ensure!(failed_job["post_id"] == expected_post_id);
+        ensure!(failed_job["post_url"] == expected_post_url);
+        let error = failed_job["error"]
+            .as_str()
+            .context("failed job omitted error snippet")?;
+        ensure!(error.contains("[redacted]"));
+        ensure!(!error.contains("/Users/example"));
+        ensure!(!error.contains("abc123"));
+        ensure!(error.chars().count() <= 183);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn dismiss_failed_site_health_jobs_resets_counter_without_deleting_history() {
+    async fn dismiss_failed_site_health_jobs_resets_counter_without_deleting_history(
+    ) -> anyhow::Result<()> {
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
         {
-            let conn = state.db.get().expect("db connection");
+            let conn = state.db.get().context("get database connection")?;
             conn.execute(
                 "INSERT INTO background_jobs
                  (job_type, payload, status, attempts, last_error, updated_at)
@@ -3146,12 +3649,12 @@ mod tests {
                  ('video_transcode', '{}', 'failed', 3, 'ffmpeg failed', unixepoch())",
                 [],
             )
-            .expect("insert failed job");
-            assert_eq!(
+            .context("insert failed job")?;
+            ensure!(
                 crate::db::background_job_summary(&conn)
-                    .expect("summary before dismiss")
-                    .failed,
-                1
+                    .context("load summary before dismiss")?
+                    .failed
+                    == 1
             );
         }
         let mut headers = same_origin_headers("localhost");
@@ -3162,95 +3665,100 @@ mod tests {
                 .add(Cookie::new("csrf_token", "csrf123"))
                 .add(Cookie::new(SESSION_COOKIE, "session123")),
             headers,
-            ConnectInfo("127.0.0.1:3000".parse().expect("peer address")),
+            ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 3_000))),
             Form(DismissFailedJobsForm {
                 csrf: Some(admin_signed_csrf()),
             }),
         )
         .await
-        .expect("dismiss response");
+        .context("dismiss failed-job counter")?;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            response.headers().get(header::LOCATION),
-            Some(&HeaderValue::from_static(
+        ensure!(response.status() == StatusCode::SEE_OTHER);
+        ensure!(
+            response.headers().get(header::LOCATION)
+                == Some(&HeaderValue::from_static(
                 "/admin/panel?flash=Failed%20job%20counter%20dismissed.&open=site-health#site-health"
             ))
         );
-        let conn = state.db.get().expect("db connection");
-        assert_eq!(
+        let conn = state.db.get().context("get database connection")?;
+        ensure!(
             crate::db::background_job_summary(&conn)
-                .expect("summary after dismiss")
-                .failed,
-            0
+                .context("load summary after dismiss")?
+                .failed
+                == 0
         );
-        assert_eq!(
+        ensure!(
             crate::db::recent_background_jobs(&conn, "failed", 10)
-                .expect("recent failed history")
-                .len(),
-            1
+                .context("load recent failed history")?
+                .len()
+                == 1
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn live_log_returns_no_store_headers_and_json_body() {
+    async fn live_log_returns_no_store_headers_and_json_body() -> anyhow::Result<()> {
         let state = crate::test_support::app_state();
-        install_admin_session(&state);
+        install_admin_session(&state)?;
         let response = admin_live_log(
             State(state),
             CookieJar::new().add(Cookie::new(SESSION_COOKIE, "session123")),
             Query(LiveLogQuery { bytes: None }),
         )
         .await
-        .expect("handler response");
+        .context("receive live-log response")?;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get(header::CONTENT_TYPE),
-            Some(&HeaderValue::from_static("application/json; charset=utf-8"))
+        ensure!(response.status() == StatusCode::OK);
+        ensure!(
+            response.headers().get(header::CONTENT_TYPE)
+                == Some(&HeaderValue::from_static("application/json; charset=utf-8"))
         );
-        assert_eq!(
-            response.headers().get(header::CACHE_CONTROL),
-            Some(&HeaderValue::from_static(
-                "private, no-cache, no-store, must-revalidate, no-transform"
-            ))
+        ensure!(
+            response.headers().get(header::CACHE_CONTROL)
+                == Some(&HeaderValue::from_static(
+                    "private, no-cache, no-store, must-revalidate, no-transform"
+                ))
         );
-        assert_eq!(
-            response.headers().get(header::PRAGMA),
-            Some(&HeaderValue::from_static("no-cache"))
+        ensure!(
+            response.headers().get(header::PRAGMA) == Some(&HeaderValue::from_static("no-cache"))
         );
-        assert_eq!(
-            response.headers().get(header::EXPIRES),
-            Some(&HeaderValue::from_static("0"))
-        );
-        assert_eq!(
+        ensure!(response.headers().get(header::EXPIRES) == Some(&HeaderValue::from_static("0")));
+        ensure!(
             response
                 .headers()
-                .get(header::HeaderName::from_static("x-accel-buffering")),
-            Some(&HeaderValue::from_static("no"))
+                .get(header::HeaderName::from_static("x-accel-buffering"))
+                == Some(&HeaderValue::from_static("no"))
         );
-        assert_eq!(
-            response.headers().get(header::VARY),
-            Some(&HeaderValue::from_static("Cookie"))
-        );
+        ensure!(response.headers().get(header::VARY) == Some(&HeaderValue::from_static("Cookie")));
 
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("body bytes");
-        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json payload");
-        assert_eq!(
-            payload.get("filename").and_then(serde_json::Value::as_str),
-            Some("no log file")
-        );
-        assert_eq!(
+            .context("read live-log body")?;
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).context("parse live-log JSON")?;
+        let filename = payload
+            .get("filename")
+            .and_then(serde_json::Value::as_str)
+            .context("live-log payload omitted filename")?;
+        let content = payload
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .context("live-log payload omitted content")?;
+        ensure!(
             payload
                 .get("truncated")
-                .and_then(serde_json::Value::as_bool),
-            Some(false)
+                .and_then(serde_json::Value::as_bool)
+                .is_some(),
+            "truncated boolean"
         );
-        assert_eq!(
-            payload.get("content").and_then(serde_json::Value::as_str),
-            Some("No live log file found yet.")
-        );
+        if filename == "no log file" {
+            ensure!(content == "No live log file found yet.");
+        } else {
+            ensure!(
+                crate::logging::is_main_log_file(std::path::Path::new(filename)),
+                "unexpected log filename: {filename}"
+            );
+        }
+        Ok(())
     }
 }

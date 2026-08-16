@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::migrations::{read_schema_version, stamp_schema_version, BASELINE_SCHEMA_VERSION};
 
+/// Complete baseline table definitions for a fresh database.
 const BASE_SCHEMA_SQL: &str = "
     CREATE TABLE IF NOT EXISTS boards (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -266,6 +267,7 @@ const BASE_SCHEMA_SQL: &str = "
     );
 ";
 
+/// Complete baseline secondary-index definitions.
 const INDEX_SCHEMA_SQL: &str = "
     CREATE INDEX IF NOT EXISTS idx_threads_board_sticky_bumped
         ON threads(board_id, sticky DESC, bumped_at DESC);
@@ -311,7 +313,9 @@ const INDEX_SCHEMA_SQL: &str = "
         ON post_submissions(created_at ASC);
 ";
 
+/// Obsolete theme index accepted only during the known legacy repair path.
 const LEGACY_THEME_SORT_INDEX: &str = "idx_themes_enabled_sort";
+/// Board columns whose historical default was zero instead of the baseline value.
 const LEGACY_BOARD_ZERO_DEFAULT_COLUMNS: [&str; 4] = [
     "allow_editing",
     "allow_self_delete",
@@ -319,6 +323,7 @@ const LEGACY_BOARD_ZERO_DEFAULT_COLUMNS: [&str; 4] = [
     "show_poster_ids",
 ];
 
+/// Install the baseline into a fresh database or normalize an existing database.
 pub(super) fn install_or_migrate_schema(conn: &rusqlite::Connection) -> Result<()> {
     if is_fresh_database(conn)? {
         install_baseline_schema(conn)?;
@@ -328,10 +333,12 @@ pub(super) fn install_or_migrate_schema(conn: &rusqlite::Connection) -> Result<(
     normalize_database_schema_version(conn)
 }
 
+/// Return the release's canonical database schema version.
 pub(super) const fn baseline_schema_version() -> &'static str {
     BASELINE_SCHEMA_VERSION
 }
 
+/// Verify both the database structure and recorded schema version.
 pub(super) fn verify_database_schema(conn: &rusqlite::Connection) -> Result<()> {
     verify_database_schema_structure(conn)?;
     match read_schema_version(conn)? {
@@ -343,6 +350,7 @@ pub(super) fn verify_database_schema(conn: &rusqlite::Connection) -> Result<()> 
     }
 }
 
+/// Repair recognized legacy drift and stamp a structurally valid baseline.
 pub(super) fn normalize_database_schema_version(conn: &rusqlite::Connection) -> Result<()> {
     repair_known_legacy_baseline_drift(conn)?;
     verify_database_schema_structure(conn)?;
@@ -352,6 +360,7 @@ pub(super) fn normalize_database_schema_version(conn: &rusqlite::Connection) -> 
     verify_database_schema(conn)
 }
 
+/// Return an operator-facing schema verification label.
 pub(super) fn database_schema_status_label(conn: &rusqlite::Connection) -> String {
     match verify_database_schema(conn) {
         Ok(()) => format!("{BASELINE_SCHEMA_VERSION} baseline verified"),
@@ -359,12 +368,14 @@ pub(super) fn database_schema_status_label(conn: &rusqlite::Connection) -> Strin
     }
 }
 
+/// Install, stamp, and verify the baseline schema.
 fn install_baseline_schema(conn: &rusqlite::Connection) -> Result<()> {
     create_baseline_schema_objects(conn)?;
     stamp_schema_version(conn)?;
     verify_database_schema(conn)
 }
 
+/// Create every table, index, search object, and invariant in the baseline.
 fn create_baseline_schema_objects(conn: &rusqlite::Connection) -> Result<()> {
     create_base_tables(conn)?;
     create_indexes(conn)?;
@@ -373,11 +384,13 @@ fn create_baseline_schema_objects(conn: &rusqlite::Connection) -> Result<()> {
     ensure_board_access_invariants(conn)
 }
 
+/// Create all baseline tables.
 fn create_base_tables(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch(BASE_SCHEMA_SQL)
         .context("Schema table creation failed")
 }
 
+/// Return whether the database contains no application schema objects.
 fn is_fresh_database(conn: &rusqlite::Connection) -> Result<bool> {
     conn.query_row(
         "SELECT COUNT(*) = 0
@@ -390,11 +403,13 @@ fn is_fresh_database(conn: &rusqlite::Connection) -> Result<bool> {
     .context("Failed to detect whether database is fresh")
 }
 
+/// Create all baseline secondary indexes.
 fn create_indexes(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch(INDEX_SCHEMA_SQL)
         .context("Schema index creation failed")
 }
 
+/// Create and synchronize the posts full-text-search index.
 fn ensure_posts_search_index(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch(
         r"
@@ -430,6 +445,7 @@ fn ensure_posts_search_index(conn: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
+/// Install database constraints coupling posts to their parent threads.
 fn ensure_post_invariants(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch(
         r"
@@ -457,6 +473,7 @@ fn ensure_post_invariants(conn: &rusqlite::Connection) -> Result<()> {
     .context("Post invariant creation failed")
 }
 
+/// Normalize and constrain board access modes and password requirements.
 fn ensure_board_access_invariants(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch(
         r"
@@ -500,6 +517,7 @@ fn ensure_board_access_invariants(conn: &rusqlite::Connection) -> Result<()> {
     .context("Board access invariant creation failed")
 }
 
+/// Apply narrowly recognized repairs for legacy baseline drift.
 fn repair_known_legacy_baseline_drift(conn: &rusqlite::Connection) -> Result<()> {
     if !is_known_legacy_schema_version(read_schema_version(conn)?.as_deref()) {
         return Ok(());
@@ -524,6 +542,7 @@ fn repair_known_legacy_baseline_drift(conn: &rusqlite::Connection) -> Result<()>
     Ok(())
 }
 
+/// Return whether a recorded numeric version belongs to the repairable legacy range.
 fn is_known_legacy_schema_version(version: Option<&str>) -> bool {
     match version.and_then(|value| value.parse::<i64>().ok()) {
         Some(1..=41) => true,
@@ -531,11 +550,13 @@ fn is_known_legacy_schema_version(version: Option<&str>) -> bool {
     }
 }
 
+/// Return whether all observed drift matches recognized legacy shapes.
 fn can_repair_known_legacy_baseline_drift(expected: &SchemaShape, actual: &SchemaShape) -> bool {
     schema_objects_are_legacy_repairable(expected, actual)
         && tables_are_legacy_repairable(expected, actual)
 }
 
+/// Compare schema objects while accepting the one obsolete theme index.
 fn schema_objects_are_legacy_repairable(expected: &SchemaShape, actual: &SchemaShape) -> bool {
     for (name, expected_object) in &expected.objects {
         let Some(actual_object) = actual.objects.get(name) else {
@@ -570,12 +591,14 @@ fn schema_objects_are_legacy_repairable(expected: &SchemaShape, actual: &SchemaS
     true
 }
 
+/// Return whether SQL exactly describes the obsolete theme sort index.
 fn is_legacy_theme_sort_index(sql: &str) -> bool {
     sql == normalize_schema_sql(
         "CREATE INDEX idx_themes_enabled_sort ON themes(enabled, sort_order, slug)",
     )
 }
 
+/// Compare table shapes under the known legacy exceptions.
 fn tables_are_legacy_repairable(expected: &SchemaShape, actual: &SchemaShape) -> bool {
     for (table, expected_table) in &expected.tables {
         let Some(actual_table) = actual.tables.get(table) else {
@@ -594,6 +617,7 @@ fn tables_are_legacy_repairable(expected: &SchemaShape, actual: &SchemaShape) ->
     true
 }
 
+/// Return whether the themes table differs only by its obsolete sort index.
 fn themes_table_is_legacy_repairable(expected: &TableShape, actual: &TableShape) -> bool {
     if actual.columns != expected.columns || actual.foreign_keys != expected.foreign_keys {
         return false;
@@ -604,12 +628,14 @@ fn themes_table_is_legacy_repairable(expected: &TableShape, actual: &TableShape)
     actual_indexes == expected.indexes
 }
 
+/// Return whether a legacy boards table can be safely rebuilt.
 fn boards_table_is_legacy_repairable(expected: &TableShape, actual: &TableShape) -> bool {
     actual.foreign_keys == expected.foreign_keys
         && legacy_board_columns_match(expected, actual)
         && legacy_board_indexes_are_repairable(actual)
 }
 
+/// Compare every board column while accepting known historical defaults.
 fn legacy_board_columns_match(expected: &TableShape, actual: &TableShape) -> bool {
     if actual.columns.len() != expected.columns.len() {
         return false;
@@ -627,6 +653,7 @@ fn legacy_board_columns_match(expected: &TableShape, actual: &TableShape) -> boo
     true
 }
 
+/// Compare one board column under the historical-default exception.
 fn legacy_board_column_matches(column: &str, expected: &ColumnShape, actual: &ColumnShape) -> bool {
     if actual == expected {
         return true;
@@ -640,6 +667,7 @@ fn legacy_board_column_matches(column: &str, expected: &ColumnShape, actual: &Co
     actual == &legacy_expected
 }
 
+/// Return whether the legacy boards table has only its expected unique index.
 fn legacy_board_indexes_are_repairable(actual: &TableShape) -> bool {
     actual.indexes.len() == 1
         && actual.indexes.values().any(|index| {
@@ -656,11 +684,13 @@ fn legacy_board_indexes_are_repairable(actual: &TableShape) -> bool {
         })
 }
 
+/// Return whether the boards table must be rebuilt to match the baseline.
 fn boards_table_requires_baseline_rebuild(expected: &SchemaShape, actual: &SchemaShape) -> bool {
     actual.tables.get("boards") != expected.tables.get("boards")
         || required_fragments_missing_for_table(actual, "boards")
 }
 
+/// Return whether a table definition lacks a required normalized SQL fragment.
 fn required_fragments_missing_for_table(shape: &SchemaShape, table: &str) -> bool {
     let Some(object) = shape.objects.get(table) else {
         return true;
@@ -675,6 +705,7 @@ fn required_fragments_missing_for_table(shape: &SchemaShape, table: &str) -> boo
         .any(|(_, fragment)| !sql.contains(&normalize_schema_sql(fragment)))
 }
 
+/// Rebuild the boards table into the release baseline shape.
 fn rebuild_boards_table_for_baseline(conn: &rusqlite::Connection) -> Result<()> {
     run_structural_schema_repair(
         conn,
@@ -749,11 +780,12 @@ fn rebuild_boards_table_for_baseline(conn: &rusqlite::Connection) -> Result<()> 
         DROP TABLE boards;
         ALTER TABLE boards_new RENAME TO boards;
         ",
-        "Structural migration: rebuild boards table for 1.3.0 baseline failed",
-        "Applied structural migration: boards table matches 1.3.0 baseline",
+        "Structural migration: rebuild boards table for 1.4.0 baseline failed",
+        "Applied structural migration: boards table matches 1.4.0 baseline",
     )
 }
 
+/// Run one structural repair with foreign keys temporarily disabled.
 fn run_structural_schema_repair(
     conn: &rusqlite::Connection,
     sql: &str,
@@ -772,7 +804,7 @@ fn run_structural_schema_repair(
     match conn.execute_batch(sql) {
         Ok(()) => {
             if let Err(error) = conn.execute_batch("COMMIT") {
-                let _ = conn.execute_batch("ROLLBACK");
+                drop(conn.execute_batch("ROLLBACK"));
                 restore_foreign_keys(conn, foreign_keys_enabled);
                 return Err(error).with_context(|| format!("Commit {failure_context}"));
             }
@@ -781,78 +813,115 @@ fn run_structural_schema_repair(
             Ok(())
         }
         Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             restore_foreign_keys(conn, foreign_keys_enabled);
             Err(error).context(failure_context.to_owned())
         }
     }
 }
 
+/// Restore the requested `SQLite` foreign-key enforcement state.
 fn restore_foreign_keys(conn: &rusqlite::Connection, enabled: bool) {
     let statement = if enabled {
         "PRAGMA foreign_keys = ON;"
     } else {
         "PRAGMA foreign_keys = OFF;"
     };
-    let _ = conn.execute_batch(statement);
+    drop(conn.execute_batch(statement));
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Normalized structure of all application schema objects and tables.
 struct SchemaShape {
+    /// Schema objects keyed by name.
     objects: BTreeMap<String, SchemaObject>,
+    /// Detailed table shapes keyed by table name.
     tables: BTreeMap<String, TableShape>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Normalized `SQLite` schema object.
 struct SchemaObject {
+    /// `SQLite` object type.
     kind: String,
+    /// Normalized creation SQL, when `SQLite` records it.
     sql: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Columns, foreign keys, and indexes comprising a table.
 struct TableShape {
+    /// Column definitions keyed by name.
     columns: BTreeMap<String, ColumnShape>,
+    /// Foreign-key definitions in stable order.
     foreign_keys: BTreeSet<ForeignKeyShape>,
+    /// Index definitions keyed by name.
     indexes: BTreeMap<String, IndexShape>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Normalized `SQLite` column definition.
 struct ColumnShape {
+    /// Declared `SQLite` type.
     decl_type: String,
+    /// Whether the column has a `NOT NULL` constraint.
     not_null: bool,
+    /// Normalized default expression.
     default_value: Option<String>,
+    /// One-based primary-key position, or zero when not in the key.
     primary_key_position: i64,
+    /// `SQLite` hidden-column classification.
     hidden: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// Normalized `SQLite` foreign-key definition.
 struct ForeignKeyShape {
+    /// Referenced table.
     table_name: String,
+    /// Local source column.
     from_column: String,
+    /// Referenced destination column.
     to_column: Option<String>,
+    /// Update action.
     on_update: String,
+    /// Delete action.
     on_delete: String,
+    /// `SQLite` match rule.
     match_rule: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Normalized `SQLite` index definition.
 struct IndexShape {
+    /// Whether index keys must be unique.
     unique: bool,
+    /// `SQLite` index-origin code.
     origin: String,
+    /// Whether the index is partial.
     partial: bool,
+    /// Ordered key columns.
     columns: Vec<IndexColumnShape>,
+    /// Normalized partial-index predicate.
     where_clause: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// One normalized `SQLite` index key column.
 struct IndexColumnShape {
+    /// Sequence position in the index.
     seqno: i64,
+    /// Source-table column identifier.
     cid: i64,
+    /// Source column name, absent for expressions or row identifiers.
     name: Option<String>,
+    /// Whether the key is sorted descending.
     descending: bool,
+    /// Applied collation name.
     collation: Option<String>,
 }
 
+/// Verify exact structural equality with the generated baseline.
 fn verify_database_schema_structure(conn: &rusqlite::Connection) -> Result<()> {
     let expected = expected_schema_shape()?;
     let actual = schema_shape(conn)?;
@@ -873,6 +942,7 @@ fn verify_database_schema_structure(conn: &rusqlite::Connection) -> Result<()> {
     }
 }
 
+/// Build the expected schema shape in an isolated in-memory database.
 fn expected_schema_shape() -> Result<SchemaShape> {
     let expected = rusqlite::Connection::open_in_memory()
         .context("Open in-memory baseline schema connection failed")?;
@@ -880,6 +950,7 @@ fn expected_schema_shape() -> Result<SchemaShape> {
     schema_shape(&expected)
 }
 
+/// Inspect and normalize the complete application schema.
 fn schema_shape(conn: &rusqlite::Connection) -> Result<SchemaShape> {
     let objects = schema_objects(conn)?;
     let mut tables = BTreeMap::new();
@@ -891,6 +962,7 @@ fn schema_shape(conn: &rusqlite::Connection) -> Result<SchemaShape> {
     Ok(SchemaShape { objects, tables })
 }
 
+/// Inspect all non-internal schema objects except the version table.
 fn schema_objects(conn: &rusqlite::Connection) -> Result<BTreeMap<String, SchemaObject>> {
     let mut stmt = conn
         .prepare(
@@ -925,6 +997,7 @@ fn schema_objects(conn: &rusqlite::Connection) -> Result<BTreeMap<String, Schema
     Ok(objects)
 }
 
+/// Inspect the complete normalized shape of one table.
 fn table_shape(conn: &rusqlite::Connection, table: &str) -> Result<TableShape> {
     Ok(TableShape {
         columns: table_columns(conn, table)?,
@@ -933,6 +1006,7 @@ fn table_shape(conn: &rusqlite::Connection, table: &str) -> Result<TableShape> {
     })
 }
 
+/// Inspect normalized columns for one table.
 fn table_columns(
     conn: &rusqlite::Connection,
     table: &str,
@@ -968,6 +1042,7 @@ fn table_columns(
     Ok(columns)
 }
 
+/// Inspect normalized foreign keys for one table.
 fn table_foreign_keys(
     conn: &rusqlite::Connection,
     table: &str,
@@ -999,6 +1074,7 @@ fn table_foreign_keys(
     Ok(foreign_keys)
 }
 
+/// Inspect normalized indexes for one table.
 fn table_indexes(conn: &rusqlite::Connection, table: &str) -> Result<BTreeMap<String, IndexShape>> {
     let mut stmt = conn
         .prepare(
@@ -1041,6 +1117,7 @@ fn table_indexes(conn: &rusqlite::Connection, table: &str) -> Result<BTreeMap<St
     Ok(indexes)
 }
 
+/// Inspect ordered key columns for one index.
 fn index_columns(conn: &rusqlite::Connection, index: &str) -> Result<Vec<IndexColumnShape>> {
     let mut stmt = conn
         .prepare(
@@ -1075,6 +1152,7 @@ fn index_columns(conn: &rusqlite::Connection, index: &str) -> Result<Vec<IndexCo
     Ok(columns)
 }
 
+/// Read creation SQL for a named schema object.
 fn schema_sql_for_object(
     conn: &rusqlite::Connection,
     kind: &str,
@@ -1088,6 +1166,7 @@ fn schema_sql_for_object(
     .with_context(|| format!("Inspect SQL for schema object {kind}:{name}"))
 }
 
+/// Record missing, extra, or mismatched schema objects.
 fn compare_schema_objects(expected: &SchemaShape, actual: &SchemaShape, issues: &mut Vec<String>) {
     for (name, expected_object) in &expected.objects {
         match actual.objects.get(name) {
@@ -1113,6 +1192,7 @@ fn compare_schema_objects(expected: &SchemaShape, actual: &SchemaShape, issues: 
     }
 }
 
+/// Record table-level column, foreign-key, and index mismatches.
 fn compare_tables(expected: &SchemaShape, actual: &SchemaShape, issues: &mut Vec<String>) {
     for (table, expected_table) in &expected.tables {
         let Some(actual_table) = actual.tables.get(table) else {
@@ -1133,6 +1213,7 @@ fn compare_tables(expected: &SchemaShape, actual: &SchemaShape, issues: &mut Vec
     }
 }
 
+/// Record missing, extra, or mismatched table columns.
 fn compare_columns(
     table: &str,
     expected: &BTreeMap<String, ColumnShape>,
@@ -1154,6 +1235,7 @@ fn compare_columns(
     }
 }
 
+/// SQL constraints that must appear verbatim after normalization.
 const REQUIRED_TABLE_SQL_FRAGMENTS: [(&str, &str); 2] = [
     (
         "boards",
@@ -1165,6 +1247,7 @@ const REQUIRED_TABLE_SQL_FRAGMENTS: [(&str, &str); 2] = [
     ),
 ];
 
+/// Record table definitions missing required SQL constraints.
 fn verify_required_sql_fragments(shape: &SchemaShape, issues: &mut Vec<String>) {
     for (table, fragment) in REQUIRED_TABLE_SQL_FRAGMENTS {
         let Some(object) = shape.objects.get(table) else {
@@ -1181,6 +1264,7 @@ fn verify_required_sql_fragments(shape: &SchemaShape, issues: &mut Vec<String>) 
     }
 }
 
+/// Run `SQLite` quick and foreign-key health checks.
 fn verify_sqlite_health(conn: &rusqlite::Connection, issues: &mut Vec<String>) {
     match conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0)) {
         Ok(result) if result.eq_ignore_ascii_case("ok") => {}
@@ -1230,12 +1314,14 @@ fn verify_sqlite_health(conn: &rusqlite::Connection, issues: &mut Vec<String>) {
     }
 }
 
+/// Extract and normalize a partial index's `WHERE` clause.
 fn index_where_clause(sql: &str) -> Option<String> {
     let lower = sql.to_ascii_lowercase();
     let where_index = lower.find(" where ")?;
     sql.get(where_index..).map(str::trim).map(str::to_owned)
 }
 
+/// Normalize schema SQL for stable structural comparison.
 fn normalize_schema_sql(sql: &str) -> String {
     sql.split_whitespace()
         .collect::<Vec<_>>()
@@ -1250,34 +1336,36 @@ mod tests {
         install_or_migrate_schema, normalize_database_schema_version, read_schema_version,
         verify_database_schema,
     };
+    use anyhow::{Context as _, Result};
 
-    fn schema_version(conn: &rusqlite::Connection) -> String {
-        conn.query_row("SELECT version FROM schema_version", [], |row| row.get(0))
-            .expect("read schema_version")
+    fn schema_version(conn: &rusqlite::Connection) -> Result<String> {
+        Ok(conn.query_row("SELECT version FROM schema_version", [], |row| row.get(0))?)
     }
 
-    fn object_exists(conn: &rusqlite::Connection, kind: &str, name: &str) -> bool {
-        conn.query_row(
+    fn object_exists(conn: &rusqlite::Connection, kind: &str, name: &str) -> Result<bool> {
+        Ok(conn.query_row(
             "SELECT EXISTS (
                 SELECT 1 FROM sqlite_master
                 WHERE type = ?1 AND name = ?2
             )",
             rusqlite::params![kind, name],
             |row| row.get(0),
-        )
-        .expect("inspect sqlite object")
+        )?)
     }
 
-    fn column_default(conn: &rusqlite::Connection, table: &str, column: &str) -> Option<String> {
-        conn.query_row(
+    fn column_default(
+        conn: &rusqlite::Connection,
+        table: &str,
+        column: &str,
+    ) -> Result<Option<String>> {
+        Ok(conn.query_row(
             "SELECT dflt_value FROM pragma_table_info(?1) WHERE name = ?2",
             rusqlite::params![table, column],
             |row| row.get(0),
-        )
-        .expect("read column default")
+        )?)
     }
 
-    fn rebuild_boards_with_historical_v41_shape(conn: &rusqlite::Connection) {
+    fn rebuild_boards_with_historical_v41_shape(conn: &rusqlite::Connection) -> Result<()> {
         conn.execute_batch(
             r"
             PRAGMA foreign_keys = OFF;
@@ -1348,37 +1436,74 @@ mod tests {
             COMMIT;
             PRAGMA foreign_keys = ON;
             ",
-        )
-        .expect("rebuild boards into historical v41 shape");
-        ensure_board_access_invariants(conn).expect("restore board access triggers");
+        )?;
+        ensure_board_access_invariants(conn)?;
+        Ok(())
     }
 
     #[test]
-    fn fresh_database_installs_130_baseline_directly() {
-        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
-        install_or_migrate_schema(&conn).expect("install schema");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn fresh_database_installs_140_baseline_directly() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        install_or_migrate_schema(&conn)?;
 
-        assert_eq!(schema_version(&conn), "1.3.0");
-        assert_eq!(baseline_schema_version(), "1.3.0");
-        assert!(object_exists(&conn, "table", "boards"));
-        assert!(object_exists(&conn, "table", "posts"));
-        assert!(object_exists(&conn, "table", "posts_fts"));
-        assert!(object_exists(&conn, "index", "idx_posts_one_op_per_thread"));
-        assert!(object_exists(
-            &conn,
-            "index",
-            "idx_banner_assets_scope_sort"
-        ));
-        assert!(object_exists(&conn, "trigger", "posts_ai"));
-        assert!(object_exists(&conn, "trigger", "posts_board_match_insert"));
-        assert!(object_exists(&conn, "trigger", "boards_access_mode_insert"));
-        verify_database_schema(&conn).expect("fresh schema verifies");
+        assert_eq!(
+            schema_version(&conn)?,
+            "1.4.0",
+            "fresh schema should record the release baseline"
+        );
+        assert_eq!(
+            baseline_schema_version(),
+            "1.4.0",
+            "compiled baseline should match the release"
+        );
+        assert!(
+            object_exists(&conn, "table", "boards")?,
+            "boards table should be installed"
+        );
+        assert!(
+            object_exists(&conn, "table", "posts")?,
+            "posts table should be installed"
+        );
+        assert!(
+            object_exists(&conn, "table", "posts_fts")?,
+            "full-text table should be installed"
+        );
+        assert!(
+            object_exists(&conn, "index", "idx_posts_one_op_per_thread")?,
+            "one-OP invariant index should be installed"
+        );
+        assert!(
+            object_exists(&conn, "index", "idx_banner_assets_scope_sort")?,
+            "banner scope index should be installed"
+        );
+        assert!(
+            object_exists(&conn, "trigger", "posts_ai")?,
+            "full-text insert trigger should be installed"
+        );
+        assert!(
+            object_exists(&conn, "trigger", "posts_board_match_insert")?,
+            "post-board invariant trigger should be installed"
+        );
+        assert!(
+            object_exists(&conn, "trigger", "boards_access_mode_insert")?,
+            "board access-mode trigger should be installed"
+        );
+        verify_database_schema(&conn)?;
+        Ok(())
     }
 
     #[test]
-    fn existing_current_schema_is_adopted_as_130_without_data_loss() {
-        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
-        create_baseline_schema_objects(&conn).expect("create baseline objects");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn existing_current_schema_is_adopted_as_140_without_data_loss() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        create_baseline_schema_objects(&conn)?;
         conn.execute_batch(
             "CREATE TABLE schema_version (
                 version INTEGER NOT NULL DEFAULT 0,
@@ -1389,24 +1514,33 @@ mod tests {
             INSERT INTO threads (id, board_id, subject) VALUES (10, 1, 'subject');
             INSERT INTO posts (id, thread_id, board_id, body, body_html, deletion_token, is_op)
             VALUES (100, 10, 1, 'preserved body', '<p>preserved body</p>', 'tok', 1);",
-        )
-        .expect("seed adoptable current schema");
+        )?;
 
-        install_or_migrate_schema(&conn).expect("adopt current schema");
+        install_or_migrate_schema(&conn)?;
 
-        assert_eq!(schema_version(&conn), "1.3.0");
-        let body: String = conn
-            .query_row("SELECT body FROM posts WHERE id = 100", [], |row| {
-                row.get(0)
-            })
-            .expect("read preserved post");
-        assert_eq!(body, "preserved body");
+        assert_eq!(
+            schema_version(&conn)?,
+            "1.4.0",
+            "adopted schema should receive the release version"
+        );
+        let body: String = conn.query_row("SELECT body FROM posts WHERE id = 100", [], |row| {
+            row.get(0)
+        })?;
+        assert_eq!(
+            body, "preserved body",
+            "schema adoption should preserve post data"
+        );
+        Ok(())
     }
 
     #[test]
-    fn historical_v41_schema_drift_repairs_to_130_baseline_without_data_loss() {
-        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
-        create_baseline_schema_objects(&conn).expect("create baseline objects");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn historical_v41_schema_drift_repairs_to_140_baseline_without_data_loss() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        create_baseline_schema_objects(&conn)?;
         conn.execute(
             "INSERT INTO boards (
                 id, short_name, name, allow_editing, allow_self_delete,
@@ -1414,9 +1548,8 @@ mod tests {
              )
              VALUES (1, 'b', 'Random', 0, 1, 0, 1, 'override', 'public')",
             [],
-        )
-        .expect("insert board before legacy reshape");
-        rebuild_boards_with_historical_v41_shape(&conn);
+        )?;
+        rebuild_boards_with_historical_v41_shape(&conn)?;
         conn.execute_batch(
             "CREATE INDEX idx_themes_enabled_sort
                  ON themes(enabled, sort_order, slug);
@@ -1425,11 +1558,11 @@ mod tests {
                  UNIQUE(version)
              );
              INSERT INTO schema_version (version) VALUES (41);",
-        )
-        .expect("create historical v41 drift markers");
+        )?;
 
-        let error =
-            verify_database_schema(&conn).expect_err("legacy drift should fail strict check");
+        let error = verify_database_schema(&conn)
+            .err()
+            .context("legacy drift should fail strict check")?;
         let message = error.to_string();
         assert!(
             message.contains("idx_themes_enabled_sort")
@@ -1438,47 +1571,60 @@ mod tests {
             "unexpected strict-check error: {error:#}"
         );
 
-        install_or_migrate_schema(&conn).expect("repair historical v41 schema drift");
+        install_or_migrate_schema(&conn)?;
 
-        assert_eq!(schema_version(&conn), "1.3.0");
-        assert!(!object_exists(&conn, "index", "idx_themes_enabled_sort"));
-        verify_database_schema(&conn).expect("repaired schema verifies");
         assert_eq!(
-            column_default(&conn, "boards", "allow_editing").as_deref(),
-            Some("1")
+            schema_version(&conn)?,
+            "1.4.0",
+            "repaired schema should be stamped with the release version"
+        );
+        assert!(
+            !object_exists(&conn, "index", "idx_themes_enabled_sort")?,
+            "obsolete theme index should be removed"
+        );
+        verify_database_schema(&conn)?;
+        assert_eq!(
+            column_default(&conn, "boards", "allow_editing")?.as_deref(),
+            Some("1"),
+            "editing default should be repaired"
         );
         assert_eq!(
-            column_default(&conn, "boards", "allow_self_delete").as_deref(),
-            Some("1")
+            column_default(&conn, "boards", "allow_self_delete")?.as_deref(),
+            Some("1"),
+            "self-delete default should be repaired"
         );
 
-        let board_flags: (i64, i64, i64, i64, String, String) = conn
-            .query_row(
-                "SELECT allow_editing, allow_self_delete, allow_video_embeds,
+        let board_flags: (i64, i64, i64, i64, String, String) = conn.query_row(
+            "SELECT allow_editing, allow_self_delete, allow_video_embeds,
                         show_poster_ids, banner_mode, access_mode
                  FROM boards WHERE id = 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                    ))
-                },
-            )
-            .expect("read preserved board flags");
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )?;
         assert_eq!(
             board_flags,
-            (0, 1, 0, 1, "override".to_owned(), "public".to_owned())
+            (0, 1, 0, 1, "override".to_owned(), "public".to_owned()),
+            "explicit board values should survive the table rebuild"
         );
+        Ok(())
     }
 
     #[test]
-    fn partial_schema_fails_closed_without_creating_missing_tables() {
-        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn partial_schema_fails_closed_without_creating_missing_tables() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
         conn.execute_batch(
             "CREATE TABLE boards (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1491,50 +1637,65 @@ mod tests {
             );
             INSERT INTO schema_version (version) VALUES (36);
             INSERT INTO boards (id, short_name, name) VALUES (1, 'b', 'Random');",
-        )
-        .expect("create partial schema");
+        )?;
 
-        let error = install_or_migrate_schema(&conn).expect_err("partial schema should fail");
+        let error = install_or_migrate_schema(&conn)
+            .err()
+            .context("partial schema should fail")?;
         assert!(
             error
                 .to_string()
-                .contains("does not match RustChan 1.3.0 baseline"),
+                .contains("does not match RustChan 1.4.0 baseline"),
             "unexpected error: {error:#}"
         );
 
-        assert!(!object_exists(&conn, "table", "posts"));
-        assert_eq!(
-            read_schema_version(&conn).expect("read version"),
-            Some("36".to_owned())
+        assert!(
+            !object_exists(&conn, "table", "posts")?,
+            "failed normalization must not create missing tables"
         );
+        assert_eq!(
+            read_schema_version(&conn)?,
+            Some("36".to_owned()),
+            "failed normalization must preserve the recorded version"
+        );
+        Ok(())
     }
 
     #[test]
-    fn unknown_schema_object_fails_closed() {
-        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
-        install_or_migrate_schema(&conn).expect("install schema");
-        conn.execute("CREATE TABLE operator_notes (body TEXT)", [])
-            .expect("create unexpected table");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn unknown_schema_object_fails_closed() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        install_or_migrate_schema(&conn)?;
+        conn.execute("CREATE TABLE operator_notes (body TEXT)", [])?;
 
-        let error = normalize_database_schema_version(&conn).expect_err("unknown table fails");
+        let error = normalize_database_schema_version(&conn)
+            .err()
+            .context("unknown table should fail normalization")?;
         assert!(
             error
                 .to_string()
                 .contains("unexpected table operator_notes"),
             "unexpected error: {error:#}"
         );
+        Ok(())
     }
 
     #[test]
-    fn fresh_schema_uses_new_board_feature_defaults() {
-        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn fresh_schema_uses_new_board_feature_defaults() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
 
-        install_or_migrate_schema(&conn).expect("install schema");
+        install_or_migrate_schema(&conn)?;
         conn.execute(
             "INSERT INTO boards (short_name, name) VALUES ('fresh', 'Fresh Board')",
             [],
-        )
-        .expect("insert board with schema defaults");
+        )?;
 
         let flags: (i64, i64, i64, i64, i64) = conn
             .query_row(
@@ -1550,8 +1711,7 @@ mod tests {
                         row.get(4)?,
                     ))
                 },
-            )
-            .expect("read fresh-schema board defaults");
+            )?;
         assert_eq!(
             flags,
             (
@@ -1560,14 +1720,20 @@ mod tests {
                 i64::from(crate::test_fixtures::DEFAULT_NEW_BOARD_SHOW_POSTER_IDS),
                 i64::from(crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_EDITING),
                 i64::from(crate::test_fixtures::DEFAULT_NEW_BOARD_ALLOW_SELF_DELETE),
-            )
+            ),
+            "fresh schema should use the standardized board defaults"
         );
+        Ok(())
     }
 
     #[test]
-    fn invalid_structural_change_does_not_stamp_130() {
-        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
-        create_baseline_schema_objects(&conn).expect("create baseline objects");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn invalid_structural_change_does_not_stamp_140() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        create_baseline_schema_objects(&conn)?;
         conn.execute_batch(
             "CREATE TABLE schema_version (
                 version INTEGER NOT NULL DEFAULT 0,
@@ -1575,10 +1741,11 @@ mod tests {
             );
             INSERT INTO schema_version (version) VALUES (41);
             DROP TRIGGER posts_board_match_insert;",
-        )
-        .expect("make schema invalid");
+        )?;
 
-        let error = install_or_migrate_schema(&conn).expect_err("invalid schema should fail");
+        let error = install_or_migrate_schema(&conn)
+            .err()
+            .context("invalid schema should fail")?;
         assert!(
             error
                 .to_string()
@@ -1586,8 +1753,10 @@ mod tests {
             "unexpected error: {error:#}"
         );
         assert_eq!(
-            read_schema_version(&conn).expect("read version"),
-            Some("41".to_owned())
+            read_schema_version(&conn)?,
+            Some("41".to_owned()),
+            "failed normalization must preserve the legacy version"
         );
+        Ok(())
     }
 }

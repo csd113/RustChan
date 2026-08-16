@@ -12,7 +12,7 @@ One binary. One data folder. SQLite only. The rest is features.
 
 RustChan is built in Rust, ships with bundled SQLite, and is designed to be understandable, movable, and fun to run.
 
-Current development version: `1.3.0`.
+Current development version: `1.4.0`.
 
 [What is RustChan?](#what-is-rustchan) ·
 [Why it exists](#why-it-exists) ·
@@ -136,14 +136,18 @@ On first run, RustChan creates `<exe-dir>/rustchan-data/settings.toml`, the data
 
 Helpful notes:
 
-- HTTPS is enabled by default on `https://localhost:8443` with a self-signed development certificate. Your browser will complain locally, which is normal.
+- HTTPS is disabled in the generated configuration. For local testing, set `[tls].enabled = true` to use `https://localhost:8443` with a self-signed development certificate; your browser will warn about that certificate.
 - On Windows, the binary is `target/release/rustchan-cli.exe`.
 - If you want another port, pass `--port`, for example `./target/release/rustchan-cli --port 9090`.
+- For a service installation, pass an absolute data root such as `--data-dir /var/lib/rustchan`.
 - If you want the optional second listener, add `--chan-net`.
 
 ## Configuration And Data
 
-RustChan keeps its runtime state in `<exe-dir>/rustchan-data/` next to the binary. The live process reads `settings.toml` from that directory, not from the current working directory.
+By default, RustChan keeps its runtime state in `<exe-dir>/rustchan-data/` next
+to the binary. Pass `--data-dir /absolute/path` to select a different complete
+runtime root. The live process reads `settings.toml` from the selected data
+directory, not from the current working directory.
 
 ```text
 rustchan-data/
@@ -163,10 +167,10 @@ rustchan-data/
 
 That folder is the thing to back up if you want to move the site or keep it safe.
 
-For RustChan `1.3.0`, fresh databases are created directly from the `1.3.0`
+For RustChan `1.4.0`, fresh databases are created directly from the `1.4.0`
 baseline schema. Earlier internal development migrations were squashed before
 release; a database that already matches the baseline is marked as schema
-version `1.3.0`, while partial or unknown schemas fail closed without deleting
+version `1.4.0`, while partial or unknown schemas fail closed without deleting
 data.
 
 `settings.toml` is generated automatically on first run and documents the available options inline. A few of the more important ones:
@@ -181,6 +185,7 @@ require_ffmpeg = false
 
 [tls]
 enabled = false
+require_https = false
 port = 8443
 ```
 
@@ -188,9 +193,10 @@ Worth knowing:
 
 - These stay TOML-owned at runtime: ports, Tor, arbitrary-file upload gate, ffmpeg/ffprobe paths, backup cadence, and other operational toggles.
 - `CHAN_*` environment variables still override the matching values from `settings.toml` at runtime.
-- When testing a copied or temporary binary, edit that binary's adjacent `rustchan-data/settings.toml`; do not rely on a cwd-local decoy file.
+- Without `--data-dir`, a copied or temporary binary uses its adjacent `rustchan-data/settings.toml`; do not rely on a cwd-local decoy file.
 - `enable_tor_support` is on by default in the generated config.
 - `tor_only = true` makes RustChan bind to loopback only and serve through Tor.
+- `[tls].require_https = true` opts into disabling public plaintext application access when native TLS is enabled.
 - `require_ffmpeg = true` makes startup fail if `ffmpeg` is missing.
 - `cookie_secret` is auto-generated on first run and should not be changed casually once the site is live.
 - `auto_full_backup_interval_hours` and `auto_full_backup_copies_to_keep` control saved full-site backups.
@@ -259,6 +265,12 @@ The ChanNet interface is text-only by design and exposes endpoints for:
 - polling for new content
 - a typed JSON command gateway for RustWave
 
+New ChanNet gateways should include a stable, globally unique UUID
+`message_id` with every `reply_push`. RustChan uses it as the durable replay
+key. The field remains optional for older gateways, whose legacy
+content-and-timestamp fingerprint cannot distinguish identical replies created
+within the same timestamp second.
+
 If you are not using federation, keep it off or firewall it properly.
 
 ## Under The Hood
@@ -282,6 +294,10 @@ The architecture is intentionally compact. That is the point.
 ## More Reading
 
 - [SETUP.md](SETUP.md) for installation, deployment, Tor, TLS, and troubleshooting
+- [CONTRIBUTING.md](CONTRIBUTING.md) for contribution workflow and validation
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for conduct in project-managed spaces
+- [SECURITY.md](SECURITY.md) for vulnerability-reporting scope and safe handling
+- [SUPPORT.md](SUPPORT.md) for support boundaries and operator responsibilities
 - [CHANGELOG.md](CHANGELOG.md) for release history
 - [LICENSE](LICENSE) for the MIT license
 

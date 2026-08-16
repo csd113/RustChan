@@ -5,10 +5,12 @@ use crate::{
 use anyhow::{Context as _, Result};
 use rusqlite::{params, OptionalExtension as _};
 
+/// Shared projection used to decode a complete banner asset.
 const BANNER_SELECT_COLUMNS: &str = "ba.id, ba.scope_type, ba.board_id, b.short_name, \
     ba.storage_key, ba.width, ba.height, ba.file_size, ba.enabled, ba.sort_order, \
     ba.target_type, ba.target_value, ba.show_on_index, ba.show_on_catalog, ba.created_at";
 
+/// Decode a banner asset from [`BANNER_SELECT_COLUMNS`].
 fn map_banner_asset(row: &rusqlite::Row<'_>) -> rusqlite::Result<BannerAsset> {
     let scope_raw: String = row.get(1)?;
     let target_raw: String = row.get(10)?;
@@ -124,7 +126,10 @@ pub fn next_banner_sort_order(
 ///
 /// # Errors
 /// Returns an error if the storage key is invalid or the insert fails.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the arguments map directly to one validated banner-asset row"
+)]
 pub fn insert_banner_asset(
     conn: &rusqlite::Connection,
     scope: BannerScope,
@@ -247,21 +252,21 @@ pub fn move_banner_asset(
     let asset = get_banner_asset(&tx, banner_id)?
         .ok_or_else(|| anyhow::anyhow!("Banner id {banner_id} not found"))?;
     let ordered_ids = if asset.scope == BannerScope::Board {
-        tx.prepare_cached(
+        let mut stmt = tx.prepare_cached(
             "SELECT id FROM banner_assets
              WHERE scope_type = 'board' AND board_id = ?1
              ORDER BY sort_order ASC, id ASC",
-        )?
-        .query_map(params![asset.board_id], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?
+        )?;
+        let rows = stmt.query_map(params![asset.board_id], |row| row.get::<_, i64>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
     } else {
-        tx.prepare_cached(
+        let mut stmt = tx.prepare_cached(
             "SELECT id FROM banner_assets
              WHERE scope_type = ?1
              ORDER BY sort_order ASC, id ASC",
-        )?
-        .query_map(params![asset.scope.as_str()], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?
+        )?;
+        let rows = stmt.query_map(params![asset.scope.as_str()], |row| row.get::<_, i64>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     let mut ordered_ids = ordered_ids;
     let index = ordered_ids
@@ -293,6 +298,8 @@ pub fn move_banner_asset(
     Ok(())
 }
 
+/// Return whether banner targets may link to external sites.
+#[must_use]
 pub fn get_banner_external_links_enabled(conn: &rusqlite::Connection) -> bool {
     super::get_site_setting(conn, "banner_external_links_enabled")
         .unwrap_or_else(|error| {
@@ -306,6 +313,8 @@ pub fn get_banner_external_links_enabled(conn: &rusqlite::Connection) -> bool {
         .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
+/// Return the configured banner rotation interval, clamped to thirty days.
+#[must_use]
 pub fn get_banner_rotation_interval_minutes(conn: &rusqlite::Connection) -> i64 {
     super::get_site_setting(conn, "banner_rotation_interval_minutes")
         .unwrap_or_else(|error| {

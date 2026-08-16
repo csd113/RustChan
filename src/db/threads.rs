@@ -12,9 +12,14 @@ use crate::models::Thread;
 use anyhow::{Context as _, Result};
 use rusqlite::{params, OptionalExtension as _};
 
+#[derive(Debug)]
+/// Optional poll values inserted alongside a new thread.
 pub struct PollInsert<'a> {
+    /// Poll question text.
     pub question: &'a str,
+    /// Ordered poll answer choices.
     pub options: &'a [String],
+    /// Unix expiration timestamp, or the caller's non-expiring sentinel.
     pub expires_at: i64,
 }
 
@@ -190,6 +195,42 @@ pub fn get_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<
 
 // ─── Thread creation (atomic with OP post) ────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of atomically deciding whether a public post submission is new.
+pub(crate) enum PostCreationOutcome<T> {
+    /// The transaction created and committed a new post bundle.
+    Created(T),
+    /// The token already names a canonical committed post.
+    Replayed(super::PostSubmissionRecord),
+}
+
+#[derive(Debug, Clone, Copy)]
+/// Filesystem lifecycle context validated in a public post transaction.
+pub(crate) struct PostFilesystemCommit<'a> {
+    /// Durable publication operation for newly staged files.
+    pending_fs_op: Option<&'a crate::pending_fs::PendingFsOpInsert>,
+    /// Prior dedup cache hits that must still be valid under the write lock.
+    deduplicated_paths: &'a [&'a str],
+    /// Whether a new thread must atomically persist board-prune work.
+    schedule_thread_prune: bool,
+}
+
+impl<'a> PostFilesystemCommit<'a> {
+    /// Build filesystem context for one post-creation transaction.
+    #[must_use]
+    pub(crate) const fn new(
+        pending_fs_op: Option<&'a crate::pending_fs::PendingFsOpInsert>,
+        deduplicated_paths: &'a [&'a str],
+        schedule_thread_prune: bool,
+    ) -> Self {
+        Self {
+            pending_fs_op,
+            deduplicated_paths,
+            schedule_thread_prune,
+        }
+    }
+}
+
 /// Create a thread, its OP post, and an optional poll atomically.
 ///
 /// # Errors
@@ -203,6 +244,38 @@ pub fn create_thread_with_optional_poll(
     poll: Option<&PollInsert<'_>>,
     pending_fs_op: Option<&crate::pending_fs::PendingFsOpInsert>,
 ) -> Result<(i64, i64, Option<i64>)> {
+    match create_thread_submission(
+        conn,
+        board_id,
+        subject,
+        post,
+        submission_token,
+        poll,
+        PostFilesystemCommit::new(pending_fs_op, &[], false),
+    )? {
+        PostCreationOutcome::Created(ids) => Ok(ids),
+        PostCreationOutcome::Replayed(existing) => Ok((existing.thread_id, existing.post_id, None)),
+    }
+}
+
+/// Create a public thread submission or return its canonical replay target.
+///
+/// The submission-token lookup is performed after `BEGIN IMMEDIATE`, before
+/// any content mutation, so concurrent requests serialize on one durable
+/// database decision.
+///
+/// # Errors
+/// Returns an error if the transaction cannot be started or committed, or if
+/// any insert in a new submission fails.
+pub(crate) fn create_thread_submission(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+    subject: Option<&str>,
+    post: &super::NewPost,
+    submission_token: &str,
+    poll: Option<&PollInsert<'_>>,
+    filesystem: PostFilesystemCommit<'_>,
+) -> Result<PostCreationOutcome<(i64, i64, Option<i64>)>> {
     // BEGIN IMMEDIATE acquires the write lock upfront to avoid SQLITE_BUSY
     // during the lock-upgrade step that DEFERRED transactions perform on first
     // write. With &Connection (not &mut Connection) we cannot use rusqlite's
@@ -210,7 +283,17 @@ pub fn create_thread_with_optional_poll(
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin IMMEDIATE transaction for create_thread_with_optional_poll")?;
 
-    let result: Result<(i64, i64, Option<i64>)> = (|| {
+    let result: Result<PostCreationOutcome<(i64, i64, Option<i64>)>> = (|| {
+        if let Some(ip_hash) = post.ip_hash.as_deref() {
+            if let Some(existing) =
+                super::posts::get_post_submission(conn, submission_token, ip_hash, board_id)?
+            {
+                return Ok(PostCreationOutcome::Replayed(existing));
+            }
+        }
+
+        validate_deduplicated_paths(conn, filesystem.deduplicated_paths)?;
+
         let thread_id: i64 = conn.query_row(
             "INSERT INTO threads (board_id, subject) VALUES (?1, ?2) RETURNING id",
             params![board_id, subject],
@@ -237,7 +320,7 @@ pub fn create_thread_with_optional_poll(
             })
             .transpose()?;
 
-        if let Some(op) = pending_fs_op {
+        if let Some(op) = filesystem.pending_fs_op {
             super::insert_pending_fs_op(conn, op)?;
         }
         if let Some(ip_hash) = post.ip_hash.as_deref() {
@@ -251,8 +334,12 @@ pub fn create_thread_with_optional_poll(
                 true,
             )?;
         }
+        if filesystem.schedule_thread_prune {
+            super::posts::persist_thread_prune_intent_in_tx(conn, board_id)
+                .context("Persist required board prune intent failed")?;
+        }
 
-        Ok((thread_id, post_id, poll_id))
+        Ok(PostCreationOutcome::Created((thread_id, post_id, poll_id)))
     })();
 
     match result {
@@ -262,7 +349,7 @@ pub fn create_thread_with_optional_poll(
             Ok(ids)
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(e)
         }
     }
@@ -281,10 +368,44 @@ pub fn create_reply_with_thread_update(
     should_bump: bool,
     pending_fs_op: Option<&crate::pending_fs::PendingFsOpInsert>,
 ) -> Result<i64> {
+    match create_reply_submission(
+        conn,
+        post,
+        submission_token,
+        should_bump,
+        PostFilesystemCommit::new(pending_fs_op, &[], false),
+    )? {
+        PostCreationOutcome::Created(post_id) => Ok(post_id),
+        PostCreationOutcome::Replayed(existing) => Ok(existing.post_id),
+    }
+}
+
+/// Create a public reply submission or return its canonical replay target.
+///
+/// # Errors
+/// Returns an error if the transaction cannot be started or committed, if the
+/// thread is not writable, or if any mutation in a new submission fails.
+pub(crate) fn create_reply_submission(
+    conn: &rusqlite::Connection,
+    post: &super::NewPost,
+    submission_token: &str,
+    should_bump: bool,
+    filesystem: PostFilesystemCommit<'_>,
+) -> Result<PostCreationOutcome<i64>> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin create_reply_with_thread_update transaction")?;
 
-    let result: Result<i64> = (|| {
+    let result: Result<PostCreationOutcome<i64>> = (|| {
+        if let Some(ip_hash) = post.ip_hash.as_deref() {
+            if let Some(existing) =
+                super::posts::get_post_submission(conn, submission_token, ip_hash, post.board_id)?
+            {
+                return Ok(PostCreationOutcome::Replayed(existing));
+            }
+        }
+
+        validate_deduplicated_paths(conn, filesystem.deduplicated_paths)?;
+
         let flags = conn
             .query_row(
                 "SELECT locked, archived
@@ -330,7 +451,7 @@ pub fn create_reply_with_thread_update(
                 post.thread_id
             );
         }
-        if let Some(op) = pending_fs_op {
+        if let Some(op) = filesystem.pending_fs_op {
             super::insert_pending_fs_op(conn, op)?;
         }
         if let Some(ip_hash) = post.ip_hash.as_deref() {
@@ -344,20 +465,41 @@ pub fn create_reply_with_thread_update(
                 false,
             )?;
         }
-        Ok(post_id)
+        Ok(PostCreationOutcome::Created(post_id))
     })();
 
     match result {
-        Ok(post_id) => {
+        Ok(outcome) => {
             conn.execute_batch("COMMIT")
                 .context("Failed to commit create_reply_with_thread_update transaction")?;
-            Ok(post_id)
+            Ok(outcome)
         }
         Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(error)
         }
     }
+}
+
+/// Revalidate a prior dedup cache hit after the post transaction owns the write lock.
+fn validate_deduplicated_paths(conn: &rusqlite::Connection, paths: &[&str]) -> Result<()> {
+    for path in paths {
+        let valid = conn.query_row(
+            "SELECT EXISTS (
+                 SELECT 1 FROM file_hashes fh WHERE fh.file_path = ?1
+             ) AND NOT EXISTS (
+                 SELECT 1 FROM posts p
+                 WHERE (p.file_path = ?1 OR p.audio_file_path = ?1)
+                   AND p.media_processing_state = ?2
+             )",
+            params![path, super::MEDIA_ORIGINAL_PRUNE_PENDING],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !valid {
+            anyhow::bail!("deduplicated media changed before post creation");
+        }
+    }
+    Ok(())
 }
 
 /// # Errors
@@ -499,7 +641,7 @@ pub fn delete_thread(
             Ok(safe)
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(e)
         }
     }
@@ -530,7 +672,7 @@ pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64)
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin archive_old_threads transaction")?;
 
-    let result: anyhow::Result<usize> = (|| {
+    let result: Result<usize> = (|| {
         // Collect inside the transaction to prevent races with concurrent bumps.
         let ids: Vec<i64> = {
             let mut stmt = conn.prepare_cached(
@@ -571,7 +713,7 @@ pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64)
     match result {
         Ok(0) => {
             // Nothing to archive — roll back the (empty) transaction cleanly.
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Ok(0)
         }
         Ok(count) => {
@@ -580,7 +722,7 @@ pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64)
             Ok(count)
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(e)
         }
     }
@@ -620,7 +762,7 @@ pub fn prune_old_threads(
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin prune_old_threads transaction")?;
 
-    let result: anyhow::Result<crate::db::DeletePathsResult> = (|| {
+    let result: Result<crate::db::DeletePathsResult> = (|| {
         // Collect ids inside the transaction to prevent concurrent bumps from
         // changing the ordering between the SELECT and the DELETE.
         let ids: Vec<i64> = {
@@ -676,7 +818,7 @@ pub fn prune_old_threads(
             Ok(result)
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(e)
         }
     }
@@ -702,7 +844,7 @@ pub fn prune_old_archived_threads(
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin prune_old_archived_threads transaction")?;
 
-    let result: anyhow::Result<crate::db::DeletePathsResult> = (|| {
+    let result: Result<crate::db::DeletePathsResult> = (|| {
         let ids: Vec<i64> = {
             let mut stmt = conn.prepare_cached(
                 "SELECT id FROM threads
@@ -752,7 +894,7 @@ pub fn prune_old_archived_threads(
             Ok(result)
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn.execute_batch("ROLLBACK"));
             Err(e)
         }
     }
@@ -799,22 +941,24 @@ pub fn count_archived_threads_for_board(conn: &rusqlite::Connection, board_id: i
 #[cfg(test)]
 mod tests {
     use super::{
-        count_threads_for_board, create_reply_with_thread_update, delete_thread,
-        prune_old_archived_threads, prune_old_threads,
+        count_threads_for_board, create_reply_with_thread_update, create_thread_submission,
+        delete_thread, prune_old_archived_threads, prune_old_threads, validate_deduplicated_paths,
+        PostFilesystemCommit,
     };
     use crate::db::{create_board, create_thread_with_optional_poll, get_board_by_short, NewPost};
     use crate::error::AppError;
     use crate::models::MediaType;
     use crate::pending_fs::finalize_delete_files_payload;
+    use anyhow::{Context as _, Result};
     use rusqlite::{params, Connection};
 
-    fn test_conn() -> Connection {
-        let conn = Connection::open_in_memory().expect("in-memory sqlite");
-        super::super::schema::install_or_migrate_schema(&conn).expect("install schema");
-        conn
+    fn test_conn() -> Result<Connection> {
+        let conn = Connection::open_in_memory()?;
+        super::super::schema::install_or_migrate_schema(&conn)?;
+        Ok(conn)
     }
 
-    fn create_plain_thread(conn: &Connection, board_id: i64, title: &str) -> i64 {
+    fn create_plain_thread(conn: &Connection, board_id: i64, title: &str) -> Result<i64> {
         let post = NewPost {
             thread_id: 0,
             board_id,
@@ -838,9 +982,61 @@ mod tests {
             is_op: true,
         };
         let (thread_id, _, _) =
-            create_thread_with_optional_poll(conn, board_id, Some(title), &post, "", None, None)
-                .expect("create thread");
-        thread_id
+            create_thread_with_optional_poll(conn, board_id, Some(title), &post, "", None, None)?;
+        Ok(thread_id)
+    }
+
+    #[test]
+    fn required_prune_insert_failure_rolls_back_new_thread() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "durable", "Durable", "", false)?;
+        conn.execute_batch(
+            "CREATE TRIGGER fail_required_thread_prune
+             BEFORE INSERT ON background_jobs
+             WHEN NEW.job_type = 'thread_prune'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected durable prune failure');
+             END;",
+        )?;
+        let post = NewPost {
+            thread_id: 0,
+            board_id,
+            name: "anon".to_owned(),
+            tripcode: None,
+            subject: Some("atomic".to_owned()),
+            body: "atomic".to_owned(),
+            body_html: "atomic".to_owned(),
+            ip_hash: None,
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_owned(),
+            is_op: true,
+        };
+
+        let result = create_thread_submission(
+            &conn,
+            board_id,
+            Some("atomic"),
+            &post,
+            "submission",
+            None,
+            PostFilesystemCommit::new(None, &[], true),
+        );
+
+        anyhow::ensure!(result.is_err());
+        anyhow::ensure!(count_threads_for_board(&conn, board_id)? == 0);
+        let jobs: i64 =
+            conn.query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row.get(0))?;
+        anyhow::ensure!(jobs == 0);
+        Ok(())
     }
 
     fn plain_reply(board_id: i64, thread_id: i64) -> NewPost {
@@ -876,91 +1072,150 @@ mod tests {
         }
     }
 
-    fn thread_reply_count(conn: &Connection, thread_id: i64) -> i64 {
-        conn.query_row(
+    fn thread_reply_count(conn: &Connection, thread_id: i64) -> Result<i64> {
+        Ok(conn.query_row(
             "SELECT reply_count FROM threads WHERE id = ?1",
             params![thread_id],
             |row| row.get(0),
-        )
-        .expect("thread reply count")
+        )?)
     }
 
-    fn post_count(conn: &Connection, thread_id: i64) -> i64 {
-        conn.query_row(
+    fn post_count(conn: &Connection, thread_id: i64) -> Result<i64> {
+        Ok(conn.query_row(
             "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
             params![thread_id],
             |row| row.get(0),
-        )
-        .expect("post count")
+        )?)
     }
 
-    fn pending_fs_op_count(conn: &Connection) -> i64 {
-        conn.query_row("SELECT COUNT(*) FROM pending_fs_ops", [], |row| row.get(0))
-            .expect("pending fs op count")
-    }
-
-    #[test]
-    fn prune_old_threads_commits_even_when_no_files_are_safe() {
-        let conn = test_conn();
-        let board_id = create_board(&conn, "prune", "Prune", "", false).expect("create board");
-        create_plain_thread(&conn, board_id, "old thread");
-        create_plain_thread(&conn, board_id, "new thread");
-        let board = get_board_by_short(&conn, "prune")
-            .expect("load board")
-            .expect("board exists");
-        assert_eq!(
-            count_threads_for_board(&conn, board.id).expect("count before"),
-            2
-        );
-
-        let deleted = prune_old_threads(&conn, board.id, 1).expect("prune");
-        assert!(deleted.paths.is_empty());
-        assert!(deleted.pending_fs_op_id.is_none());
-        assert_eq!(
-            count_threads_for_board(&conn, board.id).expect("count after"),
-            1
-        );
+    fn pending_fs_op_count(conn: &Connection) -> Result<i64> {
+        Ok(conn.query_row("SELECT COUNT(*) FROM pending_fs_ops", [], |row| row.get(0))?)
     }
 
     #[test]
-    fn prune_old_archived_threads_commits_even_when_no_files_are_safe() {
-        let conn = test_conn();
-        let board_id = create_board(&conn, "aprune", "Archive", "", false).expect("create board");
-        let first = create_plain_thread(&conn, board_id, "old archived thread");
-        let second = create_plain_thread(&conn, board_id, "new archived thread");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn dedup_path_revalidation_rejects_a_concurrent_prune_transition() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "b", "Random", "", false)?;
+        crate::db::record_file_hash(
+            &conn,
+            "hash",
+            "b/file.webp",
+            "b/thumbs/file.webp",
+            "image/webp",
+        )?;
+        validate_deduplicated_paths(&conn, &["b/file.webp"])?;
+
+        let thread_id = create_plain_thread(&conn, board_id, "thread")?;
+        let post_id = create_reply_with_thread_update(
+            &conn,
+            &plain_reply(board_id, thread_id),
+            "submission",
+            true,
+            None,
+        )?;
+        conn.execute(
+            "UPDATE posts
+             SET file_path = 'b/file.webp', media_processing_state = ?1
+             WHERE id = ?2",
+            params![crate::db::MEDIA_ORIGINAL_PRUNE_PENDING, post_id],
+        )?;
+
+        assert!(validate_deduplicated_paths(&conn, &["b/file.webp"]).is_err());
+        assert!(crate::db::find_file_by_hash(&conn, "hash")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn prune_old_threads_commits_even_when_no_files_are_safe() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "prune", "Prune", "", false)?;
+        create_plain_thread(&conn, board_id, "old thread")?;
+        create_plain_thread(&conn, board_id, "new thread")?;
+        let board = get_board_by_short(&conn, "prune")?.context("prune board should exist")?;
+        assert_eq!(
+            count_threads_for_board(&conn, board.id)?,
+            2,
+            "the test should begin with two threads"
+        );
+
+        let deleted = prune_old_threads(&conn, board.id, 1)?;
+        assert!(
+            deleted.paths.is_empty(),
+            "posts without media should produce no cleanup paths"
+        );
+        assert!(
+            deleted.pending_fs_op_id.is_none(),
+            "no cleanup operation should be queued without paths"
+        );
+        assert_eq!(
+            count_threads_for_board(&conn, board.id)?,
+            1,
+            "pruning should commit the oldest thread deletion"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn prune_old_archived_threads_commits_even_when_no_files_are_safe() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "aprune", "Archive", "", false)?;
+        let first = create_plain_thread(&conn, board_id, "old archived thread")?;
+        let second = create_plain_thread(&conn, board_id, "new archived thread")?;
         conn.execute(
             "UPDATE threads SET archived = 1 WHERE id IN (?1, ?2)",
             params![first, second],
-        )
-        .expect("archive threads");
+        )?;
 
-        let deleted = prune_old_archived_threads(&conn, board_id, 1).expect("prune archived");
-        assert!(deleted.paths.is_empty());
-        assert!(deleted.pending_fs_op_id.is_none());
+        let deleted = prune_old_archived_threads(&conn, board_id, 1)?;
+        assert!(
+            deleted.paths.is_empty(),
+            "posts without media should produce no cleanup paths"
+        );
+        assert!(
+            deleted.pending_fs_op_id.is_none(),
+            "no cleanup operation should be queued without paths"
+        );
         assert_eq!(
             conn.query_row(
                 "SELECT COUNT(*) FROM threads WHERE board_id = ?1 AND archived = 1",
                 params![board_id],
                 |row| row.get::<_, i64>(0),
-            )
-            .expect("archived count"),
-            1
+            )?,
+            1,
+            "archived pruning should commit the oldest deletion"
         );
+        Ok(())
     }
 
     #[test]
-    fn delete_thread_returns_pending_cleanup_for_media_reply() {
-        let conn = test_conn();
-        let board_id = create_board(&conn, "media", "Media", "", false).expect("create board");
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn delete_thread_returns_pending_cleanup_for_media_reply() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "media", "Media", "", false)?;
+        let temp_dir = tempfile::tempdir()?;
         let upload_dir = temp_dir.path().join("uploads");
         let board_dir = upload_dir.join("media");
         let thumb_dir = board_dir.join("thumbs");
-        std::fs::create_dir_all(&thumb_dir).expect("create upload dirs");
-        std::fs::write(board_dir.join("reply.webp"), b"reply").expect("write reply");
-        std::fs::write(thumb_dir.join("reply.webp"), b"thumb").expect("write thumb");
+        std::fs::create_dir_all(&thumb_dir)?;
+        std::fs::write(board_dir.join("reply.webp"), b"reply")?;
+        std::fs::write(thumb_dir.join("reply.webp"), b"thumb")?;
 
-        let thread_id = create_plain_thread(&conn, board_id, "thread with media reply");
+        let thread_id = create_plain_thread(&conn, board_id, "thread with media reply")?;
         let reply = NewPost {
             thread_id,
             board_id,
@@ -983,96 +1238,166 @@ mod tests {
             deletion_token: "token".to_owned(),
             is_op: false,
         };
-        create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+        create_reply_with_thread_update(&conn, &reply, "", false, None)?;
 
-        let deleted = delete_thread(&conn, thread_id).expect("delete thread");
-        assert!(deleted.pending_fs_op_id.is_some());
-        assert!(deleted.paths.iter().any(|path| path == "media/reply.webp"));
-        assert!(deleted
-            .paths
-            .iter()
-            .any(|path| path == "media/thumbs/reply.webp"));
+        let deleted = delete_thread(&conn, thread_id)?;
+        assert!(
+            deleted.pending_fs_op_id.is_some(),
+            "deleting media should enqueue durable cleanup"
+        );
+        assert!(
+            deleted.paths.iter().any(|path| path == "media/reply.webp"),
+            "primary media path should be returned"
+        );
+        assert!(
+            deleted
+                .paths
+                .iter()
+                .any(|path| path == "media/thumbs/reply.webp"),
+            "thumbnail path should be returned"
+        );
         assert_eq!(
-            count_threads_for_board(&conn, board_id).expect("count after"),
-            0
+            count_threads_for_board(&conn, board_id)?,
+            0,
+            "thread deletion should commit"
         );
 
         finalize_delete_files_payload(
             &conn,
-            upload_dir.to_str().expect("utf8 upload dir"),
+            upload_dir
+                .to_str()
+                .context("temporary path should be UTF-8")?,
             deleted.pending_fs_op_id.as_deref(),
             &deleted.paths,
-        )
-        .expect("cleanup reply files");
+        )?;
 
-        assert!(!board_dir.join("reply.webp").exists());
-        assert!(!thumb_dir.join("reply.webp").exists());
+        assert!(
+            !board_dir.join("reply.webp").exists(),
+            "primary media file should be removed"
+        );
+        assert!(
+            !thumb_dir.join("reply.webp").exists(),
+            "thumbnail file should be removed"
+        );
+        Ok(())
     }
 
     #[test]
-    fn create_reply_rejects_locked_thread_without_mutations() {
-        let conn = test_conn();
-        let board_id = create_board(&conn, "lock", "Lock", "", false).expect("create board");
-        let thread_id = create_plain_thread(&conn, board_id, "locked thread");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn create_reply_rejects_locked_thread_without_mutations() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "lock", "Lock", "", false)?;
+        let thread_id = create_plain_thread(&conn, board_id, "locked thread")?;
         conn.execute(
             "UPDATE threads SET locked = 1 WHERE id = ?1",
             params![thread_id],
-        )
-        .expect("lock thread");
+        )?;
         let reply = plain_reply(board_id, thread_id);
         let pending_op = pending_upload_op("locked-reply-upload");
 
         let error = create_reply_with_thread_update(&conn, &reply, "", true, Some(&pending_op))
-            .expect_err("locked thread should reject reply");
+            .err()
+            .context("locked thread should reject reply")?;
 
-        assert!(error.to_string().contains("This thread is locked."));
-        assert_eq!(post_count(&conn, thread_id), 1);
-        assert_eq!(thread_reply_count(&conn, thread_id), 0);
-        assert_eq!(pending_fs_op_count(&conn), 0);
+        assert!(
+            error.to_string().contains("This thread is locked."),
+            "the rejection should identify the locked state"
+        );
+        assert_eq!(
+            post_count(&conn, thread_id)?,
+            1,
+            "no reply row should be inserted"
+        );
+        assert_eq!(
+            thread_reply_count(&conn, thread_id)?,
+            0,
+            "reply count should remain unchanged"
+        );
+        assert_eq!(
+            pending_fs_op_count(&conn)?,
+            0,
+            "pending upload operation should not be inserted"
+        );
+        Ok(())
     }
 
     #[test]
-    fn create_reply_rejects_archived_thread_without_mutations() {
-        let conn = test_conn();
-        let board_id = create_board(&conn, "arch", "Archive", "", false).expect("create board");
-        let thread_id = create_plain_thread(&conn, board_id, "archived thread");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn create_reply_rejects_archived_thread_without_mutations() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "arch", "Archive", "", false)?;
+        let thread_id = create_plain_thread(&conn, board_id, "archived thread")?;
         conn.execute(
             "UPDATE threads SET archived = 1 WHERE id = ?1",
             params![thread_id],
-        )
-        .expect("archive thread");
+        )?;
         let reply = plain_reply(board_id, thread_id);
         let pending_op = pending_upload_op("archived-reply-upload");
 
         let error = create_reply_with_thread_update(&conn, &reply, "", true, Some(&pending_op))
-            .expect_err("archived thread should reject reply");
+            .err()
+            .context("archived thread should reject reply")?;
 
-        assert!(error.to_string().contains("This thread is archived."));
-        assert_eq!(post_count(&conn, thread_id), 1);
-        assert_eq!(thread_reply_count(&conn, thread_id), 0);
-        assert_eq!(pending_fs_op_count(&conn), 0);
+        assert!(
+            error.to_string().contains("This thread is archived."),
+            "the rejection should identify the archived state"
+        );
+        assert_eq!(
+            post_count(&conn, thread_id)?,
+            1,
+            "no reply row should be inserted"
+        );
+        assert_eq!(
+            thread_reply_count(&conn, thread_id)?,
+            0,
+            "reply count should remain unchanged"
+        );
+        assert_eq!(
+            pending_fs_op_count(&conn)?,
+            0,
+            "pending upload operation should not be inserted"
+        );
+        Ok(())
     }
 
     #[test]
-    fn delete_thread_returns_not_found_on_retry() {
-        let conn = test_conn();
-        let board_id = create_board(&conn, "delth", "Del Thread", "", false).expect("create board");
-        let thread_id = create_plain_thread(&conn, board_id, "thread to delete");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn delete_thread_returns_not_found_on_retry() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "delth", "Del Thread", "", false)?;
+        let thread_id = create_plain_thread(&conn, board_id, "thread to delete")?;
 
-        let deleted = delete_thread(&conn, thread_id).expect("delete thread");
-        assert!(deleted.paths.is_empty());
-        match delete_thread(&conn, thread_id) {
-            Err(AppError::NotFound(msg)) => assert!(msg.contains("Thread id")),
-            other => panic!("expected not found on retry, got {other:?}"),
-        }
+        let deleted = delete_thread(&conn, thread_id)?;
+        assert!(
+            deleted.paths.is_empty(),
+            "thread without media should have no cleanup paths"
+        );
+        let retry = delete_thread(&conn, thread_id);
+        assert!(
+            matches!(retry, Err(AppError::NotFound(message)) if message.contains("Thread id")),
+            "a repeated delete should return not found"
+        );
+        Ok(())
     }
 
     #[test]
-    fn delete_thread_removes_replies_and_retries_cleanly() {
-        let conn = test_conn();
-        let board_id =
-            create_board(&conn, "delthr", "Del Thread Replies", "", false).expect("create board");
-        let thread_id = create_plain_thread(&conn, board_id, "thread with reply");
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn delete_thread_removes_replies_and_retries_cleanly() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "delthr", "Del Thread Replies", "", false)?;
+        let thread_id = create_plain_thread(&conn, board_id, "thread with reply")?;
         let reply = NewPost {
             thread_id,
             board_id,
@@ -1095,22 +1420,27 @@ mod tests {
             deletion_token: "token".to_owned(),
             is_op: false,
         };
-        create_reply_with_thread_update(&conn, &reply, "", false, None).expect("create reply");
+        create_reply_with_thread_update(&conn, &reply, "", false, None)?;
 
-        let deleted = delete_thread(&conn, thread_id).expect("delete thread");
-        assert!(deleted.paths.is_empty());
+        let deleted = delete_thread(&conn, thread_id)?;
         assert!(
+            deleted.paths.is_empty(),
+            "posts without media should have no cleanup paths"
+        );
+        assert_eq!(
             conn.query_row(
                 "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
                 rusqlite::params![thread_id],
                 |row| row.get::<_, i64>(0),
-            )
-            .expect("post count after delete")
-                == 0
+            )?,
+            0,
+            "thread deletion should remove all replies"
         );
-        match delete_thread(&conn, thread_id) {
-            Err(AppError::NotFound(msg)) => assert!(msg.contains("Thread id")),
-            other => panic!("expected not found on retry, got {other:?}"),
-        }
+        let retry = delete_thread(&conn, thread_id);
+        assert!(
+            matches!(retry, Err(AppError::NotFound(message)) if message.contains("Thread id")),
+            "a repeated delete should return not found"
+        );
+        Ok(())
     }
 }

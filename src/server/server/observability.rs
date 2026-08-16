@@ -1,9 +1,4 @@
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-#![allow(
-    clippy::too_many_lines,
-    clippy::option_if_let_else,
-    clippy::map_unwrap_or
-)]
+//! Health, readiness, and Prometheus-compatible metrics endpoints.
 
 use std::sync::atomic::Ordering;
 
@@ -22,41 +17,68 @@ use crate::middleware::AppState;
 use super::{ACTIVE_IPS, ACTIVE_UPLOADS, IN_FLIGHT, REQUEST_COUNT};
 
 #[derive(Serialize)]
+/// Minimal liveness response.
 struct HealthPayload {
+    /// Liveness status label.
     status: &'static str,
 }
 
 #[derive(Serialize)]
 // This type mirrors serialized or render state, so the boolean count is an intentional tradeoff.
-#[expect(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the detailed readiness schema reports independent subsystem states"
+)]
+/// Detailed readiness response.
 struct ReadyPayload {
+    /// Aggregate readiness label.
     status: &'static str,
+    /// Whether the database accepts queries and has the expected schema.
     database_ready: bool,
+    /// Expected schema version.
     database_schema_version: &'static str,
+    /// Whether the schema matches the expected release baseline.
     database_schema_valid: bool,
+    /// Whether Tor support is configured.
     tor_enabled: bool,
+    /// Whether the onion service has published an address.
     tor_onion_ready: bool,
+    /// Pending worker-queue job count.
     worker_queue_pending: i64,
+    /// Failed media-processing job count.
     media_processing_failed: i64,
+    /// Whether a maintenance operation is active.
     maintenance_active: bool,
+    /// Active maintenance operation label.
     maintenance_label: Option<String>,
+    /// Whether the newest full backup passed verification.
     latest_full_backup_verified: bool,
+    /// Age of the newest full backup in hours.
     latest_full_backup_age_hours: Option<i64>,
 }
 
 #[derive(Serialize)]
+/// Public readiness response without operational internals.
 struct PublicReadyPayload {
+    /// Aggregate readiness label.
     status: &'static str,
 }
 
+/// Return process liveness.
 pub(super) async fn healthz() -> impl IntoResponse {
     Json(HealthPayload { status: "ok" })
 }
 
+/// Return configured public or detailed readiness.
 pub(super) async fn readyz(State(state): State<AppState>) -> Response {
     readyz_response(state, CONFIG.public_readiness_details).await
 }
 
+/// Build a readiness response with optional operational details.
+#[expect(
+    clippy::too_many_lines,
+    reason = "readiness computes one coherent subsystem snapshot before serializing its response"
+)]
 async fn readyz_response(state: AppState, include_details: bool) -> Response {
     if !include_details {
         let database_ready = tokio::task::spawn_blocking({
@@ -169,6 +191,7 @@ async fn readyz_response(state: AppState, include_details: bool) -> Response {
     (status, Json(payload)).into_response()
 }
 
+/// Return public metrics when explicitly enabled.
 pub(super) async fn metrics(State(state): State<AppState>) -> Response {
     if !CONFIG.public_metrics_enabled {
         return StatusCode::NOT_FOUND.into_response();
@@ -176,8 +199,14 @@ pub(super) async fn metrics(State(state): State<AppState>) -> Response {
     metrics_response(state).await
 }
 
+/// Build the Prometheus text exposition.
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeping metric declarations and values together prevents exposition-order drift"
+)]
 async fn metrics_response(state: AppState) -> Response {
     let backup = &state.backup_progress;
+    let media_reconcile = crate::media::reconcile::metrics_snapshot();
     let tor_onion_ready = if CONFIG.enable_tor_support {
         state.onion_address.read().await.is_some()
     } else {
@@ -200,8 +229,9 @@ async fn metrics_response(state: AppState) -> Response {
             let latest_full_backup_age_seconds = full_backups
                 .first()
                 .and_then(|backup| backup.modified_epoch)
-                .map(|ts| chrono::Utc::now().timestamp().saturating_sub(ts).max(0))
-                .unwrap_or(-1);
+                .map_or(-1, |ts| {
+                    chrono::Utc::now().timestamp().saturating_sub(ts).max(0)
+                });
             match pool.get() {
                 Ok(conn) => {
                     let database_schema_valid = crate::db::verify_database_schema(&conn).is_ok();
@@ -254,6 +284,22 @@ async fn metrics_response(state: AppState) -> Response {
             "rustchan_media_processing_pending {}\n",
             "# TYPE rustchan_media_processing_failed gauge\n",
             "rustchan_media_processing_failed {}\n",
+            "# TYPE rustchan_media_reconcile_files_scanned_total counter\n",
+            "rustchan_media_reconcile_files_scanned_total {}\n",
+            "# TYPE rustchan_media_reconcile_references_scanned_total counter\n",
+            "rustchan_media_reconcile_references_scanned_total {}\n",
+            "# TYPE rustchan_media_reconcile_missing_references_total counter\n",
+            "rustchan_media_reconcile_missing_references_total {}\n",
+            "# TYPE rustchan_media_reconcile_safe_orphan_bytes_total counter\n",
+            "rustchan_media_reconcile_safe_orphan_bytes_total {}\n",
+            "# TYPE rustchan_media_reconcile_ambiguous_files_total counter\n",
+            "rustchan_media_reconcile_ambiguous_files_total {}\n",
+            "# TYPE rustchan_media_reconcile_repairs_total counter\n",
+            "rustchan_media_reconcile_repairs_total {}\n",
+            "# TYPE rustchan_media_reconcile_repair_conflicts_total counter\n",
+            "rustchan_media_reconcile_repair_conflicts_total {}\n",
+            "# TYPE rustchan_media_reconcile_scan_incomplete_total counter\n",
+            "rustchan_media_reconcile_scan_incomplete_total {}\n",
             "# TYPE rustchan_database_schema_valid gauge\n",
             "rustchan_database_schema_valid{{version=\"{}\"}} {}\n",
             "# TYPE rustchan_full_backups_saved gauge\n",
@@ -287,6 +333,14 @@ async fn metrics_response(state: AppState) -> Response {
         state.job_queue.dropped_count(),
         media_processing_pending,
         media_processing_failed,
+        media_reconcile.files_scanned_total,
+        media_reconcile.references_scanned_total,
+        media_reconcile.missing_references_total,
+        media_reconcile.safe_orphan_bytes_total,
+        media_reconcile.ambiguous_files_total,
+        media_reconcile.repairs_total,
+        media_reconcile.repair_conflicts_total,
+        media_reconcile.incomplete_scans_total,
         crate::db::baseline_schema_version(),
         u8::from(database_schema_valid),
         full_backup_count,
@@ -314,73 +368,125 @@ async fn metrics_response(state: AppState) -> Response {
 }
 
 #[cfg(test)]
+/// Readiness and metrics response-contract tests.
 mod tests {
     use super::{metrics_response, readyz_response};
     use axum::{body::to_bytes, http::StatusCode};
 
     #[tokio::test]
-    async fn public_readyz_response_hides_operational_details() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Hides operational readiness fields in the public response.
+    async fn public_readyz_response_hides_operational_details() -> anyhow::Result<()> {
         let response = readyz_response(crate::test_support::app_state(), false).await;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("ready body");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("ready json");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "healthy test state should report ready"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let body: serde_json::Value = serde_json::from_slice(&body)?;
 
         assert_eq!(
             body.get("status").and_then(serde_json::Value::as_str),
-            Some("ready")
+            Some("ready"),
+            "public readiness should include the aggregate status"
         );
-        assert!(body.get("database_schema_version").is_none());
-        assert!(body.get("database_schema_valid").is_none());
-        assert!(body.get("worker_queue_pending").is_none());
-        assert!(body.get("media_processing_failed").is_none());
-        assert!(body.get("latest_full_backup_verified").is_none());
-        assert!(body.get("tor_enabled").is_none());
+        for field in [
+            "database_schema_version",
+            "database_schema_valid",
+            "worker_queue_pending",
+            "media_processing_failed",
+            "latest_full_backup_verified",
+            "tor_enabled",
+        ] {
+            assert!(
+                body.get(field).is_none(),
+                "public readiness should hide {field}"
+            );
+        }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn detailed_readyz_response_remains_available_when_enabled() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Includes operational readiness fields when details are enabled.
+    async fn detailed_readyz_response_remains_available_when_enabled() -> anyhow::Result<()> {
         let response = readyz_response(crate::test_support::app_state(), true).await;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("ready body");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("ready json");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "healthy detailed state should report ready"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let body: serde_json::Value = serde_json::from_slice(&body)?;
 
         assert_eq!(
             body.get("status").and_then(serde_json::Value::as_str),
-            Some("ready")
+            Some("ready"),
+            "detailed readiness should include the aggregate status"
         );
         assert_eq!(
             body.get("database_schema_version")
                 .and_then(serde_json::Value::as_str),
-            Some(crate::db::baseline_schema_version())
+            Some(crate::db::baseline_schema_version()),
+            "detailed readiness should include the expected schema version"
         );
         assert_eq!(
             body.get("database_schema_valid")
                 .and_then(serde_json::Value::as_bool),
-            Some(true)
+            Some(true),
+            "test schema should be valid"
         );
-        assert!(body.get("worker_queue_pending").is_some());
-        assert!(body.get("latest_full_backup_verified").is_some());
-        assert!(body.get("tor_enabled").is_some());
+        for field in [
+            "worker_queue_pending",
+            "latest_full_backup_verified",
+            "tor_enabled",
+        ] {
+            assert!(
+                body.get(field).is_some(),
+                "detailed readiness should include {field}"
+            );
+        }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn metrics_response_remains_available_for_enabled_scrapers() {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Emits the core metric families for enabled scrapers.
+    async fn metrics_response_remains_available_for_enabled_scrapers() -> anyhow::Result<()> {
         let response = metrics_response(crate::test_support::app_state()).await;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("metrics body");
-        let body = String::from_utf8(body.to_vec()).expect("utf8 metrics");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "metrics response should succeed"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let body = String::from_utf8(body.to_vec())?;
 
-        assert!(body.contains("rustchan_requests_total"));
-        assert!(body.contains("rustchan_job_queue_pending"));
-        assert!(body.contains("rustchan_database_schema_valid{version=\"1.3.0\"} 1"));
+        for metric in [
+            "rustchan_requests_total",
+            "rustchan_job_queue_pending",
+            "rustchan_media_reconcile_files_scanned_total",
+            "rustchan_media_reconcile_repair_conflicts_total",
+            "rustchan_database_schema_valid{version=\"1.4.0\"} 1",
+        ] {
+            assert!(
+                body.contains(metric),
+                "metrics response should contain {metric}"
+            );
+        }
+        Ok(())
     }
 }

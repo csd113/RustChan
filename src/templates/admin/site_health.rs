@@ -1,6 +1,9 @@
+//! Runtime health and dependency diagnostics for the admin panel.
+
 use super::{escape_html, AdminDetectionStatus, AdminPanelViewModel};
 use std::fmt::Write as _;
 
+/// Renders the complete site-health section.
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let open_attr = if view.open_section == Some("site-health") {
         " open"
@@ -59,6 +62,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     )
 }
 
+/// Renders the primary server, database, storage, and job health rows.
 fn render_health_rows(view: &AdminPanelViewModel<'_>) -> String {
     let health = &view.site_health;
     let mut rows = String::new();
@@ -81,6 +85,7 @@ fn render_health_rows(view: &AdminPanelViewModel<'_>) -> String {
     rows
 }
 
+/// Appends live job-count rows to the health summary.
 fn append_job_rows(rows: &mut String, view: &AdminPanelViewModel<'_>) {
     let health = &view.site_health;
     append_health_job_row(
@@ -127,6 +132,7 @@ fn append_job_rows(rows: &mut String, view: &AdminPanelViewModel<'_>) {
     );
 }
 
+/// Appends one escaped label-value health row.
 fn append_health_row(out: &mut String, label: &str, value: &str) {
     let _ = write!(
         out,
@@ -136,6 +142,7 @@ fn append_health_row(out: &mut String, label: &str, value: &str) {
     );
 }
 
+/// Appends a job-count row with the controls appropriate to its category.
 fn append_health_job_row(out: &mut String, label: &str, value: &str, key: &str, csrf_token: &str) {
     if key == "failed_jobs" {
         let disabled_attr = if value == "0" {
@@ -179,6 +186,7 @@ fn append_health_job_row(out: &mut String, label: &str, value: &str, key: &str, 
     );
 }
 
+/// Renders the initially hidden recent-job detail panels.
 fn render_recent_jobs_panel() -> String {
     r#"<div class="admin-health-job-details" data-admin-health-job-details hidden inert aria-hidden="true">
   <section id="admin-health-job-panel-failed" data-admin-health-job-panel="failed" hidden inert aria-hidden="true">
@@ -199,6 +207,7 @@ fn render_recent_jobs_panel() -> String {
         .to_owned()
 }
 
+/// Renders detected-state rows for optional media dependencies.
 fn render_dependency_summary(view: &AdminPanelViewModel<'_>) -> String {
     let dependencies = view.site_health.dependency_summary;
     let mut rows = String::new();
@@ -214,6 +223,7 @@ fn render_dependency_summary(view: &AdminPanelViewModel<'_>) -> String {
     rows
 }
 
+/// Renders the safe Tor runtime and configuration diagnostics.
 fn render_tor_diagnostics(view: &AdminPanelViewModel<'_>) -> String {
     let health = &view.site_health;
     let mut rows = String::new();
@@ -233,6 +243,7 @@ fn render_tor_diagnostics(view: &AdminPanelViewModel<'_>) -> String {
     rows
 }
 
+/// Converts a dependency detection state to display text.
 const fn detection_label(status: AdminDetectionStatus) -> &'static str {
     match status {
         AdminDetectionStatus::Detected => "found",

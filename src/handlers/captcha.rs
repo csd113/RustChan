@@ -7,11 +7,14 @@ use axum::{
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-pub struct CaptchaImageQuery {
+/// Query parameters accepted by the captcha image request.
+pub(crate) struct CaptchaImageQuery {
+    /// The board.
     board: String,
 }
 
-pub async fn serve_captcha_image(
+/// Handles the serve captcha image request.
+pub(crate) async fn serve_captcha_image(
     Path(captcha_id): Path<String>,
     Query(query): Query<CaptchaImageQuery>,
 ) -> Result<Response> {
@@ -42,6 +45,7 @@ pub async fn serve_captcha_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{ensure, Context as _};
     use axum::{
         body::{to_bytes, Body},
         http::Request,
@@ -51,7 +55,7 @@ mod tests {
     use tower::ServiceExt as _;
 
     #[tokio::test]
-    async fn captcha_image_route_returns_png_with_private_no_cache_headers() {
+    async fn captcha_image_route_returns_png_with_private_no_cache_headers() -> anyhow::Result<()> {
         const CAPTCHA_ROUTE: &str = concat!("/captcha/", "{id}");
 
         let id = "00000000000000000000000000000006";
@@ -62,28 +66,46 @@ mod tests {
                 Request::builder()
                     .uri(format!("/captcha/{id}?board=test"))
                     .body(Body::empty())
-                    .expect("request"),
+                    .context("build CAPTCHA image request")?,
             )
             .await
-            .expect("response");
+            .context("receive CAPTCHA image response")?;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get(header::CONTENT_TYPE),
-            Some(&HeaderValue::from_static("image/png"))
+        ensure!(
+            response.status() == StatusCode::OK,
+            "CAPTCHA image route returned {}",
+            response.status()
+        );
+        ensure!(
+            response.headers().get(header::CONTENT_TYPE)
+                == Some(&HeaderValue::from_static("image/png")),
+            "CAPTCHA image response omitted its PNG content type"
         );
         let cache_control = response
             .headers()
             .get(header::CACHE_CONTROL)
             .and_then(|value| value.to_str().ok())
-            .expect("cache-control");
-        assert!(cache_control.contains("private"));
-        assert!(cache_control.contains("no-store"));
-        assert!(crate::captcha::testing::challenge_exists_for_test(id));
+            .context("CAPTCHA image response omitted valid cache-control")?;
+        ensure!(
+            cache_control.contains("private"),
+            "CAPTCHA response cache-control was not private"
+        );
+        ensure!(
+            cache_control.contains("no-store"),
+            "CAPTCHA response cache-control allowed storage"
+        );
+        ensure!(
+            crate::captcha::testing::challenge_exists_for_test(id),
+            "serving the image removed the CAPTCHA challenge"
+        );
 
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("body");
-        assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"));
+            .context("read CAPTCHA image response body")?;
+        ensure!(
+            body.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "CAPTCHA image body did not start with the PNG signature"
+        );
+        Ok(())
     }
 }

@@ -358,20 +358,6 @@ html:not([data-theme]) .site-name { text-shadow: 0 0 14px var(--green-bright); }
 [data-theme="deep-orbit"] .site-name,
 [data-theme="fluorogrid"] .site-name { text-shadow: none; }
 
-/* Admin link pinned to far right of site header */
-.admin-header-link {
-  margin-left: auto;
-  color: var(--text-dim);
-  font-size: 0.85rem;
-  white-space: nowrap;
-  padding: 1px 4px;
-  font-family: var(--font);
-}
-.admin-header-link:hover {
-  color: var(--green-bright);
-  background: rgba(0,255,65,0.08);
-}
-
 @media (max-width: 900px), (hover: none) and (pointer: coarse) {
   html,
   body {
@@ -436,12 +422,6 @@ html:not([data-theme]) .site-name { text-shadow: 0 0 14px var(--green-bright); }
 
   .board-list {
     display: none !important;
-  }
-
-  .admin-header-link {
-    order: 3;
-    margin-left: auto;
-    font-size: 0.75rem;
   }
 
   .header-search {
@@ -825,7 +805,7 @@ html:not([data-theme]) .board-header h1 { text-shadow: 0 0 10px rgba(0,255,65,0.
 }
 
 .board-banner-image {
-  width: min(100%, 468px);
+  width: min(100%, 585px);
   height: auto;
   aspect-ratio: 468 / 60;
   display: block;
@@ -3498,6 +3478,16 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
 
 .site-footer a { color: var(--green-dim); }
 
+.site-footer .admin-footer-link {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+}
+
+.site-footer .admin-footer-link:hover,
+.site-footer .admin-footer-link:focus-visible {
+  color: var(--green-bright);
+}
+
 [data-theme="forest"] .post-toggle-btn,
 [data-theme="forest"] .thread-nav-btn,
 [data-theme="forest"] .thread-nav a,
@@ -3591,7 +3581,6 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
 /* Shared "glass pill" navigation treatment used by the lighter themes.
    Theme blocks set the variables so structure stays in one place. */
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .home-btn,
-html:is([data-theme="aero"], [data-theme="neoncubicle"]) .admin-header-link,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .mobile-board-menu-btn,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .thread-nav-btn,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn,
@@ -3600,7 +3589,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-list a {
 }
 
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .home-btn,
-html:is([data-theme="aero"], [data-theme="neoncubicle"]) .admin-header-link,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .mobile-board-menu-btn,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .thread-nav-btn,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn {
@@ -3622,7 +3610,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn {
 
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-list a:hover,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .home-btn:hover,
-html:is([data-theme="aero"], [data-theme="neoncubicle"]) .admin-header-link:hover,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .mobile-board-menu-btn:hover,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .thread-nav-btn:hover,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover {
@@ -4137,7 +4124,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   text-shadow: none;
 }
 [data-theme="forest"] .home-btn,
-[data-theme="forest"] .admin-header-link,
 [data-theme="forest"] .mobile-board-menu-btn,
 [data-theme="forest"] .thread-nav-btn,
 [data-theme="forest"] .post-toggle-btn,
@@ -4146,7 +4132,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   color: var(--forest-nav-text);
 }
 [data-theme="forest"] .home-btn:hover,
-[data-theme="forest"] .admin-header-link:hover,
 [data-theme="forest"] .mobile-board-menu-btn:hover,
 [data-theme="forest"] .thread-nav-btn:hover,
 [data-theme="forest"] .post-toggle-btn:hover,
@@ -4412,7 +4397,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   text-shadow: none;
 }
 [data-theme="blue-sky"] .home-btn,
-[data-theme="blue-sky"] .admin-header-link,
 [data-theme="blue-sky"] .mobile-board-menu-btn,
 [data-theme="blue-sky"] .thread-nav-btn,
 [data-theme="blue-sky"] .post-toggle-btn,
@@ -4421,7 +4405,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   color: var(--blue-sky-nav-text);
 }
 [data-theme="blue-sky"] .home-btn:hover,
-[data-theme="blue-sky"] .admin-header-link:hover,
 [data-theme="blue-sky"] .mobile-board-menu-btn:hover,
 [data-theme="blue-sky"] .thread-nav-btn:hover,
 [data-theme="blue-sky"] .post-toggle-btn:hover,
@@ -4739,7 +4722,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   text-shadow: none;
 }
 [data-theme="deep-orbit"] .home-btn,
-[data-theme="deep-orbit"] .admin-header-link,
 [data-theme="deep-orbit"] .mobile-board-menu-btn,
 [data-theme="deep-orbit"] .thread-nav-btn,
 [data-theme="deep-orbit"] .post-toggle-btn,
@@ -4748,7 +4730,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   color: var(--deep-orbit-nav-text);
 }
 [data-theme="deep-orbit"] .home-btn:hover,
-[data-theme="deep-orbit"] .admin-header-link:hover,
 [data-theme="deep-orbit"] .mobile-board-menu-btn:hover,
 [data-theme="deep-orbit"] .thread-nav-btn:hover,
 [data-theme="deep-orbit"] .post-toggle-btn:hover,
@@ -5099,14 +5080,12 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 }
 [data-theme="chanclassic"] .site-header .board-list a,
 [data-theme="chanclassic"] .site-header .home-btn,
-[data-theme="chanclassic"] .site-header .admin-header-link,
 [data-theme="chanclassic"] .site-header .mobile-board-menu-btn,
 [data-theme="chanclassic"] .site-header .mobile-board-link {
   color: #f3dfcf;
 }
 [data-theme="chanclassic"] .site-header .board-list a:hover,
 [data-theme="chanclassic"] .site-header .home-btn:hover,
-[data-theme="chanclassic"] .site-header .admin-header-link:hover,
 [data-theme="chanclassic"] .site-header .mobile-board-menu-btn:hover,
 [data-theme="chanclassic"] .site-header .mobile-board-link:hover {
   color: #fff8ee;
@@ -5128,7 +5107,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 [data-theme="chanclassic"] .board-list a,
 [data-theme="chanclassic"] .board-nav-link,
 [data-theme="chanclassic"] .home-btn,
-[data-theme="chanclassic"] .admin-header-link,
 [data-theme="chanclassic"] .thread-nav a,
 [data-theme="chanclassic"] .thread-nav-btn,
 [data-theme="chanclassic"] .post-toggle-btn,
@@ -5144,7 +5122,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 [data-theme="chanclassic"] .board-list a:hover,
 [data-theme="chanclassic"] .board-nav-link:hover,
 [data-theme="chanclassic"] .home-btn:hover,
-[data-theme="chanclassic"] .admin-header-link:hover,
 [data-theme="chanclassic"] .post-toggle-btn:hover {
   text-decoration: underline;
   background: transparent;
@@ -5204,8 +5181,7 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 [data-theme="chanclassic"] .site-header button,
 [data-theme="chanclassic"] .board-list a,
 [data-theme="chanclassic"] .board-nav-link,
-[data-theme="chanclassic"] .home-btn,
-[data-theme="chanclassic"] .admin-header-link {
+[data-theme="chanclassic"] .home-btn {
   background: transparent;
   border: none;
   color: #0000ee;
@@ -5215,8 +5191,7 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 [data-theme="chanclassic"] .site-header button {
   color: #fff0f0;
 }
-[data-theme="chanclassic"] .home-btn,
-[data-theme="chanclassic"] .admin-header-link {
+[data-theme="chanclassic"] .home-btn {
   padding-left: 0;
   padding-right: 0;
 }
@@ -5236,8 +5211,7 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 [data-theme="chanclassic"] .post-toggle-btn:hover,
 [data-theme="chanclassic"] .board-list a:hover,
 [data-theme="chanclassic"] .board-nav-link:hover,
-[data-theme="chanclassic"] .home-btn:hover,
-[data-theme="chanclassic"] .admin-header-link:hover {
+[data-theme="chanclassic"] .home-btn:hover {
   color: #cc0000;
   border: none;
 }
@@ -5365,7 +5339,8 @@ html.no-js #theme-picker-panel {
   display: none;
 }
 
-.user-preferences-form {
+.user-preferences-form,
+.user-preferences-noscript {
   position: absolute;
   right: 0;
   bottom: calc(100% + 10px);
@@ -5385,6 +5360,31 @@ html.no-js #theme-picker-panel {
   max-height: calc(100vh - 24px);
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+.user-preferences-noscript {
+  display: flex;
+  flex-direction: column;
+}
+
+html.no-js .user-preferences-form {
+  display: none;
+}
+
+.user-preferences-status {
+  min-height: 1.2em;
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.user-preferences-status[data-state="saved"] {
+  color: var(--green-pale);
+}
+
+.user-preferences-status[data-state="error"] {
+  color: var(--red-bright, #ff7070);
 }
 
 html[data-hide-nsfw-boards="1"] [data-board-nsfw="1"],
@@ -5433,35 +5433,45 @@ html[data-show-activity-badges="0"] .new-activity-badge {
   accent-color: var(--green);
 }
 
-.theme-picker-fallback {
-  display: none;
-  margin-top: 0;
+.user-preferences-noscript-form {
+  display: block;
+  margin: 0;
+}
+
+.user-preferences-noscript-form fieldset {
+  margin: 0;
+  padding: 0.55rem 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.user-preferences-noscript-form:last-child fieldset {
+  border-bottom: 0;
+}
+
+.user-preferences-noscript-form legend {
+  margin-bottom: 0.4rem;
+  color: var(--text);
   font-size: 0.78rem;
-  gap: 0.45rem;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-end;
-  text-align: right;
+  font-weight: bold;
 }
 
-html.no-js .theme-picker-fallback {
+.user-preferences-choice-row {
   display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
 }
 
-html.js .theme-picker-fallback {
-  display: none;
+.user-preferences-choice-row button {
+  flex: 1 1 auto;
+  min-height: 36px;
+  padding: 0.4rem 0.65rem;
 }
 
-.theme-picker-fallback-title {
-  color: var(--text-dim);
-}
-
-.theme-picker-fallback a {
-  color: var(--green-mid);
-}
-
-.theme-picker-fallback a:hover {
+.user-preferences-choice-row button[aria-pressed="true"] {
+  border-color: var(--green-bright);
   color: var(--green-bright);
+  background: color-mix(in srgb, var(--green) 12%, var(--bg-input));
 }
 
 @media (max-width: 700px) {
@@ -5469,7 +5479,7 @@ html.js .theme-picker-fallback {
     overflow: hidden;
   }
 
-  .user-preferences-panel[open]::before {
+  html.js .user-preferences-panel[open]::before {
     content: "";
     position: fixed;
     inset: 0;
@@ -5477,11 +5487,11 @@ html.js .theme-picker-fallback {
     background: rgba(0,0,0,0.42);
   }
 
-  .user-preferences-panel[open] .user-preferences-summary {
+  html.js .user-preferences-panel[open] .user-preferences-summary {
     visibility: hidden;
   }
 
-  .user-preferences-panel[open] .user-preferences-form {
+  html.js .user-preferences-panel[open] .user-preferences-form {
     position: fixed;
     top: auto;
     right: 0;
@@ -5504,9 +5514,18 @@ html.js .theme-picker-fallback {
   }
 
   @supports (height: 100svh) {
-    .user-preferences-panel[open] .user-preferences-form {
+    html.js .user-preferences-panel[open] .user-preferences-form {
       max-height: min(68svh, calc(100svh - max(20px, env(safe-area-inset-top))));
     }
+  }
+
+  .user-preferences-noscript {
+    position: static;
+    width: min(100%, 30rem);
+    max-height: none;
+    margin-top: 0.6rem;
+    padding: 12px;
+    box-shadow: none;
   }
 
   .user-preferences-mobile-close {
@@ -5588,6 +5607,10 @@ html.js .theme-picker-fallback {
   .user-preferences-form input[type="radio"] {
     min-width: 24px;
     min-height: 24px;
+  }
+
+  .user-preferences-choice-row button {
+    min-height: 44px;
   }
 }
 
