@@ -43,6 +43,7 @@ All notable changes to RustChan will be documented in this file.
 - Added conservative HTTP header limits of 32 KiB per value and 64 KiB for the parser/aggregate boundary across public and internal listeners.
 - Corrected dependency auditing so CI scans `Cargo.lock` and verifies that the resolved dependency graph is non-empty instead of treating the audit policy file as a lockfile.
 - Upgraded all 38 Arti/Tor crates to `0.44.0`, explicitly enabled its now-default stable congestion control, and incorporated the medium-severity TROVE-2026-24 and TROVE-2026-27 denial-of-service fixes; this raises the project MSRV to Rust 1.91.
+- Upgraded the Arti/Tor stack to `0.45.0`, retaining the Rustls-only TLS configuration and explicit stable congestion-control feature.
 - Updated `anyhow` to `1.0.104` and `memmap2` to `0.9.11` to resolve denied unsoundness advisories, and updated `getset` to remove the unmaintained, future-incompatible `proc-macro-error2` dependency.
 - Removed the yanked `spin` `0.9.8` release while refreshing the transitive graph; the resulting lockfile contains no yanked, pre-release, or non-registry dependencies.
 

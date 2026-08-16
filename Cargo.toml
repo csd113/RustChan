@@ -127,16 +127,16 @@ tempfile  = "3.27.0"
 # Post-change verification:
 #   cargo tree --edges features | grep -iE "openssl|native.tls"   # expect nothing
 #   cargo tree -i openssl-sys                                       # expect error: not found
-# Arti 0.44.0 requires Rust 1.91 and makes its stable congestion control a
+# Arti 0.45.0 requires Rust 1.91 and makes its stable congestion control a
 # default. Enable flowctl-cc explicitly because defaults stay disabled for TLS.
-arti-client = { version = "0.44.0", default-features = false, features = ["tokio", "rustls", "onion-service-service", "flowctl-cc"] }
+arti-client = { version = "0.45.0", default-features = false, features = ["tokio", "rustls", "onion-service-service", "flowctl-cc"] }
 
 # tor-hsservice / tor-cell: also part of the arti workspace.  Their `full`
 # default feature bundle can activate the native-tls TLS backend through
 # tor-rtcompat.  Disable defaults; add back only what the build requires.
 # If compilation fails with "feature X not found", re-add that feature here.
-tor-hsservice = { version = "0.44.0", default-features = false }
-tor-cell      = { version = "0.44.0", default-features = false }
+tor-hsservice = { version = "0.45.0", default-features = false }
+tor-cell      = { version = "0.45.0", default-features = false }
 
 futures       = "0.3.33"
 sha3          = "0.12.0"
