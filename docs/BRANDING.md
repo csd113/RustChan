@@ -21,14 +21,14 @@ Use the SVG assets when possible. PNG exports are provided for tools that do not
 
 Keep clear space around the icon equal to roughly one terminal-stroke width. Do not stretch, rotate, add effects, recolor individual elements, or place the dark wordmark on a light surface (and vice versa).
 
-## Mascot: Rin Rivet
+## Mascot: Rust Chan
 
-Rin Rivet is RustChan's original adult hacker/sysadmin mascot. Her practical utility jacket, rugged terminal laptop, thread-card hair clip, and wrench-like crab charm connect the character to self-hosting, imageboard threads, and Rust without imitating an existing mascot or anime character. Her expression should remain confident, mischievous, and friendly; her presentation should remain suitable for a serious open-source project.
+Rust Chan is the anthropomorphized form of RustChan itself: the website and app imagined as an original adult hacker/sysadmin character. Her practical utility jacket, rugged terminal laptop, thread-card hair clip, and wrench-like crab charm embody the software's self-hosting, imageboard, and Rust identity without imitating an existing mascot or anime character. Her expression should remain confident, mischievous, and friendly; her presentation should remain suitable for a serious open-source project.
 
 | Asset | Use |
 |---|---|
-| `assets/branding/rin-rivet.png` | Primary full-body transparent illustration |
-| `assets/branding/rin-rivet-chibi.png` | Simplified transparent variation for smaller placements |
+| `assets/branding/rust-chan-mascot.png` | Primary full-body transparent illustration |
+| `assets/branding/rust-chan-mascot-chibi.png` | Simplified transparent variation for smaller placements |
 
 Both mascot files are 1024 × 1536 RGBA PNGs with transparent backgrounds. They were created specifically for RustChan without third-party artwork or external visual references.
 
@@ -42,7 +42,7 @@ Both mascot files are 1024 × 1536 RGBA PNGs with transparent backgrounds. They 
 | Ink | `#0D0F14` | Deep backgrounds and outline contrast |
 | Warm cream | `#F2E2C4` | Light surfaces and dark-mode text |
 | Copper | `#9B4D2C` | Rules and secondary accents |
-| Terminal blue | `#2F80ED` | Rin's eyes and rare status accents |
+| Terminal blue | `#2F80ED` | Rust Chan's eyes and rare status accents |
 | Signal blue | `#70D7FF` | Eye highlights; use sparingly |
 
 The orange, charcoal, and cream colors carry the core brand. Blue is a small character/status accent, not a replacement primary color.

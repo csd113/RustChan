@@ -12,9 +12,9 @@
 
 [Features](#features) · [Screenshots](#screenshots) · [Quick start](#quick-start) · [Configuration](#configuration-and-runtime-data) · [Operations](#administration) · [Development](#development)
 
-<img width="150" alt="Rin Rivet, the RustChan mascot" src="docs/assets/branding/rin-rivet-chibi.png">
+<img width="150" alt="Rust Chan, the anthropomorphized RustChan mascot" src="docs/assets/branding/rust-chan-mascot-chibi.png">
 
-<sub>Rin Rivet — terminal wrangler, thread keeper, and RustChan mascot.</sub>
+<sub>Rust Chan — the website brought to life as its terminal-wrangling, thread-keeping mascot.</sub>
 
 </div>
 
@@ -331,10 +331,10 @@ Some focused media tests require `ffmpeg`, `ffprobe`, and specific codecs. See [
 ## Project identity
 
 <p align="center">
-  <img width="260" alt="Rin Rivet, RustChan's blue-eyed anime-style hacker mascot" src="docs/assets/branding/rin-rivet.png">
+  <img width="260" alt="Rust Chan, the blue-eyed anthropomorphized form of the RustChan website and app" src="docs/assets/branding/rust-chan-mascot.png">
 </p>
 
-The RustChan mark combines an imageboard thread card with a terminal prompt: conversation on the outside, a compact operator-friendly core inside. Rin Rivet carries the same rust-orange, charcoal, cream, and terminal-blue palette as the broader identity.
+The RustChan mark combines an imageboard thread card with a terminal prompt: conversation on the outside, a compact operator-friendly core inside. **Rust Chan** is RustChan itself anthropomorphized—the website and app imagined as a confident hacker/sysadmin who keeps its boards, threads, media, and server running. She carries the same rust-orange, charcoal, cream, and terminal-blue palette as the broader identity.
 
 Logo variants, mascot guidance, colors, and asset filenames are documented in [docs/BRANDING.md](docs/BRANDING.md).
 
