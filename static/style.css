@@ -1273,6 +1273,7 @@ html.no-js .post-form-wrap {
 
   .post-form td:nth-child(2),
   .post-form td[colspan="2"] {
+    display: block;
     width: 100%;
     padding: 4px 0 8px;
   }
