@@ -7,7 +7,7 @@ mod jpeg;
 /// Content-based MIME detection.
 mod mime;
 /// Validated upload persistence.
-mod storage;
+pub(crate) mod storage;
 
 pub use mime::fallback_download_mime_type;
 pub use storage::{

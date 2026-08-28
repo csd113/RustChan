@@ -475,6 +475,92 @@ mod tests {
         Ok(())
     }
 
+    /// Applies shared fail-fast backpressure before import or poll work begins.
+    #[tokio::test]
+    async fn authenticated_import_and_poll_reject_overlapping_snapshot_processing() -> Result<()> {
+        let state = chan_test_state();
+        let snapshot = {
+            let conn = state.db.get().context("get database connection")?;
+            crate::chan_net::snapshot::build_snapshot(&conn)
+                .context("build snapshot")?
+                .0
+        };
+        let active_guard = state
+            .chan_import_gate
+            .try_begin()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let router = chan_test_router(state);
+
+        let import = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chan/import")
+                    .header("X-ChanNet-Key", TEST_KEY)
+                    .header(header::CONTENT_TYPE, "application/zip")
+                    .body(Body::from(snapshot.clone()))
+                    .context("build overlapping import request")?,
+            )
+            .await
+            .context("receive overlapping import response")?;
+        ensure!(
+            import.status() == StatusCode::SERVICE_UNAVAILABLE,
+            "overlapping authenticated import must fail fast"
+        );
+        ensure!(
+            import
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                == Some("1"),
+            "overlapping import must advertise retry timing"
+        );
+
+        let poll = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chan/poll")
+                    .header("X-ChanNet-Key", TEST_KEY)
+                    .body(Body::empty())
+                    .context("build overlapping poll request")?,
+            )
+            .await
+            .context("receive overlapping poll response")?;
+        ensure!(
+            poll.status() == StatusCode::SERVICE_UNAVAILABLE,
+            "overlapping authenticated poll must fail before contacting RustWave"
+        );
+        ensure!(
+            poll.headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                == Some("1"),
+            "overlapping poll must advertise retry timing"
+        );
+
+        drop(active_guard);
+        let recovered = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/chan/import")
+                    .header("X-ChanNet-Key", TEST_KEY)
+                    .header(header::CONTENT_TYPE, "application/zip")
+                    .body(Body::from(snapshot))
+                    .context("build recovered import request")?,
+            )
+            .await
+            .context("receive recovered import response")?;
+        ensure!(
+            recovered.status() == StatusCode::OK,
+            "snapshot gate must reopen after the active operation finishes"
+        );
+        Ok(())
+    }
+
     /// Enforces character-count boundaries and replay detection for replies.
     #[tokio::test]
     async fn command_accepts_legal_ascii_and_unicode_limits_and_rejects_replays() -> Result<()> {

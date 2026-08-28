@@ -9,9 +9,6 @@ use std::time::{Duration, Instant};
 
 use super::ffmpeg;
 
-/// Maximum decoded pixel area accepted by the in-process image fallback.
-const MAX_IMAGE_THUMBNAIL_PIXELS: u64 = 100_000_000;
-
 #[cfg(test)]
 static PDF_RENDERER_TEST_MODE: std::sync::RwLock<Option<TestPdfRendererMode>> =
     std::sync::RwLock::new(None);
@@ -329,14 +326,17 @@ fn image_crate_thumbnail(
             input_path.display()
         )
     })?;
-    if u64::from(width).saturating_mul(u64::from(height)) > MAX_IMAGE_THUMBNAIL_PIXELS {
+    if u64::from(width).saturating_mul(u64::from(height)) > super::MAX_UNTRUSTED_IMAGE_PIXELS {
         anyhow::bail!("image dimensions {width}x{height} exceed thumbnail safety limit");
     }
 
     let data = std::fs::read(input_path)
         .with_context(|| format!("failed to read {} for thumbnailing", input_path.display()))?;
 
-    let img = image::load_from_memory_with_format(&data, format)
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(&data), format);
+    reader.limits(super::untrusted_image_decode_limits());
+    let img = reader
+        .decode()
         .context("failed to decode image for thumbnail")?;
 
     let (w, h) = img.dimensions();
@@ -457,7 +457,7 @@ fn pdf_first_page_thumbnail(
             return Ok(PdfThumbnailOutcome::Placeholder);
         }
     };
-    if u64::from(width).saturating_mul(u64::from(height)) > MAX_IMAGE_THUMBNAIL_PIXELS {
+    if u64::from(width).saturating_mul(u64::from(height)) > super::MAX_UNTRUSTED_IMAGE_PIXELS {
         tracing::warn!(
             renderer = renderer.binary_name(),
             path = %png_path.display(),

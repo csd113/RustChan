@@ -610,6 +610,8 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             CONFIG.auto_full_backup_split_zip_part_size_bytes,
         ),
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
+        media_upload_gate: crate::middleware::MediaUploadGate::new(),
+        chan_import_gate: crate::middleware::ChanImportGate::new(),
         db_maintenance_jobs: crate::middleware::DbMaintenanceJobs::new(),
         chan_ledger,
         onion_address: Arc::new(tokio::sync::RwLock::new(None)),

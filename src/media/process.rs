@@ -4,6 +4,13 @@ use anyhow::{Context as _, Result};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+/// Maximum diagnostic bytes retained from each media-subprocess output pipe.
+///
+/// Pipes are still drained to EOF after this limit so a verbose parser cannot
+/// block on a full pipe or force `RustChan` to retain unbounded attacker-driven
+/// output in memory.
+pub(crate) const MEDIA_SUBPROCESS_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+
 /// Places a standard-library command in a fresh process group on Unix.
 pub(crate) fn configure_std_command(command: &mut Command) -> &mut Command {
     #[cfg(unix)]
@@ -67,8 +74,23 @@ pub(crate) fn run_std_command_with_timeout(
 
 /// Drains one captured child pipe so subprocess output cannot fill its buffer.
 fn read_pipe(mut pipe: impl std::io::Read) -> std::io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut pipe, &mut bytes)?;
+    const READ_BUFFER_BYTES: usize = 8 * 1024;
+
+    let mut bytes = Vec::with_capacity(READ_BUFFER_BYTES);
+    let mut chunk = [0_u8; READ_BUFFER_BYTES];
+    loop {
+        let read = std::io::Read::read(&mut pipe, &mut chunk)?;
+        if read == 0 {
+            break;
+        }
+
+        let remaining = MEDIA_SUBPROCESS_OUTPUT_LIMIT_BYTES.saturating_sub(bytes.len());
+        let retain = remaining.min(read);
+        let retained = chunk.get(..retain).ok_or_else(|| {
+            std::io::Error::other("media output retention exceeded its read buffer")
+        })?;
+        bytes.extend_from_slice(retained);
+    }
     Ok(bytes)
 }
 
@@ -135,7 +157,7 @@ fn terminate_process_group(_pid: u32) -> std::io::Result<()> {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::run_std_command_with_timeout;
+    use super::{run_std_command_with_timeout, MEDIA_SUBPROCESS_OUTPUT_LIMIT_BYTES};
     use crate::workers::{wait_for_ffmpeg_output, AsyncWaitOutcome};
     use anyhow::{Context as _, Result};
     use std::os::unix::fs::PermissionsExt as _;
@@ -227,6 +249,25 @@ wait \"$child\"\n";
         assert_processes_gone(parent, child)
     }
 
+    #[test]
+    fn blocking_subprocess_output_is_retained_within_limit() -> Result<()> {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "printf '%131072s' ''"]);
+
+        let output = run_std_command_with_timeout(
+            &mut command,
+            Duration::from_secs(5),
+            "verbose test wrapper",
+            || "spawn verbose test wrapper".to_owned(),
+            || "wait for verbose test wrapper".to_owned(),
+        )?;
+
+        anyhow::ensure!(output.status.success());
+        anyhow::ensure!(output.stdout.len() == MEDIA_SUBPROCESS_OUTPUT_LIMIT_BYTES);
+        anyhow::ensure!(output.stderr.is_empty());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn async_timeout_kills_parent_and_descendant() -> Result<()> {
         let (_temp_dir, wrapper, pid_file) = process_wrapper()?;
@@ -244,6 +285,31 @@ wait \"$child\"\n";
 
         anyhow::ensure!(matches!(outcome, AsyncWaitOutcome::TimedOut));
         assert_processes_gone(parent, child)
+    }
+
+    #[tokio::test]
+    async fn async_subprocess_output_is_retained_within_limit() -> Result<()> {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "printf '%131072s' '' >&2"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        command.process_group(0);
+        let child = command
+            .spawn()
+            .context("spawn verbose async test wrapper")?;
+
+        let outcome =
+            wait_for_ffmpeg_output(child, Duration::from_secs(5), CancellationToken::new()).await?;
+        let AsyncWaitOutcome::Exited(output) = outcome else {
+            anyhow::bail!("verbose async test wrapper did not exit normally");
+        };
+
+        anyhow::ensure!(output.status.success());
+        anyhow::ensure!(output.stdout.is_empty());
+        anyhow::ensure!(output.stderr.len() == MEDIA_SUBPROCESS_OUTPUT_LIMIT_BYTES);
+        Ok(())
     }
 
     #[tokio::test]

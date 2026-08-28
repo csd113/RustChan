@@ -5,8 +5,8 @@ use super::{
     should_set_public_secure_cookie, templates, unlock_redirect_url, user_preferences_from_jar,
     xhr_error_response, xhr_post_error_response, xhr_redirect_response, AppError, AppState,
     BoardAccessDecision, BoardAccessRequirement, CookieJar, HashMap, HeaderMap, Html, Multipart,
-    Path, Redirect, Response, Result, SecureCookieContext, State, ADMIN_SESSION_COOKIE, CONFIG,
-    PREVIEW_REPLIES, SELF_DELETE_WINDOW_SECS, THREADS_PER_PAGE,
+    Path, PostFormData, Redirect, Response, Result, SecureCookieContext, State,
+    ADMIN_SESSION_COOKIE, CONFIG, PREVIEW_REPLIES, SELF_DELETE_WINDOW_SECS, THREADS_PER_PAGE,
 };
 use axum::response::IntoResponse as _;
 
@@ -15,6 +15,10 @@ use axum::response::IntoResponse as _;
 #[expect(
     clippy::too_many_lines,
     reason = "access checks, multipart validation, thread creation, and response cookies form one request"
+)]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "the media permit intentionally moves from the parsed form into non-cancellable blocking submission work"
 )]
 /// Handles the create thread request.
 pub(crate) async fn create_thread(
@@ -60,6 +64,7 @@ pub(crate) async fn create_thread(
             access_context.board.max_video_size_bytes(),
             access_context.board.max_audio_size_bytes(),
             access_context.board.max_pdf_size_bytes(),
+            &state.media_upload_gate,
         ),
     )
     .await
@@ -85,6 +90,24 @@ pub(crate) async fn create_thread(
 
     let board_short_err = board_short.clone();
     let identity_key = identity_key(&client_ip, &jar);
+    let PostFormData {
+        media_upload_guard,
+        csrf_verified: _,
+        submission_token,
+        name,
+        subject,
+        body,
+        deletion_token,
+        file,
+        audio_file,
+        image_file,
+        poll_question,
+        poll_options,
+        poll_duration_secs,
+        sage: _,
+        captcha_id,
+        captcha_answer,
+    } = form;
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = std::sync::Arc::clone(&state.job_queue);
@@ -92,31 +115,35 @@ pub(crate) async fn create_thread(
         let ffprobe_available = state.ffprobe_available;
         let ffmpeg_webp_available = state.ffmpeg_webp_available;
         move || -> Result<posting::SubmitPostResult> {
+            // `spawn_blocking` work is not cancelled when its join handle is
+            // dropped. Keep the permit inside this closure so a disconnected
+            // request cannot release the media gate while parsing continues.
+            let _media_upload_guard = media_upload_guard;
             let conn = pool.get()?;
             posting::submit_post(
                 &conn,
                 &job_queue,
                 posting::SubmitPostCommand {
                     mode: posting::SubmitPostMode::NewThread {
-                        subject: form.subject,
-                        poll_question: form.poll_question,
-                        poll_options: form.poll_options,
-                        poll_duration_secs: form.poll_duration_secs,
+                        subject,
+                        poll_question,
+                        poll_options,
+                        poll_duration_secs,
                     },
                     board_short,
                     identity_key,
                     cookie_secret: CONFIG.cookie_secret.clone(),
                     admin_session_id,
                     ban_csrf_token,
-                    submission_token: form.submission_token,
-                    name: form.name,
-                    body: form.body,
-                    deletion_token: form.deletion_token,
-                    captcha_id: form.captcha_id,
-                    captcha_answer: form.captcha_answer,
-                    image_file_data: form.image_file,
-                    file_data: form.file,
-                    audio_file_data: form.audio_file,
+                    submission_token,
+                    name,
+                    body,
+                    deletion_token,
+                    captcha_id,
+                    captcha_answer,
+                    image_file_data: image_file,
+                    file_data: file,
+                    audio_file_data: audio_file,
                     upload_dir: CONFIG.upload_dir.clone(),
                     thumb_size: CONFIG.thumb_size,
                     ffmpeg_available,

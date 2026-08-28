@@ -34,6 +34,17 @@ use rand_core::TryRng as _;
 use sha2::{Digest as _, Sha256};
 use std::io::Write as _;
 
+/// Maximum memory accepted from a stored Argon2 PHC string, in KiB.
+///
+/// RustChan-generated hashes use this exact memory cost. Validating the
+/// embedded value before verification prevents a restored or corrupted hash
+/// from making Argon2 allocate an attacker-selected amount of memory.
+const PASSWORD_HASH_MAX_MEMORY_KIB: u32 = 65_536;
+/// Maximum passes accepted from a stored Argon2 PHC string.
+const PASSWORD_HASH_MAX_TIME_COST: u32 = 4;
+/// Maximum lanes accepted from a stored Argon2 PHC string.
+const PASSWORD_HASH_MAX_PARALLELISM: u32 = 4;
+
 /// Hash an admin password using Argon2id.
 ///
 /// Parameters: `t_cost=2`, `m_cost=64 MiB`, `p_cost=2`.
@@ -61,9 +72,38 @@ pub fn hash_password(password: &str) -> Result<String> {
 pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
     let parsed =
         PasswordHash::new(hash).map_err(|e| anyhow::anyhow!("Invalid password hash: {e}"))?;
-    Ok(Argon2::default()
-        .verify_password(password.as_bytes(), &parsed)
-        .is_ok())
+    if parsed.salt.is_none() || parsed.hash.is_none() {
+        anyhow::bail!("Invalid password hash: salt and output are required");
+    }
+
+    let algorithm = Algorithm::try_from(parsed.algorithm)
+        .map_err(|error| anyhow::anyhow!("Invalid password hash algorithm: {error}"))?;
+    let version = parsed
+        .version
+        .map(Version::try_from)
+        .transpose()
+        .map_err(|error| anyhow::anyhow!("Invalid password hash version: {error}"))?
+        .unwrap_or_default();
+    let params = Params::try_from(&parsed)
+        .map_err(|error| anyhow::anyhow!("Invalid password hash parameters: {error}"))?;
+
+    if params.m_cost() > PASSWORD_HASH_MAX_MEMORY_KIB
+        || params.t_cost() > PASSWORD_HASH_MAX_TIME_COST
+        || params.p_cost() > PASSWORD_HASH_MAX_PARALLELISM
+    {
+        anyhow::bail!(
+            "Password hash resource parameters exceed the verification limit \
+             (m <= {PASSWORD_HASH_MAX_MEMORY_KIB} KiB, \
+             t <= {PASSWORD_HASH_MAX_TIME_COST}, p <= {PASSWORD_HASH_MAX_PARALLELISM})"
+        );
+    }
+
+    let verifier = Argon2::new(algorithm, version, params);
+    match verifier.verify_password(password.as_bytes(), &parsed) {
+        Ok(()) => Ok(true),
+        Err(argon2::password_hash::Error::Password) => Ok(false),
+        Err(error) => Err(anyhow::anyhow!("Password verification failed: {error}")),
+    }
 }
 
 /// Terminates the process when secure OS randomness is unavailable.
@@ -232,6 +272,25 @@ mod tests {
             verify_password("anything", "not-a-phc-string").is_err(),
             "malformed PHC strings must be rejected"
         );
+    }
+
+    #[test]
+    fn verify_password_rejects_excessive_phc_cost_before_hashing() -> Result<()> {
+        let hash = hash_password("correct-horse-battery-staple")?;
+        let excessive = hash.replacen("m=65536", "m=65537", 1);
+        anyhow::ensure!(
+            excessive != hash,
+            "test fixture did not contain RustChan's Argon2 memory cost"
+        );
+
+        let Err(error) = verify_password("anything", &excessive) else {
+            anyhow::bail!("an excessive Argon2 memory cost was accepted");
+        };
+        anyhow::ensure!(
+            error.to_string().contains("resource parameters exceed"),
+            "unexpected verification error: {error}"
+        );
+        Ok(())
     }
 
     // ── Random hex ───────────────────────────────────────────────────

@@ -37,6 +37,8 @@ pub(crate) fn app_state() -> crate::middleware::AppState {
             4 * 1024 * 1024 * 1024,
         ),
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
+        media_upload_gate: crate::middleware::MediaUploadGate::new(),
+        chan_import_gate: crate::middleware::ChanImportGate::new(),
         db_maintenance_jobs: crate::middleware::DbMaintenanceJobs::new(),
         chan_ledger: None,
         onion_address: std::sync::Arc::new(tokio::sync::RwLock::new(None)),

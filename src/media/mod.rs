@@ -17,6 +17,22 @@ pub mod thumbnail;
 use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
 
+/// Maximum decoded area accepted from an untrusted uploaded image.
+///
+/// Forty megapixels preserves 8K and common high-resolution camera images
+/// while bounding the largest decoded pixel buffer admitted to the pipeline.
+pub(crate) const MAX_UNTRUSTED_IMAGE_PIXELS: u64 = 40_000_000;
+
+/// Best-effort per-decoder allocation budget for untrusted images.
+pub(crate) const UNTRUSTED_IMAGE_DECODER_MAX_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Returns the shared decoder allocation policy for untrusted images.
+pub(crate) fn untrusted_image_decode_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(UNTRUSTED_IMAGE_DECODER_MAX_ALLOC_BYTES);
+    limits
+}
+
 #[cfg(test)]
 static THUMBNAIL_FAILURE_TEST_MODE: std::sync::RwLock<Option<TestThumbnailFailure>> =
     std::sync::RwLock::new(None);
@@ -334,6 +350,15 @@ impl Default for MediaProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn untrusted_image_decoder_allocation_budget_is_bounded() {
+        assert_eq!(
+            untrusted_image_decode_limits().max_alloc,
+            Some(UNTRUSTED_IMAGE_DECODER_MAX_ALLOC_BYTES),
+            "untrusted decoders must retain the explicit allocation budget"
+        );
+    }
 
     /// Constructing `MediaProcessor` with ffmpeg=false should not panic.
     #[test]

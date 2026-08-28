@@ -12,7 +12,7 @@ use crate::{
     config::CONFIG,
     db::{self},
     error::{AppError, Result},
-    handlers::{parse_post_multipart, posting, render},
+    handlers::{parse_post_multipart, posting, render, PostFormData},
     middleware::{validate_csrf, validate_signed_csrf, AppState, SecureCookieContext},
     models::{Board, Pagination, SearchQuery, SEARCH_QUERY_MAX_CHARS},
     templates,

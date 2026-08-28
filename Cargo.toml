@@ -40,7 +40,7 @@ path  = "src/lib.rs"
 axum       = { version = "0.8.9",  features = ["multipart"] }
 axum-extra = { version = "0.12.6", features = ["cookie"] }
 tower      = "0.5.3"
-tower-http = { version = "0.7.0", features = ["fs", "set-header", "compression-full", "trace"] }
+tower-http = { version = "0.7.0", features = ["fs", "set-header", "compression-full", "limit", "trace"] }
 tokio      = { version = "1.53.1", features = ["full"] }
 tokio-util = "0.7.19"
 captcha    = { version = "1.0.0", default-features = false }
@@ -90,7 +90,7 @@ ipnet     = "2.12.0"
 # by_index(), start_file(), add_directory(), finish() all stable.
 # Use file_names() iterator for name-only pre-flight scans (cleaner than
 # by_index_raw which is now by_index_without_decompression in zip 8).
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # ── HTTP client ────────────────────────────────────────────────────────────────
 # reqwest for federation push (chan_refresh) and pull (chan_poll).

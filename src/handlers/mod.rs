@@ -27,7 +27,13 @@ pub(crate) mod thread;
 use crate::error::{AppError, Result};
 use crate::middleware::validate_csrf;
 use crate::workers::JobQueue;
-use axum::extract::Multipart;
+use axum::{
+    body::Body,
+    extract::{Multipart, Request},
+    middleware::Next,
+    response::Response,
+};
+use futures::StreamExt as _;
 use std::collections::HashSet;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt as _;
@@ -43,6 +49,18 @@ const UNKNOWN_MULTIPART_FIELD_MAX_BYTES: usize = 64 * 1024;
 // multipart stream after board settings are loaded.
 /// Public multipart aggregate max bytes used by this handler.
 const PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES: usize = 512 * 1024 * 1024;
+// Leave bounded room for boundaries and field headers without reducing the
+// documented 512 MiB aggregate field-data allowance. The route-level limiter
+// applies before Multer can buffer a malformed preamble or field-header block.
+/// Maximum complete request body accepted by public multipart posting routes.
+pub(crate) const PUBLIC_MULTIPART_REQUEST_MAX_BYTES: usize =
+    PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES + 4 * 1024 * 1024;
+/// Maximum preamble or per-field header envelope retained by the multipart parser.
+pub(crate) const PUBLIC_MULTIPART_ENVELOPE_MAX_BYTES: usize = 64 * 1024;
+/// Maximum accepted multipart boundary length.
+const PUBLIC_MULTIPART_BOUNDARY_MAX_BYTES: usize = 200;
+/// Marker propagated through Axum's body error for envelope-limit classification.
+const PUBLIC_MULTIPART_ENVELOPE_LIMIT_MARKER: &str = "rustchan multipart envelope limit";
 // Caps field spam and duplicate-slot churn before bodies are streamed.
 /// Public multipart max fields used by this handler.
 const PUBLIC_MULTIPART_MAX_FIELDS: usize = 64;
@@ -52,6 +70,369 @@ const PUBLIC_MULTIPART_MAX_FIELDS: usize = 64;
 /// Public upload timeout used by this handler.
 pub(crate) const PUBLIC_UPLOAD_TIMEOUT: Duration = Duration::from_mins(10);
 
+/// Rejects malformed multipart preambles and field-header blocks before Multer
+/// can retain a request-sized buffer while searching for their delimiters.
+///
+/// The wrapped body remains fully streaming: only parser state and the boundary
+/// matcher are retained here, and field data is passed through unchanged.
+pub(crate) async fn enforce_public_multipart_envelope(
+    mut request: Request,
+    next: Next,
+) -> Result<Response> {
+    let content_type = request
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| AppError::BadRequest("Multipart Content-Type is required.".into()))?;
+    let boundary = parse_public_multipart_boundary(content_type).ok_or_else(|| {
+        AppError::BadRequest("Multipart Content-Type has an invalid boundary.".into())
+    })?;
+
+    let body = std::mem::replace(request.body_mut(), Body::empty());
+    let mut scanner = MultipartEnvelopeScanner::new(&boundary);
+    let inspected = body.into_data_stream().map(move |result| match result {
+        Ok(bytes) => scanner
+            .inspect(&bytes)
+            .map(|()| bytes)
+            .map_err(std::io::Error::other),
+        Err(error) => Err(std::io::Error::other(error)),
+    });
+    *request.body_mut() = Body::from_stream(inspected);
+    Ok(next.run(request).await)
+}
+
+/// Parses the boundary parameter needed by the streaming envelope guard.
+fn parse_public_multipart_boundary(content_type: &str) -> Option<Vec<u8>> {
+    let segments = split_mime_parameters(content_type)?;
+    if !segments
+        .first()?
+        .trim()
+        .eq_ignore_ascii_case("multipart/form-data")
+    {
+        return None;
+    }
+
+    let mut boundary = None;
+    for segment in segments.iter().skip(1) {
+        let (name, raw_value) = segment.split_once('=')?;
+        if !name.trim().eq_ignore_ascii_case("boundary") {
+            continue;
+        }
+        if boundary.is_some() {
+            return None;
+        }
+        boundary = Some(parse_mime_parameter_value(raw_value.trim())?);
+    }
+
+    let boundary = boundary?;
+    let bytes = boundary.into_bytes();
+    if bytes.is_empty()
+        || bytes.len() > PUBLIC_MULTIPART_BOUNDARY_MAX_BYTES
+        || bytes.last() == Some(&b' ')
+        || !bytes.iter().all(|byte| matches!(*byte, 0x20..=0x7e))
+    {
+        return None;
+    }
+    Some(bytes)
+}
+
+/// Splits MIME parameters without treating semicolons inside quotes as separators.
+fn split_mime_parameters(value: &str) -> Option<Vec<&str>> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, byte) in value.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if quoted && byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            quoted = !quoted;
+        } else if byte == b';' && !quoted {
+            segments.push(value.get(start..index)?);
+            start = index.saturating_add(1);
+        }
+    }
+    if quoted || escaped {
+        return None;
+    }
+    segments.push(value.get(start..)?);
+    Some(segments)
+}
+
+/// Decodes a token or quoted MIME parameter value.
+fn parse_mime_parameter_value(raw: &str) -> Option<String> {
+    if !raw.starts_with('"') {
+        return (!raw.is_empty() && !raw.contains('"')).then(|| raw.to_owned());
+    }
+
+    let mut decoded = String::new();
+    let mut escaped = false;
+    let mut closing_index = None;
+    for (offset, character) in raw.get(1..)?.char_indices() {
+        if escaped {
+            decoded.push(character);
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            closing_index = Some(offset.saturating_add(2));
+            break;
+        } else {
+            decoded.push(character);
+        }
+    }
+    let closing_index = closing_index?;
+    if escaped || !raw.get(closing_index..)?.trim().is_empty() {
+        return None;
+    }
+    Some(decoded)
+}
+
+/// Streaming state used to locate multipart field envelopes without retaining bodies.
+struct MultipartEnvelopeScanner {
+    /// Boundary marker that separates field data from the next envelope.
+    field_boundary: Vec<u8>,
+    /// Current multipart parsing stage.
+    stage: MultipartEnvelopeStage,
+}
+
+impl MultipartEnvelopeScanner {
+    /// Creates a scanner positioned before the first multipart boundary.
+    fn new(boundary: &[u8]) -> Self {
+        let mut first_boundary = Vec::with_capacity(boundary.len().saturating_add(2));
+        first_boundary.extend_from_slice(b"--");
+        first_boundary.extend_from_slice(boundary);
+
+        let mut field_boundary = Vec::with_capacity(boundary.len().saturating_add(4));
+        field_boundary.extend_from_slice(b"\r\n--");
+        field_boundary.extend_from_slice(boundary);
+
+        Self {
+            field_boundary,
+            stage: MultipartEnvelopeStage::FirstBoundary {
+                matcher: BytePatternMatcher::new(first_boundary),
+                bytes_seen: 0,
+            },
+        }
+    }
+
+    /// Inspects a streamed body chunk and retains no field data.
+    fn inspect(&mut self, bytes: &[u8]) -> std::result::Result<(), String> {
+        for byte in bytes {
+            self.inspect_byte(*byte)?;
+        }
+        Ok(())
+    }
+
+    /// Advances the envelope state machine by one byte.
+    fn inspect_byte(&mut self, byte: u8) -> std::result::Result<(), String> {
+        let mut transition = None;
+        match &mut self.stage {
+            MultipartEnvelopeStage::FirstBoundary {
+                matcher,
+                bytes_seen,
+            } => {
+                *bytes_seen = bytes_seen.saturating_add(1);
+                if *bytes_seen
+                    > PUBLIC_MULTIPART_ENVELOPE_MAX_BYTES.saturating_add(matcher.pattern_len())
+                {
+                    return Err(format!(
+                        "{PUBLIC_MULTIPART_ENVELOPE_LIMIT_MARKER}: preamble exceeds {PUBLIC_MULTIPART_ENVELOPE_MAX_BYTES} bytes"
+                    ));
+                }
+                if matcher.feed(byte) {
+                    transition = Some(MultipartEnvelopeStage::BoundarySuffix(
+                        MultipartBoundarySuffix::Start,
+                    ));
+                }
+            }
+            MultipartEnvelopeStage::BoundarySuffix(suffix) => {
+                transition = suffix.feed(byte)?;
+            }
+            MultipartEnvelopeStage::FieldHeaders {
+                matcher,
+                bytes_seen,
+            } => {
+                *bytes_seen = bytes_seen.saturating_add(1);
+                if *bytes_seen > PUBLIC_MULTIPART_ENVELOPE_MAX_BYTES {
+                    return Err(format!(
+                        "{PUBLIC_MULTIPART_ENVELOPE_LIMIT_MARKER}: field headers exceed {PUBLIC_MULTIPART_ENVELOPE_MAX_BYTES} bytes"
+                    ));
+                }
+                if matcher.feed(byte) {
+                    transition = Some(MultipartEnvelopeStage::FieldData(BytePatternMatcher::new(
+                        self.field_boundary.clone(),
+                    )));
+                }
+            }
+            MultipartEnvelopeStage::FieldData(matcher) => {
+                if matcher.feed(byte) {
+                    transition = Some(MultipartEnvelopeStage::BoundarySuffix(
+                        MultipartBoundarySuffix::Start,
+                    ));
+                }
+            }
+            MultipartEnvelopeStage::Epilogue => {}
+        }
+
+        if let Some(next_stage) = transition {
+            self.stage = next_stage;
+        }
+        Ok(())
+    }
+}
+
+/// States in the multipart envelope scanner.
+enum MultipartEnvelopeStage {
+    /// Search for the first boundary while bounding any preamble.
+    FirstBoundary {
+        /// Incremental boundary matcher.
+        matcher: BytePatternMatcher,
+        /// Bytes observed before finding the boundary.
+        bytes_seen: usize,
+    },
+    /// Validate the bytes following a boundary marker.
+    BoundarySuffix(MultipartBoundarySuffix),
+    /// Search for the CRLF pair terminating a field-header block.
+    FieldHeaders {
+        /// Incremental header terminator matcher.
+        matcher: BytePatternMatcher,
+        /// Bytes retained by Multer while seeking the terminator.
+        bytes_seen: usize,
+    },
+    /// Stream field bytes while searching for the next boundary.
+    FieldData(BytePatternMatcher),
+    /// Closing boundary observed; remaining epilogue is irrelevant to field parsing.
+    Epilogue,
+}
+
+/// State for bytes immediately following a multipart boundary.
+enum MultipartBoundarySuffix {
+    /// No suffix byte has been consumed.
+    Start,
+    /// One dash of a closing `--` suffix has been consumed.
+    FinalDash,
+    /// Optional transport padding is being consumed.
+    Padding(usize),
+    /// A carriage return was consumed and must be followed by a line feed.
+    CarriageReturn,
+}
+
+impl MultipartBoundarySuffix {
+    /// Consumes one suffix byte and returns a stage transition when complete.
+    fn feed(&mut self, byte: u8) -> std::result::Result<Option<MultipartEnvelopeStage>, String> {
+        match self {
+            Self::Start => match byte {
+                b'-' => *self = Self::FinalDash,
+                b' ' | b'\t' => *self = Self::Padding(1),
+                b'\r' => *self = Self::CarriageReturn,
+                _ => return Err("malformed multipart boundary suffix".to_owned()),
+            },
+            Self::FinalDash => {
+                if byte != b'-' {
+                    return Err("malformed multipart closing boundary".to_owned());
+                }
+                return Ok(Some(MultipartEnvelopeStage::Epilogue));
+            }
+            Self::Padding(bytes_seen) => match byte {
+                b' ' | b'\t' => {
+                    *bytes_seen = bytes_seen.saturating_add(1);
+                    if *bytes_seen > PUBLIC_MULTIPART_ENVELOPE_MAX_BYTES {
+                        return Err(format!(
+                            "{PUBLIC_MULTIPART_ENVELOPE_LIMIT_MARKER}: boundary padding exceeds {PUBLIC_MULTIPART_ENVELOPE_MAX_BYTES} bytes"
+                        ));
+                    }
+                }
+                b'\r' => *self = Self::CarriageReturn,
+                _ => return Err("malformed multipart boundary padding".to_owned()),
+            },
+            Self::CarriageReturn => {
+                if byte != b'\n' {
+                    return Err("malformed multipart boundary line ending".to_owned());
+                }
+                return Ok(Some(MultipartEnvelopeStage::FieldHeaders {
+                    matcher: BytePatternMatcher::new(b"\r\n\r\n".to_vec()),
+                    bytes_seen: 0,
+                }));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Incremental Knuth-Morris-Pratt matcher for delimiters split across body frames.
+struct BytePatternMatcher {
+    /// Delimiter bytes.
+    pattern: Vec<u8>,
+    /// Failure-function prefix lengths.
+    prefix: Vec<usize>,
+    /// Bytes currently matched.
+    matched: usize,
+}
+
+impl BytePatternMatcher {
+    /// Builds the failure function for a non-empty byte pattern.
+    fn new(pattern: Vec<u8>) -> Self {
+        debug_assert!(
+            !pattern.is_empty(),
+            "multipart delimiter patterns must not be empty"
+        );
+        let mut prefix = vec![0; pattern.len()];
+        let mut matched = 0;
+        for index in 1..pattern.len() {
+            while matched > 0 && pattern.get(matched) != pattern.get(index) {
+                matched = prefix
+                    .get(matched.saturating_sub(1))
+                    .copied()
+                    .unwrap_or_default();
+            }
+            if pattern.get(matched) == pattern.get(index) {
+                matched = matched.saturating_add(1);
+            }
+            if let Some(value) = prefix.get_mut(index) {
+                *value = matched;
+            }
+        }
+        Self {
+            pattern,
+            prefix,
+            matched: 0,
+        }
+    }
+
+    /// Returns the pattern length.
+    const fn pattern_len(&self) -> usize {
+        self.pattern.len()
+    }
+
+    /// Feeds one byte and returns true when the complete pattern is observed.
+    fn feed(&mut self, byte: u8) -> bool {
+        while self.matched > 0 && self.pattern.get(self.matched) != Some(&byte) {
+            self.matched = self
+                .prefix
+                .get(self.matched.saturating_sub(1))
+                .copied()
+                .unwrap_or_default();
+        }
+        if self.pattern.get(self.matched) == Some(&byte) {
+            self.matched = self.matched.saturating_add(1);
+        }
+        if self.matched == self.pattern.len() {
+            self.matched = self
+                .prefix
+                .get(self.matched.saturating_sub(1))
+                .copied()
+                .unwrap_or_default();
+            return true;
+        }
+        false
+    }
+}
+
 /// Performs the multipart read error handler operation.
 fn multipart_read_error(
     context: &'static str,
@@ -59,6 +440,10 @@ fn multipart_read_error(
 ) -> AppError {
     let message = error.to_string();
     let lower = message.to_ascii_lowercase();
+    if error_chain_contains(error, PUBLIC_MULTIPART_ENVELOPE_LIMIT_MARKER) {
+        tracing::warn!(context, error = %message, "multipart envelope exceeded parser limit");
+        return AppError::UploadTooLarge("Multipart field envelope is too large.".into());
+    }
     if lower.contains("body write aborted")
         || lower.contains("error reading a body")
         || lower.contains("connection")
@@ -70,6 +455,18 @@ fn multipart_read_error(
         tracing::warn!(context, error = %message, "multipart parsing failed");
     }
     AppError::BadRequest(message)
+}
+
+/// Returns whether any error source contains a private streaming marker.
+fn error_chain_contains(error: &(dyn std::error::Error + 'static), needle: &str) -> bool {
+    let mut current = Some(error);
+    while let Some(source) = current {
+        if source.to_string().to_ascii_lowercase().contains(needle) {
+            return true;
+        }
+        current = source.source();
+    }
+    false
 }
 
 #[derive(Default)]
@@ -203,6 +600,8 @@ async fn stream_field_to_temp_file(
     max_bytes: usize,
     field_name: &'static str,
     budget: &mut PublicMultipartBudget,
+    media_upload_gate: &crate::middleware::MediaUploadGate,
+    media_upload_guard: &mut Option<crate::middleware::MediaUploadGuard>,
 ) -> Result<TempUpload> {
     let temp_file = tempfile::Builder::new()
         .prefix("rustchan-upload-")
@@ -223,6 +622,13 @@ async fn stream_field_to_temp_file(
         let Some(chunk) = next_chunk else {
             break;
         };
+        if !chunk.is_empty() && media_upload_guard.is_none() {
+            // Acquire before the first upload byte is written. The owned guard
+            // remains attached to the parsed form through blocking media work,
+            // so concurrent requests cannot stage large files ahead of the
+            // resource-intensive processing gate.
+            *media_upload_guard = Some(media_upload_gate.try_begin()?);
+        }
         budget.note_chunk(chunk.len())?;
         if size_bytes.saturating_add(chunk.len()) > max_bytes {
             tracing::warn!(
@@ -279,6 +685,8 @@ async fn read_upload_field(
     default_name: &str,
     field_name: &'static str,
     budget: &mut PublicMultipartBudget,
+    media_upload_gate: &crate::middleware::MediaUploadGate,
+    media_upload_guard: &mut Option<crate::middleware::MediaUploadGuard>,
 ) -> Result<Option<(TempUpload, String)>> {
     let submitted_filename = field.file_name().map(str::to_owned);
     let fname = submitted_filename
@@ -286,7 +694,15 @@ async fn read_upload_field(
         .filter(|name| !name.is_empty())
         .unwrap_or(default_name)
         .to_owned();
-    let upload = stream_field_to_temp_file(field, max_bytes, field_name, budget).await?;
+    let upload = stream_field_to_temp_file(
+        field,
+        max_bytes,
+        field_name,
+        budget,
+        media_upload_gate,
+        media_upload_guard,
+    )
+    .await?;
     if upload.size_bytes == 0 {
         if submitted_filename
             .as_deref()
@@ -311,6 +727,8 @@ pub(crate) struct TempUpload {
 
 /// Parsed fields from a post/thread creation multipart form.
 pub(crate) struct PostFormData {
+    /// Permit acquired before the first non-empty media byte is staged.
+    pub media_upload_guard: Option<crate::middleware::MediaUploadGuard>,
     /// Whether the CSRF verified setting is active.
     pub csrf_verified: bool,
     /// The submission token.
@@ -361,6 +779,7 @@ pub(crate) async fn parse_post_multipart(
     max_video_size: usize,
     max_audio_size: usize,
     max_pdf_size: usize,
+    media_upload_gate: &crate::middleware::MediaUploadGate,
 ) -> Result<PostFormData> {
     tracing::info!(
         max_image_bytes = max_image_size,
@@ -388,6 +807,7 @@ pub(crate) async fn parse_post_multipart(
     let mut captcha_answer = String::new();
     let mut budget = PublicMultipartBudget::default();
     let mut seen_upload_slots = HashSet::new();
+    let mut media_upload_guard = None;
 
     loop {
         let next_field = multipart
@@ -468,6 +888,8 @@ pub(crate) async fn parse_post_multipart(
                     "upload",
                     "file",
                     &mut budget,
+                    media_upload_gate,
+                    &mut media_upload_guard,
                 )
                 .await?;
             }
@@ -477,9 +899,16 @@ pub(crate) async fn parse_post_multipart(
                         "Duplicate upload field 'audio_file'.".into(),
                     ));
                 }
-                audio_file =
-                    read_upload_field(field, max_audio_size, "audio", "audio_file", &mut budget)
-                        .await?;
+                audio_file = read_upload_field(
+                    field,
+                    max_audio_size,
+                    "audio",
+                    "audio_file",
+                    &mut budget,
+                    media_upload_gate,
+                    &mut media_upload_guard,
+                )
+                .await?;
             }
             Some("image_file") => {
                 if !seen_upload_slots.insert("image_file") {
@@ -487,9 +916,16 @@ pub(crate) async fn parse_post_multipart(
                         "Duplicate upload field 'image_file'.".into(),
                     ));
                 }
-                image_file =
-                    read_upload_field(field, max_image_size, "image", "image_file", &mut budget)
-                        .await?;
+                image_file = read_upload_field(
+                    field,
+                    max_image_size,
+                    "image",
+                    "image_file",
+                    &mut budget,
+                    media_upload_gate,
+                    &mut media_upload_guard,
+                )
+                .await?;
             }
             _ => {
                 discard_unknown_public_multipart_field(field, &mut budget).await?;
@@ -521,6 +957,7 @@ pub(crate) async fn parse_post_multipart(
     };
 
     Ok(PostFormData {
+        media_upload_guard,
         csrf_verified,
         submission_token,
         name,
@@ -661,24 +1098,25 @@ pub(crate) fn process_primary_upload(
         | crate::models::MediaType::Other => {}
     }
 
-    crate::utils::files::validate_upload_from_path(
+    let upload_options = crate::utils::files::SaveUploadOptions {
+        original_filename: &fname,
+        boards_dir: save_root,
+        board_short: &board.short_name,
+        thumb_size,
+        max_image_size,
+        max_video_size,
+        max_audio_size,
+        max_pdf_size,
+        ffmpeg_available,
+        ffprobe_available,
+        ffmpeg_webp_available,
+        allow_any_files,
+    };
+    let validated = crate::utils::files::storage::validate_upload_for_storage(
         upload.temp_file.path(),
         &upload.sniff_bytes,
         upload.size_bytes,
-        &crate::utils::files::SaveUploadOptions {
-            original_filename: &fname,
-            boards_dir: save_root,
-            board_short: &board.short_name,
-            thumb_size,
-            max_image_size,
-            max_video_size,
-            max_audio_size,
-            max_pdf_size,
-            ffmpeg_available,
-            ffprobe_available,
-            ffmpeg_webp_available,
-            allow_any_files,
-        },
+        &upload_options,
     )
     .map_err(|error| classify_upload_error(&error))?;
 
@@ -737,26 +1175,9 @@ pub(crate) fn process_primary_upload(
         );
     }
 
-    let f = crate::utils::files::save_upload_from_path(
-        upload.temp_file.path(),
-        &upload.sniff_bytes,
-        upload.size_bytes,
-        &crate::utils::files::SaveUploadOptions {
-            original_filename: &fname,
-            boards_dir: save_root,
-            board_short: &board.short_name,
-            thumb_size,
-            max_image_size,
-            max_video_size,
-            max_audio_size,
-            max_pdf_size,
-            ffmpeg_available,
-            ffprobe_available,
-            ffmpeg_webp_available,
-            allow_any_files,
-        },
-    )
-    .map_err(|e| classify_upload_error(&e))?;
+    let f =
+        crate::utils::files::storage::save_validated_upload_from_path(validated, &upload_options)
+            .map_err(|e| classify_upload_error(&e))?;
     Ok((Some(f), Some(hash)))
 }
 
@@ -1011,10 +1432,14 @@ pub(crate) fn enqueue_post_jobs(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_post_multipart, process_audio_first_uploads, TempUpload};
+    use super::{
+        parse_post_multipart, process_audio_first_uploads, MultipartEnvelopeScanner, TempUpload,
+        PUBLIC_MULTIPART_ENVELOPE_LIMIT_MARKER, PUBLIC_MULTIPART_ENVELOPE_MAX_BYTES,
+    };
     use anyhow::{bail, ensure, Context as _};
     use axum::{
         body::Body,
+        extract::FromRequest as _,
         http::{header, Request, StatusCode},
         routing::post,
         Router,
@@ -1060,6 +1485,82 @@ trailer << /Root 1 0 R >>
 "
     }
 
+    async fn multipart_from_bytes(
+        boundary: &str,
+        body: Vec<u8>,
+    ) -> anyhow::Result<axum::extract::Multipart> {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/parse")
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(Body::from(body))
+            .context("build multipart extraction request")?;
+        axum::extract::Multipart::from_request(request, &())
+            .await
+            .map_err(|rejection| anyhow::anyhow!(rejection.to_string()))
+    }
+
+    #[test]
+    fn public_multipart_boundary_parser_accepts_quoted_parameter() -> anyhow::Result<()> {
+        let parsed = super::parse_public_multipart_boundary(
+            "multipart/form-data; charset=utf-8; boundary=\"rust;chan-boundary\"",
+        )
+        .context("quoted boundary was rejected")?;
+        ensure!(parsed == b"rust;chan-boundary");
+        ensure!(
+            super::parse_public_multipart_boundary(
+                "multipart/form-data; boundary=first; boundary=second"
+            )
+            .is_none(),
+            "duplicate boundary parameter was accepted"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn public_multipart_envelope_scanner_accepts_split_valid_form() -> anyhow::Result<()> {
+        let body = b"preamble--boundary\r\nContent-Disposition: form-data; name=\"body\"\r\n\r\nhello\r\n--boundary--\r\n";
+        let mut scanner = MultipartEnvelopeScanner::new(b"boundary");
+        for byte in body {
+            scanner
+                .inspect(std::slice::from_ref(byte))
+                .map_err(anyhow::Error::msg)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn public_multipart_envelope_scanner_rejects_unterminated_large_headers() -> anyhow::Result<()>
+    {
+        let mut scanner = MultipartEnvelopeScanner::new(b"boundary");
+        let mut body = b"--boundary\r\n".to_vec();
+        body.extend(std::iter::repeat_n(
+            b'a',
+            PUBLIC_MULTIPART_ENVELOPE_MAX_BYTES.saturating_add(1),
+        ));
+        let Err(error) = scanner.inspect(&body) else {
+            anyhow::bail!("oversized unterminated field headers were accepted");
+        };
+        anyhow::ensure!(error.contains(PUBLIC_MULTIPART_ENVELOPE_LIMIT_MARKER));
+        Ok(())
+    }
+
+    #[test]
+    fn public_multipart_envelope_scanner_rejects_oversized_preamble_before_boundary(
+    ) -> anyhow::Result<()> {
+        let mut scanner = MultipartEnvelopeScanner::new(b"boundary");
+        let mut body = vec![b'a'; PUBLIC_MULTIPART_ENVELOPE_MAX_BYTES.saturating_add(1)];
+        body.extend_from_slice(b"--boundary\r\n\r\n");
+        let Err(error) = scanner.inspect(&body) else {
+            anyhow::bail!("oversized multipart preamble was accepted");
+        };
+        anyhow::ensure!(error.contains(PUBLIC_MULTIPART_ENVELOPE_LIMIT_MARKER));
+        Ok(())
+    }
+
     fn create_file_hash_table(conn: &rusqlite::Connection) -> anyhow::Result<()> {
         conn.execute(
             "CREATE TABLE file_hashes (
@@ -1077,9 +1578,18 @@ trailer << /Root 1 0 R >>
     async fn parse_scaled_audio_limit(
         multipart: axum::extract::Multipart,
     ) -> crate::error::Result<&'static str> {
-        let form =
-            parse_post_multipart(multipart, Some("csrf123"), 1_024, 1_024, 5_000, 1_024).await?;
-        let (upload, _) = form.audio_file.ok_or_else(|| {
+        let gate = crate::middleware::MediaUploadGate::new();
+        let form = parse_post_multipart(
+            multipart,
+            Some("csrf123"),
+            1_024,
+            1_024,
+            5_000,
+            1_024,
+            &gate,
+        )
+        .await?;
+        let (upload, _) = form.audio_file.as_ref().ok_or_else(|| {
             crate::error::AppError::Internal(anyhow::anyhow!("audio upload was not parsed"))
         })?;
         if upload.size_bytes != 4_500 {
@@ -1088,13 +1598,24 @@ trailer << /Root 1 0 R >>
                 upload.size_bytes
             )));
         }
+        drop(form);
         Ok("ok")
     }
 
     async fn parse_scaled_audio_oversize(
         multipart: axum::extract::Multipart,
     ) -> crate::error::Result<&'static str> {
-        parse_post_multipart(multipart, Some("csrf123"), 1_024, 1_024, 5_000, 1_024).await?;
+        let gate = crate::middleware::MediaUploadGate::new();
+        parse_post_multipart(
+            multipart,
+            Some("csrf123"),
+            1_024,
+            1_024,
+            5_000,
+            1_024,
+            &gate,
+        )
+        .await?;
         Ok("ok")
     }
 
@@ -1173,16 +1694,35 @@ trailer << /Root 1 0 R >>
     async fn parse_default_limits(
         multipart: axum::extract::Multipart,
     ) -> crate::error::Result<&'static str> {
-        parse_post_multipart(multipart, Some("csrf123"), 1_024, 1_024, 1_024, 1_024).await?;
+        let gate = crate::middleware::MediaUploadGate::new();
+        parse_post_multipart(
+            multipart,
+            Some("csrf123"),
+            1_024,
+            1_024,
+            1_024,
+            1_024,
+            &gate,
+        )
+        .await?;
         Ok("ok")
     }
 
     async fn parse_pdf_limit(
         multipart: axum::extract::Multipart,
     ) -> crate::error::Result<&'static str> {
-        let form =
-            parse_post_multipart(multipart, Some("csrf123"), 1_024, 1_024, 1_024, 2_048).await?;
-        let (upload, _) = form.file.ok_or_else(|| {
+        let gate = crate::middleware::MediaUploadGate::new();
+        let form = parse_post_multipart(
+            multipart,
+            Some("csrf123"),
+            1_024,
+            1_024,
+            1_024,
+            2_048,
+            &gate,
+        )
+        .await?;
+        let (upload, _) = form.file.as_ref().ok_or_else(|| {
             crate::error::AppError::Internal(anyhow::anyhow!("PDF upload was not parsed"))
         })?;
         if upload.size_bytes != 2_048 {
@@ -1191,6 +1731,7 @@ trailer << /Root 1 0 R >>
                 upload.size_bytes
             )));
         }
+        drop(form);
         Ok("ok")
     }
 
@@ -1225,6 +1766,61 @@ trailer << /Root 1 0 R >>
 
         body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
         (boundary, body)
+    }
+
+    #[tokio::test]
+    async fn multipart_parser_holds_media_gate_from_first_upload_byte() -> anyhow::Result<()> {
+        let gate = crate::middleware::MediaUploadGate::new();
+        let (boundary, body) = multipart_body_with_files(
+            &[("_csrf", "csrf123"), ("body", "guarded")],
+            &[("file", "sample.bin", b"payload", "application/octet-stream")],
+        );
+        let multipart = multipart_from_bytes(&boundary, body).await?;
+        let form = parse_post_multipart(
+            multipart,
+            Some("csrf123"),
+            1_024,
+            1_024,
+            1_024,
+            1_024,
+            &gate,
+        )
+        .await?;
+
+        ensure!(
+            matches!(gate.try_begin(), Err(crate::error::AppError::DbBusy)),
+            "parsed upload released the media gate before processing"
+        );
+        drop(form);
+        ensure!(
+            gate.try_begin().is_ok(),
+            "dropping the parsed upload did not reopen the media gate"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multipart_parser_does_not_gate_empty_file_control() -> anyhow::Result<()> {
+        let gate = crate::middleware::MediaUploadGate::new();
+        let (boundary, body) = multipart_body_with_files(
+            &[("_csrf", "csrf123"), ("body", "text only")],
+            &[("file", "", b"", "application/octet-stream")],
+        );
+        let multipart = multipart_from_bytes(&boundary, body).await?;
+        let form = parse_post_multipart(
+            multipart,
+            Some("csrf123"),
+            1_024,
+            1_024,
+            1_024,
+            1_024,
+            &gate,
+        )
+        .await?;
+
+        ensure!(form.media_upload_guard.is_none());
+        ensure!(gate.try_begin().is_ok());
+        Ok(())
     }
 
     #[tokio::test]

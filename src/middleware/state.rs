@@ -155,6 +155,111 @@ impl Default for MaintenanceGate {
 }
 
 #[derive(Clone, Debug)]
+/// Limits concurrent attacker-controlled media parsing and processing.
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "this type is intentionally re-exported from the private state module"
+)]
+pub(crate) struct MediaUploadGate {
+    /// Single permit held while a public media upload is validated and processed.
+    semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+impl MediaUploadGate {
+    /// Creates a gate that permits one resource-intensive media upload at a time.
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self {
+            semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+        }
+    }
+
+    /// Begins media processing or returns a retryable overload response.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::DbBusy`] while another media upload owns the gate.
+    pub(crate) fn try_begin(&self) -> Result<MediaUploadGuard, AppError> {
+        let permit = Arc::clone(&self.semaphore)
+            .try_acquire_owned()
+            .map_err(|_error| AppError::DbBusy)?;
+        Ok(MediaUploadGuard { _permit: permit })
+    }
+}
+
+impl Default for MediaUploadGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Debug)]
+/// Serializes authenticated federation snapshot import and poll processing.
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "this type is intentionally re-exported from the private state module"
+)]
+pub(crate) struct ChanImportGate {
+    /// Single permit held while a snapshot is fetched, parsed, and committed.
+    semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+impl ChanImportGate {
+    /// Creates a gate that permits one snapshot import or poll operation at a time.
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self {
+            semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+        }
+    }
+
+    /// Begins snapshot processing or returns a retryable overload response.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::DbBusy`] while another import or poll owns the gate.
+    pub(crate) fn try_begin(&self) -> Result<ChanImportGuard, AppError> {
+        let permit = Arc::clone(&self.semaphore)
+            .try_acquire_owned()
+            .map_err(|_error| AppError::DbBusy)?;
+        Ok(ChanImportGuard {
+            _permit: Arc::new(permit),
+        })
+    }
+}
+
+impl Default for ChanImportGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Debug)]
+/// Permit held for the duration of authenticated snapshot processing.
+///
+/// Clones keep the permit alive in detached blocking work if its request future
+/// is cancelled while decompression, JSON parsing, or database writes continue.
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "the guard crosses the private state-module boundary and blocking tasks"
+)]
+pub(crate) struct ChanImportGuard {
+    /// Shared owned permit released after the final guard clone is dropped.
+    _permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+}
+
+#[derive(Debug)]
+/// Permit held for the duration of one public media-processing operation.
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "the inferred guard type crosses the private state-module boundary"
+)]
+pub(crate) struct MediaUploadGuard {
+    /// Owned permit released when the guard is dropped.
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+#[derive(Clone, Debug)]
 /// Observable state of the current or most recent database maintenance job.
 pub enum DbMaintenanceJobStatus {
     /// No database maintenance job has started.
@@ -369,6 +474,10 @@ pub struct AppState {
     pub auto_full_backup_settings: AutoFullBackupSettings,
     /// Gate preventing overlapping maintenance operations.
     pub maintenance_gate: MaintenanceGate,
+    /// Gate limiting concurrent public media parsing and processing.
+    pub(crate) media_upload_gate: MediaUploadGate,
+    /// Gate serializing authenticated federation snapshot imports and polls.
+    pub(crate) chan_import_gate: ChanImportGate,
     /// State of database maintenance jobs.
     pub db_maintenance_jobs: DbMaintenanceJobs,
     /// Optional transaction ledger for federation operations.
@@ -380,8 +489,82 @@ pub struct AppState {
 #[cfg(test)]
 mod tests {
     use super::{
-        AutoFullBackupSettings, DbMaintenanceJobPhase, DbMaintenanceJobStatus, DbMaintenanceJobs,
+        AutoFullBackupSettings, ChanImportGate, DbMaintenanceJobPhase, DbMaintenanceJobStatus,
+        DbMaintenanceJobs, MediaUploadGate,
     };
+
+    #[test]
+    fn media_upload_gate_rejects_overlap_and_recovers_after_drop() {
+        let gate = MediaUploadGate::new();
+        let first = gate.try_begin();
+        assert!(first.is_ok(), "first media upload should acquire the gate");
+        assert!(
+            matches!(gate.try_begin(), Err(crate::error::AppError::DbBusy)),
+            "overlapping media upload should receive retryable backpressure"
+        );
+        drop(first);
+        assert!(
+            gate.try_begin().is_ok(),
+            "media gate should reopen after the active upload finishes"
+        );
+    }
+
+    #[test]
+    fn chan_import_gate_rejects_overlap_until_last_guard_clone_drops() {
+        let gate = ChanImportGate::new();
+        let first = gate.try_begin().ok();
+        assert!(
+            first.is_some(),
+            "first snapshot operation should acquire the gate"
+        );
+        let blocking_guard = first.clone();
+        drop(first);
+
+        assert!(
+            matches!(gate.try_begin(), Err(crate::error::AppError::DbBusy)),
+            "overlapping snapshot processing should receive retryable backpressure"
+        );
+        drop(blocking_guard);
+        assert!(
+            gate.try_begin().is_ok(),
+            "snapshot gate should reopen after the last guard clone drops"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn media_upload_gate_permit_outlives_cancelled_join_waiter() -> anyhow::Result<()> {
+        let gate = MediaUploadGate::new();
+        let guard = gate.try_begin().map_err(|error| anyhow::anyhow!(error))?;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let blocking_work = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let _guard = guard;
+            started_tx
+                .send(())
+                .map_err(|()| anyhow::anyhow!("test waiter dropped before work started"))?;
+            release_rx
+                .blocking_recv()
+                .map_err(|error| anyhow::anyhow!("test release channel closed: {error}"))?;
+            Ok(())
+        });
+        started_rx.await?;
+
+        blocking_work.abort();
+        anyhow::ensure!(
+            matches!(gate.try_begin(), Err(crate::error::AppError::DbBusy)),
+            "cancelling the join waiter released a permit while blocking work remained active"
+        );
+
+        release_tx
+            .send(())
+            .map_err(|()| anyhow::anyhow!("blocking work ended before test release"))?;
+        blocking_work.await??;
+        anyhow::ensure!(
+            gate.try_begin().is_ok(),
+            "media gate did not reopen after blocking work completed"
+        );
+        Ok(())
+    }
 
     #[test]
     fn auto_full_backup_settings_clamps_copies_to_keep() {

@@ -2,25 +2,27 @@
 # https://embarkstudios.github.io/cargo-deny/
 
 [graph]
-all-features = false
+all-features = true
 
 [advisories]
 unmaintained = "all"
 yanked = "deny"
 
 # RUSTSEC-2023-0071: Marvin Attack timing side-channel in rsa 0.9.x.
-# No fixed version available. rsa is a transitive dep pulled in by arti-client;
-# RustChan's Arti client/onion-service graph uses it for public-signature
-# verification, not private-key decryption or signing.
-# This exception is temporary and must be re-reviewed on every Arti upgrade.
+# No fixed version is available. rsa is compiled through Arti; RustChan has no
+# direct RSA usage. A call-site audit found public verification plus generic
+# private-key generation/signing support, but no calls to RSA decryption APIs or
+# decryption oracle, and no evidence that RustChan's v3 onion-service flow
+# invokes private RSA operations. Reviewed 2026-08-27; this temporary exception
+# must be re-reviewed on every Arti upgrade.
 [[advisories.ignore]]
 id = "RUSTSEC-2023-0071"
 
 # RUSTSEC-2024-0436: paste crate marked unmaintained by its author.
-# paste is a transitive dep of arti-client / tor-hsservice. No direct usage
-# in RustChan code; no functional impact. Will be resolved when Arti updates
-# its dependency tree. This exception is temporary and must be re-reviewed on
-# every Arti upgrade.
+# paste is a transitive proc-macro dep of arti-client / tor-hsservice. It runs
+# during compilation but is not linked into RustChan's runtime; no known
+# vulnerability or runtime exploit is associated with this maintenance notice.
+# This exception is temporary and must be re-reviewed on every Arti upgrade.
 [[advisories.ignore]]
 id = "RUSTSEC-2024-0436"
 
@@ -137,10 +139,6 @@ version = "0.14"
 [[bans.skip]]
 name    = "darling_macro"
 version = "0.21"
-
-[[bans.skip]]
-name    = "itertools"
-version = "0.14"
 
 [[bans.skip]]
 name    = "rand"

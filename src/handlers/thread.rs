@@ -14,7 +14,7 @@ use crate::{
             admin_scoped_csrf_token, check_csrf_jar, ensure_csrf_for_request,
             ensure_csrf_with_secure,
         },
-        parse_post_multipart, posting, render,
+        parse_post_multipart, posting, render, PostFormData,
     },
     middleware::AppState,
     utils::crypto::hash_ip,
@@ -277,6 +277,10 @@ pub(crate) async fn view_thread(
     clippy::too_many_lines,
     reason = "access checks, multipart validation, transactional reply creation, and cookies form one request"
 )]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "the media permit intentionally moves from the parsed form into non-cancellable blocking submission work"
+)]
 /// Handles the post reply request.
 pub(crate) async fn post_reply(
     State(state): State<AppState>,
@@ -322,6 +326,7 @@ pub(crate) async fn post_reply(
             access_context.board.max_video_size_bytes(),
             access_context.board.max_audio_size_bytes(),
             access_context.board.max_pdf_size_bytes(),
+            &state.media_upload_gate,
         ),
     )
     .await
@@ -347,6 +352,24 @@ pub(crate) async fn post_reply(
 
     let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
     let identity_key_err = identity_key.clone();
+    let PostFormData {
+        media_upload_guard,
+        csrf_verified: _,
+        submission_token,
+        name,
+        subject: _,
+        body,
+        deletion_token,
+        file,
+        audio_file,
+        image_file,
+        poll_question: _,
+        poll_options: _,
+        poll_duration_secs: _,
+        sage,
+        captcha_id,
+        captcha_answer,
+    } = form;
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = std::sync::Arc::clone(&state.job_queue);
@@ -354,29 +377,30 @@ pub(crate) async fn post_reply(
         let ffprobe_available = state.ffprobe_available;
         let ffmpeg_webp_available = state.ffmpeg_webp_available;
         move || -> Result<posting::SubmitPostResult> {
+            // `spawn_blocking` work is not cancelled when its join handle is
+            // dropped. Keep the permit inside this closure so a disconnected
+            // request cannot release the media gate while parsing continues.
+            let _media_upload_guard = media_upload_guard;
             let conn = pool.get()?;
             posting::submit_post(
                 &conn,
                 &job_queue,
                 posting::SubmitPostCommand {
-                    mode: posting::SubmitPostMode::Reply {
-                        thread_id,
-                        sage: form.sage,
-                    },
+                    mode: posting::SubmitPostMode::Reply { thread_id, sage },
                     board_short,
                     identity_key,
                     cookie_secret: CONFIG.cookie_secret.clone(),
                     admin_session_id,
                     ban_csrf_token,
-                    submission_token: form.submission_token,
-                    name: form.name,
-                    body: form.body,
-                    deletion_token: form.deletion_token,
-                    captcha_id: form.captcha_id,
-                    captcha_answer: form.captcha_answer,
-                    image_file_data: form.image_file,
-                    file_data: form.file,
-                    audio_file_data: form.audio_file,
+                    submission_token,
+                    name,
+                    body,
+                    deletion_token,
+                    captcha_id,
+                    captcha_answer,
+                    image_file_data: image_file,
+                    file_data: file,
+                    audio_file_data: audio_file,
                     upload_dir: CONFIG.upload_dir.clone(),
                     thumb_size: CONFIG.thumb_size,
                     ffmpeg_available,

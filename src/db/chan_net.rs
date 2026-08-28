@@ -24,12 +24,6 @@ use rusqlite::OptionalExtension as _;
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-// SnapshotPost is defined in src/models.rs (not chan_net::snapshot) so that
-// this file, which lives in the db layer, can import it without creating a
-// layering inversion. chan_net::snapshot re-exports the type so that all
-// other call-sites continue to compile unchanged.
-use crate::models::SnapshotPost;
-
 // ── insert_board_if_absent ────────────────────────────────────────────────────
 
 /// Ensure a board with the given `short_name` exists in the `boards` table.
@@ -84,28 +78,32 @@ pub fn insert_board_if_absent(conn: &Connection, short_name: &str, title: &str) 
 /// inserted into the live `posts` table — they are held in the mirror table
 /// and are not visible to web users browsing boards.
 ///
-/// SECURITY: Only the five text fields defined in `SnapshotPost` are written.
-/// No file paths, MIME types, thumbnail paths, or binary data are accepted.
+/// SECURITY: Only the validated scalar fields supplied by the import boundary
+/// are written. No file paths, MIME types, thumbnail paths, or binary data are
+/// accepted.
 ///
 /// # Errors
 ///
 /// Returns an error if the INSERT statement fails (e.g. DB connection lost or
-/// a NOT NULL constraint is violated by a malformed `SnapshotPost`).
+/// a NOT NULL constraint is violated by malformed data).
 pub fn insert_post_if_absent(
     conn: &Connection,
-    post: &SnapshotPost,
+    remote_post_id: i64,
     local_board_id: i64,
+    author: &str,
+    content: &str,
+    remote_timestamp: i64,
 ) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO chan_net_posts
              (remote_post_id, board_id, author, content, remote_ts)
          VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![
-            post.post_id.cast_signed(),
+            remote_post_id,
             local_board_id,
-            &post.author,
-            &post.content,
-            post.timestamp.cast_signed(),
+            author,
+            content,
+            remote_timestamp,
         ],
     )?;
     Ok(())
@@ -126,15 +124,24 @@ pub fn load_import_ledger(conn: &Connection) -> Result<Vec<Uuid>> {
     Ok(tx_ids)
 }
 
-/// Record a successfully imported `ChanNet` transaction ID durably.
+#[derive(Debug, thiserror::Error)]
+#[error("ChanNet snapshot was already imported")]
+/// Error returned when a snapshot transaction ID is already durably claimed.
+pub struct SnapshotImportReplayError;
+
+/// Claim a `ChanNet` transaction ID inside the caller's database transaction.
 ///
 /// # Errors
-/// Returns an error if the ledger row cannot be inserted.
-pub fn record_import_tx_id(conn: &Connection, tx_id: &Uuid) -> Result<()> {
-    conn.execute(
+/// Returns [`SnapshotImportReplayError`] if the identifier already exists, or
+/// a database error if the durable claim cannot be written.
+pub fn claim_import_tx_id(conn: &Connection, tx_id: &Uuid) -> Result<()> {
+    let inserted = conn.execute(
         "INSERT OR IGNORE INTO chan_net_import_ledger (tx_id) VALUES (?1)",
         rusqlite::params![tx_id.to_string()],
     )?;
+    if inserted == 0 {
+        return Err(SnapshotImportReplayError.into());
+    }
     Ok(())
 }
 

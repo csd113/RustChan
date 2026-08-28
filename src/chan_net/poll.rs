@@ -7,12 +7,11 @@
 // Queue-empty detection: if RustWave responds with Content-Type
 // application/json and a body of {"status":"empty"}, the loop exits cleanly.
 //
-// Implementation note: the response body is always consumed via .bytes()
-// before any JSON inspection. Calling .json() and then .bytes() on the same
-// reqwest::Response would fail — the body stream is single-pass.
+// Implementation note: the response body is always consumed into one bounded
+// buffer before any JSON inspection. The body stream is single-pass.
 
 use super::import::do_import;
-use super::refresh::HTTP_CLIENT;
+use super::refresh::{read_response_body_limited, HTTP_CLIENT};
 use crate::{config::CONFIG, error::AppError, middleware::AppState};
 use axum::{extract::State, response::IntoResponse, Json};
 use serde_json::json;
@@ -30,10 +29,10 @@ const MAX_POLL_ITERATIONS: usize = 50;
 /// - `MAX_POLL_ITERATIONS` snapshots have been fetched
 /// - A non-Conflict import error is encountered (propagated to the caller)
 ///
-/// Returns `{"imported": N}` where N is the total number of posts imported
-/// across all snapshots in this drain cycle. Posts skipped by INSERT OR IGNORE
-/// are not counted. Snapshots whose `tx_id` was already recorded in the `TxLedger`
-/// contribute 0 to the count and are silently skipped.
+/// Returns `{"imported": N}` where N is the total number of declared posts in
+/// newly accepted snapshots during this drain cycle. Duplicate post rows skipped
+/// by `INSERT OR IGNORE` still contribute to that snapshot count. Snapshots whose
+/// `tx_id` was already recorded in the `TxLedger` contribute 0 and are skipped.
 ///
 /// # Errors
 ///
@@ -42,12 +41,13 @@ const MAX_POLL_ITERATIONS: usize = 50;
 pub async fn chan_poll(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, super::ChanError> {
+    let processing_guard = state.chan_import_gate.try_begin()?;
     let url = format!("{}/broadcast/incoming", CONFIG.rustwave_url);
     let mut imported_count = 0usize;
 
     for _ in 0..MAX_POLL_ITERATIONS {
         // ── Fetch next item from the broadcast queue ─────────────────────
-        let resp = HTTP_CLIENT
+        let mut resp = HTTP_CLIENT
             .get(&url)
             .send()
             .await
@@ -73,9 +73,14 @@ pub async fn chan_poll(
         // JSON sentinel check and the ZIP import. Calling `.json()` before
         // `.bytes()` would leave the response in a moved / partially-read
         // state, making the subsequent `.bytes()` call fail.
-        let bytes = resp.bytes().await.map_err(|e| {
-            AppError::Internal(anyhow::anyhow!("Failed to read RustWave body: {e}"))
-        })?;
+        let bytes = read_response_body_limited(
+            &mut resp,
+            CONFIG.chan_net_max_body,
+            "RustWave poll response",
+        )
+        .await
+        .map_err(AppError::Internal)?;
+        drop(resp);
 
         // ── Empty-queue sentinel check ────────────────────────────────────
         if content_type.contains("application/json") {
@@ -92,7 +97,7 @@ pub async fn chan_poll(
         }
 
         // ── Import snapshot ───────────────────────────────────────────────
-        match do_import(&state, bytes).await {
+        match do_import(&state, bytes, &processing_guard).await {
             Ok(count) => imported_count = imported_count.saturating_add(count),
             Err(AppError::Conflict(_)) => {
                 // tx_id already in TxLedger — snapshot was seen before.
@@ -102,5 +107,6 @@ pub async fn chan_poll(
         }
     }
 
+    drop(processing_guard);
     Ok(Json(json!({ "imported": imported_count })))
 }

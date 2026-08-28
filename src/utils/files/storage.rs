@@ -80,9 +80,6 @@ struct UploadPlan {
     thumbs_dir: PathBuf,
 }
 
-/// Maximum decoded image area accepted during upload validation.
-const MAX_UPLOAD_IMAGE_PIXELS: u64 = 100_000_000;
-
 /// Classify an uploaded file into the MIME type `RustChan` should persist.
 ///
 /// # Errors
@@ -114,18 +111,37 @@ pub fn save_upload_from_path(
     original_size: usize,
     options: &SaveUploadOptions<'_>,
 ) -> Result<UploadedFile> {
-    if original_size == 0 {
-        return Err(anyhow::anyhow!("File is empty."));
-    }
-    let validated = validate_upload(input_path, sniff_bytes, original_size, options)?;
+    let validated = validate_upload_for_storage(input_path, sniff_bytes, original_size, options)?;
+    save_validated_upload_from_path(validated, options)
+}
+
+/// Saves an upload represented by a token produced by full content validation.
+///
+/// Consuming the opaque token prevents the posting path from accidentally
+/// performing the expensive decoder validation a second time after its dedup
+/// lookup. The token owns the exact source path and size that were validated.
+///
+/// # Errors
+/// Returns an error if destination preparation, media processing, disk-space
+/// checks, or the final filesystem write fails.
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "this opaque validated-upload handoff is shared across sibling crate modules"
+)]
+pub(crate) fn save_validated_upload_from_path(
+    validated: ValidatedUpload,
+    options: &SaveUploadOptions<'_>,
+) -> Result<UploadedFile> {
+    let input_path = validated.input_path.clone();
+    let original_size = validated.original_size;
     let plan = build_upload_plan(validated, original_size, options)?;
     let file_id = Uuid::new_v4().simple().to_string();
 
     if plan.media_type == crate::models::MediaType::Other {
-        return save_generic_upload(input_path, original_size, options, &plan, &file_id);
+        return save_generic_upload(&input_path, original_size, options, &plan, &file_id);
     }
 
-    save_processed_upload(input_path, options, &plan, &file_id)
+    save_processed_upload(&input_path, options, &plan, &file_id)
 }
 
 /// Save a secondary audio upload for an image+audio combo post.
@@ -345,7 +361,15 @@ fn build_upload_plan(
 
 /// MIME, media, and orientation data accepted by upload validation.
 #[derive(Debug)]
-struct ValidatedUpload {
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "this opaque validation token crosses the private storage-module boundary"
+)]
+pub(crate) struct ValidatedUpload {
+    /// Exact temporary path whose contents were validated.
+    input_path: PathBuf,
+    /// Byte size of the validated temporary file.
+    original_size: usize,
     /// Canonical MIME type accepted for persistence.
     mime_type: String,
     /// Media category derived from the canonical MIME type.
@@ -365,7 +389,28 @@ pub fn validate_upload_from_path(
     original_size: usize,
     options: &SaveUploadOptions<'_>,
 ) -> Result<()> {
-    validate_upload(input_path, sniff_bytes, original_size, options).map(|_| ())
+    validate_upload_for_storage(input_path, sniff_bytes, original_size, options).map(|_| ())
+}
+
+/// Validates a source file and returns an opaque token bound to that source.
+///
+/// # Errors
+/// Returns an error when the file is empty or when MIME detection, media
+/// policy, size checks, stream inspection, or file-format validation fails.
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "the posting handler must obtain the opaque token without exposing it publicly"
+)]
+pub(crate) fn validate_upload_for_storage(
+    input_path: &Path,
+    sniff_bytes: &[u8],
+    original_size: usize,
+    options: &SaveUploadOptions<'_>,
+) -> Result<ValidatedUpload> {
+    if original_size == 0 {
+        anyhow::bail!("File is empty.");
+    }
+    validate_upload(input_path, sniff_bytes, original_size, options)
 }
 
 /// Validates upload contents and returns their canonical classification.
@@ -430,6 +475,8 @@ fn validate_upload(
     };
 
     Ok(ValidatedUpload {
+        input_path: input_path.to_path_buf(),
+        original_size,
         mime_type,
         media_type,
         jpeg_orientation,
@@ -670,17 +717,27 @@ fn validate_decodable_image(input_path: &Path, mime_type: &str) -> Result<()> {
     if mime_type == "image/png" {
         validate_png_structure(&data)?;
     }
-    let reader = image::ImageReader::with_format(std::io::Cursor::new(&data), format);
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(&data), format);
+    reader.limits(crate::media::untrusted_image_decode_limits());
     let (width, height) = reader.into_dimensions().with_context(|| {
         format!("File appears to be {mime_type}, but its image header is malformed or incomplete.")
     })?;
-    if u64::from(width).saturating_mul(u64::from(height)) > MAX_UPLOAD_IMAGE_PIXELS {
-        anyhow::bail!("Image dimensions {width}x{height} exceed the safety limit.");
-    }
+    validate_untrusted_image_dimensions(width, height)?;
 
-    image::load_from_memory_with_format(&data, format).with_context(|| {
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(&data), format);
+    reader.limits(crate::media::untrusted_image_decode_limits());
+    reader.decode().with_context(|| {
         format!("File appears to be {mime_type}, but the image data could not be decoded.")
     })?;
+    Ok(())
+}
+
+/// Checks decoded image dimensions against the shared pixel-area budget.
+fn validate_untrusted_image_dimensions(width: u32, height: u32) -> Result<()> {
+    if u64::from(width).saturating_mul(u64::from(height)) > crate::media::MAX_UNTRUSTED_IMAGE_PIXELS
+    {
+        anyhow::bail!("Image dimensions {width}x{height} exceed the safety limit.");
+    }
     Ok(())
 }
 
@@ -1176,7 +1233,8 @@ fn mime_to_ext(mime: &str) -> &'static str {
 mod tests {
     use super::{
         delete_file_checked, refine_webm_mime, save_audio_with_image_thumb_from_path,
-        save_upload_from_path, validate_adts_aac_bytes, SaveUploadOptions, AMBIGUOUS_WEBM_MIME,
+        save_upload_from_path, validate_adts_aac_bytes, validate_untrusted_image_dimensions,
+        SaveUploadOptions, AMBIGUOUS_WEBM_MIME,
     };
     use anyhow::{Context as _, Result};
     use std::path::Path;
@@ -1192,6 +1250,18 @@ mod tests {
             )
             .context("encode one-pixel PNG fixture")?;
         Ok(bytes)
+    }
+
+    #[test]
+    fn image_dimension_budget_accepts_8k_and_rejects_over_40_megapixels() {
+        assert!(
+            validate_untrusted_image_dimensions(7_680, 4_320).is_ok(),
+            "8K images should remain within the compatibility budget"
+        );
+        assert!(
+            validate_untrusted_image_dimensions(8_000, 5_001).is_err(),
+            "images above forty megapixels must be rejected before decoding"
+        );
     }
 
     /// Creates restrictive default upload options rooted in a test directory.

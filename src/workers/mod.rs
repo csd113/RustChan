@@ -37,6 +37,7 @@ use std::process::Output;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::io::AsyncReadExt as _;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::Notify;
 use tokio::time::{sleep, Duration};
@@ -64,32 +65,117 @@ pub(crate) enum AsyncWaitOutcome {
     Cancelled,
 }
 
+/// Exit state observed while racing a media subprocess against its deadline.
+enum MediaChildWaitOutcome {
+    /// The direct child exited with this status.
+    Exited(std::process::ExitStatus),
+    /// The configured execution deadline elapsed.
+    TimedOut,
+    /// Application shutdown or explicit cancellation was requested.
+    Cancelled,
+}
+
 /// Waits for an `FFmpeg` child while racing its deadline and cancellation token.
 pub(crate) async fn wait_for_ffmpeg_output(
-    child: tokio::process::Child,
+    mut child: tokio::process::Child,
     timeout: Duration,
     cancel: CancellationToken,
 ) -> Result<AsyncWaitOutcome> {
     let mut process_group = crate::media::process::ProcessGroupGuard::new(child.id());
-    let wait = child.wait_with_output();
-    tokio::pin!(wait);
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(|stdout| tokio::spawn(read_bounded_async_pipe(stdout)));
+    let stderr_reader = child
+        .stderr
+        .take()
+        .map(|stderr| tokio::spawn(read_bounded_async_pipe(stderr)));
 
     let outcome = tokio::select! {
         biased;
-        () = cancel.cancelled() => AsyncWaitOutcome::Cancelled,
-        result = &mut wait => {
-            let output = result.context("media subprocess I/O error")?;
-            process_group.terminate_remaining();
-            return Ok(AsyncWaitOutcome::Exited(output));
-        }
-        () = sleep(timeout) => AsyncWaitOutcome::TimedOut,
+        () = cancel.cancelled() => MediaChildWaitOutcome::Cancelled,
+        result = child.wait() => MediaChildWaitOutcome::Exited(
+            result.context("media subprocess wait failed")?
+        ),
+        () = sleep(timeout) => MediaChildWaitOutcome::TimedOut,
     };
 
-    process_group.terminate_remaining();
-    // The group signal closes inherited pipes. Awaiting the original future
-    // reaps the direct child and prevents zombies before returning to callers.
-    drop((&mut wait).await);
-    Ok(outcome)
+    match outcome {
+        MediaChildWaitOutcome::Exited(status) => {
+            process_group.terminate_remaining();
+            let (stdout, stderr) = tokio::join!(
+                join_async_pipe_reader(stdout_reader, "stdout"),
+                join_async_pipe_reader(stderr_reader, "stderr")
+            );
+            Ok(AsyncWaitOutcome::Exited(Output {
+                status,
+                stdout: stdout?,
+                stderr: stderr?,
+            }))
+        }
+        terminal @ (MediaChildWaitOutcome::TimedOut | MediaChildWaitOutcome::Cancelled) => {
+            process_group.terminate_remaining();
+            // Kill the direct child as a non-Unix fallback and protection
+            // against a process-group setup race, then reap it before return.
+            drop(child.start_kill());
+            drop(child.wait().await);
+            let (stdout_result, stderr_result) = tokio::join!(
+                join_async_pipe_reader(stdout_reader, "stdout"),
+                join_async_pipe_reader(stderr_reader, "stderr")
+            );
+            drop(stdout_result);
+            drop(stderr_result);
+
+            Ok(match terminal {
+                MediaChildWaitOutcome::TimedOut => AsyncWaitOutcome::TimedOut,
+                MediaChildWaitOutcome::Cancelled => AsyncWaitOutcome::Cancelled,
+                MediaChildWaitOutcome::Exited(_) => {
+                    return Err(anyhow::anyhow!(
+                        "media subprocess exit state changed unexpectedly"
+                    ));
+                }
+            })
+        }
+    }
+}
+
+/// Drains an asynchronous child pipe while retaining a bounded prefix.
+async fn read_bounded_async_pipe(
+    mut pipe: impl tokio::io::AsyncRead + Unpin,
+) -> std::io::Result<Vec<u8>> {
+    const READ_BUFFER_BYTES: usize = 8 * 1024;
+
+    let mut bytes = Vec::with_capacity(READ_BUFFER_BYTES);
+    let mut chunk = [0_u8; READ_BUFFER_BYTES];
+    loop {
+        let read = pipe.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+
+        let remaining =
+            crate::media::process::MEDIA_SUBPROCESS_OUTPUT_LIMIT_BYTES.saturating_sub(bytes.len());
+        let retain = remaining.min(read);
+        let retained = chunk.get(..retain).ok_or_else(|| {
+            std::io::Error::other("media output retention exceeded its read buffer")
+        })?;
+        bytes.extend_from_slice(retained);
+    }
+    Ok(bytes)
+}
+
+/// Resolves an optional asynchronous pipe reader with contextual errors.
+async fn join_async_pipe_reader(
+    reader: Option<tokio::task::JoinHandle<std::io::Result<Vec<u8>>>>,
+    pipe_name: &str,
+) -> Result<Vec<u8>> {
+    let Some(reader) = reader else {
+        return Ok(Vec::new());
+    };
+    reader
+        .await
+        .with_context(|| format!("media subprocess {pipe_name} reader task failed"))?
+        .with_context(|| format!("media subprocess {pipe_name} read failed"))
 }
 
 /// How long a worker sleeps when the queue is empty.

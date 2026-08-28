@@ -9,6 +9,7 @@ use axum::{
 
 use crate::middleware::AppState;
 use crate::server::server::observability;
+use tower_http::limit::RequestBodyLimitLayer;
 
 /// Compose public pages, APIs, and media routes.
 #[expect(
@@ -78,7 +79,18 @@ pub(super) fn public_routes() -> Router<AppState> {
         .route("/{board}", get(crate::handlers::board::board_index))
         .route(
             "/{board}",
-            post(crate::handlers::board::create_thread).layer(DefaultBodyLimit::disable()),
+            post(crate::handlers::board::create_thread)
+                // Axum's extractor limit remains disabled so board-specific
+                // limits above 2 MiB work. This outer stream limit prevents
+                // Multer from buffering an unbounded malformed preamble or
+                // field-header block before RustChan sees the first field.
+                .layer::<_, std::convert::Infallible>(RequestBodyLimitLayer::new(
+                    crate::handlers::PUBLIC_MULTIPART_REQUEST_MAX_BYTES,
+                ))
+                .layer::<_, std::convert::Infallible>(axum_middleware::from_fn(
+                    crate::handlers::enforce_public_multipart_envelope,
+                ))
+                .layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/{board}/unlock",
@@ -106,7 +118,14 @@ pub(super) fn public_routes() -> Router<AppState> {
         )
         .route(
             "/{board}/thread/{id}",
-            post(crate::handlers::thread::post_reply).layer(DefaultBodyLimit::disable()),
+            post(crate::handlers::thread::post_reply)
+                .layer::<_, std::convert::Infallible>(RequestBodyLimitLayer::new(
+                    crate::handlers::PUBLIC_MULTIPART_REQUEST_MAX_BYTES,
+                ))
+                .layer::<_, std::convert::Infallible>(axum_middleware::from_fn(
+                    crate::handlers::enforce_public_multipart_envelope,
+                ))
+                .layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/{board}/post/{id}/edit",
@@ -418,7 +437,7 @@ fn admin_backup_routes() -> Router<AppState> {
 #[cfg(test)]
 /// Route-table integration tests.
 mod tests {
-    use super::admin_routes;
+    use super::{admin_routes, public_routes};
     use anyhow::Context as _;
     use axum::{
         body::{to_bytes, Body},
@@ -476,6 +495,91 @@ mod tests {
     /// Return the cookie header paired with the known test session.
     fn admin_cookie_header() -> &'static str {
         "csrf_token=csrf123; chan_admin_session=session123"
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Rejects declared oversized public multipart bodies before parsing fields.
+    async fn public_post_routes_reject_oversized_declared_bodies() -> TestResult {
+        let app = public_routes().with_state(crate::test_support::app_state());
+        let oversized = crate::handlers::PUBLIC_MULTIPART_REQUEST_MAX_BYTES
+            .checked_add(1)
+            .context("public multipart test limit overflowed")?;
+
+        for uri in ["/test", "/test/thread/1"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header(
+                            header::CONTENT_TYPE,
+                            "multipart/form-data; boundary=rustchan-test",
+                        )
+                        .header(header::CONTENT_LENGTH, oversized.to_string())
+                        .body(Body::empty())?,
+                )
+                .await?;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "{uri} should reject an oversized declared multipart body before parsing"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this route test"
+    )]
+    /// Rejects a body-sized unterminated field header before Multer retains it.
+    async fn public_post_routes_reject_oversized_multipart_field_headers() -> TestResult {
+        let state = crate::test_support::app_state();
+        let conn = state.db.get().context("get database connection")?;
+        crate::db::create_board(&conn, "test", "Test", "", false)
+            .context("create multipart envelope test board")?;
+        drop(conn);
+        let app = public_routes().with_state(state);
+        let boundary = "rustchan-envelope-test";
+        let mut body = format!("--{boundary}\r\nX-Oversized: ").into_bytes();
+        body.extend(std::iter::repeat_n(
+            b'a',
+            crate::handlers::PUBLIC_MULTIPART_ENVELOPE_MAX_BYTES.saturating_add(1),
+        ));
+
+        for uri in ["/test", "/test/thread/1"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header(
+                            header::CONTENT_TYPE,
+                            format!("multipart/form-data; boundary={boundary}"),
+                        )
+                        .extension(crate::test_support::connect_info())
+                        .body(Body::from(body.clone()))?,
+                )
+                .await?;
+
+            let status = response.status();
+            let response_body = to_bytes(response.into_body(), 1024 * 1024).await?;
+            assert_eq!(
+                status,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "{uri} should reject an unterminated oversized multipart field header; body: {}",
+                String::from_utf8_lossy(&response_body)
+            );
+        }
+        Ok(())
     }
 
     /// Encode board access settings as a form body.
