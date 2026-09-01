@@ -46,7 +46,6 @@ pub async fn chan_poll(
     let mut imported_count = 0usize;
 
     for _ in 0..MAX_POLL_ITERATIONS {
-        // ── Fetch next item from the broadcast queue ─────────────────────
         let mut resp = HTTP_CLIENT
             .get(&url)
             .send()
@@ -67,12 +66,8 @@ pub async fn chan_poll(
             .unwrap_or("")
             .to_owned();
 
-        // ── Consume body exactly once ─────────────────────────────────────
-        // IMPORTANT: reqwest::Response body is a single-pass stream. We read
-        // the full body into `bytes` here and reuse that buffer for both the
-        // JSON sentinel check and the ZIP import. Calling `.json()` before
-        // `.bytes()` would leave the response in a moved / partially-read
-        // state, making the subsequent `.bytes()` call fail.
+        // Reuse one bounded buffer for the JSON sentinel and ZIP import because
+        // a reqwest response body is a single-pass stream.
         let bytes = read_response_body_limited(
             &mut resp,
             CONFIG.chan_net_max_body,
@@ -82,7 +77,7 @@ pub async fn chan_poll(
         .map_err(AppError::Internal)?;
         drop(resp);
 
-        // ── Empty-queue sentinel check ────────────────────────────────────
+        // Empty-queue sentinel check
         if content_type.contains("application/json") {
             // Parse without failing hard — a malformed sentinel is not a
             // fatal error; we fall through and let do_import reject the
@@ -96,7 +91,7 @@ pub async fn chan_poll(
             // will reject it with AppError::BadRequest (not a valid ZIP).
         }
 
-        // ── Import snapshot ───────────────────────────────────────────────
+        // Import snapshot
         match do_import(&state, bytes, &processing_guard).await {
             Ok(count) => imported_count = imported_count.saturating_add(count),
             Err(AppError::Conflict(_)) => {

@@ -1,5 +1,3 @@
-// src/handlers/admin/backup/common.rs
-
 use crate::{
     error::{AppError, Result},
     middleware::{backup_phase, BackupProgress},
@@ -33,15 +31,11 @@ pub(super) const FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX: &str = "tor/keys/";
 const SQLITE_HEADER: &[u8] = b"SQLite format 3\0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// Variants supported by the Tor hidden service keys availability workflow.
 pub(super) enum TorHiddenServiceKeysAvailability {
-    /// Represents the skipped case.
     Skipped,
-    /// Represents the available case.
     Available(PathBuf),
 }
 
-/// Resolves Tor hidden service keys availability.
 pub(super) fn resolve_tor_hidden_service_keys_availability(
     requested: bool,
     configured_dir: Option<PathBuf>,
@@ -65,7 +59,6 @@ pub(super) fn resolve_tor_hidden_service_keys_availability(
     Ok(TorHiddenServiceKeysAvailability::Available(dir))
 }
 
-/// Resolves Tor hidden service keys restore target.
 pub(super) fn resolve_tor_hidden_service_keys_restore_target(
     requested: bool,
     configured_dir: Option<PathBuf>,
@@ -94,33 +87,22 @@ pub(super) fn resolve_tor_hidden_service_keys_restore_target(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Manifest data for full backup.
 pub(super) struct FullBackupManifest {
-    /// The version.
     pub version: u32,
-    /// The generated timestamp.
     pub generated_at: i64,
-    /// The rustchan version.
     pub rustchan_version: String,
-    /// The database size in bytes.
     pub db_bytes: u64,
-    /// The number of upload files.
     pub upload_file_count: u64,
-    /// The number of favicon files.
     pub favicon_file_count: u64,
     #[serde(default)]
-    /// The number of banner files.
     pub banner_file_count: u64,
     #[serde(default)]
-    /// Whether the Tor hidden service keys included setting is active.
     pub tor_hidden_service_keys_included: bool,
     #[serde(default)]
-    /// The number of Tor hidden service key files.
     pub tor_hidden_service_key_file_count: u64,
     #[serde(default)]
-    /// The boards collection.
     pub boards: Vec<BackupBoardSummary>,
 }
 
-/// Performs the log backup phase handler operation.
 pub(super) fn log_backup_phase(phase: u64) {
     let message = match phase {
         backup_phase::SNAPSHOT_DB => "Backup progress - snapshotting database",
@@ -132,7 +114,6 @@ pub(super) fn log_backup_phase(phase: u64) {
     tracing::info!(target: "admin", "{message}");
 }
 
-/// Performs the log backup progress handler operation.
 pub(super) fn log_backup_progress(progress: &BackupProgress) {
     use std::sync::atomic::Ordering::Relaxed;
 
@@ -178,7 +159,6 @@ pub(super) fn validate_board_short_name(short_name: &str) -> Result<()> {
     }
 }
 
-/// Performs the validated media upload relative path handler operation.
 fn validated_media_upload_relative_path(path: &str, context: &str) -> Result<Vec<String>> {
     validate_restore_safe_entry_name(path)?;
     let components = path.split('/').map(str::to_owned).collect::<Vec<_>>();
@@ -270,7 +250,6 @@ pub(super) fn remap_body_quotelinks(
     remap_numeric_references(&result, &crosslink_prefix, pairs)
 }
 
-/// Renders restored body HTML.
 pub(super) fn render_restored_body_html(body: &str) -> String {
     let escaped = crate::utils::sanitize::escape_html(body);
     crate::utils::sanitize::render_post_body(&escaped, false)
@@ -340,7 +319,6 @@ pub(super) fn copy_limited_with_total_budget<R: std::io::Read, W: std::io::Write
     Ok(copied)
 }
 
-/// Creates staging dir.
 pub(super) fn create_staging_dir(base_path: &Path, label: &str) -> Result<PathBuf> {
     let parent = base_path
         .parent()
@@ -890,7 +868,7 @@ mod tests {
         let manifest = FullBackupManifest {
             version: 3,
             generated_at: 1_700_000_000,
-            rustchan_version: "1.4.0".into(),
+            rustchan_version: env!("CARGO_PKG_VERSION").into(),
             db_bytes: u64::try_from(db_bytes.len()).context("convert database size")?,
             upload_file_count: 0,
             favicon_file_count: 0,
@@ -911,10 +889,12 @@ mod tests {
         let error = verify_full_backup_zip(&zip_path)
             .err()
             .context("structurally invalid database was unexpectedly accepted")?;
+        let expected = format!(
+            "does not match the RustChan {} database baseline",
+            crate::db::baseline_schema_version()
+        );
         ensure!(
-            error
-                .to_string()
-                .contains("does not match the RustChan 1.4.0 database baseline"),
+            error.to_string().contains(&expected),
             "unexpected error: {error:#}"
         );
         Ok(())

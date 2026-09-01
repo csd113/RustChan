@@ -46,9 +46,6 @@ fn render_admin_boards_section(
 ) -> String {
     format!(
         r#"<div class="admin-panel-boards" id="boards">
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     // boards
-     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section admin-section-collapsible">
 <details class="admin-dropdown" data-admin-dropdown-key="boards"{boards_open_attr}>
 <summary><span>// boards</span></summary>

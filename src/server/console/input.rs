@@ -5,8 +5,7 @@
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use tokio::sync::mpsc;
 
-// ─── Key event vocabulary ─────────────────────────────────────────────────────
-
+// Key event vocabulary
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Console action produced from a terminal key event.
 pub enum KeyEvent {
@@ -36,8 +35,7 @@ pub enum KeyEvent {
     Other,
 }
 
-// ─── Key mapping ──────────────────────────────────────────────────────────────
-
+// Key mapping
 /// Map one Crossterm key event into the console action vocabulary.
 fn map_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
     if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
@@ -57,8 +55,6 @@ fn map_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         _ => KeyEvent::Other,
     }
 }
-
-// ─── spawn() ─────────────────────────────────────────────────────────────────
 
 /// Spawn a blocking thread that polls crossterm events and sends mapped
 /// `KeyEvent` values over `tx`. Exits when the channel is closed.

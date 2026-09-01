@@ -13,7 +13,6 @@ use super::{
 use axum::response::IntoResponse as _;
 use std::fmt::Write as _;
 
-/// Composite value returned by catalog load result.
 type CatalogLoadResult = (
     CatalogRenderData,
     crate::banner::BannerSelection,
@@ -27,7 +26,6 @@ type CatalogLoadResult = (
     clippy::too_many_lines,
     reason = "access control, catalog loading, unread-state calculation, and rendering form one request"
 )]
-/// Handles the catalog request.
 pub(crate) async fn catalog(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
@@ -65,10 +63,7 @@ pub(crate) async fn catalog(
         }
     };
 
-    // Add ETag caching to the catalog. Previously every request
-    // fetched up to 200 full thread rows and re-rendered the entire page
-    // regardless of whether anything changed. The ETag is derived from the
-    // most-recently-bumped thread, mirroring the board index handler.
+    // The most-recently-bumped thread drives the ETag, matching the board index.
     let thread_activity_markers = thread_activity_markers_from_jar(&jar);
     let catalog_data = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -271,7 +266,6 @@ pub(crate) async fn catalog(
     Ok((jar, resp).into_response())
 }
 
-/// Handles the hidden threads request.
 pub(crate) async fn hidden_threads(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
@@ -350,9 +344,7 @@ pub(crate) async fn hidden_threads(
     Ok((jar, Html(html)).into_response())
 }
 
-// ─── GET /:board/archive ──────────────────────────────────────────────────────
-
-/// Handles the board archive request.
+// GET /:board/archive
 pub(crate) async fn board_archive(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
@@ -438,9 +430,7 @@ pub(crate) async fn board_archive(
     Ok((jar, Html(html)).into_response())
 }
 
-// ─── GET /:board/search ───────────────────────────────────────────────────────
-
-/// Handles the search request.
+// GET /:board/search
 pub(crate) async fn search(
     State(state): State<AppState>,
     Path(board_short): Path<String>,

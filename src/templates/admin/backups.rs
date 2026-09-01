@@ -61,7 +61,6 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     )
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "each backup row keeps its related restore, download, and audit controls together"
@@ -424,12 +423,10 @@ fn split_zip_part_size_options(selected_gib: u64) -> String {
     options
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "the backup section is one stable server-rendered HTML fragment"
 )]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the section interpolates independent pre-rendered backup controls"
@@ -466,9 +463,6 @@ fn render_admin_backups_section(
     let manual_part_options = split_zip_part_size_options(4);
     format!(
         r#"<div class="admin-panel-backups" id="backups">
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     // full site backup & restore
-     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section admin-section-collapsible" id="full-backup-restore">
 <details class="admin-dropdown" data-admin-dropdown-key="full-backup-restore"{full_backup_open_attr}>
 <summary><span>// full site backup &amp; restore</span></summary>

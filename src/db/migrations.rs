@@ -1,10 +1,8 @@
-// src/db/migrations.rs
-
 use anyhow::{Context as _, Result};
 use rusqlite::OptionalExtension as _;
 
-/// Database schema version for the `RustChan` 1.4.0 release baseline.
-pub(super) const BASELINE_SCHEMA_VERSION: &str = "1.4.0";
+/// Database schema version for the current package release baseline.
+pub(super) const BASELINE_SCHEMA_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Read the recorded schema version, if the version table exists.
 pub(super) fn read_schema_version(conn: &rusqlite::Connection) -> Result<Option<String>> {
@@ -23,8 +21,9 @@ pub(super) fn read_schema_version(conn: &rusqlite::Connection) -> Result<Option<
 
 /// Atomically replace the version table with the release baseline version.
 pub(super) fn stamp_schema_version(conn: &rusqlite::Connection) -> Result<()> {
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .context("Failed to begin schema_version stamp to 1.4.0")?;
+    conn.execute_batch("BEGIN IMMEDIATE").with_context(|| {
+        format!("Failed to begin schema_version stamp to {BASELINE_SCHEMA_VERSION}")
+    })?;
 
     let result = (|| {
         conn.execute_batch(
@@ -38,14 +37,14 @@ pub(super) fn stamp_schema_version(conn: &rusqlite::Connection) -> Result<()> {
             "INSERT INTO schema_version (version) VALUES (?1)",
             rusqlite::params![BASELINE_SCHEMA_VERSION],
         )
-        .context("Failed to set schema_version to 1.4.0")?;
+        .with_context(|| format!("Failed to set schema_version to {BASELINE_SCHEMA_VERSION}"))?;
         Ok(())
     })();
 
     match result {
-        Ok(()) => conn
-            .execute_batch("COMMIT")
-            .context("Failed to commit schema_version stamp to 1.4.0"),
+        Ok(()) => conn.execute_batch("COMMIT").with_context(|| {
+            format!("Failed to commit schema_version stamp to {BASELINE_SCHEMA_VERSION}")
+        }),
         Err(error) => {
             drop(conn.execute_batch("ROLLBACK"));
             Err(error)

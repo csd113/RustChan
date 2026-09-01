@@ -1,6 +1,4 @@
-// handlers/board.rs
-//
-// Handles:
+// Routes:
 //   GET  /                    — board list
 //   GET  /:board/             — board index (thread list)
 //   POST /:board/             — create new thread
@@ -33,17 +31,11 @@ use std::sync::{atomic::AtomicU64, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use time::Duration;
 
-/// Implements access preferences handler support.
 mod access_preferences;
-/// Implements catalog handler support.
 mod catalog;
-/// Implements create thread handler support.
 mod create_thread;
-/// Implements media handler support.
 mod media;
-/// Implements pages handler support.
 mod pages;
-/// Implements reports handler support.
 mod reports;
 #[cfg(test)]
 mod tests;
@@ -55,7 +47,6 @@ pub(crate) use media::*;
 pub(crate) use pages::*;
 pub(crate) use reports::*;
 
-/// Performs the should set public secure cookie handler operation.
 pub(crate) fn should_set_public_secure_cookie(
     headers: &HeaderMap,
     context: SecureCookieContext,
@@ -63,10 +54,8 @@ pub(crate) fn should_set_public_secure_cookie(
     crate::handlers::admin::should_set_secure_cookie(headers, context)
 }
 
-/// Composite value returned by optional connect info peer.
 pub(crate) type OptionalConnectInfoPeer = SecureCookieContext;
 
-/// Performs the optional connect info peer handler operation.
 pub(crate) const fn optional_connect_info_peer(
     peer: OptionalConnectInfoPeer,
 ) -> SecureCookieContext {
@@ -106,48 +95,31 @@ const HTML_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_DYNAMIC_PUBLIC;
 /// X rustchan redirect header used by this handler.
 pub(crate) const X_RUSTCHAN_REDIRECT_HEADER: &str = "x-rustchan-redirect";
 
-/// Shared state for board unlock fails.
 static BOARD_UNLOCK_FAILS: LazyLock<DashMap<String, (u32, u64)>> = LazyLock::new(DashMap::new);
-/// Shared state for board unlock cleanup secs.
 static BOARD_UNLOCK_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
 
-/// Template data for board access context.
 pub(crate) struct BoardAccessContext {
-    /// The board.
     pub board: Board,
-    /// Whether this value is admin.
     pub is_admin: bool,
-    /// Whether the requester can view.
     pub can_view: bool,
-    /// Whether the requester can post.
     pub can_post: bool,
 }
 
-/// Variants supported by the board access requirement workflow.
 pub(crate) enum BoardAccessRequirement {
-    /// Represents the view case.
     View,
-    /// Represents the post case.
     Post,
 }
 
-/// Data used by the board access denial workflow.
 pub(crate) struct BoardAccessDenial {
-    /// The context.
     pub context: BoardAccessContext,
-    /// The return to.
     pub return_to: String,
 }
 
-/// Variants supported by the board access decision workflow.
 pub(crate) enum BoardAccessDecision {
-    /// Represents the allowed case.
     Allowed(BoardAccessContext),
-    /// Represents the denied case.
     Denied(BoardAccessDenial),
 }
 
-/// Composite value returned by catalog render data.
 type CatalogRenderData = (
     Board,
     Vec<crate::models::Thread>,
@@ -156,12 +128,10 @@ type CatalogRenderData = (
     String,
 );
 
-/// Performs the latest visible thread marker tuple handler operation.
 pub(crate) fn latest_visible_thread_marker_tuple(marker: Option<(i64, i64)>) -> (i64, i64) {
     marker.unwrap_or((0, 0))
 }
 
-/// Performs the activity HTML cache control handler operation.
 pub(crate) const fn activity_html_cache_control(activity_markers_enabled: bool) -> &'static str {
     if activity_markers_enabled {
         crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE
@@ -170,7 +140,6 @@ pub(crate) const fn activity_html_cache_control(activity_markers_enabled: bool) 
     }
 }
 
-/// Performs the thread unread counts handler operation.
 pub(crate) fn thread_unread_counts(
     threads: &[crate::models::Thread],
     markers: &HashMap<i64, ThreadActivityMarker>,
@@ -185,7 +154,6 @@ pub(crate) fn thread_unread_counts(
         .collect()
 }
 
-/// Returns whether xml HTTP request.
 fn is_xml_http_request(headers: &HeaderMap) -> bool {
     headers
         .get("x-requested-with")
@@ -194,13 +162,10 @@ fn is_xml_http_request(headers: &HeaderMap) -> bool {
 }
 
 #[derive(Serialize)]
-/// Data used by the XHR error payload workflow.
 struct XhrErrorPayload<'a> {
-    /// The error message, if any.
     error: &'a str,
 }
 
-/// Builds the JSON response.
 fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> Result<Response> {
     let body =
         serde_json::to_vec(payload).map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
@@ -213,7 +178,6 @@ fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> Result<Respon
     Ok(response)
 }
 
-/// Builds the XHR JSON error response.
 fn xhr_json_error_response(
     response_status: StatusCode,
     error_status: StatusCode,
@@ -233,7 +197,6 @@ fn xhr_json_error_response(
     Ok(response)
 }
 
-/// Builds the XHR error response.
 pub(crate) fn xhr_error_response(status: StatusCode, message: &str) -> Result<Response> {
     xhr_json_error_response(status, status, message)
 }
@@ -242,12 +205,10 @@ pub(crate) fn xhr_error_response(status: StatusCode, message: &str) -> Result<Re
 // statuses even when the page handles the JSON error inline. For validation
 // errors that the UI already renders in-context, keep the transport successful
 // and expose the original HTTP meaning via `X-Rustchan-Error-Status`.
-/// Builds the XHR handled error response.
 pub(crate) fn xhr_handled_error_response(status: StatusCode, message: &str) -> Result<Response> {
     xhr_json_error_response(StatusCode::OK, status, message)
 }
 
-/// Builds the XHR redirect response.
 pub(crate) fn xhr_redirect_response(target: &str) -> Result<Response> {
     let mut response = Response::new(axum::body::Body::empty());
     *response.status_mut() = StatusCode::NO_CONTENT;
@@ -259,7 +220,6 @@ pub(crate) fn xhr_redirect_response(target: &str) -> Result<Response> {
     Ok(response)
 }
 
-/// Performs the banned page redirect URL handler operation.
 fn banned_page_redirect_url(reason: &str) -> String {
     let reason_for_url = reason.chars().take(256).collect::<String>();
     format!(
@@ -268,7 +228,6 @@ fn banned_page_redirect_url(reason: &str) -> String {
     )
 }
 
-/// Builds the XHR post error response.
 pub(crate) fn xhr_post_error_response(error: AppError) -> Result<Response> {
     match error {
         AppError::NotFound(message) => xhr_handled_error_response(StatusCode::NOT_FOUND, &message),
@@ -307,7 +266,6 @@ pub(crate) fn xhr_post_error_response(error: AppError) -> Result<Response> {
     }
 }
 
-/// Performs the handled post error status handler operation.
 pub(crate) fn handled_post_error_status(
     error: AppError,
 ) -> std::result::Result<(StatusCode, String), AppError> {
@@ -320,19 +278,15 @@ pub(crate) fn handled_post_error_status(
 }
 
 #[derive(Deserialize)]
-/// Query parameters accepted by the banned page request.
 pub(crate) struct BannedPageQuery {
-    /// The optional reason.
     pub reason: Option<String>,
 }
 
-/// Performs the current theme from jar handler operation.
 pub(crate) fn current_theme_from_jar(jar: &CookieJar) -> Option<String> {
     let cookie = jar.get(USER_THEME_COOKIE)?;
     templates::normalize_theme_slug(cookie.value())
 }
 
-/// Performs the user preferences from jar handler operation.
 pub(crate) fn user_preferences_from_jar(jar: &CookieJar) -> templates::UserPreferences {
     let default_preferences = templates::UserPreferences::default();
     templates::UserPreferences {
@@ -355,7 +309,6 @@ pub(crate) fn user_preferences_from_jar(jar: &CookieJar) -> templates::UserPrefe
     }
 }
 
-/// Checks CSRF jar.
 pub(crate) fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_owned());
     let admin_session = jar.get("chan_admin_session").map(Cookie::value);
@@ -369,7 +322,6 @@ pub(crate) fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Resul
     }
 }
 
-/// Handles the admin scoped CSRF token request.
 pub(crate) fn admin_scoped_csrf_token(
     jar: &CookieJar,
     admin_session_id: Option<&str>,
@@ -390,25 +342,21 @@ pub(crate) fn admin_scoped_csrf_token(
     ))
 }
 
-/// Returns whether the value has NSFW consent.
 pub(crate) fn has_nsfw_consent(jar: &CookieJar) -> bool {
     jar.get(NSFW_CONSENT_COOKIE)
         .is_some_and(|cookie| cookie.value() == "1")
 }
 
-/// Performs the board access cookie name handler operation.
 pub(crate) fn board_access_cookie_name(board_short: &str) -> String {
     format!("{BOARD_ACCESS_COOKIE_PREFIX}{board_short}")
 }
 
-/// Performs the board access cookie from jar handler operation.
 pub(crate) fn board_access_cookie_from_jar(jar: &CookieJar, board_short: &str) -> Option<String> {
     let cookie_name = board_access_cookie_name(board_short);
     jar.get(cookie_name.as_str())
         .map(|cookie| cookie.value().to_owned())
 }
 
-/// Performs the expected board access cookie value handler operation.
 fn expected_board_access_cookie_value(board_short: &str, password_hash: &str) -> Option<String> {
     if password_hash.is_empty() {
         return None;
@@ -422,7 +370,6 @@ fn expected_board_access_cookie_value(board_short: &str, password_hash: &str) ->
     ))
 }
 
-/// Returns whether the value has valid board access cookie.
 fn has_valid_board_access_cookie(
     board_short: &str,
     password_hash: &str,
@@ -434,7 +381,6 @@ fn has_valid_board_access_cookie(
     cookie_value.is_some_and(|value| value == expected)
 }
 
-/// Returns whether the requester can view board.
 pub(crate) fn can_view_board(board: &Board, is_admin: bool, access_cookie: Option<&str>) -> bool {
     is_admin
         || !board.access_mode.requires_view_password()
@@ -445,7 +391,6 @@ pub(crate) fn can_view_board(board: &Board, is_admin: bool, access_cookie: Optio
         )
 }
 
-/// Returns whether the requester can post to board.
 pub(crate) fn can_post_to_board(
     board: &Board,
     is_admin: bool,
@@ -460,7 +405,6 @@ pub(crate) fn can_post_to_board(
         )
 }
 
-/// Loads board access context.
 pub(crate) fn load_board_access_context(
     conn: &rusqlite::Connection,
     board_short: &str,
@@ -478,7 +422,6 @@ pub(crate) fn load_board_access_context(
     })
 }
 
-/// Handles the board access preflight request.
 pub(crate) async fn board_access_preflight(
     state: &AppState,
     board_short: &str,
@@ -518,7 +461,6 @@ pub(crate) async fn board_access_preflight(
     }
 }
 
-/// Performs the unlock redirect URL handler operation.
 pub(crate) fn unlock_redirect_url(board_short: &str, return_to: &str) -> String {
     format!(
         "/{board_short}/unlock?return_to={}",
@@ -526,7 +468,6 @@ pub(crate) fn unlock_redirect_url(board_short: &str, return_to: &str) -> String 
     )
 }
 
-/// Renders board unlock HTML.
 pub(crate) fn render_board_unlock_html(
     board: &Board,
     csrf_token: &str,
@@ -546,7 +487,6 @@ pub(crate) fn render_board_unlock_html(
     )
 }
 
-/// Builds the board access denied response.
 pub(crate) fn board_access_denied_response(
     jar: CookieJar,
     denial: &BoardAccessDenial,
@@ -563,7 +503,6 @@ pub(crate) fn board_access_denied_response(
     board_access_required_response(jar, html)
 }
 
-/// Handles the banned page request.
 pub(crate) async fn banned_page(
     Query(query): Query<BannedPageQuery>,
     jar: CookieJar,
@@ -587,7 +526,6 @@ pub(crate) async fn banned_page(
     (jar, Html(html)).into_response()
 }
 
-/// Performs the board unlock now secs handler operation.
 fn board_unlock_now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -595,12 +533,10 @@ fn board_unlock_now_secs() -> u64 {
         .as_secs()
 }
 
-/// Performs the board unlock attempt key handler operation.
 fn board_unlock_attempt_key(board_short: &str, client_ip: &str) -> String {
     sha256_hex(format!("{board_short}:{client_ip}").as_bytes())
 }
 
-/// Prunes board unlock failures.
 fn prune_board_unlock_failures(now_secs: u64) {
     let last_cleanup = BOARD_UNLOCK_CLEANUP_SECS.load(std::sync::atomic::Ordering::Relaxed);
     if now_secs.saturating_sub(last_cleanup) < 60 {
@@ -622,7 +558,6 @@ fn prune_board_unlock_failures(now_secs: u64) {
     });
 }
 
-/// Performs the board unlock retry after secs handler operation.
 fn board_unlock_retry_after_secs(attempt_key: &str) -> Option<u64> {
     let now_secs = board_unlock_now_secs();
     prune_board_unlock_failures(now_secs);
@@ -638,7 +573,6 @@ fn board_unlock_retry_after_secs(attempt_key: &str) -> Option<u64> {
     Some((BOARD_UNLOCK_FAIL_WINDOW_SECS.saturating_sub(elapsed)).max(1))
 }
 
-/// Records board unlock failure.
 fn record_board_unlock_failure(attempt_key: &str) {
     let now_secs = board_unlock_now_secs();
     prune_board_unlock_failures(now_secs);
@@ -654,12 +588,10 @@ fn record_board_unlock_failure(attempt_key: &str) {
     }
 }
 
-/// Clears board unlock failures.
 fn clear_board_unlock_failures(attempt_key: &str) {
     BOARD_UNLOCK_FAILS.remove(attempt_key);
 }
 
-/// Performs the board unlock rate limit message handler operation.
 fn board_unlock_rate_limit_message(retry_after_secs: u64) -> String {
     let minutes = retry_after_secs / 60;
     let seconds = retry_after_secs % 60;
@@ -682,7 +614,6 @@ fn board_unlock_rate_limit_message(retry_after_secs: u64) -> String {
     }
 }
 
-/// Performs the board unlock default return to handler operation.
 fn board_unlock_default_return_to(board: &Board) -> String {
     if board.access_mode.requires_view_password() {
         format!("/{}/catalog", board.short_name)
@@ -691,7 +622,6 @@ fn board_unlock_default_return_to(board: &Board) -> String {
     }
 }
 
-/// Builds the board access page response.
 fn board_access_page_response(
     jar: CookieJar,
     html: String,
@@ -712,17 +642,14 @@ fn board_access_page_response(
     (jar, resp).into_response()
 }
 
-/// Builds the board access required response.
 pub(crate) fn board_access_required_response(jar: CookieJar, html: String) -> Response {
     board_access_page_response(jar, html, StatusCode::FORBIDDEN, None)
 }
 
-/// Builds the board access ok response.
 pub(crate) fn board_access_ok_response(jar: CookieJar, html: String) -> Response {
     board_access_page_response(jar, html, StatusCode::OK, None)
 }
 
-/// Builds the board access rate limited response.
 pub(crate) fn board_access_rate_limited_response(
     jar: CookieJar,
     html: String,
@@ -736,12 +663,10 @@ pub(crate) fn board_access_rate_limited_response(
     )
 }
 
-/// Performs the safe return to handler operation.
 fn safe_return_to(path: Option<&str>, fallback: &str) -> String {
     crate::utils::redirect::strict_safe_internal_path_or(path, fallback).to_owned()
 }
 
-/// Performs the identity key handler operation.
 pub(crate) fn identity_key(client_ip: &str, jar: &CookieJar) -> String {
     if client_ip.starts_with("tor:") {
         return client_ip.to_owned();
@@ -758,12 +683,10 @@ pub(crate) fn identity_key(client_ip: &str, jar: &CookieJar) -> String {
     client_ip.to_owned()
 }
 
-/// Performs the viewer preference key handler operation.
 fn viewer_preference_key(client_ip: &str, jar: &CookieJar) -> String {
     hash_ip(&identity_key(client_ip, jar), &CONFIG.cookie_secret)
 }
 
-/// Performs the split catalog threads handler operation.
 fn split_catalog_threads(
     threads: Vec<crate::models::Thread>,
     prefs: &HashMap<i64, db::UserThreadPreference>,
@@ -805,4 +728,4 @@ fn split_catalog_threads(
     (visible, hidden, pinned_ids)
 }
 
-// ─── GET / — board list ───────────────────────────────────────────────────────
+// GET / — board list

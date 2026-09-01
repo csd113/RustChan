@@ -7,8 +7,7 @@ use super::ChanStats;
 use crate::config::CONFIG;
 use std::path::{Path, PathBuf};
 
-// ─── ANSI helpers ─────────────────────────────────────────────────────────────
-
+// ANSI helpers
 /// Style text green when ANSI output is enabled.
 fn green(s: &str) -> String {
     colour("32", s)
@@ -120,8 +119,7 @@ fn row(out: &mut String, label: &str, value: &str) {
     writeln!(out, " {label:<LW$} : {value}").ok();
 }
 
-// ─── Formatters ───────────────────────────────────────────────────────────────
-
+// Formatters
 #[expect(
     clippy::as_conversions,
     clippy::cast_precision_loss,
@@ -151,8 +149,7 @@ fn fmt_uptime(secs: u64) -> String {
     format!("{h}h {m:02}m {s:02}s")
 }
 
-// ─── TLS cert type label ──────────────────────────────────────────────────────
-
+// TLS cert type label
 /// Return the active HTTPS certificate-source label.
 fn https_cert_label() -> &'static str {
     if CONFIG.tls.acme.enabled {
@@ -164,8 +161,6 @@ fn https_cert_label() -> &'static str {
     }
 }
 
-// ─── render_dashboard() ───────────────────────────────────────────────────────
-
 #[expect(
     clippy::too_many_lines,
     reason = "the contiguous dashboard renderer keeps terminal row ordering auditable"
@@ -175,7 +170,7 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(2048);
 
-    // ── Header ────────────────────────────────────────────────────────────────
+    // Header
     writeln!(out, "{}", rule()).ok();
     writeln!(
         out,
@@ -187,7 +182,7 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
     writeln!(out, "{}", rule()).ok();
     writeln!(out).ok();
 
-    // ── Status ────────────────────────────────────────────────────────────────
+    // Status
     writeln!(out, " {}", bold("Status")).ok();
 
     if CONFIG.tls.enabled {
@@ -266,7 +261,7 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
 
     writeln!(out).ok();
 
-    // ── Endpoints ─────────────────────────────────────────────────────────────
+    // Endpoints
     writeln!(out, " {}", bold("Endpoints")).ok();
 
     if CONFIG.tls.enabled {
@@ -306,7 +301,7 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
 
     writeln!(out).ok();
 
-    // ── Activity ──────────────────────────────────────────────────────────────
+    // Activity
     writeln!(out, " {}", bold("Activity")).ok();
     let rps_str = if stats.rps >= 1.0 {
         green(&format!("{:.1}/s", stats.rps))
@@ -341,27 +336,27 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
     );
     writeln!(out).ok();
 
-    // ── Content ───────────────────────────────────────────────────────────────
+    // Content
     writeln!(out, " {}", bold("Content")).ok();
     row(&mut out, "Boards", &stats.boards.to_string());
     row(&mut out, "Threads", &stats.threads.to_string());
     row(&mut out, "Posts", &stats.posts.to_string());
     writeln!(out).ok();
 
-    // ── Storage ───────────────────────────────────────────────────────────────
+    // Storage
     writeln!(out, " {}", bold("Storage")).ok();
     row(&mut out, "Database", &fmt_bytes(stats.db_bytes));
     row(&mut out, "Uploads", &fmt_bytes(stats.upload_bytes));
     writeln!(out).ok();
 
-    // ── Upload spinner ────────────────────────────────────────────────────────
+    // Upload spinner
     if stats.active_uploads > 0 {
         let frame = spinner_frame(stats.spinner_tick);
         writeln!(out, " {}  {} uploading", cyan(frame), stats.active_uploads).ok();
         writeln!(out).ok();
     }
 
-    // ── Footer ────────────────────────────────────────────────────────────────
+    // Footer
     writeln!(out, "{}", rule()).ok();
     writeln!(out,
         " {} Help  {} Reload  {} Boards  {} New board  {} New admin  {} Del thread  {} Logs  {} Quit",
@@ -371,8 +366,6 @@ pub fn render_dashboard(stats: &ChanStats) -> String {
 
     out
 }
-
-// ─── render_log_view() ────────────────────────────────────────────────────────
 
 /// Render the live-log view.
 pub fn render_log_view() -> String {
@@ -480,8 +473,6 @@ fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool), String
     Ok((content, truncated))
 }
 
-// ─── render_help() ────────────────────────────────────────────────────────────
-
 /// Render the console key reference.
 #[must_use]
 pub fn render_help() -> String {
@@ -514,8 +505,6 @@ pub fn render_help() -> String {
     writeln!(out, "{}", rule()).ok();
     out
 }
-
-// ─── render_board_list() ─────────────────────────────────────────────────────
 
 /// Render the per-board content summary.
 #[must_use]
@@ -556,8 +545,6 @@ pub fn render_board_list(stats: &ChanStats) -> String {
     writeln!(out, "{}", rule()).ok();
     out
 }
-
-// ─── render_confirm_quit() ────────────────────────────────────────────────────
 
 /// Render the graceful-shutdown confirmation prompt.
 #[must_use]

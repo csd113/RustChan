@@ -474,13 +474,17 @@ mod tests {
         );
         let body = to_bytes(response.into_body(), usize::MAX).await?;
         let body = String::from_utf8(body.to_vec())?;
+        let schema_metric = format!(
+            "rustchan_database_schema_valid{{version=\"{}\"}} 1",
+            crate::db::baseline_schema_version()
+        );
 
         for metric in [
             "rustchan_requests_total",
             "rustchan_job_queue_pending",
             "rustchan_media_reconcile_files_scanned_total",
             "rustchan_media_reconcile_repair_conflicts_total",
-            "rustchan_database_schema_valid{version=\"1.4.0\"} 1",
+            schema_metric.as_str(),
         ] {
             assert!(
                 body.contains(metric),

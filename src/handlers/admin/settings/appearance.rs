@@ -9,16 +9,12 @@ use axum::response::IntoResponse as _;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-/// Form fields accepted by the clear board favicon request.
 pub(crate) struct ClearBoardFaviconForm {
-    /// The board identifier.
     board_id: i64,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Handles the clear board favicon override request.
 pub(crate) async fn clear_board_favicon_override(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -54,7 +50,6 @@ pub(crate) async fn clear_board_favicon_override(
     .into_response())
 }
 
-/// Handles the update site favicon request.
 pub(crate) async fn update_site_favicon(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -120,7 +115,6 @@ pub(crate) async fn update_site_favicon(
     }
 }
 
-/// Handles the update board favicon request.
 pub(crate) async fn update_board_favicon(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -199,4 +193,4 @@ pub(crate) async fn update_board_favicon(
     }
 }
 
-// ─── POST /admin/site/settings ────────────────────────────────────────────────
+// POST /admin/site/settings

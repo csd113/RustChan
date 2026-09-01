@@ -1,29 +1,6 @@
-// workers/mod.rs — Background job queue and worker pool.
-//
-// Architecture:
-//   • SQLite-backed persistent job queue (table: background_jobs).
-//     Jobs survive a server restart — they are picked up again on next boot.
-//   • Worker pool: N Tokio tasks (min(available_cpus, 4)).
-//   • Jobs are claimed atomically via UPDATE … RETURNING so multiple workers
-//     never process the same job even under concurrent access in WAL mode.
-//   • Workers sleep until a Notify fires or a 5-second poll timeout elapses.
-//   • Failed jobs are retried up to the shared job retry budget; then marked "failed"
-//     with the last error message recorded for inspection.
-//   • A CancellationToken is threaded through every worker so that a graceful
-//     shutdown drains in-progress jobs before exiting (#7).
-//
-// Job types:
-//   VideoTranscode — MP4/MKV → WebM (VP9 + Opus) via ffmpeg (off the hot path)
-//   AudioWaveform  — waveform PNG from audio via ffmpeg (off the hot path)
-//   ThreadPrune    — delete overflow threads from a board asynchronously
-//   SpamCheck      — lightweight abuse signal logging
-//
-// Integration (handlers):
-//   1. save_upload() saves the raw file and returns processing_pending=true
-//      when async post-processing is needed.
-//   2. After db::create_post / db::create_thread_with_op, the handler calls
-//      job_queue.enqueue(…) with the now-known post_id.
-//   3. Workers update posts.file_path / posts.thumb_path on completion.
+// Jobs persist in SQLite and are claimed atomically with UPDATE … RETURNING.
+// Cancellation tokens let graceful shutdown drain in-progress work; failures
+// retain their last error and retry only within the shared budget.
 
 use crate::config::CONFIG;
 use crate::db::DbPool;
@@ -181,8 +158,7 @@ async fn join_async_pipe_reader(
 /// How long a worker sleeps when the queue is empty.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-// ─── Job definitions ──────────────────────────────────────────────────────────
-
+// Job definitions
 /// All job variants the worker pool can process.
 /// Serialised to JSON and stored in `background_jobs.payload`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,8 +257,7 @@ fn log_thread_prune_schedule(board_id: i64, schedule: crate::db::ThreadPruneSche
     }
 }
 
-// ─── Job queue ────────────────────────────────────────────────────────────────
-
+// Job queue
 /// Cheaply-cloneable handle to the shared job queue.
 /// Clone this into every handler that needs to enqueue work.
 #[derive(Clone, Debug)]
@@ -543,8 +518,7 @@ impl JobQueue {
     }
 }
 
-// ─── Worker pool startup ──────────────────────────────────────────────────────
-
+// Worker pool startup
 /// Spawn the background worker pool. Call exactly once at server startup.
 ///
 /// Returns a vec of `JoinHandles`, one per worker, so the caller can await all
@@ -588,8 +562,7 @@ pub fn start_worker_pool(
         .collect()
 }
 
-// ─── Worker loop ─────────────────────────────────────────────────────────────
-
+// Worker loop
 /// Outcome of executing a claimed job before its status is persisted.
 #[derive(Clone)]
 enum JobCompletion {
@@ -1158,8 +1131,7 @@ fn backoff_duration(consecutive_errors: u32) -> Duration {
     Duration::from_millis(base + jitter)
 }
 
-// ─── Job dispatch ─────────────────────────────────────────────────────────────
-
+// Job dispatch
 #[expect(
     clippy::cognitive_complexity,
     clippy::too_many_arguments,
@@ -1185,7 +1157,7 @@ async fn handle_job(
             file_path,
             board_short,
         } => {
-            // 2.2: Skip if this file_path is already being processed.
+            // Avoid scheduling the same source path twice.
             if in_progress.contains_key(&file_path) {
                 warn!(
                     "VideoTranscode: skipping duplicate job for post {} ({}): already in flight",
@@ -1217,7 +1189,7 @@ async fn handle_job(
             file_path,
             board_short,
         } => {
-            // 2.2: Skip if this file_path is already being processed.
+            // Avoid scheduling the same source path twice.
             if in_progress.contains_key(&file_path) {
                 warn!(
                     "AudioWaveform: skipping duplicate job for post {} ({}): already in flight",
@@ -1289,8 +1261,7 @@ fn media_job_identity(job: &Job) -> Option<MediaJobIdentity> {
     }
 }
 
-// ─── VideoTranscode ───────────────────────────────────────────────────────────
-
+// VideoTranscode
 /// Transcode an MP4 upload to `WebM` (VP9 + Opus), then update the post's
 /// `file_path` and `mime_type`. The original MP4 is deleted on success.
 ///
@@ -1342,7 +1313,7 @@ async fn transcode_video(
     let timeout_secs = crate::config::ffmpeg_timeout_secs();
     let ffmpeg_timeout = Duration::from_secs(timeout_secs);
 
-    // Phase 1: prepare (file checks, codec probe, temp file creation) — blocking.
+    // File checks, codec probing, and temporary-file creation are blocking.
     let prepare_result = {
         let file_path2 = file_path.clone();
         let board_short2 = board_short.clone();
@@ -1354,13 +1325,10 @@ async fn transcode_video(
     }?;
 
     let Some((args, src_path, webm_abs, webm_rel, _webm_name, tmp)) = prepare_result else {
-        return Ok(JobExecution::NeedsCompletion); // skip gracefully
+        return Ok(JobExecution::NeedsCompletion);
     };
 
-    // Phase 2: run ffmpeg via tokio::process::Command with kill_on_drop(true).
-    // When the timeout future is dropped, the Child is dropped, and kill_on_drop
-    // ensures the OS process receives SIGKILL immediately — unlike the previous
-    // spawn_blocking approach where the OS process kept running after timeout.
+    // `kill_on_drop` terminates ffmpeg when its timeout future is dropped.
     let mut command = ffmpeg_command();
     command
         .args(&args)
@@ -1395,7 +1363,7 @@ async fn transcode_video(
         }
     }
 
-    // Phase 3: persist temp file + DB updates — blocking.
+    // File persistence and database updates are blocking.
     let finalise_result = tokio::task::spawn_blocking(move || {
         transcode_video_finalise(
             job_id, post_id, &file_path, &src_path, &webm_abs, &webm_rel, tmp, &pool,
@@ -1826,8 +1794,7 @@ fn validate_transcoded_webm_output(
     Ok(TranscodeOutputDecision::Accept)
 }
 
-// ─── AudioWaveform ────────────────────────────────────────────────────────────
-
+// AudioWaveform
 /// Generate a waveform PNG thumbnail for an audio upload via ffmpeg.
 ///
 /// Same `kill_on_drop` fix as `transcode_video`. Uses
@@ -1861,7 +1828,7 @@ async fn generate_waveform(
     let timeout_secs = crate::config::ffmpeg_timeout_secs();
     let ffmpeg_timeout = Duration::from_secs(timeout_secs);
 
-    // Phase 1: prepare (file I/O, temp file creation) — blocking.
+    // File I/O and temporary-file creation are blocking.
     let (args, png_abs, png_rel, src_path, expected_file_path, tmp_png) = {
         let file_path2 = file_path.clone();
         let board_short2 = board_short.clone();
@@ -1870,7 +1837,7 @@ async fn generate_waveform(
             .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in waveform prepare: {e}"))??
     };
 
-    // Phase 2: run ffmpeg with kill_on_drop.
+    // `kill_on_drop` terminates ffmpeg when its timeout future is dropped.
     let mut command = ffmpeg_command();
     command
         .args(&args)
@@ -1906,7 +1873,7 @@ async fn generate_waveform(
         }
     }
 
-    // Phase 3: persist + DB update — blocking.
+    // File persistence and the database update are blocking.
     let finalise_result = tokio::task::spawn_blocking(move || {
         waveform_finalise(
             job_id,
@@ -2174,8 +2141,7 @@ fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-// ─── ThreadPrune ─────────────────────────────────────────────────────────────
-
+// ThreadPrune
 #[expect(
     clippy::cognitive_complexity,
     reason = "archive, prune, and filesystem finalization remain one consistency operation"
@@ -2192,7 +2158,7 @@ async fn prune_threads(board_id: i64, pool: DbPool) -> Result<()> {
             );
             return Ok(());
         };
-        // 2.5: archive_before_prune acts as a global safety net — when true,
+        // `archive_before_prune` is a global safety net: when true,
         // overflow threads are always archived rather than hard-deleted, even
         // on boards where allow_archive = false.  This closes the silent data
         // loss gap where a thread could disappear simply because a board hit
@@ -2948,8 +2914,7 @@ pub fn reconcile_media_job_states(
     }
 }
 
-// ─── SpamCheck ────────────────────────────────────────────────────────────────
-
+// SpamCheck
 /// Records lightweight abuse signals for later operational review.
 fn run_spam_check(post_id: i64, ip_hash: &str, body_len: usize) {
     if body_len > 3500 {
@@ -2961,8 +2926,7 @@ fn run_spam_check(post_id: i64, ip_hash: &str, body_len: usize) {
     let _ = ip_hash;
 }
 
-// ─── Thumbnail / waveform cache eviction ─────────────────────────────────────
-
+// Thumbnail / waveform cache eviction
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 /// Result of one database-aware thumbnail-cache eviction pass.
 pub struct ThumbCacheEvictionReport {

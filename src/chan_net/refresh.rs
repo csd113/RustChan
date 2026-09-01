@@ -51,8 +51,6 @@ pub static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 pub async fn chan_refresh(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, super::ChanError> {
-    // ── Build snapshot on a blocking thread ──────────────────────────────
-    // Use ? directly — AppError implements From<r2d2::Error>.
     let conn = state.db.get()?;
 
     let (zip_bytes, tx_id) =
@@ -61,7 +59,7 @@ pub async fn chan_refresh(
             .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))? // JoinError
             .map_err(AppError::from)?; // anyhow::Error from build_snapshot
 
-    // ── Assemble multipart form ───────────────────────────────────────────
+    // Assemble multipart form
     let part = reqwest::multipart::Part::bytes(zip_bytes)
         .file_name("snapshot.zip")
         .mime_str("application/zip")
@@ -69,7 +67,7 @@ pub async fn chan_refresh(
 
     let form = reqwest::multipart::Form::new().part("snapshot", part);
 
-    // ── POST to RustWave ─────────────────────────────────────────────────
+    // POST to RustWave
     let url = format!("{}/broadcast/transmit", CONFIG.rustwave_url);
 
     let mut resp = HTTP_CLIENT
@@ -85,7 +83,6 @@ pub async fn chan_refresh(
         );
     }
 
-    // ── Parse broadcast tx_id from RustWave response ─────────────────────
     let response_bytes = read_response_body_limited(
         &mut resp,
         RUSTWAVE_JSON_RESPONSE_MAX_BYTES,

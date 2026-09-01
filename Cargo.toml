@@ -1,9 +1,9 @@
 [package]
 name = "rustchan"
-version = "1.4.0"
+version = "1.4.1"
 edition = "2021"
-# Arti 0.44 requires Rust 1.91; keep the package MSRV and cargo-msrv metadata
-# in sync with the current dependency set.
+# Keep the package MSRV and cargo-msrv metadata aligned with Arti's Rust 1.91
+# requirement.
 rust-version.workspace = true
 license = "MIT"
 description = "Self-contained imageboard — single binary, zero runtime dependencies"
@@ -45,7 +45,7 @@ tokio      = { version = "1.53.1", features = ["full"] }
 tokio-util = "0.7.19"
 captcha    = { version = "1.0.0", default-features = false }
 
-# Arti 0.44's tor-dirmgr requires rusqlite >=0.36,<0.40. Because rusqlite
+# Arti's tor-dirmgr requires rusqlite >=0.36,<0.40. Because rusqlite
 # and libsqlite3-sys expose Cargo `links`, r2d2_sqlite 0.35/rusqlite 0.40
 # cannot coexist in the same graph. These are the newest Arti-compatible pair.
 rusqlite    = { version = "0.39.0", features = ["bundled", "backup"] }
@@ -71,9 +71,7 @@ getrandom = { version = "0.4.3", features = ["sys_rng"] }
 
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "ico"] }
 
-# EXIF orientation correction: read Orientation tag from JPEG uploads and
-# apply the corresponding rotation before thumbnailing so that photos taken
-# on phones display upright (4.1).
+# Apply JPEG Orientation tags before thumbnailing so phone photos display upright.
 kamadak-exif = "0.6.1"
 
 clap = { version = "4.6.4", features = ["derive"] }
@@ -86,14 +84,11 @@ anyhow       = "1.0.104"
 regex     = "1.13.1"
 ipnet     = "2.12.0"
 
-# zip 8: SimpleFileOptions and core ZipWriter/ZipArchive API unchanged.
-# by_index(), start_file(), add_directory(), finish() all stable.
-# Use file_names() iterator for name-only pre-flight scans (cleaner than
-# by_index_raw which is now by_index_without_decompression in zip 8).
+# Backup preflight scans use `file_names()` without decompressing entries.
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
-# ── HTTP client ────────────────────────────────────────────────────────────────
-# reqwest for federation push (chan_refresh) and pull (chan_poll).
+# HTTP client
+# reqwest handles federation push and pull.
 # default-features = false  →  prevents the default "native-tls" backend from
 #                               being compiled in.
 # rustls-no-provider keeps the build on the pure-Rust TLS stack and avoids
@@ -113,18 +108,17 @@ tracing-appender   = "0.2.5"
 thiserror = "2.0.19"
 tempfile  = "3.27.0"
 
-# ── Tor / onion-service stack ──────────────────────────────────────────────────
-# F-09: Use rustls throughout — native-tls would pull in OpenSSL as a
-# transitive dep, causing a dynamic link against libssl/libcrypto and breaking
-# cross-compilation to aarch64-unknown-linux-gnu.
+# Tor / onion-service stack
+# Use rustls throughout; native-tls links OpenSSL and breaks the supported
+# aarch64-unknown-linux-gnu cross-compilation path.
 #
-# CRITICAL: `default-features = false` is REQUIRED on every arti crate.
+# `default-features = false` is required on every Arti crate.
 # Cargo features are purely additive — without it, `arti-client`'s default
 # feature set enables `native-tls` IN ADDITION TO `rustls`, pulling in
 # openssl-sys even though rustls is also listed. The `rustls` feature alone
 # does not prevent the native-tls default from activating.
 #
-# Post-change verification:
+# Verification:
 #   cargo tree --edges features | grep -iE "openssl|native.tls"   # expect nothing
 #   cargo tree -i openssl-sys                                       # expect error: not found
 # Arti 0.45.0 requires Rust 1.91 and makes its stable congestion control a
@@ -142,9 +136,8 @@ futures       = "0.3.33"
 sha3          = "0.12.0"
 data-encoding = "2.11.0"
 
-# ── TLS ───────────────────────────────────────────────────────────────────────
-# rustls-pki-types: standalone PKI types crate split out of rustls 0.23+.
-# Required directly by src/tls/mod.rs (CertificateDer, PrivateKeyDer, PemObject).
+# TLS
+# rustls-pki-types provides the certificate and key types used by src/tls/mod.rs.
 rustls-pki-types = "1.15.1"
 # RustChan installs rustls's ring provider explicitly at startup. Keep every
 # TLS consumer on that provider instead of also compiling the unused aws-lc-rs
@@ -163,9 +156,8 @@ axum-server    = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
 hyper          = { version = "1.11.0", features = ["http1", "http2", "server"], optional = true }
 hyper-util     = { version = "0.1.20", features = ["tokio", "server"] }
 
-# ── Terminal UI ───────────────────────────────────────────────────────────────
-# crossterm: required by src/server/console/ (wizard.rs, input.rs, mod.rs).
-# Provides cross-platform terminal control (cursor, events, raw mode).
+# Terminal UI
+# crossterm provides cross-platform cursor, event, and raw-mode control.
 crossterm = "0.29.0"
 
 [target.'cfg(unix)'.dependencies]
@@ -176,15 +168,6 @@ rustix = { version = "1.1.4", features = ["fs"] }
 default         = ["tls-self-signed"]
 tls-self-signed = ["dep:rcgen", "dep:pem-rfc7468", "dep:x509-cert"]
 tls-acme        = ["dep:hyper", "dep:rustls-acme"]
-
-# ── Safety net ────────────────────────────────────────────────────────────────
-# If a future dependency version change re-introduces openssl-sys as a
-# transitive dep, the build will fail here with a clear error rather than
-# silently linking a dynamic libssl.  Uncomment and point at a stub crate if
-# `cargo tree -i openssl-sys` ever returns a result:
-#
-# [patch.crates-io]
-# openssl-sys = { path = "patches/openssl-sys-stub" }
 
 [lints]
 workspace = true

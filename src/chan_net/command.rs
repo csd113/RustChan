@@ -39,8 +39,7 @@ use super::selective_snapshot::{
 };
 use crate::{error::AppError, middleware::AppState};
 
-// ── ChanJson extractor ────────────────────────────────────────────────────────
-//
+// ChanJson extractor
 // axum's built-in `Json` extractor maps all deserialization failures
 // (missing required fields, wrong types, syntax errors) to HTTP 422.
 // `/chan/command` must return 400 for those cases.
@@ -88,8 +87,7 @@ where
     }
 }
 
-// ── Command enum ──────────────────────────────────────────────────────────────
-
+// Command enum
 /// Maximum number of Unicode scalar values accepted in a gateway reply body.
 const MAX_REPLY_CONTENT_CHARS: usize = 32_768;
 /// Maximum number of Unicode scalar values accepted in a gateway author name.
@@ -206,8 +204,7 @@ pub enum Command {
     },
 }
 
-// ── Handler ───────────────────────────────────────────────────────────────────
-
+// Handler
 /// `POST /chan/command`
 ///
 /// Accepts a JSON body (Content-Type: application/json, body ≤
@@ -238,7 +235,6 @@ pub async fn chan_command(
     State(state): State<AppState>,
     ChanJson(cmd): ChanJson<Command>,
 ) -> Result<impl IntoResponse, super::ChanError> {
-    // Use ? directly — AppError implements From<r2d2::Error>.
     let conn = state.db.get()?;
 
     let (zip_bytes, filename) =
@@ -282,10 +278,10 @@ pub async fn chan_command(
                     timestamp,
                     message_id,
                 } => {
-                    // ── Input validation — must happen before any DB write ──
+                    // Input validation — must happen before any DB write
                     validate_reply_text(&author, &content)?;
 
-                    // ── DB write ───────────────────────────────────────────
+                    // DB write
                     // insert_reply_into_thread validates thread existence,
                     // board membership, and archive status internally.
                     crate::db::chan_net::insert_reply_into_thread(
@@ -298,7 +294,6 @@ pub async fn chan_command(
                         message_id.as_ref(),
                     )?;
 
-                    // Return the updated thread as the confirmation payload.
                     // `since = None` so that the full thread (including the new
                     // post) is always included in the response ZIP.
                     let (zip, _) = build_thread_snapshot(&conn, thread_id, None)?;

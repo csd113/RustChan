@@ -16,16 +16,12 @@ const DEFAULT_THEME_WORKSHOP_PRESET: &str = "forest";
 const MAX_ADVANCED_CSS_LEN: usize = 12_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Variants supported by the theme editor mode workflow.
 enum ThemeEditorMode {
-    /// Represents the builder case.
     Builder,
-    /// Represents the legacy case.
     Legacy,
 }
 
 impl ThemeEditorMode {
-    /// Performs the from field handler operation.
     fn from_field(value: Option<&str>) -> Self {
         if value.is_some_and(|item| item.eq_ignore_ascii_case("legacy")) {
             Self::Legacy
@@ -36,119 +32,68 @@ impl ThemeEditorMode {
 }
 
 #[derive(Deserialize)]
-/// Data used by the theme builder fields workflow.
 pub(crate) struct ThemeBuilderFields {
-    /// The optional base preset.
     pub base_preset: Option<String>,
-    /// The optional background color.
     pub background_color: Option<String>,
-    /// The optional panel color.
     pub panel_color: Option<String>,
-    /// The optional card color.
     pub card_color: Option<String>,
-    /// The optional op card color.
     pub op_card_color: Option<String>,
-    /// The optional text color.
     pub text_color: Option<String>,
-    /// The optional muted text color.
     pub muted_text_color: Option<String>,
-    /// The optional link color.
     pub link_color: Option<String>,
-    /// The optional link hover color.
     pub link_hover_color: Option<String>,
-    /// The optional border color.
     pub border_color: Option<String>,
-    /// The optional input background color.
     pub input_background_color: Option<String>,
-    /// The optional input text color.
     pub input_text_color: Option<String>,
-    /// The optional input border color.
     pub input_border_color: Option<String>,
-    /// The optional button background color.
     pub button_background_color: Option<String>,
-    /// The optional button text color.
     pub button_text_color: Option<String>,
-    /// The optional button border color.
     pub button_border_color: Option<String>,
-    /// The optional button hover color.
     pub button_hover_color: Option<String>,
-    /// The optional header background color.
     pub header_background_color: Option<String>,
-    /// The optional header text color.
     pub header_text_color: Option<String>,
-    /// The optional header border color.
     pub header_border_color: Option<String>,
-    /// The optional quote color.
     pub quote_color: Option<String>,
-    /// The optional meta text color.
     pub meta_text_color: Option<String>,
-    /// The optional success color.
     pub success_color: Option<String>,
-    /// The optional danger color.
     pub danger_color: Option<String>,
-    /// The optional border radius px.
     pub border_radius_px: Option<String>,
-    /// The optional density.
     pub density: Option<String>,
-    /// The optional font family.
     pub font_family: Option<String>,
-    /// The optional advanced CSS.
     pub advanced_css: Option<String>,
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the create theme request.
 pub(crate) struct CreateThemeForm {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
-    /// The slug.
     pub slug: String,
-    /// The display name.
     pub display_name: String,
-    /// The optional description.
     pub description: Option<String>,
-    /// The optional swatch hex.
     pub swatch_hex: Option<String>,
-    /// The optional theme mode.
     pub theme_mode: Option<String>,
-    /// The optional custom CSS.
     pub custom_css: Option<String>,
     #[serde(flatten)]
-    /// The builder.
     pub builder: ThemeBuilderFields,
-    /// Whether this item is enabled.
     pub enabled: Option<String>,
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the update theme request.
 pub(crate) struct UpdateThemeForm {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
-    /// The existing slug.
     pub existing_slug: String,
-    /// The slug.
     pub slug: String,
-    /// The display name.
     pub display_name: String,
-    /// The optional description.
     pub description: Option<String>,
-    /// The optional swatch hex.
     pub swatch_hex: Option<String>,
-    /// The optional theme mode.
     pub theme_mode: Option<String>,
-    /// The optional custom CSS.
     pub custom_css: Option<String>,
     #[serde(flatten)]
-    /// The builder.
     pub builder: ThemeBuilderFields,
-    /// Whether this item is enabled.
     pub enabled: Option<String>,
 }
 
-/// Sanitizes builder color.
 fn sanitize_builder_color(label: &str, raw_value: Option<&str>, fallback: &str) -> Result<String> {
     let value = raw_value.unwrap_or(fallback).trim();
     if value.len() == 7
@@ -163,7 +108,6 @@ fn sanitize_builder_color(label: &str, raw_value: Option<&str>, fallback: &str) 
     }
 }
 
-/// Sanitizes builder advanced CSS.
 fn sanitize_builder_advanced_css(raw_value: Option<&str>) -> Result<String> {
     let trimmed = raw_value.unwrap_or("").trim();
     if trimmed.is_empty() {
@@ -194,7 +138,6 @@ fn sanitize_builder_advanced_css(raw_value: Option<&str>) -> Result<String> {
     Ok(trimmed.to_owned())
 }
 
-/// Resolves builder swatch.
 fn resolve_builder_swatch(raw_value: Option<&str>, fallback: &str) -> String {
     let trimmed = raw_value.unwrap_or("").trim();
     if trimmed.len() == 7
@@ -207,7 +150,6 @@ fn resolve_builder_swatch(raw_value: Option<&str>, fallback: &str) -> String {
     }
 }
 
-/// Parses radius.
 fn parse_radius(raw_value: Option<&str>, fallback: u8) -> Result<u8> {
     raw_value
         .unwrap_or("")
@@ -227,7 +169,6 @@ fn parse_radius(raw_value: Option<&str>, fallback: u8) -> Result<u8> {
         })
 }
 
-/// Parses density.
 fn parse_density(raw_value: Option<&str>, fallback: ThemeDensity) -> Result<ThemeDensity> {
     raw_value.map_or(Ok(fallback), |value| {
         ThemeDensity::parse(value.trim())
@@ -235,7 +176,6 @@ fn parse_density(raw_value: Option<&str>, fallback: ThemeDensity) -> Result<Them
     })
 }
 
-/// Parses font family.
 fn parse_font_family(
     raw_value: Option<&str>,
     fallback: ThemeFontFamily,
@@ -253,7 +193,6 @@ fn parse_font_family(
     clippy::too_many_lines,
     reason = "builder defaults, submitted overrides, and range validation produce one coherent theme config"
 )]
-/// Resolves builder config.
 fn resolve_builder_config(
     fields: &ThemeBuilderFields,
     existing_theme: Option<&crate::models::Theme>,
@@ -401,7 +340,6 @@ fn resolve_builder_config(
     })
 }
 
-/// Performs the resolved theme CSS for create handler operation.
 fn resolved_theme_css_for_create(form: &CreateThemeForm, slug: &str) -> Result<(String, String)> {
     match ThemeEditorMode::from_field(form.theme_mode.as_deref()) {
         ThemeEditorMode::Builder => {
@@ -420,7 +358,6 @@ fn resolved_theme_css_for_create(form: &CreateThemeForm, slug: &str) -> Result<(
     }
 }
 
-/// Performs the resolved theme CSS for update handler operation.
 fn resolved_theme_css_for_update(
     form: &UpdateThemeForm,
     theme: &crate::models::Theme,
@@ -443,7 +380,6 @@ fn resolved_theme_css_for_update(
     }
 }
 
-/// Handles the create theme request.
 pub(crate) async fn create_theme(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -498,7 +434,6 @@ pub(crate) async fn create_theme(
     })
 }
 
-/// Handles the update theme request.
 pub(crate) async fn update_theme(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -573,16 +508,12 @@ pub(crate) async fn update_theme(
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the delete theme request.
 pub(crate) struct DeleteThemeForm {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
-    /// The slug.
     pub slug: String,
 }
 
-/// Handles the delete theme request.
 pub(crate) async fn delete_theme(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -611,8 +542,7 @@ pub(crate) async fn delete_theme(
     )
 }
 
-// ─── POST /admin/vacuum ───────────────────────────────────────────────────────
-//
+// POST /admin/vacuum
 // Runs SQLite VACUUM to reclaim space after bulk deletions.
 // Returns an inline result page showing DB size before and after.
 

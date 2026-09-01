@@ -169,9 +169,7 @@ fn needs_regeneration(cert_path: &Path, key_path: &Path) -> bool {
 fn remaining_validity_days(cert_path: &Path) -> Option<u64> {
     use x509_cert::der::Decode as _;
     let pem_bytes = std::fs::read(cert_path).ok()?;
-    // Extract the first certificate from the PEM bundle.
     let (_, pem) = pem_rfc7468::decode_vec(&pem_bytes).ok()?;
-    // Parse the DER-encoded certificate to reach the validity fields.
     let cert = x509_cert::Certificate::from_der(&pem).ok()?;
     // `not_after` is stored as an ASN.1 Time; convert via Unix timestamp.
     let not_after = cert.tbs_certificate().validity().not_after.to_system_time();

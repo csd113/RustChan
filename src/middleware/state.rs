@@ -1,5 +1,3 @@
-// src/middleware/state.rs
-
 use crate::error::AppError;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},

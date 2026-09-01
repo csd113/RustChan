@@ -398,7 +398,7 @@ pub fn migrate_runtime_layout_if_needed() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ─── Settings file structure ──────────────────────────────────────────────────
+// Settings file structure
 #[derive(Deserialize, Default)]
 /// Optional values deserialized from `settings.toml`.
 struct SettingsFile {
@@ -528,7 +528,7 @@ struct SettingsFile {
     /// `SQLite` connection pool size. Default: 8.
     /// Increase on high-traffic deployments; each connection uses ~32 MiB page cache.
     db_pool_size: Option<u32>,
-    // ── ChanNet / RustWave gateway ────────────────────────────────────────────
+    // ChanNet / RustWave gateway
     /// Base URL of the connected `RustWave` instance.
     /// Must begin with http:// or https://. Default: <http://localhost:7071>.
     rustwave_url: Option<String>,
@@ -624,7 +624,7 @@ pub fn generate_settings_file_if_missing() {
     }
 }
 
-// ─── TLS configuration ───────────────────────────────────────────────────────
+// TLS configuration
 #[derive(Debug, Clone, serde::Deserialize)]
 /// HTTPS listener and certificate-source configuration.
 pub struct TlsConfig {
@@ -724,7 +724,6 @@ fn default_acme_dir() -> String {
     "runtime/tls/acme".into()
 }
 
-// ─── Runtime config ───────────────────────────────────────────────────────────
 /// Lazily loaded process-wide runtime configuration.
 pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::from_env);
 /// Runtime-adjustable `FFmpeg` timeout.
@@ -784,7 +783,7 @@ pub fn describe_timeout_secs(timeout_secs: u64) -> String {
 )]
 /// Fully resolved runtime configuration.
 pub struct Config {
-    // ── Loaded from settings.toml (env vars still override) ──────────────────
+    // Loaded from settings.toml (env vars still override)
     /// Public forum name.
     pub forum_name: String,
     /// Initial subtitle shown on the home page; seeds the DB on first run and
@@ -817,7 +816,7 @@ pub struct Config {
     pub max_video_size: usize, // bytes
     /// Maximum accepted audio upload size in bytes.
     pub max_audio_size: usize, // bytes,
-    // ── External tool settings ────────────────────────────────────────────────
+    // External tool settings
     /// When true, Tor is probed at startup and hints are printed.
     pub enable_tor_support: bool,
     /// When true, the server binds to loopback only and is reachable exclusively
@@ -838,7 +837,7 @@ pub struct Config {
     /// Global feature gate for arbitrary uploads. Boards can only enable the
     /// per-board toggle when this is true.
     pub enable_any_file_uploads_feature: bool,
-    // ── Internal / env-only settings ─────────────────────────────────────────
+    // Internal / env-only settings
     /// Interface or host used by the primary listener.
     pub bind_addr: String,
     /// `SQLite` database file path.
@@ -916,7 +915,7 @@ pub struct Config {
     pub blocking_threads: usize,
     /// `SQLite` `r2d2` connection pool size (default 8).
     pub db_pool_size: u32,
-    // ── ChanNet / RustWave gateway ───────────────────────────────────────────
+    // ChanNet / RustWave gateway
     /// Base URL of the connected `RustWave` instance (must begin with http:// or https://).
     /// Validated at startup by `Config::validate()`.
     pub rustwave_url: String,
@@ -931,7 +930,7 @@ pub struct Config {
     /// Pre-shared key required on X-ChanNet-Key header for /chan/refresh and
     /// /chan/poll. An empty string means those endpoints are disabled entirely.
     pub chan_net_api_key: String,
-    // ── TLS / HTTPS ───────────────────────────────────────────────────────────
+    // TLS / HTTPS
     /// TLS configuration. Defaults to disabled so existing installs are unaffected.
     pub tls: TlsConfig,
 }
@@ -1080,7 +1079,6 @@ impl std::fmt::Debug for Config {
 impl Config {
     /// Load settings and environment overrides into one validated runtime shape.
     #[must_use]
-    // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
     #[expect(
         clippy::too_many_lines,
         reason = "configuration loading keeps precedence and defaults together for auditability"
@@ -1192,8 +1190,7 @@ impl Config {
             );
             hex::encode(b)
         };
-        // ── ChanNet fields ───────────────────────────────────────────────────
-        // Use as_deref() to borrow rather than move the Option<String> fields.
+        // ChanNet fields
         let rustwave_url = env::var("CHAN_RUSTWAVE_URL").unwrap_or_else(|_| {
             s.rustwave_url
                 .as_deref()
@@ -1516,9 +1513,7 @@ impl Config {
             }
             drop(std::fs::remove_file(probe));
         }
-        // F-13: Pre-flight writability check for Arti data directories.
-        // Without this, a permissions error on these dirs only surfaces ~30 s
-        // into bootstrap as a cryptic internal error — invisible at startup.
+        // Fail startup before Tor bootstrap when its private directories are unusable.
         if self.enable_tor_support {
             for dir in [runtime_tor_state_dir(), runtime_tor_cache_dir()] {
                 ensure_private_dir(&dir).map_err(|e| {
@@ -1938,7 +1933,6 @@ pub fn update_settings_file_media_pruning(enabled: bool, max_size_bytes: u64) {
     );
 }
 
-// ─── Cookie secret rotation check ────────────────────────────────────────────
 /// Check whether the `cookie_secret` has changed since the last run by comparing
 /// a SHA-256 hash stored in the DB against the currently loaded secret.
 ///
@@ -1980,7 +1974,6 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
     ));
 }
 
-// ─── Env helpers ──────────────────────────────────────────────────────────────
 /// Read a string environment override or clone its default.
 fn env_str(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_owned())
@@ -2115,7 +2108,6 @@ mod tests {
     /// Serializes tests that replace the process-wide settings file.
     static SETTINGS_FILE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Standard fallible test result.
     type TestResult = anyhow::Result<()>;
 
     /// Original settings-file state restored after a mutating test.
@@ -2521,7 +2513,7 @@ auto_full_backup_copies_to_keep = 1
         let input = r#"# RustChan settings.toml
 forum_name = "RustChan"
 
-# ── Federation / ChanNet gateway ──────────────────────────────────────────────
+# ── Federation / ChanNet gateway ─────────────────────────────────────────────
 [tls]
 enabled = false
 "#;
@@ -2573,7 +2565,7 @@ homepage_new_thread_badges_enabled = true
 homepage_new_reply_badges_enabled = true
 thread_new_reply_badges_enabled = true
 
-# ── Network / web server ──────────────────────────────────────────────────────
+# ── Network / web server ─────────────────────────────────────────────────────
 port = 8080
 "#;
 

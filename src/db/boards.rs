@@ -1,8 +1,3 @@
-// db/boards.rs — Board-level queries and site settings.
-//
-// Covers: site_settings table, boards CRUD, delete_board (with file-safety
-// guard via super::paths_safe_to_delete), and aggregate site statistics.
-//
 use crate::models::{Board, BoardAccessMode, BoardBannerMode};
 use anyhow::{Context as _, Result};
 use rusqlite::{params, OptionalExtension as _};
@@ -27,8 +22,6 @@ const BOARD_SELECT_COLUMNS_WITH_ALIAS: &str = "b.id, b.display_order, b.short_na
     b.allow_self_delete, b.allow_archive, b.allow_video_embeds, b.allow_captcha, \
     b.show_poster_ids, b.collapse_greentext, b.post_cooldown_secs, \
     b.default_theme, b.banner_mode, b.access_mode, b.access_password_hash, b.created_at";
-
-// ─── Row mapper ───────────────────────────────────────────────────────────────
 
 /// Decode a board from the shared board-column projection.
 pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
@@ -156,12 +149,10 @@ fn normalize_board_group_order(
     Ok(())
 }
 
-// ─── Site settings ────────────────────────────────────────────────────────────
-
-/// Read a site-wide setting by key. Returns None if the key has never been set.
+// Site settings
+/// Read a site-wide setting by key. Returns `None` if the key has never been set.
 ///
-/// Switched to `prepare_cached` — convenience helpers (`get_site_name`,
-/// `get_site_subtitle`, etc.) call this on every page render.
+/// The statement is cached because convenience helpers call this on every page render.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -330,8 +321,7 @@ pub fn get_thread_new_reply_badges_enabled(conn: &rusqlite::Connection) -> bool 
     )
 }
 
-// ─── Board queries ────────────────────────────────────────────────────────────
-
+// Board queries
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
@@ -344,10 +334,7 @@ pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
     Ok(boards)
 }
 
-/// Like `get_all_boards` but also returns live thread count for each board.
-///
-/// Previously issued one COUNT(*) query per board (N+1). Replaced
-/// with a single LEFT JOIN query that computes all counts in one pass.
+/// Return every board with its live thread count in one joined query.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -528,7 +515,7 @@ pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Op
     Ok(stmt.query_row(params![short], map_board).optional()?)
 }
 
-/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+/// Create a test board and return its database identifier.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -574,8 +561,6 @@ pub fn create_board(
 
 /// Create a board with explicit per-media-type toggles.
 /// Used by the CLI and console board bootstrap paths.
-///
-/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -692,8 +677,6 @@ pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Re
 }
 
 /// Update all per-board settings from the admin panel.
-///
-/// Added rows-affected check.
 ///
 /// # Errors
 /// Returns an error if the database operation fails or the board id is not found.
@@ -855,8 +838,8 @@ pub fn update_board_settings(
 /// Returns how many seconds have elapsed since `ip_hash` last posted on `board_id`.
 /// Returns None if they have never posted on this board.
 ///
-/// Switched to `prepare_cached` — this is on the hot path (called
-/// for every post submission when a cooldown is configured).
+/// The statement is cached because this runs for every submission on boards
+/// with a posting cooldown.
 ///
 /// Note: `unixepoch()` requires `SQLite` ≥ 3.38.0 (2022-02-22).
 ///
@@ -880,16 +863,9 @@ pub fn get_seconds_since_last_post(
 
 /// Delete a board and return on-disk paths that are now safe to remove.
 ///
-/// Wrapped the entire operation in a transaction. Previously,
-/// file paths were collected before the CASCADE DELETE with no transaction
-/// guard, so a concurrent insert could race between the SELECT and the DELETE.
-///
-/// Replaced the three-way join (posts → threads → boards) with a
-/// direct query on `posts.board_id`. Posts already carry `board_id` so the threads
-/// join was both unnecessary and could hide orphaned posts.
-///
-/// Added an affected-rows check so callers see an error when
-/// trying to delete a board that doesn't exist.
+/// Path collection and the cascading delete share a transaction so concurrent
+/// inserts cannot make a collected path live again before deletion. Paths are
+/// selected directly by `posts.board_id`, including any orphaned posts.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -970,8 +946,7 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<super::Delet
     }
 }
 
-// ─── Per-board stats (terminal display) ──────────────────────────────────────
-
+// Per-board stats (terminal display)
 /// Per-board thread and post counts for the terminal stats display.
 pub fn get_per_board_stats(conn: &rusqlite::Connection) -> Vec<(String, i64, i64)> {
     // Replace N+1 correlated subqueries (2 subqueries × boards)
@@ -1000,17 +975,9 @@ pub fn get_per_board_stats(conn: &rusqlite::Connection) -> Vec<(String, i64, i64
     .unwrap_or_default()
 }
 
-// ─── Site statistics ──────────────────────────────────────────────────────────
-
-/// Gather aggregate site-wide statistics for the home page.
-///
-/// Previously issued five separate full-table scans (one COUNT(*)
-/// overall, three filtered COUNTs by `media_type`, one SUM). All five are now
-/// computed in a single aggregate pass over the posts table.
-///
-/// `active_bytes` now sums both `file_size` and `audio_file_size` so
-/// image+audio combo posts are fully accounted for. The previous query only
-/// summed `file_size` and silently under-reported disk usage.
+// Site statistics
+/// Gather aggregate site-wide statistics for the home page in one table scan.
+/// `active_bytes` includes both primary and audio attachment sizes.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.

@@ -60,8 +60,7 @@ allow   = ["MIT", "Apache-2.0", "BSD-2-Clause"]
 [bans]
 multiple-versions = "warn"
 
-# ── Pre-existing skips ─────────────────────────────────────────────────────────
-
+# Pre-existing skips
 # argon2 → password-hash → rand_core 0.6
 [[bans.skip]]
 name    = "rand_core"
@@ -99,7 +98,7 @@ version = "0.16"
 name    = "windows-sys"
 version = "0.61"
 
-# ── Arti transitive dep duplicates ────────────────────────────────────────────
+# Arti transitive dependency duplicates
 # These arise from arti-client / tor-hsservice pulling in newer versions of
 # crates that other parts of the tree already depend on at an older version.
 # All are benign version splits with no API conflicts in RustChan code.

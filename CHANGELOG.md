@@ -2,6 +2,12 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## RustChan 1.4.1
+
+### Improved
+
+- Audited implementation comments across the repository, removing generated and stale narration while retaining security, concurrency, compatibility, and operational rationale.
+
 ## RustChan 1.4.0
 
 ### Added

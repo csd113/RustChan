@@ -14,14 +14,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify, RwLock};
 
-// ─── Raw-mode safety flag ─────────────────────────────────────────────────────
-
+// Raw-mode safety flag
 /// True once raw mode is active. `cleanup()` CAS-es it to false so a second call
 /// is a guaranteed no-op even under concurrent access.
 static RAW_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-// ─── Console mode ─────────────────────────────────────────────────────────────
-
+// Console mode
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// Active full-screen console view.
 pub enum ConsoleMode {
@@ -53,15 +51,13 @@ pub enum WizardKind {
 /// Concurrently shared console view.
 pub type SharedConsoleMode = Arc<RwLock<ConsoleMode>>;
 
-// ─── Force-reload notifier ────────────────────────────────────────────────────
-
+// Force-reload notifier
 /// Shared between the key-dispatch task and the stats-refresh task.
 /// Sending a notification causes the refresh task to skip its next sleep
 /// and collect stats immediately.
 pub type ForceReload = Arc<Notify>;
 
-// ─── Shared stats ─────────────────────────────────────────────────────────────
-
+// Shared stats
 /// Concurrently shared console-statistics snapshot.
 pub type SharedStats = Arc<RwLock<ChanStats>>;
 
@@ -125,8 +121,6 @@ impl Default for ChanStats {
     }
 }
 
-// ─── cleanup() ───────────────────────────────────────────────────────────────
-
 /// Restore the terminal unconditionally. Safe to call from panic hooks, signal
 /// handlers, and normal shutdown paths. Uses CAS so a second call is a no-op.
 pub fn cleanup() {
@@ -143,8 +137,6 @@ pub fn cleanup() {
         ));
     }
 }
-
-// ─── render() ────────────────────────────────────────────────────────────────
 
 /// Render one frame. Returns immediately when mode is Wizard so wizard I/O
 /// is uncontested. Uses last-rendered diffing to skip identical frames.
@@ -198,8 +190,6 @@ fn normalise_newlines(s: &str) -> String {
     out
 }
 
-// ─── start() ─────────────────────────────────────────────────────────────────
-
 /// Minimum terminal width for the dashboard to render without wrapping.
 const MIN_COLS: u16 = 90;
 /// Minimum terminal height for the dashboard to render without wrapping.
@@ -223,7 +213,6 @@ pub fn start(
         cursor::Hide
     ));
 
-    // Ensure the window is wide and tall enough to display the dashboard
     // without wrapping or truncation.  Only resize if the current dimensions
     // are smaller than the minimum — never shrink a larger window.
     if let Ok((cols, rows)) = terminal::size() {
@@ -258,9 +247,8 @@ pub fn start(
     (key_rx, force_reload)
 }
 
-// ─── collect_stats() ─────────────────────────────────────────────────────────
-
 /// Collect a fresh `ChanStats` snapshot from the DB and global atomics.
+///
 /// Mutates the delta-tracking locals in place so req/s and other deltas
 /// are accurate across calls. Runs on the calling thread — use
 /// `tokio::task::block_in_place` at the call site when inside an async context.
@@ -269,7 +257,6 @@ pub fn start(
     clippy::cast_precision_loss,
     reason = "request-rate display intentionally converts a monotonic counter delta to floating point"
 )]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the collector receives the complete sampling state maintained by its caller"
@@ -362,8 +349,7 @@ pub fn collect_stats(
     }
 }
 
-// ─── Utility helpers ──────────────────────────────────────────────────────────
-
+// Utility helpers
 /// Return a directory tree's total size as a signed display value.
 fn dir_size_bytes(path: &str) -> i64 {
     walkdir_size(std::path::Path::new(path)).cast_signed()
@@ -418,11 +404,7 @@ fn process_rss_kb() -> u64 {
     0
 }
 
-// ─── prompt_create_first_admin() helpers ─────────────────────────────────────
-
-// These are module-level private functions (not inner functions) so that
-// the `clippy::items_after_statements` lint is satisfied — inner `fn` items
-// defined after the first statement in a function body trigger that lint.
+// Keep these module-level because Clippy rejects inner items after statements.
 
 /// Return an ANSI code only when colored output is enabled.
 fn first_admin_c(code: &'static str) -> &'static str {
@@ -433,25 +415,21 @@ fn first_admin_c(code: &'static str) -> &'static str {
     }
 }
 
-/// Return the platform-appropriate success marker.
 #[cfg(windows)]
 const fn first_admin_ok() -> &'static str {
     "OK"
 }
 
-/// Return the platform-appropriate success marker.
 #[cfg(not(windows))]
 const fn first_admin_ok() -> &'static str {
     "\u{2713}"
 }
 
-/// Return the platform-appropriate error marker.
 #[cfg(windows)]
 const fn first_admin_err() -> &'static str {
     "x"
 }
 
-/// Return the platform-appropriate error marker.
 #[cfg(not(windows))]
 const fn first_admin_err() -> &'static str {
     "\u{2717}"
@@ -546,8 +524,6 @@ fn first_admin_prompt_p(reader: &mut dyn std::io::BufRead) -> Option<String> {
         return Some(p1);
     }
 }
-
-// ─── prompt_create_first_admin() ─────────────────────────────────────────────
 
 /// First-run wizard. Called before the TUI starts, so stdout is in normal
 /// terminal mode — no raw mode toggling needed here.

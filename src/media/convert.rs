@@ -1,4 +1,3 @@
-// media/convert.rs
 //
 // Per-format conversion logic.
 //
@@ -121,8 +120,7 @@ pub fn convert_file(
     }
 }
 
-// ─── Internal conversion helpers ──────────────────────────────────────────────
-
+// Internal conversion helpers
 /// Convert any ffmpeg-readable image to WebP at quality 85.
 ///
 /// On ffmpeg failure, logs a warning and falls back to copying the original
@@ -280,8 +278,7 @@ fn upload_mime_to_static(mime: &str) -> &'static str {
     }
 }
 
-// ─── Path and size utilities ──────────────────────────────────────────────────
-
+// Path and size utilities
 /// Create a UUID-named sibling path for use as an atomic temp output.
 ///
 /// The temp file is given the same extension as `target` so that ffmpeg can

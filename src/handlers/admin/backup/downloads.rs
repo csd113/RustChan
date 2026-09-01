@@ -8,7 +8,6 @@ use super::{
 use axum::response::IntoResponse as _;
 use serde::Deserialize;
 
-/// Performs the temp board download token path handler operation.
 pub(super) fn temp_board_download_token_path(filename: &str) -> PathBuf {
     temp_board_download_dir().join(format!("{filename}.token"))
 }
@@ -45,7 +44,6 @@ pub(super) fn consume_temp_board_download_token(filename: &str, token: &str) -> 
     Ok(true)
 }
 
-/// Prunes stale temp board downloads.
 pub(super) fn prune_stale_temp_board_downloads() {
     let dir = temp_board_download_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -84,7 +82,6 @@ pub(super) fn prune_stale_temp_board_downloads() {
     }
 }
 
-/// Performs the safe backup file path handler operation.
 fn safe_backup_file_path(root: &Path, filename: &str) -> Result<PathBuf> {
     let path = root.join(filename);
     if !path.exists() {
@@ -97,16 +94,12 @@ fn safe_backup_file_path(root: &Path, filename: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-/// Data used by the temp file stream workflow.
 struct TempFileStream {
-    /// The optional inner.
     inner: Option<ReaderStream<tokio::fs::File>>,
-    /// The cleanup path.
     cleanup_path: Option<PathBuf>,
 }
 
 impl TempFileStream {
-    /// Creates a new value.
     fn new(file: tokio::fs::File, cleanup_path: PathBuf) -> Self {
         Self {
             inner: Some(ReaderStream::new(file)),
@@ -135,25 +128,17 @@ impl Drop for TempFileStream {
 }
 
 #[derive(Default, Deserialize)]
-/// Query parameters accepted by the download backup request.
 pub(crate) struct DownloadBackupQuery {
-    /// The optional cleanup.
     cleanup: Option<String>,
-    /// The optional token.
     token: Option<String>,
-    /// The optional part.
     part: Option<String>,
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the delete backup request.
 pub(crate) struct DeleteBackupForm {
-    /// The kind.
     kind: String,
-    /// The filename.
     filename: String,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
@@ -161,7 +146,6 @@ pub(crate) struct DeleteBackupForm {
     clippy::too_many_lines,
     reason = "authentication, token validation, checksum verification, and streaming form one download request"
 )]
-/// Handles the download backup request.
 pub(crate) async fn download_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -308,7 +292,6 @@ pub(crate) async fn download_backup(
         .into_response())
 }
 
-/// Handles the backup progress JSON request.
 pub(crate) async fn backup_progress_json(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -342,7 +325,6 @@ pub(crate) async fn backup_progress_json(
         .into_response())
 }
 
-/// Handles the delete backup request.
 pub(crate) async fn delete_backup(
     State(state): State<AppState>,
     jar: CookieJar,

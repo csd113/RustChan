@@ -1,30 +1,8 @@
-// db/chan_net.rs — Database helpers for the ChanNet federation and RustWave gateway layers.
-//
-// Three functions live here:
-//
-//   insert_board_if_absent    — idempotent board upsert used during federation import.
-//   insert_post_if_absent     — INSERT OR IGNORE into the chan_net_posts mirror table.
-//   insert_reply_into_thread  — write path from the RustWave gateway into the live posts
-//                               table. Validates thread existence, board membership, and
-//                               archive status before inserting. Bumps thread reply_count
-//                               and bumped_at on success.
-//
-// Schema verification notes (checked against src/db/posts.rs):
-//   - Post body column is `body`         (NOT `content`)
-//   - Post author column is `name`        (NOT `author`)
-//   - `body_html` is NOT NULL — set to plain text content for gateway-inserted posts
-//   - `ip_hash` is nullable — NULL for gateway posts (no inbound IP available)
-//   - `deletion_token` is NOT NULL — a fresh UUID v4 is generated per insert
-//   - `created_at` has a DB-level default of unixepoch() — omitted from INSERT
-//   - `is_op` is 0 for all replies
-
 use anyhow::Result;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension as _;
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
-
-// ── insert_board_if_absent ────────────────────────────────────────────────────
 
 /// Ensure a board with the given `short_name` exists in the `boards` table.
 ///
@@ -54,7 +32,6 @@ pub fn insert_board_if_absent(conn: &Connection, short_name: &str, title: &str) 
         return Ok(id);
     }
 
-    // Use INSERT … RETURNING id instead of last_insert_rowid().
     // last_insert_rowid() is connection-local; in a multi-connection pool another
     // write on the same connection between the INSERT and this call would return
     // the wrong row ID.
@@ -67,8 +44,7 @@ pub fn insert_board_if_absent(conn: &Connection, short_name: &str, title: &str) 
     Ok(id)
 }
 
-// ── insert_post_if_absent ─────────────────────────────────────────────────────
-
+// insert_post_if_absent
 /// Insert a remote post into the `chan_net_posts` federation mirror table.
 ///
 /// Uses `INSERT OR IGNORE` so duplicate imports (same `remote_post_id` /
@@ -145,8 +121,7 @@ pub fn claim_import_tx_id(conn: &Connection, tx_id: &Uuid) -> Result<()> {
     Ok(())
 }
 
-// ── insert_reply_into_thread ──────────────────────────────────────────────────
-
+// insert_reply_into_thread
 /// Domain separator for deterministic legacy reply replay tokens.
 const REPLY_REPLAY_DOMAIN: &[u8] = b"rustchan-channet-reply-v1\0";
 /// Prefix distinguishing caller-provided message identifiers.

@@ -1,4 +1,3 @@
-// handlers/admin/auth.rs
 //
 // Admin authentication: login, logout, session management.
 //
@@ -34,8 +33,7 @@ use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
-// ─── Admin login brute-force lockout ──────────────────────────────────
-//
+// Admin login brute-force lockout
 // After LOGIN_FAIL_LIMIT failed attempts within LOGIN_FAIL_WINDOW seconds the
 // IP is locked out for the remainder of that window.  On success the counter
 // is cleared immediately so a genuine admin is never self-locked.
@@ -51,10 +49,8 @@ const ADMIN_LOGIN_CSRF_SCOPE: &str = "admin-login";
 
 /// `ip_hash` → (`fail_count`, `window_start_secs`)
 static ADMIN_LOGIN_FAILS: LazyLock<DashMap<String, (u32, u64)>> = LazyLock::new(DashMap::new);
-/// Shared state for login cleanup secs.
 static LOGIN_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
 
-/// Performs the login now secs handler operation.
 fn login_now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -62,7 +58,6 @@ fn login_now_secs() -> u64 {
         .as_secs()
 }
 
-/// Performs the login IP key handler operation.
 fn login_ip_key(ip: &str) -> String {
     use sha2::{Digest as _, Sha256};
     let mut h = Sha256::new();
@@ -70,7 +65,6 @@ fn login_ip_key(ip: &str) -> String {
     hex::encode(h.finalize())
 }
 
-/// Performs the redact login username handler operation.
 fn redact_login_username(username: &str) -> String {
     let trimmed = username.trim();
     if trimmed.is_empty() {
@@ -124,7 +118,6 @@ fn record_login_fail(ip_key: &str) -> u32 {
     *count
 }
 
-/// Clears login fails.
 fn clear_login_fails(ip_key: &str) {
     ADMIN_LOGIN_FAILS.remove(ip_key);
 }
@@ -169,7 +162,6 @@ fn ensure_admin_login_csrf(
     )
 }
 
-/// Handles the render admin login response request.
 async fn render_admin_login_response(
     state: &AppState,
     jar: CookieJar,
@@ -200,9 +192,7 @@ async fn render_admin_login_response(
         .into_response())
 }
 
-// ─── GET /admin ───────────────────────────────────────────────────────────────
-
-/// Handles the admin index request.
+// GET /admin
 pub(crate) async fn admin_index(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -244,21 +234,15 @@ pub(crate) async fn admin_index(
         .into_response())
 }
 
-// ─── POST /admin/login ────────────────────────────────────────────────────────
-
+// POST /admin/login
 #[derive(Deserialize)]
-/// Form fields accepted by the login request.
 pub(crate) struct LoginForm {
-    /// The username.
     username: String,
-    /// The password.
     password: String,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::cognitive_complexity,
     reason = "the authentication, lockout, and session issuance branches share one security boundary"
@@ -267,7 +251,6 @@ pub(crate) struct LoginForm {
     clippy::too_many_lines,
     reason = "authentication, lockout accounting, and session issuance form one security boundary"
 )]
-/// Handles the admin login request.
 pub(crate) async fn admin_login(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -356,7 +339,6 @@ pub(crate) async fn admin_login(
         }
         Some(admin_id) => {
             clear_login_fails(&ip_key);
-            // Create session (in spawn_blocking)
             let session_id = new_session_id();
             let bootstrap_session_id = session_id.clone();
             let expires_at = Utc::now().timestamp() + CONFIG.session_duration;
@@ -404,9 +386,7 @@ pub(crate) async fn admin_login(
     }
 }
 
-// ─── POST /admin/logout ───────────────────────────────────────────────────────
-
-/// Handles the admin logout request.
+// POST /admin/logout
 pub(crate) async fn admin_logout(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -512,8 +492,7 @@ mod tests {
         Ok(())
     }
 
-    // ── login_ip_key ─────────────────────────────────────────────────────────
-
+    // login_ip_key
     #[test]
     fn ip_key_is_hex_sha256() {
         let key = login_ip_key("127.0.0.1");
@@ -547,8 +526,7 @@ mod tests {
         assert!(!redacted.contains("<script>"));
     }
 
-    // ── is_login_locked ──────────────────────────────────────────────────────
-
+    // is_login_locked
     #[test]
     fn fresh_ip_is_not_locked() {
         let key = login_ip_key("test-fresh-ip-not-in-map");
@@ -557,13 +535,11 @@ mod tests {
 
     #[test]
     fn locked_after_exceeding_fail_limit() {
-        // Use a unique key so parallel tests don't interfere
         let key = login_ip_key("test-lock-unique-99887766");
         // Clean up any residue from a previous run
         ADMIN_LOGIN_FAILS.remove(&key);
 
         let now = login_now_secs();
-        // Insert exactly LOGIN_FAIL_LIMIT failures within the window
         ADMIN_LOGIN_FAILS.insert(key.clone(), (LOGIN_FAIL_LIMIT, now));
         assert!(is_login_locked(&key));
 

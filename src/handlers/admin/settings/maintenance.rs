@@ -11,45 +11,32 @@ use std::sync::atomic::Ordering;
 static PRE_REPAIR_BACKUP_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 #[derive(Deserialize)]
-/// Form fields accepted by the vacuum request.
 pub(crate) struct VacuumForm {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the database maintenance request.
 pub(crate) struct DbMaintenanceForm {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the media settings request.
 pub(crate) struct MediaSettingsForm {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
-    /// The `FFmpeg` timeout duration in seconds.
     pub ffmpeg_timeout_secs: Option<String>,
-    /// Whether media auto prune is enabled.
     pub media_auto_prune_enabled: Option<String>,
-    /// The optional media max active content size.
     pub media_max_active_content_size: Option<String>,
-    /// The optional media max active content size unit.
     pub media_max_active_content_size_unit: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
-/// Query parameters accepted by the database repair status request.
 pub(crate) struct DbRepairStatusQuery {
-    /// The job identifier.
     pub job_id: Option<u64>,
 }
 
-/// Creates pre repair backup.
 fn create_pre_repair_backup(
     pool: &db::DbPool,
     progress: &std::sync::Arc<crate::middleware::BackupProgress>,
@@ -75,7 +62,6 @@ fn create_pre_repair_backup(
     )
 }
 
-/// Parses `FFmpeg` timeout secs input.
 fn parse_ffmpeg_timeout_secs_input(input: Option<&str>) -> Result<u64> {
     let raw = input
         .map(str::trim)
@@ -88,7 +74,6 @@ fn parse_ffmpeg_timeout_secs_input(input: Option<&str>) -> Result<u64> {
         .map_err(|error| AppError::BadRequest(error.to_string()))
 }
 
-/// Parses media prune size input.
 fn parse_media_prune_size_input(
     enabled: bool,
     value: Option<&str>,
@@ -136,7 +121,6 @@ fn parse_media_prune_size_input(
     Ok(bytes)
 }
 
-/// Handles the update media settings request.
 pub(crate) async fn update_media_settings(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -198,7 +182,6 @@ pub(crate) async fn update_media_settings(
     )
 }
 
-/// Handles the admin vacuum request.
 pub(crate) async fn admin_vacuum(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -253,7 +236,6 @@ pub(crate) async fn admin_vacuum(
     Ok((jar, Html(html)).into_response())
 }
 
-/// Handles the admin database check request.
 pub(crate) async fn admin_db_check(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -300,7 +282,6 @@ pub(crate) async fn admin_db_check(
     Ok((jar, Html(html)).into_response())
 }
 
-/// Handles the admin database repair request.
 pub(crate) async fn admin_db_repair(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -403,7 +384,6 @@ pub(crate) async fn admin_db_repair(
     ))
 }
 
-/// Handles the admin database repair progress JSON request.
 pub(crate) async fn admin_db_repair_progress_json(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -434,7 +414,6 @@ pub(crate) async fn admin_db_repair_progress_json(
         .into_response())
 }
 
-/// Performs the database repair progress payload handler operation.
 fn db_repair_progress_payload(
     status: crate::middleware::DbMaintenanceJobStatus,
     backup_progress: &crate::middleware::BackupProgress,
@@ -528,7 +507,6 @@ fn db_repair_progress_payload(
     }
 }
 
-/// Performs the backup percent handler operation.
 fn backup_percent(phase: u64, files_done: u64, files_total: u64) -> u64 {
     match phase {
         crate::middleware::backup_phase::SNAPSHOT_DB => 35,
@@ -542,7 +520,6 @@ fn backup_percent(phase: u64, files_done: u64, files_total: u64) -> u64 {
     }
 }
 
-/// Performs the backup progress label handler operation.
 fn backup_progress_label(phase: u64, files_done: u64, files_total: u64) -> String {
     match phase {
         crate::middleware::backup_phase::SNAPSHOT_DB => {
@@ -567,7 +544,6 @@ fn backup_progress_label(phase: u64, files_done: u64, files_total: u64) -> Strin
     }
 }
 
-/// Handles the admin database repair status request.
 pub(crate) async fn admin_db_repair_status(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -600,7 +576,6 @@ pub(crate) async fn admin_db_repair_status(
     ))
 }
 
-/// Performs the database repair status URL handler operation.
 fn db_repair_status_url(job_id: Option<u64>) -> String {
     match job_id {
         Some(job_id) => format!("/admin/db/repair/status?job_id={job_id}"),
@@ -608,7 +583,6 @@ fn db_repair_status_url(job_id: Option<u64>) -> String {
     }
 }
 
-/// Builds the render database repair running response.
 fn render_db_repair_running_response(
     jar: &CookieJar,
     csrf: &str,
@@ -633,7 +607,6 @@ fn render_db_repair_running_response(
     response
 }
 
-/// Builds the render database repair entry response.
 fn render_db_repair_entry_response(
     jar: &CookieJar,
     csrf: &str,
@@ -657,7 +630,6 @@ fn render_db_repair_entry_response(
     }
 }
 
-/// Builds the render database repair status response.
 fn render_db_repair_status_response(
     jar: &CookieJar,
     csrf: &str,

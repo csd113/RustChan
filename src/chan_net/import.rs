@@ -10,15 +10,9 @@
 // `bytes::Bytes` plus the authenticated handler's processing guard rather than
 // reading from an Axum extractor internally.
 //
-// Order of operations inside do_import (MUST NOT be changed without updating
-// the security hardening checklist in channet_build_plan.md § 6.3):
-//
-//   1. Unpack and parse the ZIP (rejects unknown filenames — path traversal guard)
-//   2. Ed25519 signature check — log-and-skip if signature is present (not yet verified)
-//   3. Check TxLedger — reject duplicate tx_ids BEFORE any DB write
-//   4. Parse all untrusted identifiers and bounded text into validated values
-//   5. Atomically claim tx_id and write boards/posts in one DB transaction
-//   6. Record tx_id in the in-memory ledger after the transaction commits
+// Imports parse and validate the entire archive before writing, reject signed
+// snapshots until Ed25519 verification exists, claim the transaction ID and
+// persist content atomically, then publish the committed ID to the memory ledger.
 
 use anyhow::Context as _;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
@@ -223,8 +217,7 @@ fn commit_snapshot(
         .context("commit ChanNet snapshot transaction")
 }
 
-// ── do_import ─────────────────────────────────────────────────────────────────
-
+// do_import
 /// Core import logic shared by `chan_import` (POST /chan/import) and
 /// `chan_poll` (which drains the `RustWave` broadcast queue).
 ///
@@ -242,7 +235,6 @@ pub(super) async fn do_import(
     bytes: bytes::Bytes,
     processing_guard: &ChanImportGuard,
 ) -> Result<usize, AppError> {
-    // ── 1. Unpack ────────────────────────────────────────────────────────────
     let unpack_guard = processing_guard.clone();
     let (boards, posts, metadata) = tokio::task::spawn_blocking(move || {
         let _processing_guard = unpack_guard;
@@ -256,21 +248,20 @@ pub(super) async fn do_import(
     })?
     .map_err(|error| AppError::BadRequest(error.to_string()))?;
 
-    // ── 2. Ed25519 signature check ───────────────────────────────────────────
     // Verification is not yet implemented. Reject any signed snapshot rather
     // than silently accepting unverified data. A signed snapshot without
     // verification offers zero authenticity guarantee and exposes the
     // chan_net_posts table to arbitrary data injection.
     //
-    // This guard must be removed only when Phase N (Ed25519 verification) is
-    // fully implemented and tested (see channet_build_plan.md § 6.3).
+    // Accept signed snapshots only after Ed25519 verification is implemented
+    // and tested end to end.
     if metadata.signature.is_some() {
         return Err(AppError::BadRequest(
             "Ed25519 signature verification is not yet implemented.              Signed snapshots are rejected until Phase N is complete.".into(),
         ));
     }
 
-    // ── 3. Ledger check — must happen BEFORE any DB write ───────────────────
+    // Reject replayed transaction IDs before any database write.
     {
         let ledger_arc = state
             .chan_ledger
@@ -284,12 +275,11 @@ pub(super) async fn do_import(
         }
     } // ledger guard released here
 
-    // ── 4. Schema validation — before any DB write ───────────────────────────
+    // Validate the complete snapshot before any database write.
     let validated = validate_snapshot(boards, posts, &metadata)?;
     let post_count = validated.posts.len();
     let tx_id = metadata.tx_id;
 
-    // ── 5. Atomic DB transaction — all in one spawn_blocking ────────────────
     let mut conn = state.db.get()?;
 
     let commit_guard = processing_guard.clone();
@@ -309,7 +299,7 @@ pub(super) async fn do_import(
         return Err(AppError::from(error));
     }
 
-    // ── 6. Record tx_id in ledger after confirmed successful write ───────────
+    // Publish the transaction ID to the in-memory ledger only after commit.
     {
         let ledger_arc = state
             .chan_ledger
@@ -322,8 +312,7 @@ pub(super) async fn do_import(
     Ok(post_count)
 }
 
-// ── chan_import ───────────────────────────────────────────────────────────────
-
+// chan_import
 /// POST /chan/import — receives a federation snapshot ZIP as raw bytes.
 ///
 /// Returns `{"imported": N}` on success, where N is the number of posts in

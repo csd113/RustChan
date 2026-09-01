@@ -25,21 +25,15 @@ pub(crate) const README_FILE_NAME: &str = "README.txt";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-/// Variants supported by the backup scope workflow.
 pub(crate) enum BackupScope {
-    /// Represents the full site case.
     FullSite,
-    /// Represents the board case.
     Board,
-    /// Represents the selected boards case.
     SelectedBoards,
-    /// Represents the pre maintenance case.
     PreMaintenance,
 }
 
 impl BackupScope {
     #[must_use]
-    /// Performs the slug handler operation.
     pub(crate) const fn slug(self) -> &'static str {
         match self {
             Self::FullSite => "full-site",
@@ -52,21 +46,15 @@ impl BackupScope {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-/// Variants supported by the backup storage mode workflow.
 pub(crate) enum BackupStorageMode {
-    /// Represents the single ZIP case.
     SingleZip,
-    /// Represents the split ZIP case.
     SplitZip,
-    /// Represents the directory case.
     Directory,
-    /// Represents the legacy ZIP case.
     LegacyZip,
 }
 
 impl BackupStorageMode {
     #[must_use]
-    /// Performs the display name handler operation.
     pub(crate) const fn display_name(self) -> &'static str {
         match self {
             Self::SingleZip => "Single ZIP",
@@ -79,37 +67,21 @@ impl BackupStorageMode {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-/// Variants supported by the backup file kind workflow.
 pub(crate) enum BackupFileKind {
-    /// Represents the database case.
     Db,
-    /// Represents the settings case.
     Settings,
-    /// Represents the board JSON case.
     BoardJson,
-    /// Represents the thread export case.
     ThreadExport,
-    /// Represents the post export case.
     PostExport,
-    /// Represents the file inventory export case.
     FileInventoryExport,
-    /// Represents the original media case.
     OriginalMedia,
-    /// Represents the thumbnail case.
     Thumbnail,
-    /// Represents the audio case.
     Audio,
-    /// Represents the banner case.
     Banner,
-    /// Represents the favicon case.
     Favicon,
-    /// Represents the Tor key case.
     TorKey,
-    /// Represents the maintenance case.
     Maintenance,
-    /// Represents the pending fs ops case.
     PendingFsOps,
-    /// Represents the log case.
     Log,
 }
 
@@ -119,208 +91,132 @@ pub(crate) enum BackupFileKind {
     reason = "the flags are independent backup-content selections serialized in the manifest"
 )]
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-/// Data used by the backup include flags workflow.
 pub(crate) struct BackupIncludeFlags {
-    /// Whether the database setting is active.
     pub database: bool,
-    /// Whether the settings setting is active.
     pub settings: bool,
-    /// Whether the uploads setting is active.
     pub uploads: bool,
-    /// Whether the thumbnails setting is active.
     pub thumbnails: bool,
-    /// Whether the Tor keys setting is active.
     pub tor_keys: bool,
-    /// Whether the board exports setting is active.
     pub board_exports: bool,
-    /// Whether the file inventory setting is active.
     pub file_inventory: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-/// Data used by the database snapshot info workflow.
 pub(crate) struct DbSnapshotInfo {
-    /// The path.
     pub path: String,
-    /// The size.
     pub size: u64,
-    /// The SHA-256.
     pub sha256: String,
-    /// The optional integrity check.
     pub integrity_check: Option<String>,
-    /// The optional foreign key check.
     pub foreign_key_check: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-/// Data used by the backup file entry workflow.
 pub(crate) struct BackupFileEntry {
-    /// The logical path.
     pub logical_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The runtime logical path.
     pub runtime_logical_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional board.
     pub board: Option<String>,
-    /// The kind.
     pub kind: BackupFileKind,
-    /// The size.
     pub size: u64,
-    /// The SHA-256.
     pub sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional ZIP part.
     pub zip_part: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The ZIP entry path.
     pub zip_entry_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional compression method.
     pub compression_method: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-/// Data used by the backup part info workflow.
 pub(crate) struct BackupPartInfo {
-    /// The filename.
     pub filename: String,
-    /// The part index.
     pub part_index: u32,
-    /// The total parts.
     pub total_parts: u32,
-    /// The backup identifier.
     pub backup_id: String,
-    /// The size.
     pub size: u64,
-    /// The SHA-256.
     pub sha256: String,
-    /// The target part size.
     pub target_part_size: u64,
-    /// Whether the oversized setting is active.
     pub oversized: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-/// Data used by the maintenance metadata workflow.
 pub(crate) struct MaintenanceMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional operation.
     pub operation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The job identifier.
     pub job_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The requested timestamp.
     pub requested_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional risk class.
     pub risk_class: Option<String>,
-    /// Whether the includes uploads setting is active.
     pub includes_uploads: bool,
-    /// Whether the includes file inventory setting is active.
     pub includes_file_inventory: bool,
-    /// Whether the includes Tor keys setting is active.
     pub includes_tor_keys: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional reason.
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional pre integrity check.
     pub pre_integrity_check: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional pre foreign key check.
     pub pre_foreign_key_check: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Manifest data for backup.
 pub(crate) struct BackupManifest {
-    /// The format.
     pub format: String,
-    /// The archive container.
     pub archive_container: String,
-    /// The backup identifier.
     pub backup_id: String,
-    /// The created timestamp.
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The completed timestamp.
     pub completed_at: Option<i64>,
-    /// The rustchan version.
     pub rustchan_version: String,
-    /// The scope.
     pub scope: BackupScope,
-    /// The storage mode.
     pub storage_mode: BackupStorageMode,
     #[serde(default)]
-    /// The included boards collection.
     pub included_boards: Vec<crate::models::BackupBoardSummary>,
-    /// The includes.
     pub includes: BackupIncludeFlags,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional database snapshot.
     pub db_snapshot: Option<DbSnapshotInfo>,
     #[serde(default)]
-    /// The files collection.
     pub files: Vec<BackupFileEntry>,
     #[serde(default)]
-    /// The parts collection.
     pub parts: Vec<BackupPartInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional maintenance.
     pub maintenance: Option<MaintenanceMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-/// Data used by the backup metadata workflow.
 pub(crate) struct BackupMetadata {
-    /// The format.
     pub format: String,
-    /// The backup identifier.
     pub backup_id: String,
-    /// The scope.
     pub scope: BackupScope,
-    /// The storage mode.
     pub storage_mode: BackupStorageMode,
-    /// The created timestamp.
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The completed timestamp.
     pub completed_at: Option<i64>,
-    /// The total size size in bytes.
     pub total_size_bytes: u64,
-    /// Whether this item passed verification.
     pub verified: bool,
-    /// The number of parts.
     pub part_count: u32,
-    /// Whether the includes Tor keys setting is active.
     pub includes_tor_keys: bool,
     #[serde(default)]
-    /// The included boards collection.
     pub included_boards: Vec<crate::models::BackupBoardSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The manifest path.
     pub manifest_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// Data used by the directory stats workflow.
 pub(crate) struct DirectoryStats {
-    /// The files.
     pub files: u64,
-    /// The bytes.
     pub bytes: u64,
 }
 
 impl DirectoryStats {
     #[must_use]
-    /// Performs the zero handler operation.
     pub(crate) const fn zero() -> Self {
         Self { files: 0, bytes: 0 }
     }
 
-    /// Performs the saturating add assign handler operation.
     pub(crate) const fn saturating_add_assign(&mut self, other: &Self) {
         self.files = self.files.saturating_add(other.files);
         self.bytes = self.bytes.saturating_add(other.bytes);
@@ -328,45 +224,28 @@ impl DirectoryStats {
 }
 
 #[derive(Debug, Clone)]
-/// Data used by the saved backup layout workflow.
 pub(crate) struct SavedBackupLayout {
-    /// The root directory.
     pub root_dir: PathBuf,
-    /// The backup ref.
     pub backup_ref: String,
-    /// The manifest path.
     pub manifest_path: PathBuf,
-    /// The metadata path.
     pub metadata_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
-/// Data used by the verified saved v4 file workflow.
 pub(crate) struct VerifiedSavedV4File {
-    /// The logical path.
     pub logical_path: String,
-    /// The optional board.
     pub board: Option<String>,
-    /// The kind.
     pub kind: BackupFileKind,
-    /// The size.
     pub size: u64,
-    /// The SHA-256.
     pub sha256: String,
-    /// The source.
     pub source: VerifiedSavedV4FileSource,
 }
 
 #[derive(Debug, Clone)]
-/// Variants supported by the verified saved v4 file source workflow.
 pub(crate) enum VerifiedSavedV4FileSource {
-    /// Represents the root file case.
     RootFile(PathBuf),
-    /// Represents the ZIP entry case.
     ZipEntry {
-        /// The part path.
         part_path: PathBuf,
-        /// The entry path.
         entry_path: String,
     },
 }
@@ -374,48 +253,33 @@ pub(crate) enum VerifiedSavedV4FileSource {
 #[derive(Debug, Clone)]
 /// Point-in-time data for verified saved v4 database.
 pub(crate) struct VerifiedSavedV4DbSnapshot {
-    /// The file.
     pub file: VerifiedSavedV4File,
 }
 
 #[derive(Debug, Clone)]
-/// Data used by the verified saved v4 board layout workflow.
 pub(crate) struct VerifiedSavedV4BoardLayout {
-    /// The board JSON.
     pub board_json: VerifiedSavedV4File,
-    /// The upload files collection.
     pub upload_files: Vec<VerifiedSavedV4File>,
 }
 
 #[derive(Debug, Clone)]
-/// Data used by the verified saved v4 root workflow.
 pub(crate) struct VerifiedSavedV4Root {
-    /// The metadata.
     pub metadata: BackupMetadata,
-    /// The manifest.
     pub manifest: BackupManifest,
-    /// The completed timestamp.
     pub completed_at: i64,
-    /// The optional database snapshot.
     pub db_snapshot: Option<VerifiedSavedV4DbSnapshot>,
-    /// The site favicon files collection.
     pub site_favicon_files: Vec<VerifiedSavedV4File>,
-    /// The site banner files collection.
     pub site_banner_files: Vec<VerifiedSavedV4File>,
-    /// The Tor key files collection.
     pub tor_key_files: Vec<VerifiedSavedV4File>,
-    /// The boards collection.
     pub boards: HashMap<String, VerifiedSavedV4BoardLayout>,
 }
 
 #[must_use]
-/// Performs the backups root dir handler operation.
 pub(crate) fn backups_root_dir() -> PathBuf {
     crate::config::backups_dir()
 }
 
 #[must_use]
-/// Builds backup ID.
 pub(crate) fn build_backup_id(_scope: BackupScope, scope_label: &str) -> String {
     let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M").to_string();
     let short = uuid::Uuid::new_v4().simple().to_string();
@@ -424,7 +288,6 @@ pub(crate) fn build_backup_id(_scope: BackupScope, scope_label: &str) -> String 
     format!("{timestamp}_{scope_label}_{short}").replace("__", "_")
 }
 
-/// Creates backup root.
 pub(crate) fn create_backup_root(backup_id: &str) -> Result<PathBuf> {
     let root = backups_root_dir().join(backup_id);
     crate::config::ensure_private_dir(&root).map_err(|error| {
@@ -436,7 +299,6 @@ pub(crate) fn create_backup_root(backup_id: &str) -> Result<PathBuf> {
     Ok(root)
 }
 
-/// Performs the detect saved backup layout handler operation.
 pub(crate) fn detect_saved_backup_layout(root: &Path) -> Option<SavedBackupLayout> {
     if !root.is_dir() {
         return None;
@@ -454,7 +316,6 @@ pub(crate) fn detect_saved_backup_layout(root: &Path) -> Option<SavedBackupLayou
     })
 }
 
-/// Performs the iter saved backup layouts handler operation.
 pub(crate) fn iter_saved_backup_layouts() -> Vec<SavedBackupLayout> {
     let mut layouts = Vec::new();
     let Ok(entries) = std::fs::read_dir(backups_root_dir()) else {
@@ -469,7 +330,6 @@ pub(crate) fn iter_saved_backup_layouts() -> Vec<SavedBackupLayout> {
     layouts
 }
 
-/// Loads manifest.
 pub(crate) fn load_manifest(path: &Path) -> Result<BackupManifest> {
     let bytes = std::fs::read(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Read manifest {}: {error}", path.display()))
@@ -482,7 +342,6 @@ pub(crate) fn load_manifest(path: &Path) -> Result<BackupManifest> {
     })
 }
 
-/// Loads metadata.
 pub(crate) fn load_metadata(path: &Path) -> Result<BackupMetadata> {
     let bytes = std::fs::read(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
@@ -517,14 +376,12 @@ pub(crate) fn write_text(path: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Performs the SHA-256 hex for bytes handler operation.
 pub(crate) fn sha256_hex_for_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
 }
 
-/// Performs the SHA-256 hex for file handler operation.
 pub(crate) fn sha256_hex_for_file(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
@@ -535,7 +392,6 @@ pub(crate) fn sha256_hex_for_file(path: &Path) -> Result<String> {
     sha256_hex_for_reader(&mut file)
 }
 
-/// Performs the SHA-256 hex for reader handler operation.
 pub(crate) fn sha256_hex_for_reader<R: Read>(reader: &mut R) -> Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024].into_boxed_slice();
@@ -601,7 +457,6 @@ pub(crate) fn copy_reader_and_hash<R: Read, W: Write>(
     Ok((written, hex::encode(hasher.finalize())))
 }
 
-/// Performs the scan dir stats handler operation.
 pub(crate) fn scan_dir_stats(dir: &Path) -> DirectoryStats {
     if crate::utils::fs_security::assert_dir_no_symlink(dir).is_err() {
         return DirectoryStats::zero();
@@ -645,7 +500,6 @@ pub(crate) fn validate_backup_id_matches_parts(manifest: &BackupManifest) -> Res
     Ok(())
 }
 
-/// Builds readme.
 pub(crate) fn build_readme(
     manifest: &BackupManifest,
     metadata: &BackupMetadata,
@@ -710,7 +564,6 @@ pub(crate) fn write_root_checksums(root_dir: &Path, extra_paths: &[&Path]) -> Re
     write_text(&root_dir.join(CHECKSUMS_FILE_NAME), &lines)
 }
 
-/// Sanitizes logical path.
 pub(crate) fn sanitize_logical_path(path: &str) -> Result<()> {
     const SLASH_LIKE_SEPARATORS: [char; 5] =
         ['\u{2044}', '\u{2215}', '\u{29f8}', '\u{29f9}', '\u{ff0f}'];
@@ -746,7 +599,6 @@ pub(crate) fn sanitize_logical_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Performs the runtime upload path to logical handler operation.
 pub(crate) fn runtime_upload_path_to_logical(
     board_short: &str,
     runtime_relative_path: &str,
@@ -791,7 +643,6 @@ pub(crate) fn runtime_upload_path_to_logical(
     ))
 }
 
-/// Performs the logical upload path to runtime handler operation.
 pub(crate) fn logical_upload_path_to_runtime(
     logical_path: &str,
 ) -> Result<(String, BackupFileKind)> {
@@ -850,7 +701,6 @@ pub(crate) fn logical_upload_path_to_runtime(
     }
 }
 
-/// Performs the scope label handler operation.
 const fn scope_label(scope: BackupScope) -> &'static str {
     match scope {
         BackupScope::FullSite => "full_site",
@@ -860,7 +710,6 @@ const fn scope_label(scope: BackupScope) -> &'static str {
     }
 }
 
-/// Performs the expected scope label handler operation.
 fn expected_scope_label(expected_scopes: &[BackupScope]) -> String {
     expected_scopes
         .iter()
@@ -869,7 +718,6 @@ fn expected_scope_label(expected_scopes: &[BackupScope]) -> String {
         .join(" or ")
 }
 
-/// Resolves saved v4 file.
 fn resolve_saved_v4_file(root_dir: &Path, declared_path: &str, context: &str) -> Result<PathBuf> {
     sanitize_logical_path(declared_path)?;
     let candidate = root_dir.join(declared_path);
@@ -1153,7 +1001,6 @@ pub(crate) fn read_verified_file(file: &VerifiedSavedV4File) -> Result<Vec<u8>> 
     Ok(bytes)
 }
 
-/// Performs the verified file is root stored handler operation.
 const fn verified_file_is_root_stored(file: &VerifiedSavedV4File) -> bool {
     matches!(file.source, VerifiedSavedV4FileSource::RootFile(_))
 }
@@ -1269,7 +1116,6 @@ fn verify_split_part_path(root_dir: &Path, filename: &str) -> Result<PathBuf> {
     resolve_saved_v4_file(root_dir, filename, "Backup v4 split ZIP part")
 }
 
-/// Parses split part index.
 fn parse_split_part_index(filename: &str) -> Result<u32> {
     let Some(name) = filename.strip_prefix("parts/") else {
         return Err(AppError::BadRequest(format!(

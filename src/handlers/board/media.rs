@@ -9,7 +9,6 @@ use axum::http::header::{
 };
 use axum::response::IntoResponse as _;
 
-/// Performs the media content type handler operation.
 fn media_content_type(path: &std::path::Path) -> Option<&'static str> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("ico") => Some("image/x-icon"),
@@ -40,7 +39,6 @@ fn media_content_type(path: &std::path::Path) -> Option<&'static str> {
     }
 }
 
-/// Returns whether generated svg placeholder thumb.
 fn is_generated_svg_placeholder_thumb(media_path: &str) -> bool {
     let path = std::path::Path::new(media_path);
     path.extension()
@@ -52,7 +50,6 @@ fn is_generated_svg_placeholder_thumb(media_path: &str) -> bool {
             .is_some_and(|part| part.as_os_str() == "thumbs")
 }
 
-/// Performs the safe board media file handler operation.
 fn safe_board_media_file(
     base: &std::path::Path,
     media_path: &str,
@@ -60,7 +57,6 @@ fn safe_board_media_file(
     crate::utils::fs_security::existing_regular_file_child(base, media_path)
 }
 
-/// Returns whether not found error.
 fn is_not_found_error(error: &anyhow::Error) -> bool {
     error
         .chain()
@@ -68,7 +64,6 @@ fn is_not_found_error(error: &anyhow::Error) -> bool {
         .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
-/// Performs the stale webm redirect path handler operation.
 fn stale_webm_redirect_path(base: &std::path::Path, media_path: &str) -> Option<String> {
     let path = std::path::Path::new(media_path);
     if !path
@@ -83,16 +78,13 @@ fn stale_webm_redirect_path(base: &std::path::Path, media_path: &str) -> Option<
     Some(format!("/boards/{webm_path}"))
 }
 
-// Replaces the former nest_service(ServeDir) so we can intercept stale .mp4
-
-// links (created before the background transcoder replaced them with .webm)
-// and issue a permanent redirect. All other paths are served via ServeFile.
+// Legacy `.mp4` links redirect permanently to transcoded `.webm` files; all
+// other validated paths are served directly.
 
 #[expect(
     clippy::too_many_lines,
     reason = "path validation, access policy, legacy redirect handling, and file response form one request"
 )]
-/// Handles the serve board media request.
 pub(crate) async fn serve_board_media(
     State(state): State<AppState>,
     Path(media_path): Path<String>,
@@ -231,7 +223,6 @@ pub(crate) async fn serve_board_media(
     }
 }
 
-/// Performs the board media cache control handler operation.
 const fn board_media_cache_control(
     is_protected_board: bool,
     is_replaceable_asset: bool,
@@ -247,7 +238,6 @@ const fn board_media_cache_control(
     }
 }
 
-/// Performs the apply PDF embed headers handler operation.
 fn apply_pdf_embed_headers(headers: &mut HeaderMap) {
     headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("SAMEORIGIN"));
     headers.insert(
@@ -258,8 +248,7 @@ fn apply_pdf_embed_headers(headers: &mut HeaderMap) {
     );
 }
 
-// ─── GET /api/post/{board}/{post_id} ──────────────────────────────────────────
-//
+// GET /api/post/{board}/{post_id}
 // Lightweight JSON endpoint for cross-board quotelink hover previews.
 //
 // `post_id` is the **global** post ID (the AUTOINCREMENT primary key of the
@@ -274,7 +263,6 @@ fn apply_pdf_embed_headers(headers: &mut HeaderMap) {
 //
 // Response on failure: 404 { "error": "not found" }
 
-/// Handles the API post preview request.
 pub(crate) async fn api_post_preview(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
@@ -354,8 +342,7 @@ pub(crate) async fn api_post_preview(
     }
 }
 
-// ─── GET /{board}/post/{post_id} ──────────────────────────────────────────────
-//
+// GET /{board}/post/{post_id}
 // Canonical redirect for `>>>/board/N` links.  Resolves the global post ID to
 // its containing thread and issues a 302 to /{board}/thread/{thread_id}#p{post_id}.
 //
@@ -363,7 +350,6 @@ pub(crate) async fn api_post_preview(
 // the first hover preview the JS upgrades the href in-place so subsequent
 // clicks go directly to the thread anchor without a server round-trip.
 
-/// Handles the redirect to post request.
 pub(crate) async fn redirect_to_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
@@ -417,10 +403,6 @@ pub(crate) async fn redirect_to_post(
         (StatusCode::NOT_FOUND, Html(html)).into_response()
     }
 }
-
-// ─── POST /appeal ─────────────────────────────────────────────────────────────
-// Banned users submit a brief appeal message here.
-// Appeals appear in the admin panel under // ban appeals.
 
 #[cfg(test)]
 mod tests {

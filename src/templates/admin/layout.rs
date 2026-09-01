@@ -43,7 +43,6 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
 {backups_section}
 {maintenance_section}
 
-<!-- ── Backup progress modal ─────────────────────────────────────────────── -->
 <div id="backup-modal" class="compress-modal admin-modal-hidden" role="dialog" aria-modal="true" aria-labelledby="backup-modal-title" aria-hidden="true" hidden inert>
   <div class="compress-modal-box">
     <div class="compress-modal-title" id="backup-modal-title">&#128190; Creating Backup…</div>
@@ -116,9 +115,6 @@ fn render_admin_overview_section(view: &AdminPanelViewModel<'_>) -> String {
     format!(
         r#"<div class="admin-panel-overview" id="overview">
 {dashboard}
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     // live log
-     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section" id="live-log">
 <details class="admin-dropdown" data-admin-dropdown-key="live-log"{live_log_open_attr}>
 <summary>// live log</summary>

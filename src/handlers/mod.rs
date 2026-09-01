@@ -1,26 +1,16 @@
 // Request handlers.
 
-/// Implements admin handler support.
 pub(crate) mod admin;
-/// Implements banner handler support.
 pub(crate) mod banner;
-/// Implements board handler support.
 pub(crate) mod board;
-/// Implements captcha handler support.
 pub(crate) mod captcha;
-/// Implements favicon handler support.
 pub(crate) mod favicon;
-/// Implements posting handler support.
 pub(crate) mod posting;
-/// Implements render handler support.
 pub(crate) mod render;
-/// Implements setup handler support.
 pub(crate) mod setup;
-/// Implements thread handler support.
 pub(crate) mod thread;
 
-// ─── Shared multipart form parsing ───────────────────────────────────────────
-//
+// Shared multipart form parsing
 // Both create_thread and post_reply parse the same multipart fields.
 // This helper consolidates that duplicated logic into one place.
 
@@ -101,7 +91,6 @@ pub(crate) async fn enforce_public_multipart_envelope(
     Ok(next.run(request).await)
 }
 
-/// Parses the boundary parameter needed by the streaming envelope guard.
 fn parse_public_multipart_boundary(content_type: &str) -> Option<Vec<u8>> {
     let segments = split_mime_parameters(content_type)?;
     if !segments
@@ -201,7 +190,6 @@ struct MultipartEnvelopeScanner {
 }
 
 impl MultipartEnvelopeScanner {
-    /// Creates a scanner positioned before the first multipart boundary.
     fn new(boundary: &[u8]) -> Self {
         let mut first_boundary = Vec::with_capacity(boundary.len().saturating_add(2));
         first_boundary.extend_from_slice(b"--");
@@ -375,7 +363,6 @@ struct BytePatternMatcher {
 }
 
 impl BytePatternMatcher {
-    /// Builds the failure function for a non-empty byte pattern.
     fn new(pattern: Vec<u8>) -> Self {
         debug_assert!(
             !pattern.is_empty(),
@@ -433,7 +420,6 @@ impl BytePatternMatcher {
     }
 }
 
-/// Performs the multipart read error handler operation.
 fn multipart_read_error(
     context: &'static str,
     error: &axum::extract::multipart::MultipartError,
@@ -457,7 +443,6 @@ fn multipart_read_error(
     AppError::BadRequest(message)
 }
 
-/// Returns whether any error source contains a private streaming marker.
 fn error_chain_contains(error: &(dyn std::error::Error + 'static), needle: &str) -> bool {
     let mut current = Some(error);
     while let Some(source) = current {
@@ -470,16 +455,12 @@ fn error_chain_contains(error: &(dyn std::error::Error + 'static), needle: &str)
 }
 
 #[derive(Default)]
-/// Data used by the public multipart budget workflow.
 struct PublicMultipartBudget {
-    /// The fields seen.
     fields_seen: usize,
-    /// The bytes seen.
     bytes_seen: usize,
 }
 
 impl PublicMultipartBudget {
-    /// Performs the note field handler operation.
     fn note_field(&mut self) -> Result<()> {
         self.fields_seen = self.fields_seen.saturating_add(1);
         if self.fields_seen > PUBLIC_MULTIPART_MAX_FIELDS {
@@ -490,7 +471,6 @@ impl PublicMultipartBudget {
         Ok(())
     }
 
-    /// Performs the note chunk handler operation.
     fn note_chunk(&mut self, len: usize) -> Result<()> {
         self.bytes_seen = self.bytes_seen.saturating_add(len);
         if self.bytes_seen > PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES {
@@ -502,7 +482,6 @@ impl PublicMultipartBudget {
     }
 }
 
-/// Handles the read text field request.
 async fn read_text_field(
     mut field: axum::extract::multipart::Field<'_>,
     budget: &mut PublicMultipartBudget,
@@ -532,7 +511,6 @@ async fn read_text_field(
         .map_err(|_error| AppError::BadRequest("Multipart text field is not valid UTF-8.".into()))
 }
 
-/// Handles the discard unknown multipart field request.
 pub(crate) async fn discard_unknown_multipart_field(
     mut field: axum::extract::multipart::Field<'_>,
 ) -> Result<()> {
@@ -555,7 +533,6 @@ pub(crate) async fn discard_unknown_multipart_field(
     Ok(())
 }
 
-/// Handles the discard unknown public multipart field request.
 async fn discard_unknown_public_multipart_field(
     mut field: axum::extract::multipart::Field<'_>,
     budget: &mut PublicMultipartBudget,
@@ -580,21 +557,15 @@ async fn discard_unknown_public_multipart_field(
     Ok(())
 }
 
-// ─── Streaming multipart size limit ──────────────────────────────────────────
+// Streaming multipart size limit
 //
-// 3.1: The previous implementation called `field.bytes().await` which buffers
-// the entire file in memory before any size check, allowing a malicious client
-// to exhaust server RAM with a multi-GB upload.
-//
-// `stream_field_to_temp_file` writes chunks directly to disk and aborts —
-// returning HTTP 413 — the moment the running total exceeds the configured
-// board limit for that field.
+// Upload fields stream directly to disk and abort with HTTP 413 as soon as the
+// running total exceeds the configured board limit.
 //
 // Text fields (CSRF token, post body, …) use the same chunked parser with a
 // small fixed cap, so disabling Axum's route-level body limit for upload routes
 // does not leave text fields unbounded.
 
-/// Handles the stream field to temp file request.
 async fn stream_field_to_temp_file(
     mut field: axum::extract::multipart::Field<'_>,
     max_bytes: usize,
@@ -673,12 +644,10 @@ async fn stream_field_to_temp_file(
     })
 }
 
-/// Formats upload limit.
 fn format_upload_limit(max_bytes: usize) -> String {
     crate::utils::files::format_file_size(i64::try_from(max_bytes).unwrap_or(i64::MAX))
 }
 
-/// Handles the read upload field request.
 async fn read_upload_field(
     field: axum::extract::multipart::Field<'_>,
     max_bytes: usize,
@@ -715,13 +684,9 @@ async fn read_upload_field(
     Ok(Some((upload, fname)))
 }
 
-/// Data used by the temp upload workflow.
 pub(crate) struct TempUpload {
-    /// The temp file.
     pub temp_file: tempfile::NamedTempFile,
-    /// The sniff size in bytes.
     pub sniff_bytes: Vec<u8>,
-    /// The size size in bytes.
     pub size_bytes: usize,
 }
 
@@ -729,17 +694,11 @@ pub(crate) struct TempUpload {
 pub(crate) struct PostFormData {
     /// Permit acquired before the first non-empty media byte is staged.
     pub media_upload_guard: Option<crate::middleware::MediaUploadGuard>,
-    /// Whether the CSRF verified setting is active.
     pub csrf_verified: bool,
-    /// The submission token.
     pub submission_token: String,
-    /// The name.
     pub name: String,
-    /// The subject.
     pub subject: String,
-    /// The body.
     pub body: String,
-    /// The deletion token.
     pub deletion_token: String,
     /// Legacy/general upload slot (used for video or arbitrary files).
     pub file: Option<(TempUpload, String)>,
@@ -747,10 +706,8 @@ pub(crate) struct PostFormData {
     pub audio_file: Option<(TempUpload, String)>,
     /// Optional cover-image slot shown second in the posting UI.
     pub image_file: Option<(TempUpload, String)>,
-    // ── Poll fields (only used when creating a new thread) ────────────────
-    /// The poll question.
+    // Poll fields are used only when creating a new thread.
     pub poll_question: String,
-    /// The poll options collection.
     pub poll_options: Vec<String>,
     /// Duration in seconds (parsed from value + unit)
     pub poll_duration_secs: Option<i64>,
@@ -976,8 +933,7 @@ pub(crate) async fn parse_post_multipart(
     })
 }
 
-// ─── Upload error classifier (#6) ────────────────────────────────────────────
-
+// Upload error classifier (#6)
 /// Convert an anyhow error from `save_upload` into the most appropriate
 /// `AppError` variant, giving clients accurate HTTP status codes:
 ///   • "File too large"          → 413 `UploadTooLarge`
@@ -999,8 +955,7 @@ pub(crate) fn classify_upload_error(e: &anyhow::Error) -> AppError {
     }
 }
 
-// ─── Shared media upload processing (R2-2) ───────────────────────────────────
-//
+// Shared media upload processing (R2-2)
 // create_thread (board.rs) and post_reply (thread.rs) had identical blocks for:
 //   1. Magic-byte mime detection + per-board toggle enforcement
 //   2. SHA-256 deduplication lookup
@@ -1022,7 +977,6 @@ use crate::models::Board;
     clippy::too_many_arguments,
     reason = "the parameters mirror the validated upload, board policy, and destination records"
 )]
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "media validation, persistence, thumbnailing, and cleanup form one guarded operation"
@@ -1181,19 +1135,16 @@ pub(crate) fn process_primary_upload(
     Ok((Some(f), Some(hash)))
 }
 
-/// Performs the cached paths belong to board handler operation.
 fn cached_paths_belong_to_board(cached: &crate::db::CachedFile, board_short: &str) -> bool {
     upload_path_belongs_to_board(&cached.file_path, board_short)
         && (cached.thumb_path.is_empty()
             || upload_path_belongs_to_board(&cached.thumb_path, board_short))
 }
 
-/// Performs the upload path belongs to board handler operation.
 fn upload_path_belongs_to_board(path: &str, board_short: &str) -> bool {
     path.split('/').next() == Some(board_short)
 }
 
-/// Performs the temp upload MIME handler operation.
 fn temp_upload_mime(
     upload: &TempUpload,
     ffprobe_available: bool,
@@ -1259,12 +1210,10 @@ pub(crate) fn process_audio_combo(
     Ok(Some(aud_file))
 }
 
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the parameters represent the three optional media inputs and their shared post context"
 )]
-/// Processes audio first uploads.
 pub(crate) fn process_audio_first_uploads(
     audio_file_data: Option<(TempUpload, String)>,
     image_file_data: Option<(TempUpload, String)>,
@@ -1347,7 +1296,6 @@ pub(crate) fn process_audio_first_uploads(
     Ok((primary, None, primary_hash))
 }
 
-/// Performs the SHA-256 file hex handler operation.
 fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
     use sha2::Digest as _;
     let mut file = std::fs::File::open(path)

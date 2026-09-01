@@ -35,8 +35,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zip::{write::SimpleFileOptions, ZipWriter};
 
-// ── Public structs ────────────────────────────────────────────────────────────
-
+// Public structs
 #[derive(Serialize, Deserialize, Debug, Clone)]
 /// Public-board metadata included in a gateway snapshot.
 pub struct GwBoard {
@@ -101,8 +100,7 @@ pub struct GwMetadata {
     pub scope: String,
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
+// Internal helpers
 /// Returns the current Unix timestamp in whole seconds.
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -116,8 +114,7 @@ fn finish_zip(zip: ZipWriter<Cursor<Vec<u8>>>) -> Result<Vec<u8>> {
     Ok(zip.finish()?.into_inner())
 }
 
-// ── Public snapshot builders ──────────────────────────────────────────────────
-
+// Public snapshot builders
 /// All boards, all active (non-archived) threads, and all their posts.
 ///
 /// If `since` is `Some(ts)`, only posts with `created_at > ts` are returned
@@ -296,8 +293,7 @@ pub fn build_force_refresh_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)
     Ok((zip, tx_id))
 }
 
-// ── Private DB helpers ────────────────────────────────────────────────────────
-
+// Private DB helpers
 /// Resolves an exportable board's local identifier.
 fn board_id_by_short_name(conn: &Connection, short_name: &str) -> Result<i64> {
     conn.query_row(
@@ -535,8 +531,7 @@ fn fetch_posts(
     Ok(rows)
 }
 
-// ── ZIP packing ───────────────────────────────────────────────────────────────
-
+// ZIP packing
 /// Produce a ZIP archive containing four JSON files:
 ///   boards.json   — `[GwBoard]`
 ///   threads.json  — `[GwThread]`

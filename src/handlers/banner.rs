@@ -24,13 +24,10 @@ const VERSIONED_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_IMMUTABLE_MEDI
 const UNVERSIONED_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_STATIC_SHORT;
 
 #[derive(Deserialize, Default)]
-/// Query parameters accepted by the external banner request.
 pub(crate) struct ExternalBannerQuery {
-    /// The optional return to.
     pub return_to: Option<String>,
 }
 
-/// Loads accessible banner asset.
 fn load_accessible_banner_asset(
     conn: &rusqlite::Connection,
     banner_id: i64,
@@ -62,7 +59,6 @@ fn load_accessible_banner_asset(
     Ok((asset, false))
 }
 
-/// Handles the serve banner asset request.
 pub(crate) async fn serve_banner_asset(
     State(state): State<AppState>,
     Path(banner_id): Path<i64>,
@@ -138,7 +134,6 @@ pub(crate) async fn serve_banner_asset(
     response
 }
 
-/// Handles the external banner warning page request.
 pub(crate) async fn external_banner_warning_page(
     State(state): State<AppState>,
     Path(banner_id): Path<i64>,
@@ -214,7 +209,6 @@ pub(crate) async fn external_banner_warning_page(
     Ok((jar, response).into_response())
 }
 
-/// Handles the external banner continue request.
 pub(crate) async fn external_banner_continue(
     State(state): State<AppState>,
     Path(banner_id): Path<i64>,

@@ -7,8 +7,7 @@
 // continue to compile without any changes.
 pub use crate::models::{SnapshotBoard, SnapshotMetadata, SnapshotPost};
 
-// ── build_snapshot ────────────────────────────────────────────────────────────
-
+// build_snapshot
 use anyhow::Result;
 use rusqlite::Connection;
 use std::io::{Cursor, Write as _};
@@ -38,7 +37,7 @@ const SNAPSHOT_POSTS_MAX_COUNT: usize = 100_000;
 ///
 /// Returns an error when database reads, serialization, or ZIP construction fail.
 pub fn build_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
-    // ── Boards ────────────────────────────────────────────────────────────
+    // Boards
     // Column is `name` (display name), not `title` — verified against db/mod.rs.
     let mut stmt = conn.prepare(
         "SELECT short_name, name
@@ -55,7 +54,7 @@ pub fn build_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
         })?
         .collect::<rusqlite::Result<_>>()?;
 
-    // ── Posts (text columns only — NO media columns, NO archived threads) ─
+    // Posts (text columns only — NO media columns, NO archived threads)
     let mut stmt = conn.prepare(
         "SELECT p.id, b.short_name, p.name, p.body, p.created_at
          FROM   posts   p
@@ -79,7 +78,7 @@ pub fn build_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
         })?
         .collect::<rusqlite::Result<_>>()?;
 
-    // ── Metadata ──────────────────────────────────────────────────────────
+    // Metadata
     let tx_id = Uuid::new_v4();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -97,7 +96,6 @@ pub fn build_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
         includes_archive: false,
     };
 
-    // ── Build ZIP ─────────────────────────────────────────────────────────
     let buf = Cursor::new(Vec::new());
     let mut zip = ZipWriter::new(buf);
     let opts = SimpleFileOptions::default();
@@ -115,8 +113,7 @@ pub fn build_snapshot(conn: &Connection) -> Result<(Vec<u8>, Uuid)> {
     Ok((zip_bytes, tx_id))
 }
 
-// ── unpack_snapshot ───────────────────────────────────────────────────────────
-
+// unpack_snapshot
 /// Unpack and parse a federation snapshot ZIP.
 ///
 /// Rejects any ZIP that contains files other than the three known names,

@@ -1,17 +1,3 @@
-// error.rs — Unified error type.
-//
-// Every handler returns Result<T, AppError>. AppError converts to an HTTP
-// response automatically, so handlers never need to manually build error pages.
-//
-// Variants map 1-to-1 to HTTP status codes so the right code is always returned:
-//   NotFound          → 404
-//   BadRequest        → 400
-//   Forbidden         → 403
-//   UploadTooLarge    → 413  (Content Too Large)
-//   InvalidMediaType  → 415  (Unsupported Media Type)
-//   DbBusy            → 503  (Service Unavailable, with Retry-After)
-//   Internal          → 500
-
 use axum::{
     http::{header, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Response},

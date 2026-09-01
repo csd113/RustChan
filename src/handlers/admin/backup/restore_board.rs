@@ -94,7 +94,6 @@ fn validate_board_backup_access_settings(
     Ok(())
 }
 
-/// Performs the run restore database quick check handler operation.
 fn run_restore_db_quick_check(
     conn: &rusqlite::Connection,
     restore_label: &str,
@@ -155,7 +154,6 @@ where
     conn.query_row(sql, params, |row| row.get(0))
 }
 
-/// Returns whether the requester can reuse row IDs.
 fn can_reuse_row_ids<I>(conn: &rusqlite::Connection, table: &'static str, ids: I) -> Result<bool>
 where
     I: IntoIterator<Item = i64>,
@@ -181,7 +179,6 @@ where
     Ok(true)
 }
 
-/// Performs the sync autoincrement sequence handler operation.
 fn sync_autoincrement_sequence(
     conn: &rusqlite::Connection,
     table: &'static str,
@@ -301,20 +298,14 @@ fn insert_or_validate_restored_file_hash(
     }
 }
 
-/// Data used by the board restore workspace workflow.
 struct BoardRestoreWorkspace {
-    /// The staged upload root.
     staged_upload_root: PathBuf,
-    /// The pending restore identifier.
     pending_restore_id: String,
-    /// The pending restore payload.
     pending_restore_payload: crate::pending_fs::BoardRestoreSwapPayload,
-    /// The pending restore op.
     pending_restore_op: crate::pending_fs::PendingFsOpInsert,
 }
 
 impl BoardRestoreWorkspace {
-    /// Performs the prepare handler operation.
     fn prepare(upload_dir: &str, board_short: &str) -> Result<Self> {
         let upload_root = PathBuf::from(upload_dir);
         let staged_upload_root = create_staging_dir(&upload_root, "board-restore-stage")?;
@@ -352,12 +343,10 @@ impl BoardRestoreWorkspace {
     }
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "board replacement and media staging share one transaction and rollback boundary"
 )]
-/// Performs the execute board restore handler operation.
 pub(super) fn execute_board_restore<F>(
     conn: &mut rusqlite::Connection,
     upload_dir: &str,
@@ -876,7 +865,6 @@ where
         .collect())
 }
 
-/// Formats magic bytes.
 fn format_magic_bytes(bytes: &[u8]) -> String {
     bytes
         .iter()
@@ -886,39 +874,23 @@ fn format_magic_bytes(bytes: &[u8]) -> String {
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the extract board from full backup request.
 pub(crate) struct ExtractBoardFromFullBackupForm {
-    /// The filename.
     filename: String,
-    /// The board short.
     board_short: String,
-    /// The action.
     action: String,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Variants supported by the extract board from full backup outcome workflow.
 enum ExtractBoardFromFullBackupOutcome {
-    /// Represents the download case.
-    Download {
-        /// The generated backup filename.
-        filename: String,
-    },
-    /// Represents the restore case.
-    Restore {
-        /// The restored board's short name.
-        board_short: String,
-    },
+    Download { filename: String },
+    Restore { board_short: String },
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "authentication, source verification, extraction, and download issuance form one request"
 )]
-/// Handles the extract board from full backup request.
 pub(crate) async fn extract_board_from_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1062,8 +1034,6 @@ pub(crate) async fn extract_board_from_full_backup(
     }
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-/// Handles the restore saved board backup request.
 pub(crate) async fn restore_saved_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1144,7 +1114,6 @@ pub(crate) async fn restore_saved_board_backup(
     }
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::cognitive_complexity,
     reason = "board restore validation, mutation, and rollback remain one guarded operation"
@@ -1153,7 +1122,6 @@ pub(crate) async fn restore_saved_board_backup(
     clippy::too_many_lines,
     reason = "restore upload validation, mutation, rollback, and response handling form one guarded request"
 )]
-/// Handles the board restore request.
 pub(crate) async fn board_restore(
     State(state): State<AppState>,
     jar: CookieJar,

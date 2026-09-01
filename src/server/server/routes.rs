@@ -446,7 +446,6 @@ mod tests {
     use std::io::{Cursor, Write as _};
     use tower::ServiceExt as _;
 
-    /// Standard fallible test result.
     type TestResult = anyhow::Result<()>;
 
     /// Build a valid minimal board-backup archive.

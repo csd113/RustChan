@@ -7,19 +7,15 @@ use super::{
     BOARD_MANIFEST_MAX_BYTES, SQLITE_HEADER, ZIP_ENTRY_MAX_BYTES,
 };
 
-/// Data used by the temp ZIP cleanup guard workflow.
 pub(super) struct TempZipCleanupGuard {
-    /// The optional path.
     path: Option<PathBuf>,
 }
 
 impl TempZipCleanupGuard {
-    /// Creates a new value.
     pub(super) const fn new(path: PathBuf) -> Self {
         Self { path: Some(path) }
     }
 
-    /// Performs the disarm handler operation.
     pub(super) fn disarm(&mut self) {
         self.path = None;
     }
@@ -33,7 +29,6 @@ impl Drop for TempZipCleanupGuard {
     }
 }
 
-/// Parses board backup manifest from ZIP.
 pub(super) fn parse_board_backup_manifest_from_zip<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<board_backup_types::BoardBackupManifest> {
@@ -108,13 +103,11 @@ pub(super) fn extract_sqlite_db_from_full_backup_archive<R: std::io::Read + Seek
     Ok(())
 }
 
-/// Performs the canonicalize restored banner dir handler operation.
 pub(super) fn canonicalize_restored_banner_dir(root: &Path) -> Result<()> {
     let mut total_bytes = 0u64;
     canonicalize_restored_banner_dir_inner(root, root, &mut total_bytes)
 }
 
-/// Performs the canonicalize restored banner dir inner handler operation.
 fn canonicalize_restored_banner_dir_inner(
     root: &Path,
     current: &Path,
@@ -213,12 +206,10 @@ fn write_v4_file_to_legacy_zip<W: Write + Seek>(
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy {zip_path}: {error}")))
 }
 
-/// Performs the temp legacy ZIP path handler operation.
 fn temp_legacy_zip_path(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}_{}.zip", uuid::Uuid::new_v4().simple()))
 }
 
-/// Creates temp legacy full backup from v4 path.
 pub(super) fn create_temp_legacy_full_backup_from_v4_path(root_dir: &Path) -> Result<PathBuf> {
     let verified =
         saved_backup::verify_saved_v4_root(root_dir, &[saved_backup::BackupScope::FullSite])?;
@@ -229,7 +220,6 @@ pub(super) fn create_temp_legacy_full_backup_from_v4_path(root_dir: &Path) -> Re
     clippy::too_many_lines,
     reason = "transfer validation, entry mapping, extraction limits, and archive finalization are one pipeline"
 )]
-/// Creates temp legacy full backup from v4 transfer ZIP.
 pub(super) fn create_temp_legacy_full_backup_from_v4_transfer_zip<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<PathBuf> {
@@ -359,7 +349,6 @@ pub(super) fn create_temp_legacy_full_backup_from_v4_transfer_zip<R: std::io::Re
     clippy::too_many_lines,
     reason = "verified manifest entries and legacy metadata must be emitted in one deterministic archive pass"
 )]
-/// Creates temp legacy full backup from verified v4.
 fn create_temp_legacy_full_backup_from_verified_v4(
     verified: &saved_backup::VerifiedSavedV4Root,
 ) -> Result<PathBuf> {
@@ -546,7 +535,6 @@ fn create_temp_legacy_full_backup_from_verified_v4(
     Ok(temp_zip)
 }
 
-/// Creates temp legacy board backup from v4 path.
 pub(super) fn create_temp_legacy_board_backup_from_v4_path(
     root_dir: &Path,
     board_short: Option<&str>,
@@ -561,7 +549,6 @@ pub(super) fn create_temp_legacy_board_backup_from_v4_path(
     create_temp_legacy_board_backup_from_verified_v4(&verified, board_short)
 }
 
-/// Creates temp legacy board backup from verified v4.
 fn create_temp_legacy_board_backup_from_verified_v4(
     verified: &saved_backup::VerifiedSavedV4Root,
     board_short: Option<&str>,
@@ -617,7 +604,6 @@ fn create_temp_legacy_board_backup_from_verified_v4(
     Ok((temp_zip, filename))
 }
 
-/// Creates temp legacy board backup from saved full v4 path.
 pub(super) fn create_temp_legacy_board_backup_from_saved_full_v4_path(
     root_dir: &Path,
     board_short: &str,
@@ -627,7 +613,6 @@ pub(super) fn create_temp_legacy_board_backup_from_saved_full_v4_path(
     create_temp_legacy_board_backup_from_verified_v4(&verified, Some(board_short))
 }
 
-/// Creates temp board backup from full backup path.
 pub(super) fn create_temp_board_backup_from_full_backup_path(
     full_backup_path: &Path,
     board_short: &str,

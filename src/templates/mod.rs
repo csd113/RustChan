@@ -83,8 +83,7 @@ impl UserPreferences {
     }
 }
 
-// ─── Live site name (DB-overridable, falls back to CONFIG.forum_name) ─────────
-//
+// Live site name (DB-overridable, falls back to CONFIG.forum_name)
 // parking_lot::RwLock is used instead of std::sync::RwLock for two reasons:
 //  1. It never poisons — no need to handle poisoned-lock errors on the hot path.
 //  2. Arc<str> reduces the per-read allocation to a single atomic increment
@@ -98,8 +97,7 @@ static LIVE_SITE_SUBTITLE: LazyLock<RwLock<Arc<str>>> =
     LazyLock::new(|| RwLock::new(Arc::from("select board to proceed")));
 
 /// In-memory cache for the admin-configured default theme.
-/// Updated immediately when admin saves site settings so pages reflect the
-/// change without requiring a server restart or extra DB round-trip per request.
+/// Admin updates publish here so renderers avoid restarts and per-request DB reads.
 static LIVE_DEFAULT_THEME: LazyLock<RwLock<Arc<str>>> =
     LazyLock::new(|| RwLock::new(Arc::from("")));
 /// Snapshot of themes currently available to page renderers.
@@ -137,10 +135,7 @@ static STATIC_ASSET_VERSION: LazyLock<String> = LazyLock::new(compute_static_ass
 /// restore operation so that `error_page()` renders the correct top-bar links.
 pub fn set_live_boards(boards: Vec<Board>) {
     *LIVE_BOARDS.write() = Arc::new(boards);
-    // Bump the version so thread-page ETags incorporate board-list changes.
-    // This ensures adding/deleting a board invalidates cached thread pages,
-    // fixing the stale nav bug where deleted boards persisted in the browser
-    // cache until an unrelated reply bumped the thread.
+    // Thread-page ETags include this version so navigation changes invalidate them.
     LIVE_BOARDS_VERSION.fetch_add(1, Ordering::Relaxed);
     rebuild_live_board_nav();
 }
@@ -415,8 +410,7 @@ pub fn board_nav_html_for_preferences(boards: &[Board], preferences: UserPrefere
     .join(" ")
 }
 
-// ─── Auto-compress modal ──────────────────────────────────────────────────────
-
+// Auto-compress modal
 /// Returns the compress-modal overlay HTML.
 /// Dynamic size limits are embedded as data-max-image / data-max-video attributes
 /// on the modal element and read by main.js at runtime ().
@@ -424,7 +418,6 @@ pub fn board_nav_html_for_preferences(boards: &[Board], preferences: UserPrefere
 pub fn compress_modal_script(max_image_bytes: usize, max_video_bytes: usize) -> String {
     format!(
         r#"
-<!-- Auto-compress modal — shared by new-thread and reply forms on this page -->
 <div id="compress-modal" class="compress-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="compress-modal-title" aria-hidden="true" hidden inert
      data-max-image="{max_image_bytes}" data-max-video="{max_video_bytes}">
   <div class="compress-modal-box">
@@ -494,8 +487,7 @@ pub const fn admin_ban_delete_modal_script() -> &'static str {
 </div>"#
 }
 
-// ─── Report modal ─────────────────────────────────────────────────────────────
-
+// Report modal
 /// Returns the report overlay HTML. Injected once per thread page.
 // JS functions live in /static/main.js.
 #[must_use]
@@ -559,8 +551,7 @@ fn report_fallback_form(
     )
 }
 
-// ─── Thread auto-update script ────────────────────────────────────────────────
-
+// Thread auto-update script
 // All auto-update logic lives in /static/main.js.
 #[must_use]
 /// Renders the thread auto-update status controls.
@@ -568,8 +559,7 @@ pub const fn thread_autoupdate_script() -> &'static str {
     ""
 }
 
-// ─── Timestamp helpers ────────────────────────────────────────────────────────
-
+// Timestamp helpers
 #[must_use]
 /// Formats a Unix timestamp in the server's local time.
 pub fn fmt_ts(ts: i64) -> String {
@@ -588,12 +578,9 @@ pub fn fmt_ts_short(ts: i64) -> String {
     }
 }
 
-// ─── Embed thumbnail helper ───────────────────────────────────────────────────
-
-/// Scan raw post body text for a video embed URL and return its thumbnail URL.
-/// Used by catalog and board-index summaries when the OP has no uploaded file.
 #[must_use]
 /// Extracts the first supported embedded-media thumbnail URL from post text.
+/// Used by catalog and board-index summaries when the OP has no uploaded file.
 pub fn embed_thumb_from_body(body: &str) -> Option<String> {
     for token in body.split_whitespace() {
         let clean = token.trim_end_matches(['.', ',', ')', ';', '\'']);
@@ -606,8 +593,7 @@ pub fn embed_thumb_from_body(body: &str) -> Option<String> {
     None
 }
 
-// ─── Pagination helper ────────────────────────────────────────────────────────
-
+// Pagination helper
 #[must_use]
 /// Renders previous and next links for a paginated collection.
 pub fn render_pagination(p: &Pagination, base_url: &str) -> String {
@@ -653,9 +639,7 @@ pub fn urlencoding_simple(s: &str) -> String {
     crate::utils::redirect::encode_form_query_component(s)
 }
 
-// ─── Base layout ─────────────────────────────────────────────────────────────
-
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
+// Base layout
 #[expect(
     clippy::too_many_arguments,
     reason = "the base layout accepts independent page metadata and rendering context"
@@ -1062,11 +1046,8 @@ pub fn base_layout_with_preferences(
     )
 }
 
-// ─── Standalone error/ban pages (no board context) ────────────────────────────
-
-// ban_page must accept a csrf_token so the appeal form works.
-// Previously the field was always empty and every appeal was rejected by the
-// server's CSRF check, making the appeal feature completely non-functional.
+// Standalone error/ban pages (no board context)
+// The appeal form must use the caller's CSRF token.
 #[must_use]
 /// Renders the standalone ban notice and appeal form.
 pub fn ban_page(reason: &str, csrf_token: &str) -> String {
@@ -1127,7 +1108,6 @@ appeals are reviewed by site staff. one appeal per 24 hours.</p>
 </form>
 <p style="margin-top:1.5rem"><a href="/">return home</a></p>
 </div>
-<!-- Global CSRF token consumed by main.js for fetch-based requests -->
 <input type="hidden" id="csrf_global" value="{csrf}">
 <script src="{main_js_src}" defer></script>
 </body>

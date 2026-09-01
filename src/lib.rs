@@ -2,7 +2,6 @@
     unused_crate_dependencies,
     reason = "Cargo exposes binary-only dependencies to the library target, including the intentional rustls-webpki security floor for RUSTSEC-2026-0049"
 )]
-
 //! Shared `RustChan` domain and rendering modules.
 //!
 //! The standalone CLI builds the same source modules in its binary crate while

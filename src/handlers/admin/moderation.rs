@@ -1,4 +1,3 @@
-// handlers/admin/moderation.rs
 //
 // Moderation handlers: bans, ban appeals, word filters, reports, IP history,
 // and the mod log. All routes require a valid admin session cookie.
@@ -16,23 +15,16 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
 use serde::Deserialize;
 
-// ─── POST /admin/ban/add ──────────────────────────────────────────────────────
-
+// POST /admin/ban/add
 #[derive(Deserialize)]
-/// Form fields accepted by the add ban request.
 pub(crate) struct AddBanForm {
-    /// The IP hash.
     ip_hash: String,
-    /// The reason.
     reason: String,
-    /// The optional duration hours.
     duration_hours: Option<i64>,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Handles the add ban request.
 pub(crate) async fn add_ban(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -87,19 +79,14 @@ pub(crate) async fn add_ban(
     Ok(super::admin_panel_redirect("Ban added.").into_response())
 }
 
-// ─── POST /admin/ban/remove ───────────────────────────────────────────────────
-
+// POST /admin/ban/remove
 #[derive(Deserialize)]
-/// Form fields accepted by the ban ID request.
 pub(crate) struct BanIdForm {
-    /// The ban identifier.
     ban_id: i64,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Handles the remove ban request.
 pub(crate) async fn remove_ban(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -125,34 +112,24 @@ pub(crate) async fn remove_ban(
     Ok(super::admin_panel_redirect("Ban lifted.").into_response())
 }
 
-// ─── POST /admin/post/ban-delete ──────────────────────────────────────────────
+// POST /admin/post/ban-delete
 // Inline ban + delete from the per-post admin toolbar.
 // Bans the post author's IP hash, deletes the post, then redirects back to
 // the thread (or the board index if the OP is deleted).
 
 #[derive(Deserialize)]
-/// Form fields accepted by the ban delete request.
 pub(crate) struct BanDeleteForm {
-    /// The post identifier.
     post_id: i64,
-    /// The IP hash.
     ip_hash: String,
-    /// The board.
     board: String,
-    /// The thread identifier.
     thread_id: i64,
-    /// The optional is op.
     is_op: Option<String>,
-    /// The optional reason.
     reason: Option<String>,
-    /// The optional duration hours.
     duration_hours: Option<i64>,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::cognitive_complexity,
     reason = "ban-and-delete keeps its authorization, mutation, cleanup, and audit steps together"
@@ -161,7 +138,6 @@ pub(crate) struct BanDeleteForm {
     clippy::too_many_lines,
     reason = "authorization, ban creation, post deletion, media cleanup, and audit logging are one action"
 )]
-/// Handles the admin ban and delete request.
 pub(crate) async fn admin_ban_and_delete(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -311,7 +287,8 @@ pub(crate) async fn admin_ban_and_delete(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     // form.board is user-supplied; sanitise to alphanumeric only before
-    // embedding in the redirect URL to prevent open-redirect via "//" prefixes.
+    // embedding in the redirect URL to prevent open-redirect via "
+    // " prefixes.
     let safe_board: String = form
         .board
         .chars()
@@ -327,21 +304,15 @@ pub(crate) async fn admin_ban_and_delete(
     Ok(Redirect::to(&redirect).into_response())
 }
 
-// ─── POST /admin/appeal/dismiss ───────────────────────────────────────────────
-
+// POST /admin/appeal/dismiss
 #[derive(Deserialize)]
-/// Form fields accepted by the appeal action request.
 pub(crate) struct AppealActionForm {
-    /// The appeal identifier.
     appeal_id: i64,
-    /// The optional IP hash.
     ip_hash: Option<String>,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Handles the dismiss appeal request.
 pub(crate) async fn dismiss_appeal(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -370,9 +341,7 @@ pub(crate) async fn dismiss_appeal(
     )
 }
 
-// ─── POST /admin/appeal/accept ────────────────────────────────────────────────
-
-/// Handles the accept appeal request.
+// POST /admin/appeal/accept
 pub(crate) async fn accept_appeal(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -423,21 +392,15 @@ pub(crate) async fn accept_appeal(
     .into_response())
 }
 
-// ─── POST /admin/filter/add ───────────────────────────────────────────────────
-
+// POST /admin/filter/add
 #[derive(Deserialize)]
-/// Form fields accepted by the add filter request.
 pub(crate) struct AddFilterForm {
-    /// The pattern.
     pattern: String,
-    /// The replacement.
     replacement: String,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Handles the add filter request.
 pub(crate) async fn add_filter(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -475,19 +438,14 @@ pub(crate) async fn add_filter(
     Ok(super::admin_panel_redirect("Word filter added.").into_response())
 }
 
-// ─── POST /admin/filter/remove ────────────────────────────────────────────────
-
+// POST /admin/filter/remove
 #[derive(Deserialize)]
-/// Form fields accepted by the filter ID request.
 pub(crate) struct FilterIdForm {
-    /// The filter identifier.
     filter_id: i64,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Handles the remove filter request.
 pub(crate) async fn remove_filter(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -513,18 +471,14 @@ pub(crate) async fn remove_filter(
     Ok(super::admin_panel_redirect("Word filter removed.").into_response())
 }
 
-// ─── GET /admin/ip/{ip_hash} ──────────────────────────────────────────────────
-//
+// GET /admin/ip/{ip_hash}
 // Shows all posts made by a given IP hash across all boards, newest first,
 // with pagination.  Requires an active admin session.
 
 #[derive(Deserialize)]
-/// Query parameters accepted by the IP history request.
 pub(crate) struct IpHistoryQuery {
     #[serde(default = "default_page")]
-    /// The page.
     pub page: i64,
-    /// The optional return to.
     pub return_to: Option<String>,
 }
 
@@ -533,7 +487,6 @@ const fn default_page() -> i64 {
     1
 }
 
-/// Handles the admin IP history request.
 pub(crate) async fn admin_ip_history(
     State(state): State<AppState>,
     Path(ip_hash): Path<String>,
@@ -550,9 +503,7 @@ pub(crate) async fn admin_ip_history(
     )?;
     let csrf_clone = csrf.clone();
 
-    // Sanitise the IP hash: must be exactly a SHA-256 hex string (64 hex chars).
-    // The previous guard used `> 64` which accepted any string of 0–64 chars,
-    // including an empty string.  Require exactly 64.
+    // Moderation lookups accept only complete SHA-256 hashes.
     if ip_hash.len() != 64 || !ip_hash.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(AppError::BadRequest("Invalid IP hash.".into()));
     }
@@ -597,19 +548,14 @@ pub(crate) async fn admin_ip_history(
     Ok((jar, Html(html)))
 }
 
-// ─── POST /admin/report/resolve ───────────────────────────────────────────────
-
+// POST /admin/report/resolve
 #[derive(Deserialize)]
-/// Form fields accepted by the resolve report request.
 pub(crate) struct ResolveReportForm {
-    /// The report identifier.
     report_id: i64,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Handles the resolve report request.
 pub(crate) async fn resolve_report(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -660,27 +606,18 @@ pub(crate) async fn resolve_report(
     )
 }
 
-// ─── POST /admin/ip/report ──────────────────────────────────────────────────
-
+// POST /admin/ip/report
 #[derive(Deserialize)]
-/// Form fields accepted by the IP report request.
 pub(crate) struct IpReportForm {
-    /// The post identifier.
     post_id: i64,
-    /// The thread identifier.
     thread_id: i64,
-    /// The board.
     board: String,
-    /// The IP hash.
     ip_hash: String,
-    /// The reason.
     reason: String,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Handles the admin IP report request.
 pub(crate) async fn admin_ip_report(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -964,13 +901,10 @@ mod tests {
     }
 }
 
-// ─── GET /admin/mod-log ───────────────────────────────────────────────────────
-
+// GET /admin/mod-log
 #[derive(Deserialize)]
-/// Query parameters accepted by the mod log request.
 pub(crate) struct ModLogQuery {
     #[serde(default = "default_mod_log_page")]
-    /// The page.
     page: i64,
 }
 
@@ -979,7 +913,6 @@ const fn default_mod_log_page() -> i64 {
     1
 }
 
-/// Handles the mod log page request.
 pub(crate) async fn mod_log_page(
     State(state): State<AppState>,
     jar: CookieJar,

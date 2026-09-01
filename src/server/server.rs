@@ -1,18 +1,3 @@
-// server/server.rs — HTTP server runtime.
-//
-// Contains:
-//   • Global request-counter atomics (REQUEST_COUNT, IN_FLIGHT, etc.)
-//   • ScopedDecrement RAII guard
-//   • run_server()            — full server startup sequence
-//   • build_router()          — Axum router wiring
-//   • spawn background tasks  — session purge, WAL checkpoint, IP prune,
-//                               login-fail prune, VACUUM, poll cleanup,
-//                               thumb-cache eviction
-//   • Static asset handlers   — serve_css, serve_main_js, serve_theme_init_js
-//   • track_requests          — per-request counter middleware
-//   • hsts_middleware         — HSTS header (HTTPS-only)
-//   • shutdown_signal()       — Ctrl-C / SIGTERM waiter
-
 use anyhow::Context as _;
 use axum::{
     http::header,
@@ -80,20 +65,13 @@ fn scheduled_full_backup_failure_retry_delay(
     Duration::from_secs(attempt_secs.min(capped_secs))
 }
 
-// ─── Global terminal state ─────────────────────────────────────────────────────
 /// Total HTTP requests handled since startup.
 pub static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Requests currently being processed (in-flight).
 ///
-/// Changed from `AtomicI64` to `AtomicU64`.  In-flight request
-/// counts are inherently non-negative; using a signed type required defensive
-/// `.max(0)` casts at every read site and masked counter underflow bugs.
-/// Decrements use `ScopedDecrement` RAII guards (see below) to prevent
-/// counter leaks when async futures are cancelled mid-flight.
+/// `ScopedDecrement` guards prevent leaks when request futures are cancelled.
 pub static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 /// Multipart file uploads currently in progress.
-///
-/// Same signed→unsigned change as `IN_FLIGHT`.
 pub static ACTIVE_UPLOADS: AtomicU64 = AtomicU64::new(0);
 /// Monotonic tick used to animate the upload spinner.
 pub static SPINNER_TICK: AtomicU64 = AtomicU64::new(0);
@@ -101,8 +79,7 @@ pub static SPINNER_TICK: AtomicU64 = AtomicU64::new(0);
 /// memory (or coredumps). The count is used for the "users online" display.
 pub static ACTIVE_IPS: LazyLock<DashMap<String, Instant>> = LazyLock::new(DashMap::new);
 
-// ─── RAII counter guard ───────────────────────────────────────────────────────
-//
+// RAII counter guard
 // `IN_FLIGHT` and `ACTIVE_UPLOADS` are decremented inside
 // `track_requests` *after* `.await`.  If the surrounding future is cancelled
 // (e.g. client disconnect, timeout, or panic in a handler), the post-await
@@ -125,8 +102,7 @@ impl Drop for ScopedDecrement<'_> {
     }
 }
 
-// ─── Server mode ─────────────────────────────────────────────────────────────
-
+// Server mode
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Plaintext application listener mode selected from the TLS and Tor settings.
 enum PlaintextAppListener {
@@ -473,7 +449,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             }
         }
     }
-    // ── External tool detection ────────────────────────────────────────────────
+    // External tool detection
     // ffmpeg: required for video thumbnails (optional — graceful degradation).
     let ffmpeg_status = crate::detect::detect_ffmpeg(CONFIG.require_ffmpeg);
     let ffmpeg_available = ffmpeg_status == crate::detect::ToolStatus::Available;
@@ -499,8 +475,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
 
     // Derive bind_port from `bind_addr` (which already incorporates port_override).
     // rsplit_once(':') handles both IPv4 ("0.0.0.0:9000") and IPv6 ("[::1]:9000").
-    // F-07: Log a warning if parsing fails so the operator knows Tor proxy is
-    // using a fallback port that may not match the actual HTTP listener.
+    // Warn when Tor must fall back to a port that may not match the HTTP listener.
     let bind_port = bind_addr
         .rsplit_once(':')
         .and_then(|(_, p)| p.parse::<u16>().ok())
@@ -513,9 +488,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             );
             8080
         });
-    // sequence can await each worker instead of blindly sleeping for 10 s.
-    // Previously the return value was silently discarded, making it impossible
-    // to know whether in-flight jobs had finished before the process exited.
     {
         let conn = pool.get()?;
         let recovery = crate::db::recover_interrupted_background_jobs(&conn)?;
@@ -918,7 +890,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         });
     }
 
-    // 1.6: Scheduled database VACUUM — reclaim disk space from deleted posts
+    // Scheduled VACUUM reclaims disk space from deleted posts
     // and threads without requiring manual admin intervention.
     if CONFIG.auto_vacuum_interval_hours > 0 {
         let bg = pool.clone();
@@ -1105,7 +1077,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         });
     }
 
-    // 1.7: Expired poll vote cleanup — purge per-IP vote rows for polls whose
+    // Purge per-IP vote rows for expired polls whose
     // expiry is older than poll_cleanup_interval_hours, preventing the
     // poll_votes table from growing indefinitely.
     if CONFIG.poll_cleanup_interval_hours > 0 {
@@ -1147,7 +1119,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         });
     }
 
-    // 2.6: Retry durable filesystem operations independently of request traffic.
+    // Retry durable filesystem operations independently of request traffic.
     // Each pass is bounded by the finite queue snapshot loaded by the reconciler.
     {
         let bg = pool.clone();
@@ -1187,7 +1159,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         });
     }
 
-    // 2.7: Waveform/thumbnail cache eviction — keep total size of all thumbs
+    // Keep the waveform and thumbnail cache
     // directories under CONFIG.waveform_cache_max_bytes by deleting only the
     // oldest files that have no post reference. Uses 1-hour intervals.
     if CONFIG.waveform_cache_max_bytes > 0 {
@@ -1295,8 +1267,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         }
     }
 
-    // ── Full-screen TUI console ───────────────────────────────────────────────
-    // Build shared state for the TUI.
+    // Full-screen TUI console
     let shared_stats: super::console::SharedStats = Arc::new(tokio::sync::RwLock::new(
         super::console::ChanStats::default(),
     ));
@@ -1354,7 +1325,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // box — the dashboard shows the address on its next render tick instead.
     let (mut key_rx, _force_reload_render) = super::console::start(&shared_stats, &shared_mode);
 
-    // Tor: spawned after the TUI is up. F-04: handle awaited on shutdown.
+    // Start Tor after the TUI so its logs do not disrupt terminal setup.
     let tor_handle = crate::detect::detect_tor(
         CONFIG.enable_tor_support,
         bind_port,
@@ -1491,7 +1462,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         });
     }
 
-    // ── TLS / HTTPS listener ──────────────────────────────────────────────────
+    // TLS / HTTPS listener
     // Spawned as a background task so the HTTP listener below can start
     // immediately. Both share the same AppState (Arc'd internally).
     // build_acceptor() returns None when tls.enabled = false — existing
@@ -1588,7 +1559,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         }
     }
 
-    // ── HTTP→HTTPS redirect listener (optional) ───────────────────────────────
+    // HTTP→HTTPS redirect listener (optional)
     if CONFIG.tls.enabled && CONFIG.tls.redirect_http {
         let http_addr: SocketAddr = CONFIG
             .bind_addr_with_port(CONFIG.tls.http_port)
@@ -1636,16 +1607,15 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     worker_cancel.cancel();
     let listener_shutdown_result = finish_listener_tasks(&mut listener_tasks).await;
 
-    // timeout, replacing the previous blind 10-second sleep. Each worker is
-    // given up to (ffmpeg_timeout + 10)s to finish its in-flight job.
+    // Each worker gets `ffmpeg_timeout + 10s` to finish its in-flight job.
     tracing::info!(target: "server", "Signalling background workers to shut down…");
     worker_cancel.cancel();
     let shutdown_timeout = Duration::from_secs(crate::config::ffmpeg_timeout_secs() + 10);
     for handle in worker_handles {
         drop(tokio::time::timeout(shutdown_timeout, handle).await);
     }
-    // CancellationToken, so it will exit its select! loop promptly instead of
-    // sleeping through a multi-minute backoff. The 15-second safety-net timeout
+    // The cancellation token interrupts Tor's retry backoff. This 15-second
+    // safety-net timeout
     // below is only a last resort for the in-flight copy_bidirectional on any
     // active stream — Arti sends RELAY_END cells synchronously on drop, which
     // completes well within this window under normal conditions.
@@ -1791,8 +1761,7 @@ async fn run_plain_http(
         .await
 }
 
-// ── HTTPS listener (Static path: self-signed or manual PEM) ──────────────────
-//
+// HTTPS listener (static path: self-signed or manual PEM)
 // Uses axum-server which preserves ConnectInfo<SocketAddr> so the IP-banning
 // and rate-limiting middleware in middleware/mod.rs continues to work correctly.
 //
@@ -1836,8 +1805,7 @@ pub async fn run_https_static(
         .await
 }
 
-// ── HTTPS listener (ACME / Let's Encrypt path) ────────────────────────────────
-//
+// HTTPS listener (ACME / Let's Encrypt path)
 // ACME requires a manual accept loop because AcmeAcceptor::accept() must
 // inspect each connection for TLS-ALPN-01 challenges before the TLS handshake
 // completes. axum-server cannot intercept at that level.
@@ -1965,8 +1933,7 @@ pub async fn run_https_acme(
     Ok(())
 }
 
-// ── HTTP→HTTPS redirect listener ─────────────────────────────────────────────
-//
+// HTTP→HTTPS redirect listener
 // Issues a 301 permanent redirect to the HTTPS equivalent of every request.
 // Only spawned when `tls.enabled = true` and `tls.redirect_http = true`.
 /// Serve the HTTP-to-HTTPS redirect listener until cancellation.

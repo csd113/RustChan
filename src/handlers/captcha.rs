@@ -7,13 +7,10 @@ use axum::{
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-/// Query parameters accepted by the captcha image request.
 pub(crate) struct CaptchaImageQuery {
-    /// The board.
     board: String,
 }
 
-/// Handles the serve captcha image request.
 pub(crate) async fn serve_captcha_image(
     Path(captcha_id): Path<String>,
     Query(query): Query<CaptchaImageQuery>,

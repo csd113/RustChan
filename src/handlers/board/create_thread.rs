@@ -10,8 +10,7 @@ use super::{
 };
 use axum::response::IntoResponse as _;
 
-// ─── POST /:board/ — create new thread ───────────────────────────────────────
-
+// POST /:board/ — create new thread
 #[expect(
     clippy::too_many_lines,
     reason = "access checks, multipart validation, thread creation, and response cookies form one request"
@@ -20,7 +19,6 @@ use axum::response::IntoResponse as _;
     clippy::significant_drop_tightening,
     reason = "the media permit intentionally moves from the parsed form into non-cancellable blocking submission work"
 )]
-/// Handles the create thread request.
 pub(crate) async fn create_thread(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
@@ -249,4 +247,4 @@ pub(crate) async fn create_thread(
     Ok((jar, Redirect::to(&submit_result.redirect_url)).into_response())
 }
 
-// ─── GET /:board/catalog ──────────────────────────────────────────────────────
+// GET /:board/catalog

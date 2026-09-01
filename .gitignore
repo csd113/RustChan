@@ -15,3 +15,4 @@ playwright.config.ts
 !/tests/cli_runtime.rs
 /.github/workflows/e2e.yml
 /.cargo/audit.toml
+/rules.md

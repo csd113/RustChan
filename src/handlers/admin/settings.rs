@@ -1,4 +1,3 @@
-// handlers/admin/settings.rs
 //
 // Board settings, site settings, and maintenance (vacuum) handlers.
 // All routes require a valid admin session cookie.
@@ -26,19 +25,12 @@ use super::{
     SESSION_COOKIE,
 };
 
-/// Implements appearance handler support.
 mod appearance;
-/// Implements backup settings handler support.
 mod backup_settings;
-/// Implements banners handler support.
 mod banners;
-/// Implements board handler support.
 mod board;
-/// Implements maintenance handler support.
 mod maintenance;
-/// Implements site handler support.
 mod site;
-/// Implements themes handler support.
 mod themes;
 
 pub(crate) use appearance::*;
@@ -54,7 +46,6 @@ const MAX_FAVICON_UPLOAD_BYTES: usize = 5 * 1024 * 1024;
 /// Maximum permitted banner upload bytes.
 const MAX_BANNER_UPLOAD_BYTES: usize = 8 * 1024 * 1024;
 
-/// Formats favicon upload error.
 fn format_favicon_upload_error(error: &anyhow::Error) -> String {
     error
         .chain()
@@ -64,7 +55,6 @@ fn format_favicon_upload_error(error: &anyhow::Error) -> String {
         .unwrap_or_else(|| "Favicon upload failed.".to_owned())
 }
 
-/// Formats banner upload error.
 fn format_banner_upload_error(error: &anyhow::Error) -> String {
     error
         .chain()
@@ -74,14 +64,12 @@ fn format_banner_upload_error(error: &anyhow::Error) -> String {
         .unwrap_or_else(|| "Banner upload failed.".to_owned())
 }
 
-/// Performs the checkbox is on handler operation.
 fn checkbox_is_on(value: Option<&str>) -> bool {
     value == Some("1")
         || value.is_some_and(|item| item.eq_ignore_ascii_case("on"))
         || value.is_some_and(|item| item.eq_ignore_ascii_case("true"))
 }
 
-/// Handles the read text field request.
 async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<String> {
     field
         .text()
@@ -89,12 +77,10 @@ async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<S
         .map_err(|e| AppError::BadRequest(e.to_string()))
 }
 
-/// Handles the read checkbox field request.
 async fn read_checkbox_field(field: axum::extract::multipart::Field<'_>) -> Result<bool> {
     Ok(checkbox_is_on(Some(&read_text_field(field).await?)))
 }
 
-/// Handles the read limited upload bytes request.
 async fn read_limited_upload_bytes(
     mut field: axum::extract::multipart::Field<'_>,
     max_bytes: usize,
@@ -119,4 +105,4 @@ async fn read_limited_upload_bytes(
     Ok(out)
 }
 
-// ─── POST /admin/board/settings ──────────────────────────────────────────────
+// POST /admin/board/settings

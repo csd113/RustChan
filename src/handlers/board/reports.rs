@@ -6,22 +6,15 @@ use super::{
 use axum::response::IntoResponse as _;
 
 #[derive(serde::Deserialize)]
-/// Form fields accepted by the report request.
 pub(crate) struct ReportForm {
-    /// The post identifier.
     pub post_id: i64,
-    /// The thread identifier.
     pub thread_id: i64,
-    /// The board.
     pub board: String,
-    /// The optional reason.
     pub reason: Option<String>,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
-/// Handles the file report request.
 pub(crate) async fn file_report(
     State(state): State<AppState>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
@@ -100,11 +93,9 @@ pub(crate) async fn file_report(
     .into_response())
 }
 
-// ─── GET /boards/{*media_path} — serve media with mp4→webm redirect ──────────
-//
+// GET /boards/{*media_path} — serve media with mp4→webm redirect
 
-// ─── Content-Type helper for board media ─────────────────────────────────────
-
+// Content-Type helper for board media
 /// Return the correct `Content-Type` value for a board media file based solely
 /// on its extension.  Used to override whatever `mime_guess` / `ServeFile`
 /// produces, because some builds of `mime_guess` do not include `.webp`,
@@ -114,14 +105,11 @@ pub(crate) async fn file_report(
 
 #[derive(serde::Deserialize)]
 pub(crate) struct AppealForm {
-    /// The reason.
     pub reason: String,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
-/// Handles the submit appeal request.
 pub(crate) async fn submit_appeal(
     State(state): State<AppState>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,

@@ -408,7 +408,6 @@ mod tests {
             .layer(from_fn(super::request_boundary_middleware))
     }
 
-    /// Standard fallible test result.
     type TestResult = anyhow::Result<()>;
 
     #[tokio::test]

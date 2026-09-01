@@ -1,5 +1,3 @@
-// src/utils/files/storage.rs
-
 use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;

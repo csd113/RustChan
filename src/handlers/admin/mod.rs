@@ -1,4 +1,3 @@
-// handlers/admin/mod.rs
 //
 // Admin panel. All routes require a valid session cookie.
 //
@@ -14,23 +13,18 @@
 // spawn_blocking to avoid blocking the Tokio event loop. Direct DB calls from
 // async context were stalling worker threads under concurrent load.
 
-/// Implements auth handler support.
 pub(crate) mod auth;
 pub(crate) use auth::*;
 
-/// Implements backup handler support.
 pub(crate) mod backup;
 pub(crate) use backup::*;
 
-/// Implements content handler support.
 pub(crate) mod content;
 pub(crate) use content::*;
 
-/// Implements moderation handler support.
 pub(crate) mod moderation;
 pub(crate) use moderation::*;
 
-/// Implements settings handler support.
 pub(crate) mod settings;
 pub(crate) use settings::*;
 
@@ -59,8 +53,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-// ─── Shared constant ──────────────────────────────────────────────────────────
-
+// Shared constant
 /// Session cookie used by this handler.
 const SESSION_COOKIE: &str = "chan_admin_session";
 /// Admin cookie same site used by this handler.
@@ -70,24 +63,18 @@ const ADMIN_BOOTSTRAP_TTL_SECS: u64 = 120;
 /// Missing origin referer used by this handler.
 const MISSING_ORIGIN_REFERER: &str = "Missing Origin/Referer header.";
 
-/// Shared state for admin session bootstraps.
 static ADMIN_SESSION_BOOTSTRAPS: LazyLock<DashMap<String, (String, u64)>> =
     LazyLock::new(DashMap::new);
 
-// ─── Shared form type used by auth and backup ─────────────────────────────────
-
+// Shared form type used by auth and backup
 #[derive(Deserialize)]
-/// Data used by the CSRF only workflow.
 pub(crate) struct CsrfOnly {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
-    /// The optional return to.
     pub return_to: Option<String>,
 }
 
-// ─── Shared session helpers (used by all sub-modules) ────────────────────────
-
+// Shared session helpers (used by all sub-modules)
 /// Verify admin session and also return the admin's username.
 /// For use inside `spawn_blocking` closures.
 fn require_admin_session_with_name(
@@ -192,7 +179,6 @@ pub(super) fn require_same_origin_request(
     ))
 }
 
-/// Performs the effective same origin source handler operation.
 fn effective_same_origin_source<'a>(headers: &'a HeaderMap, request_host: &str) -> Option<&'a str> {
     let origin = header_value_trimmed(headers, header::ORIGIN);
     let referer = header_value_trimmed(headers, header::REFERER);
@@ -204,7 +190,6 @@ fn effective_same_origin_source<'a>(headers: &'a HeaderMap, request_host: &str) 
     }
 }
 
-/// Performs the header value trimmed handler operation.
 fn header_value_trimmed(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
     headers
         .get(name)
@@ -213,7 +198,6 @@ fn header_value_trimmed(headers: &HeaderMap, name: header::HeaderName) -> Option
         .filter(|value| !value.is_empty())
 }
 
-/// Returns whether the request has same origin fetch metadata.
 fn request_has_same_origin_fetch_metadata(headers: &HeaderMap) -> bool {
     headers
         .get("sec-fetch-site")
@@ -221,7 +205,6 @@ fn request_has_same_origin_fetch_metadata(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("same-origin"))
 }
 
-/// Checks admin CSRF jar.
 pub(super) fn check_admin_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
     if admin_csrf_is_valid(jar, form_token) {
         Ok(())
@@ -230,7 +213,6 @@ pub(super) fn check_admin_csrf_jar(jar: &CookieJar, form_token: Option<&str>) ->
     }
 }
 
-/// Handles the admin CSRF is valid request.
 pub(super) fn admin_csrf_is_valid(jar: &CookieJar, form_token: Option<&str>) -> bool {
     let csrf_cookie = jar.get("csrf_token").map(Cookie::value);
     let session_id = jar.get(SESSION_COOKIE).map(Cookie::value);
@@ -272,7 +254,6 @@ pub(in crate::handlers) fn require_admin_post_origin_and_csrf(
     }
 }
 
-/// Handles the admin CSRF cookie request.
 fn admin_csrf_cookie(raw_token: String, secure: bool) -> Cookie<'static> {
     let mut cookie = Cookie::new("csrf_token", raw_token);
     cookie.set_http_only(false);
@@ -316,7 +297,6 @@ pub(super) fn ensure_admin_csrf(jar: CookieJar, secure: bool) -> Result<(CookieJ
 
 pub(super) use crate::utils::redirect::encode_query_component;
 
-/// Performs the should set secure cookie handler operation.
 pub(in crate::handlers) fn should_set_secure_cookie(
     headers: &HeaderMap,
     context: crate::middleware::SecureCookieContext,
@@ -329,7 +309,6 @@ pub(in crate::handlers) fn should_set_secure_cookie(
     )
 }
 
-/// Performs the should set secure cookie with config handler operation.
 fn should_set_secure_cookie_with_config(
     headers: &HeaderMap,
     context: crate::middleware::SecureCookieContext,
@@ -341,7 +320,6 @@ fn should_set_secure_cookie_with_config(
             && crate::middleware::forwarded_proto_is_https(headers, context.peer, behind_proxy))
 }
 
-/// Performs the request scheme for same origin handler operation.
 fn request_scheme_for_same_origin(
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
@@ -357,7 +335,6 @@ fn request_scheme_for_same_origin(
     )
 }
 
-/// Performs the request scheme for same origin with config handler operation.
 fn request_scheme_for_same_origin_with_config(
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
@@ -378,7 +355,6 @@ fn request_scheme_for_same_origin_with_config(
     }
 }
 
-/// Performs the host header uses HTTPS port with config handler operation.
 fn host_header_uses_https_port_with_config(headers: &HeaderMap, tls_port: u16) -> bool {
     let Some(host) = headers
         .get(header::HOST)
@@ -397,7 +373,6 @@ fn host_header_uses_https_port_with_config(headers: &HeaderMap, tls_port: u16) -
     }
 }
 
-/// Performs the request origin uses HTTPS handler operation.
 fn request_origin_uses_https(headers: &HeaderMap) -> bool {
     let request_host = headers
         .get(header::HOST)
@@ -427,7 +402,6 @@ fn request_origin_uses_https(headers: &HeaderMap) -> bool {
     hosts_match_for_same_origin(source_host, request_host)
 }
 
-/// Performs the hosts match for same origin handler operation.
 fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
     let source_host = normalize_same_origin_host(source_host);
     let request_host = normalize_same_origin_host(request_host);
@@ -439,7 +413,6 @@ fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
     is_loopback_alias(source_host) && is_loopback_alias(request_host)
 }
 
-/// Performs the normalize same origin host handler operation.
 fn normalize_same_origin_host(host: &str) -> &str {
     let Some(inner) = host
         .strip_prefix('[')
@@ -455,7 +428,6 @@ fn normalize_same_origin_host(host: &str) -> &str {
     }
 }
 
-/// Returns whether onion host.
 fn is_onion_host(host: &str) -> bool {
     let host = normalize_same_origin_host(host);
     let Some((label, suffix)) = host.rsplit_once('.') else {
@@ -465,7 +437,6 @@ fn is_onion_host(host: &str) -> bool {
     !label.is_empty() && suffix.eq_ignore_ascii_case("onion")
 }
 
-/// Returns whether loopback alias.
 fn is_loopback_alias(host: &str) -> bool {
     let host = normalize_same_origin_host(host);
 
@@ -477,7 +448,6 @@ fn is_loopback_alias(host: &str) -> bool {
         .is_ok_and(|ip| ip.is_loopback())
 }
 
-/// Handles the admin panel redirect with status request.
 fn admin_panel_redirect_with_status(
     message: &str,
     is_error: bool,
@@ -497,16 +467,12 @@ fn admin_panel_redirect_with_status(
 }
 
 #[derive(Clone, Debug, Default)]
-/// Data used by the admin panel target workflow.
 pub(super) struct AdminPanelTarget<'a> {
-    /// The optional anchor.
     anchor: Option<Cow<'a, str>>,
-    /// The optional open section.
     open_section: Option<Cow<'a, str>>,
 }
 
 impl<'a> AdminPanelTarget<'a> {
-    /// Performs the none handler operation.
     pub(super) const fn none() -> Self {
         Self {
             anchor: None,
@@ -514,7 +480,6 @@ impl<'a> AdminPanelTarget<'a> {
         }
     }
 
-    /// Performs the anchor handler operation.
     pub(super) const fn anchor(anchor: &'a str) -> Self {
         Self {
             anchor: Some(Cow::Borrowed(anchor)),
@@ -522,7 +487,6 @@ impl<'a> AdminPanelTarget<'a> {
         }
     }
 
-    /// Performs the anchor open handler operation.
     pub(super) const fn anchor_open(anchor: &'a str, open_section: &'a str) -> Self {
         Self {
             anchor: Some(Cow::Borrowed(anchor)),
@@ -530,7 +494,6 @@ impl<'a> AdminPanelTarget<'a> {
         }
     }
 
-    /// Performs the owned anchor open handler operation.
     pub(super) const fn owned_anchor_open(anchor: String, open_section: &'a str) -> Self {
         Self {
             anchor: Some(Cow::Owned(anchor)),
@@ -538,12 +501,10 @@ impl<'a> AdminPanelTarget<'a> {
         }
     }
 
-    /// Performs the anchor value handler operation.
     pub(super) fn anchor_value(&self) -> Option<&str> {
         self.anchor.as_deref().filter(|value| !value.is_empty())
     }
 
-    /// Performs the open section value handler operation.
     pub(super) fn open_section_value(&self) -> Option<&str> {
         self.open_section
             .as_deref()
@@ -551,17 +512,14 @@ impl<'a> AdminPanelTarget<'a> {
     }
 }
 
-/// Handles the admin panel redirect request.
 pub(super) fn admin_panel_redirect(message: &str) -> Redirect {
     admin_panel_redirect_with_status(message, false, &AdminPanelTarget::none())
 }
 
-/// Handles the admin panel redirect anchor request.
 pub(super) fn admin_panel_redirect_anchor(message: &str, anchor: &str) -> Redirect {
     admin_panel_redirect_with_status(message, false, &AdminPanelTarget::anchor(anchor))
 }
 
-/// Handles the admin panel redirect anchor open request.
 pub(super) fn admin_panel_redirect_anchor_open(
     message: &str,
     anchor: &str,
@@ -574,12 +532,10 @@ pub(super) fn admin_panel_redirect_anchor_open(
     )
 }
 
-/// Handles the admin panel error redirect anchor request.
 pub(super) fn admin_panel_error_redirect_anchor(message: &str, anchor: &str) -> Redirect {
     admin_panel_redirect_with_status(message, true, &AdminPanelTarget::anchor(anchor))
 }
 
-/// Handles the admin panel error redirect anchor open request.
 pub(super) fn admin_panel_error_redirect_anchor_open(
     message: &str,
     anchor: &str,
@@ -592,25 +548,17 @@ pub(super) fn admin_panel_error_redirect_anchor_open(
     )
 }
 
-// ─── GET /admin/panel ─────────────────────────────────────────────────────────
-
+// GET /admin/panel
 /// Query params accepted by GET /admin/panel.
 /// All fields are optional — missing = no flash message.
 #[derive(Deserialize, Default)]
 pub(crate) struct AdminPanelQuery {
-    /// The flash message, if any.
     pub flash: Option<String>,
-    /// The optional flash error.
     pub flash_error: Option<String>,
-    /// The optional open.
     pub open: Option<String>,
-    /// The optional bootstrap.
     pub bootstrap: Option<String>,
-    /// The optional backup created.
     pub backup_created: Option<String>,
-    /// The optional backup deleted.
     pub backup_deleted: Option<String>,
-    /// The optional restored.
     pub restored: Option<String>,
     /// Set by `board_restore` on success: the `short_name` of the restored board.
     pub board_restored: Option<String>,
@@ -623,7 +571,6 @@ pub(crate) struct AdminPanelQuery {
 #[derive(Deserialize, Default)]
 /// Query parameters controlling the live-log response size.
 pub(crate) struct LiveLogQuery {
-    /// The optional bytes.
     pub bytes: Option<usize>,
 }
 
@@ -633,272 +580,150 @@ pub(crate) struct LiveLogQuery {
 )]
 /// Point-in-time data for admin panel.
 struct AdminPanelSnapshot {
-    /// The boards collection.
     boards: Vec<crate::models::Board>,
-    /// The bans collection.
     bans: Vec<crate::models::Ban>,
-    /// The filters collection.
     filters: Vec<crate::models::WordFilter>,
-    /// The reports collection.
     reports: Vec<crate::models::ReportWithContext>,
-    /// The appeals collection.
     appeals: Vec<crate::models::BanAppeal>,
-    /// The site name.
     site_name: String,
-    /// The site subtitle.
     site_subtitle: String,
-    /// Whether homepage new thread badges is enabled.
     homepage_new_thread_badges_enabled: bool,
-    /// Whether homepage new reply badges is enabled.
     homepage_new_reply_badges_enabled: bool,
-    /// Whether thread new reply badges is enabled.
     thread_new_reply_badges_enabled: bool,
-    /// The default theme.
     default_theme: String,
-    /// The banner rotation interval minutes.
     banner_rotation_interval_minutes: i64,
-    /// Whether banner external links is enabled.
     banner_external_links_enabled: bool,
-    /// The auto full backup interval hours.
     auto_full_backup_interval_hours: u64,
-    /// The auto full backup copies to keep.
     auto_full_backup_copies_to_keep: u64,
-    /// Whether the auto full backup include Tor hidden service keys setting is active.
     auto_full_backup_include_tor_hidden_service_keys: bool,
-    /// The auto full backup storage mode.
     auto_full_backup_storage_mode: String,
-    /// The auto full backup split ZIP part size size in bytes.
     auto_full_backup_split_zip_part_size_bytes: u64,
-    /// The themes collection.
     themes: Vec<crate::models::Theme>,
-    /// The global banners collection.
     global_banners: Vec<crate::models::BannerAsset>,
-    /// The home banners collection.
     home_banners: Vec<crate::models::BannerAsset>,
-    /// The board banners collection.
     board_banners: Vec<crate::models::BannerAsset>,
-    /// The full backups collection.
     full_backups: Vec<BackupInfo>,
-    /// The board backups collection.
     board_backups: Vec<BackupInfo>,
-    /// The database size size in bytes.
     db_size_bytes: i64,
-    /// Whether the database size warning setting is active.
     db_size_warning: bool,
-    /// The setup status.
     setup_status: crate::templates::AdminPanelSetupStatus,
-    /// The `FFmpeg` timeout duration in seconds.
     ffmpeg_timeout_secs: u64,
-    /// Whether media auto prune is enabled.
     media_auto_prune_enabled: bool,
-    /// The media max active content size size in bytes.
     media_max_active_content_size_bytes: u64,
-    /// Whether the `FFmpeg` available setting is active.
     ffmpeg_available: bool,
-    /// Whether the `FFprobe` available setting is active.
     ffprobe_available: bool,
-    /// Whether the `FFmpeg` webp available setting is active.
     ffmpeg_webp_available: bool,
-    /// Whether the `FFmpeg` VP9 available setting is active.
     ffmpeg_vp9_available: bool,
-    /// Whether the `FFmpeg` VP9 encoder available setting is active.
     ffmpeg_vp9_encoder_available: bool,
-    /// Whether the `FFmpeg` opus available setting is active.
     ffmpeg_opus_available: bool,
-    /// The optional PDF thumbnail renderer.
     pdf_thumbnail_renderer: Option<String>,
-    /// The backup summary.
     backup_summary: BackupSummary,
-    /// The site health.
     site_health: SiteHealthSnapshot,
-    /// The dashboard.
     dashboard: AdminDashboardSummary,
 }
 
 #[derive(Clone)]
-/// Data used by the backup summary workflow.
 struct BackupSummary {
-    /// The optional warning.
     warning: Option<String>,
-    /// The status line.
     status_line: String,
 }
 
-/// Data used by the overview domain data workflow.
 struct OverviewDomainData {
-    /// The backup summary.
     backup_summary: BackupSummary,
 }
 
 #[derive(Clone)]
-/// Data used by the admin dashboard summary workflow.
 struct AdminDashboardSummary {
-    /// The version.
     version: String,
-    /// The build.
     build: String,
-    /// The setup status.
     setup_status: String,
-    /// The setup detail.
     setup_detail: String,
-    /// The setup state.
     setup_state: crate::templates::AdminDashboardState,
-    /// The site title.
     site_title: String,
-    /// The public URL.
     public_url: String,
-    /// The database status.
     db_status: String,
-    /// The database detail.
     db_detail: String,
-    /// The database state.
     db_state: crate::templates::AdminDashboardState,
-    /// The backup status.
     backup_status: String,
-    /// The backup detail.
     backup_detail: String,
-    /// The backup state.
     backup_state: crate::templates::AdminDashboardState,
-    /// The storage status.
     storage_status: String,
-    /// The storage detail.
     storage_detail: String,
-    /// The storage state.
     storage_state: crate::templates::AdminDashboardState,
-    /// The Tor status.
     tor_status: String,
-    /// The Tor detail.
     tor_detail: String,
-    /// The Tor state.
     tor_state: crate::templates::AdminDashboardState,
-    /// The dependency status.
     dependency_status: String,
-    /// The dependency detail.
     dependency_detail: String,
-    /// The dependency state.
     dependency_state: crate::templates::AdminDashboardState,
-    /// The job status.
     job_status: String,
-    /// The job detail.
     job_detail: String,
-    /// The job state.
     job_state: crate::templates::AdminDashboardState,
-    /// The number of boards.
     board_count: String,
-    /// The number of threads.
     thread_count: String,
-    /// The number of posts.
     post_count: String,
-    /// The recent activity.
     recent_activity: String,
-    /// The media summary.
     media_summary: String,
-    /// The report status.
     report_status: String,
-    /// The report detail.
     report_detail: String,
-    /// The report state.
     report_state: crate::templates::AdminDashboardState,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 /// Point-in-time data for dashboard activity.
 struct DashboardActivitySnapshot {
-    /// The number of boards.
     board_count: usize,
-    /// The optional active threads.
     active_threads: Option<i64>,
-    /// The optional total threads.
     total_threads: Option<i64>,
-    /// The optional total posts.
     total_posts: Option<i64>,
-    /// The optional posts 24h.
     posts_24h: Option<i64>,
-    /// The optional posts 7d.
     posts_7d: Option<i64>,
-    /// The optional upload posts.
     upload_posts: Option<i64>,
-    /// The optional total images.
     total_images: Option<i64>,
-    /// The optional total videos.
     total_videos: Option<i64>,
-    /// The optional total audio.
     total_audio: Option<i64>,
-    /// The active size in bytes.
     active_bytes: Option<i64>,
-    /// The optional recent reports 7d.
     recent_reports_7d: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Data used by the dashboard thread counts workflow.
 struct DashboardThreadCounts {
-    /// The active.
     active: i64,
-    /// The total.
     total: i64,
 }
 
 #[derive(Clone, Copy)]
-/// Data used by the dashboard summary inputs workflow.
 struct DashboardSummaryInputs<'a> {
-    /// The activity.
     activity: &'a DashboardActivitySnapshot,
-    /// The moderation.
     moderation: &'a ModerationDomainData,
-    /// The appearance.
     appearance: &'a AppearanceDomainData,
-    /// The backup summary.
     backup_summary: &'a BackupSummary,
-    /// The maintenance.
     maintenance: &'a MaintenanceDomainData,
-    /// The setup status.
     setup_status: crate::templates::AdminPanelSetupStatus,
-    /// The site health.
     site_health: &'a SiteHealthSnapshot,
-    /// The optional Tor address.
     tor_address: Option<&'a str>,
 }
 
 /// Point-in-time data for site health.
 struct SiteHealthSnapshot {
-    /// The server status.
     server_status: String,
-    /// The database schema status.
     database_schema_status: String,
-    /// The database integrity status.
     database_integrity_status: String,
-    /// The last successful backup.
     last_successful_backup: String,
-    /// The next scheduled backup.
     next_scheduled_backup: String,
-    /// The data dir usage.
     data_dir_usage: String,
-    /// The upload dir size.
     upload_dir_size: String,
-    /// The Tor status.
     tor_status: String,
-    /// The Tor service status.
     tor_service_status: String,
-    /// The Tor mode.
     tor_mode: String,
-    /// The Tor config summary.
     tor_config_summary: String,
-    /// The running jobs.
     running_jobs: i64,
-    /// The queued jobs.
     queued_jobs: i64,
-    /// The recent completed jobs.
     recent_completed_jobs: i64,
-    /// The failed jobs.
     failed_jobs: i64,
-    /// Whether the background-job summary query succeeded.
     background_jobs_available: bool,
-    /// The backup jobs.
     backup_jobs: String,
-    /// The restore jobs.
     restore_jobs: String,
-    /// The recent warnings.
     recent_warnings: String,
 }
 
@@ -906,73 +731,47 @@ struct SiteHealthSnapshot {
 /// Point-in-time data for site health jobs.
 struct SiteHealthJobsSnapshot {
     #[serde(skip)]
-    /// Whether the background-job summary query succeeded.
     summary_available: bool,
     #[serde(rename = "running_jobs")]
-    /// The running.
     running: i64,
     #[serde(rename = "queued_jobs")]
-    /// The queued.
     queued: i64,
     #[serde(rename = "recent_completed_jobs")]
-    /// The recent completed.
     recent_completed: i64,
     #[serde(rename = "failed_jobs")]
-    /// The failed.
     failed: i64,
     #[serde(rename = "backup_jobs")]
-    /// The backup.
     backup: String,
     #[serde(rename = "restore_jobs")]
-    /// The restore.
     restore: String,
     #[serde(rename = "recent_failed_job_details")]
-    /// The recent failed collection.
     recent_failed: Vec<SiteHealthJobDetail>,
     #[serde(rename = "recent_completed_job_details")]
-    /// The recent completed details collection.
     recent_completed_details: Vec<SiteHealthJobDetail>,
 }
 
 #[derive(Clone, Serialize)]
-/// Data used by the site health job detail workflow.
 struct SiteHealthJobDetail {
-    /// The record identifier.
     id: i64,
     #[serde(rename = "type")]
-    /// The job type.
     job_type: String,
-    /// The name.
     name: String,
-    /// The post identifier.
     post_id: Option<i64>,
-    /// The post URL.
     post_url: Option<String>,
-    /// The status.
     status: String,
-    /// The attempts.
     attempts: i64,
-    /// The error message, if any.
     error: Option<String>,
-    /// The updated timestamp.
     updated_at: String,
 }
 
-/// Data used by the boards domain data workflow.
 struct BoardsDomainData {
-    /// The boards collection.
     boards: Vec<crate::models::Board>,
 }
 
-/// Data used by the moderation domain data workflow.
 struct ModerationDomainData {
-    /// The bans collection.
     bans: Vec<crate::models::Ban>,
-    /// The filters collection.
     filters: Vec<crate::models::WordFilter>,
-    /// The reports collection.
     reports: Vec<crate::models::ReportWithContext>,
-    /// The appeals collection.
     appeals: Vec<crate::models::BanAppeal>,
 }
 
@@ -980,39 +779,23 @@ struct ModerationDomainData {
     clippy::struct_excessive_bools,
     reason = "the fields mirror independent appearance toggles stored in site settings"
 )]
-/// Data used by the appearance domain data workflow.
 struct AppearanceDomainData {
-    /// The site name.
     site_name: String,
-    /// The site subtitle.
     site_subtitle: String,
-    /// Whether homepage new thread badges is enabled.
     homepage_new_thread_badges_enabled: bool,
-    /// Whether homepage new reply badges is enabled.
     homepage_new_reply_badges_enabled: bool,
-    /// Whether thread new reply badges is enabled.
     thread_new_reply_badges_enabled: bool,
-    /// The default theme.
     default_theme: String,
-    /// The banner rotation interval minutes.
     banner_rotation_interval_minutes: i64,
-    /// Whether banner external links is enabled.
     banner_external_links_enabled: bool,
-    /// The themes collection.
     themes: Vec<crate::models::Theme>,
-    /// The global banners collection.
     global_banners: Vec<crate::models::BannerAsset>,
-    /// The home banners collection.
     home_banners: Vec<crate::models::BannerAsset>,
-    /// The board banners collection.
     board_banners: Vec<crate::models::BannerAsset>,
 }
 
-/// Data used by the backups domain data workflow.
 struct BackupsDomainData {
-    /// The full backups collection.
     full_backups: Vec<BackupInfo>,
-    /// The board backups collection.
     board_backups: Vec<BackupInfo>,
 }
 
@@ -1021,42 +804,27 @@ struct BackupsDomainData {
     reason = "the fields are independent maintenance capability flags read from application state"
 )]
 // This is a flat snapshot of independent maintenance capability flags read from app state.
-/// Data used by the maintenance domain data workflow.
 struct MaintenanceDomainData {
-    /// The database size size in bytes.
     db_size_bytes: i64,
-    /// Whether the database size warning setting is active.
     db_size_warning: bool,
-    /// The `FFmpeg` timeout duration in seconds.
     ffmpeg_timeout_secs: u64,
-    /// Whether media auto prune is enabled.
     media_auto_prune_enabled: bool,
-    /// The media max active content size size in bytes.
     media_max_active_content_size_bytes: u64,
-    /// Whether the `FFmpeg` available setting is active.
     ffmpeg_available: bool,
-    /// Whether the `FFprobe` available setting is active.
     ffprobe_available: bool,
-    /// Whether the `FFmpeg` webp available setting is active.
     ffmpeg_webp_available: bool,
-    /// Whether the `FFmpeg` VP9 available setting is active.
     ffmpeg_vp9_available: bool,
-    /// Whether the `FFmpeg` VP9 encoder available setting is active.
     ffmpeg_vp9_encoder_available: bool,
-    /// Whether the `FFmpeg` opus available setting is active.
     ffmpeg_opus_available: bool,
-    /// The optional PDF thumbnail renderer.
     pdf_thumbnail_renderer: Option<String>,
 }
 
-/// Loads overview domain data.
 fn load_overview_domain_data(full_backups: &[BackupInfo]) -> OverviewDomainData {
     OverviewDomainData {
         backup_summary: build_backup_summary(full_backups),
     }
 }
 
-/// Loads site health snapshot.
 fn load_site_health_snapshot(
     conn: &rusqlite::Connection,
     state: &AppState,
@@ -1115,7 +883,6 @@ fn load_site_health_snapshot(
     }
 }
 
-/// Performs the Tor service status label handler operation.
 fn tor_service_status_label(onion_address: Option<&str>) -> String {
     if !CONFIG.enable_tor_support {
         "not started; enable Tor support in settings.toml and restart".to_owned()
@@ -1126,7 +893,6 @@ fn tor_service_status_label(onion_address: Option<&str>) -> String {
     }
 }
 
-/// Performs the Tor mode label handler operation.
 fn tor_mode_label() -> String {
     if !CONFIG.enable_tor_support {
         "clearnet only".to_owned()
@@ -1137,7 +903,6 @@ fn tor_mode_label() -> String {
     }
 }
 
-/// Loads dashboard activity snapshot.
 fn load_dashboard_activity_snapshot(
     conn: &rusqlite::Connection,
     board_count: usize,
@@ -1165,7 +930,6 @@ fn load_dashboard_activity_snapshot(
     }
 }
 
-/// Performs the dashboard thread counts handler operation.
 fn dashboard_thread_counts(conn: &rusqlite::Connection) -> Option<DashboardThreadCounts> {
     conn.query_row(
         "SELECT
@@ -1183,7 +947,6 @@ fn dashboard_thread_counts(conn: &rusqlite::Connection) -> Option<DashboardThrea
     .ok()
 }
 
-/// Performs the dashboard recent count handler operation.
 fn dashboard_recent_count(
     conn: &rusqlite::Connection,
     table_name: &str,
@@ -1200,12 +963,10 @@ fn dashboard_recent_count(
     .ok()
 }
 
-/// Performs the optional count query handler operation.
 fn optional_count_query(conn: &rusqlite::Connection, query: &str) -> Option<i64> {
     conn.query_row(query, [], |row| row.get(0)).ok()
 }
 
-/// Loads site health jobs snapshot.
 fn load_site_health_jobs_snapshot(
     conn: &rusqlite::Connection,
     state: &AppState,
@@ -1240,7 +1001,6 @@ fn load_site_health_jobs_snapshot(
     }
 }
 
-/// Loads site health job details.
 fn load_site_health_job_details(
     conn: &rusqlite::Connection,
     status: &str,
@@ -1254,7 +1014,6 @@ fn load_site_health_job_details(
         .collect()
 }
 
-/// Performs the site health job detail handler operation.
 fn site_health_job_detail(
     conn: &rusqlite::Connection,
     job: db::RecentBackgroundJob,
@@ -1277,13 +1036,11 @@ fn site_health_job_detail(
     }
 }
 
-/// Performs the job post ID handler operation.
 fn job_post_id(payload: &str) -> Option<i64> {
     let value = serde_json::from_str::<serde_json::Value>(payload).ok()?;
     value.get("d")?.get("post_id")?.as_i64()
 }
 
-/// Performs the post URL for job handler operation.
 fn post_url_for_job(conn: &rusqlite::Connection, post_id: i64) -> Option<String> {
     conn.query_row(
         "SELECT b.short_name, p.thread_id
@@ -1298,7 +1055,6 @@ fn post_url_for_job(conn: &rusqlite::Connection, post_id: i64) -> Option<String>
     .map(|(board_short, thread_id)| format!("/{board_short}/thread/{thread_id}#p{post_id}"))
 }
 
-/// Performs the background job display name handler operation.
 fn background_job_display_name(job_type: &str) -> &str {
     match job_type {
         "video_transcode" => "Video transcode",
@@ -1309,7 +1065,6 @@ fn background_job_display_name(job_type: &str) -> &str {
     }
 }
 
-/// Performs the sanitized job error snippet handler operation.
 fn sanitized_job_error_snippet(error: &str) -> Option<String> {
     let mut redacted = String::new();
     for token in error.split_whitespace() {
@@ -1347,14 +1102,12 @@ fn sanitized_job_error_snippet(error: &str) -> Option<String> {
     }
 }
 
-/// Formats backup time.
 fn format_backup_time(backup: &BackupInfo) -> String {
     backup
         .modified_epoch
         .map_or_else(|| backup.filename.clone(), fmt_epoch)
 }
 
-/// Performs the next scheduled backup label handler operation.
 fn next_scheduled_backup_label(full_backups: &[BackupInfo], interval_hours: u64) -> String {
     if interval_hours == 0 {
         return "not scheduled".to_owned();
@@ -1369,7 +1122,6 @@ fn next_scheduled_backup_label(full_backups: &[BackupInfo], interval_hours: u64)
     fmt_epoch(modified_epoch.saturating_add(interval_secs))
 }
 
-/// Performs the fmt epoch handler operation.
 fn fmt_epoch(timestamp: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0).map_or_else(
         || "unknown".to_owned(),
@@ -1377,7 +1129,6 @@ fn fmt_epoch(timestamp: i64) -> String {
     )
 }
 
-/// Performs the database integrity status handler operation.
 fn db_integrity_status(status: &crate::middleware::DbMaintenanceJobStatus) -> String {
     match status {
         crate::middleware::DbMaintenanceJobStatus::Finished { report, .. } => {
@@ -1393,7 +1144,6 @@ fn db_integrity_status(status: &crate::middleware::DbMaintenanceJobStatus) -> St
     }
 }
 
-/// Performs the backup jobs label handler operation.
 fn backup_jobs_label(progress: &crate::middleware::BackupProgress) -> String {
     use std::sync::atomic::Ordering;
     match progress.phase.load(Ordering::Relaxed) {
@@ -1414,7 +1164,6 @@ fn backup_jobs_label(progress: &crate::middleware::BackupProgress) -> String {
     }
 }
 
-/// Performs the safe dir size label handler operation.
 fn safe_dir_size_label(path: &Path) -> String {
     safe_dir_size(path).map_or_else(
         || "unknown".to_owned(),
@@ -1425,7 +1174,6 @@ fn safe_dir_size_label(path: &Path) -> String {
     )
 }
 
-/// Performs the safe dir size handler operation.
 fn safe_dir_size(root: &Path) -> Option<u64> {
     let metadata = std::fs::symlink_metadata(root).ok()?;
     if metadata.file_type().is_symlink() {
@@ -1462,7 +1210,6 @@ fn safe_dir_size(root: &Path) -> Option<u64> {
     Some(total)
 }
 
-/// Performs the recent warning lines handler operation.
 fn recent_warning_lines() -> Option<String> {
     let log_path = latest_log_file(&crate::config::logs_dir())?;
     let buf = std::fs::read(log_path).ok()?;
@@ -1486,14 +1233,12 @@ fn recent_warning_lines() -> Option<String> {
     }
 }
 
-/// Loads boards domain data.
 fn load_boards_domain_data(conn: &rusqlite::Connection) -> Result<BoardsDomainData> {
     Ok(BoardsDomainData {
         boards: db::get_all_boards(conn)?,
     })
 }
 
-/// Loads moderation domain data.
 fn load_moderation_domain_data(conn: &rusqlite::Connection) -> Result<ModerationDomainData> {
     Ok(ModerationDomainData {
         bans: db::list_bans(conn)?,
@@ -1503,7 +1248,6 @@ fn load_moderation_domain_data(conn: &rusqlite::Connection) -> Result<Moderation
     })
 }
 
-/// Loads appearance domain data.
 fn load_appearance_domain_data(
     conn: &rusqlite::Connection,
     boards: &[crate::models::Board],
@@ -1533,7 +1277,6 @@ fn load_appearance_domain_data(
     })
 }
 
-/// Loads backups domain data.
 fn load_backups_domain_data() -> BackupsDomainData {
     BackupsDomainData {
         full_backups: list_backup_files(&full_backup_dir(), BackupListKind::Full),
@@ -1541,7 +1284,6 @@ fn load_backups_domain_data() -> BackupsDomainData {
     }
 }
 
-/// Loads maintenance domain data.
 fn load_maintenance_domain_data(
     conn: &rusqlite::Connection,
     state: &AppState,
@@ -1571,7 +1313,6 @@ fn load_maintenance_domain_data(
     }
 }
 
-/// Loads admin panel snapshot.
 fn load_admin_panel_snapshot(
     conn: &rusqlite::Connection,
     state: &AppState,
@@ -1655,7 +1396,6 @@ fn load_admin_panel_snapshot(
     ))
 }
 
-/// Handles the admin panel setup status request.
 const fn admin_panel_setup_status(
     setup_state: db::SetupState,
 ) -> crate::templates::AdminPanelSetupStatus {
@@ -1670,7 +1410,6 @@ const fn admin_panel_setup_status(
     }
 }
 
-/// Builds backup summary.
 fn build_backup_summary(full_backups: &[BackupInfo]) -> BackupSummary {
     const BACKUP_WARN_AFTER_HOURS: i64 = 72;
 
@@ -1714,7 +1453,6 @@ fn build_backup_summary(full_backups: &[BackupInfo]) -> BackupSummary {
     }
 }
 
-/// Builds admin dashboard summary.
 fn build_admin_dashboard_summary(inputs: DashboardSummaryInputs<'_>) -> AdminDashboardSummary {
     let (setup_status, setup_detail, setup_state) = dashboard_setup_status(inputs.setup_status);
     let (db_status, db_detail, db_state) = dashboard_database_status(inputs.site_health);
@@ -1770,7 +1508,6 @@ fn build_admin_dashboard_summary(inputs: DashboardSummaryInputs<'_>) -> AdminDas
     }
 }
 
-/// Performs the dashboard setup status handler operation.
 fn dashboard_setup_status(
     status: crate::templates::AdminPanelSetupStatus,
 ) -> (String, String, crate::templates::AdminDashboardState) {
@@ -1798,7 +1535,6 @@ fn dashboard_setup_status(
     }
 }
 
-/// Performs the dashboard database status handler operation.
 fn dashboard_database_status(
     site_health: &SiteHealthSnapshot,
 ) -> (String, String, crate::templates::AdminDashboardState) {
@@ -1824,7 +1560,6 @@ fn dashboard_database_status(
     )
 }
 
-/// Performs the dashboard backup status handler operation.
 fn dashboard_backup_status(
     backup_summary: &BackupSummary,
 ) -> (String, String, crate::templates::AdminDashboardState) {
@@ -1855,7 +1590,6 @@ fn dashboard_backup_status(
     (status.to_owned(), warning.to_owned(), state)
 }
 
-/// Performs the dashboard storage status handler operation.
 fn dashboard_storage_status(
     activity: &DashboardActivitySnapshot,
     maintenance: &MaintenanceDomainData,
@@ -1894,7 +1628,6 @@ fn dashboard_storage_status(
     )
 }
 
-/// Performs the dashboard Tor status handler operation.
 fn dashboard_tor_status(
     tor_enabled: bool,
     tor_address: Option<&str>,
@@ -1922,7 +1655,6 @@ fn dashboard_tor_status(
     }
 }
 
-/// Performs the dashboard dependency status handler operation.
 fn dashboard_dependency_status(
     maintenance: &MaintenanceDomainData,
     ffmpeg_required: bool,
@@ -1955,7 +1687,6 @@ fn dashboard_dependency_status(
     )
 }
 
-/// Performs the dashboard job status handler operation.
 fn dashboard_job_status(
     site_health: &SiteHealthSnapshot,
 ) -> (String, String, crate::templates::AdminDashboardState) {
@@ -2002,7 +1733,6 @@ fn dashboard_job_status(
     (status, detail, state)
 }
 
-/// Performs the dashboard report status handler operation.
 fn dashboard_report_status(
     recent_reports: Option<i64>,
     open_reports: usize,
@@ -2030,7 +1760,6 @@ fn dashboard_report_status(
     )
 }
 
-/// Performs the public URL label handler operation.
 fn public_url_label() -> String {
     let Some(host) = CONFIG.public_hosts.first().filter(|host| !host.is_empty()) else {
         return "not configured".to_owned();
@@ -2048,7 +1777,6 @@ fn count_label(count: usize, singular: &str, plural: &str) -> String {
     }
 }
 
-/// Performs the optional count label handler operation.
 fn optional_count_label(count: Option<i64>, singular: &str, plural: &str) -> String {
     match count {
         Some(1) => format!("1 {singular}"),
@@ -2057,7 +1785,6 @@ fn optional_count_label(count: Option<i64>, singular: &str, plural: &str) -> Str
     }
 }
 
-/// Performs the thread count label handler operation.
 fn thread_count_label(activity: &DashboardActivitySnapshot) -> String {
     match (activity.active_threads, activity.total_threads) {
         (Some(active), Some(total)) => format!("{active} active / {total} total"),
@@ -2065,7 +1792,6 @@ fn thread_count_label(activity: &DashboardActivitySnapshot) -> String {
     }
 }
 
-/// Performs the recent activity label handler operation.
 fn recent_activity_label(activity: &DashboardActivitySnapshot) -> String {
     match (activity.posts_24h, activity.posts_7d) {
         (Some(day), Some(week)) => format!("{day} posts in 24h; {week} in 7d"),
@@ -2073,7 +1799,6 @@ fn recent_activity_label(activity: &DashboardActivitySnapshot) -> String {
     }
 }
 
-/// Performs the media summary label handler operation.
 fn media_summary_label(activity: &DashboardActivitySnapshot) -> String {
     match (
         activity.upload_posts,
@@ -2092,7 +1817,6 @@ fn media_summary_label(activity: &DashboardActivitySnapshot) -> String {
     }
 }
 
-/// Renders admin panel from snapshot.
 fn render_admin_panel_from_snapshot(
     snapshot: &AdminPanelSnapshot,
     csrf_token: &str,
@@ -2186,7 +1910,6 @@ fn render_admin_panel_from_snapshot(
     crate::templates::admin_panel_page(&view)
 }
 
-/// Builds dashboard view.
 fn build_dashboard_view(
     dashboard: &AdminDashboardSummary,
 ) -> crate::templates::AdminPanelDashboardView<'_> {
@@ -2227,7 +1950,6 @@ fn build_dashboard_view(
     }
 }
 
-/// Builds site health view.
 fn build_site_health_view<'a>(
     snapshot: &'a AdminPanelSnapshot,
     tor_address: Option<&'a str>,
@@ -2265,7 +1987,6 @@ fn build_site_health_view<'a>(
     }
 }
 
-/// Performs the detection status handler operation.
 const fn detection_status(detected: bool) -> crate::templates::AdminDetectionStatus {
     if detected {
         crate::templates::AdminDetectionStatus::Detected
@@ -2274,7 +1995,6 @@ const fn detection_status(detected: bool) -> crate::templates::AdminDetectionSta
     }
 }
 
-/// Performs the detection word handler operation.
 const fn detection_word(detected: bool) -> &'static str {
     if detected {
         "found"
@@ -2283,7 +2003,6 @@ const fn detection_word(detected: bool) -> &'static str {
     }
 }
 
-/// Builds diagnostics text.
 fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&str>) -> String {
     let tor_enabled = if CONFIG.enable_tor_support {
         "yes"
@@ -2318,7 +2037,6 @@ fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&st
     )
 }
 
-/// Performs the indent diagnostics block handler operation.
 fn indent_diagnostics_block(text: &str) -> String {
     text.lines()
         .map(|line| format!("  {line}"))
@@ -2326,7 +2044,6 @@ fn indent_diagnostics_block(text: &str) -> String {
         .join("\n")
 }
 
-/// Handles the admin panel request.
 pub(crate) async fn admin_panel(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -2357,7 +2074,6 @@ pub(crate) async fn admin_panel(
     let (jar, csrf) = ensure_admin_csrf(jar, cookie_secure)?;
     let csrf_clone = csrf.clone();
 
-    // Build the flash message from query params before entering spawn_blocking.
     let flash: Option<(bool, String)> = if let Some(err) = params.flash_error {
         Some((true, err))
     } else if let Some(msg) = params.flash {
@@ -2419,7 +2135,6 @@ pub(crate) async fn admin_panel(
     Ok((jar, Html(html)))
 }
 
-/// Handles the admin site health jobs request.
 pub(crate) async fn admin_site_health_jobs(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -2460,14 +2175,11 @@ pub(crate) async fn admin_site_health_jobs(
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the dismiss failed jobs request.
 pub(crate) struct DismissFailedJobsForm {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Handles the dismiss failed site health jobs request.
 pub(crate) async fn dismiss_failed_site_health_jobs(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -2510,7 +2222,6 @@ pub(crate) async fn dismiss_failed_site_health_jobs(
     Ok(admin_panel_redirect_anchor_open(message, "site-health", "site-health").into_response())
 }
 
-/// Handles the admin live log request.
 pub(crate) async fn admin_live_log(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -2575,7 +2286,6 @@ pub(crate) async fn admin_live_log(
         .into_response())
 }
 
-/// Performs the latest log file handler operation.
 fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
     let mut latest: Option<(SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(logs_dir).ok()?.flatten() {
@@ -2632,7 +2342,6 @@ fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool)> {
     Ok((content, truncated))
 }
 
-/// Handles the admin bootstrap now secs request.
 fn admin_bootstrap_now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2640,7 +2349,6 @@ fn admin_bootstrap_now_secs() -> u64 {
         .as_secs()
 }
 
-/// Creates admin session bootstrap.
 pub(super) fn create_admin_session_bootstrap(session_id: &str) -> String {
     let token = crate::utils::crypto::new_session_id();
     let expires_at = admin_bootstrap_now_secs().saturating_add(ADMIN_BOOTSTRAP_TTL_SECS);

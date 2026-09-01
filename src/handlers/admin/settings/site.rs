@@ -7,10 +7,8 @@ use axum::response::IntoResponse as _;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-/// Form fields accepted by the site settings request.
 pub(crate) struct SiteSettingsForm {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
     /// Custom site name (replaces [ `RustChan` ] on home page and footer).
     pub site_name: Option<String>,
@@ -24,13 +22,10 @@ pub(crate) struct SiteSettingsForm {
     pub thread_new_reply_badges_enabled: Option<String>,
     /// Default theme served to first-time visitors.
     pub default_theme: Option<String>,
-    /// The optional banner rotation interval minutes.
     pub banner_rotation_interval_minutes: Option<String>,
-    /// Whether banner external links is enabled.
     pub banner_external_links_enabled: Option<String>,
 }
 
-/// Resolves a submitted checkbox while optionally preserving a missing value.
 fn resolved_checkbox_setting(
     field: Option<&str>,
     current: bool,
@@ -56,7 +51,6 @@ fn resolved_checkbox_setting(
     clippy::too_many_lines,
     reason = "cross-field site validation and the atomic settings update share one request boundary"
 )]
-/// Handles the update site settings request.
 pub(crate) async fn update_site_settings(
     State(state): State<AppState>,
     jar: CookieJar,

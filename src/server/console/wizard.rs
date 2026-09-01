@@ -5,11 +5,10 @@ use crate::db::DbPool;
 use crossterm::{cursor, execute, terminal};
 use std::io::{stdout, BufRead, BufReader};
 
-// ─── Entry point ─────────────────────────────────────────────────────────────
-
+// Entry point
 /// Run one blocking wizard and restore the full-screen dashboard afterward.
 pub fn run_wizard(kind: &WizardKind, pool: &DbPool, mode: &SharedConsoleMode) {
-    // 1. Exit raw mode and reuse the existing alternate screen. Staying in the
+    // Exit raw mode and reuse the existing alternate screen. Staying in the
     // same full-screen buffer avoids terminal-specific redraw glitches where
     // the dashboard appears to overlap the wizard prompts on the primary screen.
     drop(terminal::disable_raw_mode());
@@ -20,7 +19,7 @@ pub fn run_wizard(kind: &WizardKind, pool: &DbPool, mode: &SharedConsoleMode) {
         cursor::Show,
     ));
 
-    // 2. Run the wizard, then consume the "press Enter" prompt — all within
+    // Run the wizard, then consume the "press Enter" prompt within
     //    a single scope so the StdinLock (significant Drop) is released before
     //    we re-enter raw mode.
     {
@@ -33,7 +32,7 @@ pub fn run_wizard(kind: &WizardKind, pool: &DbPool, mode: &SharedConsoleMode) {
             WizardKind::DeleteThread => kb_delete_thread(pool, &mut reader),
         }
 
-        // 3. Hold so the operator can read the result.
+        // Leave the result visible until the operator acknowledges it.
         {
             use std::io::Write as _;
             drop(write!(
@@ -46,7 +45,7 @@ pub fn run_wizard(kind: &WizardKind, pool: &DbPool, mode: &SharedConsoleMode) {
         drop(reader.read_line(&mut buf));
     } // StdinLock dropped here, before raw mode is re-entered.
 
-    // 4. Re-enter raw mode and clear for a fresh dashboard frame.
+    // Re-enter raw mode and clear for a fresh dashboard frame.
     drop(terminal::enable_raw_mode());
     drop(execute!(
         stdout(),
@@ -55,7 +54,7 @@ pub fn run_wizard(kind: &WizardKind, pool: &DbPool, mode: &SharedConsoleMode) {
         cursor::MoveTo(0, 0),
     ));
 
-    // 5. Reset mode so the render task resumes drawing.
+    // Reset mode so the render task resumes drawing.
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.block_on(async {
             *mode.write().await = ConsoleMode::Dashboard;
@@ -63,8 +62,7 @@ pub fn run_wizard(kind: &WizardKind, pool: &DbPool, mode: &SharedConsoleMode) {
     }
 }
 
-// ─── ANSI / prompt helpers ────────────────────────────────────────────────────
-
+// ANSI / prompt helpers
 /// Return an ANSI code only when colored output is enabled.
 fn c(code: &'static str) -> &'static str {
     if crate::logging::ansi_enabled() {
@@ -74,38 +72,28 @@ fn c(code: &'static str) -> &'static str {
     }
 }
 
-/// ANSI reset code.
 const RST: &str = "\x1b[0m";
-/// ANSI red foreground code.
 const RED: &str = "\x1b[31m";
-/// ANSI green foreground code.
 const GRN: &str = "\x1b[32m";
-/// ANSI yellow foreground code.
 const YLW: &str = "\x1b[33m";
-/// ANSI cyan foreground code.
 const CYN: &str = "\x1b[36m";
-/// ANSI bold code.
 const BLD: &str = "\x1b[1m";
 
-/// Return the platform-appropriate success marker.
 #[cfg(windows)]
 const fn ok_mark() -> &'static str {
     "OK"
 }
 
-/// Return the platform-appropriate success marker.
 #[cfg(not(windows))]
 const fn ok_mark() -> &'static str {
     "\u{2713}"
 }
 
-/// Return the platform-appropriate error marker.
 #[cfg(windows)]
 const fn err_mark() -> &'static str {
     "x"
 }
 
-/// Return the platform-appropriate error marker.
 #[cfg(not(windows))]
 const fn err_mark() -> &'static str {
     "\u{2717}"
@@ -196,8 +184,7 @@ fn prompt_password(reader: &mut dyn BufRead) -> Option<String> {
     }
 }
 
-// ─── kb_create_board ─────────────────────────────────────────────────────────
-
+// kb_create_board
 /// Prompt for a board definition and create it.
 pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
     let prompt = |msg: &str, reader: &mut dyn BufRead| -> Option<String> {
@@ -308,8 +295,7 @@ pub fn kb_create_board(pool: &DbPool, reader: &mut dyn BufRead) {
     crate::logging::console_println("");
 }
 
-// ─── kb_create_admin ─────────────────────────────────────────────────────────
-
+// kb_create_admin
 /// Prompt for administrator credentials and create the account.
 pub fn kb_create_admin(pool: &DbPool, reader: &mut dyn BufRead) {
     crate::logging::console_print_raw(&format!("\n  {}{}{}\n\n", c(CYN), section_rule(), c(RST)));
@@ -366,8 +352,7 @@ pub fn kb_create_admin(pool: &DbPool, reader: &mut dyn BufRead) {
     crate::logging::console_println("");
 }
 
-// ─── kb_delete_thread ────────────────────────────────────────────────────────
-
+// kb_delete_thread
 /// Prompt for a thread identifier and confirmed deletion.
 pub fn kb_delete_thread(pool: &DbPool, reader: &mut dyn BufRead) {
     crate::logging::console_prompt(&format!("  {}Thread ID to delete:{} ", c(CYN), c(RST)));

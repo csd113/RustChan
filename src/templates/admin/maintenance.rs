@@ -226,9 +226,6 @@ fn render_media_detection_cards(view: &AdminPanelViewModel<'_>) -> String {
 fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String {
     format!(
         r#"<div class="admin-panel-maintenance" id="maintenance">
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     // media settings
-     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section admin-section-collapsible" id="media-settings">
 <details class="admin-dropdown" data-admin-dropdown-key="media-settings"{media_settings_open_attr}>
 <summary><span>// media settings</span></summary>
@@ -297,9 +294,6 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
 </details>
 </section>
 
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     // database maintenance
-     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section admin-section-collapsible" id="database-maintenance">
 <details class="admin-dropdown" data-admin-dropdown-key="database-maintenance"{database_maintenance_open_attr}>
 <summary><span>// database maintenance</span></summary>
@@ -345,9 +339,6 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
 </details>
 </section>
 
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     // active onion address
-     ═══════════════════════════════════════════════════════════════════════════ -->
 {tor_section}
 </div>"#,
         csrf = escape_html(view.csrf_token),

@@ -1,9 +1,3 @@
-// db/admin.rs — Admin-facing queries.
-//
-// Covers: admin user & session management, bans, word filters, user reports,
-// moderation log, ban appeals, IP history, WAL checkpoint, VACUUM, DB size,
-// and the list_admins helper used by CLI tooling.
-//
 use crate::models::{AdminSession, AdminUser, Ban, WordFilter};
 use anyhow::{Context as _, Result};
 use rusqlite::{params, OptionalExtension as _};
@@ -99,8 +93,7 @@ pub struct DbHealthReport {
     pub after: Option<DbHealthSnapshot>,
 }
 
-// ─── Admin user queries ───────────────────────────────────────────────────────
-
+// Admin user queries
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_admin_by_username(
@@ -122,8 +115,7 @@ pub fn get_admin_by_username(
         .optional()?)
 }
 
-/// Replaced execute + `last_insert_rowid()` with INSERT … RETURNING id
-/// to retrieve the new row id atomically in the same statement.
+/// Create an administrator and return the row id from the same statement.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -138,8 +130,7 @@ pub fn create_admin(conn: &rusqlite::Connection, username: &str, hash: &str) -> 
     Ok(id)
 }
 
-/// Added rows-affected check — silently succeeding when the target
-/// username doesn't exist made password-reset errors invisible to the operator.
+/// Update an administrator password, failing if the username does not exist.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -160,8 +151,7 @@ pub fn update_admin_password(
     Ok(())
 }
 
-/// List all admin users (for CLI tooling).
-/// Switched from bare prepare to `prepare_cached`.
+/// List all administrator users for CLI tooling.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -188,8 +178,7 @@ pub fn get_admin_name_by_id(conn: &rusqlite::Connection, admin_id: i64) -> Resul
         .optional()?)
 }
 
-// ─── Session queries ──────────────────────────────────────────────────────────
-
+// Session queries
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn create_session(
@@ -249,12 +238,10 @@ pub fn purge_expired_sessions(conn: &rusqlite::Connection) -> Result<usize> {
     Ok(n)
 }
 
-// ─── Ban queries ──────────────────────────────────────────────────────────────
-
+// Ban queries
 /// Check whether `ip_hash` is currently banned. Returns the ban reason if so.
 ///
-/// Switched to `prepare_cached` — this is called on every post
-/// submission and was recompiling the statement on every call.
+/// The statement is cached because this check runs on every post submission.
 ///
 /// ORDER BY `expires_at` DESC NULLS FIRST ensures a permanent
 /// ban (NULL `expires_at`) always surfaces before any timed ban.
@@ -274,11 +261,11 @@ pub fn is_banned(conn: &rusqlite::Connection, ip_hash: &str) -> Result<Option<St
     let result: Option<Option<String>> = stmt
         .query_row(params![ip_hash, now], |r| r.get(0))
         .optional()?;
-    // Flatten: None = not banned; Some(r) = banned (r may be None if no reason was set)
+    // A ban with no reason still maps to an empty reason string.
     Ok(result.map(Option::unwrap_or_default))
 }
 
-/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+/// Add a ban and return its database identifier.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -313,8 +300,6 @@ pub fn remove_ban(conn: &rusqlite::Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Switched from bare prepare to `prepare_cached`.
-///
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn list_bans(conn: &rusqlite::Connection) -> Result<Vec<Ban>> {
@@ -335,10 +320,8 @@ pub fn list_bans(conn: &rusqlite::Connection) -> Result<Vec<Ban>> {
     Ok(bans)
 }
 
-// ─── Word filter queries ──────────────────────────────────────────────────────
-
-/// Switched to `prepare_cached` — called on every post submission
-/// to apply word filters; recompiling the statement every time was wasteful.
+// Word filter queries
+/// Return all word filters using a statement cached for the submission hot path.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -356,7 +339,7 @@ pub fn get_word_filters(conn: &rusqlite::Connection) -> Result<Vec<WordFilter>> 
     Ok(filters)
 }
 
-/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+/// Add a word filter and return its database identifier.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -382,8 +365,7 @@ pub fn remove_word_filter(conn: &rusqlite::Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
-// ─── Reports ──────────────────────────────────────────────────────────────────
-
+// Reports
 /// Return whether an `SQLite` error represents the open-report uniqueness guard.
 fn is_open_report_unique_violation(error: &rusqlite::Error) -> bool {
     match error {
@@ -401,7 +383,6 @@ fn is_open_report_unique_violation(error: &rusqlite::Error) -> bool {
 
 /// File a new report against a post.
 ///
-/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
 /// Duplicate open reports from the same reporter are blocked by the
 /// `idx_reports_open_unique` partial unique index.
 ///
@@ -430,7 +411,6 @@ pub fn file_report(
 }
 
 /// Return all open reports enriched with board name and post preview.
-/// Switched from bare prepare to `prepare_cached`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -475,8 +455,7 @@ pub fn get_open_reports(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// Resolve a report (mark it closed).
-/// Added rows-affected check.
+/// Resolve a report by marking it closed.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -494,8 +473,7 @@ pub fn resolve_report(conn: &rusqlite::Connection, report_id: i64, admin_id: i64
     Ok(())
 }
 
-// ─── Moderation log ───────────────────────────────────────────────────────────
-
+// Moderation log
 /// Append one entry to the moderation action log.
 ///
 /// # Errors
@@ -531,8 +509,7 @@ pub fn log_mod_action(
     Ok(())
 }
 
-/// Retrieve a page of mod log entries, newest first.
-/// Switched from bare prepare to `prepare_cached`.
+/// Retrieve a page of moderation log entries, newest first.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -572,8 +549,7 @@ pub fn count_mod_log(conn: &rusqlite::Connection) -> Result<i64> {
     Ok(conn.query_row("SELECT COUNT(*) FROM mod_log", [], |r| r.get(0))?)
 }
 
-// ─── Ban appeals ──────────────────────────────────────────────────────────────
-
+// Ban appeals
 /// File a ban appeal atomically while enforcing the 24-hour duplicate guard.
 ///
 /// Uses `BEGIN IMMEDIATE` so the "is this IP banned / has it appealed recently"
@@ -642,8 +618,7 @@ pub fn get_open_ban_appeals(conn: &rusqlite::Connection) -> Result<Vec<crate::mo
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// Dismiss a ban appeal (mark it closed without unbanning).
-/// Added rows-affected check.
+/// Dismiss a ban appeal without removing its ban.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -716,8 +691,7 @@ pub fn has_recent_appeal(conn: &rusqlite::Connection, ip_hash: &str) -> Result<b
     Ok(count > 0)
 }
 
-// ─── IP history ───────────────────────────────────────────────────────────────
-
+// IP history
 /// Count total posts by IP hash across all boards.
 ///
 /// # Errors
@@ -733,13 +707,8 @@ pub fn count_posts_by_ip_hash(conn: &rusqlite::Connection, ip_hash: &str) -> Res
 /// Return paginated posts by IP hash, newest first, across all boards.
 /// Each post is joined with its board `short_name` for display.
 ///
-/// Replaced the three-way join (posts → threads → boards) with a
-/// direct two-way join (posts → boards). The posts table already carries `board_id`,
-/// making the threads join unnecessary. The old join also silently hid any posts
-/// whose thread had been deleted (orphaned posts) because the INNER JOIN on
-/// threads would exclude them.
-///
-/// Switched from bare prepare to `prepare_cached`.
+/// Posts join directly to boards so orphaned posts are not hidden by a missing
+/// thread row. The statement is cached for repeated moderation lookups.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -775,8 +744,7 @@ pub fn get_posts_by_ip_hash(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-// ─── Database maintenance ─────────────────────────────────────────────────────
-
+// Database maintenance
 /// Run PRAGMA `wal_checkpoint(TRUNCATE)` and return (`log_pages`, `checkpointed_pages`, busy).
 ///
 /// The raw PRAGMA `wal_checkpoint` pragma returns three columns in this order:

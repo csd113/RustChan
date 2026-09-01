@@ -6,7 +6,6 @@ use super::{
 };
 use tokio::io::AsyncWriteExt as _;
 
-/// Handles the backup request logging middleware request.
 pub(crate) async fn backup_request_logging_middleware(req: Request, next: Next) -> Response {
     let method = req.method().clone();
     let uri = req.uri().clone();
@@ -36,7 +35,6 @@ pub(crate) async fn backup_request_logging_middleware(req: Request, next: Next) 
     response
 }
 
-/// Returns whether xml HTTP request.
 pub(super) fn is_xml_http_request(headers: &HeaderMap) -> bool {
     headers
         .get("x-requested-with")
@@ -44,7 +42,6 @@ pub(super) fn is_xml_http_request(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("XMLHttpRequest"))
 }
 
-/// Handles the admin XHR error response request.
 pub(super) fn admin_xhr_error_response(error: &AppError) -> Response {
     let handled = match error {
         AppError::NotFound(message) => Some((StatusCode::NOT_FOUND, message.clone())),
@@ -91,7 +88,6 @@ pub(super) fn admin_xhr_error_response(error: &AppError) -> Response {
         .unwrap_or_else(axum::response::IntoResponse::into_response)
 }
 
-/// Builds the redirect page response.
 pub(super) fn redirect_page_response(target: &str, message: &str) -> Response {
     let escaped_target = crate::utils::sanitize::escape_html(target);
     let escaped_message = crate::utils::sanitize::escape_html(message);
@@ -126,16 +122,12 @@ pub(super) fn redirect_page_response(target: &str, message: &str) -> Response {
 }
 
 #[derive(Clone, Copy)]
-/// Variants supported by the restore kind workflow.
 pub(super) enum RestoreKind {
-    /// Represents the full case.
     Full,
-    /// Represents the board case.
     Board,
 }
 
 impl RestoreKind {
-    /// Performs the title handler operation.
     pub(super) const fn title(self) -> &'static str {
         match self {
             Self::Full => "Full restore",
@@ -143,7 +135,6 @@ impl RestoreKind {
         }
     }
 
-    /// Performs the route handler operation.
     pub(super) const fn route(self) -> &'static str {
         match self {
             Self::Full => "/admin/restore",
@@ -151,7 +142,6 @@ impl RestoreKind {
         }
     }
 
-    /// Performs the maintenance label handler operation.
     pub(super) const fn maintenance_label(self) -> &'static str {
         match self {
             Self::Full => "Full restore",
@@ -159,7 +149,6 @@ impl RestoreKind {
         }
     }
 
-    /// Performs the start failure message handler operation.
     const fn start_failure_message(self) -> &'static str {
         match self {
             Self::Full => "Restore could not start.",
@@ -167,7 +156,6 @@ impl RestoreKind {
         }
     }
 
-    /// Performs the upload failure message handler operation.
     const fn upload_failure_message(self) -> &'static str {
         match self {
             Self::Full => "Restore upload failed.",
@@ -175,7 +163,6 @@ impl RestoreKind {
         }
     }
 
-    /// Performs the failure message handler operation.
     const fn failure_message(self) -> &'static str {
         match self {
             Self::Full => "Restore failed.",
@@ -183,7 +170,6 @@ impl RestoreKind {
         }
     }
 
-    /// Performs the open section handler operation.
     const fn open_section(self) -> &'static str {
         match self {
             Self::Full => FULL_BACKUP_RESTORE_SECTION,
@@ -191,29 +177,20 @@ impl RestoreKind {
         }
     }
 
-    /// Performs the anchor handler operation.
     const fn anchor(self) -> &'static str {
         self.open_section()
     }
 }
 
-/// Data used by the streamed restore upload workflow.
 pub(super) struct StreamedRestoreUpload {
-    /// The temp file.
     pub temp_file: tempfile::NamedTempFile,
-    /// The optional form CSRF.
     pub form_csrf: Option<String>,
-    /// Whether to restore Tor hidden service keys.
     pub restore_tor_hidden_service_keys: bool,
-    /// The optional uploaded filename.
     pub uploaded_filename: Option<String>,
-    /// The optional uploaded content type.
     pub uploaded_content_type: Option<String>,
-    /// The uploaded size in bytes.
     pub uploaded_bytes: u64,
 }
 
-/// Builds the restore start response.
 pub(super) fn restore_start_response(
     kind: RestoreKind,
     xhr_request: bool,
@@ -232,7 +209,6 @@ pub(super) fn restore_start_response(
     )
 }
 
-/// Builds the restore upload parse response.
 pub(super) fn restore_upload_parse_response(
     kind: RestoreKind,
     xhr_request: bool,
@@ -252,7 +228,6 @@ pub(super) fn restore_upload_parse_response(
     )
 }
 
-/// Builds the restore failure response.
 pub(super) fn restore_failure_response(
     kind: RestoreKind,
     xhr_request: bool,
@@ -331,7 +306,6 @@ fn restore_admin_panel_target(
     }
 }
 
-/// Performs the log restore upload started handler operation.
 pub(super) fn log_restore_upload_started(kind: RestoreKind, headers: &HeaderMap, jar: &CookieJar) {
     let content_type = headers
         .get(header::CONTENT_TYPE)
@@ -352,7 +326,6 @@ pub(super) fn log_restore_upload_started(kind: RestoreKind, headers: &HeaderMap,
     );
 }
 
-/// Handles the restore auth preflight request.
 pub(super) async fn restore_auth_preflight(
     state: &AppState,
     headers: &HeaderMap,
@@ -389,7 +362,6 @@ pub(super) async fn restore_auth_preflight(
     clippy::too_many_lines,
     reason = "multipart quotas, duplicate checks, temporary-file writes, and metadata parsing share one boundary"
 )]
-/// Handles the stream restore upload to tempfile request.
 pub(super) async fn stream_restore_upload_to_tempfile(
     kind: RestoreKind,
     multipart: &mut Multipart,
@@ -511,7 +483,6 @@ pub(super) async fn stream_restore_upload_to_tempfile(
     })
 }
 
-/// Handles the read restore text field request.
 async fn read_restore_text_field(
     mut field: axum::extract::multipart::Field<'_>,
     max_bytes: usize,
@@ -581,7 +552,6 @@ pub(super) fn validate_streamed_restore_upload(
     Ok(file_size)
 }
 
-/// Sanitizes backup ZIP filename.
 pub(super) fn sanitize_backup_zip_filename(filename: &str) -> Result<String> {
     let safe_filename: String = filename
         .chars()
@@ -598,7 +568,6 @@ pub(super) fn sanitize_backup_zip_filename(filename: &str) -> Result<String> {
     Ok(safe_filename)
 }
 
-/// Sanitizes saved backup ref.
 pub(super) fn sanitize_saved_backup_ref(value: &str) -> Result<String> {
     let safe_value: String = value
         .chars()
@@ -627,7 +596,6 @@ fn ensure_restore_upload_within_budget(
     Ok(())
 }
 
-/// Sanitizes board short value.
 pub(super) fn sanitize_board_short_value(board_short: &str) -> Result<String> {
     let safe_board = board_short
         .chars()

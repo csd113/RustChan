@@ -15,8 +15,7 @@ static PDF_RENDERER_TEST_MODE: std::sync::RwLock<Option<TestPdfRendererMode>> =
 #[cfg(test)]
 static PDF_RENDERER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-// ─── Static placeholder SVGs ──────────────────────────────────────────────────
-
+// Static placeholder SVGs
 // Note: these SVG strings contain `"#` sequences (e.g. fill="#0a0f0a") which
 // would terminate a `r#"..."#` raw string early.  We use `r##"..."##` so the
 // closing delimiter requires two consecutive `#` signs, which never appear in
@@ -50,8 +49,7 @@ const PDF_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" wi
   <rect x="72" y="186" width="96" height="8" rx="4" fill="#9aa29a"/>
 </svg>"##;
 
-// ─── Public API ───────────────────────────────────────────────────────────────
-
+// Public API
 /// What kind of static placeholder to write when the real thumbnail cannot be
 /// generated.
 #[derive(Debug, Clone, Copy)]
@@ -186,7 +184,7 @@ pub fn generate_thumbnail(
     ffmpeg_webp_available: bool,
 ) -> Result<PathBuf> {
     match mime {
-        // ── SVG and audio: always use static placeholder ──────────────────
+        // SVG and audio: always use static placeholder
         "image/svg+xml" => write_placeholder(output_path, PlaceholderKind::Video)
             .map(|()| output_path.to_path_buf()),
         m if m.starts_with("audio/") => write_placeholder(output_path, PlaceholderKind::Audio)
@@ -207,7 +205,7 @@ pub fn generate_thumbnail(
             }
         }
 
-        // ── Video (WebM, MP4, and any other video/*): requires ffmpeg AND libwebp ─────────────────────
+        // Video (WebM, MP4, and any other video/*): requires ffmpeg AND libwebp
         // `thumbnail_output_path` pre-selects `.webp` when both are present.
         // If ffmpeg_thumbnail then fails, write the SVG placeholder to the
         // `.svg`-extension sibling so the file content and extension match.
@@ -234,13 +232,13 @@ pub fn generate_thumbnail(
             }
         }
 
-        // ── WebP: skip ffmpeg entirely — use image crate directly ─────────
+        // WebP: skip ffmpeg entirely — use image crate directly
         // ffmpeg fails on animated WebP (VP8L) and emits a spurious warning
         // even though the image crate handles all WebP variants correctly.
         "image/webp" => image_crate_thumbnail(input_path, mime, output_path, max_dim)
             .map(|()| output_path.to_path_buf()),
 
-        // ── Other images: try ffmpeg, fall back to image crate ────────────
+        // Other images: try ffmpeg, fall back to image crate
         _ if mime.starts_with("image/") => {
             if ffmpeg_available {
                 match ffmpeg::ffmpeg_thumbnail(input_path, output_path, max_dim) {
@@ -258,7 +256,7 @@ pub fn generate_thumbnail(
             }
         }
 
-        // ── Unknown MIME: placeholder ─────────────────────────────────────
+        // Unknown MIME: placeholder
         _ => write_placeholder(output_path, PlaceholderKind::Video)
             .map(|()| output_path.to_path_buf()),
     }
@@ -305,8 +303,7 @@ pub fn write_placeholder(output_path: &Path, kind: PlaceholderKind) -> Result<()
     })
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
-
+// Internal helpers
 /// Generate a thumbnail using the `image` crate (no ffmpeg required).
 ///
 /// Decodes `input_path`, resizes to fit within `max_dim × max_dim` (aspect

@@ -25,19 +25,14 @@ const MIB: u64 = 1024 * 1024;
 const MIB_I64: i64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Variants supported by the setup preset workflow.
 pub(crate) enum SetupPreset {
-    /// Represents the public case.
     Public,
-    /// Represents the private case.
     Private,
-    /// Represents the local case.
     Local,
 }
 
 impl SetupPreset {
     #[must_use]
-    /// Returns the string representation.
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Public => "public",
@@ -47,7 +42,6 @@ impl SetupPreset {
     }
 
     #[must_use]
-    /// Performs the label handler operation.
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Public => "Public instance",
@@ -62,36 +56,22 @@ impl SetupPreset {
     clippy::struct_excessive_bools,
     reason = "preset defaults mirror independent setup toggles shown in the form"
 )]
-/// Data used by the preset defaults workflow.
 pub(crate) struct PresetDefaults {
-    /// The site name.
     pub site_name: &'static str,
-    /// The board slug.
     pub board_slug: &'static str,
-    /// The board name.
     pub board_name: &'static str,
-    /// The board description.
     pub board_description: &'static str,
-    /// The board visibility.
     pub board_visibility: &'static str,
-    /// Whether to allow uploads.
     pub allow_uploads: bool,
-    /// Whether to allow video.
     pub allow_video: bool,
-    /// Whether to allow audio.
     pub allow_audio: bool,
-    /// Whether to allow PDF.
     pub allow_pdf: bool,
-    /// Whether to allow captcha.
     pub allow_captcha: bool,
-    /// The post cooldown duration in seconds.
     pub post_cooldown_secs: i64,
-    /// Whether the hide NSFW default setting is active.
     pub hide_nsfw_default: bool,
 }
 
 #[must_use]
-/// Performs the preset defaults handler operation.
 pub(crate) const fn preset_defaults(preset: SetupPreset) -> PresetDefaults {
     match preset {
         SetupPreset::Public => PresetDefaults {
@@ -139,7 +119,6 @@ pub(crate) const fn preset_defaults(preset: SetupPreset) -> PresetDefaults {
     }
 }
 
-/// Parses preset.
 fn parse_preset(value: &str) -> SetupPreset {
     match value.trim() {
         "private" => SetupPreset::Private,
@@ -149,92 +128,49 @@ fn parse_preset(value: &str) -> SetupPreset {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Form fields accepted by the setup wizard request.
 pub(crate) struct SetupWizardForm {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
-    /// The preset.
     pub preset: String,
-    /// The site name.
     pub site_name: String,
-    /// The optional site subtitle.
     pub site_subtitle: Option<String>,
-    /// The optional default theme.
     pub default_theme: Option<String>,
-    /// The optional admin username.
     pub admin_username: Option<String>,
-    /// The optional admin password.
     pub admin_password: Option<String>,
-    /// The optional admin password confirm.
     pub admin_password_confirm: Option<String>,
-    /// The optional admin password token.
     pub admin_password_token: Option<String>,
-    /// The optional enable Tor.
     pub enable_tor: Option<String>,
-    /// The optional Tor only.
     pub tor_only: Option<String>,
-    /// The public URL.
     pub public_url: Option<String>,
-    /// The optional HTTPS cookies.
     pub https_cookies: Option<String>,
-    /// The optional behind proxy.
     pub behind_proxy: Option<String>,
-    /// The board slug.
     pub board_slug: String,
-    /// The board name.
     pub board_name: String,
-    /// The optional board description.
     pub board_description: Option<String>,
-    /// The optional board NSFW.
     pub board_nsfw: Option<String>,
-    /// The optional board visibility.
     pub board_visibility: Option<String>,
-    /// The optional allow posting.
     pub allow_posting: Option<String>,
-    /// The optional allow uploads.
     pub allow_uploads: Option<String>,
-    /// The optional allow video.
     pub allow_video: Option<String>,
-    /// The optional allow audio.
     pub allow_audio: Option<String>,
-    /// The optional allow PDF.
     pub allow_pdf: Option<String>,
-    /// The optional allow video embeds.
     pub allow_video_embeds: Option<String>,
-    /// The optional allow thread editing.
     pub allow_thread_editing: Option<String>,
-    /// The optional allow self delete.
     pub allow_self_delete: Option<String>,
-    /// The optional allow archive.
     pub allow_archive: Option<String>,
-    /// The image limit MiB.
     pub image_limit_mib: String,
-    /// The video limit MiB.
     pub video_limit_mib: String,
-    /// The audio limit MiB.
     pub audio_limit_mib: String,
-    /// The PDF limit MiB.
     pub pdf_limit_mib: String,
-    /// The optional allow captcha.
     pub allow_captcha: Option<String>,
-    /// The optional captcha type.
     pub captcha_type: Option<String>,
-    /// The post cooldown duration in seconds.
     pub post_cooldown_secs: Option<String>,
-    /// Whether homepage new thread badges is enabled.
     pub homepage_new_thread_badges_enabled: Option<String>,
-    /// Whether homepage new reply badges is enabled.
     pub homepage_new_reply_badges_enabled: Option<String>,
-    /// Whether thread new reply badges is enabled.
     pub thread_new_reply_badges_enabled: Option<String>,
-    /// The optional hide NSFW default.
     pub hide_nsfw_default: Option<String>,
-    /// Whether auto backup is enabled.
     pub auto_backup_enabled: Option<String>,
-    /// The optional backup retention.
     pub backup_retention: Option<String>,
-    /// The optional include Tor keys in backups.
     pub include_tor_keys_in_backups: Option<String>,
 }
 
@@ -243,85 +179,45 @@ pub(crate) struct SetupWizardForm {
     clippy::struct_excessive_bools,
     reason = "parsed setup data carries independent persisted toggles from the review form"
 )]
-/// Data used by the parsed setup workflow.
 pub(crate) struct ParsedSetup {
-    /// The preset.
     pub preset: SetupPreset,
-    /// The site name.
     pub site_name: String,
-    /// The site subtitle.
     pub site_subtitle: String,
-    /// The default theme.
     pub default_theme: String,
-    /// The optional admin username.
     pub admin_username: Option<String>,
-    /// The optional admin password.
     pub admin_password: Option<String>,
-    /// The board slug.
     pub board_slug: String,
-    /// The board name.
     pub board_name: String,
-    /// The board description.
     pub board_description: String,
-    /// Whether the board NSFW setting is active.
     pub board_nsfw: bool,
-    /// The board visibility.
     pub board_visibility: String,
-    /// Whether to allow posting.
     pub allow_posting: bool,
-    /// Whether to allow uploads.
     pub allow_uploads: bool,
-    /// Whether to allow video.
     pub allow_video: bool,
-    /// Whether to allow audio.
     pub allow_audio: bool,
-    /// Whether to allow PDF.
     pub allow_pdf: bool,
-    /// Whether to allow video embeds.
     pub allow_video_embeds: bool,
-    /// Whether to allow thread editing.
     pub allow_thread_editing: bool,
-    /// Whether to allow self delete.
     pub allow_self_delete: bool,
-    /// Whether to allow archive.
     pub allow_archive: bool,
-    /// The image limit size in bytes.
     pub image_limit_bytes: i64,
-    /// The video limit size in bytes.
     pub video_limit_bytes: i64,
-    /// The audio limit size in bytes.
     pub audio_limit_bytes: i64,
-    /// The PDF limit size in bytes.
     pub pdf_limit_bytes: i64,
-    /// Whether to allow captcha.
     pub allow_captcha: bool,
-    /// The captcha type.
     pub captcha_type: String,
-    /// The post cooldown duration in seconds.
     pub post_cooldown_secs: i64,
-    /// Whether homepage new thread badges is enabled.
     pub homepage_new_thread_badges_enabled: bool,
-    /// Whether homepage new reply badges is enabled.
     pub homepage_new_reply_badges_enabled: bool,
-    /// Whether thread new reply badges is enabled.
     pub thread_new_reply_badges_enabled: bool,
-    /// Whether the hide NSFW default setting is active.
     pub hide_nsfw_default: bool,
-    /// Whether the enable Tor setting is active.
     pub enable_tor: bool,
-    /// Whether the Tor only setting is active.
     pub tor_only: bool,
-    /// The public URL.
     pub public_url: String,
-    /// Whether the HTTPS cookies setting is active.
     pub https_cookies: bool,
-    /// Whether the behind proxy setting is active.
     pub behind_proxy: bool,
-    /// The auto backup interval hours.
     pub auto_backup_interval_hours: u64,
-    /// The backup retention.
     pub backup_retention: u64,
-    /// Whether to include Tor keys in backups.
     pub include_tor_keys_in_backups: bool,
 }
 
@@ -338,7 +234,6 @@ pub(crate) fn validate_board_slug(raw: &str) -> Option<String> {
 }
 
 #[must_use]
-/// Parses upload limit MiB.
 pub(crate) fn parse_upload_limit_mib(raw: &str) -> Option<i64> {
     let mib = raw.trim().parse::<u64>().ok()?;
     if !(1..=4096).contains(&mib) {
@@ -353,12 +248,10 @@ pub(crate) fn validate_password_confirmation(password: &str, confirmation: &str)
     password == confirmation && password.chars().count() >= 12 && password.chars().count() <= 1024
 }
 
-/// Performs the checkbox handler operation.
 fn checkbox(value: Option<&str>) -> bool {
     value.is_some_and(|value| matches!(value, "1" | "true" | "on"))
 }
 
-/// Performs the checked handler operation.
 fn checked(value: Option<&str>) -> &'static str {
     if checkbox(value) {
         " checked"
@@ -367,7 +260,6 @@ fn checked(value: Option<&str>) -> &'static str {
     }
 }
 
-/// Performs the pending admin hash signature handler operation.
 fn pending_admin_hash_signature(token: &str, password_hash_hex: &str) -> String {
     crypto::sha256_hex(
         format!(
@@ -378,7 +270,6 @@ fn pending_admin_hash_signature(token: &str, password_hash_hex: &str) -> String 
     )
 }
 
-/// Performs the make pending admin hash cookie handler operation.
 fn make_pending_admin_hash_cookie(
     token: &str,
     password_hash: &str,
@@ -401,7 +292,6 @@ fn make_pending_admin_hash_cookie(
     cookie
 }
 
-/// Performs the pending admin hash from cookie handler operation.
 fn pending_admin_hash_from_cookie(jar: &CookieJar, token: Option<&str>) -> Result<Option<String>> {
     let Some(token) = token.filter(|value| !value.is_empty()) else {
         return Ok(None);
@@ -436,7 +326,6 @@ fn pending_admin_hash_from_cookie(jar: &CookieJar, token: Option<&str>) -> Resul
     Ok(Some(password_hash))
 }
 
-/// Performs the trimmed limited handler operation.
 fn trimmed_limited(value: Option<&str>, max_chars: usize) -> String {
     value
         .unwrap_or_default()
@@ -446,7 +335,6 @@ fn trimmed_limited(value: Option<&str>, max_chars: usize) -> String {
         .collect()
 }
 
-/// Parses setup form.
 pub(crate) fn parse_setup_form(
     form: &SetupWizardForm,
     admin_count: i64,
@@ -458,7 +346,6 @@ pub(crate) fn parse_setup_form(
     clippy::too_many_lines,
     reason = "the wizard's dependent fields must be validated together before any setup mutation"
 )]
-/// Parses setup form inner.
 fn parse_setup_form_inner(
     form: &SetupWizardForm,
     admin_count: i64,
@@ -654,13 +541,11 @@ fn validate_setup_csrf(
     }
 }
 
-/// Handles the admin session ID request.
 fn admin_session_id(jar: &CookieJar) -> Option<String> {
     jar.get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned())
 }
 
-/// Handles the load setup state request.
 async fn load_setup_state(
     state: &AppState,
     session_id: Option<String>,
@@ -693,7 +578,6 @@ async fn load_setup_state(
     .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?
 }
 
-/// Handles the setup get request.
 pub(crate) async fn setup_get(
     State(state): State<AppState>,
     Query(query): Query<SetupQuery>,
@@ -719,13 +603,10 @@ pub(crate) async fn setup_get(
 }
 
 #[derive(Deserialize)]
-/// Query parameters accepted by the setup request.
 pub(crate) struct SetupQuery {
-    /// The optional preset.
     preset: Option<String>,
 }
 
-/// Handles the setup review request.
 pub(crate) async fn setup_review(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -794,7 +675,6 @@ pub(crate) async fn setup_review(
     clippy::too_many_lines,
     reason = "authorization, final validation, atomic setup writes, and session issuance form one request"
 )]
-/// Handles the setup finish request.
 pub(crate) async fn setup_finish(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -980,14 +860,11 @@ pub(crate) async fn setup_finish(
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the reopen setup request.
 pub(crate) struct ReopenSetupForm {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Handles the admin reopen setup request.
 pub(crate) async fn admin_reopen_setup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1017,7 +894,6 @@ pub(crate) async fn admin_reopen_setup(
     Ok(Redirect::to("/setup").into_response())
 }
 
-/// Handles the admin close setup request.
 pub(crate) async fn admin_close_setup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1051,7 +927,6 @@ pub(crate) async fn admin_close_setup(
 
 impl SetupWizardForm {
     #[must_use]
-    /// Performs the defaults for handler operation.
     pub(crate) fn defaults_for(preset: SetupPreset) -> Self {
         let defaults = preset_defaults(preset);
         Self {
@@ -1101,7 +976,6 @@ impl SetupWizardForm {
     }
 }
 
-/// Performs the request transport warning handler operation.
 fn request_transport_warning(
     headers: &HeaderMap,
     context: crate::middleware::SecureCookieContext,
@@ -1126,7 +1000,6 @@ fn request_transport_warning(
     clippy::too_many_lines,
     reason = "the function renders one ordered wizard form whose field names and fallback values are coupled"
 )]
-/// Performs the setup form page handler operation.
 fn setup_form_page(
     csrf: &str,
     state: db::SetupState,
@@ -1327,7 +1200,6 @@ fn setup_form_page(
     )
 }
 
-/// Performs the setup review page handler operation.
 fn setup_review_page(
     csrf: &str,
     state: db::SetupState,
@@ -1413,7 +1285,6 @@ fn setup_review_page(
     )
 }
 
-/// Performs the preset options handler operation.
 fn preset_options(selected: &str) -> String {
     let mut out = String::new();
     for preset in [
@@ -1442,7 +1313,6 @@ fn preset_options(selected: &str) -> String {
     out
 }
 
-/// Performs the visibility options handler operation.
 fn visibility_options(selected: &str) -> String {
     let mut out = String::new();
     for (value, label) in [
@@ -1459,7 +1329,6 @@ fn visibility_options(selected: &str) -> String {
     out
 }
 
-/// Performs the hidden field handler operation.
 fn hidden_field(name: &str, value: &str) -> String {
     format!(
         r#"<input type="hidden" name="{name}" value="{value}">"#,
@@ -1468,7 +1337,6 @@ fn hidden_field(name: &str, value: &str) -> String {
     )
 }
 
-/// Performs the hidden checkbox handler operation.
 fn hidden_checkbox(name: &str, value: Option<&str>) -> String {
     if checkbox(value) {
         hidden_field(name, "1")
@@ -1477,7 +1345,6 @@ fn hidden_checkbox(name: &str, value: Option<&str>) -> String {
     }
 }
 
-/// Performs the hidden form fields handler operation.
 fn hidden_form_fields(csrf: &str, form: &SetupWizardForm) -> String {
     let mut out = String::new();
     out.push_str(&hidden_field("_csrf", csrf));

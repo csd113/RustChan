@@ -10,21 +10,15 @@ use std::collections::HashSet;
 const BACKUP_LIST_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
-/// Data used by the backup list cache entry workflow.
 struct BackupListCacheEntry {
-    /// The generated timestamp.
     generated_at: Instant,
-    /// The optional source modified.
     source_modified: Option<SystemTime>,
-    /// The files collection.
     files: Vec<BackupInfo>,
 }
 
-/// Shared state for backup list cache.
 static BACKUP_LIST_CACHE: LazyLock<parking_lot::Mutex<HashMap<String, BackupListCacheEntry>>> =
     LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
-/// Performs the latest saved board backup filename handler operation.
 pub(super) fn latest_saved_board_backup_filename(board_short: &str) -> Option<String> {
     list_backup_files(&board_backup_dir(), BackupListKind::Board)
         .into_iter()
@@ -37,15 +31,11 @@ pub(super) fn latest_saved_board_backup_filename(board_short: &str) -> Option<St
 }
 
 #[derive(Clone, Copy)]
-/// Variants supported by the backup list kind workflow.
 pub(crate) enum BackupListKind {
-    /// Represents the full case.
     Full,
-    /// Represents the board case.
     Board,
 }
 
-/// Performs the backup cache key handler operation.
 fn backup_cache_key(kind: BackupListKind) -> String {
     match kind {
         BackupListKind::Full => "full".to_owned(),
@@ -53,12 +43,10 @@ fn backup_cache_key(kind: BackupListKind) -> String {
     }
 }
 
-/// Performs the current dir modified handler operation.
 fn current_dir_modified(dir: &Path) -> Option<SystemTime> {
     std::fs::metadata(dir).ok()?.modified().ok()
 }
 
-/// Performs the current source modified handler operation.
 fn current_source_modified(dir: &Path) -> Option<SystemTime> {
     let mut modified = current_dir_modified(dir);
     let root_modified = current_dir_modified(&saved_backup::backups_root_dir());
@@ -68,12 +56,10 @@ fn current_source_modified(dir: &Path) -> Option<SystemTime> {
     modified
 }
 
-/// Performs the invalidate backup list cache handler operation.
 pub(crate) fn invalidate_backup_list_cache(_dir: &Path, kind: BackupListKind) {
     BACKUP_LIST_CACHE.lock().remove(&backup_cache_key(kind));
 }
 
-/// Performs the modified string from epoch handler operation.
 fn modified_string_from_epoch(epoch: Option<i64>) -> String {
     epoch
         .and_then(|secs| {
@@ -85,7 +71,6 @@ fn modified_string_from_epoch(epoch: Option<i64>) -> String {
         .unwrap_or_default()
 }
 
-/// Performs the metadata scope matches handler operation.
 const fn metadata_scope_matches(kind: BackupListKind, scope: saved_backup::BackupScope) -> bool {
     match kind {
         BackupListKind::Full => matches!(
@@ -98,7 +83,6 @@ const fn metadata_scope_matches(kind: BackupListKind, scope: saved_backup::Backu
     }
 }
 
-/// Performs the scope label handler operation.
 fn scope_label(scope: saved_backup::BackupScope) -> String {
     match scope {
         saved_backup::BackupScope::FullSite => "Full site".to_owned(),
@@ -488,7 +472,6 @@ pub(crate) fn list_backup_files(dir: &Path, kind: BackupListKind) -> Vec<BackupI
     files
 }
 
-/// Performs the safe saved backup dir for delete handler operation.
 pub(super) fn safe_saved_backup_dir_for_delete(path: &Path) -> Result<()> {
     let backup_root = saved_backup::backups_root_dir();
     crate::utils::fs_security::assert_dir_no_symlink(path).map_err(|error| {
@@ -519,7 +502,6 @@ pub(super) fn safe_saved_backup_dir_for_delete(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Prunes full backup dir to limit.
 pub(super) fn prune_full_backup_dir_to_limit(dir: &Path, keep_limit: usize) -> Result<Vec<String>> {
     let keep_limit = keep_limit.max(1);
     let mut backups = list_backup_files(dir, BackupListKind::Full)
@@ -563,13 +545,11 @@ pub(super) fn prune_full_backup_dir_to_limit(dir: &Path, keep_limit: usize) -> R
     Ok(removed)
 }
 
-/// Performs the enforce full backup retention handler operation.
 pub(crate) fn enforce_full_backup_retention(copies_to_keep: u64) -> Result<Vec<String>> {
     let keep_limit = usize::try_from(copies_to_keep.max(1)).unwrap_or(usize::MAX);
     prune_full_backup_dir_to_limit(&full_backup_dir(), keep_limit)
 }
 
-/// Performs the latest verified full backup modified time in dir handler operation.
 pub(super) fn latest_verified_full_backup_modified_time_in_dir(dir: &Path) -> Option<SystemTime> {
     let mut latest = None;
     let backups = if dir == full_backup_dir().as_path() {
@@ -591,7 +571,6 @@ pub(super) fn latest_verified_full_backup_modified_time_in_dir(dir: &Path) -> Op
     latest
 }
 
-/// Performs the latest verified full backup modified time handler operation.
 pub(crate) fn latest_verified_full_backup_modified_time() -> Option<SystemTime> {
     latest_verified_full_backup_modified_time_in_dir(&full_backup_dir())
 }

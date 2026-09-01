@@ -1,4 +1,3 @@
-// utils/sanitize.rs
 //
 // XSS Prevention: User input NEVER goes to templates unescaped.
 // Every piece of user text passes through `escape_html` before insertion.
@@ -154,7 +153,6 @@ pub fn render_post_body(escaped: &str, collapse_greentext: bool) -> String {
     while let Some(line) = lines.next() {
         // Greentext block: lines starting with &gt; that aren't reply links
         if line.starts_with("&gt;") && !line.starts_with("&gt;&gt;") {
-            // Collect all consecutive greentext lines
             let mut group = vec![line];
             while let Some(next) =
                 lines.next_if(|next| next.starts_with("&gt;") && !next.starts_with("&gt;&gt;"))
@@ -655,8 +653,7 @@ mod tests {
         assert!(!html.contains("feature=share"));
     }
 
-    // ─── XSS vector tests ────────────────────────────────────────────────────
-
+    // XSS vector tests
     #[test]
     fn test_xss_script_tag() {
         let input = "<script>alert(1)</script>";
@@ -728,8 +725,7 @@ mod tests {
         );
     }
 
-    // ─── Edge case tests ─────────────────────────────────────────────────────
-
+    // Edge case tests
     #[test]
     fn test_max_body_length_guard() {
         // Input exceeding MAX_BODY_BYTES must be rejected without panicking

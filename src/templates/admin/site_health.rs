@@ -17,10 +17,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let recent_jobs = render_recent_jobs_panel();
     let diagnostics = escape_html(health.diagnostics_text);
     format!(
-        r##"<!-- ═══════════════════════════════════════════════════════════════════════════
-     // site health
-     ═══════════════════════════════════════════════════════════════════════════ -->
-<section class="admin-section admin-section-collapsible" id="site-health">
+        r##"<section class="admin-section admin-section-collapsible" id="site-health">
 <details class="admin-dropdown" data-admin-dropdown-key="site-health"{open_attr}>
 <summary><span>// site health</span></summary>
 <div class="admin-dropdown-content admin-site-health" data-admin-health-jobs-url="/admin/site-health/jobs">

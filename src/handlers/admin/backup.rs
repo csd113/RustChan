@@ -38,24 +38,15 @@ use super::{
     AdminPanelTarget, ADMIN_COOKIE_SAME_SITE, SESSION_COOKIE,
 };
 
-/// Implements archive handler support.
 mod archive;
-/// Implements common handler support.
 mod common;
-/// Implements create handler support.
 mod create;
-/// Implements downloads handler support.
 mod downloads;
-/// Implements HTTP handler support.
 mod http;
-/// Implements listing handler support.
 mod listing;
-/// Implements restore board handler support.
 mod restore_board;
-/// Implements restore full handler support.
 mod restore_full;
 mod saved_backup;
-/// Implements types handler support.
 mod types;
 pub(crate) use saved_backup::BackupStorageMode;
 
@@ -86,19 +77,14 @@ const BOARD_BACKUP_RESTORE_SECTION: &str = "board-backup-restore";
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 #[derive(Deserialize)]
-/// Form fields accepted by the restore saved request.
 pub(crate) struct RestoreSavedForm {
-    /// The filename.
     filename: String,
     #[serde(default, deserialize_with = "form_checkbox_bool")]
-    /// Whether to restore Tor hidden service keys.
     restore_tor_hidden_service_keys: bool,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Performs the form checkbox bool handler operation.
 fn form_checkbox_bool<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -107,7 +93,6 @@ where
     Ok(form_checkbox_value_is_on(value.as_deref()))
 }
 
-/// Performs the form checkbox value is on handler operation.
 fn form_checkbox_value_is_on(value: Option<&str>) -> bool {
     value == Some("1")
         || value.is_some_and(|item| item.eq_ignore_ascii_case("on"))
@@ -145,12 +130,10 @@ use restore_board::execute_board_restore;
 use restore_full::refresh_live_site_state_from_db;
 use restore_full::restore_db_from_snapshot;
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "database snapshotting, archive creation, and temporary-file cleanup form one operation"
 )]
-/// Handles the admin backup request.
 pub(crate) async fn admin_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -244,7 +227,7 @@ pub(crate) async fn admin_backup(
                     AppError::Internal(anyhow::anyhow!("Write backup manifest: {e}"))
                 })?;
 
-                // ── Database snapshot (streamed, not read into RAM) ────────
+                // Database snapshot (streamed, not read into RAM)
                 zip.start_file("chan.db", opts)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip DB entry: {e}")))?;
                 let mut db_src = std::fs::File::open(&temp_db)
@@ -257,7 +240,7 @@ pub(crate) async fn admin_backup(
                 progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
                 log_backup_progress(&progress);
 
-                // ── Upload files (streamed file-by-file via io::copy) ──────
+                // Upload files (streamed file-by-file via io::copy)
                 if uploads_base.exists() {
                     add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts, &progress)?;
                 }
@@ -402,7 +385,6 @@ fn add_dir_to_zip<W: Write + Seek>(
     add_dir_to_zip_with_prefix(zip, base, dir, "uploads", opts, progress)
 }
 
-/// Performs the add dir to ZIP with prefix handler operation.
 pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
     zip: &mut zip::ZipWriter<W>,
     base: &Path,
@@ -457,7 +439,6 @@ pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
     Ok(())
 }
 
-/// Performs the ZIP file options for path handler operation.
 fn zip_file_options_for_path(path: &Path) -> zip::write::SimpleFileOptions {
     let method = if should_store_without_recompress(path) {
         zip::CompressionMethod::Stored
@@ -467,7 +448,6 @@ fn zip_file_options_for_path(path: &Path) -> zip::write::SimpleFileOptions {
     zip::write::SimpleFileOptions::default().compression_method(method)
 }
 
-/// Performs the should store without recompress handler operation.
 fn should_store_without_recompress(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -517,12 +497,10 @@ pub(crate) fn board_backup_dir() -> PathBuf {
     crate::config::board_backups_dir()
 }
 
-/// Performs the local backup timestamp label handler operation.
 pub(super) fn local_backup_timestamp_label() -> String {
     Local::now().format("%Y%m%d_%H%M%S").to_string()
 }
 
-/// Performs the unique backup filename handler operation.
 pub(crate) fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
     let candidate = dir.join(base_name);
     if !candidate.exists() {
@@ -552,13 +530,10 @@ pub(crate) fn temp_board_download_dir() -> PathBuf {
     crate::config::runtime_temp_board_downloads_dir()
 }
 
-// ─── Board-level backup / restore ─────────────────────────────────────────────
-
+// Board-level backup / restore
 #[derive(Deserialize)]
-/// Query parameters accepted by the board backup download request.
 pub(crate) struct BoardBackupDownloadQuery {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 

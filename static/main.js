@@ -1,4 +1,3 @@
-// main.js — RustChan client-side logic.
 // Dynamic per-page values are passed via data-* attributes on HTML elements
 // and read here at runtime.
 
@@ -186,8 +185,7 @@ function applyQueuedPostSubmitAnchor() {
   }
 }
 
-// ─── Tor address copy control ────────────────────────────────────────────────
-
+// Tor address copy control
 function copyTextWithTextareaFallback(text) {
   return new Promise(function (resolve, reject) {
     var textarea = document.createElement('textarea');
@@ -269,8 +267,7 @@ function initTorCopyButtons(root) {
 
 initTorCopyButtons(document);
 
-// ─── Localize post timestamps to device timezone ──────────────────────────────
-
+// Localize post timestamps to device timezone
 function padTwoDigits(value) {
   value = String(value);
   return value.length < 2 ? '0' + value : value;
@@ -299,13 +296,13 @@ function localizePostTimes(root) {
     } else {
       el.textContent = local;
     }
-    el.removeAttribute('data-utc'); // prevent double-processing
+    el.removeAttribute('data-utc');
   });
 }
 
 function upgradeLegacySpoilers(root) {
   (root || document).querySelectorAll('.spoiler:not([data-action])').forEach(function (el) {
-    // Older posts were rendered with inline onclick handlers that are blocked by CSP.
+    // Legacy markup may contain inline handlers blocked by the current CSP.
     el.dataset.action = 'toggle-spoiler';
     el.removeAttribute('onclick');
   });
@@ -459,8 +456,7 @@ window.addEventListener('resize', function () {
   };
 }());
 
-// ─── Post form toggle & mobile drawer ────────────────────────────────────────
-
+// Post form toggle & mobile drawer
 function togglePostForm() {
   var wrap = document.getElementById('post-form-wrap');
   if (!wrap) return;
@@ -1212,8 +1208,7 @@ function captchaNonceMissing(form) {
   return !!(answerField && !answerField.value.trim());
 }
 
-// ─── NSFW disclaimer overlay ────────────────────────────────────────────────
-
+// NSFW disclaimer overlay
 function openNsfwDisclaimer(returnTo, boardLabel) {
   var overlay = document.getElementById('nsfw-disclaimer-overlay');
   if (!overlay) return;
@@ -1244,8 +1239,7 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 });
 
-// ─── Media expand / collapse ─────────────────────────────────────────────────
-
+// Media expand / collapse
 function expandMedia(preview) {
   var container = preview.closest('.file-container');
   var expanded = container.querySelector('.media-expanded');
@@ -1481,7 +1475,7 @@ function collapseVideoEmbed(btn) {
   }
 }
 
-// ─── Auto-compress modal ─────────────────────────────────────────────────────
+// Auto-compress modal
 // Dynamic limits (MAX_IMAGE / MAX_VIDEO) are read from data-max-image /
 // data-max-video attributes on the #compress-modal element, injected by the
 // Rust template at render time.
@@ -2085,8 +2079,7 @@ window.requestConfirmation = requestConfirmation;
   }
 })();
 
-// ─── Report modal ─────────────────────────────────────────────────────────────
-
+// Report modal
 var _reportActiveTrigger = null;
 var _editModalActiveTrigger = null;
 
@@ -2417,8 +2410,7 @@ function clampPopupToViewport(anchor, popup) {
   return { left: left, top: top };
 }
 
-// ─── Theme picker ─────────────────────────────────────────────────────────────
-
+// Theme picker
 (function () {
   var THEMES = (document.documentElement.getAttribute('data-theme-slugs') || '')
     .split(',')
@@ -2806,8 +2798,7 @@ function clampPopupToViewport(anchor, popup) {
   initUserPreferencesForms();
 })();
 
-// ─── Collapse greentext blocks ────────────────────────────────────────────────
-
+// Collapse greentext blocks
 (function () {
   if (document.body && document.body.getAttribute('data-collapse-greentext') === '1') {
     document.querySelectorAll('details.greentext-block').forEach(function (el) {
@@ -2816,8 +2807,7 @@ function clampPopupToViewport(anchor, popup) {
   }
 })();
 
-// ─── Thread auto-update ───────────────────────────────────────────────────────
-
+// Thread auto-update
 (function () {
   var container = document.getElementById('thread-posts');
   var statusEls = Array.prototype.slice.call(
@@ -3038,8 +3028,7 @@ function clampPopupToViewport(anchor, popup) {
   window._toggleAutoUpdate = toggleAutoUpdate;
 })();
 
-// ─── "(You)" post tracking ────────────────────────────────────────────────────
-
+// "(You)" post tracking
 (function () {
   var container = document.getElementById('thread-posts');
   if (!container) return;
@@ -3166,8 +3155,7 @@ function clampPopupToViewport(anchor, popup) {
   });
 })();
 
-// ─── Quotelink hover preview ──────────────────────────────────────────────────
-
+// Quotelink hover preview
 (function () {
   var _highlighted = null;
   var _missingHashNotice = null;
@@ -3312,9 +3300,7 @@ function clampPopupToViewport(anchor, popup) {
     _popupTarget = null;
   }
 
-  // Show an inline "post not found" notice anchored to the clicked quotelink.
-  // Reuses the existing hover popup element so the style is identical to a
-  // real post preview — no new DOM structure needed.
+  // Missing-post notices reuse the preview popup for consistent positioning.
   function showMissingPostPopup(link, pid) {
     clearTimeout(_hideTimer);
     popup.innerHTML =
@@ -3342,8 +3328,6 @@ function clampPopupToViewport(anchor, popup) {
       link.addEventListener('click', function (e) {
         var target = document.getElementById('p' + pid);
         if (!target) {
-          // Post is not on this page (deleted or in another thread).
-          // Prevent navigation and show an inline error anchored to the link.
           e.preventDefault();
           e.stopPropagation();
           showMissingPostPopup(link, pid);
@@ -3429,8 +3413,7 @@ function clampPopupToViewport(anchor, popup) {
   };
 })();
 
-// ─── Cross-board quotelink hover preview ─────────────────────────────────────
-
+// Cross-board quotelink hover preview
 (function () {
   var _cbCache = {};
   var _cbInFlight = {};
@@ -3523,9 +3506,7 @@ function clampPopupToViewport(anchor, popup) {
           positionCbPopup(link, cbPopup);
           setTimeout(function () { if (cbPopup) cbPopup.style.display = 'none'; }, 3000);
         }
-        // If we already know the thread ID from a prior hover-preview fetch, navigate directly.
         if (_cbCache[key] && _cbCache[key].thread_id) { navigate(_cbCache[key].thread_id); return; }
-        // If a prior fetch already confirmed the post is gone, show error inline.
         if (_cbCache[key] && !_cbCache[key].thread_id) { showCbMissingError(); return; }
         fetch('/api/post/' + board + '/' + pid, { credentials: 'same-origin' })
           .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
@@ -3533,12 +3514,10 @@ function clampPopupToViewport(anchor, popup) {
             if (data.thread_id) {
               navigate(data.thread_id);
             } else {
-              // API returned success but no thread_id — post is orphaned/deleted.
               showCbMissingError();
             }
           })
           .catch(function () {
-            // 404 or network error — post is gone; show error inline.
             showCbMissingError();
           });
       });
@@ -3553,8 +3532,7 @@ function clampPopupToViewport(anchor, popup) {
   };
 })();
 
-// ─── Admin ban+delete ─────────────────────────────────────────────────────────
-
+// Admin ban+delete
 function clearBanDeletePreparation(form) {
   if (!form) return;
   form.dataset.banDeletePrepared = '';
@@ -3665,8 +3643,7 @@ function submitBanDeleteModal() {
   requestFormSubmit(targetForm, targetSubmitter);
 }
 
-// ─── Poll management ──────────────────────────────────────────────────────────
-
+// Poll management
 function getPollOptionMaxLength(list) {
   if (!list) return 200;
   return parseInt(list.dataset.pollOptionMaxlength, 10) || 200;
@@ -3709,8 +3686,7 @@ function updateRemoveButtons() {
   });
 }
 
-// ─── Catalog sort ─────────────────────────────────────────────────────────────
-
+// Catalog sort
 function sortCatalog(mode) {
   try { sessionStorage.setItem('catalog_sort', mode); } catch (e) {}
   var grid = document.getElementById('catalog-grid');
@@ -3784,9 +3760,7 @@ function togglePosterHighlights(threadId, posterId) {
   } catch (e) {}
 })();
 
-// ─── Centralised event delegation ────────────────────────────────────────────
-// Replaces all inline onclick=/onchange=/onsubmit= attribute handlers.
-
+// Centralised event delegation
 document.addEventListener('click', function (e) {
   if (
     e.target === document.getElementById('ban-delete-modal') ||
@@ -4060,18 +4034,16 @@ if (window.visualViewport) {
     var url  = span.getAttribute('data-url') || span.textContent.trim();
     if (!type || !id) return;
 
-    // Validate: only allow known embed types to prevent arbitrary iframe injection
+    // Allow only known embed types to prevent arbitrary iframe injection.
     if (type !== 'youtube' && type !== 'streamable') return;
 
-    // Validate YouTube ID format: 11 alphanumeric / dash / underscore chars
+    // Constrain provider IDs before interpolating them into embed URLs.
     if (type === 'youtube' && !/^[A-Za-z0-9_-]{11}$/.test(id)) return;
     if (type === 'streamable' && !/^[A-Za-z0-9_-]{1,16}$/.test(id)) return;
 
-    // ── outer container: matches .file-container webm layout ─────────────
     var container = document.createElement('div');
     container.className = 'file-container video-embed-container';
 
-    // ── file-info row (link + close button) ───────────────────────────────
     var info = document.createElement('div');
     info.className = 'file-info';
     var a = document.createElement('a');
@@ -4091,7 +4063,6 @@ if (window.visualViewport) {
     info.appendChild(closeBtn);
     container.appendChild(info);
 
-    // ── thumbnail preview (styled like webm .media-preview) ───────────────
     var preview = document.createElement('button');
     preview.type = 'button';
     preview.className = 'media-preview';
@@ -4124,7 +4095,6 @@ if (window.visualViewport) {
     });
     container.appendChild(preview);
 
-    // ── move container before the post-body; remove span from body text ───
     var postBody = span.closest('.post-body');
     if (postBody && postBody.parentNode) {
       span.remove();
@@ -4148,7 +4118,7 @@ if (window.visualViewport) {
   };
 })();
 
-// ─── Draft autosave ───────────────────────────────────────────────────────────
+// Draft autosave
 // The draft key is read from data-draft-key on #thread-config.
 
 (function () {
@@ -4166,7 +4136,6 @@ if (window.visualViewport) {
   // restore runs.
   consumeSubmittedReplyDraft();
 
-  // Restore saved draft on page load
   try {
     var saved = localStorage.getItem(DRAFT_KEY);
     var savedMode = localStorage.getItem(DRAFT_META_KEY);
@@ -4213,7 +4182,7 @@ if (window.visualViewport) {
   }
 })();
 
-// ─── Report modal backdrop click ──────────────────────────────────────────────
+// Report modal backdrop click
 document.addEventListener('click', function (e) {
   var editModal = document.getElementById('edit-modal');
   if (editModal && e.target === editModal.querySelector('.edit-modal-backdrop')) {
@@ -4223,8 +4192,7 @@ document.addEventListener('click', function (e) {
   if (modal && e.target === modal) closeReportModal();
 });
 
-// ─── Appeal page: fill CSRF from cookie ──────────────────────────────────────
-// Replaces the inline <script> that was previously on the ban/appeal page.
+// Appeal page: fill CSRF from cookie
 (function () {
   var field = document.getElementById('appeal-csrf-field');
   if (!field) return;
@@ -4232,7 +4200,7 @@ document.addEventListener('click', function (e) {
   if (c) field.value = c.split('=')[1];
 })();
 
-// ─── Rate-limit page redirect ────────────────────────────────────────────────
+// Rate-limit page redirect
 (function () {
   if (!document.body || document.body.dataset.rateLimitPage !== '1') return;
   setTimeout(function () {

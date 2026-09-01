@@ -181,7 +181,6 @@ fn render_board_appearance_cards(view: &AdminPanelViewModel<'_>) -> String {
     board_appearance_cards
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 /// Renders theme-builder preset options and marks the selected preset.
 fn render_preset_options(selected_slug: &str) -> String {
     let mut out = String::new();
@@ -645,7 +644,6 @@ fn render_theme_metadata_fields(theme: &crate::models::Theme) -> String {
     }
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 /// Renders built-in and custom theme cards as separate HTML groups.
 fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
     let mut builtin_theme_cards = String::new();
@@ -745,7 +743,6 @@ fn render_public_url_copy_button(public_url: &str) -> String {
     }
 }
 
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the section interpolates independent pre-rendered controls into fixed HTML"
@@ -769,9 +766,6 @@ fn render_admin_site_settings_section(
     let public_url_copy_button = render_public_url_copy_button(public_url);
     format!(
         r#"<div class="admin-panel-site-settings" id="site-settings-panel">
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     // site settings
-     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section" id="site-settings">
 <h2>// site settings</h2>
 <form method="POST" action="/admin/site/settings" class="admin-site-settings-form">
@@ -865,12 +859,10 @@ fn render_admin_site_settings_section(
     )
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "the appearance section is one stable server-rendered HTML fragment"
 )]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the section interpolates independent pre-rendered appearance controls"

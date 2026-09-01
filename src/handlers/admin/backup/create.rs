@@ -21,7 +21,6 @@ use serde::Deserialize;
     clippy::too_many_lines,
     reason = "snapshot, manifest, payload publication, and cleanup share one fail-closed backup operation"
 )]
-/// Creates full backup to server.
 pub(crate) fn create_full_backup_to_server(
     pool: &db::DbPool,
     session_id: Option<&str>,
@@ -305,7 +304,6 @@ pub(crate) fn create_full_backup_to_server(
     clippy::too_many_lines,
     reason = "maintenance snapshot, manifest publication, retention, and status updates form one operation"
 )]
-/// Creates pre maintenance backup to server.
 pub(crate) fn create_pre_maintenance_backup_to_server(
     pool: &db::DbPool,
     progress: &std::sync::Arc<crate::middleware::BackupProgress>,
@@ -571,7 +569,6 @@ fn ensure_backup_dir(path: &Path) -> Result<()> {
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Create {}: {error}", path.display())))
 }
 
-/// Performs the restrict backup file handler operation.
 fn restrict_backup_file(path: &Path) -> Result<()> {
     crate::config::restrict_private_file_permissions(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
@@ -625,7 +622,6 @@ fn write_pretty_json_file<T: serde::Serialize>(path: &Path, value: &T) -> Result
     ))
 }
 
-/// Performs the relative path string handler operation.
 fn relative_path_string(path: &Path, root: &Path) -> Result<String> {
     let rel = path.strip_prefix(root).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
@@ -649,7 +645,6 @@ fn copy_regular_file_to_backup(source: &Path, destination: &Path) -> Result<(u64
     saved_backup::copy_file_and_hash(source, &mut output)
 }
 
-/// Performs the snapshot database health output handler operation.
 fn snapshot_db_health_output(conn: &rusqlite::Connection, pragma: &str) -> Option<String> {
     let sql = format!("PRAGMA {pragma}");
     let mut statement = conn.prepare(&sql).ok()?;
@@ -664,19 +659,14 @@ fn snapshot_db_health_output(conn: &rusqlite::Connection, pragma: &str) -> Optio
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the full backup create request.
 pub(crate) struct FullBackupCreateForm {
     #[serde(default, deserialize_with = "super::form_checkbox_bool")]
-    /// Whether to include Tor hidden service keys.
     include_tor_hidden_service_keys: bool,
     #[serde(default)]
-    /// The optional storage mode.
     storage_mode: Option<String>,
     #[serde(default)]
-    /// The optional split ZIP part size GiB.
     split_zip_part_size_gib: Option<u64>,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
@@ -687,7 +677,6 @@ const MIN_SPLIT_ZIP_PART_SIZE: u64 = 64 * 1024 * 1024;
 /// Maximum permitted split ZIP part size.
 const MAX_SPLIT_ZIP_PART_SIZE: u64 = 64 * 1024 * 1024 * 1024;
 
-/// Parses backup storage mode value.
 pub(crate) fn parse_backup_storage_mode_value(value: Option<&str>) -> Result<BackupStorageMode> {
     match value.unwrap_or("directory") {
         "directory" => Ok(BackupStorageMode::Directory),
@@ -696,7 +685,6 @@ pub(crate) fn parse_backup_storage_mode_value(value: Option<&str>) -> Result<Bac
     }
 }
 
-/// Parses split ZIP part size GiB.
 pub(crate) fn parse_split_zip_part_size_gib(value: Option<u64>) -> Result<u64> {
     let gib = value.unwrap_or(4);
     let bytes = gib
@@ -710,23 +698,18 @@ pub(crate) fn parse_split_zip_part_size_gib(value: Option<u64>) -> Result<u64> {
     Ok(bytes)
 }
 
-/// Performs the split ZIP part size GiB handler operation.
 pub(crate) const fn split_zip_part_size_gib(bytes: u64) -> u64 {
     bytes / (1024 * 1024 * 1024)
 }
 
-/// Parses full backup storage mode.
 fn parse_full_backup_storage_mode(form: &FullBackupCreateForm) -> Result<BackupStorageMode> {
     parse_backup_storage_mode_value(form.storage_mode.as_deref())
 }
 
-/// Parses split ZIP part size.
 fn parse_split_zip_part_size(form: &FullBackupCreateForm) -> Result<u64> {
     parse_split_zip_part_size_gib(form.split_zip_part_size_gib)
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-/// Handles the create full backup request.
 pub(crate) async fn create_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -771,18 +754,13 @@ pub(crate) async fn create_full_backup(
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the board backup create request.
 pub(crate) struct BoardBackupCreateForm {
-    /// The board short.
     board_short: String,
-    /// The optional download after create.
     download_after_create: Option<String>,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::cognitive_complexity,
     reason = "board backup validation, snapshotting, and packaging form one guarded operation"
@@ -791,7 +769,6 @@ pub(crate) struct BoardBackupCreateForm {
     clippy::too_many_lines,
     reason = "board validation, snapshotting, archive publication, and cleanup share one operation"
 )]
-/// Handles the create board backup request.
 pub(crate) async fn create_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1045,7 +1022,6 @@ pub(crate) async fn create_board_backup(
     .into_response())
 }
 
-/// Builds full backup manifest.
 pub(super) fn build_full_backup_manifest(
     conn: &rusqlite::Connection,
     db_bytes: u64,
@@ -1082,7 +1058,6 @@ pub(super) fn build_full_backup_manifest(
     clippy::too_many_lines,
     reason = "the function maps the complete relational board snapshot into one versioned manifest"
 )]
-/// Builds board backup manifest.
 pub(super) fn build_board_backup_manifest(
     conn: &rusqlite::Connection,
     board_short: &str,
@@ -1420,7 +1395,6 @@ fn collect_backup_board_summaries(
     Ok(boards)
 }
 
-/// Performs the push v4 file entry handler operation.
 fn push_v4_file_entry(
     entries: &mut Vec<saved_backup::BackupFileEntry>,
     logical_path: String,
@@ -1444,17 +1418,12 @@ fn push_v4_file_entry(
 }
 
 #[derive(Debug)]
-/// Data used by the split ZIP planned part workflow.
 struct SplitZipPlannedPart {
-    /// The files collection.
     files: Vec<usize>,
-    /// The bytes.
     bytes: u64,
-    /// Whether the oversized setting is active.
     oversized: bool,
 }
 
-/// Performs the plan split ZIP parts handler operation.
 fn plan_split_zip_parts(
     files: &[saved_backup::BackupFileEntry],
     target_part_size: u64,
@@ -1502,7 +1471,6 @@ fn plan_split_zip_parts(
     clippy::too_many_lines,
     reason = "part sizing, hashing, manifest updates, and partial-output cleanup form one publication step"
 )]
-/// Performs the materialize split ZIP parts handler operation.
 fn materialize_split_zip_parts(
     root_dir: &Path,
     manifest: &mut saved_backup::BackupManifest,
@@ -1794,7 +1762,6 @@ fn write_board_exports_to_v4_dir(
     Ok(())
 }
 
-/// Performs the finalize v4 backup root handler operation.
 fn finalize_v4_backup_root(
     root_dir: &Path,
     mut manifest: saved_backup::BackupManifest,

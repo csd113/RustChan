@@ -74,8 +74,7 @@ pub(crate) fn override_thumbnail_failure(mode: TestThumbnailFailure) -> Thumbnai
     ThumbnailFailureTestGuard { _lock: guard }
 }
 
-// ─── ProcessedMedia ───────────────────────────────────────────────────────────
-
+// ProcessedMedia
 /// Outcome of a single upload processed through the media pipeline.
 ///
 /// Returned by [`MediaProcessor::process_upload`].  All paths are absolute.
@@ -98,8 +97,7 @@ pub struct ProcessedMedia {
     pub final_size: u64,
 }
 
-// ─── MediaProcessor ───────────────────────────────────────────────────────────
-
+// MediaProcessor
 /// Stateless processor that converts uploaded media and generates thumbnails.
 ///
 /// Holds a single boolean indicating whether the `ffmpeg` binary was found on
@@ -201,7 +199,6 @@ impl MediaProcessor {
             .map(|m| m.len())
             .context("failed to stat upload temp file")?;
 
-        // ── Step 1: Convert file ──────────────────────────────────────────
         let conv = convert::convert_file(
             input_path,
             mime,
@@ -221,10 +218,8 @@ impl MediaProcessor {
             conv.final_size,
         );
 
-        // ── Step 2: Generate thumbnail ────────────────────────────────────
-        // generate_thumbnail returns the actual path written, which may differ
-        // from thumb_path when a video thumbnail falls back to an SVG placeholder
-        // (the pre-selected .webp extension would mismatch the SVG content).
+        // A video fallback can write SVG despite a preselected WebP path, so use
+        // the actual path returned by thumbnail generation.
         let generated_thumbnail = {
             #[cfg(test)]
             {

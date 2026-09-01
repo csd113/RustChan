@@ -190,12 +190,10 @@ fn render_appeal_rows(csrf_token: &str, appeals: &[crate::models::BanAppeal]) ->
     appeal_rows
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "the moderation controls form one stable server-rendered HTML fragment"
 )]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the section interpolates independent pre-rendered moderation tables"
@@ -221,9 +219,6 @@ fn render_admin_moderation_section(
     };
     format!(
         r#"<div class="admin-panel-moderation" id="moderation">
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     // moderation dropdown (log + reports + moderation tools)
-     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section admin-section-collapsible" id="reports">
 <details class="admin-dropdown" data-admin-dropdown-key="reports"{reports_open_attr}>
 <summary><span>// moderation</span><span class="admin-dropdown-badges admin-dropdown-counter-label">{moderation_summary_counter}</span></summary>

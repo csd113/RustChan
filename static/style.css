@@ -1,7 +1,4 @@
-/* ═══════════════════════════════════════════════════════════════════════════════
-   RustChan — Hacker Terminal Aesthetic
-   Dark background / Matrix green palette / Monospace everything
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* RustChan hacker-terminal theme. */
 
 :root {
   color-scheme: dark;
@@ -36,7 +33,7 @@
   --shadow-soft:  0 3px 12px rgba(0, 0, 0, 0.18);
 }
 
-/* ── Reset & base ─────────────────────────────────────────────────────────── */
+/* Reset & base */
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -185,7 +182,7 @@ html:not([data-theme]) .post-body .spoiler:hover,
 
 hr { border: none; border-top: 1px solid var(--border); margin: 0.6rem 0; }
 
-/* ── Header / nav ─────────────────────────────────────────────────────────── */
+/* Header / nav */
 
 .site-header {
   background: var(--bg-panel);
@@ -519,7 +516,7 @@ html:not([data-theme]) .site-name { text-shadow: 0 0 14px var(--green-bright); }
   }
 }
 
-/* ── Home button ──────────────────────────────────────────────────────────── */
+/* Home button */
 
 .home-btn {
   display: inline-flex;
@@ -547,7 +544,7 @@ html:not([data-theme]) .site-name { text-shadow: 0 0 14px var(--green-bright); }
   color: var(--green-bright) !important;
 }
 
-/* ── Board nav (Index / Catalog / Archive) ────────────────────────────────── */
+/* Board nav (Index / Catalog / Archive) */
 
 .board-nav {
   display: flex;
@@ -593,7 +590,7 @@ html:not([data-theme]) .board-nav-link:hover { text-shadow: 0 0 6px var(--green-
   gap: 4px;
 }
 
-/* ── Search form ──────────────────────────────────────────────────────────── */
+/* Search form */
 
 .search-form,
 .header-search { display: flex; gap: 6px; align-items: center; }
@@ -680,7 +677,7 @@ html:not([data-theme]) .board-nav-link:hover { text-shadow: 0 0 6px var(--green-
   margin-top: 8px;
 }
 
-/* ── Buttons (shared) ─────────────────────────────────────────────────────── */
+/* Buttons (shared) */
 
 button,
 .btn,
@@ -725,7 +722,7 @@ button:hover,
   box-shadow: 0 0 8px rgba(68,204,119,0.3);
 }
 
-/* ── Main layout ──────────────────────────────────────────────────────────── */
+/* Main layout */
 
 main {
   width: min(1320px, calc(100% - 32px));
@@ -752,7 +749,7 @@ main > * {
   box-shadow: var(--shadow-soft);
 }
 
-/* ── Board header ─────────────────────────────────────────────────────────── */
+/* Board header */
 
 .board-header {
   border-bottom: 1px solid var(--border);
@@ -834,7 +831,7 @@ html:not([data-theme]) .board-header h1 { text-shadow: 0 0 10px rgba(0,255,65,0.
 }
 html:not([data-theme]) .board-thread-header { text-shadow: 0 0 10px rgba(0,255,65,0.4); }
 
-/* ── Catalog header row with controls ─────────────────────────────────────── */
+/* Catalog header row with controls */
 
 .catalog-header-row {
   display: flex;
@@ -1010,7 +1007,7 @@ html:not([data-theme]) .board-thread-header { text-shadow: 0 0 10px rgba(0,255,6
   padding: 4px 0 !important;
 }
 
-/* ── Auto-update checkbox label ───────────────────────────────────────────── */
+/* Auto-update checkbox label */
 
 .autoupdate-label {
   display: inline-flex;
@@ -1094,7 +1091,7 @@ html.no-js .post-form-wrap {
   display: block !important;
 }
 
-/* ── Post form ────────────────────────────────────────────────────────────── */
+/* Post form */
 
 .post-form-container {
   background: var(--bg-panel);
@@ -1326,7 +1323,7 @@ html.no-js .post-form-wrap {
   }
 }
 
-/* ── Threads ──────────────────────────────────────────────────────────────── */
+/* Threads */
 
 .thread {
   margin-bottom: 18px;
@@ -1385,7 +1382,7 @@ html.no-js .post-form-wrap {
   }
 }
 
-/* ── Post meta ────────────────────────────────────────────────────────────── */
+/* Post meta */
 
 .post-meta {
   display: flex;
@@ -1578,7 +1575,7 @@ html:not([data-theme]) .poster-id-btn {
   }
 }
 
-/* ── Tags (sticky / locked) ───────────────────────────────────────────────── */
+/* Tags (sticky / locked) */
 
 .tag {
   font-size: 0.7rem;
@@ -1592,7 +1589,7 @@ html:not([data-theme]) .poster-id-btn {
 .sticky { border-color: var(--amber); color: var(--amber); }
 .locked { border-color: var(--red);   color: var(--red); }
 
-/* ── Subject ──────────────────────────────────────────────────────────────── */
+/* Subject */
 
 .subject {
   font-size: 0.88rem;
@@ -1622,7 +1619,7 @@ html:not([data-theme]) .poster-id-btn {
   word-break: break-word;
 }
 
-/* ── Post body ────────────────────────────────────────────────────────────── */
+/* Post body */
 
 .post-body {
   font-size: 0.9rem;
@@ -1654,7 +1651,7 @@ html:not([data-theme]) .poster-id-btn {
   }
 }
 
-/* ── Quotelinks (>>N) ──────────────────────────────────────────────────────── */
+/* Quotelinks (>>N) */
 .post-body .quotelink {
   color: var(--green);
   text-decoration: none;
@@ -1666,7 +1663,7 @@ html:not([data-theme]) .poster-id-btn {
 }
 .post-body .quotelink:hover { color: var(--green-bright); text-decoration: underline; }
 
-/* ── Backref links ─────────────────────────────────────────────────────────── */
+/* Backref links */
 .backrefs { margin-left: 0.35rem; }
 .backrefs .backref {
   color: var(--green-dim);
@@ -1694,7 +1691,7 @@ html:not([data-theme]) .poster-id-btn {
   color: var(--red-bright, #ff6b6b);
 }
 
-/* ── Hover popup preview ───────────────────────────────────────────────────── */
+/* Hover popup preview */
 .quotelink-popup {
   position: absolute;
   z-index: 9000;
@@ -1722,7 +1719,7 @@ html:not([data-theme]) .poster-id-btn {
   }
 }
 
-/* ── Missing-post inline notice (shown when a >>pid target was deleted) ───── */
+/* Missing-post inline notice (shown when a >>pid target was deleted) */
 .missing-post-notice {
   display: flex;
   flex-direction: column;
@@ -1750,7 +1747,7 @@ html:not([data-theme]) .poster-id-btn {
   margin: 0 0 10px;
 }
 
-/* ── Highlighted post ──────────────────────────────────────────────────────── */
+/* Highlighted post */
 .post-highlighted {
   outline: 2px solid var(--post-highlight-outline, var(--green, #00c840)) !important;
   background: var(--post-highlight-bg, rgba(0, 200, 64, 0.07)) !important;
@@ -1770,7 +1767,7 @@ html:not([data-theme]) .poster-id-btn {
   color: var(--green-pale);
 }
 
-/* ── File / media ─────────────────────────────────────────────────────────── */
+/* File / media */
 
 .file-container {
   margin: 4px 16px 12px 0;
@@ -2131,7 +2128,7 @@ html:not([data-theme]) .poster-id-btn {
   }
 }
 
-/* ── Thread footer / reply count ──────────────────────────────────────────── */
+/* Thread footer / reply count */
 
 .thread-footer {
   margin-top: 4px;
@@ -2165,7 +2162,7 @@ html:not([data-theme]) .poster-id-btn {
   font-style: italic;
 }
 
-/* ── Delete form ──────────────────────────────────────────────────────────── */
+/* Delete form */
 
 .post-controls {
   margin-top: 6px;
@@ -2415,7 +2412,7 @@ html.no-js .post-controls .report-fallback-form {
   background: color-mix(in srgb, var(--green) 8%, transparent);
 }
 
-/* ── Notices ──────────────────────────────────────────────────────────────── */
+/* Notices */
 
 .notice {
   padding: 6px 10px;
@@ -2427,7 +2424,7 @@ html.no-js .post-controls .report-fallback-form {
 .locked-notice { border-color: var(--red); color: var(--red); background: rgba(255,34,68,0.06); }
 .error { border-color: var(--red); color: var(--red); background: rgba(255,34,68,0.06); padding: 6px 10px; margin-bottom: 10px; }
 
-/* ── Pagination ───────────────────────────────────────────────────────────── */
+/* Pagination */
 
 .pagination {
   margin: 10px 0;
@@ -2446,14 +2443,14 @@ html.no-js .post-controls .report-fallback-form {
   color: var(--green-bright);
 }
 
-/* ── Reply form container ─────────────────────────────────────────────────── */
+/* Reply form container */
 
 .reply-form-container {
   clear: both;
   margin-top: 14px;
 }
 
-/* ── Catalog ──────────────────────────────────────────────────────────────── */
+/* Catalog */
 
 .catalog-grid {
   display: grid;
@@ -2871,7 +2868,7 @@ html.no-js .catalog-thread-fallback-actions .report-fallback-details[open] {
   border-radius: var(--radius-md);
 }
 
-/* ── Index / home ─────────────────────────────────────────────────────────── */
+/* Index / home */
 
 .index-hero {
   text-align: center;
@@ -3048,7 +3045,7 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   text-align: center;
 }
 
-/* ── Admin toolbar ────────────────────────────────────────────────────────── */
+/* Admin toolbar */
 
 .admin-toolbar {
   display: flex;
@@ -3170,7 +3167,7 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   }
 }
 
-/* ── Board card stats ─────────────────────────────────────────────────────── */
+/* Board card stats */
 
 .board-card-stats {
   font-size: 0.72rem;
@@ -3336,7 +3333,7 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   }
 }
 
-/* ── Site stats section ───────────────────────────────────────────────────── */
+/* Site stats section */
 
 .index-stats-section {
   margin-top: 28px;
@@ -3379,7 +3376,7 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   font-style: italic;
 }
 
-/* ── Inline post error banner ────────────────────────────────────────────── */
+/* Inline post error banner */
 
 .post-error-banner {
   background: rgba(180, 30, 30, 0.18);
@@ -3412,13 +3409,13 @@ html:is([data-theme="chanclassic"], [data-theme="aero"], [data-theme="neoncubicl
   color: #7a0014;
 }
 
-/* ── Admin post controls ──────────────────────────────────────────────────── */
+/* Admin post controls */
 
 .admin-post-controls {
   margin-top: 3px;
 }
 
-/* ── Error page ───────────────────────────────────────────────────────────── */
+/* Error page */
 
 .error-page {
   text-align: center;
@@ -3448,7 +3445,7 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
   border-radius: var(--radius-sm);
 }
 
-/* ── Footer ───────────────────────────────────────────────────────────────── */
+/* Footer */
 
 .site-footer {
   position: relative;
@@ -3647,7 +3644,7 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   text-decoration: underline;
 }
 
-/* ── Shared responsive rules ──────────────────────────────────────────────── */
+/* Shared responsive rules */
 
 @media (max-width: 700px) {
   main {
@@ -3762,12 +3759,9 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   THEMES
-   Applied via data-theme="..." on <html>. FluoroGrid is the system default.
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* Themes selected through data-theme on <html>; FluoroGrid is the default. */
 
-/* ── Frutiger Aero ────────────────────────────────────────────────────────── */
+/* Frutiger Aero */
 [data-theme="aero"] {
   color-scheme: light;
   --bg:           #deeef7;
@@ -3848,7 +3842,7 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   letter-spacing: 0;
 }
 
-/* ── DORFic Aero ──────────────────────────────────────────────────────────── */
+/* DORFic Aero */
 [data-theme="dorfic"] {
   color-scheme: dark;
   --bg:           #1c1610;
@@ -3978,7 +3972,7 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 }
 [data-theme="dorfic"] .board-card { box-shadow: 0 2px 8px rgba(0,0,0,0.4); }
 
-/* ── Forest ──────────────────────────────────────────────────────────────── */
+/* Forest */
 [data-theme="forest"] {
   color-scheme: dark;
   --bg:           #1a2416;
@@ -4250,7 +4244,7 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   background: rgba(122, 34, 16, 0.16);
 }
 
-/* ── Blue Sky ────────────────────────────────────────────────────────────── */
+/* Blue Sky */
 [data-theme="blue-sky"] {
   color-scheme: light;
   --bg:           #d2e1ec;
@@ -4575,7 +4569,7 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   color: #bd7d89;
 }
 
-/* ── Deep Orbit ──────────────────────────────────────────────────────────── */
+/* Deep Orbit */
 [data-theme="deep-orbit"] {
   color-scheme: dark;
   --bg:           #121621;
@@ -4900,7 +4894,7 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   color: #b8848c;
 }
 
-/* ── FluoroGrid ───────────────────────────────────────────────────────────── */
+/* FluoroGrid */
 [data-theme="fluorogrid"] {
   color-scheme: light;
   --bg:           #e8f8ef;
@@ -4961,7 +4955,7 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   color: #7ecece;
 }
 
-/* ── NeonCubicle ──────────────────────────────────────────────────────────── */
+/* NeonCubicle */
 [data-theme="neoncubicle"] {
   color-scheme: light;
   --bg:           #f0f2f6;
@@ -5028,7 +5022,7 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 [data-theme="neoncubicle"] .op,
 [data-theme="neoncubicle"] .reply { border-radius: 6px; }
 
-/* ── ChanClassic ──────────────────────────────────────────────────────────── */
+/* ChanClassic */
 /* Mimics the classic 4chan layout: tan/beige background, maroon header,      */
 /* blue post-number links, bordered post blocks.                               */
 [data-theme="chanclassic"] {
@@ -5258,7 +5252,7 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   box-shadow: none;
 }
 
-/* ── Theme Picker Widget ──────────────────────────────────────────────────── */
+/* Theme Picker Widget */
 
 #theme-picker-btn {
   position: relative;
@@ -5667,7 +5661,7 @@ body.mobile-overlay-open {
   overflow: hidden;
 }
 
-/* ── Thread ID link ───────────────────────────────────────────────────────── */
+/* Thread ID link */
 
 .thread-id-link {
   font-size: 0.72rem;
@@ -5677,7 +5671,7 @@ body.mobile-overlay-open {
 
 .thread-id-link:hover { color: var(--green-bright); }
 
-/* ── Markup / post body enhancements ──────────────────────────────────────── */
+/* Markup / post body enhancements */
 
 /* Spoiler text */
 .post-body .spoiler {
@@ -5731,7 +5725,7 @@ details.greentext-block[open] > summary { color: var(--green-pale); }
 .crosslink:hover { color: #ffd060; }
 html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.5); }
 
-/* ── Video embed unfurl widget ──────────────────────────────────────────────── */
+/* Video embed unfurl widget */
 
 .video-embed-container {
   --embed-thumb-width: 150px;
@@ -5784,7 +5778,7 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   object-fit: cover;
 }
 
-/* ── Markup hint bar ──────────────────────────────────────────────────────── */
+/* Markup hint bar */
 
 .markup-hint {
   display: flex;
@@ -5802,7 +5796,7 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   font-family: var(--font);
 }
 
-/* ── Poll styles ──────────────────────────────────────────────────────────── */
+/* Poll styles */
 
 .poll-container {
   margin: 10px 0 14px 0;
@@ -6081,7 +6075,7 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
 
 .poll-add-btn:hover { border-color: var(--border-glow); color: var(--green-bright); }
 
-/* ── Audio combo ──────────────────────────────────────────────────────────── */
+/* Audio combo */
 .audio-combo {
   margin-top: 4px;
   border-top: 1px dashed var(--border);
@@ -6139,7 +6133,7 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   }
 }
 
-/* ── Admin IP history link ────────────────────────────────────────────────── */
+/* Admin IP history link */
 .admin-ip-link {
   margin-left: 0.6rem;
   font-size: 0.78rem;
@@ -6152,7 +6146,7 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   border-bottom-color: var(--green-bright);
 }
 
-/* ── Post sage checkbox ──────────────────────────────────────────────────── */
+/* Post sage checkbox */
 .sage-label {
   display: inline-flex;
   align-items: center;
@@ -6172,7 +6166,7 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   opacity: 0.7;
 }
 
-/* ── Post edited badge ───────────────────────────────────────────────────── */
+/* Post edited badge */
 .post-edited {
   font-size: 0.7rem;
   color: var(--text-dim);
@@ -6181,7 +6175,7 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   font-style: italic;
 }
 
-/* ── Edit post link ──────────────────────────────────────────────────────── */
+/* Edit post link */
 .edit-btn {
   margin-left: 0.6rem;
   color: var(--text-dim);
@@ -6241,7 +6235,7 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   margin-bottom: 0.8rem;
 }
 
-/* ── Auto-compress modal ──────────────────────────────────────────────────── */
+/* Auto-compress modal */
 .compress-modal {
   position: fixed;
   inset: 0;
@@ -6621,7 +6615,7 @@ html:not([data-theme]) .compress-do-btn {
   max-width: 420px;
 }
 
-/* ── Thread board banner & nav bar ───────────────────────────────────────── */
+/* Thread board banner & nav bar */
 .thread-board-banner {
   text-align: center;
   font-size: 1.1rem;
@@ -6780,7 +6774,7 @@ html:not([data-theme]) .thread-nav-btn.active { text-shadow: 0 0 8px rgba(0,255,
   }
 }
 
-/* ── Dice roll display ────────────────────────────────────────────────────── */
+/* Dice roll display */
 .dice-roll {
   display: inline-block;
   background: var(--bg-post);
@@ -6794,7 +6788,7 @@ html:not([data-theme]) .thread-nav-btn.active { text-shadow: 0 0 8px rgba(0,255,
   cursor: default;
 }
 
-/* ── Archive page ─────────────────────────────────────────────────────────── */
+/* Archive page */
 .archive-subtext {
   font-size: 0.78rem;
   color: var(--text-dim, #666);
@@ -6895,7 +6889,7 @@ html:not([data-theme]) .thread-nav-btn.active { text-shadow: 0 0 8px rgba(0,255,
   }
 }
 
-/* ── Floating new-replies pill ────────────────────────────────────────────── */
+/* Floating new-replies pill */
 .new-replies-pill {
   position: fixed;
   bottom: 72px;
@@ -6931,7 +6925,7 @@ html:not([data-theme]) .thread-nav-btn.active { text-shadow: 0 0 8px rgba(0,255,
   }
 }
 
-/* ── Thread reply-count stat ──────────────────────────────────────────────── */
+/* Thread reply-count stat */
 .thread-reply-stat {
   font-size: 0.77rem;
   color: var(--text-dim, #666);
@@ -6941,7 +6935,7 @@ html:not([data-theme]) .thread-nav-btn.active { text-shadow: 0 0 8px rgba(0,255,
   color: var(--green-pale, #99cc99);
 }
 
-/* ── (You) badge ─────────────────────────────────────────────────────────── */
+/* (You) badge */
 .you-badge {
   display: inline-block;
   margin-left: 5px;

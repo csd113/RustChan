@@ -1,4 +1,3 @@
-// admin.js - RustChan admin-panel-only client-side logic
 'use strict';
 
 function setAdminElementInert(element, inert) {

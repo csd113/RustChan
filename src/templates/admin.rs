@@ -10,8 +10,7 @@ use std::fmt::Write as _;
 
 use super::{base_layout, fmt_ts, fmt_ts_short, render_pagination, urlencoding_simple};
 
-// ─── Admin login ──────────────────────────────────────────────────────────────
-
+// Admin login
 #[must_use]
 /// Renders the administrator login form and an optional authentication error.
 pub fn admin_login_page(
@@ -65,8 +64,7 @@ pub fn admin_login_page(
     )
 }
 
-// ─── Admin panel ──────────────────────────────────────────────────────────────
-
+// Admin panel
 /// Appearance-section rendering.
 mod appearance;
 /// Backup-section rendering.
@@ -774,7 +772,6 @@ fn render_board_backup_actions(board: &Board, csrf_token: &str) -> String {
     )
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "the board settings card preserves one cohesive form and its stable field hooks"
@@ -1169,8 +1166,7 @@ pub fn admin_panel_page(view: &AdminPanelViewModel<'_>) -> String {
     layout::render(view)
 }
 
-// ─── Moderation log ───────────────────────────────────────────────────────────
-
+// Moderation log
 #[must_use]
 /// Renders the paginated moderation log.
 pub fn mod_log_page(
@@ -1251,8 +1247,7 @@ pub fn mod_log_page(
     )
 }
 
-// ─── VACUUM result ────────────────────────────────────────────────────────────
-
+// VACUUM result
 #[must_use]
 /// Renders the space reclaimed by a completed `SQLite` `VACUUM`.
 pub fn admin_vacuum_result_page(
@@ -1310,7 +1305,6 @@ pub fn admin_vacuum_result_page(
     )
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "the health report keeps one cohesive diagnostic result document"
@@ -1705,8 +1699,7 @@ fn render_db_check_result(label: &str, result: &crate::db::DbCheckResult) -> Str
     )
 }
 
-// ─── IP history ───────────────────────────────────────────────────────────────
-
+// IP history
 #[expect(
     clippy::too_many_lines,
     reason = "the investigation page keeps its summary, results, and controls together"
@@ -2151,10 +2144,21 @@ mod tests {
     }
 
     fn sample_site_health() -> AdminPanelSiteHealthView<'static> {
+        static SCHEMA_STATUS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            format!("{} baseline verified", crate::db::baseline_schema_version())
+        });
+        static DIAGNOSTICS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            format!(
+                "RustChan version: {}\nDatabase schema: {}\nRecent warnings:\n  none",
+                env!("CARGO_PKG_VERSION"),
+                SCHEMA_STATUS.as_str()
+            )
+        });
+
         AdminPanelSiteHealthView {
             server_status: "ready",
-            rustchan_version: "1.4.0",
-            database_schema_status: "1.4.0 baseline verified",
+            rustchan_version: env!("CARGO_PKG_VERSION"),
+            database_schema_status: SCHEMA_STATUS.as_str(),
             database_integrity_status: "not checked",
             last_successful_backup: "none saved",
             next_scheduled_backup: "not scheduled",
@@ -2179,14 +2183,13 @@ mod tests {
             failed_jobs: 0,
             backup_jobs: "idle",
             restore_jobs: "not available",
-            diagnostics_text:
-                "RustChan version: 1.4.0\nDatabase schema: 1.4.0 baseline verified\nRecent warnings:\n  none",
+            diagnostics_text: DIAGNOSTICS.as_str(),
         }
     }
 
     fn sample_dashboard() -> AdminPanelDashboardView<'static> {
         AdminPanelDashboardView {
-            version: "1.4.0",
+            version: env!("CARGO_PKG_VERSION"),
             build: "test/test",
             setup_status: "complete",
             setup_detail: "Public setup routes are blocked.",
@@ -2570,9 +2573,12 @@ mod tests {
         assert!(html.contains("Database integrity status"));
         assert!(html.contains("open media panel"));
         assert!(html.contains("copy diagnostics"));
-        assert!(html.contains("RustChan version: 1.4.0"));
+        assert!(html.contains(&format!("RustChan version: {}", env!("CARGO_PKG_VERSION"))));
         assert!(html.contains("Database schema"));
-        assert!(html.contains("1.4.0 baseline verified"));
+        assert!(html.contains(&format!(
+            "{} baseline verified",
+            crate::db::baseline_schema_version()
+        )));
         assert!(html.contains(r#"data-admin-health-jobs-url="/admin/site-health/jobs""#));
         assert!(html.contains(r#"data-admin-health-job="running_jobs""#));
         assert!(html.contains(r#"data-admin-health-job="queued_jobs""#));
@@ -2760,7 +2766,10 @@ mod tests {
             before: DbHealthSnapshot {
                 schema: DbCheckResult {
                     ok: true,
-                    messages: vec!["1.4.0 baseline verified".into()],
+                    messages: vec![format!(
+                        "{} baseline verified",
+                        crate::db::baseline_schema_version()
+                    )],
                 },
                 integrity: DbCheckResult {
                     ok: false,

@@ -128,7 +128,6 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt as _;
 
-    /// Standard fallible test result.
     type TestResult = anyhow::Result<()>;
 
     /// Seed a public board and refresh the template board cache.

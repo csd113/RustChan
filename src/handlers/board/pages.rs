@@ -11,7 +11,6 @@ use super::{
 };
 use axum::response::IntoResponse as _;
 
-/// Composite value returned by home page load result.
 type HomePageLoadResult = (
     Vec<crate::models::BoardStats>,
     Option<crate::models::SiteStats>,
@@ -23,7 +22,6 @@ type HomePageLoadResult = (
     HashMap<i64, i64>,
 );
 
-/// Composite value returned by board index load result.
 type BoardIndexLoadResult = (
     String,
     render::BoardPageData,
@@ -38,7 +36,6 @@ type BoardIndexLoadResult = (
     clippy::too_many_lines,
     reason = "home-page data loading, activity markers, banner selection, and rendering form one request"
 )]
-/// Handles the index request.
 pub(crate) async fn index(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -221,13 +218,11 @@ pub(crate) async fn index(
     Ok((jar, response).into_response())
 }
 
-// ─── GET /:board/ — board index ───────────────────────────────────────────────
-
+// GET /:board/ — board index
 #[expect(
     clippy::too_many_lines,
     reason = "board access, pagination, activity markers, banner selection, and rendering form one request"
 )]
-/// Handles the board index request.
 pub(crate) async fn board_index(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
@@ -397,7 +392,7 @@ pub(crate) async fn board_index(
         jar
     };
 
-    // 3.2: Return 304 Not Modified when the client's cached version is current.
+    // Reuse the client's current cached representation.
     let client_etag = req_headers
         .get("if-none-match")
         .and_then(|v| v.to_str().ok())

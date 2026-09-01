@@ -1,45 +1,8 @@
-// logging.rs — Structured logging initialisation.
-//
-// Two output channels:
-//
-//   1. Terminal (stdout, TTY-aware)
-//      • When stdout is a TTY (interactive terminal):
-//          HH:MM:SS.mmm [LEVEL] [component] message  key=val …
-//        Coloured level tags; component tag in cyan; fits in 80 columns.
-//      • When stdout is not a TTY (piped, systemd, Docker, nohup):
-//          YYYY-MM-DD HH:MM:SS.mmm [LEVEL] [component] message  key=val …
-//        Zero ANSI codes — clean for log shippers and `grep`.
-//
-//      All writes go through `CONSOLE_MUTEX` so `console.rs` interactive
-//      output never interleaves with log events.
-//
-//   2. Main log file (logs/rustchan.YYYY-MM-DD.log, human-readable text, daily rotation)
-//      Same fixed-column format as the non-TTY terminal output, with two extras:
-//        • Millisecond precision on every timestamp.
-//        • WARN and ERROR lines append  (src/file.rs:line)  at the end so you
-//          can jump straight to the source without grepping the codebase.
-//      One event per line — easy to tail, grep, and read in any text editor.
-//
-//   3. Dependency log file (logs/dep_log.log)
-//      Third-party dependency events are hidden from the terminal and main log
-//      by default, but are still written here with the same human-readable file
-//      formatter. FFMPEG-related logs are intentionally treated as app/runtime
-//      logs and remain in the main log.
-//
-//      If you need machine-parseable output for a log shipper (Loki, Datadog,
-//      etc.) swap the FileFormatter layer for .json() — see the comment in
-//      init_logging().
-//
-// `CONSOLE_MUTEX`
-// ───────────────
-// A `parking_lot::Mutex<()>` used as a coordinated write-lock on stdout.
-// Both this module's `ConsoleLock` `MakeWriter` (used by the tracing
-// terminal layer) and `console.rs`'s helpers acquire this same lock before
-// writing. This eliminates byte-level interleaving between log events and
-// stats/prompt output regardless of concurrent async activity.
+// Terminal logs use ANSI and short timestamps only on a TTY. File logs use
+// daily rotation and route dependency targets separately. All terminal writers
+// share `CONSOLE_MUTEX` to prevent log events from interleaving with the TUI.
 //
 // `IS_TTY`
-// ────────
 // Set once during `init_logging()` via `std::io::IsTerminal`.
 // Read at every log event and every `console.rs` write to decide whether
 // to emit ANSI escape codes. Exposed via `is_tty()`.
@@ -65,8 +28,7 @@ use tracing_subscriber::{
     EnvFilter,
 };
 
-// ─── Shared console write lock ────────────────────────────────────────────────
-
+// Shared console write lock
 /// Global mutex that serialises all stdout writes across the process.
 ///
 /// Both the tracing terminal layer (via [`ConsoleLock`]) and the `console.rs`
@@ -75,8 +37,7 @@ use tracing_subscriber::{
 static CONSOLE_MUTEX: LazyLock<parking_lot::Mutex<()>> =
     LazyLock::new(|| parking_lot::Mutex::new(()));
 
-// ─── Non-blocking file writer guard ─────────────────────────────────────────────
-//
+// Non-blocking file writer guard
 // `tracing_appender::non_blocking()` spawns a background thread that drains a
 // channel and flushes writes to disk after every batch.  The returned
 // `WorkerGuard` MUST stay alive for the entire process lifetime — dropping it
@@ -97,8 +58,7 @@ pub const MAIN_LOG_FALLBACK_FILE_NAME: &str = "rustchan.log";
 /// Filename used for third-party dependency logs.
 pub const DEPENDENCY_LOG_FILE_NAME: &str = "dep_log.log";
 
-// ─── TTY detection ────────────────────────────────────────────────────────────
-
+// TTY detection
 /// Whether standard output was an interactive terminal at startup.
 static IS_TTY: AtomicBool = AtomicBool::new(false);
 /// Whether terminal output may contain ANSI escape sequences.
@@ -114,6 +74,7 @@ pub fn is_tty() -> bool {
 }
 
 /// Returns `true` when stdout is an interactive terminal that can consume ANSI
+///
 /// escape sequences. On Windows this also probes/enables virtual terminal
 /// processing so raw colour sequences are not printed literally.
 pub fn ansi_enabled() -> bool {
@@ -161,8 +122,7 @@ pub fn is_tui_active() -> bool {
     TUI_ACTIVE.load(Ordering::Relaxed)
 }
 
-// ─── Component name extraction ────────────────────────────────────────────────
-
+// Component name extraction
 /// Namespace prefixes routed to `RustChan`'s main log.
 const APP_LOG_TARGETS: &[&str] = &[
     "admin",
@@ -267,8 +227,7 @@ fn display_component(target: &str) -> String {
     }
 }
 
-// ─── Shared formatting helpers ────────────────────────────────────────────────
-
+// Shared formatting helpers
 /// Write the fixed-width level tag.  Returns the ANSI open/close codes for
 /// the tag (empty strings when `ansi` is false).
 fn write_level_tag(writer: &mut Writer<'_>, level: Level, ansi: bool) -> fmt::Result {
@@ -1014,8 +973,7 @@ fn env_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| default_env_filter())
 }
 
-// ─── Terminal formatter ───────────────────────────────────────────────────────
-
+// Terminal formatter
 /// Writes one compact line per log event to the terminal.
 ///
 /// TTY mode (local dev):
@@ -1046,7 +1004,6 @@ where
             return Ok(());
         };
 
-        // ── Timestamp (with milliseconds) ─────────────────────────────────────
         let now = chrono::Local::now();
         if tty {
             write!(writer, "{} ", now.format("%H:%M:%S%.3f"))?;
@@ -1054,12 +1011,11 @@ where
             write!(writer, "{} ", now.format("%Y-%m-%d %H:%M:%S%.3f"))?;
         }
 
-        // ── Level + component columns ─────────────────────────────────────────
         let level = *meta.level();
         write_level_tag(&mut writer, level, ansi)?;
         write_component_tag(&mut writer, meta.target(), ansi)?;
 
-        // ── Message and structured fields ─────────────────────────────────────
+        // Message and structured fields
         // tracing_subscriber writes the `message` field first, then all other
         // key=value fields separated by spaces — e.g.:
         //   "Request received  method=GET path=/b/ latency_ms=4"
@@ -1068,8 +1024,7 @@ where
     }
 }
 
-// ─── File formatter ───────────────────────────────────────────────────────────
-
+// File formatter
 /// Writes one human-readable line per log event to the log file.
 ///
 /// Format:
@@ -1099,23 +1054,20 @@ where
             return Ok(());
         };
 
-        // ── Timestamp — server-local, full date, millisecond precision ───────
         let now = chrono::Local::now();
         write!(writer, "{} ", now.format("%Y-%m-%d %H:%M:%S%.3f"))?;
 
-        // ── Level + component columns (no colour) ─────────────────────────────
         let level = *event.metadata().level();
         write_level_tag(&mut writer, level, false)?;
         write_component_tag(&mut writer, meta.target(), false)?;
 
-        // ── Message and structured key=value fields ───────────────────────────
         write_event_fields(&mut writer, &fields)?;
 
-        // ── Source location suffix for WARN and ERROR ─────────────────────────
+        // Source location suffix for WARN and ERROR
         // Only attached at these levels because:
         //   • INFO/DEBUG events fire thousands of times per minute on a busy
         //     board; the call site is rarely the interesting part.
-        //   • WARN/ERROR events are rare and almost always need follow-up —
+        // • WARN/ERROR events are rare and almost always need follow-up
         //     having the exact file:line avoids a grep → blame cycle.
         if matches!(level, Level::ERROR | Level::WARN) {
             if let (Some(file), Some(line)) = (meta.file(), meta.line()) {
@@ -1135,8 +1087,7 @@ where
     }
 }
 
-// ─── MakeWriter: routes terminal writes through CONSOLE_MUTEX ─────────────────
-
+// MakeWriter: routes terminal writes through CONSOLE_MUTEX
 /// Holds the console lock guard for the duration of one log event write.
 ///
 /// The `_guard` field is held solely for its `Drop` side-effect (releasing
@@ -1181,8 +1132,7 @@ impl<'a> MakeWriter<'a> for ConsoleLock {
     }
 }
 
-// ─── Initialisation ───────────────────────────────────────────────────────────
-
+// Initialisation
 /// Initialise the global tracing subscriber. Call exactly once at startup,
 /// before any `tracing::info!` or `tracing::warn!` calls are made.
 ///
@@ -1221,7 +1171,6 @@ pub fn init_logging(log_dir: &Path) {
         .with_filter(filter_fn(|meta| is_main_log_target(meta.target())))
         .with_filter(env_filter());
 
-    // Build the rolling file appender.
     // FIX (filename): tracing_appender::rolling::daily(dir, "rustchan.log")
     // appends the date *after* the full string → "rustchan.log.2024-01-15"
     // (no .log extension on rotated files).  The builder API separates
@@ -1273,8 +1222,7 @@ pub fn init_logging(log_dir: &Path) {
         .init();
 }
 
-// ─── Console print helpers ────────────────────────────────────────────────────
-//
+// Console print helpers
 // All helpers acquire `CONSOLE_MUTEX` before writing so they serialise
 // correctly with the tracing terminal layer. Use these instead of
 // `println!`/`print!` in `console.rs` and `detect.rs`.

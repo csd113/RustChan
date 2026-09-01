@@ -1,4 +1,3 @@
-// handlers/admin/content.rs
 //
 // Board, thread, and post management handlers.
 // All routes require a valid admin session cookie.
@@ -18,7 +17,6 @@ use serde::Deserialize;
 #[cfg(test)]
 use std::path::{Path, PathBuf};
 
-/// Sanitizes board short value.
 fn sanitize_board_short_value(board_short: &str) -> String {
     board_short
         .chars()
@@ -39,7 +37,6 @@ fn validate_new_board_short_name(raw_short_name: &str) -> Result<String> {
     Ok(trimmed.to_lowercase())
 }
 
-/// Resolves board short name.
 fn resolve_board_short_name(
     boards: Option<&[crate::models::Board]>,
     board_id: i64,
@@ -102,27 +99,18 @@ fn checked_board_upload_dir(upload_dir: &str, short: &str) -> Result<PathBuf> {
     Ok(canonical_board_dir)
 }
 
-// ─── POST /admin/board/create ─────────────────────────────────────────────────
-
+// POST /admin/board/create
 #[derive(Deserialize)]
-/// Form fields accepted by the create board request.
 pub(crate) struct CreateBoardForm {
-    /// The short name.
     short_name: String,
-    /// The name.
     name: String,
-    /// The description.
     description: String,
-    /// The optional NSFW.
     nsfw: Option<String>,
-    /// The optional allow audio.
     allow_audio: Option<String>,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Handles the create board request.
 pub(crate) async fn create_board(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -180,38 +168,27 @@ pub(crate) async fn create_board(
     Ok(super::admin_panel_redirect(&format!("Board /{short_for_flash}/ created.")).into_response())
 }
 
-// ─── POST /admin/board/delete ─────────────────────────────────────────────────
-
+// POST /admin/board/delete
 #[derive(Deserialize)]
-/// Form fields accepted by the board ID request.
 pub(crate) struct BoardIdForm {
-    /// The board identifier.
     board_id: i64,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the reorder board request.
 pub(crate) struct ReorderBoardForm {
-    /// The board identifier.
     board_id: i64,
-    /// The direction.
     direction: String,
-    /// The optional return to.
     return_to: Option<String>,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Performs the safe return to handler operation.
 fn safe_return_to(path: Option<&str>) -> &str {
     crate::utils::redirect::safe_internal_path_or(path, "/admin/panel")
 }
 
-/// Handles the delete board request.
 pub(crate) async fn delete_board(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -299,9 +276,7 @@ pub(crate) async fn delete_board(
     Ok(super::admin_panel_redirect("Board deleted.").into_response())
 }
 
-// ─── POST /admin/board/reorder ───────────────────────────────────────────────
-
-/// Handles the reorder board request.
+// POST /admin/board/reorder
 pub(crate) async fn reorder_board(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -340,23 +315,16 @@ pub(crate) async fn reorder_board(
     Ok(Redirect::to(&return_to).into_response())
 }
 
-// ─── POST /admin/thread/action ────────────────────────────────────────────────
-
+// POST /admin/thread/action
 #[derive(Deserialize)]
-/// Form fields accepted by the thread action request.
 pub(crate) struct ThreadActionForm {
-    /// The thread identifier.
     thread_id: i64,
-    /// The board.
     board: String,
-    /// The action.
     action: String, // "sticky", "unsticky", "lock", "unlock"
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Handles the thread action request.
 pub(crate) async fn thread_action(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -367,7 +335,6 @@ pub(crate) async fn thread_action(
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    // Validate action before spawning to give early error
     match form.action.as_str() {
         "sticky" | "unsticky" | "lock" | "unlock" | "archive" => {}
         _ => return Err(AppError::BadRequest("Unknown action.".into())),
@@ -450,17 +417,12 @@ pub(crate) async fn thread_action(
     Ok(Redirect::to(&redirect_url).into_response())
 }
 
-// ─── POST /admin/post/delete ──────────────────────────────────────────────────
-
+// POST /admin/post/delete
 #[derive(Deserialize)]
-/// Form fields accepted by the admin delete post request.
 pub(crate) struct AdminDeletePostForm {
-    /// The post identifier.
     post_id: i64,
-    /// The board.
     board: String,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
@@ -468,7 +430,6 @@ pub(crate) struct AdminDeletePostForm {
     clippy::cognitive_complexity,
     reason = "post deletion keeps authorization, database mutation, file cleanup, and audit logging together"
 )]
-/// Handles the admin delete post request.
 pub(crate) async fn admin_delete_post(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -547,7 +508,6 @@ pub(crate) async fn admin_delete_post(
                 );
             }
             tracing::info!(target: "admin", post_id = post_id, "Post deleted");
-            // Return board_name + thread context so we can redirect back to the thread.
             // If the post was an OP, redirect to the board index (thread is gone).
             if is_op {
                 Ok(format!("/{board_name}"))
@@ -562,21 +522,15 @@ pub(crate) async fn admin_delete_post(
     Ok(Redirect::to(&redirect_board).into_response())
 }
 
-// ─── POST /admin/thread/delete ────────────────────────────────────────────────
-
+// POST /admin/thread/delete
 #[derive(Deserialize)]
-/// Form fields accepted by the admin delete thread request.
 pub(crate) struct AdminDeleteThreadForm {
-    /// The thread identifier.
     thread_id: i64,
-    /// The board.
     board: String,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Handles the admin delete thread request.
 pub(crate) async fn admin_delete_thread(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -597,8 +551,7 @@ pub(crate) async fn admin_delete_thread(
             let (admin_id, admin_name) =
                 super::require_admin_session_with_name(&conn, session_id.as_deref())?;
 
-            // Resolve board name from DB.
-            // Fallback sanitizes the user-supplied value to alphanumeric only.
+            // Fall back only to a sanitized user value when the DB row is gone.
             let board_name = db::get_thread(&conn, thread_id)?
                 .and_then(|t| {
                     db::get_all_boards(&conn)

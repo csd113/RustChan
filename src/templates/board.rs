@@ -11,8 +11,7 @@ use super::{
     report_modal_script, urlencoding_simple,
 };
 
-// ─── Site index (board list) ──────────────────────────────────────────────────
-
+// Site index (board list)
 /// Renders administrator controls for moving a board within its content group.
 fn board_reorder_controls(
     board: &Board,
@@ -399,7 +398,6 @@ fn render_catalog_thumb(thread: &Thread) -> String {
     format!(r#"<div class="catalog-card-media">{media}{badges}</div>"#)
 }
 
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the action menu accepts independent labels and form values for two actions"
@@ -476,7 +474,6 @@ fn render_catalog_actions(
     )
 }
 
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the card combines thread state with independent action labels and values"
@@ -652,12 +649,10 @@ fn board_cards<S: std::hash::BuildHasher>(
 }
 
 #[must_use]
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "the homepage keeps its board groups, statistics, and modals together"
 )]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the homepage consumes distinct board, activity, consent, and admin contexts"
@@ -854,16 +849,13 @@ pub fn index_page<S: std::hash::BuildHasher>(
     )
 }
 
-// ─── Board index ──────────────────────────────────────────────────────────────
-
+// Board index
 #[must_use]
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     clippy::fn_params_excessive_bools,
     reason = "the board index keeps its forms, navigation, and thread list together"
 )]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the board index consumes distinct paging, moderation, activity, and visitor contexts"
@@ -1012,8 +1004,7 @@ pub fn board_page<S: std::hash::BuildHasher>(
     )
 }
 
-// ─── Thread summary (used by board_page) ─────────────────────────────────────
-
+// Thread summary (used by board_page)
 #[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -1239,8 +1230,7 @@ fn render_thread_summary(
     html
 }
 
-// ─── Catalog page ─────────────────────────────────────────────────────────────
-
+// Catalog page
 #[must_use]
 // These flags map directly to render or DB inputs, so bundling them would make the call sites less clear.
 #[expect(
@@ -1248,7 +1238,6 @@ fn render_thread_summary(
     clippy::too_many_lines,
     reason = "the catalog keeps its card grid, forms, navigation, and hidden-view state together"
 )]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the catalog consumes distinct filtering, moderation, activity, and visitor contexts"
@@ -1468,10 +1457,8 @@ pub fn catalog_page<S: std::hash::BuildHasher>(
     )
 }
 
-// ─── Search results ───────────────────────────────────────────────────────────
-
+// Search results
 #[must_use]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "search rendering consumes distinct result, paging, theme, and visitor contexts"
@@ -1572,8 +1559,7 @@ pub fn search_page(
     )
 }
 
-// ─── Archive page ─────────────────────────────────────────────────────────────
-
+// Archive page
 #[must_use]
 /// Renders a board's paginated archived-thread list.
 pub fn archive_page(

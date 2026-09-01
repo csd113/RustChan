@@ -280,15 +280,12 @@ pub fn render_archive_state_badges(sticky: bool) -> String {
     format!(r#"<span class="thread-state-badges">{badges}</span>"#)
 }
 
-// ─── Thread page ──────────────────────────────────────────────────────────────
-
+// Thread page
 #[must_use]
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "the thread document keeps navigation, posts, poll, forms, and modals together"
 )]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "thread rendering consumes distinct moderation, poll, form, theme, and visitor contexts"
@@ -461,7 +458,7 @@ pub fn thread_page(
         ));
     }
 
-    body.push_str("</div><!-- #thread-posts -->\n");
+    body.push_str("</div>\n");
     body.push_str(&render_edit_overlay(
         board,
         thread.id,
@@ -519,18 +516,10 @@ pub fn thread_page(
     body.push_str(report_modal_script());
     body.push_str(thread_autoupdate_script());
 
-    // The previous approach used inline <script> blocks to inject
-    // board-specific values (EMBED_ENABLED, DRAFT_KEY) at render time.  Inline
-    // scripts are blocked by the CSP `script-src 'self'` directive (which
-    // deliberately omits 'unsafe-inline'), so neither buildEmbed nor the draft
-    // autosave ever executed in the browser — breaking YouTube thumbnail display
-    // and inline playback entirely.
-    //
-    // The fix: pass the board-specific values as data-* attributes on a small
-    // config element and let the static main.js read them.  No inline script
-    // execution is required, the CSP remains unchanged, and embeds work again.
+    // Board-specific values use data attributes because the CSP intentionally
+    // forbids inline scripts.
 
-    // ── Video embed + draft autosave config (data attributes only) ─────────
+    // Video embed + draft autosave config (data attributes only)
     let embed_enabled_attr = if board.allow_video_embeds { "1" } else { "0" };
     let draft_key = format!("rustchan_draft_{}_{}", board.short_name, thread.id);
     let _ = write!(
@@ -561,8 +550,7 @@ pub fn thread_page(
     )
 }
 
-// ─── Poll renderer ────────────────────────────────────────────────────────────
-
+// Poll renderer
 /// Renders a poll voting form or its results.
 fn render_poll(
     pd: &crate::models::PollData,
@@ -672,8 +660,7 @@ fn render_poll(
     html
 }
 
-// ─── Single post renderer ─────────────────────────────────────────────────────
-
+// Single post renderer
 /// Options that control which controls are rendered for a post.
 #[expect(
     clippy::struct_excessive_bools,

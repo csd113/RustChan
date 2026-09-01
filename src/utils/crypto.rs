@@ -1,4 +1,3 @@
-// utils/crypto.rs
 //
 // Security primitives:
 //
@@ -227,8 +226,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
-// ─── Password validation ──────────────────────────────────────────────────────
-
+// Password validation
 /// Validate an admin password meets minimum requirements.
 /// Minimum 8 characters (enforced here; tighten as needed).
 ///
@@ -246,8 +244,7 @@ mod tests {
 
     use super::*;
 
-    // ── Password hashing ─────────────────────────────────────────────
-
+    // Password hashing
     #[test]
     #[expect(
         clippy::panic_in_result_fn,
@@ -293,8 +290,7 @@ mod tests {
         Ok(())
     }
 
-    // ── Random hex ───────────────────────────────────────────────────
-
+    // Random hex
     #[test]
     fn random_hex_length() {
         assert_eq!(
@@ -328,8 +324,7 @@ mod tests {
         );
     }
 
-    // ── Token generators ─────────────────────────────────────────────
-
+    // Token generators
     #[test]
     fn session_id_length() {
         assert_eq!(
@@ -357,8 +352,7 @@ mod tests {
         );
     }
 
-    // ── IP hashing ───────────────────────────────────────────────────
-
+    // IP hashing
     #[test]
     fn hash_ip_deterministic() {
         let a = hash_ip("127.0.0.1", "secret");
@@ -389,8 +383,7 @@ mod tests {
         );
     }
 
-    // ── sha256_hex ───────────────────────────────────────────────────
-
+    // sha256_hex
     #[test]
     fn sha256_hex_known_vector() {
         // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855

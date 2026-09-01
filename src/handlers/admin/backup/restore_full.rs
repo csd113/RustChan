@@ -186,7 +186,6 @@ fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Resul
     Ok(())
 }
 
-/// Performs the recompute restored post body HTML handler operation.
 fn recompute_restored_post_body_html(conn: &rusqlite::Connection) -> Result<()> {
     let posts = {
         let mut stmt = conn
@@ -229,18 +228,14 @@ fn recompute_restored_post_body_html(conn: &rusqlite::Connection) -> Result<()> 
     Ok(())
 }
 
-/// Performs the scrub full restore runtime state handler operation.
 fn scrub_full_restore_runtime_state(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute("DELETE FROM admin_sessions", [])
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Clear restored sessions: {error}")))?;
     Ok(())
 }
 
-/// Data used by the full restore temp paths workflow.
 struct FullRestoreTempPaths {
-    /// The temp database.
     temp_db: PathBuf,
-    /// The database snapshot.
     db_snapshot: PathBuf,
 }
 
@@ -262,19 +257,15 @@ fn full_restore_runtime_tmp_dir() -> PathBuf {
 }
 
 #[cfg(not(test))]
-/// Performs the full restore runtime tmp dir handler operation.
 fn full_restore_runtime_tmp_dir() -> PathBuf {
     crate::config::runtime_tmp_dir()
 }
 
-/// Data used by the full restore temp cleanup guard workflow.
 struct FullRestoreTempCleanupGuard {
-    /// The database paths.
     db_paths: [PathBuf; 2],
 }
 
 impl FullRestoreTempCleanupGuard {
-    /// Creates a new value.
     fn new(paths: &FullRestoreTempPaths) -> Self {
         Self {
             db_paths: [paths.temp_db.clone(), paths.db_snapshot.clone()],
@@ -290,7 +281,6 @@ impl Drop for FullRestoreTempCleanupGuard {
     }
 }
 
-/// Performs the `SQLite` database and sidecar paths handler operation.
 fn sqlite_db_and_sidecar_paths(path: &Path) -> Vec<PathBuf> {
     let mut paths = vec![path.to_path_buf()];
     let Some(file_name) = path.file_name() else {
@@ -320,12 +310,10 @@ fn remove_sqlite_db_and_sidecars(path: &Path) {
     }
 }
 
-/// Performs the prepare full restore temp paths handler operation.
 fn prepare_full_restore_temp_paths(tmp_id: &str) -> Result<FullRestoreTempPaths> {
     prepare_full_restore_temp_paths_in(&full_restore_runtime_tmp_dir(), tmp_id)
 }
 
-/// Performs the prepare full restore temp paths in handler operation.
 fn prepare_full_restore_temp_paths_in(
     runtime_tmp_root: &Path,
     tmp_id: &str,
@@ -343,7 +331,6 @@ fn prepare_full_restore_temp_paths_in(
     })
 }
 
-/// Performs the restrict restore temp file handler operation.
 fn restrict_restore_temp_file(path: &Path) -> Result<()> {
     crate::config::restrict_private_file_permissions(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
@@ -353,7 +340,6 @@ fn restrict_restore_temp_file(path: &Path) -> Result<()> {
     })
 }
 
-/// Creates private restore temp database.
 fn create_private_restore_temp_db(path: &Path) -> Result<std::fs::File> {
     #[cfg(unix)]
     {
@@ -391,7 +377,6 @@ fn create_private_restore_temp_db(path: &Path) -> Result<std::fs::File> {
     }
 }
 
-/// Creates live restore snapshot.
 fn create_live_restore_snapshot(
     live_conn: &rusqlite::Connection,
     db_snapshot: &Path,
@@ -407,7 +392,6 @@ fn create_live_restore_snapshot(
     Ok(())
 }
 
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::cognitive_complexity,
     reason = "full restore validation, replacement, and rollback remain one fail-closed operation"
@@ -417,7 +401,6 @@ fn create_live_restore_snapshot(
     clippy::too_many_lines,
     reason = "full restore inputs and ordered rollback phases must remain visible at one trust boundary"
 )]
-/// Performs the execute full restore handler operation.
 pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
     live_conn: &mut rusqlite::Connection,
     admin_id: i64,
@@ -872,7 +855,6 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
     session_result
 }
 
-/// Performs the restrict private key material permissions handler operation.
 fn restrict_private_key_material_permissions(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -907,7 +889,6 @@ fn restrict_private_key_material_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Builds the full restore success response.
 fn full_restore_success_response(
     jar: CookieJar,
     headers: &HeaderMap,
@@ -937,12 +918,10 @@ fn full_restore_success_response(
         .into_response()
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "authentication, upload validation, job execution, and failure responses form one restore request"
 )]
-/// Handles the admin restore request.
 pub(crate) async fn admin_restore(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -1079,8 +1058,6 @@ pub(crate) async fn admin_restore(
     }
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
-/// Handles the restore saved full backup request.
 pub(crate) async fn restore_saved_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,

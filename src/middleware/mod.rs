@@ -1,5 +1,3 @@
-// src/middleware/mod.rs
-
 /// Backup-operation progress shared with status endpoints.
 mod backup_progress;
 /// Cross-site request forgery token validation.

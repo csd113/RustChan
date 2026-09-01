@@ -20,10 +20,8 @@ use std::os::unix::fs::PermissionsExt as _;
 /// - TLS-ALPN-01 challenge responses (no port 80 required)
 /// - Automatic renewal before expiry
 ///
-/// **Important:** always test with staging = true first. Let's Encrypt
-/// rate-limits production certificate issuance; a misconfigured setup will
-/// burn your quota. Set staging = false only once you have confirmed the
-/// full ACME flow works end-to-end in staging.
+/// Test the complete flow with `staging = true` before using production;
+/// Let's Encrypt rate-limits production certificate issuance.
 ///
 /// # Errors
 ///

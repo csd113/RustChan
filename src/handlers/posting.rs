@@ -1,5 +1,3 @@
-// src/handlers/posting.rs
-
 use crate::{
     db,
     error::{AppError, Result},
@@ -16,85 +14,48 @@ use crate::{
 
 use crate::db::NewPost;
 
-/// Variants supported by the submit post mode workflow.
 pub(crate) enum SubmitPostMode {
-    /// Represents the new thread case.
     NewThread {
-        /// The subject.
         subject: String,
-        /// The poll question.
         poll_question: String,
-        /// The poll options collection.
         poll_options: Vec<String>,
-        /// The poll duration duration in seconds.
         poll_duration_secs: Option<i64>,
     },
-    /// Represents the reply case.
     Reply {
-        /// The thread identifier.
         thread_id: i64,
-        /// Whether the sage setting is active.
         sage: bool,
     },
 }
 
-/// Data used by the submit post command workflow.
 pub(crate) struct SubmitPostCommand {
-    /// The mode.
     pub mode: SubmitPostMode,
-    /// The board short.
     pub board_short: String,
-    /// The identity key.
     pub identity_key: String,
-    /// The cookie secret.
     pub cookie_secret: String,
-    /// The admin session identifier.
     pub admin_session_id: Option<String>,
-    /// The ban CSRF token.
     pub ban_csrf_token: String,
-    /// The submission token.
     pub submission_token: String,
-    /// The name.
     pub name: String,
-    /// The body.
     pub body: String,
-    /// The deletion token.
     pub deletion_token: String,
-    /// The captcha identifier.
     pub captcha_id: String,
-    /// The captcha answer.
     pub captcha_answer: String,
-    /// The optional image file data.
     pub image_file_data: Option<(crate::handlers::TempUpload, String)>,
-    /// The optional file data.
     pub file_data: Option<(crate::handlers::TempUpload, String)>,
-    /// The optional audio file data.
     pub audio_file_data: Option<(crate::handlers::TempUpload, String)>,
-    /// The upload directory.
     pub upload_dir: String,
-    /// The thumb size.
     pub thumb_size: u32,
-    /// Whether the `FFmpeg` available setting is active.
     pub ffmpeg_available: bool,
-    /// Whether the `FFprobe` available setting is active.
     pub ffprobe_available: bool,
-    /// Whether the `FFmpeg` webp available setting is active.
     pub ffmpeg_webp_available: bool,
 }
 
-/// Data used by the submit post result workflow.
 pub(crate) struct SubmitPostResult {
-    /// The redirect URL.
     pub redirect_url: String,
-    /// The board short.
     pub board_short: String,
-    /// The thread identifier.
     pub thread_id: i64,
-    /// The post identifier.
     pub post_id: i64,
-    /// The deletion token.
     pub deletion_token: String,
-    /// The created timestamp.
     pub created_at: i64,
 }
 
@@ -122,49 +83,31 @@ fn existing_submission_result(
     })
 }
 
-/// Data used by the upload config workflow.
 pub(crate) struct UploadConfig<'a> {
-    /// The upload directory.
     pub upload_dir: &'a str,
-    /// The thumb size.
     pub thumb_size: u32,
-    /// The max image size.
     pub max_image_size: usize,
-    /// The max video size.
     pub max_video_size: usize,
-    /// The max audio size.
     pub max_audio_size: usize,
-    /// The max PDF size.
     pub max_pdf_size: usize,
-    /// Whether the `FFmpeg` available setting is active.
     pub ffmpeg_available: bool,
-    /// Whether the `FFprobe` available setting is active.
     pub ffprobe_available: bool,
-    /// Whether the `FFmpeg` webp available setting is active.
     pub ffmpeg_webp_available: bool,
 }
 
 #[derive(Clone)]
-/// Data used by the pending upload finalize workflow.
 pub(crate) struct PendingUploadFinalize {
-    /// The op identifier.
     pub op_id: String,
-    /// The payload.
     pub payload: crate::pending_fs::UploadFinalizePayload,
 }
 
-/// Data used by the processed uploads workflow.
 pub(crate) struct ProcessedUploads {
-    /// The optional primary.
     pub primary: Option<crate::utils::files::UploadedFile>,
-    /// The optional audio.
     pub audio: Option<crate::utils::files::UploadedFile>,
-    /// The optional pending finalize.
     pub pending_finalize: Option<PendingUploadFinalize>,
 }
 
 impl ProcessedUploads {
-    /// Performs the rollback new files handler operation.
     pub(crate) fn rollback_new_files(
         &self,
         conn: &rusqlite::Connection,
@@ -226,7 +169,6 @@ impl ProcessedUploads {
     }
 }
 
-/// Performs the cleanup unused upload stage handler operation.
 fn cleanup_unused_upload_stage(stage_root: Option<&std::path::Path>) {
     let Some(stage_dir) = stage_root else {
         return;
@@ -243,7 +185,6 @@ fn cleanup_unused_upload_stage(stage_root: Option<&std::path::Path>) {
     }
 }
 
-/// Builds upload finalize payload.
 fn build_upload_finalize_payload(
     stage_dir: &std::path::Path,
     mut primary: Option<&mut crate::utils::files::UploadedFile>,
@@ -352,7 +293,6 @@ fn build_upload_finalize_payload(
     Ok(payload)
 }
 
-/// Builds pending upload op.
 pub(crate) fn build_pending_upload_op(
     uploads: &ProcessedUploads,
 ) -> Result<Option<crate::pending_fs::PendingFsOpInsert>> {
@@ -371,7 +311,6 @@ pub(crate) fn build_pending_upload_op(
     }))
 }
 
-/// Performs the finalize pending uploads handler operation.
 pub(crate) fn finalize_pending_uploads(
     conn: &rusqlite::Connection,
     upload_dir: &str,
@@ -398,7 +337,6 @@ pub(crate) fn finalize_pending_uploads(
     }
 }
 
-/// Returns whether admin session.
 pub(crate) fn is_admin_session(
     conn: &rusqlite::Connection,
     admin_session_id: Option<&str>,
@@ -406,7 +344,6 @@ pub(crate) fn is_admin_session(
     admin_session_id.is_some_and(|sid| db::get_session(conn, sid).ok().flatten().is_some())
 }
 
-/// Loads word filters.
 pub(crate) fn load_word_filters(conn: &rusqlite::Connection) -> Result<Vec<(String, String)>> {
     Ok(db::get_word_filters(conn)?
         .into_iter()
@@ -414,7 +351,6 @@ pub(crate) fn load_word_filters(conn: &rusqlite::Connection) -> Result<Vec<(Stri
         .collect())
 }
 
-/// Resolves post identity.
 pub(crate) fn resolve_post_identity(
     raw_name: &str,
     allow_tripcodes: bool,
@@ -424,7 +360,6 @@ pub(crate) fn resolve_post_identity(
     (name, tripcode)
 }
 
-/// Builds post body.
 pub(crate) fn build_post_body(
     raw_body: &str,
     has_file: bool,
@@ -445,7 +380,6 @@ pub(crate) fn build_post_body(
     Ok((body_text, body_html))
 }
 
-/// Resolves deletion token.
 pub(crate) fn resolve_deletion_token(raw_token: &str) -> String {
     if raw_token.trim().is_empty() {
         new_deletion_token()
@@ -454,7 +388,6 @@ pub(crate) fn resolve_deletion_token(raw_token: &str) -> String {
     }
 }
 
-/// Processes uploads.
 pub(crate) fn process_uploads(
     image_file_data: Option<(crate::handlers::TempUpload, String)>,
     file_data: Option<(crate::handlers::TempUpload, String)>,
@@ -524,12 +457,10 @@ pub(crate) fn process_uploads(
     })
 }
 
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the constructor mirrors the persisted post record assembled from validated form fields"
 )]
-/// Handles the build new post request.
 pub(crate) fn build_new_post(
     thread_id: i64,
     board_id: i64,
@@ -570,7 +501,6 @@ pub(crate) fn build_new_post(
     }
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::cognitive_complexity,
     reason = "post validation and transactional creation share one consistency boundary"
@@ -579,7 +509,6 @@ pub(crate) fn build_new_post(
     clippy::too_many_lines,
     reason = "validation, transactional insertion, attachment updates, and job enqueueing share one boundary"
 )]
-/// Handles the submit post request.
 pub(crate) fn submit_post(
     conn: &rusqlite::Connection,
     job_queue: &crate::workers::JobQueue,

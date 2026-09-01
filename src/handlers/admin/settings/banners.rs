@@ -10,33 +10,20 @@ use anyhow::Context as _;
 use axum::response::IntoResponse as _;
 use serde::Deserialize;
 
-/// Data used by the parsed banner upload workflow.
 struct ParsedBannerUpload {
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
-    /// The board identifier.
     board_id: Option<i64>,
-    /// The target type.
     target_type: String,
-    /// The optional target value.
     target_value: Option<String>,
-    /// The optional target board value.
     target_board_value: Option<String>,
-    /// The optional target thread value.
     target_thread_value: Option<String>,
-    /// The target external URL.
     target_external_url: Option<String>,
-    /// Whether to show on index.
     show_on_index: bool,
-    /// Whether to show on catalog.
     show_on_catalog: bool,
-    /// Whether this item is enabled.
     enabled: bool,
-    /// The banner size in bytes.
     banner_bytes: Vec<u8>,
 }
 
-/// Handles the parse banner upload request.
 async fn parse_banner_upload(mut multipart: Multipart) -> Result<ParsedBannerUpload> {
     let mut csrf = None;
     let mut board_id = None;
@@ -100,64 +87,42 @@ async fn parse_banner_upload(mut multipart: Multipart) -> Result<ParsedBannerUpl
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the banner meta request.
 pub(crate) struct BannerMetaForm {
-    /// The banner identifier.
     pub banner_id: i64,
-    /// The target type.
     pub target_type: String,
-    /// The optional target value.
     pub target_value: Option<String>,
-    /// The optional target board value.
     pub target_board_value: Option<String>,
-    /// The optional target thread value.
     pub target_thread_value: Option<String>,
-    /// The target external URL.
     pub target_external_url: Option<String>,
-    /// Whether this item is enabled.
     pub enabled: Option<String>,
-    /// The optional show on index.
     pub show_on_index: Option<String>,
-    /// The optional show on catalog.
     pub show_on_catalog: Option<String>,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the delete banner request.
 pub(crate) struct DeleteBannerForm {
-    /// The banner identifier.
     pub banner_id: i64,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the move banner request.
 pub(crate) struct MoveBannerForm {
-    /// The banner identifier.
     pub banner_id: i64,
-    /// The direction.
     pub direction: String,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the clear board banner request.
 pub(crate) struct ClearBoardBannerForm {
-    /// The board identifier.
     pub board_id: i64,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
-/// Handles the board appearance anchor from ID request.
 async fn board_appearance_anchor_from_id(state: &AppState, board_id: i64) -> Result<String> {
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -175,7 +140,6 @@ async fn board_appearance_anchor_from_id(state: &AppState, board_id: i64) -> Res
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
 }
 
-/// Resolves banner target selection.
 fn resolve_banner_target_selection(
     target_type_raw: &str,
     target_value_raw: Option<&str>,
@@ -215,7 +179,6 @@ fn restore_board_banner_inheritance_if_empty(
     Ok(())
 }
 
-/// Performs the banner cleanup payload handler operation.
 fn banner_cleanup_payload(
     assets: &[crate::models::BannerAsset],
 ) -> Result<Option<crate::pending_fs::PendingFsOpInsert>> {
@@ -265,7 +228,6 @@ fn delete_banner_asset_safely(
     Ok(asset)
 }
 
-/// Clears board banner assets safely.
 fn clear_board_banner_assets_safely(
     conn: &rusqlite::Connection,
     board_id: i64,
@@ -299,7 +261,6 @@ fn clear_board_banner_assets_safely(
     clippy::too_many_lines,
     reason = "upload validation, image processing, draft cleanup, and database insertion form one operation"
 )]
-/// Handles the upload banner for scope request.
 async fn upload_banner_for_scope(
     state: AppState,
     session_id: Option<String>,
@@ -412,7 +373,6 @@ async fn upload_banner_for_scope(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
 }
 
-/// Handles the upload global banner request.
 pub(crate) async fn upload_global_banner(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -449,7 +409,6 @@ pub(crate) async fn upload_global_banner(
     }
 }
 
-/// Handles the upload home banner request.
 pub(crate) async fn upload_home_banner(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -486,7 +445,6 @@ pub(crate) async fn upload_home_banner(
     }
 }
 
-/// Handles the upload board banner request.
 pub(crate) async fn upload_board_banner(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -535,7 +493,6 @@ pub(crate) async fn upload_board_banner(
     }
 }
 
-/// Handles the update banner meta request.
 pub(crate) async fn update_banner_meta(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -604,7 +561,6 @@ pub(crate) async fn update_banner_meta(
     }
 }
 
-/// Handles the delete banner request.
 pub(crate) async fn delete_banner(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -638,7 +594,6 @@ pub(crate) async fn delete_banner(
     .into_response())
 }
 
-/// Handles the move banner request.
 pub(crate) async fn move_banner(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -683,7 +638,6 @@ pub(crate) async fn move_banner(
     .into_response())
 }
 
-/// Handles the clear board banner override request.
 pub(crate) async fn clear_board_banner_override(
     State(state): State<AppState>,
     jar: CookieJar,

@@ -1,5 +1,3 @@
-// src/utils/files/mime.rs
-
 use anyhow::Result;
 
 /// Detect the MIME type of an uploaded file from its magic bytes.

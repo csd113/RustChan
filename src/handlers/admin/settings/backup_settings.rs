@@ -7,40 +7,25 @@ use axum::response::IntoResponse as _;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-/// Form fields accepted by the full backup settings request.
 pub(crate) struct FullBackupSettingsForm {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
-    /// The optional auto full backup interval hours.
     pub auto_full_backup_interval_hours: Option<String>,
-    /// The optional auto full backup copies to keep.
     pub auto_full_backup_copies_to_keep: Option<String>,
-    /// The optional auto full backup include Tor hidden service keys.
     pub auto_full_backup_include_tor_hidden_service_keys: Option<String>,
-    /// The optional auto full backup storage mode.
     pub auto_full_backup_storage_mode: Option<String>,
-    /// The optional auto full backup split ZIP part size GiB.
     pub auto_full_backup_split_zip_part_size_gib: Option<String>,
 }
 
-/// Data used by the parsed full backup settings workflow.
 struct ParsedFullBackupSettings {
-    /// The interval hours.
     interval_hours: u64,
-    /// The copies to keep.
     copies_to_keep: u64,
-    /// Whether to include Tor hidden service keys.
     include_tor_hidden_service_keys: bool,
-    /// The storage mode value.
     storage_mode_value: &'static str,
-    /// The split ZIP part size.
     split_zip_part_size: u64,
-    /// The split ZIP part size GiB.
     split_zip_part_size_gib: u64,
 }
 
-/// Parses full backup settings form.
 fn parse_full_backup_settings_form(
     form: &FullBackupSettingsForm,
 ) -> Result<ParsedFullBackupSettings> {
@@ -91,7 +76,6 @@ fn parse_full_backup_settings_form(
     })
 }
 
-/// Handles the update full backup settings request.
 pub(crate) async fn update_full_backup_settings(
     State(state): State<AppState>,
     jar: CookieJar,

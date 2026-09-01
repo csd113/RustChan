@@ -34,8 +34,7 @@ use axum::{
 use serde_json::json;
 use std::sync::Arc;
 
-// ── ChanError ─────────────────────────────────────────────────────────────────
-//
+// ChanError
 // All `/chan/*` routes are machine-to-machine. They must never return the HTML
 // error pages that `AppError::into_response` renders for browser-facing routes.
 // `ChanError` wraps `AppError` and overrides `IntoResponse` to emit JSON:
@@ -113,8 +112,7 @@ impl IntoResponse for ChanError {
     }
 }
 
-// ── Body-limit JSON middleware ─────────────────────────────────────────────────
-//
+// Body-limit JSON middleware
 // `DefaultBodyLimit` rejects oversized bodies before the handler runs, and its
 // built-in rejection renders plain text (StatusCode 413, body:
 // "Failed to buffer request body: …"). That bypasses our `ChanError` JSON
@@ -134,8 +132,7 @@ async fn json_body_limit_error(req: axum::http::Request<axum::body::Body>, next:
     response
 }
 
-// ─── ChanNet API key middleware ───────────────────────────────────────────────
-
+// ChanNet API key middleware
 /// Middleware that enforces the pre-shared `X-ChanNet-Key` header on sensitive
 /// `ChanNet` endpoints.
 ///
@@ -196,8 +193,7 @@ pub fn chan_router_with_auth(
     import_max_body: usize,
 ) -> Router {
     let protected_routes = Router::new()
-        // ── RustWave gateway — raw JSON in, ZIP data package out ─────────────
-        //
+        // RustWave gateway — raw JSON in, ZIP data package out
         // The json_body_limit_error middleware is applied *outside* the
         // DefaultBodyLimit layer so that 413 rejections are rendered as JSON
         // instead of the default plain-text "Failed to buffer request body".
@@ -207,7 +203,7 @@ pub fn chan_router_with_auth(
                 .layer(DefaultBodyLimit::max(command_max_body))
                 .layer(middleware::from_fn(json_body_limit_error)),
         )
-        // ── Federation sync — ZIP in, ZIP out ────────────────────────────────
+        // Federation sync — ZIP in, ZIP out
         .route("/chan/export", post(export::chan_export))
         .route(
             "/chan/import",
@@ -220,7 +216,7 @@ pub fn chan_router_with_auth(
         .route_layer(middleware::from_fn_with_state(api_key, verify_chan_api_key));
 
     Router::new()
-        // ── Status ──────────────────────────────────────────────────────────
+        // Status
         .route("/chan/status", get(status::chan_status))
         .merge(protected_routes)
         .with_state(state)

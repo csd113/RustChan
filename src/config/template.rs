@@ -1,7 +1,6 @@
 //! Default `settings.toml` rendering.
 
 /// Render the documented default settings file with the generated cookie secret.
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "the generated settings file stays contiguous so its documented ordering remains obvious"
@@ -12,7 +11,7 @@ pub(super) fn settings_template(secret: &str) -> String {
 # Restart RustChan after changing this file.
 # Environment variables still override these values.
 
-# ── Site identity ─────────────────────────────────────────────────────────────
+# Site identity
 # Name shown in the browser tab, page header, and home page title.
 forum_name = "RustChan"
 
@@ -42,7 +41,7 @@ default_theme = "forest"
 enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]
 
 
-# ── Network / web server ──────────────────────────────────────────────────────
+# ── Network / web server ─────────────────────────────────────────────────────
 # Main HTTP port. The server binds to 0.0.0.0:<port> unless Tor-only mode is enabled.
 port = 8080
 
@@ -60,7 +59,7 @@ trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
 public_readiness_details = false
 public_metrics_enabled = false
 
-# ── Upload limits ─────────────────────────────────────────────────────────────
+# Upload limits
 # Maximum size for image uploads in MiB (jpg, png, gif, webp, heic).
 max_image_size_mb = 8
 
@@ -75,14 +74,14 @@ max_audio_size_mb = 150
 enable_any_file_uploads_feature = false
 
 
-# ── Security ──────────────────────────────────────────────────────────────────
+# Security
 # AUTO-GENERATED on first run.
 # Do not change this after the site is live unless you also intend to invalidate
 # existing CSRF tokens, IP hashes, and ban lookups.
 cookie_secret = "{secret}"
 
 
-# ── Tor Onion Service ─────────────────────────────────────────────────────────
+# Tor Onion Service
 # Built-in Onion Service support (powered by Arti — no system tor required).
 # First run downloads ~2 MB of directory data and can take ~30 s.
 # The service keypair lives in rustchan-data/runtime/tor/state/keystore/ — back it up.
@@ -108,7 +107,7 @@ tor_max_concurrent_streams = 512
 tor_service_nickname = "rustchan"
 
 
-# ── Media / external tools ────────────────────────────────────────────────────
+# Media / external tools
 # Set to true to hard-exit at startup when ffmpeg is not found.
 # When false, the server still starts and video thumbnails fall back to placeholders.
 require_ffmpeg = false
@@ -133,7 +132,7 @@ media_auto_prune_enabled = false
 media_max_active_content_size_bytes = 0
 
 
-# ── Maintenance / performance ────────────────────────────────────────────────
+# Maintenance / performance
 # How often (in seconds) to run PRAGMA wal_checkpoint(TRUNCATE) to keep
 # the SQLite WAL file from growing unbounded under write load.
 # Set to 0 to disable.
@@ -194,7 +193,7 @@ blocking_threads = 0
 db_pool_size = 8
 
 
-# ── Federation / ChanNet gateway ──────────────────────────────────────────────
+# ── Federation / ChanNet gateway ─────────────────────────────────────────────
 # Uncomment these only if you are using the ChanNet / RustWave integration.
 
 # Base URL of the connected RustWave instance.
@@ -210,7 +209,7 @@ db_pool_size = 8
 # chan_net_api_key = "replace-with-a-long-random-secret"
 
 
-# ── TLS / HTTPS ───────────────────────────────────────────────────────────────
+# TLS / HTTPS
 # Built-in HTTPS listener. On first run a self-signed localhost certificate is
 # generated automatically in rustchan-data/runtime/tls/dev/.
 # For production, configure [tls.acme] (Let's Encrypt) or [tls.manual_cert].

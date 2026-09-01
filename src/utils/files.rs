@@ -1,5 +1,3 @@
-// src/utils/files.rs
-
 /// Free-space preflight checks.
 mod disk_space;
 /// JPEG metadata normalization.

@@ -2,8 +2,7 @@
 
 use clap::{Parser, Subcommand};
 
-// ─── CLI definition ───────────────────────────────────────────────────────────
-
+// CLI definition
 #[derive(Debug, Parser)]
 #[command(
     name = "rustchan-cli",
@@ -182,8 +181,7 @@ impl std::fmt::Debug for AdminAction {
     }
 }
 
-// ─── Admin CLI mode ───────────────────────────────────────────────────────────
-
+// Admin CLI mode
 /// Write database status text to an arbitrary output stream.
 fn write_db_status_output<W: std::io::Write>(
     mut writer: W,
@@ -563,11 +561,12 @@ mod tests {
     /// Prints both the release schema label and `SQLite` version.
     fn db_status_output_uses_release_schema_version() -> anyhow::Result<()> {
         let mut out = Vec::new();
+        let schema_status = format!("{} baseline verified", crate::db::baseline_schema_version());
 
-        write_db_status_output(&mut out, "1.4.0 baseline verified", "3.test")?;
+        write_db_status_output(&mut out, &schema_status, "3.test")?;
         let output = String::from_utf8(out)?;
         anyhow::ensure!(
-            output.contains("Database schema: 1.4.0 baseline verified"),
+            output.contains(&format!("Database schema: {schema_status}")),
             "status output should include the release schema label"
         );
         anyhow::ensure!(

@@ -2,8 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-// ─── Media type classification ────────────────────────────────────────────────
-
+// Media type classification
 /// Classifies an uploaded file as image, video, audio, PDF, or a generic download.
 /// Stored as a TEXT column in posts ("image", "video", "audio", "pdf", "other").
 ///
@@ -910,15 +909,9 @@ pub struct BanAppeal {
     pub created_at: i64,
 }
 
-// ─── ChanNet federation snapshot types ───────────────────────────────────────
-//
-// Defined here (not in chan_net::snapshot) so that src/db/chan_net.rs can
-// reference SnapshotPost without creating a layering inversion. chan_net is
-// declared in main.rs and is therefore not accessible from the lib crate;
-// models.rs is re-exported by lib.rs and is safe to import from anywhere.
-//
-// chan_net::snapshot re-exports these types so that all existing call-sites
-// (snapshot::SnapshotPost, etc.) continue to compile without change.
+// ChanNet federation snapshot types
+// These live in the shared model layer so database code does not depend on the
+// handler-only `chan_net` module.
 
 /// A single board entry in a federation snapshot.
 /// `id` is the board's `short_name` (e.g. "tech", "b").
@@ -969,14 +962,12 @@ pub struct SnapshotMetadata {
     pub includes_archive: bool,
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
-
+// Tests
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── MediaType serde ↔ DB string parity ────────────────────────────────
-
+    // MediaType serde ↔ DB string parity
     #[test]
     fn media_type_serde_matches_db_str() {
         for mt in [
@@ -1225,8 +1216,7 @@ mod tests {
         assert_eq!(query.page, 1, "default searches must start on page one");
     }
 
-    // ── Pagination ────────────────────────────────────────────────────────
-
+    // Pagination
     #[test]
     fn pagination_clamps_inputs() {
         let p = Pagination::new(0, 0, -5);

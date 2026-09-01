@@ -1,22 +1,10 @@
-// db/posts.rs — Post queries, file deduplication, polls, and the background
-//               job queue (including worker-side update helpers).
-//
-// Dependency notes:
-//   create_post_inner  is pub(super) — threads.rs calls it inside
-//                      create_thread_with_op's manual transaction.
-//   delete_post        calls super::paths_safe_to_delete.
-//
 use crate::models::Post;
 use anyhow::{Context as _, Result};
 use rusqlite::{params, OptionalExtension as _};
 use std::collections::HashMap;
 use std::fmt;
 
-// ─── Retry budget constant ────────────────────────────────────────────────────
-
-/// Single source of truth for the job retry budget.
-/// Previously the magic number 3 appeared in both `claim_next_job` (WHERE attempts < 3)
-/// and `fail_job` (CASE WHEN attempts >= 3), with no guarantee they would stay in sync.
+/// Shared retry budget for job claiming and terminal-failure transitions.
 const MAX_JOB_ATTEMPTS: i64 = 3;
 /// Shared projection used to decode a complete post.
 const POST_SELECT_COLUMNS: &str = "id, thread_id, board_id, name, tripcode, subject, body, \
@@ -116,8 +104,7 @@ pub struct RecentBackgroundJob {
     pub updated_at: i64,
 }
 
-// ─── Row mapper ───────────────────────────────────────────────────────────────
-
+// Row mapper
 /// Map a full post row (25 columns, selected in the canonical order used
 /// throughout this module) into a Post struct.
 ///
@@ -179,8 +166,7 @@ pub(super) fn map_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<Post> {
     })
 }
 
-// ─── Post queries ─────────────────────────────────────────────────────────────
-
+// Post queries
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<Post>> {
@@ -512,13 +498,8 @@ pub fn get_post_on_board(
 
 /// Delete a post by id; returns file paths safe to remove from disk.
 ///
-/// The previous implementation had a SELECT → DELETE TOCTOU race:
-/// if the post was concurrently deleted between the `get_post` call and the
-/// DELETE, the function silently returned an empty path list rather than an
-/// error, and the caller would skip file cleanup assuming there was nothing to
-/// clean. Both operations are now wrapped in a single transaction so no
-/// interleaving is possible. `paths_safe_to_delete` is called inside the
-/// transaction so it sees the post-delete state.
+/// Selection, deletion, and `paths_safe_to_delete` share a transaction so a
+/// concurrent delete cannot invalidate the returned cleanup paths.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -766,15 +747,8 @@ pub fn self_delete_post(
 /// Returns `Ok(true)` on success, `Ok(false)` if the token is wrong or the
 /// edit window has closed; `Err` for database failures.
 ///
-/// Upgraded from DEFERRED (`unchecked_transaction`) to IMMEDIATE by
-/// issuing BEGIN IMMEDIATE explicitly. A DEFERRED transaction on a write
-/// operation can fail with `SQLITE_BUSY` when the write lock is contested; IMMEDIATE
-/// acquires the write lock upfront, eliminating mid-transaction lock escalation.
-///
-/// The previous two-round-trip design (one SELECT for the token,
-/// a second SELECT for `created_at`) introduced a race window: the post could be
-/// deleted between the token check and the timestamp fetch. Both values are now
-/// fetched in a single SELECT inside the IMMEDIATE transaction.
+/// An immediate transaction acquires the write lock before validation, and one
+/// query reads both the token and timestamp so deletion cannot race either check.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -798,7 +772,6 @@ pub fn edit_post(
         .context("Failed to begin IMMEDIATE transaction for edit_post")?;
 
     let result: Result<bool> = (|| {
-        // Fetch token and created_at in a single round-trip.
         let row: Option<(String, i64, bool, bool)> = conn
             .query_row(
                 "SELECT p.deletion_token, p.created_at, t.locked, t.archived
@@ -858,10 +831,8 @@ pub fn edit_post(
 
 /// Constant-time byte slice comparison to prevent timing side-channel attacks.
 ///
-/// The previous implementation returned false immediately when
-/// lengths differed, leaking token length as a timing signal. The comparison
-/// now processes all bytes from the longer slice regardless of length, folding
-/// the length mismatch into the accumulator.
+/// Length mismatch is folded into the accumulator while every byte from the
+/// longer slice is processed.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     let max_len = a.len().max(b.len());
     // Non-zero when lengths differ.
@@ -874,8 +845,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-// ─── LIKE escape helper ───────────────────────────────────────────────────────
-
+// LIKE escape helper
 /// Extract conservative FTS-safe tokens from free-form user input.
 ///
 /// `SQLite` FTS5 treats punctuation-heavy input as query syntax, so raw tokens like
@@ -921,8 +891,7 @@ fn to_fts_query(query: &str) -> Option<String> {
     (!terms.is_empty()).then(|| terms.join(" AND "))
 }
 
-// ─── Search ───────────────────────────────────────────────────────────────────
-
+// Search
 /// Full-text search across post bodies.
 ///
 /// # Errors
@@ -977,8 +946,7 @@ pub fn count_search_results(
     )?)
 }
 
-// ─── File deduplication ───────────────────────────────────────────────────────
-
+// File deduplication
 /// Look up an existing upload by its SHA-256 hash.
 ///
 /// # Errors
@@ -1028,12 +996,8 @@ pub fn find_file_by_hash(
 
 /// Record a newly saved upload in the deduplication table.
 ///
-/// Uses INSERT OR REPLACE so that if the same SHA-256 was previously stored
-/// with an unconverted format (e.g. image/jpeg stored before WebP conversion
-/// was enabled), re-uploading the same bytes will update the cache to point
-/// at the converted file and mime type. Without OR REPLACE, the stale
-/// cache entry would be returned on every subsequent upload of that image,
-/// silently skipping conversion forever.
+/// `INSERT OR REPLACE` refreshes stale metadata when the same content hash is
+/// re-uploaded after conversion policy changes.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -1052,8 +1016,7 @@ pub fn record_file_hash(
     Ok(())
 }
 
-// ─── Poll queries ─────────────────────────────────────────────────────────────
-
+// Poll queries
 /// Fetch the full poll for a thread including vote counts and the user's choice.
 ///
 /// Note: poll expiry is checked against the application clock (`chrono::Utc::now`)
@@ -1190,8 +1153,7 @@ pub fn get_poll_context(
         .optional()?)
 }
 
-// ─── Poll maintenance ─────────────────────────────────────────────────────────
-
+// Poll maintenance
 /// Delete vote rows for polls whose `expires_at` is older than the given cutoff timestamp.
 ///
 /// The poll question and options are preserved for historical display; only
@@ -1219,8 +1181,7 @@ pub fn cleanup_expired_poll_votes(
     Ok(n)
 }
 
-// ─── Background job queue ─────────────────────────────────────────────────────
-//
+// Background job queue
 // Jobs flow through: pending → running → done | failed
 // claim_next_job uses UPDATE … RETURNING for atomic claim with no TOCTOU race.
 
@@ -1228,8 +1189,6 @@ pub fn cleanup_expired_poll_votes(
 const FAILED_BACKGROUND_JOBS_ACK_ID_KEY: &str = "failed_background_jobs_acknowledged_through_id";
 
 /// Persist a new job in the pending state. Returns the new row id.
-///
-/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -1666,10 +1625,7 @@ pub fn claim_next_job(conn: &rusqlite::Connection) -> Result<Option<(i64, String
     Ok(result)
 }
 
-/// Mark a job as successfully completed.
-///
-/// Added rows-affected check — silently succeeding for an unknown
-/// `job_id` made double-complete bugs invisible.
+/// Mark a running job as successfully completed.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -1686,10 +1642,7 @@ pub fn complete_job(conn: &rusqlite::Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Record a job failure. After `MAX_JOB_ATTEMPTS` the job stays "failed" permanently.
-///
-/// Added rows-affected check.
-/// Uses `MAX_JOB_ATTEMPTS` constant instead of duplicating the magic number.
+/// Record a job failure. After `MAX_JOB_ATTEMPTS` the job stays failed permanently.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -2216,8 +2169,7 @@ pub fn count_posts_by_media_processing_state(
     Ok(n)
 }
 
-// ─── Post update helpers (used by background workers) ────────────────────────
-
+// Post update helpers (used by background workers)
 /// Update a post's `thumb_path` after background waveform / thumbnail generation.
 ///
 /// # Errors

@@ -1,5 +1,3 @@
-// src/db/schema.rs
-
 use anyhow::{bail, Context as _, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -707,6 +705,14 @@ fn required_fragments_missing_for_table(shape: &SchemaShape, table: &str) -> boo
 
 /// Rebuild the boards table into the release baseline shape.
 fn rebuild_boards_table_for_baseline(conn: &rusqlite::Connection) -> Result<()> {
+    let failure_context = format!(
+        "Structural migration: rebuild boards table for {} baseline failed",
+        baseline_schema_version()
+    );
+    let success_log = format!(
+        "Applied structural migration: boards table matches {} baseline",
+        baseline_schema_version()
+    );
     run_structural_schema_repair(
         conn,
         r"
@@ -780,8 +786,8 @@ fn rebuild_boards_table_for_baseline(conn: &rusqlite::Connection) -> Result<()> 
         DROP TABLE boards;
         ALTER TABLE boards_new RENAME TO boards;
         ",
-        "Structural migration: rebuild boards table for 1.4.0 baseline failed",
-        "Applied structural migration: boards table matches 1.4.0 baseline",
+        &failure_context,
+        &success_log,
     )
 }
 
@@ -1452,12 +1458,12 @@ mod tests {
 
         assert_eq!(
             schema_version(&conn)?,
-            "1.4.0",
+            baseline_schema_version(),
             "fresh schema should record the release baseline"
         );
         assert_eq!(
             baseline_schema_version(),
-            "1.4.0",
+            env!("CARGO_PKG_VERSION"),
             "compiled baseline should match the release"
         );
         assert!(
@@ -1520,7 +1526,7 @@ mod tests {
 
         assert_eq!(
             schema_version(&conn)?,
-            "1.4.0",
+            baseline_schema_version(),
             "adopted schema should receive the release version"
         );
         let body: String = conn.query_row("SELECT body FROM posts WHERE id = 100", [], |row| {
@@ -1575,7 +1581,7 @@ mod tests {
 
         assert_eq!(
             schema_version(&conn)?,
-            "1.4.0",
+            baseline_schema_version(),
             "repaired schema should be stamped with the release version"
         );
         assert!(
@@ -1642,10 +1648,12 @@ mod tests {
         let error = install_or_migrate_schema(&conn)
             .err()
             .context("partial schema should fail")?;
+        let expected = format!(
+            "does not match RustChan {} baseline",
+            baseline_schema_version()
+        );
         assert!(
-            error
-                .to_string()
-                .contains("does not match RustChan 1.4.0 baseline"),
+            error.to_string().contains(&expected),
             "unexpected error: {error:#}"
         );
 
