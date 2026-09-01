@@ -444,7 +444,8 @@ fn list_legacy_zip_backups(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> 
 pub(crate) fn list_backup_files(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> {
     let cache_key = backup_cache_key(kind);
     let source_modified = current_source_modified(dir);
-    if let Some(entry) = BACKUP_LIST_CACHE.lock().get(&cache_key).cloned() {
+    let cached = { BACKUP_LIST_CACHE.lock().get(&cache_key).cloned() };
+    if let Some(entry) = cached {
         if entry.generated_at.elapsed() <= BACKUP_LIST_CACHE_TTL
             && entry.source_modified == source_modified
         {

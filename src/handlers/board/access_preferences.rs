@@ -569,7 +569,7 @@ pub(crate) async fn set_theme(
         check_csrf_jar(&jar, params.csrf.as_deref())?;
     }
 
-    let mut cookie = Cookie::new(USER_THEME_COOKIE, theme.clone());
+    let mut cookie = Cookie::new(USER_THEME_COOKIE, theme);
     cookie.set_http_only(false);
     cookie.set_same_site(SameSite::Lax);
     cookie.set_path("/");

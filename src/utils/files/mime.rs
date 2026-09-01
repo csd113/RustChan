@@ -107,11 +107,8 @@ pub(super) fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
 /// Return whether an ISO base-media header declares any accepted brand.
 fn has_ftyp_brand(data: &[u8], accepted: &[&[u8; 4]]) -> bool {
     data.get(8..data.len().min(64)).is_some_and(|brands| {
-        brands.chunks_exact(4).any(|brand| {
-            accepted
-                .iter()
-                .any(|candidate| brand == candidate.as_slice())
-        })
+        let (brands, _) = brands.as_chunks::<4>();
+        brands.iter().any(|brand| accepted.contains(&brand))
     })
 }
 
@@ -133,4 +130,21 @@ fn ebml_doc_type(scan: &[u8]) -> Option<&[u8]> {
 /// Return the safe generic MIME type used for unrecognized downloads.
 pub const fn fallback_download_mime_type() -> &'static str {
     "application/octet-stream"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ftyp_brand_chunks_ignore_incomplete_trailing_bytes() {
+        let accepted = &[b"heic"];
+
+        assert!(!has_ftyp_brand(b"", accepted));
+        assert!(!has_ftyp_brand(b"00000000hei", accepted));
+        assert!(has_ftyp_brand(b"00000000heic", accepted));
+        assert!(has_ftyp_brand(b"00000000heicx", accepted));
+        assert!(has_ftyp_brand(b"00000000heicxy", accepted));
+        assert!(!has_ftyp_brand(b"00000000xxxxhei", accepted));
+    }
 }

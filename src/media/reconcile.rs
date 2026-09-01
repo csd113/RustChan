@@ -1274,7 +1274,7 @@ fn collect_hashes(
         model.incomplete = true;
     }
     model.database_rows_scanned = model.database_rows_scanned.saturating_add(rows.len());
-    let mut digests_by_path = HashMap::<String, BTreeSet<String>>::new();
+    let mut digests_by_path = BTreeMap::<String, BTreeSet<String>>::new();
     for (digest, file_path, thumb_path, mime_type) in rows {
         let owner = format!("hash:{}", digest.get(..12).unwrap_or(&digest));
         if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -2931,24 +2931,26 @@ enum RepairAttempt {
     Conflict,
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the bounded repair ordering and per-category accounting remain together for auditability"
-)]
-fn apply_repairs(
+const fn reserve_repair_attempt(attempted: &mut usize, limit: usize) -> bool {
+    if *attempted >= limit {
+        return false;
+    }
+    *attempted = attempted.saturating_add(1);
+    true
+}
+
+fn apply_completed_intent_repairs(
     conn: &rusqlite::Connection,
     upload_root: &Path,
-    model: &ReferenceModel,
-    orphan_candidates: &[OrphanCandidate],
+    candidates: &[IntentRepairCandidate],
+    attempted: &mut usize,
     limit: usize,
     report: &mut AuditReport,
 ) {
-    let mut attempted = 0_usize;
-    for candidate in &model.intent_candidates {
-        if attempted >= limit {
+    for candidate in candidates {
+        if !reserve_repair_attempt(attempted, limit) {
             return;
         }
-        attempted = attempted.saturating_add(1);
         let repair = repair_completed_intent(conn, upload_root, candidate);
         match repair {
             Ok(RepairAttempt::Applied) => {
@@ -2968,11 +2970,20 @@ fn apply_repairs(
             }
         }
     }
-    for candidate in &model.job_candidates {
-        if attempted >= limit {
+}
+
+fn apply_obsolete_job_repairs(
+    conn: &rusqlite::Connection,
+    upload_root: &Path,
+    candidates: &[JobRepairCandidate],
+    attempted: &mut usize,
+    limit: usize,
+    report: &mut AuditReport,
+) {
+    for candidate in candidates {
+        if !reserve_repair_attempt(attempted, limit) {
             return;
         }
-        attempted = attempted.saturating_add(1);
         let repair = repair_obsolete_job(conn, upload_root, candidate);
         match repair {
             Ok(RepairAttempt::Applied) => {
@@ -2992,17 +3003,26 @@ fn apply_repairs(
             }
         }
     }
-    for candidate in &model.hash_candidates {
-        if attempted >= limit {
-            return;
-        }
+}
+
+fn apply_stale_hash_repairs(
+    conn: &rusqlite::Connection,
+    upload_root: &Path,
+    candidates: &[HashRepairCandidate],
+    attempted: &mut usize,
+    limit: usize,
+    report: &mut AuditReport,
+) {
+    for candidate in candidates {
         if !matches!(
             candidate.classification,
             AuditClassification::StaleHashMissingFile | AuditClassification::StaleHashUnreferenced
         ) {
             continue;
         }
-        attempted = attempted.saturating_add(1);
+        if !reserve_repair_attempt(attempted, limit) {
+            return;
+        }
         let repair = repair_stale_hash(conn, upload_root, candidate);
         match repair {
             Ok(RepairAttempt::Applied) => {
@@ -3022,14 +3042,23 @@ fn apply_repairs(
             }
         }
     }
-    for candidate in orphan_candidates {
-        if attempted >= limit {
-            return;
-        }
+}
+
+fn apply_orphan_repairs(
+    conn: &rusqlite::Connection,
+    upload_root: &Path,
+    candidates: &[OrphanCandidate],
+    attempted: &mut usize,
+    limit: usize,
+    report: &mut AuditReport,
+) {
+    for candidate in candidates {
         if candidate.digest.is_none() {
             continue;
         }
-        attempted = attempted.saturating_add(1);
+        if !reserve_repair_attempt(attempted, limit) {
+            return;
+        }
         let repair = repair_orphan(conn, upload_root, candidate);
         match repair {
             Ok(RepairAttempt::Applied) => {
@@ -3053,6 +3082,58 @@ fn apply_repairs(
             }
         }
     }
+}
+
+fn apply_repairs(
+    conn: &rusqlite::Connection,
+    upload_root: &Path,
+    model: &ReferenceModel,
+    orphan_candidates: &[OrphanCandidate],
+    limit: usize,
+    report: &mut AuditReport,
+) {
+    let mut attempted = 0_usize;
+    apply_completed_intent_repairs(
+        conn,
+        upload_root,
+        &model.intent_candidates,
+        &mut attempted,
+        limit,
+        report,
+    );
+    if attempted >= limit {
+        return;
+    }
+    apply_obsolete_job_repairs(
+        conn,
+        upload_root,
+        &model.job_candidates,
+        &mut attempted,
+        limit,
+        report,
+    );
+    if attempted >= limit {
+        return;
+    }
+    apply_stale_hash_repairs(
+        conn,
+        upload_root,
+        &model.hash_candidates,
+        &mut attempted,
+        limit,
+        report,
+    );
+    if attempted >= limit {
+        return;
+    }
+    apply_orphan_repairs(
+        conn,
+        upload_root,
+        orphan_candidates,
+        &mut attempted,
+        limit,
+        report,
+    );
 }
 
 const fn record_repair_conflict(report: &mut AuditReport) {
@@ -4154,6 +4235,44 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_hash_examples_are_ordered_by_managed_path() -> Result<()> {
+        let fixture = Fixture::new()?;
+        for (path, first, second) in [
+            (
+                "b/z-conflict.webp",
+                b"z-first".as_slice(),
+                b"z-second".as_slice(),
+            ),
+            (
+                "b/a-conflict.webp",
+                b"a-first".as_slice(),
+                b"a-second".as_slice(),
+            ),
+        ] {
+            fixture.write(path, first)?;
+            fixture.hash(&digest(first), path, "", "image/webp")?;
+            fixture.hash(&digest(second), path, "", "image/webp")?;
+        }
+
+        let first = fixture.audit(ReconcileMode::Audit, limits())?;
+        let second = fixture.audit(ReconcileMode::Audit, limits())?;
+        let conflicting_paths = |report: &AuditReport| {
+            report
+                .examples
+                .iter()
+                .filter(|example| {
+                    example.classification == AuditClassification::ConflictingHashMetadata
+                })
+                .map(|example| example.managed_id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        ensure!(conflicting_paths(&first) == ["b/a-conflict.webp", "b/z-conflict.webp"]);
+        ensure!(conflicting_paths(&first) == conflicting_paths(&second));
+        Ok(())
+    }
+
+    #[test]
     fn malformed_intent_makes_apparent_orphan_ambiguous() -> Result<()> {
         let fixture = Fixture::new()?;
         fixture.write("b/orphan.webp", b"orphan")?;
@@ -4443,6 +4562,56 @@ mod tests {
                 .get()?
                 .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row.get(0))?;
         ensure!(jobs == 0);
+        Ok(())
+    }
+
+    #[test]
+    fn repair_budget_is_shared_in_category_order() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let payload = serde_json::to_string(&crate::pending_fs::DeleteFilesPayload {
+            paths: vec!["b/already-gone.webp".to_owned()],
+            dirs: Vec::new(),
+        })?;
+        fixture.intent("complete", crate::pending_fs::DELETE_FILES_KIND, &payload)?;
+        let job = serde_json::json!({
+            "t": "VideoTranscode",
+            "d": {"post_id": 9999, "file_path": "b/gone.mp4", "board_short": "b"}
+        });
+        fixture.job("video_transcode", &job, "done")?;
+        fixture.hash(&digest(b"missing"), "b/missing.webp", "", "image/webp")?;
+        fixture.write("b/orphan.webp", b"orphan")?;
+
+        let first = fixture.audit(
+            ReconcileMode::Repair,
+            ReconcileLimits {
+                repairs_per_pass: 2,
+                ..limits()
+            },
+        )?;
+        ensure!(first.repairs.completed_intents_removed == 1);
+        ensure!(first.repairs.obsolete_jobs_removed == 1);
+        ensure!(first.repairs.stale_hash_rows_removed == 0);
+        ensure!(first.repairs.files_scheduled == 0);
+
+        let second = fixture.audit(
+            ReconcileMode::Repair,
+            ReconcileLimits {
+                repairs_per_pass: 1,
+                ..limits()
+            },
+        )?;
+        ensure!(second.repairs.stale_hash_rows_removed == 1);
+        ensure!(second.repairs.files_scheduled == 0);
+
+        let third = fixture.audit(
+            ReconcileMode::Repair,
+            ReconcileLimits {
+                repairs_per_pass: 1,
+                ..limits()
+            },
+        )?;
+        ensure!(third.repairs.files_scheduled == 1);
+        ensure!(fixture.pending_ops()?.len() == 1);
         Ok(())
     }
 

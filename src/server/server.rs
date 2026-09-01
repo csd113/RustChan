@@ -923,7 +923,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                             continue;
                         };
                         let bg2 = bg.clone();
-                        tokio::task::spawn_blocking(move || {
+                        let task_result = tokio::task::spawn_blocking(move || {
                             if let Ok(conn) = bg2.get() {
                                 let before = crate::db::get_db_size_bytes(&conn).unwrap_or(0);
                                 match crate::db::run_vacuum(&conn) {
@@ -942,8 +942,14 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                                 }
                             }
                         })
-                        .await
-                        .ok();
+                        .await;
+                        if let Err(error) = task_result {
+                            tracing::warn!(
+                                target: "db",
+                                error = %error,
+                                "Scheduled VACUUM blocking task failed"
+                            );
+                        }
                     }
                     () = cancel_clone.cancelled() => {
                         tracing::debug!("VACUUM task shutting down");
@@ -1095,7 +1101,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     _ = iv.tick() => {
                         let bg2 = bg.clone();
                         let retention_cutoff_secs = interval_secs.cast_signed();
-                        tokio::task::spawn_blocking(move || {
+                        let task_result = tokio::task::spawn_blocking(move || {
                             if let Ok(conn) = bg2.get() {
                                 let cutoff = chrono::Utc::now().timestamp() - retention_cutoff_secs;
                                 match crate::db::cleanup_expired_poll_votes(&conn, cutoff) {
@@ -1107,8 +1113,14 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                                 }
                             }
                         })
-                        .await
-                        .ok();
+                        .await;
+                        if let Err(error) = task_result {
+                            tracing::warn!(
+                                target: "polls",
+                                error = %error,
+                                "Poll vote cleanup blocking task failed"
+                            );
+                        }
                     }
                     () = cancel_clone.cancelled() => {
                         tracing::debug!("Poll vote cleanup task shutting down");
@@ -1135,7 +1147,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     _ = iv.tick() => {
                         let retry_pool = bg.clone();
                         let upload_dir = CONFIG.upload_dir.clone();
-                        tokio::task::spawn_blocking(move || {
+                        let task_result = tokio::task::spawn_blocking(move || {
                             if let Err(error) = crate::pending_fs::reconcile_pending_fs_ops(
                                 &retry_pool,
                                 &upload_dir,
@@ -1147,8 +1159,14 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                                 );
                             }
                         })
-                        .await
-                        .ok();
+                        .await;
+                        if let Err(error) = task_result {
+                            tracing::warn!(
+                                target: "pending_fs",
+                                error = %error,
+                                "Periodic filesystem reconciliation blocking task failed"
+                            );
+                        }
                     }
                     () = cancel_clone.cancelled() => {
                         tracing::debug!("Filesystem reconciliation task shutting down");
@@ -1177,7 +1195,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                     _ = iv.tick() => {
                         let upload_dir = CONFIG.upload_dir.clone();
                         let eviction_pool = bg.clone();
-                        tokio::task::spawn_blocking(move || {
+                        let task_result = tokio::task::spawn_blocking(move || {
                             let Ok(conn) = eviction_pool.get() else {
                                 return;
                             };
@@ -1190,8 +1208,14 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                                 tracing::warn!(error = %error, "Thumbnail cache eviction failed");
                             }
                         })
-                        .await
-                        .ok();
+                        .await;
+                        if let Err(error) = task_result {
+                            tracing::warn!(
+                                target: "workers",
+                                error = %error,
+                                "Thumbnail cache eviction blocking task failed"
+                            );
+                        }
                     }
                     () = cancel_clone.cancelled() => {
                         tracing::debug!("Waveform cache eviction task shutting down");
