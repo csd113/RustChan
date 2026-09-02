@@ -159,6 +159,9 @@ hyper-util     = { version = "0.1.20", features = ["tokio", "server"] }
 # Terminal UI
 # crossterm provides cross-platform cursor, event, and raw-mode control.
 crossterm = "0.29.0"
+# Ratatui provides Unicode-aware, diff-rendered layout primitives while keeping
+# Crossterm as the sole terminal backend.
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 
 [target.'cfg(unix)'.dependencies]
 # Safe in-process filesystem-capacity queries for upload disk-space preflights.

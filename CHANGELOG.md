@@ -7,6 +7,7 @@ All notable changes to RustChan will be documented in this file.
 ### Improved
 
 - Audited implementation comments across the repository, removing generated and stale narration while retaining security, concurrency, compatibility, and operational rationale.
+- Rebuilt the terminal administration console with responsive layouts, persistent navigation, selectable and scrollable data views, masked in-console and first-run credentials, contextual shortcuts, structured feedback and confirmation states, Unicode-safe clipping, and diff-based rendering.
 
 ## RustChan 1.4.0
 

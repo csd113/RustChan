@@ -5,6 +5,7 @@ use axum::{
 };
 use dashmap::DashMap;
 use std::future::pending;
+use std::io::IsTerminal as _;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -25,8 +26,7 @@ mod observability;
 /// HTTP route construction and handler wiring.
 mod router;
 
-use super::console::input::KeyEvent;
-use super::console::{ConsoleMode, WizardKind};
+use super::console::{ConsoleAction, ConsoleState};
 use lifecycle::shutdown_signal;
 use router::build_router;
 
@@ -1271,12 +1271,15 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     };
     tracing::info!(target: "server", path = %data_dir.display(), "Data directory");
 
-    // First-run admin wizard: if no admin accounts exist and stdout is a TTY,
+    let has_interactive_console = crate::logging::is_tty() && std::io::stdin().is_terminal();
+
+    // First-run admin wizard: if no admin accounts exist and both terminal
+    // streams are interactive, prompt before starting the keyboard handler.
     // prompt interactively before starting the keyboard handler (which also
     // reads stdin).  In non-TTY mode (daemon/systemd) we log a warning instead
     // so the operator knows to use the CLI.
     if crate::db::has_no_admin(&pool) {
-        if crate::logging::is_tty() {
+        if has_interactive_console {
             let stdin = std::io::stdin();
             // Acquire and immediately pass the stdin lock to the wizard.
             // The lock is released when `reader` drops at the end of this block,
@@ -1291,63 +1294,75 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         }
     }
 
-    // Full-screen TUI console
-    let shared_stats: super::console::SharedStats = Arc::new(tokio::sync::RwLock::new(
-        super::console::ChanStats::default(),
-    ));
-    let shared_mode: super::console::SharedConsoleMode =
-        Arc::new(tokio::sync::RwLock::new(ConsoleMode::Dashboard));
-    // Stats refresh task — polls DB every 3 s (or immediately on [R]).
-    // block_in_place keeps &mut delta locals on the same stack frame so
-    // req/s and other deltas are correctly accumulated across calls.
-    let force_reload_notify = Arc::new(tokio::sync::Notify::new());
-    {
-        let pool_stats = pool.clone();
-        let worker_queue_stats = Arc::clone(&state.job_queue);
-        let stats_w = Arc::clone(&shared_stats);
-        let cancel_stats = worker_cancel.clone();
-        let onion_addr = Arc::clone(&state.onion_address);
-        let force_reload = Arc::clone(&force_reload_notify);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(3));
-            let mut prev_req = REQUEST_COUNT.load(Ordering::Relaxed);
-            let mut prev_tick = Instant::now();
-            let mut prev_threads: i64 = 0;
-            let mut prev_posts: i64 = 0;
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {}
-                    () = force_reload.notified() => {
-                        interval.reset();
-                    }
-                    () = cancel_stats.cancelled() => {
-                        tracing::debug!("Stats refresh task shutting down");
-                        return;
-                    }
-                }
-                let onion = onion_addr.read().await.clone();
-                let snap = tokio::task::block_in_place(|| {
-                    super::console::collect_stats(
-                        &pool_stats,
-                        &worker_queue_stats,
-                        start_time,
-                        &mut prev_req,
-                        &mut prev_tick,
-                        &mut prev_threads,
-                        &mut prev_posts,
-                        onion,
-                    )
-                });
-                *stats_w.write().await = snap;
-            }
-        });
-    }
+    // Start the full-screen console only when stdout is an interactive terminal.
+    // Headless service processes retain the regular logging and signal-driven
+    // shutdown path without touching raw mode, stdin, or terminal capabilities.
+    let console_runtime = if has_interactive_console {
+        let shared_stats: super::console::SharedStats = Arc::new(tokio::sync::RwLock::new(
+            super::console::ChanStats::default(),
+        ));
+        let console_state: super::console::SharedConsoleState =
+            Arc::new(tokio::sync::RwLock::new(ConsoleState::default()));
+        let force_reload_notify = Arc::new(tokio::sync::Notify::new());
 
-    // Enter the alternate screen BEFORE spawning Tor so Tor bootstrap log
-    // events go to the file log rather than scrolling the normal terminal.
-    // detect.rs checks is_tui_active() and skips its onion-address banner
-    // box — the dashboard shows the address on its next render tick instead.
-    let (mut key_rx, _force_reload_render) = super::console::start(&shared_stats, &shared_mode);
+        // Stats refresh task — polls DB every 3 s (or immediately on [R]).
+        // block_in_place keeps &mut delta locals on the same stack frame so
+        // req/s and other deltas are correctly accumulated across calls.
+        {
+            let pool_stats = pool.clone();
+            let worker_queue_stats = Arc::clone(&state.job_queue);
+            let stats_w = Arc::clone(&shared_stats);
+            let cancel_stats = worker_cancel.clone();
+            let onion_addr = Arc::clone(&state.onion_address);
+            let force_reload = Arc::clone(&force_reload_notify);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(3));
+                let mut prev_req = REQUEST_COUNT.load(Ordering::Relaxed);
+                let mut prev_tick = Instant::now();
+                let mut prev_threads: i64 = 0;
+                let mut prev_posts: i64 = 0;
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {}
+                        () = force_reload.notified() => {
+                            interval.reset();
+                        }
+                        () = cancel_stats.cancelled() => {
+                            tracing::debug!("Stats refresh task shutting down");
+                            return;
+                        }
+                    }
+                    let onion = onion_addr.read().await.clone();
+                    let snap = tokio::task::block_in_place(|| {
+                        super::console::collect_stats(
+                            &pool_stats,
+                            &worker_queue_stats,
+                            start_time,
+                            &mut prev_req,
+                            &mut prev_tick,
+                            &mut prev_threads,
+                            &mut prev_posts,
+                            onion,
+                        )
+                    });
+                    *stats_w.write().await = snap;
+                }
+            });
+        }
+
+        // Enter the alternate screen before spawning Tor so bootstrap log
+        // events go to the file log rather than disrupting the dashboard.
+        let (key_rx, redraw_console) = super::console::start(&shared_stats, &console_state)?;
+        Some((
+            shared_stats,
+            console_state,
+            force_reload_notify,
+            key_rx,
+            redraw_console,
+        ))
+    } else {
+        None
+    };
 
     // Start Tor after the TUI so its logs do not disrupt terminal setup.
     let tor_handle = crate::detect::detect_tor(
@@ -1358,106 +1373,58 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         worker_cancel.clone(),
     );
 
-    // Event dispatch — translate KeyEvents into mode changes and wizard launches.
-    {
-        let mode_d = Arc::clone(&shared_mode);
-        let pool_d = pool.clone();
+    // Event dispatch — apply typed view transitions and launch validated operations.
+    if let Some((metrics, console, force_reload, mut key_rx, redraw)) = console_runtime {
         let cancel_d = worker_cancel.clone();
         let shutdown_tx = worker_cancel.clone();
-        let force_reload = Arc::clone(&force_reload_notify);
+        let operation_pool = pool.clone();
         tokio::spawn(async move {
             loop {
                 let next_key = key_rx.recv().await;
                 let Some(key) = next_key else {
                     break;
                 };
-                let current = mode_d.read().await.clone();
+                let board_count = metrics.read().await.board_rows.len();
+                let action = console.write().await.handle_key(&key, board_count);
+                redraw.notify_one();
 
-                match key {
-                    KeyEvent::Reload => {
+                match action {
+                    ConsoleAction::None => {}
+                    ConsoleAction::Reload => {
                         force_reload.notify_one();
                     }
-                    KeyEvent::ToggleLogs => {
-                        let next = if current == ConsoleMode::LogView {
-                            ConsoleMode::Dashboard
+                    ConsoleAction::Shutdown { forced } => {
+                        if forced {
+                            tracing::info!(target: "server", "Immediate shutdown initiated from console");
                         } else {
-                            ConsoleMode::LogView
-                        };
-                        *mode_d.write().await = next;
-                    }
-                    KeyEvent::BoardList => {
-                        let next = if current == ConsoleMode::BoardList {
-                            ConsoleMode::Dashboard
-                        } else {
-                            ConsoleMode::BoardList
-                        };
-                        *mode_d.write().await = next;
-                    }
-                    KeyEvent::Help => {
-                        let next = if current == ConsoleMode::Help {
-                            ConsoleMode::Dashboard
-                        } else {
-                            ConsoleMode::Help
-                        };
-                        *mode_d.write().await = next;
-                    }
-                    KeyEvent::Quit => {
-                        *mode_d.write().await = ConsoleMode::ConfirmQuit;
-                    }
-                    KeyEvent::Cancel => {
-                        *mode_d.write().await = ConsoleMode::Dashboard;
-                    }
-                    KeyEvent::Confirm => {
-                        if current == ConsoleMode::ConfirmQuit {
                             tracing::info!(target: "server", "Graceful shutdown initiated from console");
-                            super::console::cleanup();
-                            shutdown_tx.cancel();
-                            return;
                         }
-                    }
-                    KeyEvent::ForceQuit => {
-                        tracing::info!(target: "server", "Force quit from console (Ctrl-C)");
                         super::console::cleanup();
                         shutdown_tx.cancel();
                         return;
                     }
-                    KeyEvent::CreateBoard => {
-                        *mode_d.write().await = ConsoleMode::Wizard(WizardKind::CreateBoard);
-                        let pool_w = pool_d.clone();
-                        let mode_w = Arc::clone(&mode_d);
-                        tokio::task::spawn_blocking(move || {
-                            super::console::wizard::run_wizard(
-                                &WizardKind::CreateBoard,
-                                &pool_w,
-                                &mode_w,
-                            );
+                    ConsoleAction::Submit(request) => {
+                        let request_for_work = request.clone();
+                        let pool_for_work = operation_pool.clone();
+                        let state_for_work = Arc::clone(&console);
+                        let reload_after_work = Arc::clone(&force_reload);
+                        let redraw_after_work = Arc::clone(&redraw);
+                        tokio::spawn(async move {
+                            let result = tokio::task::spawn_blocking(move || {
+                                super::console::wizard::execute(&request_for_work, &pool_for_work)
+                            })
+                            .await
+                            .unwrap_or_else(|error| Err(format!("Operation task failed: {error}")));
+                            state_for_work
+                                .write()
+                                .await
+                                .finish_operation(&request, result);
+                            if request.refreshes_stats() {
+                                reload_after_work.notify_one();
+                            }
+                            redraw_after_work.notify_one();
                         });
                     }
-                    KeyEvent::CreateAdmin => {
-                        *mode_d.write().await = ConsoleMode::Wizard(WizardKind::CreateAdmin);
-                        let pool_w = pool_d.clone();
-                        let mode_w = Arc::clone(&mode_d);
-                        tokio::task::spawn_blocking(move || {
-                            super::console::wizard::run_wizard(
-                                &WizardKind::CreateAdmin,
-                                &pool_w,
-                                &mode_w,
-                            );
-                        });
-                    }
-                    KeyEvent::DeleteThread => {
-                        *mode_d.write().await = ConsoleMode::Wizard(WizardKind::DeleteThread);
-                        let pool_w = pool_d.clone();
-                        let mode_w = Arc::clone(&mode_d);
-                        tokio::task::spawn_blocking(move || {
-                            super::console::wizard::run_wizard(
-                                &WizardKind::DeleteThread,
-                                &pool_w,
-                                &mode_w,
-                            );
-                        });
-                    }
-                    KeyEvent::Other => {}
                 }
 
                 if cancel_d.is_cancelled() {
