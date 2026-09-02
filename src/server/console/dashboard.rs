@@ -1,12 +1,13 @@
 //! Ratatui rendering for every full-screen console surface.
 
 use super::state::{
-    ConsoleState, Dialog, FieldValue, FormField, FormState, NoticeSeverity, Screen,
+    terminal_is_usable, ConsoleState, Dialog, FieldValue, FormField, FormState, NoticeSeverity,
+    Screen,
 };
 use super::ChanStats;
 use crate::config::CONFIG;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Constraint, Layout, Margin, Position, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
@@ -50,12 +51,19 @@ pub struct LogSnapshot {
 }
 
 /// Render the complete console frame.
-pub fn render(frame: &mut Frame<'_>, app: &ConsoleState, metrics: &ChanStats, logs: &LogSnapshot) {
+pub fn render(
+    frame: &mut Frame<'_>,
+    app: &mut ConsoleState,
+    metrics: &ChanStats,
+    logs: &LogSnapshot,
+) {
     let area = frame.area();
-    if area.width < MIN_USEFUL_WIDTH || area.height < MIN_USEFUL_HEIGHT {
+    if !terminal_is_usable(area.width, area.height) {
         render_small_terminal(frame, area);
         return;
     }
+
+    app.boards.reconcile_rows(&metrics.board_rows);
 
     let notice_height = u16::from(app.notice.is_some());
     let layout = Layout::vertical([
@@ -80,10 +88,10 @@ pub fn render(frame: &mut Frame<'_>, app: &ConsoleState, metrics: &ChanStats, lo
     }
 
     match app.screen {
-        Screen::Dashboard => render_dashboard(frame, body_area, metrics),
+        Screen::Dashboard => render_dashboard(frame, body_area, metrics, &mut app.overview_scroll),
         Screen::Boards => render_boards(frame, body_area, app, metrics),
         Screen::Logs => render_logs(frame, body_area, app, logs),
-        Screen::Help => render_help(frame, body_area),
+        Screen::Help => render_help(frame, body_area, &mut app.help_scroll),
     }
     render_footer(frame, footer_area, app);
 
@@ -213,33 +221,75 @@ fn render_notice(frame: &mut Frame<'_>, area: Rect, severity: NoticeSeverity, me
 }
 
 /// Render the overview screen with adaptive one- or two-column panels.
-fn render_dashboard(frame: &mut Frame<'_>, area: Rect, stats: &ChanStats) {
-    if area.width >= 110 {
-        let columns = Layout::horizontal([Constraint::Percentage(51), Constraint::Percentage(49)])
-            .spacing(1)
-            .split(area);
-        render_service_panel(frame, columns.first().copied().unwrap_or(area), stats);
-        render_operations_panel(frame, columns.get(1).copied().unwrap_or(area), stats);
+fn render_dashboard(frame: &mut Frame<'_>, area: Rect, stats: &ChanStats, offset: &mut u16) {
+    // Preserve the panel layout in a scrollable viewport instead of allowing
+    // short terminals to silently discard entire service/operations rows.
+    let service_height = u16::try_from(service_rows(stats).len()).unwrap_or(7) + 2;
+    let operations_height = 8 + u16::from(stats.collection_error.is_some());
+    let wide = area.width >= 110;
+    let content_height = if wide {
+        service_height.max(operations_height)
     } else {
-        let service_height = area.height.saturating_mul(45) / 100;
-        let rows = Layout::vertical([
-            Constraint::Length(service_height.max(6)),
-            Constraint::Min(5),
-        ])
-        .spacing(1)
-        .split(area);
-        render_service_panel(frame, rows.first().copied().unwrap_or(area), stats);
-        render_operations_panel(frame, rows.get(1).copied().unwrap_or(area), stats);
+        service_height + operations_height + 1
+    };
+    render_scrollable(frame, area, content_height, offset, |buffer, content| {
+        if wide {
+            let columns =
+                Layout::horizontal([Constraint::Percentage(51), Constraint::Percentage(49)])
+                    .spacing(1)
+                    .split(content);
+            render_service_panel(buffer, columns.first().copied().unwrap_or(content), stats);
+            render_operations_panel(buffer, columns.get(1).copied().unwrap_or(content), stats);
+        } else {
+            let rows = Layout::vertical([
+                Constraint::Length(
+                    (content.height.saturating_mul(45) / 100)
+                        .max(service_height)
+                        .min(content.height.saturating_sub(operations_height + 1)),
+                ),
+                Constraint::Min(operations_height),
+            ])
+            .spacing(1)
+            .split(content);
+            render_service_panel(buffer, rows.first().copied().unwrap_or(content), stats);
+            render_operations_panel(buffer, rows.get(1).copied().unwrap_or(content), stats);
+        }
+    });
+}
+
+/// Clip a vertically scrollable content buffer to the visible terminal body.
+fn render_scrollable(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    minimum_height: u16,
+    offset: &mut u16,
+    draw: impl FnOnce(&mut Buffer, Rect),
+) {
+    let content = Rect::new(0, 0, area.width, minimum_height.max(area.height));
+    *offset = (*offset).min(content.height.saturating_sub(area.height));
+    let mut buffer = Buffer::empty(content);
+    draw(&mut buffer, content);
+    for y in 0..area.height {
+        for x in 0..area.width {
+            if let (Some(source), Some(target)) = (
+                buffer.cell((x, y.saturating_add(*offset))),
+                frame
+                    .buffer_mut()
+                    .cell_mut((area.x.saturating_add(x), area.y.saturating_add(y))),
+            ) {
+                *target = source.clone();
+            }
+        }
     }
 }
 
 /// Render server transports and direct operator endpoints.
-fn render_service_panel(frame: &mut Frame<'_>, area: Rect, stats: &ChanStats) {
+fn render_service_panel(buffer: &mut Buffer, area: Rect, stats: &ChanStats) {
     let block = panel("Service & access", ACCENT);
     let inner = block.inner(area);
-    block.render(area, frame.buffer_mut());
+    block.render(area, buffer);
     let rows = service_rows(stats);
-    render_label_rows(frame, inner, rows, 15);
+    render_label_rows(buffer, inner, rows, 15);
 }
 
 /// Build service-status and endpoint rows.
@@ -249,7 +299,11 @@ fn service_rows(stats: &ChanStats) -> Vec<(Line<'static>, Line<'static>)> {
         if CONFIG.enable_tor_support {
             rows.push((
                 Line::from("HTTP backend"),
-                status_value(StatusKind::Healthy, "RUNNING", backend_address()),
+                status_value(
+                    StatusKind::Healthy,
+                    "RUNNING",
+                    backend_address(stats.http_port),
+                ),
             ));
         } else {
             rows.push((
@@ -288,12 +342,15 @@ fn service_rows(stats: &ChanStats) -> Vec<(Line<'static>, Line<'static>)> {
             status_value(
                 StatusKind::Healthy,
                 "RUNNING",
-                format!("port {}", configured_http_port()),
+                format!("port {}", stats.http_port),
             ),
         ));
         rows.push((
             Line::from("Local URL"),
-            Line::from(Span::styled(local_url(), Style::default().fg(ACCENT))),
+            Line::from(Span::styled(
+                local_url(stats.http_port),
+                Style::default().fg(ACCENT),
+            )),
         ));
         rows.push((
             Line::from("HTTPS"),
@@ -341,14 +398,14 @@ fn service_rows(stats: &ChanStats) -> Vec<(Line<'static>, Line<'static>)> {
 }
 
 /// Render activity, content, storage, and background-work metrics.
-fn render_operations_panel(frame: &mut Frame<'_>, area: Rect, stats: &ChanStats) {
+fn render_operations_panel(buffer: &mut Buffer, area: Rect, stats: &ChanStats) {
     let block = panel("Operations", ACCENT);
     let inner = block.inner(area);
-    block.render(area, frame.buffer_mut());
+    block.render(area, buffer);
 
     if !stats.is_ready {
         render_centered_state(
-            frame,
+            buffer,
             inner,
             "LOADING",
             "Collecting the first operational snapshot…",
@@ -423,12 +480,12 @@ fn render_operations_panel(frame: &mut Frame<'_>, area: Rect, stats: &ChanStats)
         (Line::from("Memory"), Line::from(fmt_bytes(stats.mem_bytes))),
         (Line::from("Media work"), work_label),
     ]);
-    render_label_rows(frame, inner, rows, 12);
+    render_label_rows(buffer, inner, rows, 12);
 }
 
 /// Render label/value rows without allowing long values to escape their panel.
 fn render_label_rows(
-    frame: &mut Frame<'_>,
+    buffer: &mut Buffer,
     area: Rect,
     rows: Vec<(Line<'static>, Line<'static>)>,
     label_width: u16,
@@ -446,18 +503,18 @@ fn render_label_rows(
         )
         .column_spacing(1),
         area,
-        frame.buffer_mut(),
+        buffer,
     );
 }
 
 /// Render the board table, detail panel, and empty state.
-fn render_boards(frame: &mut Frame<'_>, area: Rect, app: &ConsoleState, metrics: &ChanStats) {
+fn render_boards(frame: &mut Frame<'_>, area: Rect, app: &mut ConsoleState, metrics: &ChanStats) {
     if !metrics.is_ready {
         let block = panel("Boards", ACCENT);
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
         render_centered_state(
-            frame,
+            frame.buffer_mut(),
             inner,
             "LOADING",
             "Collecting board statistics…",
@@ -469,7 +526,7 @@ fn render_boards(frame: &mut Frame<'_>, area: Rect, app: &ConsoleState, metrics:
         let block = panel("Boards", DANGER);
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
-        render_centered_state(frame, inner, "DATA UNAVAILABLE", error, DANGER);
+        render_centered_state(frame.buffer_mut(), inner, "DATA UNAVAILABLE", error, DANGER);
         return;
     }
     if metrics.board_rows.is_empty() {
@@ -477,7 +534,7 @@ fn render_boards(frame: &mut Frame<'_>, area: Rect, app: &ConsoleState, metrics:
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
         render_centered_state(
-            frame,
+            frame.buffer_mut(),
             inner,
             "NO BOARDS",
             "Create the first board with C.",
@@ -503,7 +560,12 @@ fn render_boards(frame: &mut Frame<'_>, area: Rect, app: &ConsoleState, metrics:
 }
 
 /// Render the selectable board statistics table.
-fn render_board_table(frame: &mut Frame<'_>, area: Rect, app: &ConsoleState, metrics: &ChanStats) {
+fn render_board_table(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &mut ConsoleState,
+    metrics: &ChanStats,
+) {
     let block = panel("Boards", ACCENT).title_bottom(Line::from(Span::styled(
         format!(" {} total ", metrics.board_rows.len()),
         Style::default().fg(MUTED),
@@ -536,6 +598,7 @@ fn render_board_table(frame: &mut Frame<'_>, area: Rect, app: &ConsoleState, met
             .add_modifier(Modifier::BOLD),
     )
     .highlight_symbol("› ");
+    app.boards.visible_rows = usize::from(area.height.saturating_sub(4)).max(1);
     let mut table_state = TableState::default().with_selected(app.boards.selected);
     if let Some(selected) = app.boards.selected {
         let visible = usize::from(area.height.saturating_sub(4)).max(1);
@@ -554,7 +617,13 @@ fn render_board_detail(frame: &mut Frame<'_>, area: Rect, app: &ConsoleState, me
         .selected
         .and_then(|selected| metrics.board_rows.get(selected));
     let Some((short, threads, posts)) = selected else {
-        render_centered_state(frame, inner, "NO SELECTION", "Choose a board row.", MUTED);
+        render_centered_state(
+            frame.buffer_mut(),
+            inner,
+            "NO SELECTION",
+            "Choose a board row.",
+            MUTED,
+        );
         return;
     };
     let lines = vec![
@@ -587,11 +656,26 @@ fn render_board_detail(frame: &mut Frame<'_>, area: Rect, app: &ConsoleState, me
 }
 
 /// Render the scrollable, follow-capable log viewer.
-fn render_logs(frame: &mut Frame<'_>, area: Rect, app: &ConsoleState, logs: &LogSnapshot) {
+fn render_logs(frame: &mut Frame<'_>, area: Rect, app: &mut ConsoleState, logs: &LogSnapshot) {
     let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(3)]).split(area);
     let info_area = rows.first().copied().unwrap_or(area);
     let body_area = rows.get(1).copied().unwrap_or(area);
 
+    app.logs.visible_rows = usize::from(body_area.height.saturating_sub(2)).max(1);
+    app.logs.rows_from_bottom = app
+        .logs
+        .rows_from_bottom
+        .min(logs.lines.len().saturating_sub(app.logs.visible_rows));
+    let max_width = logs
+        .lines
+        .iter()
+        .map(|line| Line::from(line.as_str()).width())
+        .max()
+        .unwrap_or(0);
+    app.logs.horizontal_offset = app.logs.horizontal_offset.min(
+        u16::try_from(max_width.saturating_sub(usize::from(body_area.width.saturating_sub(4))))
+            .unwrap_or(u16::MAX),
+    );
     let follow = if app.logs.follow {
         Span::styled("[FOLLOWING]", Style::default().fg(SUCCESS))
     } else {
@@ -605,10 +689,9 @@ fn render_logs(frame: &mut Frame<'_>, area: Rect, app: &ConsoleState, logs: &Log
         .as_deref()
         .unwrap_or("waiting for first log file");
     Paragraph::new(Line::from(vec![
-        Span::styled("Source  ", Style::default().fg(MUTED)),
-        Span::raw(source.to_owned()),
-        Span::styled("   ", Style::default()),
         follow,
+        Span::styled("  Source  ", Style::default().fg(MUTED)),
+        Span::raw(source.to_owned()),
         Span::styled(
             format!(
                 "   {} retained lines",
@@ -627,12 +710,12 @@ fn render_logs(frame: &mut Frame<'_>, area: Rect, app: &ConsoleState, logs: &Log
     block.render(body_area, frame.buffer_mut());
 
     if let Some(error) = &logs.error {
-        render_centered_state(frame, inner, "LOG ERROR", error, DANGER);
+        render_centered_state(frame.buffer_mut(), inner, "LOG ERROR", error, DANGER);
         return;
     }
     if logs.lines.is_empty() {
         render_centered_state(
-            frame,
+            frame.buffer_mut(),
             inner,
             "NO LOG ENTRIES",
             "New application events will appear here automatically.",
@@ -677,69 +760,119 @@ fn log_line_style(line: &str) -> Style {
 }
 
 /// Render a responsive keyboard and workflow reference.
-fn render_help(frame: &mut Frame<'_>, area: Rect) {
-    let sections = if area.width >= 84 {
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .spacing(1)
-            .split(area)
+fn render_help(frame: &mut Frame<'_>, area: Rect, offset: &mut u16) {
+    let navigation = [
+        ("1 / G", "Operational overview"),
+        ("2 / B", "Board list"),
+        ("3 / L", "Live logs"),
+        ("4 / ? / H", "Keyboard reference"),
+        ("R", "Refresh metrics now"),
+        ("C", "Create board"),
+        ("A", "Create administrator"),
+        ("D / X", "Delete thread"),
+        ("Q", "Graceful shutdown prompt"),
+        ("Esc", "Close / return to overview"),
+    ];
+    let editing = [
+        ("↑ ↓ / J K", "Move selection or scroll"),
+        ("PgUp PgDn", "Move by one page"),
+        ("Home End", "First/last row or newest log"),
+        ("← →", "Pan long log lines"),
+        ("F", "Resume log follow mode"),
+        ("Tab / Shift-Tab", "Move form focus"),
+        ("Space", "Toggle a setting"),
+        ("Enter", "Advance or submit final field"),
+        ("Ctrl-Enter / F2", "Submit the full form"),
+        ("Ctrl-U", "Clear focused text"),
+        ("Ctrl-C", "Immediate server stop"),
+    ];
+    let wide = area.width >= 84;
+    let panel_width = if wide {
+        area.width.saturating_sub(1) / 2
     } else {
-        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+        area.width
+    };
+    let navigation_height = help_panel_height(&navigation, panel_width);
+    let editing_height = help_panel_height(&editing, panel_width);
+    let minimum_height = if wide {
+        navigation_height.max(editing_height)
+    } else {
+        navigation_height + editing_height + 1
+    };
+    render_scrollable(frame, area, minimum_height, offset, |buffer, area| {
+        let sections = if wide {
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .spacing(1)
+                .split(area)
+        } else {
+            Layout::vertical([
+                Constraint::Length(navigation_height),
+                Constraint::Min(editing_height),
+            ])
             .spacing(1)
             .split(area)
-    };
-    render_help_panel(
-        frame,
-        sections.first().copied().unwrap_or(area),
-        "Navigation & actions",
-        &[
-            ("1 / G", "Operational overview"),
-            ("2 / B", "Board list"),
-            ("3 / L", "Live logs"),
-            ("4 / ? / H", "Keyboard reference"),
-            ("R", "Refresh metrics now"),
-            ("C", "Create board"),
-            ("A", "Create administrator"),
-            ("D / X", "Delete thread"),
-            ("Q", "Graceful shutdown prompt"),
-            ("Esc", "Close / return to overview"),
-        ],
-    );
-    render_help_panel(
-        frame,
-        sections.get(1).copied().unwrap_or(area),
-        "Lists, logs & forms",
-        &[
-            ("↑ ↓ / J K", "Move selection or scroll"),
-            ("PgUp PgDn", "Move by one page"),
-            ("Home End", "First/last row or newest log"),
-            ("← →", "Pan long log lines"),
-            ("F", "Resume log follow mode"),
-            ("Tab / Shift-Tab", "Move form focus"),
-            ("Space", "Toggle a setting"),
-            ("Enter", "Advance or submit final field"),
-            ("Ctrl-Enter / F2", "Submit the full form"),
-            ("Ctrl-U", "Clear focused text"),
-            ("Ctrl-C", "Immediate server stop"),
-        ],
-    );
+        };
+        render_help_panel(
+            buffer,
+            sections.first().copied().unwrap_or(area),
+            "Navigation & actions",
+            &navigation,
+        );
+        render_help_panel(
+            buffer,
+            sections.get(1).copied().unwrap_or(area),
+            "Lists, logs & forms",
+            &editing,
+        );
+    });
+}
+
+/// Wrap the static help descriptions to the available description column.
+fn help_description(description: &str, panel_width: u16) -> Text<'static> {
+    let width = usize::from(panel_width.saturating_sub(23)).max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in description.split_whitespace() {
+        if !line.is_empty() && line.len() + 1 + word.len() > width {
+            lines.push(Line::from(std::mem::take(&mut line)));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    lines.push(Line::from(line));
+    Text::from(lines)
+}
+
+/// Full panel height needed to keep every wrapped help row reachable.
+fn help_panel_height(items: &[(&str, &str)], width: u16) -> u16 {
+    let rows = items
+        .iter()
+        .map(|(_, description)| help_description(description, width).height())
+        .sum::<usize>();
+    u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(2)
 }
 
 /// Render one help category as aligned key/description rows.
-fn render_help_panel(frame: &mut Frame<'_>, area: Rect, title: &str, items: &[(&str, &str)]) {
+fn render_help_panel(buffer: &mut Buffer, area: Rect, title: &str, items: &[(&str, &str)]) {
     let block = panel(title, ACCENT);
     let inner = block.inner(area);
-    block.render(area, frame.buffer_mut());
+    block.render(area, buffer);
     let rows = items.iter().map(|(key, description)| {
+        let text = help_description(description, area.width);
+        let height = u16::try_from(text.height()).unwrap_or(u16::MAX);
         Row::new(vec![
             Cell::from((*key).to_owned())
                 .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-            Cell::from((*description).to_owned()),
+            Cell::from(text),
         ])
+        .height(height)
     });
     Widget::render(
         Table::new(rows, [Constraint::Length(18), Constraint::Min(1)]),
         inner,
-        frame.buffer_mut(),
+        buffer,
     );
 }
 
@@ -747,15 +880,22 @@ fn render_help_panel(frame: &mut Frame<'_>, area: Rect, title: &str, items: &[(&
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &ConsoleState) {
     let hints: &[(&str, &str)] = if area.width < 76 {
         match app.screen {
-            Screen::Dashboard => &[("C", "Board"), ("A", "Admin"), ("?", "Help"), ("Q", "Quit")],
+            Screen::Dashboard => &[
+                ("↑↓", "Scroll"),
+                ("C", "Board"),
+                ("A", "Admin"),
+                ("?", "Help"),
+                ("Q", "Quit"),
+            ],
             Screen::Boards => &[("↑↓", "Select"), ("C", "Create"), ("Esc", "Back")],
             Screen::Logs => &[("↑↓", "Scroll"), ("F", "Follow"), ("Esc", "Back")],
-            Screen::Help => &[("Esc", "Back"), ("Q", "Quit")],
+            Screen::Help => &[("↑↓", "Scroll"), ("Esc", "Back"), ("Q", "Quit")],
         }
     } else {
         match app.screen {
             Screen::Dashboard => &[
-                ("C", "New board"),
+                ("↑↓", "Scroll"),
+                ("C", "Board"),
                 ("A", "New admin"),
                 ("D", "Delete thread"),
                 ("R", "Refresh"),
@@ -775,7 +915,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &ConsoleState) {
                 ("R", "Refresh"),
                 ("Esc", "Overview"),
             ],
-            Screen::Help => &[("Esc", "Overview"), ("Q", "Quit")],
+            Screen::Help => &[("↑↓", "Scroll"), ("Esc", "Overview"), ("Q", "Quit")],
         }
     };
     let mut spans = Vec::with_capacity(hints.len().saturating_mul(3));
@@ -797,6 +937,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &ConsoleState) {
     }
     Paragraph::new(Line::from(spans))
         .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true })
         .render(area, frame.buffer_mut());
 }
 
@@ -817,7 +958,7 @@ fn render_dialog(frame: &mut Frame<'_>, area: Rect, dialog: &Dialog, spinner_tic
             area,
             "Permanently delete thread?",
             &format!("Thread {thread_id} and all of its posts and attached files will be removed."),
-            "Y / Enter  Delete permanently",
+            "Y  Delete permanently",
             DANGER,
         ),
         Dialog::Progress { label } => render_progress_dialog(frame, area, label, spinner_tick),
@@ -889,11 +1030,16 @@ fn render_progress_dialog(frame: &mut Frame<'_>, area: Rect, label: &str, spinne
 
 /// Render a keyboard-efficient form with inline help and validation.
 fn render_form_dialog(frame: &mut Frame<'_>, area: Rect, form: &FormState) {
+    let expanded_error = form.error.is_some() && area.width < 64;
     let desired_height = u16::try_from(form.fields.len())
         .unwrap_or(u16::MAX)
-        .saturating_add(9)
+        .saturating_add(9 + u16::from(expanded_error))
         .min(area.height.saturating_sub(2));
-    let popup = centered_rect(area, 82, desired_height.max(11));
+    let popup = centered_rect(
+        area,
+        82,
+        desired_height.max(if expanded_error { 12 } else { 11 }),
+    );
     Clear.render(popup, frame.buffer_mut());
     let block = panel(form.kind.title(), ACCENT).border_style(Style::default().fg(ACCENT));
     let inner = block.inner(popup);
@@ -902,7 +1048,7 @@ fn render_form_dialog(frame: &mut Frame<'_>, area: Rect, form: &FormState) {
     let rows = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(3),
-        Constraint::Length(2),
+        Constraint::Length(if expanded_error { 3 } else { 2 }),
         Constraint::Length(2),
     ])
     .split(inner);
@@ -951,16 +1097,27 @@ fn render_form_dialog(frame: &mut Frame<'_>, area: Rect, form: &FormState) {
             .render(help_area, frame.buffer_mut());
     }
 
-    Paragraph::new(Line::from(vec![
-        Span::styled(" Tab ", key_style()),
-        Span::styled(" Next   ", Style::default().fg(MUTED)),
-        Span::styled(" Space ", key_style()),
-        Span::styled(" Toggle   ", Style::default().fg(MUTED)),
-        Span::styled(" Ctrl-Enter / F2 ", key_style()),
-        Span::styled(" Submit   ", Style::default().fg(MUTED)),
-        Span::styled(" Esc ", key_style()),
-        Span::styled(" Cancel", Style::default().fg(MUTED)),
-    ]))
+    Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(" Tab ", key_style()),
+            Span::styled(" Next   ", Style::default().fg(MUTED)),
+            Span::styled(" Space ", key_style()),
+            Span::styled(" Toggle", Style::default().fg(MUTED)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                if inner.width < 60 {
+                    " F2 "
+                } else {
+                    " Ctrl-Enter / F2 "
+                },
+                key_style(),
+            ),
+            Span::styled(" Submit   ", Style::default().fg(MUTED)),
+            Span::styled(" Esc ", key_style()),
+            Span::styled(" Cancel", Style::default().fg(MUTED)),
+        ]),
+    ])
     .render(actions_area, frame.buffer_mut());
 
     if let Some(position) = cursor_position {
@@ -1025,10 +1182,25 @@ fn render_form_field(
             let cursor_prefix = displayed.chars().take(cursor).collect::<String>();
             let cursor_width = Line::from(cursor_prefix).width();
             let viewport_width = usize::from(value_area.width).max(1);
-            let horizontal_scroll = cursor_width.saturating_sub(viewport_width.saturating_sub(1));
-            Paragraph::new(displayed)
+            let desired_scroll = if focused {
+                cursor_width.saturating_sub(viewport_width.saturating_sub(1))
+            } else {
+                0
+            };
+            // Scroll only at complete grapheme boundaries. Cutting through a
+            // double-width glyph shifts the visible text away from the cursor.
+            let line = Line::from(displayed.as_str());
+            let mut horizontal_scroll = 0usize;
+            let mut visible = String::new();
+            for grapheme in line.styled_graphemes(Style::default()) {
+                if horizontal_scroll < desired_scroll {
+                    horizontal_scroll += Span::raw(grapheme.symbol).width();
+                } else {
+                    visible.push_str(grapheme.symbol);
+                }
+            }
+            Paragraph::new(visible)
                 .style(input_style(focused))
-                .scroll((0, u16::try_from(horizontal_scroll).unwrap_or(u16::MAX)))
                 .render(value_area, frame.buffer_mut());
             if focused {
                 let cursor_column = cursor_width.saturating_sub(horizontal_scroll);
@@ -1064,7 +1236,7 @@ fn key_style() -> Style {
 
 /// Render a vertically centered state label and explanation.
 fn render_centered_state(
-    frame: &mut Frame<'_>,
+    buffer: &mut Buffer,
     area: Rect,
     label: &str,
     message: &str,
@@ -1082,7 +1254,7 @@ fn render_centered_state(
     ])
     .alignment(Alignment::Center)
     .wrap(Wrap { trim: true })
-    .render(centered, frame.buffer_mut());
+    .render(centered, buffer);
 }
 
 /// Build a consistently padded and titled panel.
@@ -1104,10 +1276,12 @@ fn centered_rect(area: Rect, requested_width: u16, requested_height: u16) -> Rec
     let height = requested_height.min(area.height.saturating_sub(2)).max(1);
     let horizontal_margin = area.width.saturating_sub(width) / 2;
     let vertical_margin = area.height.saturating_sub(height) / 2;
-    area.inner(Margin {
-        horizontal: horizontal_margin,
-        vertical: vertical_margin,
-    })
+    Rect::new(
+        area.x.saturating_add(horizontal_margin),
+        area.y.saturating_add(vertical_margin),
+        width,
+        height,
+    )
 }
 
 /// Status semantic used by labeled tags.
@@ -1201,22 +1375,13 @@ fn https_cert_label() -> &'static str {
 }
 
 /// Return the effective local HTTP URL.
-fn local_url() -> String {
-    format!("http://localhost:{}", configured_http_port())
+fn local_url(http_port: u16) -> String {
+    format!("http://localhost:{http_port}")
 }
 
-/// Return the Tor-internal HTTP backend address.
-fn backend_address() -> String {
-    CONFIG.loopback_addr_with_port(configured_http_port())
-}
-
-/// Parse the configured application port with the established fallback.
-fn configured_http_port() -> u16 {
-    CONFIG
-        .bind_addr
-        .rsplit_once(':')
-        .and_then(|(_, port)| port.parse::<u16>().ok())
-        .unwrap_or(8080)
+/// Return the Tor-internal HTTP backend address using the bound port.
+fn backend_address(http_port: u16) -> String {
+    CONFIG.loopback_addr_with_port(http_port)
 }
 
 /// Format uptime compactly while retaining days for long-running servers.
@@ -1368,14 +1533,17 @@ pub fn load_log_snapshot() -> LogSnapshot {
 
 /// Find the newest main-process log file.
 fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
-    let mut files = std::fs::read_dir(logs_dir)
+    std::fs::read_dir(logs_dir)
         .ok()?
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| crate::logging::is_main_log_file(path))
-        .collect::<Vec<_>>();
-    files.sort();
-    files.pop()
+        .filter_map(|path| {
+            let metadata = path.metadata().ok()?;
+            metadata.is_file().then(|| (metadata.modified().ok(), path))
+        })
+        .max()
+        .map(|(_, path)| path)
 }
 
 /// Read at most the newest `max_bytes` of a log file without loading its prefix.
@@ -1386,21 +1554,29 @@ fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool), String
         .map_err(|error| format!("Log metadata: {error}"))?
         .len();
     let start = length.saturating_sub(u64::try_from(max_bytes).unwrap_or(u64::MAX));
-    file.seek(SeekFrom::Start(start))
+    // Inspect the preceding byte so an exact line boundary keeps its first
+    // complete line instead of dropping it as an assumed partial prefix.
+    let read_start = start.saturating_sub(1);
+    file.seek(SeekFrom::Start(read_start))
         .map_err(|error| format!("Seek log: {error}"))?;
     let mut bytes =
-        Vec::with_capacity(usize::try_from(length.saturating_sub(start)).unwrap_or(max_bytes));
-    std::io::copy(&mut file.take(length.saturating_sub(start)), &mut bytes)
-        .map_err(|error| format!("Read log: {error}"))?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
+        Vec::with_capacity(usize::try_from(length.saturating_sub(read_start)).unwrap_or(max_bytes));
+    std::io::copy(
+        &mut file.take(length.saturating_sub(read_start)),
+        &mut bytes,
+    )
+    .map_err(|error| format!("Read log: {error}"))?;
     let truncated = start > 0;
     let content = if truncated {
-        text.split_once('\n')
-            .map_or_else(|| text.clone(), |(_, remainder)| remainder.to_owned())
+        let prefix = bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(1, |index| index + 1);
+        bytes.get(prefix..).unwrap_or_default()
     } else {
-        text
+        bytes.as_slice()
     };
-    Ok((content, truncated))
+    Ok((String::from_utf8_lossy(content).into_owned(), truncated))
 }
 
 /// Render directly into a buffer for deterministic layout tests.
@@ -1413,7 +1589,8 @@ fn render_to_buffer(
 ) -> anyhow::Result<Buffer> {
     let mut terminal =
         ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))?;
-    terminal.draw(|frame| render(frame, app, metrics, logs))?;
+    let mut app = app.clone();
+    terminal.draw(|frame| render(frame, &mut app, metrics, logs))?;
     Ok(terminal.backend().buffer().clone())
 }
 
@@ -1629,6 +1806,287 @@ mod tests {
             latest.file_name().and_then(|name| name.to_str()),
             Some("rustchan.2026-04-01.log"),
             "main-process log should win"
+        );
+        Ok(())
+    }
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions verify rendered controls and cursor bounds"
+    )]
+    fn every_screen_and_dialog_survives_resizing_and_masks_secrets() -> anyhow::Result<()> {
+        use super::super::state::FormKind;
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))?;
+        let mut password = FormState::new(FormKind::CreateAdmin);
+        if let Some(field) = password.fields.get_mut(1) {
+            field.value = FieldValue::Text("Secret界🦀123".to_owned());
+        }
+        password.focused = 1;
+        password.cursor = 11;
+        let dialogs = [
+            None,
+            Some(Dialog::Form(password)),
+            Some(Dialog::Form(FormState::new(FormKind::CreateBoard))),
+            Some(Dialog::ConfirmDelete {
+                thread_id: i64::MAX,
+            }),
+            Some(Dialog::ConfirmQuit),
+            Some(Dialog::Progress {
+                label: "Creating board…",
+            }),
+        ];
+        for screen in [
+            Screen::Dashboard,
+            Screen::Boards,
+            Screen::Logs,
+            Screen::Help,
+        ] {
+            for dialog in &dialogs {
+                let mut app = ConsoleState {
+                    screen,
+                    dialog: dialog.clone(),
+                    ..ConsoleState::default()
+                };
+                for (width, height) in [
+                    (120, 40),
+                    (40, 10),
+                    (44, 14),
+                    (60, 18),
+                    (80, 24),
+                    (0, 0),
+                    (1, 100),
+                    (200, 1),
+                    (120, 40),
+                ] {
+                    terminal.backend_mut().resize(width, height);
+                    terminal.draw(|frame| {
+                        render(
+                            frame,
+                            &mut app,
+                            &ChanStats::default(),
+                            &LogSnapshot::default(),
+                        );
+                    })?;
+                    let text = buffer_text(terminal.backend().buffer());
+                    assert!(
+                        !text.contains("Secret"),
+                        "password values must never reach the terminal buffer"
+                    );
+                    if terminal_is_usable(width, height) && matches!(dialog, Some(Dialog::Form(_)))
+                    {
+                        assert!(
+                            text.contains("Submit") && text.contains("Cancel"),
+                            "form actions must be reachable at {width}x{height}: {text}"
+                        );
+                        let cursor = terminal.get_cursor_position()?;
+                        assert!(
+                            cursor.x < width && cursor.y < height,
+                            "cursor must stay inside the terminal"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions verify scrollable panel content"
+    )]
+    fn short_viewports_can_reach_the_last_overview_and_help_rows() -> anyhow::Result<()> {
+        for (width, height) in [(44, 14), (60, 18), (80, 24), (120, 40)] {
+            for (screen, expected) in [(Screen::Dashboard, "Media work"), (Screen::Help, "Ctrl-C")]
+            {
+                let app = ConsoleState {
+                    screen,
+                    overview_scroll: u16::MAX,
+                    help_scroll: u16::MAX,
+                    ..ConsoleState::default()
+                };
+                let buffer = render_to_buffer(
+                    Rect::new(0, 0, width, height),
+                    &app,
+                    &ChanStats {
+                        is_ready: true,
+                        ..ChanStats::default()
+                    },
+                    &LogSnapshot::default(),
+                )?;
+                assert!(
+                    buffer_text(&buffer).contains(expected),
+                    "End must expose {expected} at {width}x{height}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions verify field scroll and glyph/cursor alignment"
+    )]
+    fn form_scroll_uses_only_the_focused_field_and_whole_wide_glyphs() -> anyhow::Result<()> {
+        let mut form = FormState::new(super::super::state::FormKind::CreateBoard);
+        let field = form
+            .fields
+            .get_mut(1)
+            .ok_or_else(|| anyhow::anyhow!("missing display-name field"))?;
+        field.value = FieldValue::Text("界界界界x".to_owned());
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(28, 3))?;
+        let mut cursor = None;
+        terminal.draw(|frame| {
+            cursor = render_form_field(frame, Rect::new(0, 0, 28, 1), field, true, 5);
+        })?;
+        let cursor = cursor.ok_or_else(|| anyhow::anyhow!("missing focused cursor"))?;
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((cursor.x - 1, cursor.y))
+                .map(ratatui::buffer::Cell::symbol),
+            Some("x"),
+            "cursor must follow the last glyph after horizontal scrolling"
+        );
+        field.value = FieldValue::Text("abcdef".to_owned());
+        terminal.draw(|frame| {
+            render_form_field(frame, Rect::new(0, 0, 25, 1), field, false, 80);
+        })?;
+        assert!(
+            buffer_text(terminal.backend().buffer()).contains("abcd"),
+            "an unfocused field must show its prefix independently of the active cursor"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions verify log scroll bounds after resize and rotation"
+    )]
+    fn log_scroll_clamps_to_retained_content() -> anyhow::Result<()> {
+        let mut app = ConsoleState {
+            screen: Screen::Logs,
+            ..ConsoleState::default()
+        };
+        app.logs.follow = false;
+        app.logs.rows_from_bottom = usize::MAX;
+        app.logs.horizontal_offset = u16::MAX;
+        let logs = LogSnapshot {
+            lines: (0..20).map(|index| format!("entry-{index:02}")).collect(),
+            ..LogSnapshot::default()
+        };
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))?;
+        terminal.draw(|frame| render(frame, &mut app, &ChanStats::default(), &logs))?;
+        assert_eq!(
+            app.logs.rows_from_bottom,
+            logs.lines.len() - app.logs.visible_rows,
+            "scroll state must clamp, not only its rendered projection"
+        );
+        assert_eq!(
+            app.logs.horizontal_offset, 0,
+            "short lines must not leave a blank panned viewport"
+        );
+        assert!(
+            buffer_text(terminal.backend().buffer()).contains("entry-00"),
+            "oldest retained content must remain visible"
+        );
+        app.handle_key(&super::super::input::KeyEvent::Down, 0, (80, 24));
+        terminal.draw(|frame| render(frame, &mut app, &ChanStats::default(), &logs))?;
+        assert!(
+            buffer_text(terminal.backend().buffer()).contains("entry-01"),
+            "one Down press must move after excessive upward scrolling"
+        );
+        Ok(())
+    }
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions verify active log selection across fallback/rotation"
+    )]
+    fn newer_rotated_log_wins_over_stale_fallback_file() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let fallback = directory.path().join("rustchan.log");
+        let current = directory.path().join("rustchan.2026-09-02.log");
+        std::fs::write(&fallback, "stale")?;
+        std::fs::File::open(&fallback)?.set_modified(std::time::SystemTime::UNIX_EPOCH)?;
+        std::fs::write(&current, "live")?;
+        std::fs::create_dir(directory.path().join("rustchan.zzz.log"))?;
+        assert_eq!(
+            latest_log_file(directory.path()),
+            Some(current),
+            "file timestamps must select the live log even when fallback sorts last"
+        );
+        Ok(())
+    }
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions verify exact-boundary tail reads"
+    )]
+    fn log_tail_keeps_a_complete_line_at_the_byte_limit() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("rustchan.log");
+        std::fs::write(&path, "old\n界-new\n")?;
+        let (tail, truncated) =
+            read_log_tail(&path, "界-new\n".len()).map_err(anyhow::Error::msg)?;
+        assert!(truncated, "prefix must be marked omitted");
+        assert_eq!(
+            tail, "界-new\n",
+            "a complete UTF-8 line at the read boundary must survive"
+        );
+        Ok(())
+    }
+    #[test]
+    fn service_endpoints_use_the_runtime_port_override() {
+        let metrics = ChanStats {
+            http_port: 43210,
+            ..ChanStats::default()
+        };
+        if !CONFIG.tls.enabled {
+            let displayed = service_rows(&metrics)
+                .into_iter()
+                .map(|(_, value)| value.to_string())
+                .collect::<String>();
+            assert!(
+                displayed.contains("http://localhost:43210"),
+                "service rendering must advertise the bound listener port"
+            );
+        }
+        assert!(
+            backend_address(metrics.http_port).ends_with(":43210"),
+            "Tor backend details must use the same effective port"
+        );
+    }
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions verify complete validation feedback on narrow terminals"
+    )]
+    fn narrow_form_preserves_the_full_validation_rule_and_actions() -> anyhow::Result<()> {
+        let mut app = ConsoleState {
+            dialog: Some(Dialog::Form(FormState::new(
+                super::super::state::FormKind::CreateAdmin,
+            ))),
+            ..ConsoleState::default()
+        };
+        app.handle_key(&super::super::input::KeyEvent::Submit, 0, (44, 14));
+        let buffer = render_to_buffer(
+            Rect::new(0, 0, 44, 14),
+            &app,
+            &ChanStats::default(),
+            &LogSnapshot::default(),
+        )?;
+        let text = buffer_text(&buffer);
+        assert!(
+            text.contains("dashes."),
+            "validation rules must not lose their final line: {text}"
+        );
+        assert!(
+            text.contains("Submit") && text.contains("Cancel"),
+            "validation must not displace form actions"
         );
         Ok(())
     }

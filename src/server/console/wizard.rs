@@ -150,6 +150,9 @@ fn color(code: &'static str) -> &'static str {
 
 /// Print a consistently styled first-run prompt and read a trimmed response.
 fn prompt(reader: &mut dyn BufRead, label: &str) -> Option<String> {
+    if crate::logging::is_tty() {
+        return prompt_terminal(label, false);
+    }
     crate::logging::console_prompt(&format!(
         "  {}{label}{} ",
         color("\x1b[36m"),
@@ -168,7 +171,7 @@ fn prompt_username(reader: &mut dyn BufRead) -> Option<String> {
         let username = prompt(reader, "Username:")?;
         match validate_username(&username) {
             Ok(()) => return Some(username),
-            Err(error) => crate::logging::console_println(&format!(
+            Err(error) => print_line(&format!(
                 "  {}[ERROR]{} {error}",
                 color("\x1b[31m"),
                 color("\x1b[0m")
@@ -181,12 +184,12 @@ fn prompt_username(reader: &mut dyn BufRead) -> Option<String> {
 fn prompt_password(reader: &mut dyn BufRead) -> Option<String> {
     loop {
         let password = if crate::logging::is_tty() {
-            prompt_secret("Password (8+ characters):")?
+            prompt_terminal("Password (8+ characters):", true)?
         } else {
             prompt(reader, "Password (8+ characters):")?
         };
         if let Err(error) = crate::utils::crypto::validate_password(&password) {
-            crate::logging::console_println(&format!(
+            print_line(&format!(
                 "  {}[ERROR]{} {error}",
                 color("\x1b[31m"),
                 color("\x1b[0m")
@@ -194,14 +197,14 @@ fn prompt_password(reader: &mut dyn BufRead) -> Option<String> {
             continue;
         }
         let confirmation = if crate::logging::is_tty() {
-            prompt_secret("Confirm password:")?
+            prompt_terminal("Confirm password:", true)?
         } else {
             prompt(reader, "Confirm password:")?
         };
         if password == confirmation {
             return Some(password);
         }
-        crate::logging::console_println(&format!(
+        print_line(&format!(
             "  {}[ERROR]{} Passwords do not match.",
             color("\x1b[31m"),
             color("\x1b[0m")
@@ -209,67 +212,150 @@ fn prompt_password(reader: &mut dyn BufRead) -> Option<String> {
     }
 }
 
-/// Raw-mode guard used only during pre-console secret input.
-struct SecretInputGuard;
+/// Restore raw mode even when setup returns early or unwinds.
+struct SetupInputGuard;
 
-impl Drop for SecretInputGuard {
+impl Drop for SetupInputGuard {
     fn drop(&mut self) {
-        drop(crossterm::terminal::disable_raw_mode());
+        super::cleanup();
     }
 }
 
-/// Read and mask one first-run secret without adding a password-input crate.
-fn prompt_secret(label: &str) -> Option<String> {
-    if crossterm::terminal::enable_raw_mode().is_err() {
-        return None;
+/// Print line-mode output with carriage returns while raw input is active.
+fn print_raw(message: &str) {
+    if super::line_input_active() {
+        crate::logging::console_print_raw(&message.replace('\n', "\r\n"));
+    } else {
+        crate::logging::console_print_raw(message);
     }
-    let guard = SecretInputGuard;
-    crate::logging::console_prompt(&format!(
-        "  {}{label}{} ",
-        color("\x1b[36m"),
-        color("\x1b[0m")
-    ));
-    let mut secret = String::new();
-    loop {
-        let Ok(terminal_event) = event::read() else {
-            return None;
-        };
-        let Event::Key(key) = terminal_event else {
-            continue;
-        };
-        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-            continue;
+}
+
+/// Print one first-run setup line.
+fn print_line(message: &str) {
+    print_raw(&format!("{message}\n"));
+}
+
+/// Read all interactive setup fields through one event reader so buffered
+/// keystrokes never disappear between cooked stdin and masked raw input.
+fn prompt_terminal(label: &str, secret: bool) -> Option<String> {
+    let mut value = String::new();
+    redraw_prompt(label, &value, secret);
+    while super::line_input_active() {
+        match event::poll(std::time::Duration::from_millis(50)) {
+            Ok(false) => continue,
+            Err(_) => return None,
+            Ok(true) => {}
         }
-        match key.code {
-            KeyCode::Enter => break,
-            KeyCode::Char('c' | 'C') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return None;
-            }
-            KeyCode::Backspace => {
-                if secret.pop().is_some() {
-                    crate::logging::console_print_raw("\u{8} \u{8}");
+        let terminal_event = event::read().ok()?;
+        match terminal_event {
+            Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+                match key.code {
+                    KeyCode::Enter if key.kind == KeyEventKind::Press => {
+                        print_line("");
+                        return Some(if secret {
+                            value
+                        } else {
+                            value.trim().to_owned()
+                        });
+                    }
+                    KeyCode::Esc => {
+                        print_line("");
+                        return None;
+                    }
+                    KeyCode::Char('c' | 'C' | 'd' | 'D')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        print_line("");
+                        return None;
+                    }
+                    KeyCode::Char('u' | 'U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        value.clear();
+                    }
+                    KeyCode::Backspace => {
+                        value.pop();
+                    }
+                    KeyCode::Char(character)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                            && !character.is_control()
+                            && value.chars().count() < 256 =>
+                    {
+                        value.push(character);
+                    }
+                    _ => {}
                 }
             }
-            KeyCode::Char(character)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                    && secret.chars().count() < 256 =>
-            {
-                secret.push(character);
-                crate::logging::console_print_raw("•");
+            Event::Paste(content) => {
+                let remaining = 256usize.saturating_sub(value.chars().count());
+                value.extend(
+                    content
+                        .chars()
+                        .filter(|character| !character.is_control())
+                        .take(remaining),
+                );
             }
             _ => {}
         }
+        redraw_prompt(label, &value, secret);
     }
-    drop(guard);
-    crate::logging::console_println("");
-    Some(secret)
+    None
+}
+
+/// Keep first-run input on one physical row, including narrow terminals.
+fn redraw_prompt(label: &str, value: &str, secret: bool) {
+    use ratatui::style::Style;
+    use ratatui::text::{Line, Span};
+
+    let width = usize::from(
+        crossterm::terminal::size()
+            .map_or(80, |size| size.0)
+            .saturating_sub(1),
+    );
+    let label = format!("  {label} ");
+    let label: String = label.chars().take(width / 2).collect();
+    let available = width.saturating_sub(Line::from(label.as_str()).width());
+    let displayed = if secret {
+        "•".repeat(value.chars().count())
+    } else {
+        value.to_owned()
+    };
+    let line = Line::from(displayed.as_str());
+    let mut skip = line.width().saturating_sub(available.saturating_sub(1));
+    let mut visible = String::new();
+    for grapheme in line.styled_graphemes(Style::default()) {
+        if skip > 0 {
+            skip = skip.saturating_sub(Span::raw(grapheme.symbol).width());
+        } else {
+            visible.push_str(grapheme.symbol);
+        }
+    }
+    crate::logging::console_prompt(&format!(
+        "\r\x1b[2K{}{label}{}{visible}",
+        color("\x1b[36m"),
+        color("\x1b[0m")
+    ));
 }
 
 /// First-run account bootstrap shown before the full-screen console starts.
-pub fn prompt_create_first_admin(pool: &DbPool, reader: &mut dyn BufRead) {
-    crate::logging::console_print_raw(&format!(
+pub fn prompt_create_first_admin(
+    pool: &DbPool,
+    reader: &mut dyn BufRead,
+    cancel: &tokio_util::sync::CancellationToken,
+) {
+    let _input_guard = if crate::logging::is_tty() {
+        if let Err(error) = super::start_line_input() {
+            print_line(&format!("Setup input unavailable: {error}"));
+            return;
+        }
+        Some(SetupInputGuard)
+    } else {
+        None
+    };
+    if cancel.is_cancelled() {
+        return;
+    }
+    print_raw(&format!(
         "\n  {}┌─ First-run setup ─────────────────────────────────────┐\n\
            │  Create the administrator used at /admin.             │\n\
            │  Ctrl-C or end-of-input skips setup for now.           │\n\
@@ -278,7 +364,7 @@ pub fn prompt_create_first_admin(pool: &DbPool, reader: &mut dyn BufRead) {
         color("\x1b[0m")
     ));
     if crate::logging::is_tty() {
-        crate::logging::console_println(&format!(
+        print_line(&format!(
             "  {}[SECURE] Password input is masked.{}",
             color("\x1b[32m"),
             color("\x1b[0m")
@@ -286,24 +372,22 @@ pub fn prompt_create_first_admin(pool: &DbPool, reader: &mut dyn BufRead) {
     }
 
     let Some(username) = prompt_username(reader) else {
-        crate::logging::console_println(
-            "\n  Setup skipped. Use: rustchan-cli admin create-admin <user> <pass>",
-        );
+        print_line("\n  Setup skipped. Use: rustchan-cli admin create-admin <user> <pass>");
         return;
     };
     let Some(password) = prompt_password(reader) else {
-        crate::logging::console_println("\n  Setup skipped.");
+        print_line("\n  Setup skipped.");
         return;
     };
     let request = OperationRequest::CreateAdmin { username, password };
     match execute(&request, pool) {
-        Ok(message) => crate::logging::console_println(&format!(
+        Ok(message) => print_line(&format!(
             "\n  {}[OK]{} {message}",
             color("\x1b[32m"),
             color("\x1b[0m")
         )),
         Err(error) => {
-            crate::logging::console_println(&format!(
+            print_line(&format!(
                 "\n  {}[ERROR]{} {error}",
                 color("\x1b[31m"),
                 color("\x1b[0m")
@@ -317,41 +401,44 @@ pub fn prompt_create_first_admin(pool: &DbPool, reader: &mut dyn BufRead) {
     if create_board {
         prompt_create_first_board(pool, reader);
     }
-    crate::logging::console_println("");
+    print_line("");
 }
 
 /// Collect and create an optional first board during line-mode setup.
 fn prompt_create_first_board(pool: &DbPool, reader: &mut dyn BufRead) {
-    crate::logging::console_println("");
+    print_line("");
     let Some(short) = prompt(reader, "Short name (for example, tech):") else {
-        crate::logging::console_println("  Board setup skipped.");
+        print_line("  Board setup skipped.");
         return;
     };
     let Some(name) = prompt(reader, "Display name:") else {
-        crate::logging::console_println("  Board setup skipped.");
+        print_line("  Board setup skipped.");
         return;
     };
-    let description = prompt(reader, "Description (optional):").unwrap_or_default();
-    let nsfw = yes(prompt(reader, "NSFW board? [y/N]:"));
-    let allow_images = !yes(prompt(reader, "Disable image uploads? [y/N]:"));
-    let allow_video = !yes(prompt(reader, "Disable video uploads? [y/N]:"));
-    let allow_audio = yes(prompt(reader, "Enable audio uploads? [y/N]:"));
-    let request = OperationRequest::CreateBoard {
-        short: short.to_ascii_lowercase(),
-        name,
-        description,
-        nsfw,
-        allow_images,
-        allow_video,
-        allow_audio,
+    // Cancellation at any remaining field must not create a board using
+    // defaults for questions the operator never answered.
+    let request = (|| {
+        Some(OperationRequest::CreateBoard {
+            short: short.to_ascii_lowercase(),
+            name,
+            description: prompt(reader, "Description (optional):")?,
+            nsfw: yes(&prompt(reader, "NSFW board? [y/N]:")?),
+            allow_images: !yes(&prompt(reader, "Disable image uploads? [y/N]:")?),
+            allow_video: !yes(&prompt(reader, "Disable video uploads? [y/N]:")?),
+            allow_audio: yes(&prompt(reader, "Enable audio uploads? [y/N]:")?),
+        })
+    })();
+    let Some(request) = request else {
+        print_line("  Board setup skipped.");
+        return;
     };
     match execute(&request, pool) {
-        Ok(message) => crate::logging::console_println(&format!(
+        Ok(message) => print_line(&format!(
             "  {}[OK]{} {message}",
             color("\x1b[32m"),
             color("\x1b[0m")
         )),
-        Err(error) => crate::logging::console_println(&format!(
+        Err(error) => print_line(&format!(
             "  {}[ERROR]{} {error}",
             color("\x1b[31m"),
             color("\x1b[0m")
@@ -360,8 +447,8 @@ fn prompt_create_first_board(pool: &DbPool, reader: &mut dyn BufRead) {
 }
 
 /// Interpret an optional line-mode yes/no answer.
-fn yes(answer: Option<String>) -> bool {
-    answer.is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "y" | "yes"))
+fn yes(answer: &str) -> bool {
+    matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 #[cfg(test)]
@@ -395,5 +482,22 @@ mod tests {
             !format!("{request:?}").contains("not-for-logs"),
             "operation debug output must redact passwords"
         );
+    }
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions verify cancellation before filesystem/database mutation"
+    )]
+    fn first_board_cancellation_does_not_create_from_partial_answers() -> anyhow::Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        for answers in ["tech\nTechnology\n", "tech\nTechnology\nDiscussion\nn\nn\n"] {
+            let mut reader = std::io::Cursor::new(answers);
+            prompt_create_first_board(&pool, &mut reader);
+            let count: i64 = pool
+                .get()?
+                .query_row("SELECT COUNT(*) FROM boards", [], |row| row.get(0))?;
+            assert_eq!(count, 0, "cancelled prompts must not create a board");
+        }
+        Ok(())
     }
 }

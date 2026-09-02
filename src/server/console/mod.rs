@@ -24,6 +24,35 @@ pub use wizard::prompt_create_first_admin;
 /// True while raw mode and the alternate screen are active.
 static RAW_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Whether the first-run line editor owns raw mode (without an alternate screen).
+static LINE_INPUT_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Serialize drawing and restoration, including reentry from a draw panic.
+static TERMINAL_IO: parking_lot::ReentrantMutex<()> = parking_lot::ReentrantMutex::new(());
+
+/// Whether input and drawing still belong to an active console session.
+pub(super) fn is_active() -> bool {
+    RAW_MODE_ACTIVE.load(Ordering::SeqCst)
+}
+
+/// Start raw first-run input under the same panic/exit cleanup as the TUI.
+pub(super) fn start_line_input() -> std::io::Result<()> {
+    let _terminal_guard = TERMINAL_IO.lock();
+    terminal::enable_raw_mode()?;
+    LINE_INPUT_ACTIVE.store(true, Ordering::SeqCst);
+    crate::logging::set_tui_active(true);
+    if let Err(error) = execute!(stdout(), event::EnableBracketedPaste) {
+        cleanup();
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Whether first-run input can continue after a shutdown signal.
+pub(super) fn line_input_active() -> bool {
+    LINE_INPUT_ACTIVE.load(Ordering::SeqCst)
+}
+
 /// Concurrently shared console interaction state.
 pub type SharedConsoleState = Arc<RwLock<ConsoleState>>;
 /// Concurrently shared statistics snapshot.
@@ -42,6 +71,8 @@ pub struct ChanStats {
     pub collection_error: Option<String>,
     /// Process uptime in seconds.
     pub uptime_secs: u64,
+    /// Actual bound HTTP port, including a command-line override.
+    pub http_port: u16,
     /// Total handled requests.
     pub req_count: u64,
     /// Requests handled per second during the latest sample.
@@ -81,6 +112,7 @@ impl Default for ChanStats {
             sampled_at: None,
             collection_error: None,
             uptime_secs: 0,
+            http_port: 8080,
             req_count: 0,
             rps: 0.0,
             in_flight: 0,
@@ -104,11 +136,16 @@ impl Default for ChanStats {
 ///
 /// The compare-and-swap makes repeated cleanup calls safe.
 pub fn cleanup() {
+    let _terminal_guard = TERMINAL_IO.lock();
+    if LINE_INPUT_ACTIVE.swap(false, Ordering::SeqCst) {
+        drop(terminal::disable_raw_mode());
+        drop(execute!(stdout(), event::DisableBracketedPaste));
+        crate::logging::set_tui_active(false);
+    }
     if RAW_MODE_ACTIVE
         .compare_exchange(true, false, Ordering::SeqCst, Ordering::Relaxed)
         .is_ok()
     {
-        crate::logging::set_tui_active(false);
         drop(terminal::disable_raw_mode());
         drop(execute!(
             stdout(),
@@ -116,6 +153,7 @@ pub fn cleanup() {
             terminal::LeaveAlternateScreen,
             cursor::Show
         ));
+        crate::logging::set_tui_active(false);
     }
 }
 
@@ -131,8 +169,10 @@ pub fn cleanup() {
 pub fn start(
     shared_metrics: &SharedStats,
     shared_app: &SharedConsoleState,
-) -> anyhow::Result<(mpsc::UnboundedReceiver<input::KeyEvent>, RedrawSignal)> {
+) -> anyhow::Result<(mpsc::Receiver<input::KeyEvent>, RedrawSignal)> {
+    let _terminal_guard = TERMINAL_IO.lock();
     terminal::enable_raw_mode()?;
+    crate::logging::set_tui_active(true);
     if let Err(error) = execute!(
         stdout(),
         terminal::EnterAlternateScreen,
@@ -146,6 +186,7 @@ pub fn start(
             cursor::Show
         ));
         drop(terminal::disable_raw_mode());
+        crate::logging::set_tui_active(false);
         return Err(error.into());
     }
     RAW_MODE_ACTIVE.store(true, Ordering::SeqCst);
@@ -160,7 +201,7 @@ pub fn start(
         }
     };
     let redraw = Arc::new(Notify::new());
-    let (key_tx, key_rx) = mpsc::unbounded_channel::<input::KeyEvent>();
+    let (key_tx, key_rx) = mpsc::channel::<input::KeyEvent>(256);
     if let Err(error) = input::spawn(key_tx, Arc::clone(&redraw)) {
         cleanup();
         return Err(error.into());
@@ -192,32 +233,47 @@ pub fn start(
             spinner_tick = spinner_tick.wrapping_add(1) % 10;
             snapshot.spinner_tick = spinner_tick;
 
-            let active_screen = app_writer.read().await.screen;
+            let (active_screen, follow_logs) = {
+                let app = app_writer.read().await;
+                (app.screen, app.logs.follow)
+            };
             if active_screen == state::Screen::Logs
+                && (follow_logs || last_log_refresh.is_none())
                 && last_log_refresh
                     .is_none_or(|last: Instant| last.elapsed() >= Duration::from_secs(1))
             {
-                logs = tokio::task::block_in_place(dashboard::load_log_snapshot);
-                last_log_refresh = Some(Instant::now());
+                let next_logs = tokio::task::block_in_place(dashboard::load_log_snapshot);
+                // Input can pause while disk IO is in flight. Do not replace
+                // the snapshot the operator has just chosen to inspect.
+                if app_writer.read().await.logs.follow || last_log_refresh.is_none() {
+                    logs = next_logs;
+                    last_log_refresh = Some(Instant::now());
+                }
             }
 
             let mut app = app_writer.write().await;
             app.expire_notice(Instant::now());
-            app.boards.reconcile(snapshot.board_rows.len());
             animated = matches!(app.dialog, Some(state::Dialog::Progress { .. }))
                 || snapshot.active_uploads > 0;
-            let draw_result = terminal.draw(|frame| {
-                dashboard::render(frame, &app, &snapshot, &logs);
-            });
+            let draw_result = {
+                let _terminal_guard = TERMINAL_IO.lock();
+                if !is_active() {
+                    return;
+                }
+                terminal.draw(|frame| {
+                    dashboard::render(frame, &mut app, &snapshot, &logs);
+                })
+            };
             drop(app);
             if let Err(error) = draw_result {
-                tracing::error!(target: "console", error = %error, "Failed to render console frame");
                 cleanup();
+                tracing::error!(target: "console", error = %error, "Console disabled after render failure");
                 return;
             }
         }
     });
 
+    redraw.notify_one();
     Ok((key_rx, redraw))
 }
 
@@ -243,6 +299,7 @@ pub fn collect_stats(
     prev_threads: &mut i64,
     prev_posts: &mut i64,
     onion_address: Option<String>,
+    http_port: u16,
 ) -> ChanStats {
     let uptime_secs = start.elapsed().as_secs();
     let now = Instant::now();
@@ -258,73 +315,66 @@ pub fn collect_stats(
     let active_ffmpeg_videos = job_queue.active_video_count();
     let online = crate::server::ACTIVE_IPS.len();
 
-    let (boards, threads, posts, db_bytes, board_rows, collection_error) = match pool.get() {
-        Ok(connection) => {
-            let boards = connection
-                .query_row("SELECT COUNT(*) FROM boards", [], |row| row.get(0))
-                .unwrap_or(0);
-            let threads = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM threads WHERE archived = 0",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
-            let posts = connection
-                .query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))
-                .unwrap_or(0);
-            let page_count: i64 = connection
-                .query_row("PRAGMA page_count", [], |row| row.get(0))
-                .unwrap_or(0);
-            let page_size: i64 = connection
-                .query_row("PRAGMA page_size", [], |row| row.get(0))
-                .unwrap_or(4_096);
-            (
-                boards,
-                threads,
-                posts,
-                page_count.saturating_mul(page_size),
-                crate::db::get_per_board_stats(&connection),
-                None,
-            )
-        }
+    let database = match read_database_stats(pool) {
+        Ok(snapshot) => snapshot,
         Err(error) => {
             tracing::warn!(target: "console", error = %error, "Console database metrics unavailable");
-            (
-                -1,
-                -1,
-                -1,
-                -1,
-                Vec::new(),
-                Some("Database metrics are temporarily unavailable.".to_owned()),
-            )
+            ChanStats {
+                boards: -1,
+                threads: -1,
+                posts: -1,
+                db_bytes: -1,
+                collection_error: Some("Database metrics are temporarily unavailable.".to_owned()),
+                ..ChanStats::default()
+            }
         }
     };
 
-    *prev_threads = threads;
-    *prev_posts = posts;
+    *prev_threads = database.threads;
+    *prev_posts = database.posts;
 
     ChanStats {
         is_ready: true,
         sampled_at: Some(now),
-        collection_error,
         uptime_secs,
+        http_port,
         req_count,
         rps,
         in_flight,
         online,
-        boards,
-        threads,
-        posts,
-        db_bytes,
         upload_bytes: dir_size_bytes(&crate::config::CONFIG.upload_dir),
         mem_bytes: process_rss_kb().cast_signed().saturating_mul(1_024),
-        board_rows,
         active_uploads,
         active_ffmpeg_videos,
         spinner_tick: 0,
         onion_address,
+        ..database
     }
+}
+
+/// Read all database metrics from one consistent snapshot, preserving failures.
+fn read_database_stats(pool: &crate::db::DbPool) -> anyhow::Result<ChanStats> {
+    let connection = pool.get()?;
+    let transaction = connection.unchecked_transaction()?;
+    let boards = transaction.query_row("SELECT COUNT(*) FROM boards", [], |row| row.get(0))?;
+    let threads = transaction.query_row(
+        "SELECT COUNT(*) FROM threads WHERE archived = 0",
+        [],
+        |row| row.get(0),
+    )?;
+    let posts = transaction.query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))?;
+    let page_count: i64 = transaction.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+    let page_size: i64 = transaction.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+    let board_rows = crate::db::get_per_board_stats(&transaction)?;
+    transaction.commit()?;
+    Ok(ChanStats {
+        boards,
+        threads,
+        posts,
+        db_bytes: page_count.saturating_mul(page_size),
+        board_rows,
+        ..ChanStats::default()
+    })
 }
 
 /// Return a directory tree's total size as a signed display value.
@@ -379,4 +429,39 @@ fn process_rss_kb() -> u64 {
         }
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions verify that query failures cannot be displayed as healthy zero metrics"
+    )]
+    fn database_snapshot_propagates_schema_and_row_errors() -> anyhow::Result<()> {
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        let pool = r2d2::Pool::builder().max_size(1).build(manager)?;
+        let connection = pool.get()?;
+        connection.execute_batch("CREATE TABLE boards (id INTEGER, short_name TEXT); CREATE TABLE threads (id INTEGER, board_id INTEGER, archived INTEGER); CREATE TABLE posts (id INTEGER, thread_id INTEGER); INSERT INTO boards VALUES (1, 'test');")?;
+        drop(connection);
+        let snapshot = read_database_stats(&pool)?;
+        assert_eq!(snapshot.boards, 1, "healthy board count must be retained");
+        let connection = pool.get()?;
+        connection.execute("UPDATE boards SET short_name = NULL", [])?;
+        drop(connection);
+        assert!(
+            read_database_stats(&pool).is_err(),
+            "a malformed board row must fail the whole snapshot"
+        );
+        let connection = pool.get()?;
+        connection.execute("DROP TABLE posts", [])?;
+        drop(connection);
+        assert!(
+            read_database_stats(&pool).is_err(),
+            "SQL errors must not turn into healthy zero counts"
+        );
+        Ok(())
+    }
 }

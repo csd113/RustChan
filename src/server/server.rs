@@ -1271,6 +1271,14 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     };
     tracing::info!(target: "server", path = %data_dir.display(), "Data directory");
 
+    // Install shutdown handling before raw first-run input can begin.
+    let signal_cancel = worker_cancel.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        signal_cancel.cancel();
+        super::console::cleanup();
+    });
+
     let has_interactive_console = crate::logging::is_tty() && std::io::stdin().is_terminal();
 
     // First-run admin wizard: if no admin accounts exist and both terminal
@@ -1285,7 +1293,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
             // The lock is released when `reader` drops at the end of this block,
             // before spawn_keyboard_handler acquires its own stdin lock below.
             let mut reader = std::io::BufReader::new(stdin.lock());
-            super::console::prompt_create_first_admin(&pool, &mut reader);
+            super::console::prompt_create_first_admin(&pool, &mut reader, &worker_cancel);
         } else {
             tracing::warn!(
                 target: "startup",
@@ -1294,13 +1302,23 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         }
     }
 
+    if worker_cancel.is_cancelled() {
+        return Ok(());
+    }
+
     // Start the full-screen console only when stdout is an interactive terminal.
     // Headless service processes retain the regular logging and signal-driven
     // shutdown path without touching raw mode, stdin, or terminal capabilities.
     let console_runtime = if has_interactive_console {
-        let shared_stats: super::console::SharedStats = Arc::new(tokio::sync::RwLock::new(
-            super::console::ChanStats::default(),
-        ));
+        let http_port = match &plaintext_server {
+            Some((listener, _)) => listener.local_addr()?.port(),
+            None => bind_port,
+        };
+        let shared_stats: super::console::SharedStats =
+            Arc::new(tokio::sync::RwLock::new(super::console::ChanStats {
+                http_port,
+                ..super::console::ChanStats::default()
+            }));
         let console_state: super::console::SharedConsoleState =
             Arc::new(tokio::sync::RwLock::new(ConsoleState::default()));
         let force_reload_notify = Arc::new(tokio::sync::Notify::new());
@@ -1343,6 +1361,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                             &mut prev_threads,
                             &mut prev_posts,
                             onion,
+                            http_port,
                         )
                     });
                     *stats_w.write().await = snap;
@@ -1380,12 +1399,31 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         let operation_pool = pool.clone();
         tokio::spawn(async move {
             loop {
-                let next_key = key_rx.recv().await;
-                let Some(key) = next_key else {
-                    break;
+                let next_key = tokio::select! {
+                    biased;
+                    () = cancel_d.cancelled() => {
+                        super::console::cleanup();
+                        return;
+                    }
+                    key = key_rx.recv() => key,
                 };
-                let board_count = metrics.read().await.board_rows.len();
-                let action = console.write().await.handle_key(&key, board_count);
+                let Some(key) = next_key else {
+                    super::console::cleanup();
+                    return;
+                };
+                if !super::console::is_active() || cancel_d.is_cancelled() {
+                    return;
+                }
+                let size = crossterm::terminal::size().unwrap_or((0, 0));
+                let board_rows = metrics.read().await.board_rows.clone();
+                let action = {
+                    let mut app = console.write().await;
+                    if !super::console::is_active() || cancel_d.is_cancelled() {
+                        return;
+                    }
+                    app.boards.reconcile_rows(&board_rows);
+                    app.handle_key(&key, board_rows.len(), size)
+                };
                 redraw.notify_one();
 
                 match action {
@@ -1425,10 +1463,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
                             redraw_after_work.notify_one();
                         });
                     }
-                }
-
-                if cancel_d.is_cancelled() {
-                    break;
                 }
             }
         });
@@ -1588,10 +1622,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     }
 
     let runtime_result = tokio::select! {
-        () = shutdown_signal() => {
-            worker_cancel.cancel();
-            Ok(())
-        }
         () = wait_shutdown.cancelled() => Ok(()),
         result = next_listener_exit(&mut listener_tasks, &worker_cancel) => result,
     };

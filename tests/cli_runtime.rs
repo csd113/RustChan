@@ -609,3 +609,62 @@ async fn direct_https_process_exposes_only_https_and_redirect_with_secure_login_
     );
     Ok(())
 }
+
+#[cfg(all(feature = "tls-self-signed", unix))]
+#[tokio::test]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "assertions verify the headless server never enters interactive setup or raw terminal mode"
+)]
+async fn headless_server_without_admin_never_starts_console_input() -> Result<()> {
+    drop(rustls::crypto::ring::default_provider().install_default());
+    let root = tempfile::tempdir()?;
+    let binary = copy_cli_to_empty_bin(root.path())?;
+    let data_dir = root.path().join("headless-data");
+    std::fs::create_dir(&data_dir)?;
+    let (_main_reservation, main_port) = reserve_loopback_port()?;
+    let (https_reservation, https_port) = reserve_loopback_port()?;
+    let (redirect_reservation, redirect_port) = reserve_loopback_port()?;
+    write_tls_settings(&data_dir, main_port, https_port, redirect_port)?;
+    let data_dir_text = data_dir.to_str().context("temporary path is not UTF-8")?;
+    // Initialize an account-free database before the readiness deadline, just
+    // as the login lifecycle test initializes its administrator beforehand.
+    let initialized = run_cli(
+        &binary,
+        &["--data-dir", data_dir_text, "admin", "list-boards"],
+        root.path(),
+    )?;
+    assert!(
+        initialized.status.success(),
+        "initialize headless test data"
+    );
+    drop((https_reservation, redirect_reservation));
+    let log_path = root.path().join("headless.log");
+    let mut process = spawn_tls_process(&binary, data_dir_text, root.path(), main_port, &log_path)?;
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()?;
+    wait_for_https_admin(
+        &client,
+        &format!("https://127.0.0.1:{https_port}/admin"),
+        &mut process,
+        &log_path,
+    )
+    .await?;
+    assert!(
+        process.terminate_gracefully(&log_path).await?.success(),
+        "headless server must shut down cleanly"
+    );
+    let log = read_log(&log_path);
+    assert!(
+        log.contains("No admin accounts exist"),
+        "headless setup must provide CLI guidance"
+    );
+    assert!(
+        !log.contains("Username:") && !log.contains("\x1b[?1049") && !log.contains("\x1b[?2004"),
+        "headless startup must not prompt, enter the alternate screen, or enable bracketed paste"
+    );
+    Ok(())
+}

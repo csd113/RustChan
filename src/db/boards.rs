@@ -948,11 +948,16 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<super::Delet
 
 // Per-board stats (terminal display)
 /// Per-board thread and post counts for the terminal stats display.
-pub fn get_per_board_stats(conn: &rusqlite::Connection) -> Vec<(String, i64, i64)> {
+///
+/// # Errors
+/// Returns an error if any board statistic cannot be read.
+pub fn get_per_board_stats(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<Vec<(String, i64, i64)>> {
     // Replace N+1 correlated subqueries (2 subqueries × boards)
     // with a single LEFT JOIN … GROUP BY pass. For a forum with 20 boards the
     // old query executed 41 SQL statements; this executes 1.
-    let Ok(mut stmt) = conn.prepare(
+    let mut stmt = conn.prepare(
         "SELECT b.short_name, \
                 COUNT(DISTINCT t.id) AS tc, \
                 COUNT(DISTINCT p.id) AS pc \
@@ -961,18 +966,15 @@ pub fn get_per_board_stats(conn: &rusqlite::Connection) -> Vec<(String, i64, i64
          LEFT JOIN posts   p ON p.thread_id = t.id \
          GROUP BY b.id \
          ORDER BY b.short_name",
-    ) else {
-        return vec![];
-    };
-    stmt.query_map([], |row| {
+    )?;
+    let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, i64>(1)?,
             row.get::<_, i64>(2)?,
         ))
-    })
-    .map(|rows| rows.flatten().collect())
-    .unwrap_or_default()
+    })?;
+    rows.collect()
 }
 
 // Site statistics

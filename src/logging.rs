@@ -114,6 +114,10 @@ static TOR_DESCRIPTOR_TIMEOUT_LIMITER: LazyLock<parking_lot::Mutex<TorDescriptor
 
 /// Records whether the full-screen terminal interface currently owns stdout.
 pub fn set_tui_active(active: bool) {
+    // Let an in-flight log writer finish before the console takes the screen.
+    // Cleanup must remain lock-free here: a panic hook may run from a writer
+    // that already holds CONSOLE_MUTEX.
+    let _guard = active.then(|| CONSOLE_MUTEX.lock());
     TUI_ACTIVE.store(active, Ordering::SeqCst);
 }
 

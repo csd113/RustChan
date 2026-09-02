@@ -9,6 +9,12 @@ const NOTICE_TTL: Duration = Duration::from_secs(8);
 /// Maximum character count accepted by a password field.
 const MAX_PASSWORD_CHARS: usize = 256;
 
+/// Whether the terminal can display the console and its dialogs.
+#[must_use]
+pub const fn terminal_is_usable(width: u16, height: u16) -> bool {
+    width >= 44 && height >= 14
+}
+
 /// Primary console destination.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Screen {
@@ -80,9 +86,27 @@ impl Notice {
 pub struct BoardListState {
     /// Selected row, when at least one board exists.
     pub selected: Option<usize>,
+    /// Identity retained across statistics refreshes.
+    pub selected_short: Option<String>,
+    /// Number of rows visible in the latest frame.
+    pub visible_rows: usize,
 }
 
 impl BoardListState {
+    /// Keep the selected board stable when rows are inserted or removed.
+    pub fn reconcile_rows(&mut self, rows: &[(String, i64, i64)]) {
+        if let Some(short) = &self.selected_short {
+            if let Some(index) = rows.iter().position(|(name, _, _)| name == short) {
+                self.selected = Some(index);
+            }
+        }
+        self.reconcile(rows.len());
+        self.selected_short = self
+            .selected
+            .and_then(|index| rows.get(index))
+            .map(|row| row.0.clone());
+    }
+
     /// Reconcile selection after the backing row count changes.
     pub fn reconcile(&mut self, row_count: usize) {
         self.selected = match (self.selected, row_count) {
@@ -94,6 +118,7 @@ impl BoardListState {
 
     /// Move the selection by one row without wrapping.
     fn move_by(&mut self, delta: i32, row_count: usize) {
+        self.selected_short = None;
         self.reconcile(row_count);
         let Some(selected) = self.selected else {
             return;
@@ -107,17 +132,18 @@ impl BoardListState {
 
     /// Move the selection by a page-sized distance.
     fn page_by(&mut self, delta: i32, row_count: usize) {
-        const PAGE: usize = 10;
+        let page = self.visible_rows.max(1);
+        self.selected_short = None;
         self.reconcile(row_count);
         let Some(selected) = self.selected else {
             return;
         };
         self.selected = if delta.is_negative() {
-            Some(selected.saturating_sub(PAGE))
+            Some(selected.saturating_sub(page))
         } else {
             Some(
                 selected
-                    .saturating_add(PAGE)
+                    .saturating_add(page)
                     .min(row_count.saturating_sub(1)),
             )
         };
@@ -133,6 +159,8 @@ pub struct LogViewState {
     pub horizontal_offset: u16,
     /// Whether newly appended lines keep the view pinned to the end.
     pub follow: bool,
+    /// Height of the most recently rendered log viewport.
+    pub visible_rows: usize,
 }
 
 impl Default for LogViewState {
@@ -141,6 +169,7 @@ impl Default for LogViewState {
             rows_from_bottom: 0,
             horizontal_offset: 0,
             follow: true,
+            visible_rows: 10,
         }
     }
 }
@@ -486,7 +515,20 @@ impl FormState {
 
     /// Insert sanitized pasted content into the focused text field.
     fn insert_paste(&mut self, content: &str) {
-        for character in content.chars().filter(|character| !character.is_control()) {
+        let Some(field) = self.focused_field() else {
+            return;
+        };
+        let Some(value) = field.text_value() else {
+            return;
+        };
+        let remaining = field.max_chars.saturating_sub(value.chars().count());
+        // One excess character supplies the existing length error without
+        // repeatedly allocating it for the rest of a large clipboard.
+        for character in content
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(remaining + 1)
+        {
             self.insert_char(character);
         }
     }
@@ -669,6 +711,10 @@ pub struct ConsoleState {
     pub boards: BoardListState,
     /// Log scrolling and follow mode.
     pub logs: LogViewState,
+    /// Vertical viewport for overview panels on short terminals.
+    pub overview_scroll: u16,
+    /// Vertical viewport for the keyboard reference.
+    pub help_scroll: u16,
 }
 
 impl ConsoleState {
@@ -703,9 +749,20 @@ impl ConsoleState {
     }
 
     /// Route one input event and return any side effect for the server runtime.
-    pub fn handle_key(&mut self, key: &KeyEvent, board_count: usize) -> ConsoleAction {
+    pub fn handle_key(
+        &mut self,
+        key: &KeyEvent,
+        board_count: usize,
+        size: (u16, u16),
+    ) -> ConsoleAction {
         if matches!(key, KeyEvent::ForceQuit) {
             return ConsoleAction::Shutdown { forced: true };
+        }
+
+        // A hidden form or confirmation must never accept input. Retain its
+        // state until a usable terminal is restored; Ctrl-C remains available.
+        if !terminal_is_usable(size.0, size.1) {
+            return ConsoleAction::None;
         }
 
         if let Some(dialog) = self.dialog.take() {
@@ -746,6 +803,9 @@ impl ConsoleState {
                     self.screen = Screen::Dashboard;
                 }
             }
+            KeyEvent::RepeatCharacter(character) => {
+                self.handle_screen_key(&KeyEvent::Character(*character), board_count);
+            }
             _ => self.handle_screen_key(key, board_count),
         }
         ConsoleAction::None
@@ -762,7 +822,7 @@ impl ConsoleState {
                 _ => self.dialog = Some(dialog),
             },
             Dialog::ConfirmDelete { thread_id } => match key {
-                KeyEvent::Enter | KeyEvent::Character('y' | 'Y') => {
+                KeyEvent::Character('y' | 'Y') => {
                     let request = OperationRequest::DeleteThread {
                         thread_id: *thread_id,
                     };
@@ -814,12 +874,14 @@ impl ConsoleState {
                 KeyEvent::PageUp => self.boards.page_by(-1, board_count),
                 KeyEvent::PageDown => self.boards.page_by(1, board_count),
                 KeyEvent::Home => {
+                    self.boards.selected_short = None;
                     self.boards.reconcile(board_count);
                     if board_count > 0 {
                         self.boards.selected = Some(0);
                     }
                 }
                 KeyEvent::End => {
+                    self.boards.selected_short = None;
                     self.boards.reconcile(board_count);
                     if board_count > 0 {
                         self.boards.selected = Some(board_count.saturating_sub(1));
@@ -836,11 +898,17 @@ impl ConsoleState {
                     self.logs.rows_from_bottom = self.logs.rows_from_bottom.saturating_sub(1);
                 }
                 KeyEvent::PageUp => {
-                    self.logs.rows_from_bottom = self.logs.rows_from_bottom.saturating_add(10);
+                    self.logs.rows_from_bottom = self
+                        .logs
+                        .rows_from_bottom
+                        .saturating_add(self.logs.visible_rows.max(1));
                     self.logs.follow = false;
                 }
                 KeyEvent::PageDown => {
-                    self.logs.rows_from_bottom = self.logs.rows_from_bottom.saturating_sub(10);
+                    self.logs.rows_from_bottom = self
+                        .logs
+                        .rows_from_bottom
+                        .saturating_sub(self.logs.visible_rows.max(1));
                 }
                 KeyEvent::Left => {
                     self.logs.horizontal_offset = self.logs.horizontal_offset.saturating_sub(4);
@@ -855,7 +923,26 @@ impl ConsoleState {
                 }
                 _ => {}
             },
-            Screen::Dashboard | Screen::Help => {}
+            Screen::Dashboard | Screen::Help => {
+                let offset = if self.screen == Screen::Help {
+                    &mut self.help_scroll
+                } else {
+                    &mut self.overview_scroll
+                };
+                match key {
+                    KeyEvent::Up | KeyEvent::Character('k' | 'K') => {
+                        *offset = offset.saturating_sub(1);
+                    }
+                    KeyEvent::Down | KeyEvent::Character('j' | 'J') => {
+                        *offset = offset.saturating_add(1);
+                    }
+                    KeyEvent::PageUp => *offset = offset.saturating_sub(10),
+                    KeyEvent::PageDown => *offset = offset.saturating_add(10),
+                    KeyEvent::Home => *offset = 0,
+                    KeyEvent::End => *offset = u16::MAX,
+                    _ => {}
+                }
+            }
         }
     }
 }
@@ -1002,7 +1089,9 @@ fn handle_form_key(form: &mut FormState, key: &KeyEvent) -> Option<FormAction> {
         {
             form.toggle_focused();
         }
-        KeyEvent::Character(character) => form.insert_char(*character),
+        KeyEvent::Character(character) | KeyEvent::RepeatCharacter(character) => {
+            form.insert_char(*character);
+        }
         KeyEvent::Paste(content) => form.insert_paste(content),
         KeyEvent::Enter => {
             let final_field = form.focused.saturating_add(1) >= form.fields.len();
@@ -1046,7 +1135,7 @@ mod tests {
             ..ConsoleState::default()
         };
 
-        let action = state.handle_key(&KeyEvent::Escape, 0);
+        let action = state.handle_key(&KeyEvent::Escape, 0, (80, 24));
 
         assert_eq!(
             action,
@@ -1063,7 +1152,10 @@ mod tests {
 
     #[test]
     fn board_selection_stays_valid_when_rows_change() {
-        let mut selection = BoardListState { selected: Some(8) };
+        let mut selection = BoardListState {
+            selected: Some(8),
+            ..BoardListState::default()
+        };
 
         selection.reconcile(3);
         assert_eq!(
@@ -1083,7 +1175,7 @@ mod tests {
             ..ConsoleState::default()
         };
 
-        state.handle_key(&KeyEvent::PageUp, 0);
+        state.handle_key(&KeyEvent::PageUp, 0, (80, 24));
         assert!(
             !state.logs.follow,
             "manual scrolling should pause follow mode"
@@ -1093,7 +1185,7 @@ mod tests {
             "page-up should move ten rows"
         );
 
-        state.handle_key(&KeyEvent::End, 0);
+        state.handle_key(&KeyEvent::End, 0, (80, 24));
         assert!(state.logs.follow, "end should resume follow mode");
         assert_eq!(
             state.logs.rows_from_bottom, 0,
@@ -1123,7 +1215,7 @@ mod tests {
     #[test]
     fn delete_thread_uses_a_separate_destructive_confirmation() {
         let mut state = ConsoleState::default();
-        state.handle_key(&KeyEvent::Character('d'), 0);
+        state.handle_key(&KeyEvent::Character('d'), 0, (80, 24));
         let form_dialog = state.dialog.take();
         assert!(
             matches!(&form_dialog, Some(Dialog::Form(_))),
@@ -1135,7 +1227,7 @@ mod tests {
         type_text(&mut form, "42");
         state.dialog = Some(Dialog::Form(form));
 
-        let action = state.handle_key(&KeyEvent::Submit, 0);
+        let action = state.handle_key(&KeyEvent::Submit, 0, (80, 24));
 
         assert_eq!(
             action,
@@ -1161,5 +1253,170 @@ mod tests {
         let result = form.request();
 
         assert_eq!(result, Err("Passwords do not match.".to_owned()));
+    }
+    #[test]
+    fn hidden_dialogs_reject_input_but_allow_ctrl_c() {
+        let mut state = ConsoleState {
+            dialog: Some(Dialog::ConfirmDelete { thread_id: 42 }),
+            ..ConsoleState::default()
+        };
+        for size in [(40, 10), (120, 2), (1, 100)] {
+            assert_eq!(
+                state.handle_key(&KeyEvent::Character('y'), 0, size),
+                ConsoleAction::None,
+                "a hidden confirmation must not delete"
+            );
+            assert_eq!(
+                state.dialog,
+                Some(Dialog::ConfirmDelete { thread_id: 42 }),
+                "resize must preserve the pending identity"
+            );
+        }
+        assert_eq!(
+            state.handle_key(&KeyEvent::ForceQuit, 0, (0, 0)),
+            ConsoleAction::Shutdown { forced: true },
+            "Ctrl-C must work at every size"
+        );
+    }
+
+    #[test]
+    fn repeated_enter_cannot_accept_destructive_confirmation() {
+        let mut state = ConsoleState::default();
+        for key in [
+            KeyEvent::Character('d'),
+            KeyEvent::Paste("42".to_owned()),
+            KeyEvent::Enter,
+            KeyEvent::Enter,
+            KeyEvent::RepeatCharacter('y'),
+        ] {
+            assert_eq!(
+                state.handle_key(&key, 0, (80, 24)),
+                ConsoleAction::None,
+                "submission must wait for an explicit confirmation key"
+            );
+        }
+        let request = OperationRequest::DeleteThread { thread_id: 42 };
+        assert_eq!(
+            state.handle_key(&KeyEvent::Character('y'), 0, (80, 24)),
+            ConsoleAction::Submit(request),
+            "only the confirmed thread should be submitted"
+        );
+        for key in [
+            KeyEvent::Enter,
+            KeyEvent::Character('y'),
+            KeyEvent::Character('d'),
+            KeyEvent::Escape,
+        ] {
+            assert_eq!(
+                state.handle_key(&key, 0, (80, 24)),
+                ConsoleAction::None,
+                "progress must prevent duplicate operations"
+            );
+            assert!(
+                matches!(state.dialog, Some(Dialog::Progress { .. })),
+                "in-flight operation must retain its progress state"
+            );
+        }
+    }
+
+    #[test]
+    fn board_selection_tracks_identity_and_page_height() {
+        let mut boards = BoardListState {
+            selected: Some(1),
+            visible_rows: 3,
+            ..BoardListState::default()
+        };
+        boards.reconcile_rows(&[("b".to_owned(), 0, 0), ("c".to_owned(), 0, 0)]);
+        boards.reconcile_rows(&[
+            ("a".to_owned(), 0, 0),
+            ("b".to_owned(), 0, 0),
+            ("c".to_owned(), 0, 0),
+        ]);
+        assert_eq!(
+            boards.selected,
+            Some(2),
+            "inserting a board must not change the selected board"
+        );
+        boards.page_by(-1, 3);
+        assert_eq!(
+            boards.selected,
+            Some(0),
+            "page navigation must use the visible height"
+        );
+        boards.reconcile_rows(&[]);
+        assert!(
+            boards.selected.is_none() && boards.selected_short.is_none(),
+            "empty snapshots must clear selection identity"
+        );
+    }
+
+    #[test]
+    fn form_editing_preserves_unicode_and_limits_large_paste() {
+        let mut form = FormState::new(FormKind::CreateBoard);
+        form.move_focus(false);
+        form.insert_paste("a界e\u{301}🦀");
+        form.move_cursor(false);
+        form.backspace();
+        form.delete();
+        assert_eq!(
+            form.text(FormFieldId::BoardName),
+            Ok("a界e"),
+            "editing must remove complete Unicode scalar values"
+        );
+        form.move_cursor_to_edge(false);
+        form.insert_paste("Z\r\n");
+        assert_eq!(
+            form.text(FormFieldId::BoardName),
+            Ok("Za界e"),
+            "paste must not inject terminal controls"
+        );
+        form.clear_text();
+        form.insert_paste(&"界".repeat(100_000));
+        assert_eq!(
+            form.text(FormFieldId::BoardName)
+                .map(|value| value.chars().count()),
+            Ok(80),
+            "large paste must respect the field limit"
+        );
+        assert!(
+            form.error.is_some(),
+            "overflow must report the length limit"
+        );
+    }
+
+    #[test]
+    fn form_focus_and_repeat_keys_do_not_trigger_global_actions() {
+        let mut state = ConsoleState::default();
+        state.handle_key(&KeyEvent::RepeatCharacter('a'), 0, (80, 24));
+        assert!(
+            state.dialog.is_none(),
+            "a held action key must not reopen forms"
+        );
+        state.handle_key(&KeyEvent::Character('a'), 0, (80, 24));
+        for key in [
+            KeyEvent::BackTab,
+            KeyEvent::RepeatCharacter('q'),
+            KeyEvent::Character('1'),
+        ] {
+            state.handle_key(&key, 0, (80, 24));
+        }
+        assert!(
+            matches!(state.dialog, Some(Dialog::Form(_))),
+            "form must retain focus"
+        );
+        let Some(Dialog::Form(form)) = &state.dialog else {
+            return;
+        };
+        assert_eq!(form.focused, 2, "back-tab must wrap to the final field");
+        assert_eq!(
+            form.text(FormFieldId::AdminPasswordConfirm),
+            Ok("q1"),
+            "global shortcuts and repeated text belong to the focused field"
+        );
+        state.handle_key(&KeyEvent::Escape, 0, (80, 24));
+        assert!(
+            state.dialog.is_none(),
+            "escape must cancel without submission"
+        );
     }
 }

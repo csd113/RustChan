@@ -11,6 +11,8 @@ use tokio::sync::{mpsc, Notify};
 pub enum KeyEvent {
     /// Printable character.
     Character(char),
+    /// Auto-repeated text, usable for editing but not global/modal actions.
+    RepeatCharacter(char),
     /// Bracketed-paste content.
     Paste(String),
     /// Confirm or advance.
@@ -88,8 +90,29 @@ const fn map_key(code: KeyCode, modifiers: KeyModifiers) -> Option<KeyEvent> {
 /// Convert a raw terminal event into a state-machine event.
 fn map_event(event: Event) -> Option<KeyEvent> {
     match event {
-        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+        Event::Key(key) if key.kind == KeyEventKind::Press => map_key(key.code, key.modifiers),
+        Event::Key(key)
+            if key.kind == KeyEventKind::Repeat
+                && matches!(
+                    key.code,
+                    KeyCode::Up
+                        | KeyCode::Down
+                        | KeyCode::Left
+                        | KeyCode::Right
+                        | KeyCode::PageUp
+                        | KeyCode::PageDown
+                        | KeyCode::Backspace
+                        | KeyCode::Delete
+                ) =>
+        {
             map_key(key.code, key.modifiers)
+        }
+        Event::Key(key) if key.kind == KeyEventKind::Repeat => {
+            match map_key(key.code, key.modifiers) {
+                Some(KeyEvent::Character(character)) => Some(KeyEvent::RepeatCharacter(character)),
+                Some(KeyEvent::ForceQuit) => Some(KeyEvent::ForceQuit),
+                _ => None,
+            }
         }
         Event::Paste(content) => Some(KeyEvent::Paste(content)),
         Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => Some(KeyEvent::Resize),
@@ -105,19 +128,27 @@ fn map_event(event: Event) -> Option<KeyEvent> {
 /// # Errors
 ///
 /// Returns an error if the operating system refuses to create the thread.
-pub fn spawn(tx: mpsc::UnboundedSender<KeyEvent>, redraw: Arc<Notify>) -> std::io::Result<()> {
+pub fn spawn(tx: mpsc::Sender<KeyEvent>, redraw: Arc<Notify>) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("console-input".into())
         .spawn(move || loop {
+            if tx.is_closed() || !super::is_active() {
+                break;
+            }
             match event::poll(std::time::Duration::from_millis(50)) {
                 Ok(true) => {
-                    let Ok(event) = event::read() else {
-                        break;
+                    let event = match event::read() {
+                        Ok(event) => event,
+                        Err(error) => {
+                            super::cleanup();
+                            tracing::error!(target: "console", %error, "Console input disconnected");
+                            break;
+                        }
                     };
                     let Some(mapped) = map_event(event) else {
                         continue;
                     };
-                    if tx.send(mapped).is_err() {
+                    if tx.blocking_send(mapped).is_err() {
                         break;
                     }
                     redraw.notify_one();
@@ -127,7 +158,11 @@ pub fn spawn(tx: mpsc::UnboundedSender<KeyEvent>, redraw: Arc<Notify>) -> std::i
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(error) => {
+                    super::cleanup();
+                    tracing::error!(target: "console", %error, "Console input disconnected");
+                    break;
+                }
             }
         })?;
     Ok(())
@@ -166,6 +201,27 @@ mod tests {
             map_key(KeyCode::Char('q'), KeyModifiers::ALT),
             None,
             "Alt-modified input should not trigger global actions"
+        );
+    }
+    #[test]
+    fn key_releases_and_repeated_confirmation_keys_cannot_submit() {
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let key = event::KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, kind);
+            assert_eq!(
+                map_event(Event::Key(key)),
+                None,
+                "only a fresh Enter press may submit"
+            );
+        }
+        let key = event::KeyEvent::new_with_kind(
+            KeyCode::Char('y'),
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        );
+        assert_eq!(
+            map_event(Event::Key(key)),
+            Some(KeyEvent::RepeatCharacter('y')),
+            "repeated text must retain its editing-only classification"
         );
     }
 }
