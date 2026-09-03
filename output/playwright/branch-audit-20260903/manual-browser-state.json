@@ -1,0 +1,139 @@
+{
+  "cookies": [
+    {
+      "name": "rustchan_visitor_id",
+      "value": "39d42a3b7c0ab53ad597ac2e0c4f81262d49b8d41533bb66084d91cc4634b773",
+      "domain": "127.0.0.1",
+      "path": "/",
+      "expires": 1819948685.719487,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "chan_admin_session",
+      "value": "4ac09a1945c2bf16392015a24624156d24a0ea860060e6d7332fcb48a672db20",
+      "domain": "127.0.0.1",
+      "path": "/",
+      "expires": 1788441589.191798,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "audit_unrelated",
+      "value": "preserve-me",
+      "domain": "127.0.0.1",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "csrf_token",
+      "value": "7f86e19f82c26945ba62c51599dd3bddaa19a45ec1710b1763703ba0e3df7563",
+      "domain": "127.0.0.1",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Strict"
+    },
+    {
+      "name": "rustchan_theme",
+      "value": "blue-sky",
+      "domain": "127.0.0.1",
+      "path": "/",
+      "expires": 1819948884.359,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "rustchan_preferred_view",
+      "value": "catalog",
+      "domain": "127.0.0.1",
+      "path": "/",
+      "expires": 1819948884.359,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "rustchan_video_audio",
+      "value": "on",
+      "domain": "127.0.0.1",
+      "path": "/",
+      "expires": 1819948884.359,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "rustchan_activity_badges",
+      "value": "1",
+      "domain": "127.0.0.1",
+      "path": "/",
+      "expires": 1819948884.359,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "rustchan_hide_nsfw",
+      "value": "0",
+      "domain": "127.0.0.1",
+      "path": "/",
+      "expires": 1819948884.359,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "rustchan_owned_posts",
+      "value": "7b226772616e7473223a5b7b22706f73745f6964223a362c227468726561645f6964223a322c22626f6172645f73686f7274223a22636f6d626f222c2264656c6574696f6e5f746f6b656e223a223539613639303534393839346534666439646563373337376231623165626166222c22657870697265735f6174223a313738383431333432327d2c7b22706f73745f6964223a352c227468726561645f6964223a312c22626f6172645f73686f7274223a226175646974222c2264656c6574696f6e5f746f6b656e223a223065363563396630363435373938653763323133623364643236343030323665222c22657870697265735f6174223a313738383431333337327d5d7d.bc7e61c4b8f665cba40c5b0530af7112d010f912bba23b9ea6ad8c7de62c9f0c",
+      "domain": "127.0.0.1",
+      "path": "/",
+      "expires": 1788413662.840062,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "rustchan_thread_activity",
+      "value": "v1%7C2.0.1788413362%7C1.4.1788413312",
+      "domain": "127.0.0.1",
+      "path": "/",
+      "expires": 1803965362.873226,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "rustchan_board_activity",
+      "value": "v1%7C3.1788413362.2.1788413362%7C1.1788412725.1.1788413312",
+      "domain": "127.0.0.1",
+      "path": "/",
+      "expires": 1803965362.873269,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    }
+  ],
+  "origins": [
+    {
+      "origin": "http://127.0.0.1:62305",
+      "localStorage": [
+        {
+          "name": "rustchan_my_posts_audit_1",
+          "value": "[2]"
+        },
+        {
+          "name": "rustchan_theme",
+          "value": "blue-sky"
+        }
+      ]
+    }
+  ]
+}

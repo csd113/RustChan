@@ -1,0 +1,79 @@
+- generic [ref=f16e1]:
+  - banner [ref=f16e2]:
+    - generic [ref=f16e3]: RustChan Branch Audit
+    - link "⌂ Home" [ref=f16e4] [cursor=pointer]:
+      - /url: /
+    - group [ref=f16e5]:
+      - generic "Open board menu" [ref=f16e6] [cursor=pointer]:
+        - generic [ref=f16e7]: Boards
+        - text: ▾
+    - generic [ref=f16e9]:
+      - textbox "search /combo/" [ref=f16e10]:
+        - /placeholder: search /combo/…
+      - button "go" [ref=f16e11] [cursor=pointer]
+  - main [ref=f16e12]:
+    - generic [ref=f16e13]:
+      - generic [ref=f16e14]: ■ ADMIN
+      - button "logout" [ref=f16e16] [cursor=pointer]
+    - generic [ref=f16e17]:
+      - heading "/combo/ — Audio and Image" [level=1] [ref=f16e18]
+      - paragraph [ref=f16e19]: Two supported upload slots
+    - generic [ref=f16e20]:
+      - link "[Index]" [ref=f16e21] [cursor=pointer]:
+        - /url: /combo
+      - link "[Catalog]" [ref=f16e22] [cursor=pointer]:
+        - /url: /combo/catalog
+      - link "[Archive]" [ref=f16e23] [cursor=pointer]:
+        - /url: /combo/archive
+    - link "[ Post a New Thread ]" [expanded] [active] [ref=f16e25] [cursor=pointer]:
+      - /url: "#post-form-wrap"
+    - generic [ref=f16e34]:
+      - generic [ref=f16e35]: "[ new thread ]"
+      - table [ref=f16e37]:
+        - rowgroup [ref=f16e38]:
+          - row [ref=f16e39]:
+            - cell [ref=f16e40]:
+              - textbox "name Name" [ref=f16e42]:
+                - /placeholder: Anonymous
+          - row [ref=f16e43]:
+            - cell [ref=f16e44]:
+              - generic [ref=f16e45]: Subject
+              - textbox "subject Subject" [ref=f16e46]
+              - button "post thread" [ref=f16e47] [cursor=pointer]
+          - row [ref=f16e48]:
+            - cell "Body >green **bold** __italic__ [spoiler]text[/spoiler] >>123 >>>/b/123 :fire:" [ref=f16e49]:
+              - generic [ref=f16e50]: Body
+              - textbox "body Body" [ref=f16e51]
+              - generic [ref=f16e52]:
+                - generic "Greentext" [ref=f16e53]: ">green"
+                - generic "Bold" [ref=f16e54]: "**bold**"
+                - generic "Italic" [ref=f16e55]: __italic__
+                - generic "Spoiler" [ref=f16e56]: "[spoiler]text[/spoiler]"
+                - generic "Reply" [ref=f16e57]: ">>123"
+                - generic "Cross-thread" [ref=f16e58]: ">>>/b/123"
+                - generic "Emoji" [ref=f16e59]: ":fire:"
+          - row [ref=f16e60]:
+            - cell [ref=f16e61]:
+              - generic [ref=f16e62]: Audio
+              - button "audio Audio" [ref=f16e63] [cursor=pointer]
+              - text: mp3/ogg/oga/opus/flac/wav/m4a/aac/webm · max 150 MiB
+              - group [ref=f16e64]:
+                - generic "Show optional image upload" [ref=f16e65] [cursor=pointer]: ▾ Optional Image
+          - row [ref=f16e66]:
+            - cell "Poll" [ref=f16e67]:
+              - group [ref=f16e69]:
+                - generic "[ 📊 Add a Poll to this thread ]" [ref=f16e70] [cursor=pointer]
+                - option "Hours" [selected]
+                - option "Minutes"
+                - option "Days"
+  - contentinfo [ref=f16e26]:
+    - paragraph [ref=f16e27]:
+      - text: RustChan Branch Audit —
+      - link "home" [ref=f16e28] [cursor=pointer]:
+        - /url: /
+      - text: ·
+      - link "Administrator login" [ref=f16e29] [cursor=pointer]:
+        - /url: /admin
+        - text: admin
+    - group [ref=f16e31]:
+      - generic "⚙ User Preferences" [ref=f16e32] [cursor=pointer]

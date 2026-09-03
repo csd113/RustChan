@@ -1,0 +1,71 @@
+{
+  "status": "PASS",
+  "checks": [
+    {
+      "name": "save retention of two full backups through admin HTTP",
+      "detail": 303
+    },
+    {
+      "name": "create full backup 1",
+      "detail": 303
+    },
+    {
+      "name": "new backup appears immediately in listing 1",
+      "detail": 1
+    },
+    {
+      "name": "create full backup 2",
+      "detail": 303
+    },
+    {
+      "name": "new backup appears immediately in listing 2",
+      "detail": 2
+    },
+    {
+      "name": "create full backup 3",
+      "detail": 303
+    },
+    {
+      "name": "new backup appears immediately in listing 3",
+      "detail": 2
+    },
+    {
+      "name": "retention invalidates listing and keeps only latest two"
+    },
+    {
+      "name": "saved manifest includes representative boards"
+    },
+    {
+      "name": "retention removed oldest backup from disk"
+    },
+    {
+      "name": "board extraction issues temporary download URL"
+    },
+    {
+      "name": "temporary download denies missing token"
+    },
+    {
+      "name": "temporary download denies wrong token"
+    },
+    {
+      "name": "temporary download also requires admin session"
+    },
+    {
+      "name": "authorized temporary backup downloads as ZIP",
+      "detail": 20398
+    },
+    {
+      "name": "temporary download token is single-use"
+    },
+    {
+      "name": "consumed temporary ZIP and token are cleaned up"
+    },
+    {
+      "name": "backup progress remains available"
+    }
+  ],
+  "retained": [
+    "2026-09-02_2234_full-site_9a4ffa",
+    "2026-09-02_2234_full-site_b74fcb"
+  ]
+}

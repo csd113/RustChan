@@ -1,0 +1,46 @@
+PASS direct X-Forwarded-For: post accepted 303
+PASS direct X-Forwarded-For: stored request identity 127.0.0.1
+PASS direct X-Real-IP: post accepted 303
+PASS direct X-Real-IP: stored request identity 127.0.0.1
+PASS direct: CSRF secure cookie with forwarded HTTPS=False 
+PASS direct: HSTS with forwarded HTTPS=False 
+PASS direct: CSRF secure cookie with forwarded HTTPS=True 
+PASS direct: HSTS with forwarded HTTPS=True 
+PASS direct: clean SIGTERM exit 0
+PASS untrusted X-Forwarded-For: post accepted 303
+PASS untrusted X-Forwarded-For: stored request identity 127.0.0.1
+PASS untrusted X-Real-IP: post accepted 303
+PASS untrusted X-Real-IP: stored request identity 127.0.0.1
+PASS untrusted: CSRF secure cookie with forwarded HTTPS=False 
+PASS untrusted: HSTS with forwarded HTTPS=False 
+PASS untrusted: CSRF secure cookie with forwarded HTTPS=True 
+PASS untrusted: HSTS with forwarded HTTPS=True 
+PASS untrusted: clean SIGTERM exit 0
+PASS trusted X-Forwarded-For: post accepted 303
+PASS trusted X-Forwarded-For: stored request identity 203.0.113.8
+PASS trusted X-Real-IP: post accepted 303
+PASS trusted X-Real-IP: stored request identity 198.51.100.77
+PASS trusted: CSRF secure cookie with forwarded HTTPS=False 
+PASS trusted: HSTS with forwarded HTTPS=False 
+PASS trusted: CSRF secure cookie with forwarded HTTPS=True 
+PASS trusted: HSTS with forwarded HTTPS=True 
+PASS network fixture admin login 303
+PASS password board configured through admin HTTP form 303
+PASS wrong board password denied before limit 
+PASS wrong board password denied before limit 
+PASS correct board unlock succeeds after failures 303
+PASS unlocked board is viewable 
+PASS unlock failure 1 after successful reset 403
+PASS unlock failure 2 after successful reset 403
+PASS unlock failure 3 after successful reset 403
+PASS unlock failure 4 after successful reset 403
+PASS unlock failure 5 after successful reset 429
+PASS board lockout advertises Retry-After 
+PASS correct password cannot bypass active lockout 
+PASS board lockout is isolated by trusted client IP 
+PASS expired admin session denied 
+PASS trusted: clean SIGTERM exit 0
+PASS request limiter rejects excess requests despite spoofed headers [200, 200, 200, 429, 429, 429, 429, 429]
+PASS rate-limited clients retain static asset access 
+PASS request limiter recovers after configured window 
+PASS rate: clean SIGTERM exit 0

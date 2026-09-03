@@ -1,0 +1,122 @@
+- generic [active] [ref=f4e1]:
+  - banner [ref=f4e2]:
+    - generic [ref=f4e3]: RustChan
+    - link "⌂ Home" [ref=f4e4] [cursor=pointer]:
+      - /url: /
+    - text: ▾
+    - navigation [ref=f4e5]:
+      - generic [ref=f4e6]:
+        - text: "["
+        - link "audit" [ref=f4e7] [cursor=pointer]:
+          - /url: /audit/catalog
+        - text: "]"
+      - generic [ref=f4e8]:
+        - text: "["
+        - link "adult" [ref=f4e9] [cursor=pointer]:
+          - /url: /adult/catalog
+        - text: "]"
+    - generic [ref=f4e11]:
+      - textbox "search /audit/" [ref=f4e12]:
+        - /placeholder: search /audit/…
+      - button "go" [ref=f4e13] [cursor=pointer]
+  - main [ref=f4e14]:
+    - generic [ref=f4e15]: /audit/ — Audit Board
+    - generic [ref=f4e16]:
+      - generic [ref=f4e17]:
+        - link "[ Return ]" [ref=f4e18] [cursor=pointer]:
+          - /url: /audit
+        - link "[ Catalog ]" [ref=f4e19] [cursor=pointer]:
+          - /url: /audit/catalog
+        - link "[ Bottom ]" [ref=f4e20] [cursor=pointer]:
+          - /url: "#bottom"
+      - generic [ref=f4e21]:
+        - button "[ Update now ]" [ref=f4e22] [cursor=pointer]
+        - generic [ref=f4e23] [cursor=pointer]:
+          - checkbox "Auto refresh" [ref=f4e24]
+          - generic [ref=f4e25]: Auto refresh
+      - generic [ref=f4e26]:
+        - status
+        - generic "Reply count" [ref=f4e27]:
+          - generic [ref=f4e28]: Replies
+          - text: ":"
+          - generic [ref=f4e29]: "1"
+    - generic [ref=f4e30]:
+      - generic [ref=f4e31]:
+        - generic [ref=f4e32]:
+          - generic [ref=f4e33]:
+            - strong [ref=f4e34]: Branch audit persistence thread
+            - text: •
+          - strong [ref=f4e35]: Anonymous
+          - 'button "ID: 6TwzE29V" [ref=f4e36] [cursor=pointer]'
+          - generic [ref=f4e37]: 09/02/26(Wed)22:18:45
+          - link "No.1" [ref=f4e38] [cursor=pointer]:
+            - /url: "#p1"
+          - link ">>2" [ref=f4e40] [cursor=pointer]:
+            - /url: "#p2"
+        - generic [ref=f4e41]:
+          - text: Fresh browser post. Unicode 😀 and
+          - strong [ref=f4e42]: bold
+          - text: survive reload.
+        - generic [ref=f4e43]:
+          - generic [ref=f4e44]:
+            - link "edit" [ref=f4e45] [cursor=pointer]:
+              - /url: /audit/post/1/edit
+            - link "delete" [ref=f4e46] [cursor=pointer]:
+              - /url: /audit/post/1/delete
+            - generic [ref=f4e47]: (24s)
+          - button "report" [ref=f4e48] [cursor=pointer]
+      - generic [ref=f4e49]:
+        - generic [ref=f4e50]:
+          - strong [ref=f4e51]: Anonymous
+          - 'button "ID: 6TwzE29V" [ref=f4e52] [cursor=pointer]'
+          - generic [ref=f4e53]: 09/02/26(Wed)22:19:20
+          - link "No.2" [ref=f4e54] [cursor=pointer]:
+            - /url: "#p2"
+          - generic "You posted this": (You)
+        - generic [ref=f4e55]:
+          - text: Reply through the visible browser form, with
+          - link ">>1 (OP)" [ref=f4e56] [cursor=pointer]:
+            - /url: "#p1"
+            - text: ">>1"
+            - generic [ref=f4e57]: (OP)
+          - text: and café.
+        - generic [ref=f4e58]:
+          - generic [ref=f4e59]:
+            - link "edit" [ref=f4e60] [cursor=pointer]:
+              - /url: /audit/post/2/edit
+            - link "delete" [ref=f4e61] [cursor=pointer]:
+              - /url: /audit/post/2/delete
+            - generic [ref=f4e62]: (59s)
+          - button "report" [ref=f4e63] [cursor=pointer]
+    - link "[ Reply ]" [ref=f4e65] [cursor=pointer]:
+      - /url: "#post-form-wrap"
+    - generic [ref=f4e66]:
+      - generic [ref=f4e67]:
+        - link "[ Return ]" [ref=f4e68] [cursor=pointer]:
+          - /url: /audit
+        - link "[ Catalog ]" [ref=f4e69] [cursor=pointer]:
+          - /url: /audit/catalog
+        - link "[ Top ]" [ref=f4e70] [cursor=pointer]:
+          - /url: "#top"
+      - generic [ref=f4e71]:
+        - button "[ Update now ]" [ref=f4e72] [cursor=pointer]
+        - generic [ref=f4e73] [cursor=pointer]:
+          - checkbox "Auto refresh" [ref=f4e74]
+          - generic [ref=f4e75]: Auto refresh
+      - generic [ref=f4e76]:
+        - status
+        - generic "Reply count" [ref=f4e77]:
+          - generic [ref=f4e78]: Replies
+          - text: ":"
+          - generic [ref=f4e79]: "1"
+  - contentinfo [ref=f4e80]:
+    - paragraph [ref=f4e81]:
+      - text: RustChan —
+      - link "home" [ref=f4e82] [cursor=pointer]:
+        - /url: /
+      - text: ·
+      - link "Administrator login" [ref=f4e83] [cursor=pointer]:
+        - /url: /admin
+        - text: admin
+    - group [ref=f4e85]:
+      - generic "⚙ User Preferences" [ref=f4e86] [cursor=pointer]

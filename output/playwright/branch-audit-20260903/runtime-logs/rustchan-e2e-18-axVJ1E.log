@@ -1,0 +1,75 @@
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-admin admin AdminPass123!
+Created settings.toml (/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-data/settings.toml)
+✓ Admin 'admin' created (id=1).
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board pub Public Board General public discussion
+✓ Board /pub/ — Public Board created (id=1).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board img Images Image upload board
+✓ Board /img/ — Images created (id=2).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board vid Video Video upload board
+✓ Board /vid/ — Video created (id=3).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board aud Audio Audio upload board --audio
+✓ Board /aud/ — Audio created (id=4).  images:yes video:yes audio:yes
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board nsfw NSFW Board Adult test board --nsfw
+✓ Board /nsfw/ — NSFW Board [NSFW] created (id=5).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board txt Text Only Uploads disabled --no-images --no-videos
+✓ Board /txt/ — Text Only created (id=6).  images:no video:no audio:no
+
+2026-09-02 22:32:02.312 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__
+2026-09-02 22:32:02.314 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board bnd659ec Ban Delete Modal ban delete fixture
+✓ Board /bnd659ec/ — Ban Delete Modal created (id=7).  images:yes video:yes audio:no
+
+2026-09-02 22:32:08.630 [WARN ] [auth    ] Failed admin login - username: adm… (len=5), ip prefix: 12ca17b4, attempts: 1, attempt limit: 5, locked out: no
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board rpt026e4 Reported Board Moderation queue fixture
+✓ Board /rpt026e4/ — Reported Board created (id=8).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board adm2e5de Admin Controls Public admin controls fixture
+✓ Board /adm2e5de/ — Admin Controls created (id=10).  images:yes video:yes audio:no
+
+
+[server exited code=0 signal=null]
+2026-09-02 22:32:30.549 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__
+2026-09-02 22:32:30.550 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board btn83a05 Button Sizing Public button sizing fixture
+✓ Board /btn83a05/ — Button Sizing created (id=13).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board pwa925d2 Password Buttons Password prompt fixture
+✓ Board /pwa925d2/ — Password Buttons created (id=14).  images:yes video:yes audio:no
+
+2026-09-02 22:32:41.134 [WARN ] [admin   ] Admin same-origin validation rejected request - request scheme: http, request host: 127.0.0.1, request port: 64950, source scheme: http, source host: evil.example, source port: 80, source: http://evil.example
+2026-09-02 22:32:41.138 [WARN ] [admin   ] Admin same-origin validation rejected request - request scheme: http, request host: 127.0.0.1, request port: 64950, source scheme: http, source host: evil.example, source port: 80, source: http://evil.example/path
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board pdf189e2 PDF Board 
+✓ Board /pdf189e2/ — PDF Board created (id=17).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board vieb7087 View Password 
+✓ Board /vieb7087/ — View Password created (id=18).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board lea45186 Leak Audit 
+✓ Board /lea45186/ — Leak Audit created (id=19).  images:yes video:yes audio:no
+
+
+[server exited code=0 signal=null]
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board mwd2d534 Phase 3 Mobile Board Board Board Board Board Board Board Board mwd2d534 Narrow layout protected board description description description description description description description description description description description description 
+✓ Board /mwd2d534/ — Phase 3 Mobile Board Board Board Board Board Board Board Board mwd2d534 created (id=20).  images:yes video:yes audio:no
+
+2026-09-02 22:33:08.576 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__
+2026-09-02 22:33:08.577 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board errcf056 Error State Board phase 4 error fixtures
+✓ Board /errcf056/ — Error State Board created (id=21).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board lon447c1 Long Name phase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtoken Description with URLs https://example.test/phase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtoken and dense text wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide 
+✓ Board /lon447c1/ — Long Name phase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtoken created (id=22).  images:yes video:yes audio:no
+
+
+[server exited code=0 signal=null]
+2026-09-02 22:33:32.287 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__
+2026-09-02 22:33:32.288 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-18-axVJ1E/bin/rustchan-cli admin create-board arc47720 Archive Board 
+✓ Board /arc47720/ — Archive Board created (id=23).  images:yes video:yes audio:no
+

@@ -1,0 +1,9 @@
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-manual-3oJNmT/bin/rustchan-cli admin create-admin admin AdminPass123!
+Created settings.toml (/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-manual-3oJNmT/bin/rustchan-data/settings.toml)
+✓ Admin 'admin' created (id=1).
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-manual-3oJNmT/bin/rustchan-cli admin create-board pub Public 
+✓ Board /pub/ — Public created (id=1).  images:yes video:yes audio:no
+
+2026-09-02 22:34:41.796 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__
+2026-09-02 22:34:41.797 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__

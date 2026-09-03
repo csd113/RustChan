@@ -1,0 +1,37 @@
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-0-KjmsEM/bin/rustchan-cli admin create-admin admin AdminPass123!
+Created settings.toml (/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-0-KjmsEM/bin/rustchan-data/settings.toml)
+✓ Admin 'admin' created (id=1).
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-0-KjmsEM/bin/rustchan-cli admin create-board pub Public Board General public discussion
+✓ Board /pub/ — Public Board created (id=1).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-0-KjmsEM/bin/rustchan-cli admin create-board img Images Image upload board
+✓ Board /img/ — Images created (id=2).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-0-KjmsEM/bin/rustchan-cli admin create-board vid Video Video upload board
+✓ Board /vid/ — Video created (id=3).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-0-KjmsEM/bin/rustchan-cli admin create-board aud Audio Audio upload board --audio
+✓ Board /aud/ — Audio created (id=4).  images:yes video:yes audio:yes
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-0-KjmsEM/bin/rustchan-cli admin create-board nsfw NSFW Board Adult test board --nsfw
+✓ Board /nsfw/ — NSFW Board [NSFW] created (id=5).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-0-KjmsEM/bin/rustchan-cli admin create-board txt Text Only Uploads disabled --no-images --no-videos
+✓ Board /txt/ — Text Only created (id=6).  images:no video:no audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-0-KjmsEM/bin/rustchan-cli admin create-board acimg04r Auto Image 
+✓ Board /acimg04r/ — Auto Image created (id=7).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-0-KjmsEM/bin/rustchan-cli admin create-board acvid0ch Auto Video 
+✓ Board /acvid0ch/ — Auto Video created (id=8).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-0-KjmsEM/bin/rustchan-cli admin create-board acnojs0o No Auto 
+✓ Board /acnojs0o/ — No Auto created (id=9).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-0-KjmsEM/bin/rustchan-cli admin create-board acfail0q Auto Fail 
+✓ Board /acfail0q/ — Auto Fail created (id=10).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-0-KjmsEM/bin/rustchan-cli admin create-board rpdf0oy7 Real PDF Board 
+✓ Board /rpdf0oy7/ — Real PDF Board created (id=11).  images:yes video:yes audio:no
+

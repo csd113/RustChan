@@ -1,0 +1,1 @@
+Error: CONFIG ERROR: cookie_secret is too short (27 chars). It must be at least 64 hex characters (32 bytes). Delete settings.toml and restart to auto-generate a secure secret.

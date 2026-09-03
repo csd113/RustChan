@@ -1,0 +1,67 @@
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-admin admin AdminPass123!
+Created settings.toml (/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-data/settings.toml)
+✓ Admin 'admin' created (id=1).
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board pub Public Board General public discussion
+✓ Board /pub/ — Public Board created (id=1).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board img Images Image upload board
+✓ Board /img/ — Images created (id=2).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board vid Video Video upload board
+✓ Board /vid/ — Video created (id=3).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board aud Audio Audio upload board --audio
+✓ Board /aud/ — Audio created (id=4).  images:yes video:yes audio:yes
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board nsfw NSFW Board Adult test board --nsfw
+✓ Board /nsfw/ — NSFW Board [NSFW] created (id=5).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board txt Text Only Uploads disabled --no-images --no-videos
+✓ Board /txt/ — Text Only created (id=6).  images:no video:no audio:no
+
+2026-09-02 22:20:54.236 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__
+2026-09-02 22:20:54.238 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__
+
+[server exited code=0 signal=null]
+2026-09-02 22:20:59.590 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__
+2026-09-02 22:20:59.592 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board cns939e9 Captcha NoJS 
+✓ Board /cns939e9/ — Captcha NoJS created (id=12).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board vieeac30 View Password 
+✓ Board /vieeac30/ — View Password created (id=13).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board lea31501 Leak Audit 
+✓ Board /lea31501/ — Leak Audit created (id=14).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board pwc1c022 Password Change 
+✓ Board /pwc1c022/ — Password Change created (id=15).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board p3p56e7f Phase 3 PDF 
+✓ Board /p3p56e7f/ — Phase 3 PDF created (id=16).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board dlg14710 Dialog Board dialog coverage
+✓ Board /dlg14710/ — Dialog Board created (id=17).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board pe089e30 Progressive Board optional JS degradation
+✓ Board /pe089e30/ — Progressive Board created (id=18).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board loc4db88 Locked Phase Four Board Permission page coverage
+✓ Board /loc4db88/ — Locked Phase Four Board created (id=19).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board lon15844 Long Name phase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtoken Description with URLs https://example.test/phase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtoken and dense text wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide wide 
+✓ Board /lon15844/ — Long Name phase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtokenphase4longtoken created (id=20).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board the84e36 Theme Override Board board theme override coverage
+✓ Board /the84e36/ — Theme Override Board created (id=21).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board edd73346 Edit Delete 
+✓ Board /edd73346/ — Edit Delete created (id=22).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board dend951b Own Post Denials 
+✓ Board /dend951b/ — Own Post Denials created (id=23).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-3-hfug9Z/bin/rustchan-cli admin create-board arca142b Archive Board 
+✓ Board /arca142b/ — Archive Board created (id=24).  images:yes video:yes audio:no
+

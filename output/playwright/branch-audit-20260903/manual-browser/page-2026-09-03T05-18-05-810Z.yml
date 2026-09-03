@@ -1,0 +1,53 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]: RustChan
+    - link "⌂ Home" [ref=e4] [cursor=pointer]:
+      - /url: /
+    - text: ▾
+    - navigation [ref=e5]:
+      - generic [ref=e6]:
+        - text: "["
+        - link "audit" [ref=e7] [cursor=pointer]:
+          - /url: /audit/catalog
+        - text: "]"
+      - generic [ref=e8]:
+        - text: "["
+        - link "adult" [ref=e9] [cursor=pointer]:
+          - /url: /adult/catalog
+        - text: "]"
+  - main [ref=e10]:
+    - generic [ref=e11]:
+      - heading "[ RustChan ]" [level=1] [ref=e12]
+      - paragraph [ref=e13]: select board to proceed
+    - generic [ref=e14]:
+      - heading "// Boards" [level=2] [ref=e15]
+      - link "/audit/ Audit Board Disposable end-to-end test board 0 threads" [ref=e18] [cursor=pointer]:
+        - /url: /audit/catalog
+        - generic [ref=e19]: /audit/
+        - generic [ref=e21]: Audit Board
+        - generic [ref=e22]: Disposable end-to-end test board
+        - generic [ref=e23]: 0 threads
+    - generic [ref=e24]:
+      - heading "// Adult Boards NSFW" [level=2] [ref=e25]
+      - link "/adult/ NSFW Adult Audit NSFW consent smoke 0 threads" [ref=e28] [cursor=pointer]:
+        - /url: /?nsfw=adult
+        - generic [ref=e29]:
+          - generic [ref=e30]: /adult/
+          - generic [ref=e31]: NSFW
+        - generic [ref=e33]: Adult Audit
+        - generic [ref=e34]: NSFW consent smoke
+        - generic [ref=e35]: 0 threads
+    - generic [ref=e36]:
+      - heading "// Stats" [level=2] [ref=e37]
+      - paragraph [ref=e38]: site statistics are temporarily unavailable.
+  - contentinfo [ref=e39]:
+    - paragraph [ref=e40]:
+      - text: RustChan —
+      - link "home" [ref=e41] [cursor=pointer]:
+        - /url: /
+      - text: ·
+      - link "Administrator login" [ref=e42] [cursor=pointer]:
+        - /url: /admin
+        - text: admin
+    - group [ref=e44]:
+      - generic "⚙ User Preferences" [ref=e45] [cursor=pointer]

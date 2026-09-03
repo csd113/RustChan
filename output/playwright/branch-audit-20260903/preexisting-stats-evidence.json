@@ -1,0 +1,6 @@
+{
+  "main": "29eb55f21aab2c9c85b6035343052b4cadf01033",
+  "head": "e5f8f0906b93dd47b3c767dd350b020ee4e542f8",
+  "get_site_stats_body_identical_to_main": true,
+  "reason": "SUM media counts return NULL with zero posts, read as non-null integer; visible fallback warning on first empty homepage."
+}

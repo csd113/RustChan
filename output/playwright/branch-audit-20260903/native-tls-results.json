@@ -1,0 +1,49 @@
+{
+  "status": "PASS",
+  "root": "/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-tls-audit-KoyKlM",
+  "ports": {
+    "port": 65387,
+    "tlsPort": 65388,
+    "redirectPort": 65389
+  },
+  "checks": [
+    {
+      "name": "native self-signed HTTPS listener is ready"
+    },
+    {
+      "name": "HTTPS admin login page",
+      "detail": 200
+    },
+    {
+      "name": "native HTTPS creates Secure CSRF cookie"
+    },
+    {
+      "name": "admin login over native HTTPS",
+      "detail": 303
+    },
+    {
+      "name": "native HTTPS creates Secure HttpOnly session"
+    },
+    {
+      "name": "HTTPS session bootstrap reaches panel"
+    },
+    {
+      "name": "public posting through native HTTPS",
+      "detail": 303
+    },
+    {
+      "name": "HTTPS thread content renders"
+    },
+    {
+      "name": "HTTPS-only mode disables the main plaintext application listener"
+    },
+    {
+      "name": "HTTP port 65389 redirects with preserved path/query",
+      "detail": "https://127.0.0.1:65388/tls?audit=1"
+    },
+    {
+      "name": "HTTP port 65389 replaces untrusted Host with configured redirect host",
+      "detail": "https://127.0.0.1:65388/tls"
+    }
+  ]
+}

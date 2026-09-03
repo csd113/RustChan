@@ -1049,9 +1049,9 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
     let query = format!(
         "SELECT
              COUNT(*)                                                           AS total_posts,
-             {total_images_expr}                                                AS total_images,
-             {total_videos_expr}                                                AS total_videos,
-             {total_audio_expr}                                                 AS total_audio,
+             COALESCE({total_images_expr}, 0)                                   AS total_images,
+             COALESCE({total_videos_expr}, 0)                                   AS total_videos,
+             COALESCE({total_audio_expr}, 0)                                    AS total_audio,
              COALESCE(
                  SUM(CASE WHEN file_path IS NOT NULL AND file_size IS NOT NULL{active_file_bytes_filter}
                           THEN file_size ELSE 0 END),
@@ -1137,11 +1137,38 @@ mod tests {
     }
 
     #[test]
+    fn site_stats_empty_database_returns_zeroes() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+
+        let stats = get_site_stats(&conn)?;
+
+        anyhow::ensure!(stats.total_posts == 0, "empty site should have zero posts");
+        anyhow::ensure!(
+            stats.total_images == 0,
+            "empty site should have zero images"
+        );
+        anyhow::ensure!(
+            stats.total_videos == 0,
+            "empty site should have zero videos"
+        );
+        anyhow::ensure!(
+            stats.total_audio == 0,
+            "empty site should have zero audio uploads"
+        );
+        anyhow::ensure!(
+            stats.active_bytes == 0,
+            "empty site should have zero active bytes"
+        );
+        Ok(())
+    }
+
+    #[test]
     #[expect(
         clippy::panic_in_result_fn,
         reason = "test assertions intentionally panic on failure"
     )]
-    fn site_stats_count_audio_primary_and_combo_uploads() -> Result<()> {
+    fn site_stats_count_posts_and_media_uploads() -> Result<()> {
         let pool = crate::db::init_test_pool()?;
         let conn = pool.get()?;
 
@@ -1162,7 +1189,11 @@ mod tests {
              (1, 1, 1, 'audio post', '<p>audio</p>', 'tok1', 0,
               'test/track.mp3', 'track.mp3', 1234, 'audio/mpeg', 'audio'),
              (2, 1, 1, 'combo post', '<p>combo</p>', 'tok2', 0,
-              'test/cover.png', 'cover.png', 4321, 'image/png', 'image')",
+              'test/cover.png', 'cover.png', 4321, 'image/png', 'image'),
+             (3, 1, 1, 'video post', '<p>video</p>', 'tok3', 0,
+              'test/clip.webm', 'clip.webm', 2048, 'video/webm', 'video'),
+             (4, 1, 1, 'text post', '<p>text</p>', 'tok4', 0,
+              NULL, NULL, NULL, NULL, NULL)",
             [],
         )?;
         conn.execute(
@@ -1176,9 +1207,16 @@ mod tests {
         )?;
 
         let stats = get_site_stats(&conn)?;
+        assert_eq!(stats.total_posts, 4, "all posts should be counted");
+        assert_eq!(stats.total_images, 1, "the combo image should be counted");
+        assert_eq!(stats.total_videos, 1, "the video should be counted");
         assert_eq!(
             stats.total_audio, 2,
             "primary and companion audio should both be counted"
+        );
+        assert_eq!(
+            stats.active_bytes, 13_281,
+            "primary and companion media bytes should all be counted"
         );
         Ok(())
     }

@@ -1,0 +1,58 @@
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-cli admin create-admin admin AdminPass123!
+Created settings.toml (/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-data/settings.toml)
+✓ Admin 'admin' created (id=1).
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-cli admin create-board pub Public Board General public discussion
+✓ Board /pub/ — Public Board created (id=1).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-cli admin create-board img Images Image upload board
+✓ Board /img/ — Images created (id=2).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-cli admin create-board vid Video Video upload board
+✓ Board /vid/ — Video created (id=3).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-cli admin create-board aud Audio Audio upload board --audio
+✓ Board /aud/ — Audio created (id=4).  images:yes video:yes audio:yes
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-cli admin create-board nsfw NSFW Board Adult test board --nsfw
+✓ Board /nsfw/ — NSFW Board [NSFW] created (id=5).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-cli admin create-board txt Text Only Uploads disabled --no-images --no-videos
+✓ Board /txt/ — Text Only created (id=6).  images:no video:no audio:no
+
+2026-09-02 22:29:17.993 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__
+2026-09-02 22:29:17.995 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-cli admin create-board bndc4eae Ban Delete Modal ban delete fixture
+✓ Board /bndc4eae/ — Ban Delete Modal created (id=7).  images:yes video:yes audio:no
+
+2026-09-02 22:29:23.914 [WARN ] [auth    ] Failed admin login - username: adm… (len=5), ip prefix: 12ca17b4, attempts: 1, attempt limit: 5, locked out: no
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-cli admin create-board rpt516f5 Reported Board Moderation queue fixture
+✓ Board /rpt516f5/ — Reported Board created (id=8).  images:yes video:yes audio:no
+
+
+[server exited code=0 signal=null]
+2026-09-02 22:29:37.811 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__
+2026-09-02 22:29:37.812 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-cli admin create-board btne1f09 Button Sizing Public button sizing fixture
+✓ Board /btne1f09/ — Button Sizing created (id=11).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-cli admin create-board pwfc0bcf Password Buttons Password prompt fixture
+✓ Board /pwfc0bcf/ — Password Buttons created (id=12).  images:yes video:yes audio:no
+
+2026-09-02 22:29:45.673 [WARN ] [admin   ] Admin same-origin validation rejected request - request scheme: http, request host: 127.0.0.1, request port: 64422, source scheme: http, source host: evil.example, source port: 80, source: http://evil.example
+2026-09-02 22:29:45.677 [WARN ] [admin   ] Admin same-origin validation rejected request - request scheme: http, request host: 127.0.0.1, request port: 64422, source scheme: http, source host: evil.example, source port: 80, source: http://evil.example/path
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-cli admin create-board lim145lp Limits 
+✓ Board /lim145lp/ — Limits created (id=15).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-cli admin create-board posd6cf0 Post Password 
+✓ Board /posd6cf0/ — Post Password created (id=16).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-cli admin create-board pwc4b8f2 Password Change 
+✓ Board /pwc4b8f2/ — Password Change created (id=17).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-cli admin create-board denc6d84 Own Post Denials 
+✓ Board /denc6d84/ — Own Post Denials created (id=18).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-14-YO6aBN/bin/rustchan-cli admin create-board arce9b41 Archive Board 
+✓ Board /arce9b41/ — Archive Board created (id=19).  images:yes video:yes audio:no
+

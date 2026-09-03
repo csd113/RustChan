@@ -1,0 +1,97 @@
+{
+  "stats": {
+    "startTime": "2026-09-03T05:18:46.851Z",
+    "duration": 1088641.743,
+    "expected": 348,
+    "skipped": 342,
+    "unexpected": 0,
+    "flaky": 0
+  },
+  "projects": {
+    "chromium": {
+      "passed": 89,
+      "skipped": 26
+    },
+    "webkit": {
+      "skipped": 64,
+      "passed": 51
+    },
+    "firefox": {
+      "skipped": 71,
+      "passed": 44
+    },
+    "mobile-firefox": {
+      "skipped": 71,
+      "passed": 44
+    },
+    "mobile-webkit": {
+      "passed": 56,
+      "skipped": 59
+    },
+    "firefox-nojs": {
+      "skipped": 51,
+      "passed": 64
+    }
+  },
+  "skip_reasons": {
+    "focused Chromium and mobile WebKit activity audit": 8,
+    "Firefox no-JS activity smoke": 5,
+    "no-JS fallback is covered by the Firefox no-JS project": 5,
+    "modal flow requires JavaScript": 1,
+    "mobile dashboard coverage runs on mobile Firefox": 5,
+    "no-JS dashboard coverage runs on the no-JS project": 5,
+    "dashboard desktop coverage runs on Chromium first": 5,
+    "theme contrast coverage runs on Chromium first": 5,
+    "unauthenticated dashboard coverage runs on Chromium first": 5,
+    "browser-generic admin settings coverage runs on Chromium first": 5,
+    "admin security route coverage runs on Chromium first": 5,
+    "asset workflow coverage runs on Chromium first": 5,
+    "banner workflow coverage runs on Chromium first": 5,
+    "theme management coverage runs on Chromium first": 5,
+    "focused audit browser matrix only": 15,
+    "opt-in real media auto-compress pass only; set RUSTCHAN_E2E_MEDIA_TOOLCHAIN=1": 24,
+    "browser-generic board settings coverage runs on Chromium first": 5,
+    "board validation and cleanup coverage runs on Chromium first": 5,
+    "Chromium/WebKit CAPTCHA pass": 4,
+    "Chromium/WebKit no-JS CAPTCHA pass": 4,
+    "headless process coverage runs once in Chromium": 10,
+    "Firefox/no-JS regression project only": 25,
+    "fixture lifecycle runs once in Chromium": 10,
+    "normal e2e binary does not expose the cfg(test) pre-repair backup failure hook or a deterministic hard repair failure trigger": 1,
+    "maintenance progress coverage runs on Chromium first": 5,
+    "backup UI/progress coverage runs on Chromium first": 5,
+    "manual note is attached to the Chromium phase-2 run only": 5,
+    "opt-in real media toolchain pass only": 6,
+    "plain report fallback is covered by the Firefox no-JS project": 5,
+    "JS moderation lifecycle coverage runs on Chromium first": 5,
+    "mobile WebKit cookie persistence regression": 5,
+    "no-JS activity fallback is Firefox-specific signal": 5,
+    "BFCache and restart activity coverage is sampled on Chromium and mobile WebKit": 4,
+    "protected activity leak audit runs once in Chromium": 5,
+    "no-JS fallback is Firefox-specific signal": 5,
+    "DOM media-control and refresh assertions run once in Chromium": 5,
+    "scripted media viewer coverage is sampled on Chromium, WebKit, and mobile WebKit": 3,
+    "download and header flow coverage runs in Chromium and Firefox": 4,
+    "mobile WebKit is the focused mobile runtime": 5,
+    "static/runtime header matrix runs once in Chromium": 5,
+    "requires deterministic local TLS ports/cert trust or redirect listener config; covered by Rust unit tests and should be run manually in release validation": 1,
+    "request-level proxy/TLS checks run once in Chromium": 5,
+    "manual note is attached to the Chromium phase-3 run only": 10,
+    "requires starting Arti/Tor and waiting for a live onion address; default e2e keeps Tor disabled for deterministic local runs": 1,
+    "Tor-disabled UI check runs once in Chromium": 5,
+    "phase 4 accessibility coverage runs on Chromium, mobile WebKit, and no-JS Firefox": 9,
+    "broken optional-JS degradation is checked once in Chromium": 2,
+    "scripted modal behavior is covered by no-JS fallback forms separately": 1,
+    "phase 4 error-state coverage runs on Chromium, no-JS Firefox, and mobile WebKit": 9,
+    "responsive long-content coverage runs on desktop Chromium and mobile WebKit": 4,
+    "no-JS release smoke runs in the firefox-nojs project": 5,
+    "high-volume browser stress runs once in Chromium": 5,
+    "full release smoke runs once in Chromium": 5,
+    "theme polish coverage runs once in Chromium": 10,
+    "scripted own-post modal flow; no-JS fallback is covered separately": 1,
+    "covered by the firefox-nojs project": 5,
+    "set RUSTCHAN_TOR_E2E=1 to run the local Tor/onion smoke test": 6,
+    "set RUSTCHAN_UPLOAD_REGRESSION_E2E=1 to run this opt-in upload suite": 6,
+    "upload validation runs on chromium, firefox-nojs, and mobile-webkit": 3
+  }
+}

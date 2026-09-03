@@ -1,0 +1,46 @@
+2026-09-02 22:17:57.816 [INFO ] [startup ] Rustchan starting - version: 1.4.1, log dir: /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-branch-audit-sayi3p47/data/logs, dependency log: /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-branch-audit-sayi3p47/data/logs/dep_log.log
+2026-09-02 22:17:57.852 [INFO ] [db      ] Database initialised - path: /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-branch-audit-sayi3p47/data/chan.db
+2026-09-02 22:17:57.889 [INFO ] [detect  ] Ffmpeg detected - video thumbnails and transcoding enabled - available: yes
+2026-09-02 22:17:57.917 [INFO ] [detect  ] Ffprobe detected - WebM codec inspection enabled - available: yes
+2026-09-02 22:17:57.949 [WARN ] [detect  ] Ffmpeg libwebp encoder missing - JPEG/PNG/BMP/TIFF stored in original format - webp: no
+2026-09-02 22:17:57.950 [INFO ] [detect  ] Ffmpeg VP9 + Opus encoders available - MP4 to WebM transcoding enabled with platform-tuned settings - vp9: yes, opus: yes, profile: aarch64-neon, cpu used: 3, tile columns: 1, threads: 12, row mt: yes
+2026-09-02 22:17:58.062 [INFO ] [detect  ] PDF thumbnail renderer detected - available: yes, renderers: pdftoppm, qlmanage, selected: pdftoppm
+2026-09-02 22:17:58.063 [INFO ] [workers ] Background worker pool online - count: 4
+2026-09-02 22:17:58.071 [INFO ] [server  ] HTTP server listening - address: 127.0.0.1:62305
+2026-09-02 22:17:58.072 [INFO ] [server  ] Admin panel - URL: http://127.0.0.1:62305/admin
+2026-09-02 22:17:58.072 [INFO ] [server  ] Data directory - path: /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-branch-audit-sayi3p47/data
+2026-09-02 22:18:05.716 [WARN ] [db      ] Failed to load home page site stats - error: Failed to query site stats
+2026-09-02 22:18:45.728 [INFO ] [handlers] Accepted multipart upload limits for post request - max image bytes: 8388608, max video bytes: 52428800, max audio bytes: 157286400, max pdf bytes: 8388608
+2026-09-02 22:18:45.729 [INFO ] [handlers] Multipart upload field staged successfully - field: file, size bytes: 0, limit bytes: 157286400
+2026-09-02 22:18:45.756 [INFO ] [board   ] Created new thread - board: audit, thread ID: 1
+2026-09-02 22:19:20.753 [INFO ] [handlers] Accepted multipart upload limits for post request - max image bytes: 8388608, max video bytes: 52428800, max audio bytes: 157286400, max pdf bytes: 8388608
+2026-09-02 22:19:20.753 [INFO ] [handlers] Multipart upload field staged successfully - field: file, size bytes: 0, limit bytes: 157286400
+2026-09-02 22:19:20.755 [INFO ] [board   ] Reply posted - post ID: 2, thread ID: 1, board: audit
+2026-09-02 22:19:49.191 [INFO ] [admin   ] Admin logged in - admin ID: 1
+2026-09-02 22:22:05.994 [INFO ] [admin   ] Site name updated
+2026-09-02 22:22:05.995 [INFO ] [admin   ] Site subtitle updated
+2026-09-02 22:22:05.995 [INFO ] [admin   ] Default theme updated
+2026-09-02 22:22:05.995 [INFO ] [admin   ] New-activity badge settings updated
+2026-09-02 22:22:06.012 [INFO ] [admin   ] Settings.toml updated
+2026-09-02 22:22:06.013 [INFO ] [admin   ] Banner settings updated
+2026-09-02 22:26:25.243 [INFO ] [handlers] Accepted multipart upload limits for post request - max image bytes: 8388608, max video bytes: 52428800, max audio bytes: 157286400, max pdf bytes: 8388608
+2026-09-02 22:26:25.244 [INFO ] [handlers] Multipart upload field staged successfully - field: file, size bytes: 18998, limit bytes: 157286400
+2026-09-02 22:26:25.333 [WARN ] [thumbnai] Ffmpeg image thumbnail failed (thumbnail generation failed for /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-branch-audit-sayi3p47/data/boards/.pending/upload-905d722ceccf4137a10f8f222b48b052/audit/f99dc59c39ff446b81d14a03a8ceca24.gif); falling back to image crate
+2026-09-02 22:26:25.342 [INFO ] [board   ] Reply posted - post ID: 3, thread ID: 1, board: audit
+2026-09-02 22:27:43.389 [INFO ] [handlers] Accepted multipart upload limits for post request - max image bytes: 8388608, max video bytes: 52428800, max audio bytes: 157286400, max pdf bytes: 8388608
+2026-09-02 22:27:43.390 [INFO ] [handlers] Multipart upload field staged successfully - field: file, size bytes: 378, limit bytes: 157286400
+2026-09-02 22:27:43.485 [WARN ] [thumbnai] Ffmpeg image thumbnail failed (thumbnail generation failed for /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-branch-audit-sayi3p47/data/boards/.pending/upload-5f9157ebf22240a7af6d4bbf60392a4d/audit/e9d6704f0cf64a1da4e8ea2ce08a8e3f.png); falling back to image crate
+2026-09-02 22:27:43.493 [INFO ] [board   ] Reply posted - post ID: 4, thread ID: 1, board: audit
+2026-09-02 22:28:32.305 [INFO ] [handlers] Accepted multipart upload limits for post request - max image bytes: 8388608, max video bytes: 52428800, max audio bytes: 157286400, max pdf bytes: 8388608
+2026-09-02 22:28:32.307 [INFO ] [handlers] Multipart upload field staged successfully - field: file, size bytes: 42217, limit bytes: 157286400
+2026-09-02 22:28:32.463 [INFO ] [board   ] Reply posted - post ID: 5, thread ID: 1, board: audit
+2026-09-02 22:28:32.463 [INFO ] [workers ] VideoTranscode: starting - post ID: 5, file: audit/b69d7998e0904b7bb86a9b6ec88254d7.mp4
+2026-09-02 22:28:32.604 [WARN ] [workers ] VideoTranscode: keeping original media - post ID: 5, reason: transcoded output is not smaller than the original
+2026-09-02 22:29:22.697 [INFO ] [handlers] Accepted multipart upload limits for post request - max image bytes: 8388608, max video bytes: 52428800, max audio bytes: 157286400, max pdf bytes: 8388608
+2026-09-02 22:29:22.698 [INFO ] [handlers] Multipart upload field staged successfully - field: audio_file, size bytes: 18430, limit bytes: 157286400
+2026-09-02 22:29:22.698 [INFO ] [handlers] Multipart upload field staged successfully - field: image_file, size bytes: 378, limit bytes: 8388608
+2026-09-02 22:29:22.734 [WARN ] [thumbnai] Ffmpeg image thumbnail failed (thumbnail generation failed for /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-branch-audit-sayi3p47/data/boards/.pending/upload-8cddeb0a91234de68402295f8c02e2be/combo/eab1d3cf2fec4ca683c6a1477a1325e4.png); falling back to image crate
+2026-09-02 22:29:22.839 [INFO ] [board   ] Created new thread - board: combo, thread ID: 2
+2026-09-02 22:29:54.895 [INFO ] [server  ] Shutdown signal received - signal: SIGTERM
+2026-09-02 22:29:54.896 [INFO ] [server  ] Signalling background workers to shut down...
+2026-09-02 22:29:54.896 [INFO ] [server  ] Server shut down gracefully.

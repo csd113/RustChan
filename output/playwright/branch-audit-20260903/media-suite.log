@@ -1,0 +1,19 @@
+
+Running 6 tests using 1 worker
+
+(node:93878) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:93878) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 [chromium] › tests/e2e/auto-compress.spec.ts:27:7 › auto-compress oversized uploads › oversized image is compressed, accepted, served, and previewed (6.8s)
+  ✓  2 [chromium] › tests/e2e/auto-compress.spec.ts:68:7 › auto-compress oversized uploads › oversized video is compressed, accepted, served, playable, and thumbnailed (12.1s)
+  ✓  3 [chromium] › tests/e2e/auto-compress.spec.ts:113:7 › auto-compress oversized uploads › direct oversized upload without client compression rejects cleanly (4.0s)
+  ✓  4 [chromium] › tests/e2e/auto-compress.spec.ts:148:7 › auto-compress oversized uploads › still-too-large browser compression fails without creating posts or staged files (5.4s)
+  ✓  5 [chromium] › tests/e2e/media-toolchain.spec.ts:14:7 › real media toolchain › uploads use real thumbnails, transcodes, waveform previews, and PDF fallback safely (4.3s)
+(node:95939) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:95939) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  6 [chromium] › tests/e2e/upload-regressions.spec.ts:95:3 › upload regressions (ignored by default) › posting UI accepts audio/MKV variants and keeps textarea resize disabled (14.2s)
+
+  6 passed (51.8s)

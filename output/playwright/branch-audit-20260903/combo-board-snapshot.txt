@@ -1,0 +1,46 @@
+### Page
+- Page URL: http://127.0.0.1:62305/combo
+- Page Title: /combo/ — Audio and Image - Index
+### Snapshot
+```yaml
+- generic [active] [ref=f16e1]:
+  - banner [ref=f16e2]:
+    - generic [ref=f16e3]: RustChan Branch Audit
+    - link "⌂ Home" [ref=f16e4] [cursor=pointer]:
+      - /url: /
+    - group [ref=f16e5]:
+      - generic "Open board menu" [ref=f16e6] [cursor=pointer]:
+        - generic [ref=f16e7]: Boards
+        - text: ▾
+    - generic [ref=f16e9]:
+      - textbox "search /combo/" [ref=f16e10]:
+        - /placeholder: search /combo/…
+      - button "go" [ref=f16e11] [cursor=pointer]
+  - main [ref=f16e12]:
+    - generic [ref=f16e13]:
+      - generic [ref=f16e14]: ■ ADMIN
+      - button "logout" [ref=f16e16] [cursor=pointer]
+    - generic [ref=f16e17]:
+      - heading "/combo/ — Audio and Image" [level=1] [ref=f16e18]
+      - paragraph [ref=f16e19]: Two supported upload slots
+    - generic [ref=f16e20]:
+      - link "[Index]" [ref=f16e21] [cursor=pointer]:
+        - /url: /combo
+      - link "[Catalog]" [ref=f16e22] [cursor=pointer]:
+        - /url: /combo/catalog
+      - link "[Archive]" [ref=f16e23] [cursor=pointer]:
+        - /url: /combo/archive
+    - link "[ Post a New Thread ]" [ref=f16e25] [cursor=pointer]:
+      - /url: "#post-form-wrap"
+  - contentinfo [ref=f16e26]:
+    - paragraph [ref=f16e27]:
+      - text: RustChan Branch Audit —
+      - link "home" [ref=f16e28] [cursor=pointer]:
+        - /url: /
+      - text: ·
+      - link "Administrator login" [ref=f16e29] [cursor=pointer]:
+        - /url: /admin
+        - text: admin
+    - group [ref=f16e31]:
+      - generic "⚙ User Preferences" [ref=f16e32] [cursor=pointer]
+```

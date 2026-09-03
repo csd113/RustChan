@@ -1,0 +1,692 @@
+Listing tests:
+  [chromium] › activity-notifications.spec.ts:33:7 › new activity notification clearing audit › scripted projects › homepage, board, catalog, and thread badges clear after viewed in Chromium and mobile WebKit
+  [chromium] › activity-notifications.spec.ts:119:7 › new activity notification clearing audit › scripted projects › admin toggles keep homepage and thread badges independent
+  [chromium] › activity-notifications.spec.ts:174:7 › new activity notification clearing audit › Firefox no-JS project › server-rendered read state clears without JavaScript
+  [chromium] › admin-ban-delete.spec.ts:17:7 › admin ban+delete confirmation flow › styled modal handles cancel, validation, focus, and safe reply submission
+  [chromium] › admin-ban-delete.spec.ts:90:7 › admin ban+delete confirmation flow › no-JS fallback still submits the original form with default moderation fields
+  [chromium] › admin-dashboard.spec.ts:14:7 › admin dashboard control center › desktop dashboard prioritizes current issues and task-oriented workflows
+  [chromium] › admin-dashboard.spec.ts:83:7 › admin dashboard control center › mobile dashboard is visible, tappable, and contained at 390px and 320px
+  [chromium] › admin-dashboard.spec.ts:111:7 › admin dashboard control center › no-JS dashboard opens by default and its links reveal protected destinations
+  [chromium] › admin-dashboard.spec.ts:148:7 › admin dashboard control center › state pills retain readable text contrast across built-in themes
+  [chromium] › admin-dashboard.spec.ts:165:7 › admin dashboard control center › unauthenticated admin panel requests do not render the dashboard
+  [chromium] › admin-polish.spec.ts:20:7 › admin panel and moderation UI polish › admin login, panel sections, settings forms, and moderation queues stay usable
+  [chromium] › admin-polish.spec.ts:86:7 › admin panel and moderation UI polish › admin controls on public board, catalog, thread, and post surfaces stay grouped and tappable
+  [chromium] › admin-settings-phase2.spec.ts:14:7 › phase 2 admin settings save flows › site, media, backup, banner toggles, invalid values, and TOML writeback stay deterministic
+  [chromium] › admin-settings-phase2.spec.ts:144:7 › phase 2 admin settings save flows › admin settings mutations are admin-only and CSRF-protected
+  [chromium] › assets-themes-phase2.spec.ts:19:7 › phase 2 assets, favicons, banners, and themes › global and board favicons upload, replace, cache, protect, and clear without stale files
+  [chromium] › assets-themes-phase2.spec.ts:95:7 › phase 2 assets, favicons, banners, and themes › banners upload, reject invalid assets, cache-bust, protect board assets, delete, and restore inherit mode
+  [chromium] › assets-themes-phase2.spec.ts:171:7 › phase 2 assets, favicons, banners, and themes › custom themes create, edit, delete, and clear default references safely
+  [chromium] › audit-surfaces.spec.ts:19:7 › browser-reachable audit surfaces › home, preferences, theme fallback, and narrow layout are reachable
+  [chromium] › audit-surfaces.spec.ts:61:7 › browser-reachable audit surfaces › poll creation, voting, catalog controls, and hidden-thread views work through browser paths
+  [chromium] › audit-surfaces.spec.ts:121:7 › browser-reachable audit surfaces › public report controls work with JavaScript and expose a no-JS fallback
+  [chromium] › audit-surfaces.spec.ts:153:7 › browser-reachable audit surfaces › admin-authenticated and unauthenticated browser states expose expected security controls
+  [chromium] › audit-surfaces.spec.ts:177:7 › browser-reachable audit surfaces › new activity badges are browser-visible and clear after visiting the target thread
+  [chromium] › auth-admin.spec.ts:22:7 › first run and admin authentication › fresh runtime creates exe-local structure and reports missing admin without leaking secrets
+  [chromium] › auth-admin.spec.ts:61:7 › first run and admin authentication › invalid settings fail closed without leaking configured secrets
+  [chromium] › auth-admin.spec.ts:98:7 › first run and admin authentication › admin login, logout, stale back page, cookie attributes, and context isolation
+  [chromium] › auth-admin.spec.ts:140:7 › admin board management › creates, edits, protects against injection, persists, and deletes boards
+  [chromium] › auth-admin.spec.ts:184:7 › admin board management › rejects invalid, traversal-like, and duplicate board short names safely
+  [chromium] › auto-compress.spec.ts:27:7 › auto-compress oversized uploads › oversized image is compressed, accepted, served, and previewed
+  [chromium] › auto-compress.spec.ts:68:7 › auto-compress oversized uploads › oversized video is compressed, accepted, served, playable, and thumbnailed
+  [chromium] › auto-compress.spec.ts:113:7 › auto-compress oversized uploads › direct oversized upload without client compression rejects cleanly
+  [chromium] › auto-compress.spec.ts:148:7 › auto-compress oversized uploads › still-too-large browser compression fails without creating posts or staged files
+  [chromium] › backup-restore.spec.ts:107:7 › live backup and restore coverage › manual directory full backups restore complete site state into a fresh restarted runtime
+  [chromium] › backup-restore.spec.ts:135:7 › live backup and restore coverage › manual split full backups cover every exposed split-size option and require complete parts for restore
+  [chromium] › backup-restore.spec.ts:188:7 › live backup and restore coverage › saved board backups restore one board without replacing the rest of the site
+  [chromium] › backup-restore.spec.ts:224:7 › live backup and restore coverage › automated full backups write scheduled artifacts with the configured storage mode
+  [chromium] › backup-restore.spec.ts:255:7 › live backup and restore coverage › Tor hidden service keys are included, excluded, and restored only when explicitly requested
+  [chromium] › backup-restore.spec.ts:322:7 › live backup and restore coverage › restore rejects invalid archives and leaves the live site usable
+  [chromium] › board-settings-phase2.spec.ts:21:7 › phase 2 board settings depth › browser admin flow creates boards and persists deep settings across access modes
+  [chromium] › board-settings-phase2.spec.ts:183:7 › phase 2 board settings depth › invalid board inputs, upload caps, delete cleanup, and safe redirects fail closed
+  [chromium] › button-sizing.spec.ts:34:7 › public button and action-control sizing › public action controls stay consistently sized across scripted and no-JS controls
+  [chromium] › captcha.spec.ts:10:7 › CAPTCHA posting flow › renders image CAPTCHA and rejects bad answers in Chromium and WebKit
+  [chromium] › captcha.spec.ts:46:7 › CAPTCHA posting flow › no-JS users can reload for a fresh challenge and see server-rendered errors
+  [chromium] › console-headless.spec.ts:19:7 › terminal console / browser boundary › fresh headless startup keeps web setup available without terminal prompts
+  [chromium] › console-headless.spec.ts:38:7 › terminal console / browser boundary › CLI-seeded administration survives headless restart with readable logs
+  [chromium] › csrf-navigation.spec.ts:17:7 › CSRF, Origin, Referer, and browser navigation regressions › forms include CSRF and missing or invalid CSRF is rejected for mutations
+  [chromium] › csrf-navigation.spec.ts:51:7 › CSRF, Origin, Referer, and browser navigation regressions › session-scoped admin CSRF cannot be reused across sessions or after logout
+  [chromium] › csrf-navigation.spec.ts:90:7 › CSRF, Origin, Referer, and browser navigation regressions › Origin, Referer, null Origin, loopback aliases, and GET mutations follow policy
+  [chromium] › csrf-navigation.spec.ts:137:7 › CSRF, Origin, Referer, and browser navigation regressions › back-forward and refresh around POST redirects do not duplicate mutations
+  [chromium] › firefox-nojs-public.spec.ts:22:7 › Firefox no-JS public regression › public browsing, anchors, quotes, posting validation, and readable errors are server-rendered
+  [chromium] › firefox-nojs-public.spec.ts:75:7 › Firefox no-JS public regression › own-post edit and delete fallbacks use ownership cookies and fail closed
+  [chromium] › firefox-nojs-public.spec.ts:130:7 › Firefox no-JS public regression › media upload, render, headers, disabled policy, size, and traversal checks work without JavaScript
+  [chromium] › firefox-nojs-public.spec.ts:197:7 › Firefox no-JS public regression › fixture-driven board/site toggles, password boards, thread states, and defaults stay public-only
+  [chromium] › firefox-nojs-public.spec.ts:283:7 › Firefox no-JS public regression › themes, no-JS preferences, activity read state, and degraded HTTP behavior are safe
+  [chromium] › helpers-lifecycle.spec.ts:30:7 › RustChan fixture lifecycle › dispose removes temporary roots and supports explicit preservation
+  [chromium] › helpers-lifecycle.spec.ts:50:7 › RustChan fixture lifecycle › dispose stops a started process before removing its root
+  [chromium] › maintenance-backup-phase2.spec.ts:15:7 › phase 2 admin maintenance and backup progress › DB check, repair status, progress polling, stale job protection, and concurrent maintenance blocking work through admin UI routes
+  [chromium] › maintenance-backup-phase2.spec.ts:74:7 › phase 2 admin maintenance and backup progress › backup create, progress JSON, saved row, download, corrupt restore failure, cleanup, and delete are safe
+  [chromium] › maintenance-backup-phase2.spec.ts:153:7 › phase 2 admin maintenance and backup progress › fault-injected repair failure and pre-repair backup failure remain manual e2e cases
+  [chromium] › media-toolchain.spec.ts:14:7 › real media toolchain › uploads use real thumbnails, transcodes, waveform previews, and PDF fallback safely
+  [chromium] › media.spec.ts:12:7 › media upload handling › image uploads render previews and disabled boards reject them safely
+  [chromium] › media.spec.ts:51:7 › media upload handling › invalid, spoofed, oversized, and traversal-like media paths are rejected safely
+  [chromium] › media.spec.ts:84:7 › media upload handling › video, audio, PDF, and unusual filenames follow board media policy
+  [chromium] › mobile-nojs.spec.ts:14:7 › mobile responsive smoke › home, board, thread composer, media preview, admin login, and board edit are usable on mobile
+  [chromium] › mobile-nojs.spec.ts:43:7 › no-JS fallback › public navigation, thread creation, admin login, settings POST, and CSRF work without JavaScript
+  [chromium] › moderation-phase2.spec.ts:17:7 › phase 2 moderation, report, and ban lifecycle › JS report modal, duplicate reports, resolution, deletion, bans, appeals, and mod log are coherent
+  [chromium] › moderation-phase2.spec.ts:234:7 › phase 2 moderation, report, and ban lifecycle › no-JS report fallback posts through the plain form when JavaScript is disabled
+  [chromium] › password-boards.spec.ts:20:7 › password-protected boards › view-password boards require per-context unlock and resist back-forward bypasses
+  [chromium] › password-boards.spec.ts:70:7 › password-protected boards › post-password boards allow viewing but require password for threads and replies
+  [chromium] › password-boards.spec.ts:128:7 › password-protected boards › view-password boards do not leak protected content before unlock
+  [chromium] › password-boards.spec.ts:193:7 › password-protected boards › password changes retire the old password and accept the new one
+  [chromium] › password-boards.spec.ts:223:7 › password-protected boards › mobile WebKit persists board unlock over HTTP localhost when HTTPS cookies are configured
+  [chromium] › phase3-activity-cache.spec.ts:30:7 › phase 3 activity cache and browser restore behavior › activity cookies survive restart and BFCache restore does not resurrect cleared badges
+  [chromium] › phase3-activity-cache.spec.ts:90:7 › phase 3 activity cache and browser restore behavior › protected board activity cookies do not leak badges after the unlock cookie is removed
+  [chromium] › phase3-activity-cache.spec.ts:140:7 › phase 3 activity cache and browser restore behavior › Firefox no-JS activity badges clear through plain navigation
+  [chromium] › phase3-media-runtime.spec.ts:25:7 › phase 3 media viewer runtime behavior › image viewer expands, collapses, falls back for missing thumbs, and keeps long filename links usable
+  [chromium] › phase3-media-runtime.spec.ts:77:7 › phase 3 media viewer runtime behavior › video, audio, PDF, and pending media refresh render controls without pixel assertions
+  [chromium] › phase3-media-runtime.spec.ts:154:7 › phase 3 media viewer runtime behavior › Firefox no-JS users keep direct media links without the JS viewer
+  [chromium] › phase3-media-runtime.spec.ts:181:7 › phase 3 downloads, range requests, and media headers › uploaded media headers, browser downloads, stale transcode redirects, and protected denials are safe
+  [chromium] › phase3-mobile-webkit-runtime.spec.ts:21:7 › phase 3 mobile WebKit runtime coverage › login, protected unlock, posting, own-post controls, media viewer, admin settings, and long pages stay usable
+  [chromium] › phase3-static-proxy-tor.spec.ts:19:7 › phase 3 static and runtime headers › static assets, dynamic pages, media, and missing assets use safe cache and framing headers
+  [chromium] › phase3-static-proxy-tor.spec.ts:88:7 › phase 3 proxy, public-host, and secure-cookie checks › trusted forwarded HTTPS sets secure admin cookies and HSTS only for configured public hosts
+  [chromium] › phase3-static-proxy-tor.spec.ts:167:7 › phase 3 proxy, public-host, and secure-cookie checks › local TLS listener, self-signed browser trust, and HTTP redirect host rejection remain opt-in
+  [chromium] › phase3-static-proxy-tor.spec.ts:177:7 › phase 3 Tor and onion UI checks › Tor-disabled runtime keeps home/admin layouts stable and hides Tor-key backup controls
+  [chromium] › phase3-static-proxy-tor.spec.ts:207:7 › phase 3 Tor and onion UI checks › active onion pill, copy behavior, Onion-Location, and already-onion suppression remain opt-in
+  [chromium] › phase4-accessibility-progressive.spec.ts:30:7 › phase 4 accessibility basics and progressive enhancement › home, board, catalog, thread, posting, preferences, and admin forms expose keyboardable named controls
+  [chromium] › phase4-accessibility-progressive.spec.ts:105:7 › phase 4 accessibility basics and progressive enhancement › report, edit, delete confirmation, preferences, and media controls close cleanly and restore focus
+  [chromium] › phase4-accessibility-progressive.spec.ts:166:7 › phase 4 accessibility basics and progressive enhancement › critical public flows remain usable without optional main JavaScript
+  [chromium] › phase4-empty-error-permission.spec.ts:34:7 › phase 4 empty, error, and permission states › standalone 404, 400-ish, 403, locked-board, and banned pages stay clear and safe
+  [chromium] › phase4-empty-error-permission.spec.ts:87:7 › phase 4 empty, error, and permission states › posting, invalid upload, locked or archived thread, deleted post or thread, and active ban errors stay safe
+  [chromium] › phase4-empty-error-permission.spec.ts:168:7 › phase 4 empty, error, and permission states › invalid admin forms and restore uploads fail closed with useful admin navigation
+  [chromium] › phase4-responsive-long-content.spec.ts:32:7 › phase 4 responsive and long-content stress › long board metadata, titles, posts, filenames, counters, and admin rows stay usable without overlap
+  [chromium] › phase4-stress-release-smoke.spec.ts:32:7 › phase 4 high-volume and release-smoke journeys › busy public, protected, admin, search, API, update, and pagination surfaces remain usable
+  [chromium] › phase4-stress-release-smoke.spec.ts:147:7 › phase 4 high-volume and release-smoke journeys › fresh runtime can become a usable site, moderate content, back up, and restore
+  [chromium] › phase4-stress-release-smoke.spec.ts:232:7 › phase 4 high-volume and release-smoke journeys › no-JS public posting, upload, own edit or delete, report, unlock, and moderation smoke works
+  [chromium] › phase4-theme-contrast.spec.ts:24:7 › phase 4 built-in theme and contrast polish › theme picker order, selected state, site default, board override, and inherit behavior stay stable
+  [chromium] › phase4-theme-contrast.spec.ts:93:7 › phase 4 built-in theme and contrast polish › built-in themes keep core public and admin states readable without console errors
+  [chromium] › posting-thread.spec.ts:19:7 › logged-out navigation and posting › home, board, catalog, thread, assets, theme, and back-forward navigation are stable
+  [chromium] › posting-thread.spec.ts:50:7 › logged-out navigation and posting › thread creation, reply, escaping, quote-ish text, unicode, and refresh do not duplicate posts
+  [chromium] › posting-thread.spec.ts:68:7 › logged-out navigation and posting › empty, oversized, duplicate, invalid id, and stale-form posting errors stay safe
+  [chromium] › posting-thread.spec.ts:124:7 › logged-out navigation and posting › own edit modal and delete confirmation are limited to the posting browser context
+  [chromium] › posting-thread.spec.ts:169:7 › logged-out navigation and posting › own-post controls deny expired, replied, locked, archived, and deleted posts safely
+  [chromium] › settings.spec.ts:19:7 › settings, catalog, archive, search, and maintenance › site settings persist to settings.toml and survive restart
+  [chromium] › settings.spec.ts:43:7 › settings, catalog, archive, search, and maintenance › search and catalog handle unicode, punctuation, empty, long, and SQL-ish queries safely
+  [chromium] › settings.spec.ts:59:7 › settings, catalog, archive, search, and maintenance › bump/archive behavior and maintenance controls are admin-only and CSRF protected
+  [chromium] › settings.spec.ts:116:7 › settings, catalog, archive, search, and maintenance › thread sage, bump limits, sticky, lock, archive, and ban denials stay deterministic
+  [chromium] › setup-wizard.spec.ts:86:7 › first-run setup wizard › fresh setup persists PDF/media limits and enforces PDF limit
+  [chromium] › setup-wizard.spec.ts:125:7 › first-run setup wizard › initialized instance cannot access setup routes
+  [chromium] › setup-wizard.spec.ts:143:7 › first-run setup wizard › admin can reopen setup and close it without changing settings
+  [chromium] › setup-wizard.spec.ts:168:7 › first-run setup wizard › reopened setup cannot replace existing admin credentials
+  [chromium] › setup-wizard.spec.ts:191:7 › first-run setup wizard › no-JS setup flow still works
+  [chromium] › setup-wizard.spec.ts:199:7 › first-run setup wizard › mobile wizard review and finish layout remains usable
+  [chromium] › submission-idempotency.spec.ts:28:5 › public submission tokens stay atomic across concurrent thread and reply requests
+  [chromium] › tor-admin-onion-smoke.spec.ts:27:7 › Tor onion admin smoke (local opt-in) › admin login and same-origin checks work over plain onion HTTP
+  [chromium] › upload-regressions.spec.ts:95:3 › upload regressions (ignored by default) › posting UI accepts audio/MKV variants and keeps textarea resize disabled
+  [chromium] › upload-validation.spec.ts:222:1 › RustChan media upload validation matrix
+  [webkit] › activity-notifications.spec.ts:33:7 › new activity notification clearing audit › scripted projects › homepage, board, catalog, and thread badges clear after viewed in Chromium and mobile WebKit
+  [webkit] › activity-notifications.spec.ts:119:7 › new activity notification clearing audit › scripted projects › admin toggles keep homepage and thread badges independent
+  [webkit] › activity-notifications.spec.ts:174:7 › new activity notification clearing audit › Firefox no-JS project › server-rendered read state clears without JavaScript
+  [webkit] › admin-ban-delete.spec.ts:17:7 › admin ban+delete confirmation flow › styled modal handles cancel, validation, focus, and safe reply submission
+  [webkit] › admin-ban-delete.spec.ts:90:7 › admin ban+delete confirmation flow › no-JS fallback still submits the original form with default moderation fields
+  [webkit] › admin-dashboard.spec.ts:14:7 › admin dashboard control center › desktop dashboard prioritizes current issues and task-oriented workflows
+  [webkit] › admin-dashboard.spec.ts:83:7 › admin dashboard control center › mobile dashboard is visible, tappable, and contained at 390px and 320px
+  [webkit] › admin-dashboard.spec.ts:111:7 › admin dashboard control center › no-JS dashboard opens by default and its links reveal protected destinations
+  [webkit] › admin-dashboard.spec.ts:148:7 › admin dashboard control center › state pills retain readable text contrast across built-in themes
+  [webkit] › admin-dashboard.spec.ts:165:7 › admin dashboard control center › unauthenticated admin panel requests do not render the dashboard
+  [webkit] › admin-polish.spec.ts:20:7 › admin panel and moderation UI polish › admin login, panel sections, settings forms, and moderation queues stay usable
+  [webkit] › admin-polish.spec.ts:86:7 › admin panel and moderation UI polish › admin controls on public board, catalog, thread, and post surfaces stay grouped and tappable
+  [webkit] › admin-settings-phase2.spec.ts:14:7 › phase 2 admin settings save flows › site, media, backup, banner toggles, invalid values, and TOML writeback stay deterministic
+  [webkit] › admin-settings-phase2.spec.ts:144:7 › phase 2 admin settings save flows › admin settings mutations are admin-only and CSRF-protected
+  [webkit] › assets-themes-phase2.spec.ts:19:7 › phase 2 assets, favicons, banners, and themes › global and board favicons upload, replace, cache, protect, and clear without stale files
+  [webkit] › assets-themes-phase2.spec.ts:95:7 › phase 2 assets, favicons, banners, and themes › banners upload, reject invalid assets, cache-bust, protect board assets, delete, and restore inherit mode
+  [webkit] › assets-themes-phase2.spec.ts:171:7 › phase 2 assets, favicons, banners, and themes › custom themes create, edit, delete, and clear default references safely
+  [webkit] › audit-surfaces.spec.ts:19:7 › browser-reachable audit surfaces › home, preferences, theme fallback, and narrow layout are reachable
+  [webkit] › audit-surfaces.spec.ts:61:7 › browser-reachable audit surfaces › poll creation, voting, catalog controls, and hidden-thread views work through browser paths
+  [webkit] › audit-surfaces.spec.ts:121:7 › browser-reachable audit surfaces › public report controls work with JavaScript and expose a no-JS fallback
+  [webkit] › audit-surfaces.spec.ts:153:7 › browser-reachable audit surfaces › admin-authenticated and unauthenticated browser states expose expected security controls
+  [webkit] › audit-surfaces.spec.ts:177:7 › browser-reachable audit surfaces › new activity badges are browser-visible and clear after visiting the target thread
+  [webkit] › auth-admin.spec.ts:22:7 › first run and admin authentication › fresh runtime creates exe-local structure and reports missing admin without leaking secrets
+  [webkit] › auth-admin.spec.ts:61:7 › first run and admin authentication › invalid settings fail closed without leaking configured secrets
+  [webkit] › auth-admin.spec.ts:98:7 › first run and admin authentication › admin login, logout, stale back page, cookie attributes, and context isolation
+  [webkit] › auth-admin.spec.ts:140:7 › admin board management › creates, edits, protects against injection, persists, and deletes boards
+  [webkit] › auth-admin.spec.ts:184:7 › admin board management › rejects invalid, traversal-like, and duplicate board short names safely
+  [webkit] › auto-compress.spec.ts:27:7 › auto-compress oversized uploads › oversized image is compressed, accepted, served, and previewed
+  [webkit] › auto-compress.spec.ts:68:7 › auto-compress oversized uploads › oversized video is compressed, accepted, served, playable, and thumbnailed
+  [webkit] › auto-compress.spec.ts:113:7 › auto-compress oversized uploads › direct oversized upload without client compression rejects cleanly
+  [webkit] › auto-compress.spec.ts:148:7 › auto-compress oversized uploads › still-too-large browser compression fails without creating posts or staged files
+  [webkit] › backup-restore.spec.ts:107:7 › live backup and restore coverage › manual directory full backups restore complete site state into a fresh restarted runtime
+  [webkit] › backup-restore.spec.ts:135:7 › live backup and restore coverage › manual split full backups cover every exposed split-size option and require complete parts for restore
+  [webkit] › backup-restore.spec.ts:188:7 › live backup and restore coverage › saved board backups restore one board without replacing the rest of the site
+  [webkit] › backup-restore.spec.ts:224:7 › live backup and restore coverage › automated full backups write scheduled artifacts with the configured storage mode
+  [webkit] › backup-restore.spec.ts:255:7 › live backup and restore coverage › Tor hidden service keys are included, excluded, and restored only when explicitly requested
+  [webkit] › backup-restore.spec.ts:322:7 › live backup and restore coverage › restore rejects invalid archives and leaves the live site usable
+  [webkit] › board-settings-phase2.spec.ts:21:7 › phase 2 board settings depth › browser admin flow creates boards and persists deep settings across access modes
+  [webkit] › board-settings-phase2.spec.ts:183:7 › phase 2 board settings depth › invalid board inputs, upload caps, delete cleanup, and safe redirects fail closed
+  [webkit] › button-sizing.spec.ts:34:7 › public button and action-control sizing › public action controls stay consistently sized across scripted and no-JS controls
+  [webkit] › captcha.spec.ts:10:7 › CAPTCHA posting flow › renders image CAPTCHA and rejects bad answers in Chromium and WebKit
+  [webkit] › captcha.spec.ts:46:7 › CAPTCHA posting flow › no-JS users can reload for a fresh challenge and see server-rendered errors
+  [webkit] › console-headless.spec.ts:19:7 › terminal console / browser boundary › fresh headless startup keeps web setup available without terminal prompts
+  [webkit] › console-headless.spec.ts:38:7 › terminal console / browser boundary › CLI-seeded administration survives headless restart with readable logs
+  [webkit] › csrf-navigation.spec.ts:17:7 › CSRF, Origin, Referer, and browser navigation regressions › forms include CSRF and missing or invalid CSRF is rejected for mutations
+  [webkit] › csrf-navigation.spec.ts:51:7 › CSRF, Origin, Referer, and browser navigation regressions › session-scoped admin CSRF cannot be reused across sessions or after logout
+  [webkit] › csrf-navigation.spec.ts:90:7 › CSRF, Origin, Referer, and browser navigation regressions › Origin, Referer, null Origin, loopback aliases, and GET mutations follow policy
+  [webkit] › csrf-navigation.spec.ts:137:7 › CSRF, Origin, Referer, and browser navigation regressions › back-forward and refresh around POST redirects do not duplicate mutations
+  [webkit] › firefox-nojs-public.spec.ts:22:7 › Firefox no-JS public regression › public browsing, anchors, quotes, posting validation, and readable errors are server-rendered
+  [webkit] › firefox-nojs-public.spec.ts:75:7 › Firefox no-JS public regression › own-post edit and delete fallbacks use ownership cookies and fail closed
+  [webkit] › firefox-nojs-public.spec.ts:130:7 › Firefox no-JS public regression › media upload, render, headers, disabled policy, size, and traversal checks work without JavaScript
+  [webkit] › firefox-nojs-public.spec.ts:197:7 › Firefox no-JS public regression › fixture-driven board/site toggles, password boards, thread states, and defaults stay public-only
+  [webkit] › firefox-nojs-public.spec.ts:283:7 › Firefox no-JS public regression › themes, no-JS preferences, activity read state, and degraded HTTP behavior are safe
+  [webkit] › helpers-lifecycle.spec.ts:30:7 › RustChan fixture lifecycle › dispose removes temporary roots and supports explicit preservation
+  [webkit] › helpers-lifecycle.spec.ts:50:7 › RustChan fixture lifecycle › dispose stops a started process before removing its root
+  [webkit] › maintenance-backup-phase2.spec.ts:15:7 › phase 2 admin maintenance and backup progress › DB check, repair status, progress polling, stale job protection, and concurrent maintenance blocking work through admin UI routes
+  [webkit] › maintenance-backup-phase2.spec.ts:74:7 › phase 2 admin maintenance and backup progress › backup create, progress JSON, saved row, download, corrupt restore failure, cleanup, and delete are safe
+  [webkit] › maintenance-backup-phase2.spec.ts:153:7 › phase 2 admin maintenance and backup progress › fault-injected repair failure and pre-repair backup failure remain manual e2e cases
+  [webkit] › media-toolchain.spec.ts:14:7 › real media toolchain › uploads use real thumbnails, transcodes, waveform previews, and PDF fallback safely
+  [webkit] › media.spec.ts:12:7 › media upload handling › image uploads render previews and disabled boards reject them safely
+  [webkit] › media.spec.ts:51:7 › media upload handling › invalid, spoofed, oversized, and traversal-like media paths are rejected safely
+  [webkit] › media.spec.ts:84:7 › media upload handling › video, audio, PDF, and unusual filenames follow board media policy
+  [webkit] › mobile-nojs.spec.ts:14:7 › mobile responsive smoke › home, board, thread composer, media preview, admin login, and board edit are usable on mobile
+  [webkit] › mobile-nojs.spec.ts:43:7 › no-JS fallback › public navigation, thread creation, admin login, settings POST, and CSRF work without JavaScript
+  [webkit] › moderation-phase2.spec.ts:17:7 › phase 2 moderation, report, and ban lifecycle › JS report modal, duplicate reports, resolution, deletion, bans, appeals, and mod log are coherent
+  [webkit] › moderation-phase2.spec.ts:234:7 › phase 2 moderation, report, and ban lifecycle › no-JS report fallback posts through the plain form when JavaScript is disabled
+  [webkit] › password-boards.spec.ts:20:7 › password-protected boards › view-password boards require per-context unlock and resist back-forward bypasses
+  [webkit] › password-boards.spec.ts:70:7 › password-protected boards › post-password boards allow viewing but require password for threads and replies
+  [webkit] › password-boards.spec.ts:128:7 › password-protected boards › view-password boards do not leak protected content before unlock
+  [webkit] › password-boards.spec.ts:193:7 › password-protected boards › password changes retire the old password and accept the new one
+  [webkit] › password-boards.spec.ts:223:7 › password-protected boards › mobile WebKit persists board unlock over HTTP localhost when HTTPS cookies are configured
+  [webkit] › phase3-activity-cache.spec.ts:30:7 › phase 3 activity cache and browser restore behavior › activity cookies survive restart and BFCache restore does not resurrect cleared badges
+  [webkit] › phase3-activity-cache.spec.ts:90:7 › phase 3 activity cache and browser restore behavior › protected board activity cookies do not leak badges after the unlock cookie is removed
+  [webkit] › phase3-activity-cache.spec.ts:140:7 › phase 3 activity cache and browser restore behavior › Firefox no-JS activity badges clear through plain navigation
+  [webkit] › phase3-media-runtime.spec.ts:25:7 › phase 3 media viewer runtime behavior › image viewer expands, collapses, falls back for missing thumbs, and keeps long filename links usable
+  [webkit] › phase3-media-runtime.spec.ts:77:7 › phase 3 media viewer runtime behavior › video, audio, PDF, and pending media refresh render controls without pixel assertions
+  [webkit] › phase3-media-runtime.spec.ts:154:7 › phase 3 media viewer runtime behavior › Firefox no-JS users keep direct media links without the JS viewer
+  [webkit] › phase3-media-runtime.spec.ts:181:7 › phase 3 downloads, range requests, and media headers › uploaded media headers, browser downloads, stale transcode redirects, and protected denials are safe
+  [webkit] › phase3-mobile-webkit-runtime.spec.ts:21:7 › phase 3 mobile WebKit runtime coverage › login, protected unlock, posting, own-post controls, media viewer, admin settings, and long pages stay usable
+  [webkit] › phase3-static-proxy-tor.spec.ts:19:7 › phase 3 static and runtime headers › static assets, dynamic pages, media, and missing assets use safe cache and framing headers
+  [webkit] › phase3-static-proxy-tor.spec.ts:88:7 › phase 3 proxy, public-host, and secure-cookie checks › trusted forwarded HTTPS sets secure admin cookies and HSTS only for configured public hosts
+  [webkit] › phase3-static-proxy-tor.spec.ts:167:7 › phase 3 proxy, public-host, and secure-cookie checks › local TLS listener, self-signed browser trust, and HTTP redirect host rejection remain opt-in
+  [webkit] › phase3-static-proxy-tor.spec.ts:177:7 › phase 3 Tor and onion UI checks › Tor-disabled runtime keeps home/admin layouts stable and hides Tor-key backup controls
+  [webkit] › phase3-static-proxy-tor.spec.ts:207:7 › phase 3 Tor and onion UI checks › active onion pill, copy behavior, Onion-Location, and already-onion suppression remain opt-in
+  [webkit] › phase4-accessibility-progressive.spec.ts:30:7 › phase 4 accessibility basics and progressive enhancement › home, board, catalog, thread, posting, preferences, and admin forms expose keyboardable named controls
+  [webkit] › phase4-accessibility-progressive.spec.ts:105:7 › phase 4 accessibility basics and progressive enhancement › report, edit, delete confirmation, preferences, and media controls close cleanly and restore focus
+  [webkit] › phase4-accessibility-progressive.spec.ts:166:7 › phase 4 accessibility basics and progressive enhancement › critical public flows remain usable without optional main JavaScript
+  [webkit] › phase4-empty-error-permission.spec.ts:34:7 › phase 4 empty, error, and permission states › standalone 404, 400-ish, 403, locked-board, and banned pages stay clear and safe
+  [webkit] › phase4-empty-error-permission.spec.ts:87:7 › phase 4 empty, error, and permission states › posting, invalid upload, locked or archived thread, deleted post or thread, and active ban errors stay safe
+  [webkit] › phase4-empty-error-permission.spec.ts:168:7 › phase 4 empty, error, and permission states › invalid admin forms and restore uploads fail closed with useful admin navigation
+  [webkit] › phase4-responsive-long-content.spec.ts:32:7 › phase 4 responsive and long-content stress › long board metadata, titles, posts, filenames, counters, and admin rows stay usable without overlap
+  [webkit] › phase4-stress-release-smoke.spec.ts:32:7 › phase 4 high-volume and release-smoke journeys › busy public, protected, admin, search, API, update, and pagination surfaces remain usable
+  [webkit] › phase4-stress-release-smoke.spec.ts:147:7 › phase 4 high-volume and release-smoke journeys › fresh runtime can become a usable site, moderate content, back up, and restore
+  [webkit] › phase4-stress-release-smoke.spec.ts:232:7 › phase 4 high-volume and release-smoke journeys › no-JS public posting, upload, own edit or delete, report, unlock, and moderation smoke works
+  [webkit] › phase4-theme-contrast.spec.ts:24:7 › phase 4 built-in theme and contrast polish › theme picker order, selected state, site default, board override, and inherit behavior stay stable
+  [webkit] › phase4-theme-contrast.spec.ts:93:7 › phase 4 built-in theme and contrast polish › built-in themes keep core public and admin states readable without console errors
+  [webkit] › posting-thread.spec.ts:19:7 › logged-out navigation and posting › home, board, catalog, thread, assets, theme, and back-forward navigation are stable
+  [webkit] › posting-thread.spec.ts:50:7 › logged-out navigation and posting › thread creation, reply, escaping, quote-ish text, unicode, and refresh do not duplicate posts
+  [webkit] › posting-thread.spec.ts:68:7 › logged-out navigation and posting › empty, oversized, duplicate, invalid id, and stale-form posting errors stay safe
+  [webkit] › posting-thread.spec.ts:124:7 › logged-out navigation and posting › own edit modal and delete confirmation are limited to the posting browser context
+  [webkit] › posting-thread.spec.ts:169:7 › logged-out navigation and posting › own-post controls deny expired, replied, locked, archived, and deleted posts safely
+  [webkit] › settings.spec.ts:19:7 › settings, catalog, archive, search, and maintenance › site settings persist to settings.toml and survive restart
+  [webkit] › settings.spec.ts:43:7 › settings, catalog, archive, search, and maintenance › search and catalog handle unicode, punctuation, empty, long, and SQL-ish queries safely
+  [webkit] › settings.spec.ts:59:7 › settings, catalog, archive, search, and maintenance › bump/archive behavior and maintenance controls are admin-only and CSRF protected
+  [webkit] › settings.spec.ts:116:7 › settings, catalog, archive, search, and maintenance › thread sage, bump limits, sticky, lock, archive, and ban denials stay deterministic
+  [webkit] › setup-wizard.spec.ts:86:7 › first-run setup wizard › fresh setup persists PDF/media limits and enforces PDF limit
+  [webkit] › setup-wizard.spec.ts:125:7 › first-run setup wizard › initialized instance cannot access setup routes
+  [webkit] › setup-wizard.spec.ts:143:7 › first-run setup wizard › admin can reopen setup and close it without changing settings
+  [webkit] › setup-wizard.spec.ts:168:7 › first-run setup wizard › reopened setup cannot replace existing admin credentials
+  [webkit] › setup-wizard.spec.ts:191:7 › first-run setup wizard › no-JS setup flow still works
+  [webkit] › setup-wizard.spec.ts:199:7 › first-run setup wizard › mobile wizard review and finish layout remains usable
+  [webkit] › submission-idempotency.spec.ts:28:5 › public submission tokens stay atomic across concurrent thread and reply requests
+  [webkit] › tor-admin-onion-smoke.spec.ts:27:7 › Tor onion admin smoke (local opt-in) › admin login and same-origin checks work over plain onion HTTP
+  [webkit] › upload-regressions.spec.ts:95:3 › upload regressions (ignored by default) › posting UI accepts audio/MKV variants and keeps textarea resize disabled
+  [webkit] › upload-validation.spec.ts:222:1 › RustChan media upload validation matrix
+  [firefox] › activity-notifications.spec.ts:33:7 › new activity notification clearing audit › scripted projects › homepage, board, catalog, and thread badges clear after viewed in Chromium and mobile WebKit
+  [firefox] › activity-notifications.spec.ts:119:7 › new activity notification clearing audit › scripted projects › admin toggles keep homepage and thread badges independent
+  [firefox] › activity-notifications.spec.ts:174:7 › new activity notification clearing audit › Firefox no-JS project › server-rendered read state clears without JavaScript
+  [firefox] › admin-ban-delete.spec.ts:17:7 › admin ban+delete confirmation flow › styled modal handles cancel, validation, focus, and safe reply submission
+  [firefox] › admin-ban-delete.spec.ts:90:7 › admin ban+delete confirmation flow › no-JS fallback still submits the original form with default moderation fields
+  [firefox] › admin-dashboard.spec.ts:14:7 › admin dashboard control center › desktop dashboard prioritizes current issues and task-oriented workflows
+  [firefox] › admin-dashboard.spec.ts:83:7 › admin dashboard control center › mobile dashboard is visible, tappable, and contained at 390px and 320px
+  [firefox] › admin-dashboard.spec.ts:111:7 › admin dashboard control center › no-JS dashboard opens by default and its links reveal protected destinations
+  [firefox] › admin-dashboard.spec.ts:148:7 › admin dashboard control center › state pills retain readable text contrast across built-in themes
+  [firefox] › admin-dashboard.spec.ts:165:7 › admin dashboard control center › unauthenticated admin panel requests do not render the dashboard
+  [firefox] › admin-polish.spec.ts:20:7 › admin panel and moderation UI polish › admin login, panel sections, settings forms, and moderation queues stay usable
+  [firefox] › admin-polish.spec.ts:86:7 › admin panel and moderation UI polish › admin controls on public board, catalog, thread, and post surfaces stay grouped and tappable
+  [firefox] › admin-settings-phase2.spec.ts:14:7 › phase 2 admin settings save flows › site, media, backup, banner toggles, invalid values, and TOML writeback stay deterministic
+  [firefox] › admin-settings-phase2.spec.ts:144:7 › phase 2 admin settings save flows › admin settings mutations are admin-only and CSRF-protected
+  [firefox] › assets-themes-phase2.spec.ts:19:7 › phase 2 assets, favicons, banners, and themes › global and board favicons upload, replace, cache, protect, and clear without stale files
+  [firefox] › assets-themes-phase2.spec.ts:95:7 › phase 2 assets, favicons, banners, and themes › banners upload, reject invalid assets, cache-bust, protect board assets, delete, and restore inherit mode
+  [firefox] › assets-themes-phase2.spec.ts:171:7 › phase 2 assets, favicons, banners, and themes › custom themes create, edit, delete, and clear default references safely
+  [firefox] › audit-surfaces.spec.ts:19:7 › browser-reachable audit surfaces › home, preferences, theme fallback, and narrow layout are reachable
+  [firefox] › audit-surfaces.spec.ts:61:7 › browser-reachable audit surfaces › poll creation, voting, catalog controls, and hidden-thread views work through browser paths
+  [firefox] › audit-surfaces.spec.ts:121:7 › browser-reachable audit surfaces › public report controls work with JavaScript and expose a no-JS fallback
+  [firefox] › audit-surfaces.spec.ts:153:7 › browser-reachable audit surfaces › admin-authenticated and unauthenticated browser states expose expected security controls
+  [firefox] › audit-surfaces.spec.ts:177:7 › browser-reachable audit surfaces › new activity badges are browser-visible and clear after visiting the target thread
+  [firefox] › auth-admin.spec.ts:22:7 › first run and admin authentication › fresh runtime creates exe-local structure and reports missing admin without leaking secrets
+  [firefox] › auth-admin.spec.ts:61:7 › first run and admin authentication › invalid settings fail closed without leaking configured secrets
+  [firefox] › auth-admin.spec.ts:98:7 › first run and admin authentication › admin login, logout, stale back page, cookie attributes, and context isolation
+  [firefox] › auth-admin.spec.ts:140:7 › admin board management › creates, edits, protects against injection, persists, and deletes boards
+  [firefox] › auth-admin.spec.ts:184:7 › admin board management › rejects invalid, traversal-like, and duplicate board short names safely
+  [firefox] › auto-compress.spec.ts:27:7 › auto-compress oversized uploads › oversized image is compressed, accepted, served, and previewed
+  [firefox] › auto-compress.spec.ts:68:7 › auto-compress oversized uploads › oversized video is compressed, accepted, served, playable, and thumbnailed
+  [firefox] › auto-compress.spec.ts:113:7 › auto-compress oversized uploads › direct oversized upload without client compression rejects cleanly
+  [firefox] › auto-compress.spec.ts:148:7 › auto-compress oversized uploads › still-too-large browser compression fails without creating posts or staged files
+  [firefox] › backup-restore.spec.ts:107:7 › live backup and restore coverage › manual directory full backups restore complete site state into a fresh restarted runtime
+  [firefox] › backup-restore.spec.ts:135:7 › live backup and restore coverage › manual split full backups cover every exposed split-size option and require complete parts for restore
+  [firefox] › backup-restore.spec.ts:188:7 › live backup and restore coverage › saved board backups restore one board without replacing the rest of the site
+  [firefox] › backup-restore.spec.ts:224:7 › live backup and restore coverage › automated full backups write scheduled artifacts with the configured storage mode
+  [firefox] › backup-restore.spec.ts:255:7 › live backup and restore coverage › Tor hidden service keys are included, excluded, and restored only when explicitly requested
+  [firefox] › backup-restore.spec.ts:322:7 › live backup and restore coverage › restore rejects invalid archives and leaves the live site usable
+  [firefox] › board-settings-phase2.spec.ts:21:7 › phase 2 board settings depth › browser admin flow creates boards and persists deep settings across access modes
+  [firefox] › board-settings-phase2.spec.ts:183:7 › phase 2 board settings depth › invalid board inputs, upload caps, delete cleanup, and safe redirects fail closed
+  [firefox] › button-sizing.spec.ts:34:7 › public button and action-control sizing › public action controls stay consistently sized across scripted and no-JS controls
+  [firefox] › captcha.spec.ts:10:7 › CAPTCHA posting flow › renders image CAPTCHA and rejects bad answers in Chromium and WebKit
+  [firefox] › captcha.spec.ts:46:7 › CAPTCHA posting flow › no-JS users can reload for a fresh challenge and see server-rendered errors
+  [firefox] › console-headless.spec.ts:19:7 › terminal console / browser boundary › fresh headless startup keeps web setup available without terminal prompts
+  [firefox] › console-headless.spec.ts:38:7 › terminal console / browser boundary › CLI-seeded administration survives headless restart with readable logs
+  [firefox] › csrf-navigation.spec.ts:17:7 › CSRF, Origin, Referer, and browser navigation regressions › forms include CSRF and missing or invalid CSRF is rejected for mutations
+  [firefox] › csrf-navigation.spec.ts:51:7 › CSRF, Origin, Referer, and browser navigation regressions › session-scoped admin CSRF cannot be reused across sessions or after logout
+  [firefox] › csrf-navigation.spec.ts:90:7 › CSRF, Origin, Referer, and browser navigation regressions › Origin, Referer, null Origin, loopback aliases, and GET mutations follow policy
+  [firefox] › csrf-navigation.spec.ts:137:7 › CSRF, Origin, Referer, and browser navigation regressions › back-forward and refresh around POST redirects do not duplicate mutations
+  [firefox] › firefox-nojs-public.spec.ts:22:7 › Firefox no-JS public regression › public browsing, anchors, quotes, posting validation, and readable errors are server-rendered
+  [firefox] › firefox-nojs-public.spec.ts:75:7 › Firefox no-JS public regression › own-post edit and delete fallbacks use ownership cookies and fail closed
+  [firefox] › firefox-nojs-public.spec.ts:130:7 › Firefox no-JS public regression › media upload, render, headers, disabled policy, size, and traversal checks work without JavaScript
+  [firefox] › firefox-nojs-public.spec.ts:197:7 › Firefox no-JS public regression › fixture-driven board/site toggles, password boards, thread states, and defaults stay public-only
+  [firefox] › firefox-nojs-public.spec.ts:283:7 › Firefox no-JS public regression › themes, no-JS preferences, activity read state, and degraded HTTP behavior are safe
+  [firefox] › helpers-lifecycle.spec.ts:30:7 › RustChan fixture lifecycle › dispose removes temporary roots and supports explicit preservation
+  [firefox] › helpers-lifecycle.spec.ts:50:7 › RustChan fixture lifecycle › dispose stops a started process before removing its root
+  [firefox] › maintenance-backup-phase2.spec.ts:15:7 › phase 2 admin maintenance and backup progress › DB check, repair status, progress polling, stale job protection, and concurrent maintenance blocking work through admin UI routes
+  [firefox] › maintenance-backup-phase2.spec.ts:74:7 › phase 2 admin maintenance and backup progress › backup create, progress JSON, saved row, download, corrupt restore failure, cleanup, and delete are safe
+  [firefox] › maintenance-backup-phase2.spec.ts:153:7 › phase 2 admin maintenance and backup progress › fault-injected repair failure and pre-repair backup failure remain manual e2e cases
+  [firefox] › media-toolchain.spec.ts:14:7 › real media toolchain › uploads use real thumbnails, transcodes, waveform previews, and PDF fallback safely
+  [firefox] › media.spec.ts:12:7 › media upload handling › image uploads render previews and disabled boards reject them safely
+  [firefox] › media.spec.ts:51:7 › media upload handling › invalid, spoofed, oversized, and traversal-like media paths are rejected safely
+  [firefox] › media.spec.ts:84:7 › media upload handling › video, audio, PDF, and unusual filenames follow board media policy
+  [firefox] › mobile-nojs.spec.ts:14:7 › mobile responsive smoke › home, board, thread composer, media preview, admin login, and board edit are usable on mobile
+  [firefox] › mobile-nojs.spec.ts:43:7 › no-JS fallback › public navigation, thread creation, admin login, settings POST, and CSRF work without JavaScript
+  [firefox] › moderation-phase2.spec.ts:17:7 › phase 2 moderation, report, and ban lifecycle › JS report modal, duplicate reports, resolution, deletion, bans, appeals, and mod log are coherent
+  [firefox] › moderation-phase2.spec.ts:234:7 › phase 2 moderation, report, and ban lifecycle › no-JS report fallback posts through the plain form when JavaScript is disabled
+  [firefox] › password-boards.spec.ts:20:7 › password-protected boards › view-password boards require per-context unlock and resist back-forward bypasses
+  [firefox] › password-boards.spec.ts:70:7 › password-protected boards › post-password boards allow viewing but require password for threads and replies
+  [firefox] › password-boards.spec.ts:128:7 › password-protected boards › view-password boards do not leak protected content before unlock
+  [firefox] › password-boards.spec.ts:193:7 › password-protected boards › password changes retire the old password and accept the new one
+  [firefox] › password-boards.spec.ts:223:7 › password-protected boards › mobile WebKit persists board unlock over HTTP localhost when HTTPS cookies are configured
+  [firefox] › phase3-activity-cache.spec.ts:30:7 › phase 3 activity cache and browser restore behavior › activity cookies survive restart and BFCache restore does not resurrect cleared badges
+  [firefox] › phase3-activity-cache.spec.ts:90:7 › phase 3 activity cache and browser restore behavior › protected board activity cookies do not leak badges after the unlock cookie is removed
+  [firefox] › phase3-activity-cache.spec.ts:140:7 › phase 3 activity cache and browser restore behavior › Firefox no-JS activity badges clear through plain navigation
+  [firefox] › phase3-media-runtime.spec.ts:25:7 › phase 3 media viewer runtime behavior › image viewer expands, collapses, falls back for missing thumbs, and keeps long filename links usable
+  [firefox] › phase3-media-runtime.spec.ts:77:7 › phase 3 media viewer runtime behavior › video, audio, PDF, and pending media refresh render controls without pixel assertions
+  [firefox] › phase3-media-runtime.spec.ts:154:7 › phase 3 media viewer runtime behavior › Firefox no-JS users keep direct media links without the JS viewer
+  [firefox] › phase3-media-runtime.spec.ts:181:7 › phase 3 downloads, range requests, and media headers › uploaded media headers, browser downloads, stale transcode redirects, and protected denials are safe
+  [firefox] › phase3-mobile-webkit-runtime.spec.ts:21:7 › phase 3 mobile WebKit runtime coverage › login, protected unlock, posting, own-post controls, media viewer, admin settings, and long pages stay usable
+  [firefox] › phase3-static-proxy-tor.spec.ts:19:7 › phase 3 static and runtime headers › static assets, dynamic pages, media, and missing assets use safe cache and framing headers
+  [firefox] › phase3-static-proxy-tor.spec.ts:88:7 › phase 3 proxy, public-host, and secure-cookie checks › trusted forwarded HTTPS sets secure admin cookies and HSTS only for configured public hosts
+  [firefox] › phase3-static-proxy-tor.spec.ts:167:7 › phase 3 proxy, public-host, and secure-cookie checks › local TLS listener, self-signed browser trust, and HTTP redirect host rejection remain opt-in
+  [firefox] › phase3-static-proxy-tor.spec.ts:177:7 › phase 3 Tor and onion UI checks › Tor-disabled runtime keeps home/admin layouts stable and hides Tor-key backup controls
+  [firefox] › phase3-static-proxy-tor.spec.ts:207:7 › phase 3 Tor and onion UI checks › active onion pill, copy behavior, Onion-Location, and already-onion suppression remain opt-in
+  [firefox] › phase4-accessibility-progressive.spec.ts:30:7 › phase 4 accessibility basics and progressive enhancement › home, board, catalog, thread, posting, preferences, and admin forms expose keyboardable named controls
+  [firefox] › phase4-accessibility-progressive.spec.ts:105:7 › phase 4 accessibility basics and progressive enhancement › report, edit, delete confirmation, preferences, and media controls close cleanly and restore focus
+  [firefox] › phase4-accessibility-progressive.spec.ts:166:7 › phase 4 accessibility basics and progressive enhancement › critical public flows remain usable without optional main JavaScript
+  [firefox] › phase4-empty-error-permission.spec.ts:34:7 › phase 4 empty, error, and permission states › standalone 404, 400-ish, 403, locked-board, and banned pages stay clear and safe
+  [firefox] › phase4-empty-error-permission.spec.ts:87:7 › phase 4 empty, error, and permission states › posting, invalid upload, locked or archived thread, deleted post or thread, and active ban errors stay safe
+  [firefox] › phase4-empty-error-permission.spec.ts:168:7 › phase 4 empty, error, and permission states › invalid admin forms and restore uploads fail closed with useful admin navigation
+  [firefox] › phase4-responsive-long-content.spec.ts:32:7 › phase 4 responsive and long-content stress › long board metadata, titles, posts, filenames, counters, and admin rows stay usable without overlap
+  [firefox] › phase4-stress-release-smoke.spec.ts:32:7 › phase 4 high-volume and release-smoke journeys › busy public, protected, admin, search, API, update, and pagination surfaces remain usable
+  [firefox] › phase4-stress-release-smoke.spec.ts:147:7 › phase 4 high-volume and release-smoke journeys › fresh runtime can become a usable site, moderate content, back up, and restore
+  [firefox] › phase4-stress-release-smoke.spec.ts:232:7 › phase 4 high-volume and release-smoke journeys › no-JS public posting, upload, own edit or delete, report, unlock, and moderation smoke works
+  [firefox] › phase4-theme-contrast.spec.ts:24:7 › phase 4 built-in theme and contrast polish › theme picker order, selected state, site default, board override, and inherit behavior stay stable
+  [firefox] › phase4-theme-contrast.spec.ts:93:7 › phase 4 built-in theme and contrast polish › built-in themes keep core public and admin states readable without console errors
+  [firefox] › posting-thread.spec.ts:19:7 › logged-out navigation and posting › home, board, catalog, thread, assets, theme, and back-forward navigation are stable
+  [firefox] › posting-thread.spec.ts:50:7 › logged-out navigation and posting › thread creation, reply, escaping, quote-ish text, unicode, and refresh do not duplicate posts
+  [firefox] › posting-thread.spec.ts:68:7 › logged-out navigation and posting › empty, oversized, duplicate, invalid id, and stale-form posting errors stay safe
+  [firefox] › posting-thread.spec.ts:124:7 › logged-out navigation and posting › own edit modal and delete confirmation are limited to the posting browser context
+  [firefox] › posting-thread.spec.ts:169:7 › logged-out navigation and posting › own-post controls deny expired, replied, locked, archived, and deleted posts safely
+  [firefox] › settings.spec.ts:19:7 › settings, catalog, archive, search, and maintenance › site settings persist to settings.toml and survive restart
+  [firefox] › settings.spec.ts:43:7 › settings, catalog, archive, search, and maintenance › search and catalog handle unicode, punctuation, empty, long, and SQL-ish queries safely
+  [firefox] › settings.spec.ts:59:7 › settings, catalog, archive, search, and maintenance › bump/archive behavior and maintenance controls are admin-only and CSRF protected
+  [firefox] › settings.spec.ts:116:7 › settings, catalog, archive, search, and maintenance › thread sage, bump limits, sticky, lock, archive, and ban denials stay deterministic
+  [firefox] › setup-wizard.spec.ts:86:7 › first-run setup wizard › fresh setup persists PDF/media limits and enforces PDF limit
+  [firefox] › setup-wizard.spec.ts:125:7 › first-run setup wizard › initialized instance cannot access setup routes
+  [firefox] › setup-wizard.spec.ts:143:7 › first-run setup wizard › admin can reopen setup and close it without changing settings
+  [firefox] › setup-wizard.spec.ts:168:7 › first-run setup wizard › reopened setup cannot replace existing admin credentials
+  [firefox] › setup-wizard.spec.ts:191:7 › first-run setup wizard › no-JS setup flow still works
+  [firefox] › setup-wizard.spec.ts:199:7 › first-run setup wizard › mobile wizard review and finish layout remains usable
+  [firefox] › submission-idempotency.spec.ts:28:5 › public submission tokens stay atomic across concurrent thread and reply requests
+  [firefox] › tor-admin-onion-smoke.spec.ts:27:7 › Tor onion admin smoke (local opt-in) › admin login and same-origin checks work over plain onion HTTP
+  [firefox] › upload-regressions.spec.ts:95:3 › upload regressions (ignored by default) › posting UI accepts audio/MKV variants and keeps textarea resize disabled
+  [firefox] › upload-validation.spec.ts:222:1 › RustChan media upload validation matrix
+  [mobile-firefox] › activity-notifications.spec.ts:33:7 › new activity notification clearing audit › scripted projects › homepage, board, catalog, and thread badges clear after viewed in Chromium and mobile WebKit
+  [mobile-firefox] › activity-notifications.spec.ts:119:7 › new activity notification clearing audit › scripted projects › admin toggles keep homepage and thread badges independent
+  [mobile-firefox] › activity-notifications.spec.ts:174:7 › new activity notification clearing audit › Firefox no-JS project › server-rendered read state clears without JavaScript
+  [mobile-firefox] › admin-ban-delete.spec.ts:17:7 › admin ban+delete confirmation flow › styled modal handles cancel, validation, focus, and safe reply submission
+  [mobile-firefox] › admin-ban-delete.spec.ts:90:7 › admin ban+delete confirmation flow › no-JS fallback still submits the original form with default moderation fields
+  [mobile-firefox] › admin-dashboard.spec.ts:14:7 › admin dashboard control center › desktop dashboard prioritizes current issues and task-oriented workflows
+  [mobile-firefox] › admin-dashboard.spec.ts:83:7 › admin dashboard control center › mobile dashboard is visible, tappable, and contained at 390px and 320px
+  [mobile-firefox] › admin-dashboard.spec.ts:111:7 › admin dashboard control center › no-JS dashboard opens by default and its links reveal protected destinations
+  [mobile-firefox] › admin-dashboard.spec.ts:148:7 › admin dashboard control center › state pills retain readable text contrast across built-in themes
+  [mobile-firefox] › admin-dashboard.spec.ts:165:7 › admin dashboard control center › unauthenticated admin panel requests do not render the dashboard
+  [mobile-firefox] › admin-polish.spec.ts:20:7 › admin panel and moderation UI polish › admin login, panel sections, settings forms, and moderation queues stay usable
+  [mobile-firefox] › admin-polish.spec.ts:86:7 › admin panel and moderation UI polish › admin controls on public board, catalog, thread, and post surfaces stay grouped and tappable
+  [mobile-firefox] › admin-settings-phase2.spec.ts:14:7 › phase 2 admin settings save flows › site, media, backup, banner toggles, invalid values, and TOML writeback stay deterministic
+  [mobile-firefox] › admin-settings-phase2.spec.ts:144:7 › phase 2 admin settings save flows › admin settings mutations are admin-only and CSRF-protected
+  [mobile-firefox] › assets-themes-phase2.spec.ts:19:7 › phase 2 assets, favicons, banners, and themes › global and board favicons upload, replace, cache, protect, and clear without stale files
+  [mobile-firefox] › assets-themes-phase2.spec.ts:95:7 › phase 2 assets, favicons, banners, and themes › banners upload, reject invalid assets, cache-bust, protect board assets, delete, and restore inherit mode
+  [mobile-firefox] › assets-themes-phase2.spec.ts:171:7 › phase 2 assets, favicons, banners, and themes › custom themes create, edit, delete, and clear default references safely
+  [mobile-firefox] › audit-surfaces.spec.ts:19:7 › browser-reachable audit surfaces › home, preferences, theme fallback, and narrow layout are reachable
+  [mobile-firefox] › audit-surfaces.spec.ts:61:7 › browser-reachable audit surfaces › poll creation, voting, catalog controls, and hidden-thread views work through browser paths
+  [mobile-firefox] › audit-surfaces.spec.ts:121:7 › browser-reachable audit surfaces › public report controls work with JavaScript and expose a no-JS fallback
+  [mobile-firefox] › audit-surfaces.spec.ts:153:7 › browser-reachable audit surfaces › admin-authenticated and unauthenticated browser states expose expected security controls
+  [mobile-firefox] › audit-surfaces.spec.ts:177:7 › browser-reachable audit surfaces › new activity badges are browser-visible and clear after visiting the target thread
+  [mobile-firefox] › auth-admin.spec.ts:22:7 › first run and admin authentication › fresh runtime creates exe-local structure and reports missing admin without leaking secrets
+  [mobile-firefox] › auth-admin.spec.ts:61:7 › first run and admin authentication › invalid settings fail closed without leaking configured secrets
+  [mobile-firefox] › auth-admin.spec.ts:98:7 › first run and admin authentication › admin login, logout, stale back page, cookie attributes, and context isolation
+  [mobile-firefox] › auth-admin.spec.ts:140:7 › admin board management › creates, edits, protects against injection, persists, and deletes boards
+  [mobile-firefox] › auth-admin.spec.ts:184:7 › admin board management › rejects invalid, traversal-like, and duplicate board short names safely
+  [mobile-firefox] › auto-compress.spec.ts:27:7 › auto-compress oversized uploads › oversized image is compressed, accepted, served, and previewed
+  [mobile-firefox] › auto-compress.spec.ts:68:7 › auto-compress oversized uploads › oversized video is compressed, accepted, served, playable, and thumbnailed
+  [mobile-firefox] › auto-compress.spec.ts:113:7 › auto-compress oversized uploads › direct oversized upload without client compression rejects cleanly
+  [mobile-firefox] › auto-compress.spec.ts:148:7 › auto-compress oversized uploads › still-too-large browser compression fails without creating posts or staged files
+  [mobile-firefox] › backup-restore.spec.ts:107:7 › live backup and restore coverage › manual directory full backups restore complete site state into a fresh restarted runtime
+  [mobile-firefox] › backup-restore.spec.ts:135:7 › live backup and restore coverage › manual split full backups cover every exposed split-size option and require complete parts for restore
+  [mobile-firefox] › backup-restore.spec.ts:188:7 › live backup and restore coverage › saved board backups restore one board without replacing the rest of the site
+  [mobile-firefox] › backup-restore.spec.ts:224:7 › live backup and restore coverage › automated full backups write scheduled artifacts with the configured storage mode
+  [mobile-firefox] › backup-restore.spec.ts:255:7 › live backup and restore coverage › Tor hidden service keys are included, excluded, and restored only when explicitly requested
+  [mobile-firefox] › backup-restore.spec.ts:322:7 › live backup and restore coverage › restore rejects invalid archives and leaves the live site usable
+  [mobile-firefox] › board-settings-phase2.spec.ts:21:7 › phase 2 board settings depth › browser admin flow creates boards and persists deep settings across access modes
+  [mobile-firefox] › board-settings-phase2.spec.ts:183:7 › phase 2 board settings depth › invalid board inputs, upload caps, delete cleanup, and safe redirects fail closed
+  [mobile-firefox] › button-sizing.spec.ts:34:7 › public button and action-control sizing › public action controls stay consistently sized across scripted and no-JS controls
+  [mobile-firefox] › captcha.spec.ts:10:7 › CAPTCHA posting flow › renders image CAPTCHA and rejects bad answers in Chromium and WebKit
+  [mobile-firefox] › captcha.spec.ts:46:7 › CAPTCHA posting flow › no-JS users can reload for a fresh challenge and see server-rendered errors
+  [mobile-firefox] › console-headless.spec.ts:19:7 › terminal console / browser boundary › fresh headless startup keeps web setup available without terminal prompts
+  [mobile-firefox] › console-headless.spec.ts:38:7 › terminal console / browser boundary › CLI-seeded administration survives headless restart with readable logs
+  [mobile-firefox] › csrf-navigation.spec.ts:17:7 › CSRF, Origin, Referer, and browser navigation regressions › forms include CSRF and missing or invalid CSRF is rejected for mutations
+  [mobile-firefox] › csrf-navigation.spec.ts:51:7 › CSRF, Origin, Referer, and browser navigation regressions › session-scoped admin CSRF cannot be reused across sessions or after logout
+  [mobile-firefox] › csrf-navigation.spec.ts:90:7 › CSRF, Origin, Referer, and browser navigation regressions › Origin, Referer, null Origin, loopback aliases, and GET mutations follow policy
+  [mobile-firefox] › csrf-navigation.spec.ts:137:7 › CSRF, Origin, Referer, and browser navigation regressions › back-forward and refresh around POST redirects do not duplicate mutations
+  [mobile-firefox] › firefox-nojs-public.spec.ts:22:7 › Firefox no-JS public regression › public browsing, anchors, quotes, posting validation, and readable errors are server-rendered
+  [mobile-firefox] › firefox-nojs-public.spec.ts:75:7 › Firefox no-JS public regression › own-post edit and delete fallbacks use ownership cookies and fail closed
+  [mobile-firefox] › firefox-nojs-public.spec.ts:130:7 › Firefox no-JS public regression › media upload, render, headers, disabled policy, size, and traversal checks work without JavaScript
+  [mobile-firefox] › firefox-nojs-public.spec.ts:197:7 › Firefox no-JS public regression › fixture-driven board/site toggles, password boards, thread states, and defaults stay public-only
+  [mobile-firefox] › firefox-nojs-public.spec.ts:283:7 › Firefox no-JS public regression › themes, no-JS preferences, activity read state, and degraded HTTP behavior are safe
+  [mobile-firefox] › helpers-lifecycle.spec.ts:30:7 › RustChan fixture lifecycle › dispose removes temporary roots and supports explicit preservation
+  [mobile-firefox] › helpers-lifecycle.spec.ts:50:7 › RustChan fixture lifecycle › dispose stops a started process before removing its root
+  [mobile-firefox] › maintenance-backup-phase2.spec.ts:15:7 › phase 2 admin maintenance and backup progress › DB check, repair status, progress polling, stale job protection, and concurrent maintenance blocking work through admin UI routes
+  [mobile-firefox] › maintenance-backup-phase2.spec.ts:74:7 › phase 2 admin maintenance and backup progress › backup create, progress JSON, saved row, download, corrupt restore failure, cleanup, and delete are safe
+  [mobile-firefox] › maintenance-backup-phase2.spec.ts:153:7 › phase 2 admin maintenance and backup progress › fault-injected repair failure and pre-repair backup failure remain manual e2e cases
+  [mobile-firefox] › media-toolchain.spec.ts:14:7 › real media toolchain › uploads use real thumbnails, transcodes, waveform previews, and PDF fallback safely
+  [mobile-firefox] › media.spec.ts:12:7 › media upload handling › image uploads render previews and disabled boards reject them safely
+  [mobile-firefox] › media.spec.ts:51:7 › media upload handling › invalid, spoofed, oversized, and traversal-like media paths are rejected safely
+  [mobile-firefox] › media.spec.ts:84:7 › media upload handling › video, audio, PDF, and unusual filenames follow board media policy
+  [mobile-firefox] › mobile-nojs.spec.ts:14:7 › mobile responsive smoke › home, board, thread composer, media preview, admin login, and board edit are usable on mobile
+  [mobile-firefox] › mobile-nojs.spec.ts:43:7 › no-JS fallback › public navigation, thread creation, admin login, settings POST, and CSRF work without JavaScript
+  [mobile-firefox] › moderation-phase2.spec.ts:17:7 › phase 2 moderation, report, and ban lifecycle › JS report modal, duplicate reports, resolution, deletion, bans, appeals, and mod log are coherent
+  [mobile-firefox] › moderation-phase2.spec.ts:234:7 › phase 2 moderation, report, and ban lifecycle › no-JS report fallback posts through the plain form when JavaScript is disabled
+  [mobile-firefox] › password-boards.spec.ts:20:7 › password-protected boards › view-password boards require per-context unlock and resist back-forward bypasses
+  [mobile-firefox] › password-boards.spec.ts:70:7 › password-protected boards › post-password boards allow viewing but require password for threads and replies
+  [mobile-firefox] › password-boards.spec.ts:128:7 › password-protected boards › view-password boards do not leak protected content before unlock
+  [mobile-firefox] › password-boards.spec.ts:193:7 › password-protected boards › password changes retire the old password and accept the new one
+  [mobile-firefox] › password-boards.spec.ts:223:7 › password-protected boards › mobile WebKit persists board unlock over HTTP localhost when HTTPS cookies are configured
+  [mobile-firefox] › phase3-activity-cache.spec.ts:30:7 › phase 3 activity cache and browser restore behavior › activity cookies survive restart and BFCache restore does not resurrect cleared badges
+  [mobile-firefox] › phase3-activity-cache.spec.ts:90:7 › phase 3 activity cache and browser restore behavior › protected board activity cookies do not leak badges after the unlock cookie is removed
+  [mobile-firefox] › phase3-activity-cache.spec.ts:140:7 › phase 3 activity cache and browser restore behavior › Firefox no-JS activity badges clear through plain navigation
+  [mobile-firefox] › phase3-media-runtime.spec.ts:25:7 › phase 3 media viewer runtime behavior › image viewer expands, collapses, falls back for missing thumbs, and keeps long filename links usable
+  [mobile-firefox] › phase3-media-runtime.spec.ts:77:7 › phase 3 media viewer runtime behavior › video, audio, PDF, and pending media refresh render controls without pixel assertions
+  [mobile-firefox] › phase3-media-runtime.spec.ts:154:7 › phase 3 media viewer runtime behavior › Firefox no-JS users keep direct media links without the JS viewer
+  [mobile-firefox] › phase3-media-runtime.spec.ts:181:7 › phase 3 downloads, range requests, and media headers › uploaded media headers, browser downloads, stale transcode redirects, and protected denials are safe
+  [mobile-firefox] › phase3-mobile-webkit-runtime.spec.ts:21:7 › phase 3 mobile WebKit runtime coverage › login, protected unlock, posting, own-post controls, media viewer, admin settings, and long pages stay usable
+  [mobile-firefox] › phase3-static-proxy-tor.spec.ts:19:7 › phase 3 static and runtime headers › static assets, dynamic pages, media, and missing assets use safe cache and framing headers
+  [mobile-firefox] › phase3-static-proxy-tor.spec.ts:88:7 › phase 3 proxy, public-host, and secure-cookie checks › trusted forwarded HTTPS sets secure admin cookies and HSTS only for configured public hosts
+  [mobile-firefox] › phase3-static-proxy-tor.spec.ts:167:7 › phase 3 proxy, public-host, and secure-cookie checks › local TLS listener, self-signed browser trust, and HTTP redirect host rejection remain opt-in
+  [mobile-firefox] › phase3-static-proxy-tor.spec.ts:177:7 › phase 3 Tor and onion UI checks › Tor-disabled runtime keeps home/admin layouts stable and hides Tor-key backup controls
+  [mobile-firefox] › phase3-static-proxy-tor.spec.ts:207:7 › phase 3 Tor and onion UI checks › active onion pill, copy behavior, Onion-Location, and already-onion suppression remain opt-in
+  [mobile-firefox] › phase4-accessibility-progressive.spec.ts:30:7 › phase 4 accessibility basics and progressive enhancement › home, board, catalog, thread, posting, preferences, and admin forms expose keyboardable named controls
+  [mobile-firefox] › phase4-accessibility-progressive.spec.ts:105:7 › phase 4 accessibility basics and progressive enhancement › report, edit, delete confirmation, preferences, and media controls close cleanly and restore focus
+  [mobile-firefox] › phase4-accessibility-progressive.spec.ts:166:7 › phase 4 accessibility basics and progressive enhancement › critical public flows remain usable without optional main JavaScript
+  [mobile-firefox] › phase4-empty-error-permission.spec.ts:34:7 › phase 4 empty, error, and permission states › standalone 404, 400-ish, 403, locked-board, and banned pages stay clear and safe
+  [mobile-firefox] › phase4-empty-error-permission.spec.ts:87:7 › phase 4 empty, error, and permission states › posting, invalid upload, locked or archived thread, deleted post or thread, and active ban errors stay safe
+  [mobile-firefox] › phase4-empty-error-permission.spec.ts:168:7 › phase 4 empty, error, and permission states › invalid admin forms and restore uploads fail closed with useful admin navigation
+  [mobile-firefox] › phase4-responsive-long-content.spec.ts:32:7 › phase 4 responsive and long-content stress › long board metadata, titles, posts, filenames, counters, and admin rows stay usable without overlap
+  [mobile-firefox] › phase4-stress-release-smoke.spec.ts:32:7 › phase 4 high-volume and release-smoke journeys › busy public, protected, admin, search, API, update, and pagination surfaces remain usable
+  [mobile-firefox] › phase4-stress-release-smoke.spec.ts:147:7 › phase 4 high-volume and release-smoke journeys › fresh runtime can become a usable site, moderate content, back up, and restore
+  [mobile-firefox] › phase4-stress-release-smoke.spec.ts:232:7 › phase 4 high-volume and release-smoke journeys › no-JS public posting, upload, own edit or delete, report, unlock, and moderation smoke works
+  [mobile-firefox] › phase4-theme-contrast.spec.ts:24:7 › phase 4 built-in theme and contrast polish › theme picker order, selected state, site default, board override, and inherit behavior stay stable
+  [mobile-firefox] › phase4-theme-contrast.spec.ts:93:7 › phase 4 built-in theme and contrast polish › built-in themes keep core public and admin states readable without console errors
+  [mobile-firefox] › posting-thread.spec.ts:19:7 › logged-out navigation and posting › home, board, catalog, thread, assets, theme, and back-forward navigation are stable
+  [mobile-firefox] › posting-thread.spec.ts:50:7 › logged-out navigation and posting › thread creation, reply, escaping, quote-ish text, unicode, and refresh do not duplicate posts
+  [mobile-firefox] › posting-thread.spec.ts:68:7 › logged-out navigation and posting › empty, oversized, duplicate, invalid id, and stale-form posting errors stay safe
+  [mobile-firefox] › posting-thread.spec.ts:124:7 › logged-out navigation and posting › own edit modal and delete confirmation are limited to the posting browser context
+  [mobile-firefox] › posting-thread.spec.ts:169:7 › logged-out navigation and posting › own-post controls deny expired, replied, locked, archived, and deleted posts safely
+  [mobile-firefox] › settings.spec.ts:19:7 › settings, catalog, archive, search, and maintenance › site settings persist to settings.toml and survive restart
+  [mobile-firefox] › settings.spec.ts:43:7 › settings, catalog, archive, search, and maintenance › search and catalog handle unicode, punctuation, empty, long, and SQL-ish queries safely
+  [mobile-firefox] › settings.spec.ts:59:7 › settings, catalog, archive, search, and maintenance › bump/archive behavior and maintenance controls are admin-only and CSRF protected
+  [mobile-firefox] › settings.spec.ts:116:7 › settings, catalog, archive, search, and maintenance › thread sage, bump limits, sticky, lock, archive, and ban denials stay deterministic
+  [mobile-firefox] › setup-wizard.spec.ts:86:7 › first-run setup wizard › fresh setup persists PDF/media limits and enforces PDF limit
+  [mobile-firefox] › setup-wizard.spec.ts:125:7 › first-run setup wizard › initialized instance cannot access setup routes
+  [mobile-firefox] › setup-wizard.spec.ts:143:7 › first-run setup wizard › admin can reopen setup and close it without changing settings
+  [mobile-firefox] › setup-wizard.spec.ts:168:7 › first-run setup wizard › reopened setup cannot replace existing admin credentials
+  [mobile-firefox] › setup-wizard.spec.ts:191:7 › first-run setup wizard › no-JS setup flow still works
+  [mobile-firefox] › setup-wizard.spec.ts:199:7 › first-run setup wizard › mobile wizard review and finish layout remains usable
+  [mobile-firefox] › submission-idempotency.spec.ts:28:5 › public submission tokens stay atomic across concurrent thread and reply requests
+  [mobile-firefox] › tor-admin-onion-smoke.spec.ts:27:7 › Tor onion admin smoke (local opt-in) › admin login and same-origin checks work over plain onion HTTP
+  [mobile-firefox] › upload-regressions.spec.ts:95:3 › upload regressions (ignored by default) › posting UI accepts audio/MKV variants and keeps textarea resize disabled
+  [mobile-firefox] › upload-validation.spec.ts:222:1 › RustChan media upload validation matrix
+  [mobile-webkit] › activity-notifications.spec.ts:33:7 › new activity notification clearing audit › scripted projects › homepage, board, catalog, and thread badges clear after viewed in Chromium and mobile WebKit
+  [mobile-webkit] › activity-notifications.spec.ts:119:7 › new activity notification clearing audit › scripted projects › admin toggles keep homepage and thread badges independent
+  [mobile-webkit] › activity-notifications.spec.ts:174:7 › new activity notification clearing audit › Firefox no-JS project › server-rendered read state clears without JavaScript
+  [mobile-webkit] › admin-ban-delete.spec.ts:17:7 › admin ban+delete confirmation flow › styled modal handles cancel, validation, focus, and safe reply submission
+  [mobile-webkit] › admin-ban-delete.spec.ts:90:7 › admin ban+delete confirmation flow › no-JS fallback still submits the original form with default moderation fields
+  [mobile-webkit] › admin-dashboard.spec.ts:14:7 › admin dashboard control center › desktop dashboard prioritizes current issues and task-oriented workflows
+  [mobile-webkit] › admin-dashboard.spec.ts:83:7 › admin dashboard control center › mobile dashboard is visible, tappable, and contained at 390px and 320px
+  [mobile-webkit] › admin-dashboard.spec.ts:111:7 › admin dashboard control center › no-JS dashboard opens by default and its links reveal protected destinations
+  [mobile-webkit] › admin-dashboard.spec.ts:148:7 › admin dashboard control center › state pills retain readable text contrast across built-in themes
+  [mobile-webkit] › admin-dashboard.spec.ts:165:7 › admin dashboard control center › unauthenticated admin panel requests do not render the dashboard
+  [mobile-webkit] › admin-polish.spec.ts:20:7 › admin panel and moderation UI polish › admin login, panel sections, settings forms, and moderation queues stay usable
+  [mobile-webkit] › admin-polish.spec.ts:86:7 › admin panel and moderation UI polish › admin controls on public board, catalog, thread, and post surfaces stay grouped and tappable
+  [mobile-webkit] › admin-settings-phase2.spec.ts:14:7 › phase 2 admin settings save flows › site, media, backup, banner toggles, invalid values, and TOML writeback stay deterministic
+  [mobile-webkit] › admin-settings-phase2.spec.ts:144:7 › phase 2 admin settings save flows › admin settings mutations are admin-only and CSRF-protected
+  [mobile-webkit] › assets-themes-phase2.spec.ts:19:7 › phase 2 assets, favicons, banners, and themes › global and board favicons upload, replace, cache, protect, and clear without stale files
+  [mobile-webkit] › assets-themes-phase2.spec.ts:95:7 › phase 2 assets, favicons, banners, and themes › banners upload, reject invalid assets, cache-bust, protect board assets, delete, and restore inherit mode
+  [mobile-webkit] › assets-themes-phase2.spec.ts:171:7 › phase 2 assets, favicons, banners, and themes › custom themes create, edit, delete, and clear default references safely
+  [mobile-webkit] › audit-surfaces.spec.ts:19:7 › browser-reachable audit surfaces › home, preferences, theme fallback, and narrow layout are reachable
+  [mobile-webkit] › audit-surfaces.spec.ts:61:7 › browser-reachable audit surfaces › poll creation, voting, catalog controls, and hidden-thread views work through browser paths
+  [mobile-webkit] › audit-surfaces.spec.ts:121:7 › browser-reachable audit surfaces › public report controls work with JavaScript and expose a no-JS fallback
+  [mobile-webkit] › audit-surfaces.spec.ts:153:7 › browser-reachable audit surfaces › admin-authenticated and unauthenticated browser states expose expected security controls
+  [mobile-webkit] › audit-surfaces.spec.ts:177:7 › browser-reachable audit surfaces › new activity badges are browser-visible and clear after visiting the target thread
+  [mobile-webkit] › auth-admin.spec.ts:22:7 › first run and admin authentication › fresh runtime creates exe-local structure and reports missing admin without leaking secrets
+  [mobile-webkit] › auth-admin.spec.ts:61:7 › first run and admin authentication › invalid settings fail closed without leaking configured secrets
+  [mobile-webkit] › auth-admin.spec.ts:98:7 › first run and admin authentication › admin login, logout, stale back page, cookie attributes, and context isolation
+  [mobile-webkit] › auth-admin.spec.ts:140:7 › admin board management › creates, edits, protects against injection, persists, and deletes boards
+  [mobile-webkit] › auth-admin.spec.ts:184:7 › admin board management › rejects invalid, traversal-like, and duplicate board short names safely
+  [mobile-webkit] › auto-compress.spec.ts:27:7 › auto-compress oversized uploads › oversized image is compressed, accepted, served, and previewed
+  [mobile-webkit] › auto-compress.spec.ts:68:7 › auto-compress oversized uploads › oversized video is compressed, accepted, served, playable, and thumbnailed
+  [mobile-webkit] › auto-compress.spec.ts:113:7 › auto-compress oversized uploads › direct oversized upload without client compression rejects cleanly
+  [mobile-webkit] › auto-compress.spec.ts:148:7 › auto-compress oversized uploads › still-too-large browser compression fails without creating posts or staged files
+  [mobile-webkit] › backup-restore.spec.ts:107:7 › live backup and restore coverage › manual directory full backups restore complete site state into a fresh restarted runtime
+  [mobile-webkit] › backup-restore.spec.ts:135:7 › live backup and restore coverage › manual split full backups cover every exposed split-size option and require complete parts for restore
+  [mobile-webkit] › backup-restore.spec.ts:188:7 › live backup and restore coverage › saved board backups restore one board without replacing the rest of the site
+  [mobile-webkit] › backup-restore.spec.ts:224:7 › live backup and restore coverage › automated full backups write scheduled artifacts with the configured storage mode
+  [mobile-webkit] › backup-restore.spec.ts:255:7 › live backup and restore coverage › Tor hidden service keys are included, excluded, and restored only when explicitly requested
+  [mobile-webkit] › backup-restore.spec.ts:322:7 › live backup and restore coverage › restore rejects invalid archives and leaves the live site usable
+  [mobile-webkit] › board-settings-phase2.spec.ts:21:7 › phase 2 board settings depth › browser admin flow creates boards and persists deep settings across access modes
+  [mobile-webkit] › board-settings-phase2.spec.ts:183:7 › phase 2 board settings depth › invalid board inputs, upload caps, delete cleanup, and safe redirects fail closed
+  [mobile-webkit] › button-sizing.spec.ts:34:7 › public button and action-control sizing › public action controls stay consistently sized across scripted and no-JS controls
+  [mobile-webkit] › captcha.spec.ts:10:7 › CAPTCHA posting flow › renders image CAPTCHA and rejects bad answers in Chromium and WebKit
+  [mobile-webkit] › captcha.spec.ts:46:7 › CAPTCHA posting flow › no-JS users can reload for a fresh challenge and see server-rendered errors
+  [mobile-webkit] › console-headless.spec.ts:19:7 › terminal console / browser boundary › fresh headless startup keeps web setup available without terminal prompts
+  [mobile-webkit] › console-headless.spec.ts:38:7 › terminal console / browser boundary › CLI-seeded administration survives headless restart with readable logs
+  [mobile-webkit] › csrf-navigation.spec.ts:17:7 › CSRF, Origin, Referer, and browser navigation regressions › forms include CSRF and missing or invalid CSRF is rejected for mutations
+  [mobile-webkit] › csrf-navigation.spec.ts:51:7 › CSRF, Origin, Referer, and browser navigation regressions › session-scoped admin CSRF cannot be reused across sessions or after logout
+  [mobile-webkit] › csrf-navigation.spec.ts:90:7 › CSRF, Origin, Referer, and browser navigation regressions › Origin, Referer, null Origin, loopback aliases, and GET mutations follow policy
+  [mobile-webkit] › csrf-navigation.spec.ts:137:7 › CSRF, Origin, Referer, and browser navigation regressions › back-forward and refresh around POST redirects do not duplicate mutations
+  [mobile-webkit] › firefox-nojs-public.spec.ts:22:7 › Firefox no-JS public regression › public browsing, anchors, quotes, posting validation, and readable errors are server-rendered
+  [mobile-webkit] › firefox-nojs-public.spec.ts:75:7 › Firefox no-JS public regression › own-post edit and delete fallbacks use ownership cookies and fail closed
+  [mobile-webkit] › firefox-nojs-public.spec.ts:130:7 › Firefox no-JS public regression › media upload, render, headers, disabled policy, size, and traversal checks work without JavaScript
+  [mobile-webkit] › firefox-nojs-public.spec.ts:197:7 › Firefox no-JS public regression › fixture-driven board/site toggles, password boards, thread states, and defaults stay public-only
+  [mobile-webkit] › firefox-nojs-public.spec.ts:283:7 › Firefox no-JS public regression › themes, no-JS preferences, activity read state, and degraded HTTP behavior are safe
+  [mobile-webkit] › helpers-lifecycle.spec.ts:30:7 › RustChan fixture lifecycle › dispose removes temporary roots and supports explicit preservation
+  [mobile-webkit] › helpers-lifecycle.spec.ts:50:7 › RustChan fixture lifecycle › dispose stops a started process before removing its root
+  [mobile-webkit] › maintenance-backup-phase2.spec.ts:15:7 › phase 2 admin maintenance and backup progress › DB check, repair status, progress polling, stale job protection, and concurrent maintenance blocking work through admin UI routes
+  [mobile-webkit] › maintenance-backup-phase2.spec.ts:74:7 › phase 2 admin maintenance and backup progress › backup create, progress JSON, saved row, download, corrupt restore failure, cleanup, and delete are safe
+  [mobile-webkit] › maintenance-backup-phase2.spec.ts:153:7 › phase 2 admin maintenance and backup progress › fault-injected repair failure and pre-repair backup failure remain manual e2e cases
+  [mobile-webkit] › media-toolchain.spec.ts:14:7 › real media toolchain › uploads use real thumbnails, transcodes, waveform previews, and PDF fallback safely
+  [mobile-webkit] › media.spec.ts:12:7 › media upload handling › image uploads render previews and disabled boards reject them safely
+  [mobile-webkit] › media.spec.ts:51:7 › media upload handling › invalid, spoofed, oversized, and traversal-like media paths are rejected safely
+  [mobile-webkit] › media.spec.ts:84:7 › media upload handling › video, audio, PDF, and unusual filenames follow board media policy
+  [mobile-webkit] › mobile-nojs.spec.ts:14:7 › mobile responsive smoke › home, board, thread composer, media preview, admin login, and board edit are usable on mobile
+  [mobile-webkit] › mobile-nojs.spec.ts:43:7 › no-JS fallback › public navigation, thread creation, admin login, settings POST, and CSRF work without JavaScript
+  [mobile-webkit] › moderation-phase2.spec.ts:17:7 › phase 2 moderation, report, and ban lifecycle › JS report modal, duplicate reports, resolution, deletion, bans, appeals, and mod log are coherent
+  [mobile-webkit] › moderation-phase2.spec.ts:234:7 › phase 2 moderation, report, and ban lifecycle › no-JS report fallback posts through the plain form when JavaScript is disabled
+  [mobile-webkit] › password-boards.spec.ts:20:7 › password-protected boards › view-password boards require per-context unlock and resist back-forward bypasses
+  [mobile-webkit] › password-boards.spec.ts:70:7 › password-protected boards › post-password boards allow viewing but require password for threads and replies
+  [mobile-webkit] › password-boards.spec.ts:128:7 › password-protected boards › view-password boards do not leak protected content before unlock
+  [mobile-webkit] › password-boards.spec.ts:193:7 › password-protected boards › password changes retire the old password and accept the new one
+  [mobile-webkit] › password-boards.spec.ts:223:7 › password-protected boards › mobile WebKit persists board unlock over HTTP localhost when HTTPS cookies are configured
+  [mobile-webkit] › phase3-activity-cache.spec.ts:30:7 › phase 3 activity cache and browser restore behavior › activity cookies survive restart and BFCache restore does not resurrect cleared badges
+  [mobile-webkit] › phase3-activity-cache.spec.ts:90:7 › phase 3 activity cache and browser restore behavior › protected board activity cookies do not leak badges after the unlock cookie is removed
+  [mobile-webkit] › phase3-activity-cache.spec.ts:140:7 › phase 3 activity cache and browser restore behavior › Firefox no-JS activity badges clear through plain navigation
+  [mobile-webkit] › phase3-media-runtime.spec.ts:25:7 › phase 3 media viewer runtime behavior › image viewer expands, collapses, falls back for missing thumbs, and keeps long filename links usable
+  [mobile-webkit] › phase3-media-runtime.spec.ts:77:7 › phase 3 media viewer runtime behavior › video, audio, PDF, and pending media refresh render controls without pixel assertions
+  [mobile-webkit] › phase3-media-runtime.spec.ts:154:7 › phase 3 media viewer runtime behavior › Firefox no-JS users keep direct media links without the JS viewer
+  [mobile-webkit] › phase3-media-runtime.spec.ts:181:7 › phase 3 downloads, range requests, and media headers › uploaded media headers, browser downloads, stale transcode redirects, and protected denials are safe
+  [mobile-webkit] › phase3-mobile-webkit-runtime.spec.ts:21:7 › phase 3 mobile WebKit runtime coverage › login, protected unlock, posting, own-post controls, media viewer, admin settings, and long pages stay usable
+  [mobile-webkit] › phase3-static-proxy-tor.spec.ts:19:7 › phase 3 static and runtime headers › static assets, dynamic pages, media, and missing assets use safe cache and framing headers
+  [mobile-webkit] › phase3-static-proxy-tor.spec.ts:88:7 › phase 3 proxy, public-host, and secure-cookie checks › trusted forwarded HTTPS sets secure admin cookies and HSTS only for configured public hosts
+  [mobile-webkit] › phase3-static-proxy-tor.spec.ts:167:7 › phase 3 proxy, public-host, and secure-cookie checks › local TLS listener, self-signed browser trust, and HTTP redirect host rejection remain opt-in
+  [mobile-webkit] › phase3-static-proxy-tor.spec.ts:177:7 › phase 3 Tor and onion UI checks › Tor-disabled runtime keeps home/admin layouts stable and hides Tor-key backup controls
+  [mobile-webkit] › phase3-static-proxy-tor.spec.ts:207:7 › phase 3 Tor and onion UI checks › active onion pill, copy behavior, Onion-Location, and already-onion suppression remain opt-in
+  [mobile-webkit] › phase4-accessibility-progressive.spec.ts:30:7 › phase 4 accessibility basics and progressive enhancement › home, board, catalog, thread, posting, preferences, and admin forms expose keyboardable named controls
+  [mobile-webkit] › phase4-accessibility-progressive.spec.ts:105:7 › phase 4 accessibility basics and progressive enhancement › report, edit, delete confirmation, preferences, and media controls close cleanly and restore focus
+  [mobile-webkit] › phase4-accessibility-progressive.spec.ts:166:7 › phase 4 accessibility basics and progressive enhancement › critical public flows remain usable without optional main JavaScript
+  [mobile-webkit] › phase4-empty-error-permission.spec.ts:34:7 › phase 4 empty, error, and permission states › standalone 404, 400-ish, 403, locked-board, and banned pages stay clear and safe
+  [mobile-webkit] › phase4-empty-error-permission.spec.ts:87:7 › phase 4 empty, error, and permission states › posting, invalid upload, locked or archived thread, deleted post or thread, and active ban errors stay safe
+  [mobile-webkit] › phase4-empty-error-permission.spec.ts:168:7 › phase 4 empty, error, and permission states › invalid admin forms and restore uploads fail closed with useful admin navigation
+  [mobile-webkit] › phase4-responsive-long-content.spec.ts:32:7 › phase 4 responsive and long-content stress › long board metadata, titles, posts, filenames, counters, and admin rows stay usable without overlap
+  [mobile-webkit] › phase4-stress-release-smoke.spec.ts:32:7 › phase 4 high-volume and release-smoke journeys › busy public, protected, admin, search, API, update, and pagination surfaces remain usable
+  [mobile-webkit] › phase4-stress-release-smoke.spec.ts:147:7 › phase 4 high-volume and release-smoke journeys › fresh runtime can become a usable site, moderate content, back up, and restore
+  [mobile-webkit] › phase4-stress-release-smoke.spec.ts:232:7 › phase 4 high-volume and release-smoke journeys › no-JS public posting, upload, own edit or delete, report, unlock, and moderation smoke works
+  [mobile-webkit] › phase4-theme-contrast.spec.ts:24:7 › phase 4 built-in theme and contrast polish › theme picker order, selected state, site default, board override, and inherit behavior stay stable
+  [mobile-webkit] › phase4-theme-contrast.spec.ts:93:7 › phase 4 built-in theme and contrast polish › built-in themes keep core public and admin states readable without console errors
+  [mobile-webkit] › posting-thread.spec.ts:19:7 › logged-out navigation and posting › home, board, catalog, thread, assets, theme, and back-forward navigation are stable
+  [mobile-webkit] › posting-thread.spec.ts:50:7 › logged-out navigation and posting › thread creation, reply, escaping, quote-ish text, unicode, and refresh do not duplicate posts
+  [mobile-webkit] › posting-thread.spec.ts:68:7 › logged-out navigation and posting › empty, oversized, duplicate, invalid id, and stale-form posting errors stay safe
+  [mobile-webkit] › posting-thread.spec.ts:124:7 › logged-out navigation and posting › own edit modal and delete confirmation are limited to the posting browser context
+  [mobile-webkit] › posting-thread.spec.ts:169:7 › logged-out navigation and posting › own-post controls deny expired, replied, locked, archived, and deleted posts safely
+  [mobile-webkit] › settings.spec.ts:19:7 › settings, catalog, archive, search, and maintenance › site settings persist to settings.toml and survive restart
+  [mobile-webkit] › settings.spec.ts:43:7 › settings, catalog, archive, search, and maintenance › search and catalog handle unicode, punctuation, empty, long, and SQL-ish queries safely
+  [mobile-webkit] › settings.spec.ts:59:7 › settings, catalog, archive, search, and maintenance › bump/archive behavior and maintenance controls are admin-only and CSRF protected
+  [mobile-webkit] › settings.spec.ts:116:7 › settings, catalog, archive, search, and maintenance › thread sage, bump limits, sticky, lock, archive, and ban denials stay deterministic
+  [mobile-webkit] › setup-wizard.spec.ts:86:7 › first-run setup wizard › fresh setup persists PDF/media limits and enforces PDF limit
+  [mobile-webkit] › setup-wizard.spec.ts:125:7 › first-run setup wizard › initialized instance cannot access setup routes
+  [mobile-webkit] › setup-wizard.spec.ts:143:7 › first-run setup wizard › admin can reopen setup and close it without changing settings
+  [mobile-webkit] › setup-wizard.spec.ts:168:7 › first-run setup wizard › reopened setup cannot replace existing admin credentials
+  [mobile-webkit] › setup-wizard.spec.ts:191:7 › first-run setup wizard › no-JS setup flow still works
+  [mobile-webkit] › setup-wizard.spec.ts:199:7 › first-run setup wizard › mobile wizard review and finish layout remains usable
+  [mobile-webkit] › submission-idempotency.spec.ts:28:5 › public submission tokens stay atomic across concurrent thread and reply requests
+  [mobile-webkit] › tor-admin-onion-smoke.spec.ts:27:7 › Tor onion admin smoke (local opt-in) › admin login and same-origin checks work over plain onion HTTP
+  [mobile-webkit] › upload-regressions.spec.ts:95:3 › upload regressions (ignored by default) › posting UI accepts audio/MKV variants and keeps textarea resize disabled
+  [mobile-webkit] › upload-validation.spec.ts:222:1 › RustChan media upload validation matrix
+  [firefox-nojs] › activity-notifications.spec.ts:33:7 › new activity notification clearing audit › scripted projects › homepage, board, catalog, and thread badges clear after viewed in Chromium and mobile WebKit
+  [firefox-nojs] › activity-notifications.spec.ts:119:7 › new activity notification clearing audit › scripted projects › admin toggles keep homepage and thread badges independent
+  [firefox-nojs] › activity-notifications.spec.ts:174:7 › new activity notification clearing audit › Firefox no-JS project › server-rendered read state clears without JavaScript
+  [firefox-nojs] › admin-ban-delete.spec.ts:17:7 › admin ban+delete confirmation flow › styled modal handles cancel, validation, focus, and safe reply submission
+  [firefox-nojs] › admin-ban-delete.spec.ts:90:7 › admin ban+delete confirmation flow › no-JS fallback still submits the original form with default moderation fields
+  [firefox-nojs] › admin-dashboard.spec.ts:14:7 › admin dashboard control center › desktop dashboard prioritizes current issues and task-oriented workflows
+  [firefox-nojs] › admin-dashboard.spec.ts:83:7 › admin dashboard control center › mobile dashboard is visible, tappable, and contained at 390px and 320px
+  [firefox-nojs] › admin-dashboard.spec.ts:111:7 › admin dashboard control center › no-JS dashboard opens by default and its links reveal protected destinations
+  [firefox-nojs] › admin-dashboard.spec.ts:148:7 › admin dashboard control center › state pills retain readable text contrast across built-in themes
+  [firefox-nojs] › admin-dashboard.spec.ts:165:7 › admin dashboard control center › unauthenticated admin panel requests do not render the dashboard
+  [firefox-nojs] › admin-polish.spec.ts:20:7 › admin panel and moderation UI polish › admin login, panel sections, settings forms, and moderation queues stay usable
+  [firefox-nojs] › admin-polish.spec.ts:86:7 › admin panel and moderation UI polish › admin controls on public board, catalog, thread, and post surfaces stay grouped and tappable
+  [firefox-nojs] › admin-settings-phase2.spec.ts:14:7 › phase 2 admin settings save flows › site, media, backup, banner toggles, invalid values, and TOML writeback stay deterministic
+  [firefox-nojs] › admin-settings-phase2.spec.ts:144:7 › phase 2 admin settings save flows › admin settings mutations are admin-only and CSRF-protected
+  [firefox-nojs] › assets-themes-phase2.spec.ts:19:7 › phase 2 assets, favicons, banners, and themes › global and board favicons upload, replace, cache, protect, and clear without stale files
+  [firefox-nojs] › assets-themes-phase2.spec.ts:95:7 › phase 2 assets, favicons, banners, and themes › banners upload, reject invalid assets, cache-bust, protect board assets, delete, and restore inherit mode
+  [firefox-nojs] › assets-themes-phase2.spec.ts:171:7 › phase 2 assets, favicons, banners, and themes › custom themes create, edit, delete, and clear default references safely
+  [firefox-nojs] › audit-surfaces.spec.ts:19:7 › browser-reachable audit surfaces › home, preferences, theme fallback, and narrow layout are reachable
+  [firefox-nojs] › audit-surfaces.spec.ts:61:7 › browser-reachable audit surfaces › poll creation, voting, catalog controls, and hidden-thread views work through browser paths
+  [firefox-nojs] › audit-surfaces.spec.ts:121:7 › browser-reachable audit surfaces › public report controls work with JavaScript and expose a no-JS fallback
+  [firefox-nojs] › audit-surfaces.spec.ts:153:7 › browser-reachable audit surfaces › admin-authenticated and unauthenticated browser states expose expected security controls
+  [firefox-nojs] › audit-surfaces.spec.ts:177:7 › browser-reachable audit surfaces › new activity badges are browser-visible and clear after visiting the target thread
+  [firefox-nojs] › auth-admin.spec.ts:22:7 › first run and admin authentication › fresh runtime creates exe-local structure and reports missing admin without leaking secrets
+  [firefox-nojs] › auth-admin.spec.ts:61:7 › first run and admin authentication › invalid settings fail closed without leaking configured secrets
+  [firefox-nojs] › auth-admin.spec.ts:98:7 › first run and admin authentication › admin login, logout, stale back page, cookie attributes, and context isolation
+  [firefox-nojs] › auth-admin.spec.ts:140:7 › admin board management › creates, edits, protects against injection, persists, and deletes boards
+  [firefox-nojs] › auth-admin.spec.ts:184:7 › admin board management › rejects invalid, traversal-like, and duplicate board short names safely
+  [firefox-nojs] › auto-compress.spec.ts:27:7 › auto-compress oversized uploads › oversized image is compressed, accepted, served, and previewed
+  [firefox-nojs] › auto-compress.spec.ts:68:7 › auto-compress oversized uploads › oversized video is compressed, accepted, served, playable, and thumbnailed
+  [firefox-nojs] › auto-compress.spec.ts:113:7 › auto-compress oversized uploads › direct oversized upload without client compression rejects cleanly
+  [firefox-nojs] › auto-compress.spec.ts:148:7 › auto-compress oversized uploads › still-too-large browser compression fails without creating posts or staged files
+  [firefox-nojs] › backup-restore.spec.ts:107:7 › live backup and restore coverage › manual directory full backups restore complete site state into a fresh restarted runtime
+  [firefox-nojs] › backup-restore.spec.ts:135:7 › live backup and restore coverage › manual split full backups cover every exposed split-size option and require complete parts for restore
+  [firefox-nojs] › backup-restore.spec.ts:188:7 › live backup and restore coverage › saved board backups restore one board without replacing the rest of the site
+  [firefox-nojs] › backup-restore.spec.ts:224:7 › live backup and restore coverage › automated full backups write scheduled artifacts with the configured storage mode
+  [firefox-nojs] › backup-restore.spec.ts:255:7 › live backup and restore coverage › Tor hidden service keys are included, excluded, and restored only when explicitly requested
+  [firefox-nojs] › backup-restore.spec.ts:322:7 › live backup and restore coverage › restore rejects invalid archives and leaves the live site usable
+  [firefox-nojs] › board-settings-phase2.spec.ts:21:7 › phase 2 board settings depth › browser admin flow creates boards and persists deep settings across access modes
+  [firefox-nojs] › board-settings-phase2.spec.ts:183:7 › phase 2 board settings depth › invalid board inputs, upload caps, delete cleanup, and safe redirects fail closed
+  [firefox-nojs] › button-sizing.spec.ts:34:7 › public button and action-control sizing › public action controls stay consistently sized across scripted and no-JS controls
+  [firefox-nojs] › captcha.spec.ts:10:7 › CAPTCHA posting flow › renders image CAPTCHA and rejects bad answers in Chromium and WebKit
+  [firefox-nojs] › captcha.spec.ts:46:7 › CAPTCHA posting flow › no-JS users can reload for a fresh challenge and see server-rendered errors
+  [firefox-nojs] › console-headless.spec.ts:19:7 › terminal console / browser boundary › fresh headless startup keeps web setup available without terminal prompts
+  [firefox-nojs] › console-headless.spec.ts:38:7 › terminal console / browser boundary › CLI-seeded administration survives headless restart with readable logs
+  [firefox-nojs] › csrf-navigation.spec.ts:17:7 › CSRF, Origin, Referer, and browser navigation regressions › forms include CSRF and missing or invalid CSRF is rejected for mutations
+  [firefox-nojs] › csrf-navigation.spec.ts:51:7 › CSRF, Origin, Referer, and browser navigation regressions › session-scoped admin CSRF cannot be reused across sessions or after logout
+  [firefox-nojs] › csrf-navigation.spec.ts:90:7 › CSRF, Origin, Referer, and browser navigation regressions › Origin, Referer, null Origin, loopback aliases, and GET mutations follow policy
+  [firefox-nojs] › csrf-navigation.spec.ts:137:7 › CSRF, Origin, Referer, and browser navigation regressions › back-forward and refresh around POST redirects do not duplicate mutations
+  [firefox-nojs] › firefox-nojs-public.spec.ts:22:7 › Firefox no-JS public regression › public browsing, anchors, quotes, posting validation, and readable errors are server-rendered
+  [firefox-nojs] › firefox-nojs-public.spec.ts:75:7 › Firefox no-JS public regression › own-post edit and delete fallbacks use ownership cookies and fail closed
+  [firefox-nojs] › firefox-nojs-public.spec.ts:130:7 › Firefox no-JS public regression › media upload, render, headers, disabled policy, size, and traversal checks work without JavaScript
+  [firefox-nojs] › firefox-nojs-public.spec.ts:197:7 › Firefox no-JS public regression › fixture-driven board/site toggles, password boards, thread states, and defaults stay public-only
+  [firefox-nojs] › firefox-nojs-public.spec.ts:283:7 › Firefox no-JS public regression › themes, no-JS preferences, activity read state, and degraded HTTP behavior are safe
+  [firefox-nojs] › helpers-lifecycle.spec.ts:30:7 › RustChan fixture lifecycle › dispose removes temporary roots and supports explicit preservation
+  [firefox-nojs] › helpers-lifecycle.spec.ts:50:7 › RustChan fixture lifecycle › dispose stops a started process before removing its root
+  [firefox-nojs] › maintenance-backup-phase2.spec.ts:15:7 › phase 2 admin maintenance and backup progress › DB check, repair status, progress polling, stale job protection, and concurrent maintenance blocking work through admin UI routes
+  [firefox-nojs] › maintenance-backup-phase2.spec.ts:74:7 › phase 2 admin maintenance and backup progress › backup create, progress JSON, saved row, download, corrupt restore failure, cleanup, and delete are safe
+  [firefox-nojs] › maintenance-backup-phase2.spec.ts:153:7 › phase 2 admin maintenance and backup progress › fault-injected repair failure and pre-repair backup failure remain manual e2e cases
+  [firefox-nojs] › media-toolchain.spec.ts:14:7 › real media toolchain › uploads use real thumbnails, transcodes, waveform previews, and PDF fallback safely
+  [firefox-nojs] › media.spec.ts:12:7 › media upload handling › image uploads render previews and disabled boards reject them safely
+  [firefox-nojs] › media.spec.ts:51:7 › media upload handling › invalid, spoofed, oversized, and traversal-like media paths are rejected safely
+  [firefox-nojs] › media.spec.ts:84:7 › media upload handling › video, audio, PDF, and unusual filenames follow board media policy
+  [firefox-nojs] › mobile-nojs.spec.ts:14:7 › mobile responsive smoke › home, board, thread composer, media preview, admin login, and board edit are usable on mobile
+  [firefox-nojs] › mobile-nojs.spec.ts:43:7 › no-JS fallback › public navigation, thread creation, admin login, settings POST, and CSRF work without JavaScript
+  [firefox-nojs] › moderation-phase2.spec.ts:17:7 › phase 2 moderation, report, and ban lifecycle › JS report modal, duplicate reports, resolution, deletion, bans, appeals, and mod log are coherent
+  [firefox-nojs] › moderation-phase2.spec.ts:234:7 › phase 2 moderation, report, and ban lifecycle › no-JS report fallback posts through the plain form when JavaScript is disabled
+  [firefox-nojs] › password-boards.spec.ts:20:7 › password-protected boards › view-password boards require per-context unlock and resist back-forward bypasses
+  [firefox-nojs] › password-boards.spec.ts:70:7 › password-protected boards › post-password boards allow viewing but require password for threads and replies
+  [firefox-nojs] › password-boards.spec.ts:128:7 › password-protected boards › view-password boards do not leak protected content before unlock
+  [firefox-nojs] › password-boards.spec.ts:193:7 › password-protected boards › password changes retire the old password and accept the new one
+  [firefox-nojs] › password-boards.spec.ts:223:7 › password-protected boards › mobile WebKit persists board unlock over HTTP localhost when HTTPS cookies are configured
+  [firefox-nojs] › phase3-activity-cache.spec.ts:30:7 › phase 3 activity cache and browser restore behavior › activity cookies survive restart and BFCache restore does not resurrect cleared badges
+  [firefox-nojs] › phase3-activity-cache.spec.ts:90:7 › phase 3 activity cache and browser restore behavior › protected board activity cookies do not leak badges after the unlock cookie is removed
+  [firefox-nojs] › phase3-activity-cache.spec.ts:140:7 › phase 3 activity cache and browser restore behavior › Firefox no-JS activity badges clear through plain navigation
+  [firefox-nojs] › phase3-media-runtime.spec.ts:25:7 › phase 3 media viewer runtime behavior › image viewer expands, collapses, falls back for missing thumbs, and keeps long filename links usable
+  [firefox-nojs] › phase3-media-runtime.spec.ts:77:7 › phase 3 media viewer runtime behavior › video, audio, PDF, and pending media refresh render controls without pixel assertions
+  [firefox-nojs] › phase3-media-runtime.spec.ts:154:7 › phase 3 media viewer runtime behavior › Firefox no-JS users keep direct media links without the JS viewer
+  [firefox-nojs] › phase3-media-runtime.spec.ts:181:7 › phase 3 downloads, range requests, and media headers › uploaded media headers, browser downloads, stale transcode redirects, and protected denials are safe
+  [firefox-nojs] › phase3-mobile-webkit-runtime.spec.ts:21:7 › phase 3 mobile WebKit runtime coverage › login, protected unlock, posting, own-post controls, media viewer, admin settings, and long pages stay usable
+  [firefox-nojs] › phase3-static-proxy-tor.spec.ts:19:7 › phase 3 static and runtime headers › static assets, dynamic pages, media, and missing assets use safe cache and framing headers
+  [firefox-nojs] › phase3-static-proxy-tor.spec.ts:88:7 › phase 3 proxy, public-host, and secure-cookie checks › trusted forwarded HTTPS sets secure admin cookies and HSTS only for configured public hosts
+  [firefox-nojs] › phase3-static-proxy-tor.spec.ts:167:7 › phase 3 proxy, public-host, and secure-cookie checks › local TLS listener, self-signed browser trust, and HTTP redirect host rejection remain opt-in
+  [firefox-nojs] › phase3-static-proxy-tor.spec.ts:177:7 › phase 3 Tor and onion UI checks › Tor-disabled runtime keeps home/admin layouts stable and hides Tor-key backup controls
+  [firefox-nojs] › phase3-static-proxy-tor.spec.ts:207:7 › phase 3 Tor and onion UI checks › active onion pill, copy behavior, Onion-Location, and already-onion suppression remain opt-in
+  [firefox-nojs] › phase4-accessibility-progressive.spec.ts:30:7 › phase 4 accessibility basics and progressive enhancement › home, board, catalog, thread, posting, preferences, and admin forms expose keyboardable named controls
+  [firefox-nojs] › phase4-accessibility-progressive.spec.ts:105:7 › phase 4 accessibility basics and progressive enhancement › report, edit, delete confirmation, preferences, and media controls close cleanly and restore focus
+  [firefox-nojs] › phase4-accessibility-progressive.spec.ts:166:7 › phase 4 accessibility basics and progressive enhancement › critical public flows remain usable without optional main JavaScript
+  [firefox-nojs] › phase4-empty-error-permission.spec.ts:34:7 › phase 4 empty, error, and permission states › standalone 404, 400-ish, 403, locked-board, and banned pages stay clear and safe
+  [firefox-nojs] › phase4-empty-error-permission.spec.ts:87:7 › phase 4 empty, error, and permission states › posting, invalid upload, locked or archived thread, deleted post or thread, and active ban errors stay safe
+  [firefox-nojs] › phase4-empty-error-permission.spec.ts:168:7 › phase 4 empty, error, and permission states › invalid admin forms and restore uploads fail closed with useful admin navigation
+  [firefox-nojs] › phase4-responsive-long-content.spec.ts:32:7 › phase 4 responsive and long-content stress › long board metadata, titles, posts, filenames, counters, and admin rows stay usable without overlap
+  [firefox-nojs] › phase4-stress-release-smoke.spec.ts:32:7 › phase 4 high-volume and release-smoke journeys › busy public, protected, admin, search, API, update, and pagination surfaces remain usable
+  [firefox-nojs] › phase4-stress-release-smoke.spec.ts:147:7 › phase 4 high-volume and release-smoke journeys › fresh runtime can become a usable site, moderate content, back up, and restore
+  [firefox-nojs] › phase4-stress-release-smoke.spec.ts:232:7 › phase 4 high-volume and release-smoke journeys › no-JS public posting, upload, own edit or delete, report, unlock, and moderation smoke works
+  [firefox-nojs] › phase4-theme-contrast.spec.ts:24:7 › phase 4 built-in theme and contrast polish › theme picker order, selected state, site default, board override, and inherit behavior stay stable
+  [firefox-nojs] › phase4-theme-contrast.spec.ts:93:7 › phase 4 built-in theme and contrast polish › built-in themes keep core public and admin states readable without console errors
+  [firefox-nojs] › posting-thread.spec.ts:19:7 › logged-out navigation and posting › home, board, catalog, thread, assets, theme, and back-forward navigation are stable
+  [firefox-nojs] › posting-thread.spec.ts:50:7 › logged-out navigation and posting › thread creation, reply, escaping, quote-ish text, unicode, and refresh do not duplicate posts
+  [firefox-nojs] › posting-thread.spec.ts:68:7 › logged-out navigation and posting › empty, oversized, duplicate, invalid id, and stale-form posting errors stay safe
+  [firefox-nojs] › posting-thread.spec.ts:124:7 › logged-out navigation and posting › own edit modal and delete confirmation are limited to the posting browser context
+  [firefox-nojs] › posting-thread.spec.ts:169:7 › logged-out navigation and posting › own-post controls deny expired, replied, locked, archived, and deleted posts safely
+  [firefox-nojs] › settings.spec.ts:19:7 › settings, catalog, archive, search, and maintenance › site settings persist to settings.toml and survive restart
+  [firefox-nojs] › settings.spec.ts:43:7 › settings, catalog, archive, search, and maintenance › search and catalog handle unicode, punctuation, empty, long, and SQL-ish queries safely
+  [firefox-nojs] › settings.spec.ts:59:7 › settings, catalog, archive, search, and maintenance › bump/archive behavior and maintenance controls are admin-only and CSRF protected
+  [firefox-nojs] › settings.spec.ts:116:7 › settings, catalog, archive, search, and maintenance › thread sage, bump limits, sticky, lock, archive, and ban denials stay deterministic
+  [firefox-nojs] › setup-wizard.spec.ts:86:7 › first-run setup wizard › fresh setup persists PDF/media limits and enforces PDF limit
+  [firefox-nojs] › setup-wizard.spec.ts:125:7 › first-run setup wizard › initialized instance cannot access setup routes
+  [firefox-nojs] › setup-wizard.spec.ts:143:7 › first-run setup wizard › admin can reopen setup and close it without changing settings
+  [firefox-nojs] › setup-wizard.spec.ts:168:7 › first-run setup wizard › reopened setup cannot replace existing admin credentials
+  [firefox-nojs] › setup-wizard.spec.ts:191:7 › first-run setup wizard › no-JS setup flow still works
+  [firefox-nojs] › setup-wizard.spec.ts:199:7 › first-run setup wizard › mobile wizard review and finish layout remains usable
+  [firefox-nojs] › submission-idempotency.spec.ts:28:5 › public submission tokens stay atomic across concurrent thread and reply requests
+  [firefox-nojs] › tor-admin-onion-smoke.spec.ts:27:7 › Tor onion admin smoke (local opt-in) › admin login and same-origin checks work over plain onion HTTP
+  [firefox-nojs] › upload-regressions.spec.ts:95:3 › upload regressions (ignored by default) › posting UI accepts audio/MKV variants and keeps textarea resize disabled
+  [firefox-nojs] › upload-validation.spec.ts:222:1 › RustChan media upload validation matrix
+Total: 690 tests in 39 files

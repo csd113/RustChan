@@ -1,0 +1,78 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]: RustChan Branch Audit
+    - link "⌂ Home" [ref=e4] [cursor=pointer]:
+      - /url: /
+    - text: ▾
+    - navigation [ref=e5]:
+      - generic [ref=e6]:
+        - text: "["
+        - link "audit" [ref=e7] [cursor=pointer]:
+          - /url: /audit/catalog
+        - text: /
+        - link "combo" [ref=e8] [cursor=pointer]:
+          - /url: /combo/catalog
+        - text: "]"
+      - generic [ref=e9]:
+        - text: "["
+        - link "adult" [ref=e10] [cursor=pointer]:
+          - /url: /adult/catalog
+        - text: "]"
+  - main [ref=e11]:
+    - generic [ref=e12]:
+      - heading "[ RustChan Branch Audit ]" [level=1] [ref=e13]
+      - paragraph [ref=e14]: select board to proceed
+    - generic [ref=e15]:
+      - heading "// Boards" [level=2] [ref=e16]
+      - generic [ref=e17]:
+        - link "/audit/ Audit Board Disposable end-to-end test board 1 thread" [ref=e19] [cursor=pointer]:
+          - /url: /audit/catalog
+          - generic [ref=e20]: /audit/
+          - generic [ref=e22]: Audit Board
+          - generic [ref=e23]: Disposable end-to-end test board
+          - generic [ref=e24]: 1 thread
+        - link "/combo/ Audio and Image Two supported upload slots 1 thread" [ref=e26] [cursor=pointer]:
+          - /url: /combo/catalog
+          - generic [ref=e27]: /combo/
+          - generic [ref=e29]: Audio and Image
+          - generic [ref=e30]: Two supported upload slots
+          - generic [ref=e31]: 1 thread
+    - generic [ref=e32]:
+      - heading "// Adult Boards NSFW" [level=2] [ref=e33]
+      - link "/adult/ NSFW Adult Audit NSFW consent smoke 0 threads" [ref=e36] [cursor=pointer]:
+        - /url: /?nsfw=adult
+        - generic [ref=e37]:
+          - generic [ref=e38]: /adult/
+          - generic [ref=e39]: NSFW
+        - generic [ref=e41]: Adult Audit
+        - generic [ref=e42]: NSFW consent smoke
+        - generic [ref=e43]: 0 threads
+    - generic [ref=e44]:
+      - heading "// Stats" [level=2] [ref=e45]
+      - generic [ref=e46]:
+        - generic [ref=e47]:
+          - generic [ref=e48]: "6"
+          - generic [ref=e49]: total posts
+        - generic [ref=e50]:
+          - generic [ref=e51]: "3"
+          - generic [ref=e52]: images uploaded
+        - generic [ref=e53]:
+          - generic [ref=e54]: "1"
+          - generic [ref=e55]: videos uploaded
+        - generic [ref=e56]:
+          - generic [ref=e57]: "1"
+          - generic [ref=e58]: audio files uploaded
+        - generic [ref=e59]:
+          - generic [ref=e60]: 0.00 GB
+          - generic [ref=e61]: active content
+  - contentinfo [ref=e62]:
+    - paragraph [ref=e63]:
+      - text: RustChan Branch Audit —
+      - link "home" [ref=e64] [cursor=pointer]:
+        - /url: /
+      - text: ·
+      - link "Administrator login" [ref=e65] [cursor=pointer]:
+        - /url: /admin
+        - text: admin
+    - group [ref=e67]:
+      - generic "⚙ User Preferences" [ref=e68] [cursor=pointer]

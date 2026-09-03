@@ -1,0 +1,87 @@
+[
+  {
+    "count": 264,
+    "category": "[media_pr] Media file missing while DB still references it",
+    "example": "2026-09-02 22:22:30.034 [WARN ] [media_pr] Media file missing while DB still references it - post ID: 43, path: img/f9537248160e4c67a55ba7da14d9fe90.png"
+  },
+  {
+    "count": 145,
+    "category": "[detect  ] Ffmpeg not detected",
+    "example": "2026-09-02 22:29:08.641 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__"
+  },
+  {
+    "count": 145,
+    "category": "[detect  ] Ffprobe not detected",
+    "example": "2026-09-02 22:29:08.643 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__"
+  },
+  {
+    "count": 26,
+    "category": "[startup ] No admin accounts exist",
+    "example": "2026-09-02 22:29:08.761 [WARN ] [startup ] No admin accounts exist - run: rustchan-cli admin create-admin <username> <password>"
+  },
+  {
+    "count": 12,
+    "category": "[auth    ] Failed admin login",
+    "example": "2026-09-02 22:26:57.622 [WARN ] [auth    ] Failed admin login - username: adm\u2026 (len=5), ip prefix: 12ca17b4, attempts: 1, attempt limit: 5, locked out: no"
+  },
+  {
+    "count": 12,
+    "category": "[admin   ] Admin same-origin validation rejected request",
+    "example": "2026-09-02 22:27:07.608 [WARN ] [admin   ] Admin same-origin validation rejected request - request scheme: http, request host: 127.0.0.1, request port: 63903, source scheme: http, source host: evil.example, source port: 80, source: http://evil.example/path"
+  },
+  {
+    "count": 10,
+    "category": "[config  ] SECURITY WARNING: cookie_secret has changed since the last run. All IP-based bans are now invalid because all IP hashes have changed. If this was unintentional, restore the previous cookie_secret from settings.toml. If intentional, consider running: DELETE FROM bans; DELETE FROM ban_appeals;",
+    "example": "2026-09-02 22:22:46.947 [WARN ] [config  ] SECURITY WARNING: cookie_secret has changed since the last run. All IP-based bans are now invalid because all IP hashes have changed. If this was unintentional, restore the previous cookie_secret from settings.toml. If intentional, consider running: DELETE FROM bans; DELETE FROM ban_appeals;"
+  },
+  {
+    "count": 10,
+    "category": "[config  ] Tor support is enabled, but tor_only=false. RustChan will accept both clearnet and Tor traffic.",
+    "example": "2026-09-02 22:25:43.622 [WARN ] [config  ] Tor support is enabled, but tor_only=false. RustChan will accept both clearnet and Tor traffic."
+  },
+  {
+    "count": 10,
+    "category": "[detect  ] Tor: fatal error",
+    "example": "2026-09-02 22:25:44.991 [ERROR] [detect  ] Tor: fatal error - error: Tor bootstrap timed out after 1 s \u2014 check network connectivity (increase tor_bootstrap_timeout_secs in settings.toml for censored networks), attempt: 0"
+  },
+  {
+    "count": 10,
+    "category": "[detect  ] Tor: scheduling restart",
+    "example": "2026-09-02 22:25:44.992 [WARN ] [detect  ] Tor: scheduling restart - retry in: 30s"
+  },
+  {
+    "count": 7,
+    "category": "[handlers] Multipart upload field exceeded board limit",
+    "example": "2026-09-02 22:35:28.448 [WARN ] [handlers] Multipart upload field exceeded board limit - field: file, streamed bytes: 2081456, next chunk bytes: 15697, limit bytes: 2097152"
+  },
+  {
+    "count": 6,
+    "category": "[db      ] Failed to load home page site stats",
+    "example": "2026-09-02 22:28:06.110 [WARN ] [db      ] Failed to load home page site stats - error: Failed to query site stats"
+  },
+  {
+    "count": 6,
+    "category": "[thumbnai] Image thumbnail generation failed; using generic placeholder",
+    "example": "2026-09-02 22:35:15.696 [WARN ] [thumbnai] Image thumbnail generation failed; using generic placeholder - MIME type: image/heif, input: /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-21-w0q4SZ/bin/rustchan-data/boards/.pending/upload-e90db9bf7faa4d1fa5c6353494080b6f/mf483/c2cba285acd74986b5c31062d748f26e.heif, error: unsupported image MIME for thumbnail: image/heif"
+  },
+  {
+    "count": 6,
+    "category": "[storage ] WebM stream kind is ambiguous; storing as a neutral download",
+    "example": "2026-09-02 22:35:15.908 [WARN ] [storage ] WebM stream kind is ambiguous; storing as a neutral download - path: /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-upload-mXt5vv, error: failed to spawn ffmpeg binary '__rustchan_e2e_no_ffmpeg__' \u2014 is it installed and executable?"
+  },
+  {
+    "count": 5,
+    "category": "[admin   ] Full restore failed",
+    "example": "2026-09-02 22:26:01.951 [ERROR] [admin   ] Full restore failed - route: /admin/restore, error: Bad request: Invalid zip: invalid Zip archive: Could not find EOCD"
+  },
+  {
+    "count": 5,
+    "category": "[thumbnai] PDF thumbnail rendering failed; using built-in generic thumbnail",
+    "example": "2026-09-02 22:35:26.714 [WARN ] [thumbnai] PDF thumbnail rendering failed; using built-in generic thumbnail - pdftoppm: pdftoppm failed, mutool: failed to run mutool, qlmanage: failed to run qlmanage"
+  },
+  {
+    "count": 3,
+    "category": "[admin   ] Board restore failed",
+    "example": "2026-09-02 22:36:38.199 [ERROR] [admin   ] Board restore failed - route: /admin/board/restore, error: Bad request: Invalid board.json: missing field `version` at line 1 column 24"
+  }
+]

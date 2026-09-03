@@ -1,0 +1,12 @@
+PASS native self-signed HTTPS listener is ready 
+PASS HTTPS admin login page 200
+PASS native HTTPS creates Secure CSRF cookie 
+PASS admin login over native HTTPS 303
+PASS native HTTPS creates Secure HttpOnly session 
+PASS HTTPS session bootstrap reaches panel 
+PASS public posting through native HTTPS 303
+PASS HTTPS thread content renders 
+PASS HTTPS-only mode disables the main plaintext application listener 
+PASS HTTP port 65389 redirects with preserved path/query https://127.0.0.1:65388/tls?audit=1
+PASS HTTP port 65389 replaces untrusted Host with configured redirect host https://127.0.0.1:65388/tls
+PASS TLS instance shuts down cleanly 0

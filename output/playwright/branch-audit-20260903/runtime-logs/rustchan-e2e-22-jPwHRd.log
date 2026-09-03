@@ -1,0 +1,74 @@
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-admin admin AdminPass123!
+Created settings.toml (/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-data/settings.toml)
+✓ Admin 'admin' created (id=1).
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board pub Public Board General public discussion
+✓ Board /pub/ — Public Board created (id=1).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board img Images Image upload board
+✓ Board /img/ — Images created (id=2).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board vid Video Video upload board
+✓ Board /vid/ — Video created (id=3).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board aud Audio Audio upload board --audio
+✓ Board /aud/ — Audio created (id=4).  images:yes video:yes audio:yes
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board nsfw NSFW Board Adult test board --nsfw
+✓ Board /nsfw/ — NSFW Board [NSFW] created (id=5).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board txt Text Only Uploads disabled --no-images --no-videos
+✓ Board /txt/ — Text Only created (id=6).  images:no video:no audio:no
+
+2026-09-02 22:35:15.244 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__
+2026-09-02 22:35:15.246 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board bnjf81a9 Ban Delete No JS no js ban delete fixture
+✓ Board /bnjf81a9/ — Ban Delete No JS created (id=7).  images:yes video:yes audio:no
+
+2026-09-02 22:35:24.919 [WARN ] [auth    ] Failed admin login - username: adm… (len=5), ip prefix: 12ca17b4, attempts: 1, attempt limit: 5, locked out: no
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board rpt45486 Reported Board Moderation queue fixture
+✓ Board /rpt45486/ — Reported Board created (id=8).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board admc9c91 Admin Controls Public admin controls fixture
+✓ Board /admc9c91/ — Admin Controls created (id=10).  images:yes video:yes audio:no
+
+
+[server exited code=0 signal=null]
+2026-09-02 22:35:57.527 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__
+2026-09-02 22:35:57.529 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__
+
+[server exited code=0 signal=null]
+2026-09-02 22:36:06.903 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__
+2026-09-02 22:36:06.905 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board vie8db02 View Password 
+✓ Board /vie8db02/ — View Password created (id=12).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board posb2c13 Post Password 
+✓ Board /posb2c13/ — Post Password created (id=13).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board sta8dac4 State Board 
+✓ Board /sta8dac4/ — State Board created (id=14).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board lim22du0 Limits 
+✓ Board /lim22du0/ — Limits created (id=15).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board mnjd16ab Moderation No JS 
+✓ Board /mnjd16ab/ — Moderation No JS created (id=16).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board pos806be Post Password 
+✓ Board /pos806be/ — Post Password created (id=17).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board pwcfdc74 Password Change 
+✓ Board /pwcfdc74/ — Password Change created (id=18).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board loc588c1 Locked Phase Four Board Permission page coverage
+✓ Board /loc588c1/ — Locked Phase Four Board created (id=19).  images:yes video:yes audio:no
+
+2026-09-02 22:36:38.140 [ERROR] [admin   ] Full restore failed - route: /admin/restore, error: Bad request: Invalid zip: invalid Zip archive: Could not find EOCD
+2026-09-02 22:36:38.199 [ERROR] [admin   ] Board restore failed - route: /admin/board/restore, error: Bad request: Invalid board.json: missing field `version` at line 1 column 24
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board denaf0e2 Own Post Denials 
+✓ Board /denaf0e2/ — Own Post Denials created (id=20).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-22-jPwHRd/bin/rustchan-cli admin create-board arcd02c5 Archive Board 
+✓ Board /arcd02c5/ — Archive Board created (id=21).  images:yes video:yes audio:no
+

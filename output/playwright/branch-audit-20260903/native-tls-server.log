@@ -1,0 +1,28 @@
+2026-09-02 22:34:21.408 [INFO ] [startup ] Rustchan starting - version: 1.4.1, log dir: /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-tls-audit-KoyKlM/data/logs, dependency log: /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-tls-audit-KoyKlM/data/logs/dep_log.log
+2026-09-02 22:34:21.830 [INFO ] [db      ] Database initialised - path: /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-tls-audit-KoyKlM/data/chan.db
+✓ Admin 'admin' created (id=1).
+2026-09-02 22:34:22.698 [INFO ] [startup ] Rustchan starting - version: 1.4.1, log dir: /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-tls-audit-KoyKlM/data/logs, dependency log: /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-tls-audit-KoyKlM/data/logs/dep_log.log
+2026-09-02 22:34:22.726 [INFO ] [db      ] Database initialised - path: /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-tls-audit-KoyKlM/data/chan.db
+✓ Board /tls/ — TLS Audit created (id=1).  images:yes video:yes audio:no
+2026-09-02 22:34:22.747 [INFO ] [startup ] Rustchan starting - version: 1.4.1, log dir: /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-tls-audit-KoyKlM/data/logs, dependency log: /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-tls-audit-KoyKlM/data/logs/dep_log.log
+2026-09-02 22:34:22.782 [INFO ] [db      ] Database initialised - path: /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-tls-audit-KoyKlM/data/chan.db
+2026-09-02 22:34:22.846 [INFO ] [detect  ] Ffmpeg detected - video thumbnails and transcoding enabled - available: yes
+2026-09-02 22:34:22.880 [INFO ] [detect  ] Ffprobe detected - WebM codec inspection enabled - available: yes
+2026-09-02 22:34:22.938 [WARN ] [detect  ] Ffmpeg libwebp encoder missing - JPEG/PNG/BMP/TIFF stored in original format - webp: no
+2026-09-02 22:34:22.941 [INFO ] [detect  ] Ffmpeg VP9 + Opus encoders available - MP4 to WebM transcoding enabled with platform-tuned settings - vp9: yes, opus: yes, profile: aarch64-neon, cpu used: 3, tile columns: 1, threads: 12, row mt: yes
+2026-09-02 22:34:23.053 [INFO ] [detect  ] PDF thumbnail renderer detected - available: yes, renderers: pdftoppm, qlmanage, selected: pdftoppm
+2026-09-02 22:34:23.054 [INFO ] [workers ] Background worker pool online - count: 4
+2026-09-02 22:34:23.054 [INFO ] [server  ] HTTPS-only mode enabled; plaintext application listener disabled
+2026-09-02 22:34:23.054 [INFO ] [server  ] Data directory - path: /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-tls-audit-KoyKlM/data
+2026-09-02 22:34:23.058 [INFO ] [tls     ] TLS: no cert configured - generating self-signed dev certificate
+2026-09-02 22:34:23.058 [INFO ] [self_sig] TLS: generating self-signed certificate for ["localhost", "127.0.0.1", "::1"]
+2026-09-02 22:34:23.059 [INFO ] [self_sig] TLS: wrote self-signed certificate to /private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-tls-audit-KoyKlM/data/runtime/tls/dev/self-signed.crt
+2026-09-02 22:34:23.059 [INFO ] [server  ] HTTPS server listening - address: 127.0.0.1:65388
+2026-09-02 22:34:23.059 [INFO ] [server  ] Admin panel available over HTTPS - URL: https://127.0.0.1:65388/admin
+2026-09-02 22:34:23.059 [INFO ] [server  ] HTTP to HTTPS redirect listening - address: 127.0.0.1:65389
+2026-09-02 22:34:23.956 [INFO ] [admin   ] Admin logged in - admin ID: 1
+2026-09-02 22:34:24.000 [INFO ] [handlers] Accepted multipart upload limits for post request - max image bytes: 8388608, max video bytes: 52428800, max audio bytes: 157286400, max pdf bytes: 8388608
+2026-09-02 22:34:24.026 [INFO ] [board   ] Created new thread - board: tls, thread ID: 1
+2026-09-02 22:34:24.039 [INFO ] [server  ] Shutdown signal received - signal: SIGTERM
+2026-09-02 22:34:24.040 [INFO ] [server  ] Signalling background workers to shut down...
+2026-09-02 22:34:24.040 [INFO ] [server  ] Server shut down gracefully.

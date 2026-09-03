@@ -1,0 +1,18 @@
+PASS save retention of two full backups through admin HTTP 303
+PASS create full backup 1 303
+PASS new backup appears immediately in listing 1 1
+PASS create full backup 2 303
+PASS new backup appears immediately in listing 2 2
+PASS create full backup 3 303
+PASS new backup appears immediately in listing 3 2
+PASS retention invalidates listing and keeps only latest two 
+PASS saved manifest includes representative boards 
+PASS retention removed oldest backup from disk 
+PASS board extraction issues temporary download URL 
+PASS temporary download denies missing token 
+PASS temporary download denies wrong token 
+PASS temporary download also requires admin session 
+PASS authorized temporary backup downloads as ZIP 20398
+PASS temporary download token is single-use 
+PASS consumed temporary ZIP and token are cleaned up 
+PASS backup progress remains available 

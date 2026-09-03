@@ -1,0 +1,31 @@
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-21-w0q4SZ/bin/rustchan-cli admin create-admin admin AdminPass123!
+Created settings.toml (/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-21-w0q4SZ/bin/rustchan-data/settings.toml)
+✓ Admin 'admin' created (id=1).
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-21-w0q4SZ/bin/rustchan-cli admin create-board pub Public Board General public discussion
+✓ Board /pub/ — Public Board created (id=1).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-21-w0q4SZ/bin/rustchan-cli admin create-board img Images Image upload board
+✓ Board /img/ — Images created (id=2).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-21-w0q4SZ/bin/rustchan-cli admin create-board vid Video Video upload board
+✓ Board /vid/ — Video created (id=3).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-21-w0q4SZ/bin/rustchan-cli admin create-board aud Audio Audio upload board --audio
+✓ Board /aud/ — Audio created (id=4).  images:yes video:yes audio:yes
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-21-w0q4SZ/bin/rustchan-cli admin create-board nsfw NSFW Board Adult test board --nsfw
+✓ Board /nsfw/ — NSFW Board [NSFW] created (id=5).  images:yes video:yes audio:no
+
+$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-21-w0q4SZ/bin/rustchan-cli admin create-board txt Text Only Uploads disabled --no-images --no-videos
+✓ Board /txt/ — Text Only created (id=6).  images:no video:no audio:no
+
+2026-09-02 22:35:12.062 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__
+2026-09-02 22:35:12.064 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__
+2026-09-02 22:35:15.603 [WARN ] [thumbnai] Image thumbnail generation failed; using generic placeholder - MIME type: image/heic, input: /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-21-w0q4SZ/bin/rustchan-data/boards/.pending/upload-7086391a4ff349d2bf7fb52e83d60cb8/mf483/0ef12660e5424116af9d8053fe235420.heic, error: unsupported image MIME for thumbnail: image/heic
+2026-09-02 22:35:15.696 [WARN ] [thumbnai] Image thumbnail generation failed; using generic placeholder - MIME type: image/heif, input: /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-21-w0q4SZ/bin/rustchan-data/boards/.pending/upload-e90db9bf7faa4d1fa5c6353494080b6f/mf483/c2cba285acd74986b5c31062d748f26e.heif, error: unsupported image MIME for thumbnail: image/heif
+2026-09-02 22:35:15.907 [WARN ] [storage ] WebM stream kind is ambiguous; storing as a neutral download - path: /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-upload-mXt5vv, error: failed to spawn ffmpeg binary '__rustchan_e2e_no_ffmpeg__' — is it installed and executable?
+2026-09-02 22:35:15.908 [WARN ] [storage ] WebM stream kind is ambiguous; storing as a neutral download - path: /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-upload-mXt5vv, error: failed to spawn ffmpeg binary '__rustchan_e2e_no_ffmpeg__' — is it installed and executable?
+2026-09-02 22:35:26.714 [WARN ] [thumbnai] PDF thumbnail rendering failed; using built-in generic thumbnail - pdftoppm: pdftoppm failed, mutool: failed to run mutool, qlmanage: failed to run qlmanage
+2026-09-02 22:35:28.158 [WARN ] [handlers] Multipart upload field exceeded board limit - field: file, streamed bytes: 2086444, next chunk bytes: 10964, limit bytes: 2097152
+2026-09-02 22:35:28.448 [WARN ] [handlers] Multipart upload field exceeded board limit - field: file, streamed bytes: 2081456, next chunk bytes: 15697, limit bytes: 2097152

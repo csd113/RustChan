@@ -1,0 +1,41 @@
+- generic [ref=f5e1]:
+  - banner [ref=f5e2]:
+    - generic [ref=f5e3]: RustChan
+    - link "⌂ Home" [ref=f5e4] [cursor=pointer]:
+      - /url: /
+    - text: ▾
+    - navigation [ref=f5e5]:
+      - generic [ref=f5e6]:
+        - text: "["
+        - link "audit" [ref=f5e7] [cursor=pointer]:
+          - /url: /audit/catalog
+        - text: "]"
+      - generic [ref=f5e8]:
+        - text: "["
+        - link "adult" [ref=f5e9] [cursor=pointer]:
+          - /url: /adult/catalog
+        - text: "]"
+  - main [ref=f5e10]:
+    - generic [ref=f5e11]:
+      - generic [ref=f5e12]:
+        - heading "Admin Login" [level=1] [ref=f5e13]
+        - paragraph [ref=f5e14]: Sign in to manage boards, moderation, backups, and site settings.
+      - generic [ref=f5e15]:
+        - generic [ref=f5e16]:
+          - text: Username
+          - textbox "Username" [active] [ref=f5e17]
+        - generic [ref=f5e18]:
+          - text: Password
+          - textbox "Password" [ref=f5e19]
+        - button "authenticate" [ref=f5e21] [cursor=pointer]
+  - contentinfo [ref=f5e22]:
+    - paragraph [ref=f5e23]:
+      - text: RustChan —
+      - link "home" [ref=f5e24] [cursor=pointer]:
+        - /url: /
+      - text: ·
+      - link "Administrator login" [ref=f5e25] [cursor=pointer]:
+        - /url: /admin
+        - text: admin
+    - group [ref=f5e27]:
+      - generic "⚙ User Preferences" [ref=f5e28] [cursor=pointer]
