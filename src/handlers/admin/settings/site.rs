@@ -7,7 +7,7 @@ use axum::response::IntoResponse as _;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-pub(crate) struct SiteSettingsForm {
+pub(in crate::server) struct SiteSettingsForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     /// Custom site name (replaces [ `RustChan` ] on home page and footer).
@@ -51,7 +51,7 @@ fn resolved_checkbox_setting(
     clippy::too_many_lines,
     reason = "cross-field site validation and the atomic settings update share one request boundary"
 )]
-pub(crate) async fn update_site_settings(
+pub(in crate::server) async fn update_site_settings(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,

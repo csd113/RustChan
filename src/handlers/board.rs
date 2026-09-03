@@ -6,6 +6,9 @@
 //   GET  /:board/search       — search results
 //   POST /delete              — user post deletion
 
+/// Original tracing target, retained for existing `RUST_LOG` filters.
+const LOG_TARGET: &str = concat!(env!("CARGO_CRATE_NAME"), "::handlers::board");
+
 use crate::{
     config::CONFIG,
     db::{self},
@@ -40,23 +43,23 @@ mod reports;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use access_preferences::*;
-pub(crate) use catalog::*;
-pub(crate) use create_thread::*;
-pub(crate) use media::*;
-pub(crate) use pages::*;
-pub(crate) use reports::*;
+pub(in crate::server) use access_preferences::*;
+pub(in crate::server) use catalog::*;
+pub(in crate::server) use create_thread::*;
+pub(in crate::server) use media::*;
+pub(in crate::server) use pages::*;
+pub(in crate::server) use reports::*;
 
-pub(crate) fn should_set_public_secure_cookie(
+pub(super) fn should_set_public_secure_cookie(
     headers: &HeaderMap,
     context: SecureCookieContext,
 ) -> bool {
     crate::handlers::admin::should_set_secure_cookie(headers, context)
 }
 
-pub(crate) type OptionalConnectInfoPeer = SecureCookieContext;
+pub(super) type OptionalConnectInfoPeer = SecureCookieContext;
 
-pub(crate) const fn optional_connect_info_peer(
+pub(super) const fn optional_connect_info_peer(
     peer: OptionalConnectInfoPeer,
 ) -> SecureCookieContext {
     peer
@@ -67,21 +70,21 @@ const PREVIEW_REPLIES: i64 = 3;
 /// Threads per page used by this handler.
 const THREADS_PER_PAGE: i64 = 10;
 /// User theme cookie used by this handler.
-pub(crate) const USER_THEME_COOKIE: &str = "rustchan_theme";
+const USER_THEME_COOKIE: &str = "rustchan_theme";
 /// User hide NSFW cookie used by this handler.
-pub(crate) const USER_HIDE_NSFW_COOKIE: &str = "rustchan_hide_nsfw";
+const USER_HIDE_NSFW_COOKIE: &str = "rustchan_hide_nsfw";
 /// User video audio cookie used by this handler.
-pub(crate) const USER_VIDEO_AUDIO_COOKIE: &str = "rustchan_video_audio";
+const USER_VIDEO_AUDIO_COOKIE: &str = "rustchan_video_audio";
 /// User preferred view cookie used by this handler.
-pub(crate) const USER_PREFERRED_VIEW_COOKIE: &str = "rustchan_preferred_view";
+const USER_PREFERRED_VIEW_COOKIE: &str = "rustchan_preferred_view";
 /// User activity badges cookie used by this handler.
-pub(crate) const USER_ACTIVITY_BADGES_COOKIE: &str = "rustchan_activity_badges";
+const USER_ACTIVITY_BADGES_COOKIE: &str = "rustchan_activity_badges";
 /// NSFW consent cookie used by this handler.
-pub(crate) const NSFW_CONSENT_COOKIE: &str = "rustchan_nsfw_ok";
+const NSFW_CONSENT_COOKIE: &str = "rustchan_nsfw_ok";
 /// Visitor ID cookie used by this handler.
-pub(crate) const VISITOR_ID_COOKIE: &str = "rustchan_visitor_id";
+const VISITOR_ID_COOKIE: &str = "rustchan_visitor_id";
 /// Admin session cookie used by this handler.
-pub(crate) const ADMIN_SESSION_COOKIE: &str = "chan_admin_session";
+pub(in crate::server) const ADMIN_SESSION_COOKIE: &str = "chan_admin_session";
 /// Board access cookie prefix used by this handler.
 const BOARD_ACCESS_COOKIE_PREFIX: &str = "rustchan_board_access_";
 /// Board access cookie TTL days used by this handler.
@@ -93,29 +96,29 @@ const BOARD_UNLOCK_FAIL_WINDOW_SECS: u64 = 900;
 /// HTML cache control used by this handler.
 const HTML_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_DYNAMIC_PUBLIC;
 /// X rustchan redirect header used by this handler.
-pub(crate) const X_RUSTCHAN_REDIRECT_HEADER: &str = "x-rustchan-redirect";
+const X_RUSTCHAN_REDIRECT_HEADER: &str = "x-rustchan-redirect";
 
 static BOARD_UNLOCK_FAILS: LazyLock<DashMap<String, (u32, u64)>> = LazyLock::new(DashMap::new);
 static BOARD_UNLOCK_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) struct BoardAccessContext {
+pub(super) struct BoardAccessContext {
     pub board: Board,
     pub is_admin: bool,
     pub can_view: bool,
     pub can_post: bool,
 }
 
-pub(crate) enum BoardAccessRequirement {
+pub(super) enum BoardAccessRequirement {
     View,
     Post,
 }
 
-pub(crate) struct BoardAccessDenial {
+pub(super) struct BoardAccessDenial {
     pub context: BoardAccessContext,
     pub return_to: String,
 }
 
-pub(crate) enum BoardAccessDecision {
+pub(super) enum BoardAccessDecision {
     Allowed(BoardAccessContext),
     Denied(BoardAccessDenial),
 }
@@ -128,11 +131,11 @@ type CatalogRenderData = (
     String,
 );
 
-pub(crate) fn latest_visible_thread_marker_tuple(marker: Option<(i64, i64)>) -> (i64, i64) {
+pub(super) fn latest_visible_thread_marker_tuple(marker: Option<(i64, i64)>) -> (i64, i64) {
     marker.unwrap_or((0, 0))
 }
 
-pub(crate) const fn activity_html_cache_control(activity_markers_enabled: bool) -> &'static str {
+pub(super) const fn activity_html_cache_control(activity_markers_enabled: bool) -> &'static str {
     if activity_markers_enabled {
         crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE
     } else {
@@ -140,7 +143,7 @@ pub(crate) const fn activity_html_cache_control(activity_markers_enabled: bool) 
     }
 }
 
-pub(crate) fn thread_unread_counts(
+fn thread_unread_counts(
     threads: &[crate::models::Thread],
     markers: &HashMap<i64, ThreadActivityMarker>,
 ) -> HashMap<i64, i64> {
@@ -197,7 +200,7 @@ fn xhr_json_error_response(
     Ok(response)
 }
 
-pub(crate) fn xhr_error_response(status: StatusCode, message: &str) -> Result<Response> {
+pub(super) fn xhr_error_response(status: StatusCode, message: &str) -> Result<Response> {
     xhr_json_error_response(status, status, message)
 }
 
@@ -205,11 +208,11 @@ pub(crate) fn xhr_error_response(status: StatusCode, message: &str) -> Result<Re
 // statuses even when the page handles the JSON error inline. For validation
 // errors that the UI already renders in-context, keep the transport successful
 // and expose the original HTTP meaning via `X-Rustchan-Error-Status`.
-pub(crate) fn xhr_handled_error_response(status: StatusCode, message: &str) -> Result<Response> {
+pub(super) fn xhr_handled_error_response(status: StatusCode, message: &str) -> Result<Response> {
     xhr_json_error_response(StatusCode::OK, status, message)
 }
 
-pub(crate) fn xhr_redirect_response(target: &str) -> Result<Response> {
+pub(super) fn xhr_redirect_response(target: &str) -> Result<Response> {
     let mut response = Response::new(axum::body::Body::empty());
     *response.status_mut() = StatusCode::NO_CONTENT;
     response.headers_mut().insert(
@@ -228,7 +231,7 @@ fn banned_page_redirect_url(reason: &str) -> String {
     )
 }
 
-pub(crate) fn xhr_post_error_response(error: AppError) -> Result<Response> {
+pub(super) fn xhr_post_error_response(error: AppError) -> Result<Response> {
     match error {
         AppError::NotFound(message) => xhr_handled_error_response(StatusCode::NOT_FOUND, &message),
         AppError::BadRequest(message) => {
@@ -250,14 +253,14 @@ pub(crate) fn xhr_post_error_response(error: AppError) -> Result<Response> {
             "The server is temporarily busy. Please try again in a moment.",
         ),
         AppError::Internal(error) => {
-            tracing::error!("Internal error during XHR post submission: {:?}", error);
+            tracing::error!(target: LOG_TARGET, "Internal error during XHR post submission: {:?}", error);
             xhr_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "An internal error occurred.",
             )
         }
         AppError::Tls(message) => {
-            tracing::error!("TLS error during XHR post submission: {message}");
+            tracing::error!(target: LOG_TARGET, "TLS error during XHR post submission: {message}");
             xhr_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "A TLS configuration error occurred.",
@@ -266,7 +269,7 @@ pub(crate) fn xhr_post_error_response(error: AppError) -> Result<Response> {
     }
 }
 
-pub(crate) fn handled_post_error_status(
+pub(super) fn handled_post_error_status(
     error: AppError,
 ) -> std::result::Result<(StatusCode, String), AppError> {
     match error {
@@ -278,16 +281,16 @@ pub(crate) fn handled_post_error_status(
 }
 
 #[derive(Deserialize)]
-pub(crate) struct BannedPageQuery {
+pub(in crate::server) struct BannedPageQuery {
     pub reason: Option<String>,
 }
 
-pub(crate) fn current_theme_from_jar(jar: &CookieJar) -> Option<String> {
+pub(super) fn current_theme_from_jar(jar: &CookieJar) -> Option<String> {
     let cookie = jar.get(USER_THEME_COOKIE)?;
     templates::normalize_theme_slug(cookie.value())
 }
 
-pub(crate) fn user_preferences_from_jar(jar: &CookieJar) -> templates::UserPreferences {
+pub(super) fn user_preferences_from_jar(jar: &CookieJar) -> templates::UserPreferences {
     let default_preferences = templates::UserPreferences::default();
     templates::UserPreferences {
         hide_nsfw_boards: jar
@@ -309,7 +312,7 @@ pub(crate) fn user_preferences_from_jar(jar: &CookieJar) -> templates::UserPrefe
     }
 }
 
-pub(crate) fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
+pub(super) fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Result<()> {
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_owned());
     let admin_session = jar.get("chan_admin_session").map(Cookie::value);
     let form_token = form_token.unwrap_or("");
@@ -322,7 +325,7 @@ pub(crate) fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Resul
     }
 }
 
-pub(crate) fn admin_scoped_csrf_token(
+pub(super) fn admin_scoped_csrf_token(
     jar: &CookieJar,
     admin_session_id: Option<&str>,
     is_admin: bool,
@@ -342,16 +345,16 @@ pub(crate) fn admin_scoped_csrf_token(
     ))
 }
 
-pub(crate) fn has_nsfw_consent(jar: &CookieJar) -> bool {
+fn has_nsfw_consent(jar: &CookieJar) -> bool {
     jar.get(NSFW_CONSENT_COOKIE)
         .is_some_and(|cookie| cookie.value() == "1")
 }
 
-pub(crate) fn board_access_cookie_name(board_short: &str) -> String {
+fn board_access_cookie_name(board_short: &str) -> String {
     format!("{BOARD_ACCESS_COOKIE_PREFIX}{board_short}")
 }
 
-pub(crate) fn board_access_cookie_from_jar(jar: &CookieJar, board_short: &str) -> Option<String> {
+pub(super) fn board_access_cookie_from_jar(jar: &CookieJar, board_short: &str) -> Option<String> {
     let cookie_name = board_access_cookie_name(board_short);
     jar.get(cookie_name.as_str())
         .map(|cookie| cookie.value().to_owned())
@@ -381,7 +384,7 @@ fn has_valid_board_access_cookie(
     cookie_value.is_some_and(|value| value == expected)
 }
 
-pub(crate) fn can_view_board(board: &Board, is_admin: bool, access_cookie: Option<&str>) -> bool {
+fn can_view_board(board: &Board, is_admin: bool, access_cookie: Option<&str>) -> bool {
     is_admin
         || !board.access_mode.requires_view_password()
         || has_valid_board_access_cookie(
@@ -391,11 +394,7 @@ pub(crate) fn can_view_board(board: &Board, is_admin: bool, access_cookie: Optio
         )
 }
 
-pub(crate) fn can_post_to_board(
-    board: &Board,
-    is_admin: bool,
-    access_cookie: Option<&str>,
-) -> bool {
+fn can_post_to_board(board: &Board, is_admin: bool, access_cookie: Option<&str>) -> bool {
     is_admin
         || !board.access_mode.requires_unlock_for_posting()
         || has_valid_board_access_cookie(
@@ -405,7 +404,7 @@ pub(crate) fn can_post_to_board(
         )
 }
 
-pub(crate) fn load_board_access_context(
+pub(super) fn load_board_access_context(
     conn: &rusqlite::Connection,
     board_short: &str,
     admin_session_id: Option<&str>,
@@ -422,7 +421,7 @@ pub(crate) fn load_board_access_context(
     })
 }
 
-pub(crate) async fn board_access_preflight(
+pub(super) async fn board_access_preflight(
     state: &AppState,
     board_short: &str,
     admin_session_id: Option<String>,
@@ -461,14 +460,14 @@ pub(crate) async fn board_access_preflight(
     }
 }
 
-pub(crate) fn unlock_redirect_url(board_short: &str, return_to: &str) -> String {
+pub(super) fn unlock_redirect_url(board_short: &str, return_to: &str) -> String {
     format!(
         "/{board_short}/unlock?return_to={}",
         templates::urlencoding_simple(return_to)
     )
 }
 
-pub(crate) fn render_board_unlock_html(
+pub(super) fn render_board_unlock_html(
     board: &Board,
     csrf_token: &str,
     return_to: &str,
@@ -487,7 +486,7 @@ pub(crate) fn render_board_unlock_html(
     )
 }
 
-pub(crate) fn board_access_denied_response(
+pub(super) fn board_access_denied_response(
     jar: CookieJar,
     denial: &BoardAccessDenial,
     csrf_token: &str,
@@ -503,7 +502,7 @@ pub(crate) fn board_access_denied_response(
     board_access_required_response(jar, html)
 }
 
-pub(crate) async fn banned_page(
+pub(in crate::server) async fn banned_page(
     Query(query): Query<BannedPageQuery>,
     jar: CookieJar,
     req_headers: HeaderMap,
@@ -586,6 +585,7 @@ fn record_board_unlock_failure(attempt_key: &str) {
     } else {
         *count = count.saturating_add(1);
     }
+    drop(entry);
 }
 
 fn clear_board_unlock_failures(attempt_key: &str) {
@@ -642,15 +642,15 @@ fn board_access_page_response(
     (jar, resp).into_response()
 }
 
-pub(crate) fn board_access_required_response(jar: CookieJar, html: String) -> Response {
+pub(super) fn board_access_required_response(jar: CookieJar, html: String) -> Response {
     board_access_page_response(jar, html, StatusCode::FORBIDDEN, None)
 }
 
-pub(crate) fn board_access_ok_response(jar: CookieJar, html: String) -> Response {
+fn board_access_ok_response(jar: CookieJar, html: String) -> Response {
     board_access_page_response(jar, html, StatusCode::OK, None)
 }
 
-pub(crate) fn board_access_rate_limited_response(
+fn board_access_rate_limited_response(
     jar: CookieJar,
     html: String,
     retry_after_secs: u64,
@@ -667,7 +667,7 @@ fn safe_return_to(path: Option<&str>, fallback: &str) -> String {
     crate::utils::redirect::strict_safe_internal_path_or(path, fallback).to_owned()
 }
 
-pub(crate) fn identity_key(client_ip: &str, jar: &CookieJar) -> String {
+pub(super) fn identity_key(client_ip: &str, jar: &CookieJar) -> String {
     if client_ip.starts_with("tor:") {
         return client_ip.to_owned();
     }

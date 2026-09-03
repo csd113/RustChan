@@ -248,11 +248,9 @@ thread_local! {
 #[cfg(test)]
 fn full_restore_runtime_tmp_dir() -> PathBuf {
     FULL_RESTORE_RUNTIME_TMP_ROOT_FOR_TEST.with(|root| {
-        if let Some(path) = root.borrow().as_ref() {
-            path.clone()
-        } else {
-            crate::config::runtime_tmp_dir()
-        }
+        root.borrow()
+            .clone()
+            .unwrap_or_else(crate::config::runtime_tmp_dir)
     })
 }
 
@@ -922,7 +920,7 @@ fn full_restore_success_response(
     clippy::too_many_lines,
     reason = "authentication, upload validation, job execution, and failure responses form one restore request"
 )]
-pub(crate) async fn admin_restore(
+pub(in crate::server) async fn admin_restore(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -1058,7 +1056,7 @@ pub(crate) async fn admin_restore(
     }
 }
 
-pub(crate) async fn restore_saved_full_backup(
+pub(in crate::server) async fn restore_saved_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,

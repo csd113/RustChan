@@ -9,13 +9,13 @@ use axum::response::IntoResponse as _;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-pub(crate) struct ClearBoardFaviconForm {
+pub(in crate::server) struct ClearBoardFaviconForm {
     board_id: i64,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
 
-pub(crate) async fn clear_board_favicon_override(
+pub(in crate::server) async fn clear_board_favicon_override(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -50,7 +50,7 @@ pub(crate) async fn clear_board_favicon_override(
     .into_response())
 }
 
-pub(crate) async fn update_site_favicon(
+pub(in crate::server) async fn update_site_favicon(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -115,7 +115,7 @@ pub(crate) async fn update_site_favicon(
     }
 }
 
-pub(crate) async fn update_board_favicon(
+pub(in crate::server) async fn update_board_favicon(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,

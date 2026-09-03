@@ -13,7 +13,7 @@ pub(super) fn temp_board_download_token_path(filename: &str) -> PathBuf {
 }
 
 /// Writes temp board download token.
-pub(crate) fn write_temp_board_download_token(filename: &str, token: &str) -> Result<()> {
+pub(super) fn write_temp_board_download_token(filename: &str, token: &str) -> Result<()> {
     crate::config::ensure_private_dir(&temp_board_download_dir()).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create temp board backup dir: {error}"))
     })?;
@@ -128,14 +128,14 @@ impl Drop for TempFileStream {
 }
 
 #[derive(Default, Deserialize)]
-pub(crate) struct DownloadBackupQuery {
+pub(in crate::server) struct DownloadBackupQuery {
     cleanup: Option<String>,
     token: Option<String>,
     part: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct DeleteBackupForm {
+pub(in crate::server) struct DeleteBackupForm {
     kind: String,
     filename: String,
     #[serde(rename = "_csrf")]
@@ -146,7 +146,7 @@ pub(crate) struct DeleteBackupForm {
     clippy::too_many_lines,
     reason = "authentication, token validation, checksum verification, and streaming form one download request"
 )]
-pub(crate) async fn download_backup(
+pub(in crate::server) async fn download_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     Query(query): Query<DownloadBackupQuery>,
@@ -292,7 +292,7 @@ pub(crate) async fn download_backup(
         .into_response())
 }
 
-pub(crate) async fn backup_progress_json(
+pub(in crate::server) async fn backup_progress_json(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Response> {
@@ -325,7 +325,7 @@ pub(crate) async fn backup_progress_json(
         .into_response())
 }
 
-pub(crate) async fn delete_backup(
+pub(in crate::server) async fn delete_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,

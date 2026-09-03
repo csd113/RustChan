@@ -36,7 +36,7 @@ type BoardIndexLoadResult = (
     clippy::too_many_lines,
     reason = "home-page data loading, activity markers, banner selection, and rendering form one request"
 )]
-pub(crate) async fn index(
+pub(in crate::server) async fn index(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
     jar: CookieJar,
@@ -223,7 +223,7 @@ pub(crate) async fn index(
     clippy::too_many_lines,
     reason = "board access, pagination, activity markers, banner selection, and rendering form one request"
 )]
-pub(crate) async fn board_index(
+pub(in crate::server) async fn board_index(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     Query(params): Query<HashMap<String, String>>,

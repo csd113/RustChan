@@ -874,7 +874,7 @@ fn format_magic_bytes(bytes: &[u8]) -> String {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct ExtractBoardFromFullBackupForm {
+pub(in crate::server) struct ExtractBoardFromFullBackupForm {
     filename: String,
     board_short: String,
     action: String,
@@ -891,7 +891,7 @@ enum ExtractBoardFromFullBackupOutcome {
     clippy::too_many_lines,
     reason = "authentication, source verification, extraction, and download issuance form one request"
 )]
-pub(crate) async fn extract_board_from_full_backup(
+pub(in crate::server) async fn extract_board_from_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -1034,7 +1034,7 @@ pub(crate) async fn extract_board_from_full_backup(
     }
 }
 
-pub(crate) async fn restore_saved_board_backup(
+pub(in crate::server) async fn restore_saved_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -1122,7 +1122,7 @@ pub(crate) async fn restore_saved_board_backup(
     clippy::too_many_lines,
     reason = "restore upload validation, mutation, rollback, and response handling form one guarded request"
 )]
-pub(crate) async fn board_restore(
+pub(in crate::server) async fn board_restore(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,

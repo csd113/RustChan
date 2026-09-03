@@ -2782,14 +2782,12 @@ pub fn reconcile_media_job_states(
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             drop(active_stmt);
             let has_compatible = active_payloads.iter().any(|(stored_type, payload)| {
-                serde_json::from_str::<Job>(payload)
-                    .ok()
-                    .is_some_and(|job| {
-                        job.type_str() == stored_type
-                            && media_job_identity(&job).is_some_and(|identity| {
-                                identity.post_id == post_id && identity.expected_source == source
-                            })
-                    })
+                serde_json::from_str::<Job>(payload).is_ok_and(|job| {
+                    job.type_str() == stored_type
+                        && media_job_identity(&job).is_some_and(|identity| {
+                            identity.post_id == post_id && identity.expected_source == source
+                        })
+                })
             });
             if has_compatible {
                 continue;

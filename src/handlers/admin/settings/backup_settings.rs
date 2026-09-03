@@ -7,7 +7,7 @@ use axum::response::IntoResponse as _;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-pub(crate) struct FullBackupSettingsForm {
+pub(in crate::server) struct FullBackupSettingsForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub auto_full_backup_interval_hours: Option<String>,
@@ -76,7 +76,7 @@ fn parse_full_backup_settings_form(
     })
 }
 
-pub(crate) async fn update_full_backup_settings(
+pub(in crate::server) async fn update_full_backup_settings(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,

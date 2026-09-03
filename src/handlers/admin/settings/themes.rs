@@ -32,7 +32,7 @@ impl ThemeEditorMode {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct ThemeBuilderFields {
+pub(in crate::server) struct ThemeBuilderFields {
     pub base_preset: Option<String>,
     pub background_color: Option<String>,
     pub panel_color: Option<String>,
@@ -64,7 +64,7 @@ pub(crate) struct ThemeBuilderFields {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct CreateThemeForm {
+pub(in crate::server) struct CreateThemeForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub slug: String,
@@ -79,7 +79,7 @@ pub(crate) struct CreateThemeForm {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct UpdateThemeForm {
+pub(in crate::server) struct UpdateThemeForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub existing_slug: String,
@@ -380,7 +380,7 @@ fn resolved_theme_css_for_update(
     }
 }
 
-pub(crate) async fn create_theme(
+pub(in crate::server) async fn create_theme(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -434,7 +434,7 @@ pub(crate) async fn create_theme(
     })
 }
 
-pub(crate) async fn update_theme(
+pub(in crate::server) async fn update_theme(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -508,13 +508,13 @@ pub(crate) async fn update_theme(
 }
 
 #[derive(Deserialize)]
-pub(crate) struct DeleteThemeForm {
+pub(in crate::server) struct DeleteThemeForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub slug: String,
 }
 
-pub(crate) async fn delete_theme(
+pub(in crate::server) async fn delete_theme(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,

@@ -85,7 +85,7 @@ fn stale_webm_redirect_path(base: &std::path::Path, media_path: &str) -> Option<
     clippy::too_many_lines,
     reason = "path validation, access policy, legacy redirect handling, and file response form one request"
 )]
-pub(crate) async fn serve_board_media(
+pub(in crate::server) async fn serve_board_media(
     State(state): State<AppState>,
     Path(media_path): Path<String>,
     jar: CookieJar,
@@ -263,7 +263,7 @@ fn apply_pdf_embed_headers(headers: &mut HeaderMap) {
 //
 // Response on failure: 404 { "error": "not found" }
 
-pub(crate) async fn api_post_preview(
+pub(in crate::server) async fn api_post_preview(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
@@ -350,7 +350,7 @@ pub(crate) async fn api_post_preview(
 // the first hover preview the JS upgrades the href in-place so subsequent
 // clicks go directly to the thread anchor without a server round-trip.
 
-pub(crate) async fn redirect_to_post(
+pub(in crate::server) async fn redirect_to_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
@@ -384,7 +384,7 @@ pub(crate) async fn redirect_to_post(
     if let Ok(Ok((Some(thread_id), _))) = result {
         let url = format!("/{board_short_for_url}/thread/{thread_id}#p{post_id}");
         Redirect::to(&url).into_response()
-    } else if let Ok(Ok((None, true))) = result {
+    } else if matches!(result, Ok(Ok((None, true)))) {
         Redirect::to(&unlock_redirect_url(
             &board_short_for_url,
             &format!("/{board_short_for_url}/post/{post_id}"),

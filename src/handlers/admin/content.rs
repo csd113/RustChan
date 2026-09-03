@@ -101,7 +101,7 @@ fn checked_board_upload_dir(upload_dir: &str, short: &str) -> Result<PathBuf> {
 
 // POST /admin/board/create
 #[derive(Deserialize)]
-pub(crate) struct CreateBoardForm {
+pub(in crate::server) struct CreateBoardForm {
     short_name: String,
     name: String,
     description: String,
@@ -111,7 +111,7 @@ pub(crate) struct CreateBoardForm {
     csrf: Option<String>,
 }
 
-pub(crate) async fn create_board(
+pub(in crate::server) async fn create_board(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -170,14 +170,14 @@ pub(crate) async fn create_board(
 
 // POST /admin/board/delete
 #[derive(Deserialize)]
-pub(crate) struct BoardIdForm {
+pub(in crate::server) struct BoardIdForm {
     board_id: i64,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct ReorderBoardForm {
+pub(in crate::server) struct ReorderBoardForm {
     board_id: i64,
     direction: String,
     return_to: Option<String>,
@@ -189,7 +189,7 @@ fn safe_return_to(path: Option<&str>) -> &str {
     crate::utils::redirect::safe_internal_path_or(path, "/admin/panel")
 }
 
-pub(crate) async fn delete_board(
+pub(in crate::server) async fn delete_board(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -277,7 +277,7 @@ pub(crate) async fn delete_board(
 }
 
 // POST /admin/board/reorder
-pub(crate) async fn reorder_board(
+pub(in crate::server) async fn reorder_board(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -317,7 +317,7 @@ pub(crate) async fn reorder_board(
 
 // POST /admin/thread/action
 #[derive(Deserialize)]
-pub(crate) struct ThreadActionForm {
+pub(in crate::server) struct ThreadActionForm {
     thread_id: i64,
     board: String,
     action: String, // "sticky", "unsticky", "lock", "unlock"
@@ -325,7 +325,7 @@ pub(crate) struct ThreadActionForm {
     csrf: Option<String>,
 }
 
-pub(crate) async fn thread_action(
+pub(in crate::server) async fn thread_action(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -419,7 +419,7 @@ pub(crate) async fn thread_action(
 
 // POST /admin/post/delete
 #[derive(Deserialize)]
-pub(crate) struct AdminDeletePostForm {
+pub(in crate::server) struct AdminDeletePostForm {
     post_id: i64,
     board: String,
     #[serde(rename = "_csrf")]
@@ -430,7 +430,7 @@ pub(crate) struct AdminDeletePostForm {
     clippy::cognitive_complexity,
     reason = "post deletion keeps authorization, database mutation, file cleanup, and audit logging together"
 )]
-pub(crate) async fn admin_delete_post(
+pub(in crate::server) async fn admin_delete_post(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -524,14 +524,14 @@ pub(crate) async fn admin_delete_post(
 
 // POST /admin/thread/delete
 #[derive(Deserialize)]
-pub(crate) struct AdminDeleteThreadForm {
+pub(in crate::server) struct AdminDeleteThreadForm {
     thread_id: i64,
     board: String,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
 
-pub(crate) async fn admin_delete_thread(
+pub(in crate::server) async fn admin_delete_thread(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,

@@ -1402,13 +1402,12 @@ impl Config {
     )]
     pub fn validate(&self) -> anyhow::Result<()> {
         fn url_host_is_loopback(url: &str) -> bool {
-            reqwest::Url::parse(url).ok().is_some_and(|parsed| {
+            reqwest::Url::parse(url).is_ok_and(|parsed| {
                 parsed.host_str().is_some_and(|host| {
                     host.eq_ignore_ascii_case("localhost")
                         || host
                             .parse::<std::net::IpAddr>()
-                            .ok()
-                            .is_some_and(|ip| ip.is_loopback())
+                            .is_ok_and(|ip| ip.is_loopback())
                 })
             })
         }

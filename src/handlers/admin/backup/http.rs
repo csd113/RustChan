@@ -1,3 +1,6 @@
+/// Original tracing target, retained for existing `RUST_LOG` filters.
+const LOG_TARGET: &str = concat!(env!("CARGO_CRATE_NAME"), "::handlers::admin::backup::http");
+
 use super::{
     check_admin_csrf_jar, common, header, require_admin_session_sid, require_same_origin_request,
     AdminPanelTarget, AppError, AppState, CookieJar, HeaderMap, HeaderValue, Multipart, Next, Path,
@@ -6,7 +9,10 @@ use super::{
 };
 use tokio::io::AsyncWriteExt as _;
 
-pub(crate) async fn backup_request_logging_middleware(req: Request, next: Next) -> Response {
+pub(in crate::server) async fn backup_request_logging_middleware(
+    req: Request,
+    next: Next,
+) -> Response {
     let method = req.method().clone();
     let uri = req.uri().clone();
     if uri.path() == "/admin/backup/progress" {
@@ -61,11 +67,11 @@ pub(super) fn admin_xhr_error_response(error: &AppError) -> Response {
             "The server is temporarily busy. Please try again in a moment.".to_owned(),
         )),
         AppError::Internal(error) => {
-            tracing::error!("Internal admin restore XHR error: {:?}", error);
+            tracing::error!(target: LOG_TARGET, "Internal admin restore XHR error: {:?}", error);
             None
         }
         AppError::Tls(message) => {
-            tracing::error!("TLS admin restore XHR error: {message}");
+            tracing::error!(target: LOG_TARGET, "TLS admin restore XHR error: {message}");
             None
         }
     };
@@ -256,7 +262,7 @@ pub(super) fn restore_success_redirect_target(
         ),
         RestoreKind::Board => {
             let Some(board_short) = board_short else {
-                tracing::error!(
+                tracing::error!(target: LOG_TARGET,
                     "Board restore succeeded without a board name; using the generic restore target"
                 );
                 return format!(
@@ -293,16 +299,15 @@ fn restore_admin_panel_target(
 ) -> AdminPanelTarget<'_> {
     match kind {
         RestoreKind::Full => AdminPanelTarget::anchor_open(kind.anchor(), kind.open_section()),
-        RestoreKind::Board => {
-            if let Some(board_short) = board_short {
+        RestoreKind::Board => board_short.map_or_else(
+            || AdminPanelTarget::anchor_open(kind.anchor(), kind.open_section()),
+            |board_short| {
                 AdminPanelTarget::owned_anchor_open(
                     format!("board-backup-{board_short}"),
                     kind.open_section(),
                 )
-            } else {
-                AdminPanelTarget::anchor_open(kind.anchor(), kind.open_section())
-            }
-        }
+            },
+        ),
     }
 }
 

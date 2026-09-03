@@ -11,19 +11,19 @@ use std::sync::atomic::Ordering;
 static PRE_REPAIR_BACKUP_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 #[derive(Deserialize)]
-pub(crate) struct VacuumForm {
+pub(in crate::server) struct VacuumForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct DbMaintenanceForm {
+pub(in crate::server) struct DbMaintenanceForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct MediaSettingsForm {
+pub(in crate::server) struct MediaSettingsForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub ffmpeg_timeout_secs: Option<String>,
@@ -33,7 +33,7 @@ pub(crate) struct MediaSettingsForm {
 }
 
 #[derive(Deserialize, Default)]
-pub(crate) struct DbRepairStatusQuery {
+pub(in crate::server) struct DbRepairStatusQuery {
     pub job_id: Option<u64>,
 }
 
@@ -121,7 +121,7 @@ fn parse_media_prune_size_input(
     Ok(bytes)
 }
 
-pub(crate) async fn update_media_settings(
+pub(in crate::server) async fn update_media_settings(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -182,7 +182,7 @@ pub(crate) async fn update_media_settings(
     )
 }
 
-pub(crate) async fn admin_vacuum(
+pub(in crate::server) async fn admin_vacuum(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -236,7 +236,7 @@ pub(crate) async fn admin_vacuum(
     Ok((jar, Html(html)).into_response())
 }
 
-pub(crate) async fn admin_db_check(
+pub(in crate::server) async fn admin_db_check(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -282,7 +282,7 @@ pub(crate) async fn admin_db_check(
     Ok((jar, Html(html)).into_response())
 }
 
-pub(crate) async fn admin_db_repair(
+pub(in crate::server) async fn admin_db_repair(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -384,7 +384,7 @@ pub(crate) async fn admin_db_repair(
     ))
 }
 
-pub(crate) async fn admin_db_repair_progress_json(
+pub(in crate::server) async fn admin_db_repair_progress_json(
     State(state): State<AppState>,
     jar: CookieJar,
     Query(query): Query<DbRepairStatusQuery>,
@@ -544,7 +544,7 @@ fn backup_progress_label(phase: u64, files_done: u64, files_total: u64) -> Strin
     }
 }
 
-pub(crate) async fn admin_db_repair_status(
+pub(in crate::server) async fn admin_db_repair_status(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -577,10 +577,10 @@ pub(crate) async fn admin_db_repair_status(
 }
 
 fn db_repair_status_url(job_id: Option<u64>) -> String {
-    match job_id {
-        Some(job_id) => format!("/admin/db/repair/status?job_id={job_id}"),
-        None => "/admin/db/repair".to_owned(),
-    }
+    job_id.map_or_else(
+        || "/admin/db/repair".to_owned(),
+        |job_id| format!("/admin/db/repair/status?job_id={job_id}"),
+    )
 }
 
 fn render_db_repair_running_response(

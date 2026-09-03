@@ -29,7 +29,7 @@ pub mod error;
 pub mod favicon;
 #[cfg(test)]
 /// Browser-facing and administration handlers used by crate-level tests.
-pub mod handlers;
+pub use server::handlers;
 #[cfg(test)]
 /// Structured application and console logging used by crate-level tests.
 pub mod logging;
@@ -52,7 +52,7 @@ pub mod templates;
 pub mod test_fixtures;
 #[cfg(test)]
 /// Shared state and request builders for crate-local tests.
-pub(crate) mod test_support;
+pub(crate) use test_fixtures as test_support;
 /// Built-in theme metadata.
 pub mod theme;
 /// Custom theme configuration and CSS generation.

@@ -58,27 +58,27 @@ const fn cache_control_for_favicon(has_version: bool) -> &'static str {
     }
 }
 
-pub(crate) async fn serve_favicon_ico(req: axum::extract::Request) -> Response {
+pub(in crate::server) async fn serve_favicon_ico(req: axum::extract::Request) -> Response {
     serve_named_global_favicon("favicon.ico", req).await
 }
 
-pub(crate) async fn serve_favicon_16(req: axum::extract::Request) -> Response {
+pub(in crate::server) async fn serve_favicon_16(req: axum::extract::Request) -> Response {
     serve_named_global_favicon("favicon-16x16.png", req).await
 }
 
-pub(crate) async fn serve_favicon_32(req: axum::extract::Request) -> Response {
+pub(in crate::server) async fn serve_favicon_32(req: axum::extract::Request) -> Response {
     serve_named_global_favicon("favicon-32x32.png", req).await
 }
 
-pub(crate) async fn serve_apple_touch_icon(req: axum::extract::Request) -> Response {
+pub(in crate::server) async fn serve_apple_touch_icon(req: axum::extract::Request) -> Response {
     serve_named_global_favicon("apple-touch-icon.png", req).await
 }
 
-pub(crate) async fn serve_android_chrome_192(req: axum::extract::Request) -> Response {
+pub(in crate::server) async fn serve_android_chrome_192(req: axum::extract::Request) -> Response {
     serve_named_global_favicon("android-chrome-192x192.png", req).await
 }
 
-pub(crate) async fn serve_android_chrome_512(req: axum::extract::Request) -> Response {
+pub(in crate::server) async fn serve_android_chrome_512(req: axum::extract::Request) -> Response {
     serve_named_global_favicon("android-chrome-512x512.png", req).await
 }
 

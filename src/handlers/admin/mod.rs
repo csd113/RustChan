@@ -13,20 +13,20 @@
 // spawn_blocking to avoid blocking the Tokio event loop. Direct DB calls from
 // async context were stalling worker threads under concurrent load.
 
-pub(crate) mod auth;
-pub(crate) use auth::*;
+pub(in crate::server) mod auth;
+pub(in crate::server) use auth::*;
 
-pub(crate) mod backup;
-pub(crate) use backup::*;
+pub(in crate::server) mod backup;
+pub(in crate::server) use backup::*;
 
-pub(crate) mod content;
-pub(crate) use content::*;
+pub(in crate::server) mod content;
+pub(in crate::server) use content::*;
 
-pub(crate) mod moderation;
-pub(crate) use moderation::*;
+pub(in crate::server) mod moderation;
+pub(in crate::server) use moderation::*;
 
-pub(crate) mod settings;
-pub(crate) use settings::*;
+pub(in crate::server) mod settings;
+pub(in crate::server) use settings::*;
 
 use crate::{
     config::CONFIG,
@@ -68,7 +68,7 @@ static ADMIN_SESSION_BOOTSTRAPS: LazyLock<DashMap<String, (String, u64)>> =
 
 // Shared form type used by auth and backup
 #[derive(Deserialize)]
-pub(crate) struct CsrfOnly {
+pub(in crate::server) struct CsrfOnly {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub return_to: Option<String>,
@@ -89,7 +89,7 @@ fn require_admin_session_with_name(
 /// Check CSRF using the cookie jar. Returns error on mismatch.
 /// Verify admin session from a session ID string.
 /// For use inside `spawn_blocking` closures where we have an open connection.
-pub(in crate::handlers) fn require_admin_session_sid(
+pub(in crate::server::handlers) fn require_admin_session_sid(
     conn: &rusqlite::Connection,
     session_id: Option<&str>,
 ) -> Result<i64> {
@@ -220,7 +220,7 @@ pub(super) fn admin_csrf_is_valid(jar: &CookieJar, form_token: Option<&str>) -> 
 }
 
 /// Requires same origin or valid CSRF.
-pub(in crate::handlers) fn require_same_origin_or_valid_csrf(
+pub(in crate::server::handlers) fn require_same_origin_or_valid_csrf(
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
     csrf_valid: bool,
@@ -239,7 +239,7 @@ pub(in crate::handlers) fn require_same_origin_or_valid_csrf(
 }
 
 /// Requires admin post origin and CSRF.
-pub(in crate::handlers) fn require_admin_post_origin_and_csrf(
+pub(in crate::server::handlers) fn require_admin_post_origin_and_csrf(
     jar: &CookieJar,
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
@@ -277,13 +277,11 @@ pub(super) fn ensure_admin_csrf(jar: CookieJar, secure: bool) -> Result<(CookieJ
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
     let mut jar = jar;
-    let raw = if let Some(raw) = raw {
-        raw
-    } else {
+    let raw = raw.unwrap_or_else(|| {
         let raw = new_csrf_token();
-        jar = jar.add(admin_csrf_cookie(raw.clone(), secure));
+        jar = std::mem::take(&mut jar).add(admin_csrf_cookie(raw.clone(), secure));
         raw
-    };
+    });
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(Cookie::value)
@@ -297,7 +295,7 @@ pub(super) fn ensure_admin_csrf(jar: CookieJar, secure: bool) -> Result<(CookieJ
 
 pub(super) use crate::utils::redirect::encode_query_component;
 
-pub(in crate::handlers) fn should_set_secure_cookie(
+pub(in crate::server::handlers) fn should_set_secure_cookie(
     headers: &HeaderMap,
     context: crate::middleware::SecureCookieContext,
 ) -> bool {
@@ -367,10 +365,7 @@ fn host_header_uses_https_port_with_config(headers: &HeaderMap, tls_port: u16) -
         return false;
     };
 
-    match authority.port_u16() {
-        Some(port) => port == tls_port,
-        None => tls_port == 443,
-    }
+    authority.port_u16().unwrap_or(443) == tls_port
 }
 
 fn request_origin_uses_https(headers: &HeaderMap) -> bool {
@@ -552,7 +547,7 @@ pub(super) fn admin_panel_error_redirect_anchor_open(
 /// Query params accepted by GET /admin/panel.
 /// All fields are optional — missing = no flash message.
 #[derive(Deserialize, Default)]
-pub(crate) struct AdminPanelQuery {
+pub(in crate::server) struct AdminPanelQuery {
     pub flash: Option<String>,
     pub flash_error: Option<String>,
     pub open: Option<String>,
@@ -570,7 +565,7 @@ pub(crate) struct AdminPanelQuery {
 
 #[derive(Deserialize, Default)]
 /// Query parameters controlling the live-log response size.
-pub(crate) struct LiveLogQuery {
+pub(in crate::server) struct LiveLogQuery {
     pub bytes: Option<usize>,
 }
 
@@ -2044,7 +2039,7 @@ fn indent_diagnostics_block(text: &str) -> String {
         .join("\n")
 }
 
-pub(crate) async fn admin_panel(
+pub(in crate::server) async fn admin_panel(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -2135,7 +2130,7 @@ pub(crate) async fn admin_panel(
     Ok((jar, Html(html)))
 }
 
-pub(crate) async fn admin_site_health_jobs(
+pub(in crate::server) async fn admin_site_health_jobs(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Response> {
@@ -2175,12 +2170,12 @@ pub(crate) async fn admin_site_health_jobs(
 }
 
 #[derive(Deserialize)]
-pub(crate) struct DismissFailedJobsForm {
+pub(in crate::server) struct DismissFailedJobsForm {
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
 
-pub(crate) async fn dismiss_failed_site_health_jobs(
+pub(in crate::server) async fn dismiss_failed_site_health_jobs(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -2222,7 +2217,7 @@ pub(crate) async fn dismiss_failed_site_health_jobs(
     Ok(admin_panel_redirect_anchor_open(message, "site-health", "site-health").into_response())
 }
 
-pub(crate) async fn admin_live_log(
+pub(in crate::server) async fn admin_live_log(
     State(state): State<AppState>,
     jar: CookieJar,
     Query(params): Query<LiveLogQuery>,
@@ -2372,8 +2367,8 @@ mod tests {
         create_admin_session_bootstrap, dashboard_backup_status, dashboard_dependency_status,
         dashboard_job_status, dashboard_recent_count, dashboard_report_status,
         dashboard_thread_counts, dashboard_tor_status, dismiss_failed_site_health_jobs,
-        host_header_uses_https_port_with_config, hosts_match_for_same_origin, latest_log_file,
-        load_dashboard_activity_snapshot, optional_count_query, read_log_tail,
+        ensure_admin_csrf, host_header_uses_https_port_with_config, hosts_match_for_same_origin,
+        latest_log_file, load_dashboard_activity_snapshot, optional_count_query, read_log_tail,
         request_origin_uses_https, request_scheme_for_same_origin_with_config,
         require_same_origin_or_valid_csrf, require_same_origin_request,
         should_set_secure_cookie_with_config, BackupSummary, DismissFailedJobsForm, LiveLogQuery,
@@ -2386,6 +2381,7 @@ mod tests {
         body::to_bytes,
         extract::{ConnectInfo, Form, Query, State},
         http::{header, HeaderMap, HeaderValue, StatusCode},
+        response::IntoResponse as _,
     };
     use axum_extra::extract::cookie::{Cookie, CookieJar};
 
@@ -2394,6 +2390,67 @@ mod tests {
         "http://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion";
     const TEST_ONION_HTTPS_ORIGIN: &str =
         "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion";
+
+    #[test]
+    fn admin_csrf_preserves_cookies_and_only_issues_missing_tokens() -> anyhow::Result<()> {
+        for existing in [None, Some(""), Some("existing-csrf-token")] {
+            for secure in [false, true] {
+                let mut cookie_header = format!("{SESSION_COOKIE}=test-session; unrelated=keep-me");
+                if let Some(raw) = existing {
+                    cookie_header.push_str("; csrf_token=");
+                    cookie_header.push_str(raw);
+                }
+                let mut headers = HeaderMap::new();
+                headers.insert(header::COOKIE, HeaderValue::from_str(&cookie_header)?);
+                let (jar, token) = ensure_admin_csrf(CookieJar::from_headers(&headers), secure)?;
+                let raw = jar.get("csrf_token").context("CSRF cookie is missing")?;
+                ensure!(!raw.value().is_empty(), "CSRF cookie must not be empty");
+                ensure!(
+                    token
+                        == crate::utils::crypto::make_scoped_csrf_form_token(
+                            raw.value(),
+                            &crate::config::CONFIG.cookie_secret,
+                            "test-session"
+                        ),
+                    "form token must remain bound to the session and raw cookie"
+                );
+                ensure!(
+                    jar.get("unrelated").map(Cookie::value) == Some("keep-me"),
+                    "issuing a CSRF cookie must preserve other cookies"
+                );
+                let reused = existing.is_some_and(|value| !value.is_empty());
+                if reused {
+                    ensure!(
+                        Some(raw.value()) == existing,
+                        "existing token must be reused"
+                    );
+                } else {
+                    ensure!(
+                        raw.secure() == Some(secure),
+                        "new cookie must preserve transport security"
+                    );
+                }
+                let response = (jar, StatusCode::OK).into_response();
+                ensure!(
+                    response
+                        .headers()
+                        .get_all(header::SET_COOKIE)
+                        .iter()
+                        .count()
+                        == usize::from(!reused),
+                    "only a missing or empty CSRF token should issue a cookie"
+                );
+            }
+        }
+        ensure!(
+            matches!(
+                ensure_admin_csrf(CookieJar::new(), false),
+                Err(AppError::Forbidden(_))
+            ),
+            "CSRF issuance must still reject a missing admin session"
+        );
+        Ok(())
+    }
 
     #[test]
     fn dashboard_count_helpers_fail_closed_when_schema_is_missing() -> anyhow::Result<()> {

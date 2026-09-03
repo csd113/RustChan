@@ -26,7 +26,7 @@ type CatalogLoadResult = (
     clippy::too_many_lines,
     reason = "access control, catalog loading, unread-state calculation, and rendering form one request"
 )]
-pub(crate) async fn catalog(
+pub(in crate::server) async fn catalog(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
@@ -266,7 +266,7 @@ pub(crate) async fn catalog(
     Ok((jar, resp).into_response())
 }
 
-pub(crate) async fn hidden_threads(
+pub(in crate::server) async fn hidden_threads(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
@@ -345,7 +345,7 @@ pub(crate) async fn hidden_threads(
 }
 
 // GET /:board/archive
-pub(crate) async fn board_archive(
+pub(in crate::server) async fn board_archive(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     Query(params): Query<HashMap<String, String>>,
@@ -431,7 +431,7 @@ pub(crate) async fn board_archive(
 }
 
 // GET /:board/search
-pub(crate) async fn search(
+pub(in crate::server) async fn search(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     Query(q): Query<SearchQuery>,

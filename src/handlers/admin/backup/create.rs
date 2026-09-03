@@ -21,7 +21,7 @@ use serde::Deserialize;
     clippy::too_many_lines,
     reason = "snapshot, manifest, payload publication, and cleanup share one fail-closed backup operation"
 )]
-pub(crate) fn create_full_backup_to_server(
+pub(in crate::server) fn create_full_backup_to_server(
     pool: &db::DbPool,
     session_id: Option<&str>,
     progress: &std::sync::Arc<crate::middleware::BackupProgress>,
@@ -304,7 +304,7 @@ pub(crate) fn create_full_backup_to_server(
     clippy::too_many_lines,
     reason = "maintenance snapshot, manifest publication, retention, and status updates form one operation"
 )]
-pub(crate) fn create_pre_maintenance_backup_to_server(
+pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_server(
     pool: &db::DbPool,
     progress: &std::sync::Arc<crate::middleware::BackupProgress>,
     operation: &str,
@@ -659,7 +659,7 @@ fn snapshot_db_health_output(conn: &rusqlite::Connection, pragma: &str) -> Optio
 }
 
 #[derive(Deserialize)]
-pub(crate) struct FullBackupCreateForm {
+pub(in crate::server) struct FullBackupCreateForm {
     #[serde(default, deserialize_with = "super::form_checkbox_bool")]
     include_tor_hidden_service_keys: bool,
     #[serde(default)]
@@ -677,7 +677,9 @@ const MIN_SPLIT_ZIP_PART_SIZE: u64 = 64 * 1024 * 1024;
 /// Maximum permitted split ZIP part size.
 const MAX_SPLIT_ZIP_PART_SIZE: u64 = 64 * 1024 * 1024 * 1024;
 
-pub(crate) fn parse_backup_storage_mode_value(value: Option<&str>) -> Result<BackupStorageMode> {
+pub(in crate::server) fn parse_backup_storage_mode_value(
+    value: Option<&str>,
+) -> Result<BackupStorageMode> {
     match value.unwrap_or("directory") {
         "directory" => Ok(BackupStorageMode::Directory),
         "split_zip" => Ok(BackupStorageMode::SplitZip),
@@ -685,7 +687,9 @@ pub(crate) fn parse_backup_storage_mode_value(value: Option<&str>) -> Result<Bac
     }
 }
 
-pub(crate) fn parse_split_zip_part_size_gib(value: Option<u64>) -> Result<u64> {
+pub(in crate::server::handlers::admin) fn parse_split_zip_part_size_gib(
+    value: Option<u64>,
+) -> Result<u64> {
     let gib = value.unwrap_or(4);
     let bytes = gib
         .checked_mul(1024 * 1024 * 1024)
@@ -698,7 +702,7 @@ pub(crate) fn parse_split_zip_part_size_gib(value: Option<u64>) -> Result<u64> {
     Ok(bytes)
 }
 
-pub(crate) const fn split_zip_part_size_gib(bytes: u64) -> u64 {
+pub(in crate::server::handlers) const fn split_zip_part_size_gib(bytes: u64) -> u64 {
     bytes / (1024 * 1024 * 1024)
 }
 
@@ -710,7 +714,7 @@ fn parse_split_zip_part_size(form: &FullBackupCreateForm) -> Result<u64> {
     parse_split_zip_part_size_gib(form.split_zip_part_size_gib)
 }
 
-pub(crate) async fn create_full_backup(
+pub(in crate::server) async fn create_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -754,7 +758,7 @@ pub(crate) async fn create_full_backup(
 }
 
 #[derive(Deserialize)]
-pub(crate) struct BoardBackupCreateForm {
+pub(in crate::server) struct BoardBackupCreateForm {
     board_short: String,
     download_after_create: Option<String>,
     #[serde(rename = "_csrf")]
@@ -769,7 +773,7 @@ pub(crate) struct BoardBackupCreateForm {
     clippy::too_many_lines,
     reason = "board validation, snapshotting, archive publication, and cleanup share one operation"
 )]
-pub(crate) async fn create_board_backup(
+pub(in crate::server) async fn create_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,

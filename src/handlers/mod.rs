@@ -1,5 +1,8 @@
 // Request handlers.
 
+/// Original tracing target, retained for existing `RUST_LOG` filters.
+const LOG_TARGET: &str = concat!(env!("CARGO_CRATE_NAME"), "::handlers");
+
 pub(crate) mod admin;
 pub(crate) mod banner;
 pub(crate) mod board;
@@ -427,7 +430,7 @@ fn multipart_read_error(
     let message = error.to_string();
     let lower = message.to_ascii_lowercase();
     if error_chain_contains(error, PUBLIC_MULTIPART_ENVELOPE_LIMIT_MARKER) {
-        tracing::warn!(context, error = %message, "multipart envelope exceeded parser limit");
+        tracing::warn!(target: LOG_TARGET, context, error = %message, "multipart envelope exceeded parser limit");
         return AppError::UploadTooLarge("Multipart field envelope is too large.".into());
     }
     if lower.contains("body write aborted")
@@ -436,9 +439,9 @@ fn multipart_read_error(
         || lower.contains("early eof")
         || lower.contains("unexpected eof")
     {
-        tracing::warn!(context, error = %message, "client disconnected during multipart upload");
+        tracing::warn!(target: LOG_TARGET, context, error = %message, "client disconnected during multipart upload");
     } else {
-        tracing::warn!(context, error = %message, "multipart parsing failed");
+        tracing::warn!(target: LOG_TARGET, context, error = %message, "multipart parsing failed");
     }
     AppError::BadRequest(message)
 }
@@ -497,7 +500,7 @@ async fn read_text_field(
         };
         budget.note_chunk(chunk.len())?;
         if bytes.len().saturating_add(chunk.len()) > TEXT_MULTIPART_FIELD_MAX_BYTES {
-            tracing::warn!(
+            tracing::warn!(target: LOG_TARGET,
                 limit_bytes = TEXT_MULTIPART_FIELD_MAX_BYTES,
                 "multipart text field exceeded parser limit"
             );
@@ -602,7 +605,7 @@ async fn stream_field_to_temp_file(
         }
         budget.note_chunk(chunk.len())?;
         if size_bytes.saturating_add(chunk.len()) > max_bytes {
-            tracing::warn!(
+            tracing::warn!(target: LOG_TARGET,
                 field = field_name,
                 streamed_bytes = size_bytes,
                 next_chunk_bytes = chunk.len(),
@@ -630,7 +633,7 @@ async fn stream_field_to_temp_file(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Flush temp upload file: {e}")))?;
 
-    tracing::info!(
+    tracing::info!(target: LOG_TARGET,
         field = field_name,
         size_bytes,
         limit_bytes = max_bytes,
@@ -738,7 +741,7 @@ pub(crate) async fn parse_post_multipart(
     max_pdf_size: usize,
     media_upload_gate: &crate::middleware::MediaUploadGate,
 ) -> Result<PostFormData> {
-    tracing::info!(
+    tracing::info!(target: LOG_TARGET,
         max_image_bytes = max_image_size,
         max_video_bytes = max_video_size,
         max_audio_bytes = max_audio_size,
@@ -1123,7 +1126,7 @@ pub(crate) fn process_primary_upload(
         // through so the file is re-saved and the cache is updated below.
         // Cross-board hits are also re-saved under the current board; otherwise
         // a protected board could point at public media from another board.
-        tracing::debug!(
+        tracing::debug!(target: LOG_TARGET,
             "dedup cache miss: same_board_cache={same_board_cache} file_ok={file_ok} thumb_ok={thumb_ok}, \
              re-processing upload for hash {hash}"
         );

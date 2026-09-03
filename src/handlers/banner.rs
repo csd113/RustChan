@@ -24,7 +24,7 @@ const VERSIONED_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_IMMUTABLE_MEDI
 const UNVERSIONED_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_STATIC_SHORT;
 
 #[derive(Deserialize, Default)]
-pub(crate) struct ExternalBannerQuery {
+pub(in crate::server) struct ExternalBannerQuery {
     pub return_to: Option<String>,
 }
 
@@ -59,7 +59,7 @@ fn load_accessible_banner_asset(
     Ok((asset, false))
 }
 
-pub(crate) async fn serve_banner_asset(
+pub(in crate::server) async fn serve_banner_asset(
     State(state): State<AppState>,
     Path(banner_id): Path<i64>,
     jar: CookieJar,
@@ -134,7 +134,7 @@ pub(crate) async fn serve_banner_asset(
     response
 }
 
-pub(crate) async fn external_banner_warning_page(
+pub(in crate::server) async fn external_banner_warning_page(
     State(state): State<AppState>,
     Path(banner_id): Path<i64>,
     Query(query): Query<ExternalBannerQuery>,
@@ -209,7 +209,7 @@ pub(crate) async fn external_banner_warning_page(
     Ok((jar, response).into_response())
 }
 
-pub(crate) async fn external_banner_continue(
+pub(in crate::server) async fn external_banner_continue(
     State(state): State<AppState>,
     Path(banner_id): Path<i64>,
     Query(_query): Query<ExternalBannerQuery>,

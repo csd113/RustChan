@@ -9,23 +9,23 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Backup v4 format used by this handler.
-pub(crate) const BACKUP_V4_FORMAT: &str = "rustchan-backup-v4";
+pub(super) const BACKUP_V4_FORMAT: &str = "rustchan-backup-v4";
 /// Backup v4 archive container used by this handler.
-pub(crate) const BACKUP_V4_ARCHIVE_CONTAINER: &str = "zip";
+pub(super) const BACKUP_V4_ARCHIVE_CONTAINER: &str = "zip";
 /// Parts dir name used by this handler.
-pub(crate) const PARTS_DIR_NAME: &str = "parts";
+pub(super) const PARTS_DIR_NAME: &str = "parts";
 /// Manifest file name used by this handler.
-pub(crate) const MANIFEST_FILE_NAME: &str = "manifest.json";
+pub(super) const MANIFEST_FILE_NAME: &str = "manifest.json";
 /// Backup metadata file name used by this handler.
-pub(crate) const BACKUP_METADATA_FILE_NAME: &str = "backup.json";
+pub(super) const BACKUP_METADATA_FILE_NAME: &str = "backup.json";
 /// Checksums file name used by this handler.
-pub(crate) const CHECKSUMS_FILE_NAME: &str = "checksums.sha256";
+const CHECKSUMS_FILE_NAME: &str = "checksums.sha256";
 /// Readme file name used by this handler.
-pub(crate) const README_FILE_NAME: &str = "README.txt";
+pub(super) const README_FILE_NAME: &str = "README.txt";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum BackupScope {
+pub(super) enum BackupScope {
     FullSite,
     Board,
     SelectedBoards,
@@ -46,7 +46,7 @@ impl BackupScope {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum BackupStorageMode {
+pub(in crate::server) enum BackupStorageMode {
     SingleZip,
     SplitZip,
     Directory,
@@ -67,7 +67,7 @@ impl BackupStorageMode {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum BackupFileKind {
+pub(super) enum BackupFileKind {
     Db,
     Settings,
     BoardJson,
@@ -91,7 +91,7 @@ pub(crate) enum BackupFileKind {
     reason = "the flags are independent backup-content selections serialized in the manifest"
 )]
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub(crate) struct BackupIncludeFlags {
+pub(super) struct BackupIncludeFlags {
     pub database: bool,
     pub settings: bool,
     pub uploads: bool,
@@ -102,7 +102,7 @@ pub(crate) struct BackupIncludeFlags {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct DbSnapshotInfo {
+pub(super) struct DbSnapshotInfo {
     pub path: String,
     pub size: u64,
     pub sha256: String,
@@ -111,7 +111,7 @@ pub(crate) struct DbSnapshotInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct BackupFileEntry {
+pub(super) struct BackupFileEntry {
     pub logical_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_logical_path: Option<String>,
@@ -129,7 +129,7 @@ pub(crate) struct BackupFileEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct BackupPartInfo {
+pub(super) struct BackupPartInfo {
     pub filename: String,
     pub part_index: u32,
     pub total_parts: u32,
@@ -141,7 +141,7 @@ pub(crate) struct BackupPartInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub(crate) struct MaintenanceMetadata {
+pub(super) struct MaintenanceMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,7 +163,7 @@ pub(crate) struct MaintenanceMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Manifest data for backup.
-pub(crate) struct BackupManifest {
+pub(super) struct BackupManifest {
     pub format: String,
     pub archive_container: String,
     pub backup_id: String,
@@ -187,7 +187,7 @@ pub(crate) struct BackupManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct BackupMetadata {
+pub(super) struct BackupMetadata {
     pub format: String,
     pub backup_id: String,
     pub scope: BackupScope,
@@ -206,7 +206,7 @@ pub(crate) struct BackupMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DirectoryStats {
+pub(super) struct DirectoryStats {
     pub files: u64,
     pub bytes: u64,
 }
@@ -224,7 +224,7 @@ impl DirectoryStats {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SavedBackupLayout {
+pub(super) struct SavedBackupLayout {
     pub root_dir: PathBuf,
     pub backup_ref: String,
     pub manifest_path: PathBuf,
@@ -232,7 +232,7 @@ pub(crate) struct SavedBackupLayout {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct VerifiedSavedV4File {
+pub(super) struct VerifiedSavedV4File {
     pub logical_path: String,
     pub board: Option<String>,
     pub kind: BackupFileKind,
@@ -242,7 +242,7 @@ pub(crate) struct VerifiedSavedV4File {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum VerifiedSavedV4FileSource {
+pub(super) enum VerifiedSavedV4FileSource {
     RootFile(PathBuf),
     ZipEntry {
         part_path: PathBuf,
@@ -252,18 +252,18 @@ pub(crate) enum VerifiedSavedV4FileSource {
 
 #[derive(Debug, Clone)]
 /// Point-in-time data for verified saved v4 database.
-pub(crate) struct VerifiedSavedV4DbSnapshot {
+pub(super) struct VerifiedSavedV4DbSnapshot {
     pub file: VerifiedSavedV4File,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct VerifiedSavedV4BoardLayout {
+pub(super) struct VerifiedSavedV4BoardLayout {
     pub board_json: VerifiedSavedV4File,
     pub upload_files: Vec<VerifiedSavedV4File>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct VerifiedSavedV4Root {
+pub(super) struct VerifiedSavedV4Root {
     pub metadata: BackupMetadata,
     pub manifest: BackupManifest,
     pub completed_at: i64,
@@ -275,12 +275,12 @@ pub(crate) struct VerifiedSavedV4Root {
 }
 
 #[must_use]
-pub(crate) fn backups_root_dir() -> PathBuf {
+pub(super) fn backups_root_dir() -> PathBuf {
     crate::config::backups_dir()
 }
 
 #[must_use]
-pub(crate) fn build_backup_id(_scope: BackupScope, scope_label: &str) -> String {
+pub(super) fn build_backup_id(_scope: BackupScope, scope_label: &str) -> String {
     let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M").to_string();
     let short = uuid::Uuid::new_v4().simple().to_string();
     let short = short.get(..6).unwrap_or(&short);
@@ -288,7 +288,7 @@ pub(crate) fn build_backup_id(_scope: BackupScope, scope_label: &str) -> String 
     format!("{timestamp}_{scope_label}_{short}").replace("__", "_")
 }
 
-pub(crate) fn create_backup_root(backup_id: &str) -> Result<PathBuf> {
+pub(super) fn create_backup_root(backup_id: &str) -> Result<PathBuf> {
     let root = backups_root_dir().join(backup_id);
     crate::config::ensure_private_dir(&root).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
@@ -299,7 +299,7 @@ pub(crate) fn create_backup_root(backup_id: &str) -> Result<PathBuf> {
     Ok(root)
 }
 
-pub(crate) fn detect_saved_backup_layout(root: &Path) -> Option<SavedBackupLayout> {
+fn detect_saved_backup_layout(root: &Path) -> Option<SavedBackupLayout> {
     if !root.is_dir() {
         return None;
     }
@@ -316,7 +316,7 @@ pub(crate) fn detect_saved_backup_layout(root: &Path) -> Option<SavedBackupLayou
     })
 }
 
-pub(crate) fn iter_saved_backup_layouts() -> Vec<SavedBackupLayout> {
+pub(super) fn iter_saved_backup_layouts() -> Vec<SavedBackupLayout> {
     let mut layouts = Vec::new();
     let Ok(entries) = std::fs::read_dir(backups_root_dir()) else {
         return layouts;
@@ -330,7 +330,7 @@ pub(crate) fn iter_saved_backup_layouts() -> Vec<SavedBackupLayout> {
     layouts
 }
 
-pub(crate) fn load_manifest(path: &Path) -> Result<BackupManifest> {
+pub(super) fn load_manifest(path: &Path) -> Result<BackupManifest> {
     let bytes = std::fs::read(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Read manifest {}: {error}", path.display()))
     })?;
@@ -342,7 +342,7 @@ pub(crate) fn load_manifest(path: &Path) -> Result<BackupManifest> {
     })
 }
 
-pub(crate) fn load_metadata(path: &Path) -> Result<BackupMetadata> {
+pub(super) fn load_metadata(path: &Path) -> Result<BackupMetadata> {
     let bytes = std::fs::read(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
             "Read backup metadata {}: {error}",
@@ -358,7 +358,7 @@ pub(crate) fn load_metadata(path: &Path) -> Result<BackupMetadata> {
 }
 
 /// Writes JSON pretty.
-pub(crate) fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub(super) fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Serialize {}: {error}", path.display()))
     })?;
@@ -369,20 +369,20 @@ pub(crate) fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<
 }
 
 /// Writes text.
-pub(crate) fn write_text(path: &Path, text: &str) -> Result<()> {
+pub(super) fn write_text(path: &Path, text: &str) -> Result<()> {
     crate::config::write_private_file(path, text.as_bytes()).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Write {}: {error}", path.display()))
     })?;
     Ok(())
 }
 
-pub(crate) fn sha256_hex_for_bytes(bytes: &[u8]) -> String {
+pub(super) fn sha256_hex_for_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
 }
 
-pub(crate) fn sha256_hex_for_file(path: &Path) -> Result<String> {
+pub(super) fn sha256_hex_for_file(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
             "Open {} for hashing: {error}",
@@ -392,7 +392,7 @@ pub(crate) fn sha256_hex_for_file(path: &Path) -> Result<String> {
     sha256_hex_for_reader(&mut file)
 }
 
-pub(crate) fn sha256_hex_for_reader<R: Read>(reader: &mut R) -> Result<String> {
+fn sha256_hex_for_reader<R: Read>(reader: &mut R) -> Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024].into_boxed_slice();
     loop {
@@ -413,7 +413,7 @@ pub(crate) fn sha256_hex_for_reader<R: Read>(reader: &mut R) -> Result<String> {
 }
 
 /// Copies file and hash.
-pub(crate) fn copy_file_and_hash<W: Write>(
+pub(super) fn copy_file_and_hash<W: Write>(
     source_path: &Path,
     writer: &mut W,
 ) -> Result<(u64, String)> {
@@ -424,7 +424,7 @@ pub(crate) fn copy_file_and_hash<W: Write>(
 }
 
 /// Copies reader and hash.
-pub(crate) fn copy_reader_and_hash<R: Read, W: Write>(
+fn copy_reader_and_hash<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
 ) -> Result<(u64, String)> {
@@ -457,7 +457,7 @@ pub(crate) fn copy_reader_and_hash<R: Read, W: Write>(
     Ok((written, hex::encode(hasher.finalize())))
 }
 
-pub(crate) fn scan_dir_stats(dir: &Path) -> DirectoryStats {
+pub(super) fn scan_dir_stats(dir: &Path) -> DirectoryStats {
     if crate::utils::fs_security::assert_dir_no_symlink(dir).is_err() {
         return DirectoryStats::zero();
     }
@@ -488,7 +488,7 @@ pub(crate) fn scan_dir_stats(dir: &Path) -> DirectoryStats {
 }
 
 /// Validates backup ID matches parts.
-pub(crate) fn validate_backup_id_matches_parts(manifest: &BackupManifest) -> Result<()> {
+fn validate_backup_id_matches_parts(manifest: &BackupManifest) -> Result<()> {
     for part in &manifest.parts {
         if part.backup_id != manifest.backup_id {
             return Err(AppError::BadRequest(format!(
@@ -500,7 +500,7 @@ pub(crate) fn validate_backup_id_matches_parts(manifest: &BackupManifest) -> Res
     Ok(())
 }
 
-pub(crate) fn build_readme(
+pub(super) fn build_readme(
     manifest: &BackupManifest,
     metadata: &BackupMetadata,
     has_tor_keys: bool,
@@ -539,7 +539,7 @@ pub(crate) fn build_readme(
 }
 
 /// Writes root checksums.
-pub(crate) fn write_root_checksums(root_dir: &Path, extra_paths: &[&Path]) -> Result<()> {
+pub(super) fn write_root_checksums(root_dir: &Path, extra_paths: &[&Path]) -> Result<()> {
     let mut lines = String::new();
     for name in [
         README_FILE_NAME,
@@ -564,7 +564,7 @@ pub(crate) fn write_root_checksums(root_dir: &Path, extra_paths: &[&Path]) -> Re
     write_text(&root_dir.join(CHECKSUMS_FILE_NAME), &lines)
 }
 
-pub(crate) fn sanitize_logical_path(path: &str) -> Result<()> {
+pub(super) fn sanitize_logical_path(path: &str) -> Result<()> {
     const SLASH_LIKE_SEPARATORS: [char; 5] =
         ['\u{2044}', '\u{2215}', '\u{29f8}', '\u{29f9}', '\u{ff0f}'];
 
@@ -599,7 +599,7 @@ pub(crate) fn sanitize_logical_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn runtime_upload_path_to_logical(
+pub(super) fn runtime_upload_path_to_logical(
     board_short: &str,
     runtime_relative_path: &str,
 ) -> Result<(String, BackupFileKind)> {
@@ -643,7 +643,7 @@ pub(crate) fn runtime_upload_path_to_logical(
     ))
 }
 
-pub(crate) fn logical_upload_path_to_runtime(
+pub(super) fn logical_upload_path_to_runtime(
     logical_path: &str,
 ) -> Result<(String, BackupFileKind)> {
     sanitize_logical_path(logical_path)?;
@@ -954,7 +954,7 @@ fn verify_root_declared_file(
 }
 
 /// Copies verified file to writer.
-pub(crate) fn copy_verified_file_to_writer<W: Write>(
+pub(super) fn copy_verified_file_to_writer<W: Write>(
     file: &VerifiedSavedV4File,
     writer: &mut W,
 ) -> Result<()> {
@@ -994,7 +994,7 @@ pub(crate) fn copy_verified_file_to_writer<W: Write>(
 }
 
 /// Reads verified file.
-pub(crate) fn read_verified_file(file: &VerifiedSavedV4File) -> Result<Vec<u8>> {
+pub(super) fn read_verified_file(file: &VerifiedSavedV4File) -> Result<Vec<u8>> {
     let capacity = usize::try_from(file.size).unwrap_or(usize::MAX);
     let mut bytes = Vec::with_capacity(capacity.min(1024 * 1024));
     copy_verified_file_to_writer(file, &mut bytes)?;
@@ -1379,7 +1379,7 @@ fn verify_split_zip_files(
     reason = "root metadata, manifest, payload, path, and checksum checks form one fail-closed verifier"
 )]
 /// Verifies saved v4 root.
-pub(crate) fn verify_saved_v4_root(
+pub(super) fn verify_saved_v4_root(
     root_dir: &Path,
     expected_scopes: &[BackupScope],
 ) -> Result<VerifiedSavedV4Root> {
@@ -1872,7 +1872,7 @@ fn verify_db_snapshot_schema(snapshot: &VerifiedSavedV4DbSnapshot) -> Result<()>
 }
 
 #[cfg(test)]
-pub(crate) fn valid_db_snapshot_for_test() -> anyhow::Result<Vec<u8>> {
+pub(super) fn valid_db_snapshot_for_test() -> anyhow::Result<Vec<u8>> {
     valid_db_snapshot_for_test_result()
 }
 
@@ -1894,7 +1894,7 @@ fn valid_db_snapshot_for_test_result() -> anyhow::Result<Vec<u8>> {
 }
 
 #[cfg(test)]
-pub(crate) fn write_saved_v4_fixture_for_test(
+pub(super) fn write_saved_v4_fixture_for_test(
     root_dir: &Path,
     scope: BackupScope,
     files: Vec<(BackupFileEntry, Vec<u8>)>,
@@ -2011,7 +2011,7 @@ fn write_saved_v4_fixture_for_test_result(
 }
 
 #[cfg(test)]
-pub(crate) fn test_file_entry_for_test(
+pub(super) fn test_file_entry_for_test(
     logical_path: &str,
     board: Option<&str>,
     kind: BackupFileKind,
@@ -2031,7 +2031,7 @@ pub(crate) fn test_file_entry_for_test(
 }
 
 #[cfg(test)]
-pub(crate) fn board_fixture_files_for_test() -> Vec<(BackupFileEntry, Vec<u8>)> {
+pub(super) fn board_fixture_files_for_test() -> Vec<(BackupFileEntry, Vec<u8>)> {
     let board_json = br#"{"version":1,"board":{"id":1,"short_name":"tech","name":"Technology","description":"","nsfw":false,"max_threads":100,"max_archived_threads":150,"bump_limit":300,"allow_images":true,"allow_video":true,"allow_audio":false,"allow_any_files":false,"allow_tripcodes":true,"edit_window_secs":300,"allow_editing":false,"allow_self_delete":false,"allow_archive":true,"allow_video_embeds":false,"allow_captcha":false,"show_poster_ids":false,"collapse_greentext":false,"post_cooldown_secs":0,"banner_mode":"inherit","access_mode":"public","access_password_hash":"","created_at":1},"threads":[],"posts":[],"polls":[],"poll_options":[],"poll_votes":[],"file_hashes":[],"banners":[]}"#;
     vec![
         (

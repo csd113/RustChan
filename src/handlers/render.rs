@@ -8,14 +8,14 @@ use crate::{
 };
 use sha2::{Digest as _, Sha256};
 
-pub(crate) struct BoardPageData {
+pub(super) struct BoardPageData {
     pub board: Board,
     pub pagination: Pagination,
     pub summaries: Vec<ThreadSummary>,
     pub is_admin: bool,
 }
 
-pub(crate) struct ThreadPageData {
+pub(super) struct ThreadPageData {
     pub board: Board,
     pub thread: Thread,
     pub posts: Vec<crate::models::Post>,
@@ -25,7 +25,7 @@ pub(crate) struct ThreadPageData {
 }
 
 #[must_use]
-pub(crate) fn board_page_etag_signature(data: &BoardPageData) -> String {
+pub(super) fn board_page_etag_signature(data: &BoardPageData) -> String {
     let mut hasher = Sha256::new();
     for summary in &data.summaries {
         update_thread_signature(&mut hasher, &summary.thread);
@@ -38,7 +38,7 @@ pub(crate) fn board_page_etag_signature(data: &BoardPageData) -> String {
 }
 
 #[must_use]
-pub(crate) fn thread_page_etag_signature(data: &ThreadPageData) -> String {
+pub(super) fn thread_page_etag_signature(data: &ThreadPageData) -> String {
     let mut hasher = Sha256::new();
     update_thread_signature(&mut hasher, &data.thread);
     for post in &data.posts {
@@ -99,7 +99,7 @@ fn update_poll_signature(hasher: &mut Sha256, poll_data: &PollData) {
     }
 }
 
-pub(crate) fn load_board_page_data(
+pub(super) fn load_board_page_data(
     conn: &rusqlite::Connection,
     board_short: &str,
     page: i64,
@@ -140,7 +140,7 @@ pub(crate) fn load_board_page_data(
     clippy::too_many_arguments,
     reason = "the renderer accepts distinct request-scoped security, preference, and pagination inputs"
 )]
-pub(crate) fn render_board_page(
+pub(super) fn render_board_page(
     data: &BoardPageData,
     csrf_token: &str,
     admin_csrf_token: Option<&str>,
@@ -174,7 +174,7 @@ pub(crate) fn render_board_page(
     )
 }
 
-pub(crate) fn load_thread_page_data(
+pub(super) fn load_thread_page_data(
     conn: &rusqlite::Connection,
     board_short: &str,
     thread_id: i64,
@@ -207,7 +207,7 @@ pub(crate) fn load_thread_page_data(
     clippy::too_many_arguments,
     reason = "the renderer accepts distinct request-scoped security, preference, and thread-state inputs"
 )]
-pub(crate) fn render_thread_page(
+pub(super) fn render_thread_page(
     data: &ThreadPageData,
     csrf_token: &str,
     admin_csrf_token: Option<&str>,

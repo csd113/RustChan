@@ -25,7 +25,7 @@ const MIB: u64 = 1024 * 1024;
 const MIB_I64: i64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SetupPreset {
+enum SetupPreset {
     Public,
     Private,
     Local,
@@ -56,7 +56,7 @@ impl SetupPreset {
     clippy::struct_excessive_bools,
     reason = "preset defaults mirror independent setup toggles shown in the form"
 )]
-pub(crate) struct PresetDefaults {
+struct PresetDefaults {
     pub site_name: &'static str,
     pub board_slug: &'static str,
     pub board_name: &'static str,
@@ -72,7 +72,7 @@ pub(crate) struct PresetDefaults {
 }
 
 #[must_use]
-pub(crate) const fn preset_defaults(preset: SetupPreset) -> PresetDefaults {
+const fn preset_defaults(preset: SetupPreset) -> PresetDefaults {
     match preset {
         SetupPreset::Public => PresetDefaults {
             site_name: "RustChan",
@@ -128,7 +128,7 @@ fn parse_preset(value: &str) -> SetupPreset {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct SetupWizardForm {
+pub(in crate::server) struct SetupWizardForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub preset: String,
@@ -179,7 +179,7 @@ pub(crate) struct SetupWizardForm {
     clippy::struct_excessive_bools,
     reason = "parsed setup data carries independent persisted toggles from the review form"
 )]
-pub(crate) struct ParsedSetup {
+struct ParsedSetup {
     pub preset: SetupPreset,
     pub site_name: String,
     pub site_subtitle: String,
@@ -223,7 +223,7 @@ pub(crate) struct ParsedSetup {
 
 #[must_use]
 /// Validates board slug.
-pub(crate) fn validate_board_slug(raw: &str) -> Option<String> {
+fn validate_board_slug(raw: &str) -> Option<String> {
     let slug = raw.trim().to_ascii_lowercase();
     let valid = !slug.is_empty()
         && slug.len() <= 8
@@ -234,7 +234,7 @@ pub(crate) fn validate_board_slug(raw: &str) -> Option<String> {
 }
 
 #[must_use]
-pub(crate) fn parse_upload_limit_mib(raw: &str) -> Option<i64> {
+fn parse_upload_limit_mib(raw: &str) -> Option<i64> {
     let mib = raw.trim().parse::<u64>().ok()?;
     if !(1..=4096).contains(&mib) {
         return None;
@@ -244,7 +244,7 @@ pub(crate) fn parse_upload_limit_mib(raw: &str) -> Option<i64> {
 
 #[must_use]
 /// Validates password confirmation.
-pub(crate) fn validate_password_confirmation(password: &str, confirmation: &str) -> bool {
+fn validate_password_confirmation(password: &str, confirmation: &str) -> bool {
     password == confirmation && password.chars().count() >= 12 && password.chars().count() <= 1024
 }
 
@@ -335,7 +335,7 @@ fn trimmed_limited(value: Option<&str>, max_chars: usize) -> String {
         .collect()
 }
 
-pub(crate) fn parse_setup_form(
+fn parse_setup_form(
     form: &SetupWizardForm,
     admin_count: i64,
 ) -> std::result::Result<ParsedSetup, Vec<String>> {
@@ -578,7 +578,7 @@ async fn load_setup_state(
     .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?
 }
 
-pub(crate) async fn setup_get(
+pub(in crate::server) async fn setup_get(
     State(state): State<AppState>,
     Query(query): Query<SetupQuery>,
     jar: CookieJar,
@@ -603,11 +603,11 @@ pub(crate) async fn setup_get(
 }
 
 #[derive(Deserialize)]
-pub(crate) struct SetupQuery {
+pub(in crate::server) struct SetupQuery {
     preset: Option<String>,
 }
 
-pub(crate) async fn setup_review(
+pub(in crate::server) async fn setup_review(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -675,7 +675,7 @@ pub(crate) async fn setup_review(
     clippy::too_many_lines,
     reason = "authorization, final validation, atomic setup writes, and session issuance form one request"
 )]
-pub(crate) async fn setup_finish(
+pub(in crate::server) async fn setup_finish(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -860,12 +860,12 @@ pub(crate) async fn setup_finish(
 }
 
 #[derive(Deserialize)]
-pub(crate) struct ReopenSetupForm {
+pub(in crate::server) struct ReopenSetupForm {
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
 
-pub(crate) async fn admin_reopen_setup(
+pub(in crate::server) async fn admin_reopen_setup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -894,7 +894,7 @@ pub(crate) async fn admin_reopen_setup(
     Ok(Redirect::to("/setup").into_response())
 }
 
-pub(crate) async fn admin_close_setup(
+pub(in crate::server) async fn admin_close_setup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -927,7 +927,7 @@ pub(crate) async fn admin_close_setup(
 
 impl SetupWizardForm {
     #[must_use]
-    pub(crate) fn defaults_for(preset: SetupPreset) -> Self {
+    fn defaults_for(preset: SetupPreset) -> Self {
         let defaults = preset_defaults(preset);
         Self {
             csrf: None,

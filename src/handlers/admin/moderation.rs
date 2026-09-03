@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 // POST /admin/ban/add
 #[derive(Deserialize)]
-pub(crate) struct AddBanForm {
+pub(in crate::server) struct AddBanForm {
     ip_hash: String,
     reason: String,
     duration_hours: Option<i64>,
@@ -25,7 +25,7 @@ pub(crate) struct AddBanForm {
     csrf: Option<String>,
 }
 
-pub(crate) async fn add_ban(
+pub(in crate::server) async fn add_ban(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -81,13 +81,13 @@ pub(crate) async fn add_ban(
 
 // POST /admin/ban/remove
 #[derive(Deserialize)]
-pub(crate) struct BanIdForm {
+pub(in crate::server) struct BanIdForm {
     ban_id: i64,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
 
-pub(crate) async fn remove_ban(
+pub(in crate::server) async fn remove_ban(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -118,7 +118,7 @@ pub(crate) async fn remove_ban(
 // the thread (or the board index if the OP is deleted).
 
 #[derive(Deserialize)]
-pub(crate) struct BanDeleteForm {
+pub(in crate::server) struct BanDeleteForm {
     post_id: i64,
     ip_hash: String,
     board: String,
@@ -138,7 +138,7 @@ pub(crate) struct BanDeleteForm {
     clippy::too_many_lines,
     reason = "authorization, ban creation, post deletion, media cleanup, and audit logging are one action"
 )]
-pub(crate) async fn admin_ban_and_delete(
+pub(in crate::server) async fn admin_ban_and_delete(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -306,14 +306,14 @@ pub(crate) async fn admin_ban_and_delete(
 
 // POST /admin/appeal/dismiss
 #[derive(Deserialize)]
-pub(crate) struct AppealActionForm {
+pub(in crate::server) struct AppealActionForm {
     appeal_id: i64,
     ip_hash: Option<String>,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
 
-pub(crate) async fn dismiss_appeal(
+pub(in crate::server) async fn dismiss_appeal(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -342,7 +342,7 @@ pub(crate) async fn dismiss_appeal(
 }
 
 // POST /admin/appeal/accept
-pub(crate) async fn accept_appeal(
+pub(in crate::server) async fn accept_appeal(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -394,14 +394,14 @@ pub(crate) async fn accept_appeal(
 
 // POST /admin/filter/add
 #[derive(Deserialize)]
-pub(crate) struct AddFilterForm {
+pub(in crate::server) struct AddFilterForm {
     pattern: String,
     replacement: String,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
 
-pub(crate) async fn add_filter(
+pub(in crate::server) async fn add_filter(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -440,13 +440,13 @@ pub(crate) async fn add_filter(
 
 // POST /admin/filter/remove
 #[derive(Deserialize)]
-pub(crate) struct FilterIdForm {
+pub(in crate::server) struct FilterIdForm {
     filter_id: i64,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
 
-pub(crate) async fn remove_filter(
+pub(in crate::server) async fn remove_filter(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -476,7 +476,7 @@ pub(crate) async fn remove_filter(
 // with pagination.  Requires an active admin session.
 
 #[derive(Deserialize)]
-pub(crate) struct IpHistoryQuery {
+pub(in crate::server) struct IpHistoryQuery {
     #[serde(default = "default_page")]
     pub page: i64,
     pub return_to: Option<String>,
@@ -487,7 +487,7 @@ const fn default_page() -> i64 {
     1
 }
 
-pub(crate) async fn admin_ip_history(
+pub(in crate::server) async fn admin_ip_history(
     State(state): State<AppState>,
     Path(ip_hash): Path<String>,
     Query(params): Query<IpHistoryQuery>,
@@ -550,13 +550,13 @@ pub(crate) async fn admin_ip_history(
 
 // POST /admin/report/resolve
 #[derive(Deserialize)]
-pub(crate) struct ResolveReportForm {
+pub(in crate::server) struct ResolveReportForm {
     report_id: i64,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
 
-pub(crate) async fn resolve_report(
+pub(in crate::server) async fn resolve_report(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -608,7 +608,7 @@ pub(crate) async fn resolve_report(
 
 // POST /admin/ip/report
 #[derive(Deserialize)]
-pub(crate) struct IpReportForm {
+pub(in crate::server) struct IpReportForm {
     post_id: i64,
     thread_id: i64,
     board: String,
@@ -618,7 +618,7 @@ pub(crate) struct IpReportForm {
     csrf: Option<String>,
 }
 
-pub(crate) async fn admin_ip_report(
+pub(in crate::server) async fn admin_ip_report(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
@@ -903,7 +903,7 @@ mod tests {
 
 // GET /admin/mod-log
 #[derive(Deserialize)]
-pub(crate) struct ModLogQuery {
+pub(in crate::server) struct ModLogQuery {
     #[serde(default = "default_mod_log_page")]
     page: i64,
 }
@@ -913,7 +913,7 @@ const fn default_mod_log_page() -> i64 {
     1
 }
 
-pub(crate) async fn mod_log_page(
+pub(in crate::server) async fn mod_log_page(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,

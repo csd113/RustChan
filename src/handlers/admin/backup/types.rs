@@ -7,7 +7,7 @@ pub(super) mod board_backup_types {
         clippy::struct_excessive_bools,
         reason = "the fields mirror independent persisted board settings in the backup schema"
     )]
-    pub(crate) struct BoardRow {
+    pub(in crate::server::handlers::admin::backup) struct BoardRow {
         pub id: i64,
         pub short_name: String,
         pub name: String,
@@ -82,7 +82,7 @@ pub(super) mod board_backup_types {
     }
 
     #[derive(Serialize, Deserialize)]
-    pub(crate) struct ThreadRow {
+    pub(in crate::server::handlers::admin::backup) struct ThreadRow {
         pub id: i64,
         pub board_id: i64,
         pub subject: Option<String>,
@@ -96,7 +96,7 @@ pub(super) mod board_backup_types {
     }
 
     #[derive(Serialize, Deserialize)]
-    pub(crate) struct PostRow {
+    pub(in crate::server::handlers::admin::backup) struct PostRow {
         pub id: i64,
         pub thread_id: i64,
         pub board_id: i64,
@@ -120,7 +120,7 @@ pub(super) mod board_backup_types {
     }
 
     #[derive(Serialize, Deserialize)]
-    pub(crate) struct PollRow {
+    pub(in crate::server::handlers::admin::backup) struct PollRow {
         pub id: i64,
         pub thread_id: i64,
         pub question: String,
@@ -129,7 +129,7 @@ pub(super) mod board_backup_types {
     }
 
     #[derive(Serialize, Deserialize)]
-    pub(crate) struct PollOptionRow {
+    pub(in crate::server::handlers::admin::backup) struct PollOptionRow {
         pub id: i64,
         pub poll_id: i64,
         pub text: String,
@@ -137,7 +137,7 @@ pub(super) mod board_backup_types {
     }
 
     #[derive(Serialize, Deserialize)]
-    pub(crate) struct PollVoteRow {
+    pub(in crate::server::handlers::admin::backup) struct PollVoteRow {
         pub id: i64,
         pub poll_id: i64,
         pub option_id: i64,
@@ -145,7 +145,7 @@ pub(super) mod board_backup_types {
     }
 
     #[derive(Serialize, Deserialize)]
-    pub(crate) struct FileHashRow {
+    pub(in crate::server::handlers::admin::backup) struct FileHashRow {
         pub sha256: String,
         pub file_path: String,
         pub thumb_path: String,
@@ -154,7 +154,7 @@ pub(super) mod board_backup_types {
     }
 
     #[derive(Serialize, Deserialize)]
-    pub(crate) struct BannerRow {
+    pub(in crate::server::handlers::admin::backup) struct BannerRow {
         pub storage_key: String,
         pub width: i64,
         pub height: i64,
@@ -170,7 +170,7 @@ pub(super) mod board_backup_types {
 
     #[derive(Serialize, Deserialize)]
     /// Manifest data for board backup.
-    pub(crate) struct BoardBackupManifest {
+    pub(in crate::server::handlers::admin::backup) struct BoardBackupManifest {
         pub version: u32,
         pub board: BoardRow,
         pub threads: Vec<ThreadRow>,

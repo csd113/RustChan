@@ -2068,9 +2068,7 @@ fn audit_completed_intents(
             continue;
         };
         let files_absent = payload.paths.iter().all(|path| {
-            inspected_regular_file(upload_root, path)
-                .ok()
-                .is_some_and(|entry| entry.is_none())
+            inspected_regular_file(upload_root, path).is_ok_and(|entry| entry.is_none())
         });
         let dirs_absent = payload
             .dirs

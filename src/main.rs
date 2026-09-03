@@ -34,7 +34,7 @@ pub mod error;
 /// Favicon validation and storage.
 pub mod favicon;
 /// Browser-facing and administration HTTP handlers.
-pub mod handlers;
+pub use server::handlers;
 /// Structured application, dependency, and console logging.
 pub mod logging;
 /// Uploaded-media inspection and conversion.
@@ -54,7 +54,7 @@ pub mod templates;
 pub mod test_fixtures;
 #[cfg(test)]
 /// Shared state and request builders for crate-local tests.
-pub(crate) mod test_support;
+pub(crate) use test_fixtures as test_support;
 /// Built-in theme metadata.
 pub mod theme;
 /// Custom theme configuration and CSS generation.

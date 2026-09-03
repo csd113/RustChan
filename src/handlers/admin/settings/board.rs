@@ -7,7 +7,7 @@ use axum::response::IntoResponse as _;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-pub(crate) struct BoardSettingsForm {
+pub(in crate::server) struct BoardSettingsForm {
     board_id: i64,
     name: String,
     description: String,
@@ -109,7 +109,7 @@ fn resolve_board_access_password_hash(
     clippy::too_many_lines,
     reason = "cross-field board validation and the atomic settings update share one request boundary"
 )]
-pub(crate) async fn update_board_settings(
+pub(in crate::server) async fn update_board_settings(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,

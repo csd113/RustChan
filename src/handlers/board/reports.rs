@@ -6,7 +6,7 @@ use super::{
 use axum::response::IntoResponse as _;
 
 #[derive(serde::Deserialize)]
-pub(crate) struct ReportForm {
+pub(in crate::server) struct ReportForm {
     pub post_id: i64,
     pub thread_id: i64,
     pub board: String,
@@ -15,7 +15,7 @@ pub(crate) struct ReportForm {
     pub csrf: Option<String>,
 }
 
-pub(crate) async fn file_report(
+pub(in crate::server) async fn file_report(
     State(state): State<AppState>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
@@ -104,13 +104,13 @@ pub(crate) async fn file_report(
 /// rather than display or play it inline.
 
 #[derive(serde::Deserialize)]
-pub(crate) struct AppealForm {
+pub(in crate::server) struct AppealForm {
     pub reason: String,
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
 }
 
-pub(crate) async fn submit_appeal(
+pub(in crate::server) async fn submit_appeal(
     State(state): State<AppState>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,

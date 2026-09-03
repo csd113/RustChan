@@ -19,7 +19,7 @@ use axum::response::IntoResponse as _;
     clippy::significant_drop_tightening,
     reason = "the media permit intentionally moves from the parsed form into non-cancellable blocking submission work"
 )]
-pub(crate) async fn create_thread(
+pub(in crate::server) async fn create_thread(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     secure_context: SecureCookieContext,

@@ -87,7 +87,7 @@ async fn parse_banner_upload(mut multipart: Multipart) -> Result<ParsedBannerUpl
 }
 
 #[derive(Deserialize)]
-pub(crate) struct BannerMetaForm {
+pub(in crate::server) struct BannerMetaForm {
     pub banner_id: i64,
     pub target_type: String,
     pub target_value: Option<String>,
@@ -102,14 +102,14 @@ pub(crate) struct BannerMetaForm {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct DeleteBannerForm {
+pub(in crate::server) struct DeleteBannerForm {
     pub banner_id: i64,
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct MoveBannerForm {
+pub(in crate::server) struct MoveBannerForm {
     pub banner_id: i64,
     pub direction: String,
     #[serde(rename = "_csrf")]
@@ -117,7 +117,7 @@ pub(crate) struct MoveBannerForm {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct ClearBoardBannerForm {
+pub(in crate::server) struct ClearBoardBannerForm {
     pub board_id: i64,
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
@@ -373,7 +373,7 @@ async fn upload_banner_for_scope(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
 }
 
-pub(crate) async fn upload_global_banner(
+pub(in crate::server) async fn upload_global_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -409,7 +409,7 @@ pub(crate) async fn upload_global_banner(
     }
 }
 
-pub(crate) async fn upload_home_banner(
+pub(in crate::server) async fn upload_home_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -445,7 +445,7 @@ pub(crate) async fn upload_home_banner(
     }
 }
 
-pub(crate) async fn upload_board_banner(
+pub(in crate::server) async fn upload_board_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -493,7 +493,7 @@ pub(crate) async fn upload_board_banner(
     }
 }
 
-pub(crate) async fn update_banner_meta(
+pub(in crate::server) async fn update_banner_meta(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -561,7 +561,7 @@ pub(crate) async fn update_banner_meta(
     }
 }
 
-pub(crate) async fn delete_banner(
+pub(in crate::server) async fn delete_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -594,7 +594,7 @@ pub(crate) async fn delete_banner(
     .into_response())
 }
 
-pub(crate) async fn move_banner(
+pub(in crate::server) async fn move_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -638,7 +638,7 @@ pub(crate) async fn move_banner(
     .into_response())
 }
 
-pub(crate) async fn clear_board_banner_override(
+pub(in crate::server) async fn clear_board_banner_override(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,

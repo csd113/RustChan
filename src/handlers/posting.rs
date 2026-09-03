@@ -1,3 +1,6 @@
+/// Original tracing target, retained for existing `RUST_LOG` filters.
+const LOG_TARGET: &str = concat!(env!("CARGO_CRATE_NAME"), "::handlers::posting");
+
 use crate::{
     db,
     error::{AppError, Result},
@@ -14,7 +17,7 @@ use crate::{
 
 use crate::db::NewPost;
 
-pub(crate) enum SubmitPostMode {
+pub(super) enum SubmitPostMode {
     NewThread {
         subject: String,
         poll_question: String,
@@ -27,7 +30,7 @@ pub(crate) enum SubmitPostMode {
     },
 }
 
-pub(crate) struct SubmitPostCommand {
+pub(super) struct SubmitPostCommand {
     pub mode: SubmitPostMode,
     pub board_short: String,
     pub identity_key: String,
@@ -50,7 +53,7 @@ pub(crate) struct SubmitPostCommand {
     pub ffmpeg_webp_available: bool,
 }
 
-pub(crate) struct SubmitPostResult {
+pub(super) struct SubmitPostResult {
     pub redirect_url: String,
     pub board_short: String,
     pub thread_id: i64,
@@ -83,7 +86,7 @@ fn existing_submission_result(
     })
 }
 
-pub(crate) struct UploadConfig<'a> {
+struct UploadConfig<'a> {
     pub upload_dir: &'a str,
     pub thumb_size: u32,
     pub max_image_size: usize,
@@ -96,12 +99,12 @@ pub(crate) struct UploadConfig<'a> {
 }
 
 #[derive(Clone)]
-pub(crate) struct PendingUploadFinalize {
+struct PendingUploadFinalize {
     pub op_id: String,
     pub payload: crate::pending_fs::UploadFinalizePayload,
 }
 
-pub(crate) struct ProcessedUploads {
+struct ProcessedUploads {
     pub primary: Option<crate::utils::files::UploadedFile>,
     pub audio: Option<crate::utils::files::UploadedFile>,
     pub pending_finalize: Option<PendingUploadFinalize>,
@@ -177,7 +180,7 @@ fn cleanup_unused_upload_stage(stage_root: Option<&std::path::Path>) {
         return;
     }
     if let Err(error) = std::fs::remove_dir_all(stage_dir) {
-        tracing::warn!(
+        tracing::warn!(target: LOG_TARGET,
             stage_dir = %stage_dir.display(),
             error = %error,
             "failed to clean unused upload stage directory"
@@ -231,7 +234,7 @@ fn build_upload_finalize_payload(
                     );
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    tracing::warn!(
+                    tracing::warn!(target: LOG_TARGET,
                         artifact = "optional_thumbnail",
                         outcome = "omitted_before_commit",
                         "generated thumbnail was absent; preserving upload without it"
@@ -293,7 +296,7 @@ fn build_upload_finalize_payload(
     Ok(payload)
 }
 
-pub(crate) fn build_pending_upload_op(
+fn build_pending_upload_op(
     uploads: &ProcessedUploads,
 ) -> Result<Option<crate::pending_fs::PendingFsOpInsert>> {
     let Some(pending) = uploads.pending_finalize.as_ref() else {
@@ -311,7 +314,7 @@ pub(crate) fn build_pending_upload_op(
     }))
 }
 
-pub(crate) fn finalize_pending_uploads(
+fn finalize_pending_uploads(
     conn: &rusqlite::Connection,
     upload_dir: &str,
     uploads: &ProcessedUploads,
@@ -328,7 +331,7 @@ pub(crate) fn finalize_pending_uploads(
     ) {
         Ok(()) => {}
         Err(error) => {
-            tracing::error!(
+            tracing::error!(target: LOG_TARGET,
                 op_id = %pending.op_id,
                 error = %error,
                 "upload finalization failed; leaving pending_fs_op for startup reconciliation"
@@ -337,30 +340,27 @@ pub(crate) fn finalize_pending_uploads(
     }
 }
 
-pub(crate) fn is_admin_session(
+pub(super) fn is_admin_session(
     conn: &rusqlite::Connection,
     admin_session_id: Option<&str>,
 ) -> bool {
     admin_session_id.is_some_and(|sid| db::get_session(conn, sid).ok().flatten().is_some())
 }
 
-pub(crate) fn load_word_filters(conn: &rusqlite::Connection) -> Result<Vec<(String, String)>> {
+fn load_word_filters(conn: &rusqlite::Connection) -> Result<Vec<(String, String)>> {
     Ok(db::get_word_filters(conn)?
         .into_iter()
         .map(|f| (f.pattern, f.replacement))
         .collect())
 }
 
-pub(crate) fn resolve_post_identity(
-    raw_name: &str,
-    allow_tripcodes: bool,
-) -> (String, Option<String>) {
+fn resolve_post_identity(raw_name: &str, allow_tripcodes: bool) -> (String, Option<String>) {
     let (name, tripcode) = parse_name_tripcode(&validate_name(raw_name));
     let tripcode = if allow_tripcodes { tripcode } else { None };
     (name, tripcode)
 }
 
-pub(crate) fn build_post_body(
+fn build_post_body(
     raw_body: &str,
     has_file: bool,
     board_allows_media: bool,
@@ -380,7 +380,7 @@ pub(crate) fn build_post_body(
     Ok((body_text, body_html))
 }
 
-pub(crate) fn resolve_deletion_token(raw_token: &str) -> String {
+fn resolve_deletion_token(raw_token: &str) -> String {
     if raw_token.trim().is_empty() {
         new_deletion_token()
     } else {
@@ -388,7 +388,7 @@ pub(crate) fn resolve_deletion_token(raw_token: &str) -> String {
     }
 }
 
-pub(crate) fn process_uploads(
+fn process_uploads(
     image_file_data: Option<(crate::handlers::TempUpload, String)>,
     file_data: Option<(crate::handlers::TempUpload, String)>,
     audio_file_data: Option<(crate::handlers::TempUpload, String)>,
@@ -461,7 +461,7 @@ pub(crate) fn process_uploads(
     clippy::too_many_arguments,
     reason = "the constructor mirrors the persisted post record assembled from validated form fields"
 )]
-pub(crate) fn build_new_post(
+fn build_new_post(
     thread_id: i64,
     board_id: i64,
     name: String,
@@ -509,7 +509,7 @@ pub(crate) fn build_new_post(
     clippy::too_many_lines,
     reason = "validation, transactional insertion, attachment updates, and job enqueueing share one boundary"
 )]
-pub(crate) fn submit_post(
+pub(super) fn submit_post(
     conn: &rusqlite::Connection,
     job_queue: &crate::workers::JobQueue,
     command: SubmitPostCommand,

@@ -124,7 +124,7 @@ fn clear_login_fails(ip_key: &str) {
 
 /// Remove login-fail entries whose window has expired.
 /// Called periodically from the background task in `server/server.rs`.
-pub(crate) fn prune_login_fails() {
+pub(in crate::server) fn prune_login_fails() {
     let now = login_now_secs();
     // Throttle to at most once per LOGIN_FAIL_WINDOW seconds.
     let last = LOGIN_CLEANUP_SECS.load(Ordering::Relaxed);
@@ -193,7 +193,7 @@ async fn render_admin_login_response(
 }
 
 // GET /admin
-pub(crate) async fn admin_index(
+pub(in crate::server) async fn admin_index(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -236,7 +236,7 @@ pub(crate) async fn admin_index(
 
 // POST /admin/login
 #[derive(Deserialize)]
-pub(crate) struct LoginForm {
+pub(in crate::server) struct LoginForm {
     username: String,
     password: String,
     #[serde(rename = "_csrf")]
@@ -251,7 +251,7 @@ pub(crate) struct LoginForm {
     clippy::too_many_lines,
     reason = "authentication, lockout accounting, and session issuance form one security boundary"
 )]
-pub(crate) async fn admin_login(
+pub(in crate::server) async fn admin_login(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -387,7 +387,7 @@ pub(crate) async fn admin_login(
 }
 
 // POST /admin/logout
-pub(crate) async fn admin_logout(
+pub(in crate::server) async fn admin_logout(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,

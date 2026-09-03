@@ -1,3 +1,6 @@
+/// Original tracing target, retained for existing `RUST_LOG` filters.
+const LOG_TARGET: &str = concat!(env!("CARGO_CRATE_NAME"), "::handlers::thread");
+
 // Routes:
 //   GET  /:board/thread/:id   — view thread with all posts
 //   POST /:board/thread/:id   — post a reply
@@ -47,7 +50,7 @@ fn is_xml_http_request(headers: &HeaderMap) -> bool {
     clippy::too_many_lines,
     reason = "access control, thread loading, unread-state calculation, and rendering form one request"
 )]
-pub(crate) async fn view_thread(
+pub(in crate::server) async fn view_thread(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
     Query(params): Query<ThreadPageQuery>,
@@ -274,7 +277,7 @@ pub(crate) async fn view_thread(
     clippy::significant_drop_tightening,
     reason = "the media permit intentionally moves from the parsed form into non-cancellable blocking submission work"
 )]
-pub(crate) async fn post_reply(
+pub(in crate::server) async fn post_reply(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
     secure_context: crate::middleware::SecureCookieContext,
@@ -490,7 +493,7 @@ pub(crate) async fn post_reply(
 }
 
 #[derive(Deserialize, Default)]
-pub(crate) struct ThreadPageQuery {
+pub(in crate::server) struct ThreadPageQuery {
     pub reported: Option<String>,
 }
 
@@ -596,7 +599,7 @@ async fn render_edit_post_error_page(
     Ok((jar, response).into_response())
 }
 
-pub(crate) async fn edit_post_get(
+pub(in crate::server) async fn edit_post_get(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
@@ -692,14 +695,14 @@ pub(crate) async fn edit_post_get(
 
 // POST /:board/post/:id/edit — submit edit
 #[derive(Deserialize)]
-pub(crate) struct EditForm {
+pub(in crate::server) struct EditForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub body: String,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct DeletePostForm {
+pub(in crate::server) struct DeletePostForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
 }
@@ -708,7 +711,7 @@ pub(crate) struct DeletePostForm {
     clippy::too_many_lines,
     reason = "ownership checks, edit validation, transactional update, media cleanup, and jobs form one request"
 )]
-pub(crate) async fn edit_post_post(
+pub(in crate::server) async fn edit_post_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
@@ -881,7 +884,7 @@ pub(crate) async fn edit_post_post(
     }
 }
 
-pub(crate) async fn delete_post_get(
+pub(in crate::server) async fn delete_post_get(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
@@ -980,7 +983,7 @@ pub(crate) async fn delete_post_get(
     clippy::too_many_lines,
     reason = "ownership checks, deletion rules, transactional mutation, and media cleanup form one request"
 )]
-pub(crate) async fn delete_own_post(
+pub(in crate::server) async fn delete_own_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
@@ -1071,7 +1074,7 @@ pub(crate) async fn delete_own_post(
                     deleted.pending_fs_op_id.as_deref(),
                     &deleted.paths,
                 ) {
-                    tracing::error!(
+                    tracing::error!(target: LOG_TARGET,
                         post_id,
                         error = %error,
                         "self-delete post cleanup did not fully complete"
@@ -1127,13 +1130,13 @@ pub(crate) async fn delete_own_post(
 
 // POST /vote — cast poll vote
 #[derive(Deserialize)]
-pub(crate) struct VoteForm {
+pub(in crate::server) struct VoteForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
     pub option_id: i64,
 }
 
-pub(crate) async fn vote_handler(
+pub(in crate::server) async fn vote_handler(
     State(state): State<AppState>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
@@ -1255,7 +1258,7 @@ pub(crate) async fn vote_handler(
 // controls so the response is auth-state-independent (safe to cache).
 
 #[derive(Deserialize)]
-pub(crate) struct UpdatesQuery {
+pub(in crate::server) struct UpdatesQuery {
     since: i64,
     refresh: Option<String>,
 }
@@ -1317,7 +1320,7 @@ fn parse_refresh_post_ids(raw: Option<&str>) -> Vec<i64> {
     clippy::too_many_lines,
     reason = "access checks, update filtering, unread state, and response rendering form one polling request"
 )]
-pub(crate) async fn thread_updates(
+pub(in crate::server) async fn thread_updates(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
     Query(params): Query<UpdatesQuery>,

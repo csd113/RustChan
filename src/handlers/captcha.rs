@@ -7,11 +7,11 @@ use axum::{
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-pub(crate) struct CaptchaImageQuery {
+pub(in crate::server) struct CaptchaImageQuery {
     board: String,
 }
 
-pub(crate) async fn serve_captcha_image(
+pub(in crate::server) async fn serve_captcha_image(
     Path(captcha_id): Path<String>,
     Query(query): Query<CaptchaImageQuery>,
 ) -> Result<Response> {

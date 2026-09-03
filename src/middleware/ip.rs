@@ -23,8 +23,7 @@ fn trusted_proxy_peer_with(peer: Option<SocketAddr>, trusted_proxy_cidrs: &[Stri
     peer.is_some_and(|addr| {
         trusted_proxy_cidrs.iter().any(|cidr| {
             cidr.parse::<IpNet>()
-                .ok()
-                .is_some_and(|network| network.contains(&addr.ip()))
+                .is_ok_and(|network| network.contains(&addr.ip()))
         })
     })
 }
@@ -124,28 +123,53 @@ where
 {
     type Rejection = Infallible;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         let peer = parts
             .extensions
             .get::<ConnectInfo<SocketAddr>>()
             .map(|connect_info| connect_info.0);
 
-        Ok(Self(resolved_client_ip(
+        std::future::ready(Ok(Self(resolved_client_ip(
             &parts.headers,
             peer,
             CONFIG.behind_proxy,
             &CONFIG.trusted_proxy_cidrs,
             CONFIG.enable_tor_support,
-        )))
+        ))))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{forwarded_client_ip, resolved_client_ip, trusted_proxy_peer_with};
+    use super::{forwarded_client_ip, resolved_client_ip, trusted_proxy_peer_with, ClientIp};
+    use anyhow::{ensure, Context as _};
+    use axum::extract::{ConnectInfo, FromRequestParts as _};
     use axum::http::{HeaderMap, HeaderValue};
+    use futures::FutureExt as _;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::sync::Arc;
+
+    #[test]
+    fn client_ip_extractor_is_ready_with_or_without_peer_metadata() -> anyhow::Result<()> {
+        let peer = SocketAddr::from(([198, 51, 100, 10], 8080));
+        for (peer, expected) in [(Some(peer), "198.51.100.10"), (None, "unknown")] {
+            let (mut parts, ()) = axum::http::Request::new(()).into_parts();
+            if let Some(peer) = peer {
+                parts.extensions.insert(ConnectInfo(peer));
+            }
+            let resolved = ClientIp::from_request_parts(&mut parts, &())
+                .now_or_never()
+                .context("client IP extraction should complete without yielding")??;
+            ensure!(
+                resolved.0 == expected,
+                "client IP extraction changed for {peer:?}"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn forwarded_ip_prefers_leftmost_hop() {

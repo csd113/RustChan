@@ -1,5 +1,11 @@
 //! HTTP server, terminal console, and administration CLI.
 
+/// Browser-facing and administration HTTP handlers.
+// Route entry points are scoped to the server; crate::handlers preserves the
+// established import paths while the source files remain in their existing directory.
+#[path = "../handlers/mod.rs"]
+pub mod handlers;
+
 /// Command-line argument parsing and administration commands.
 pub mod cli;
 /// Full-screen terminal console.

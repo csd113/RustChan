@@ -33,13 +33,13 @@ mod maintenance;
 mod site;
 mod themes;
 
-pub(crate) use appearance::*;
-pub(crate) use backup_settings::*;
-pub(crate) use banners::*;
-pub(crate) use board::*;
-pub(crate) use maintenance::*;
-pub(crate) use site::*;
-pub(crate) use themes::*;
+pub(in crate::server) use appearance::*;
+pub(in crate::server) use backup_settings::*;
+pub(in crate::server) use banners::*;
+pub(in crate::server) use board::*;
+pub(in crate::server) use maintenance::*;
+pub(in crate::server) use site::*;
+pub(in crate::server) use themes::*;
 
 /// Maximum permitted favicon upload bytes.
 const MAX_FAVICON_UPLOAD_BYTES: usize = 5 * 1024 * 1024;

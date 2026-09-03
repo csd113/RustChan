@@ -2,6 +2,9 @@
 // Covers full-site backups, board-level backups, streaming downloads,
 // saved-backup restoration, and live board.json restore.
 
+/// Original tracing target, retained for existing `RUST_LOG` filters.
+const LOG_TARGET: &str = concat!(env!("CARGO_CRATE_NAME"), "::handlers::admin::backup");
+
 use crate::{
     banner,
     config::CONFIG,
@@ -48,7 +51,7 @@ mod restore_board;
 mod restore_full;
 mod saved_backup;
 mod types;
-pub(crate) use saved_backup::BackupStorageMode;
+pub(in crate::server) use saved_backup::BackupStorageMode;
 
 use common::{
     copy_limited, create_staging_dir, extract_uploads_to_dir, log_backup_phase,
@@ -57,16 +60,14 @@ use common::{
     validate_restore_safe_entry_name, verify_full_backup_archive, BANNER_RESTORE_ENTRY_MAX_BYTES,
     BANNER_RESTORE_TOTAL_MAX_BYTES, BOARD_MANIFEST_MAX_BYTES, ZIP_ENTRY_MAX_BYTES,
 };
-pub(crate) use create::*;
-pub(crate) use downloads::{
-    backup_progress_json, delete_backup, download_backup, write_temp_board_download_token,
-};
-pub(crate) use http::backup_request_logging_middleware;
-pub(crate) use listing::{invalidate_backup_list_cache, list_backup_files, BackupListKind};
-pub(crate) use restore_board::{
+pub(in crate::server) use create::*;
+pub(in crate::server) use downloads::{backup_progress_json, delete_backup, download_backup};
+pub(in crate::server) use http::backup_request_logging_middleware;
+pub(in crate::server) use listing::{list_backup_files, BackupListKind};
+pub(in crate::server) use restore_board::{
     board_restore, extract_board_from_full_backup, restore_saved_board_backup,
 };
-pub(crate) use restore_full::{admin_restore, restore_saved_full_backup};
+pub(in crate::server) use restore_full::{admin_restore, restore_saved_full_backup};
 use types::board_backup_types;
 
 /// Full backup restore section used by this handler.
@@ -77,7 +78,7 @@ const BOARD_BACKUP_RESTORE_SECTION: &str = "board-backup-restore";
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 #[derive(Deserialize)]
-pub(crate) struct RestoreSavedForm {
+pub(in crate::server) struct RestoreSavedForm {
     filename: String,
     #[serde(default, deserialize_with = "form_checkbox_bool")]
     restore_tor_hidden_service_keys: bool,
@@ -106,9 +107,9 @@ use archive::{
     create_temp_legacy_full_backup_from_v4_transfer_zip, parse_board_backup_manifest_from_zip,
     validate_full_restore_archive_layout,
 };
-use downloads::prune_stale_temp_board_downloads;
 #[cfg(test)]
 use downloads::{consume_temp_board_download_token, temp_board_download_token_path};
+use downloads::{prune_stale_temp_board_downloads, write_temp_board_download_token};
 #[cfg(test)]
 use http::admin_xhr_error_response;
 use http::{
@@ -118,9 +119,10 @@ use http::{
     sanitize_backup_zip_filename, sanitize_board_short_value, sanitize_saved_backup_ref,
     stream_restore_upload_to_tempfile, validate_streamed_restore_upload, RestoreKind,
 };
-use listing::latest_saved_board_backup_filename as latest_board_backup_filename;
-pub(crate) use listing::{
-    enforce_full_backup_retention, latest_verified_full_backup_modified_time,
+pub(in crate::server) use listing::latest_verified_full_backup_modified_time;
+use listing::{
+    enforce_full_backup_retention, invalidate_backup_list_cache,
+    latest_saved_board_backup_filename as latest_board_backup_filename,
 };
 #[cfg(test)]
 use listing::{latest_verified_full_backup_modified_time_in_dir, prune_full_backup_dir_to_limit};
@@ -134,7 +136,7 @@ use restore_full::restore_db_from_snapshot;
     clippy::too_many_lines,
     reason = "database snapshotting, archive creation, and temporary-file cleanup form one operation"
 )]
-pub(crate) async fn admin_backup(
+pub(in crate::server) async fn admin_backup(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Response> {
@@ -403,7 +405,7 @@ pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
             AppError::Internal(anyhow::anyhow!("inspect {}: {error}", path.display()))
         })?;
         if metadata.file_type().is_symlink() {
-            tracing::warn!(path = %path.display(), "skipping symlink during backup traversal");
+            tracing::warn!(target: LOG_TARGET, path = %path.display(), "skipping symlink during backup traversal");
             continue;
         }
 
@@ -419,7 +421,7 @@ pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
             add_dir_to_zip_with_prefix(zip, base, &path, prefix, opts, progress)?;
         } else if metadata.file_type().is_file() {
             if crate::utils::fs_security::assert_regular_file_no_symlink(&path).is_err() {
-                tracing::warn!(path = %path.display(), "skipping unsafe runtime file during backup");
+                tracing::warn!(target: LOG_TARGET, path = %path.display(), "skipping unsafe runtime file during backup");
                 continue;
             }
             // MEM-FIX: open file, stream through io::copy — no Vec<u8> allocation.
@@ -488,12 +490,12 @@ fn should_store_without_recompress(path: &Path) -> bool {
 }
 
 /// rustchan-data/backups/full/
-pub(crate) fn full_backup_dir() -> PathBuf {
+pub(in crate::server) fn full_backup_dir() -> PathBuf {
     crate::config::full_backups_dir()
 }
 
 /// rustchan-data/backups/boards/
-pub(crate) fn board_backup_dir() -> PathBuf {
+pub(super) fn board_backup_dir() -> PathBuf {
     crate::config::board_backups_dir()
 }
 
@@ -501,7 +503,7 @@ pub(super) fn local_backup_timestamp_label() -> String {
     Local::now().format("%Y%m%d_%H%M%S").to_string()
 }
 
-pub(crate) fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
+fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
     let candidate = dir.join(base_name);
     if !candidate.exists() {
         return base_name.to_owned();
@@ -526,13 +528,13 @@ pub(crate) fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
 }
 
 /// rustchan-data/runtime/tmp/board-downloads/
-pub(crate) fn temp_board_download_dir() -> PathBuf {
+fn temp_board_download_dir() -> PathBuf {
     crate::config::runtime_temp_board_downloads_dir()
 }
 
 // Board-level backup / restore
 #[derive(Deserialize)]
-pub(crate) struct BoardBackupDownloadQuery {
+pub(in crate::server) struct BoardBackupDownloadQuery {
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
@@ -541,7 +543,7 @@ pub(crate) struct BoardBackupDownloadQuery {
 ///
 /// MEM-FIX: Same approach as `admin_backup` — build zip into a `NamedTempFile` on
 /// disk, then stream the result in 64 KiB chunks.
-pub(crate) async fn board_backup(
+pub(in crate::server) async fn board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     Query(query): Query<BoardBackupDownloadQuery>,

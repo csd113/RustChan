@@ -31,7 +31,7 @@ pub(super) fn latest_saved_board_backup_filename(board_short: &str) -> Option<St
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum BackupListKind {
+pub(in crate::server) enum BackupListKind {
     Full,
     Board,
 }
@@ -56,7 +56,7 @@ fn current_source_modified(dir: &Path) -> Option<SystemTime> {
     modified
 }
 
-pub(crate) fn invalidate_backup_list_cache(_dir: &Path, kind: BackupListKind) {
+pub(super) fn invalidate_backup_list_cache(_dir: &Path, kind: BackupListKind) {
     BACKUP_LIST_CACHE.lock().remove(&backup_cache_key(kind));
 }
 
@@ -441,7 +441,7 @@ fn list_legacy_zip_backups(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> 
 }
 
 /// List saved backups for the requested kind, newest-first.
-pub(crate) fn list_backup_files(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> {
+pub(in crate::server) fn list_backup_files(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> {
     let cache_key = backup_cache_key(kind);
     let source_modified = current_source_modified(dir);
     let cached = { BACKUP_LIST_CACHE.lock().get(&cache_key).cloned() };
@@ -546,7 +546,7 @@ pub(super) fn prune_full_backup_dir_to_limit(dir: &Path, keep_limit: usize) -> R
     Ok(removed)
 }
 
-pub(crate) fn enforce_full_backup_retention(copies_to_keep: u64) -> Result<Vec<String>> {
+pub(super) fn enforce_full_backup_retention(copies_to_keep: u64) -> Result<Vec<String>> {
     let keep_limit = usize::try_from(copies_to_keep.max(1)).unwrap_or(usize::MAX);
     prune_full_backup_dir_to_limit(&full_backup_dir(), keep_limit)
 }
@@ -572,7 +572,7 @@ pub(super) fn latest_verified_full_backup_modified_time_in_dir(dir: &Path) -> Op
     latest
 }
 
-pub(crate) fn latest_verified_full_backup_modified_time() -> Option<SystemTime> {
+pub(in crate::server) fn latest_verified_full_backup_modified_time() -> Option<SystemTime> {
     latest_verified_full_backup_modified_time_in_dir(&full_backup_dir())
 }
 
