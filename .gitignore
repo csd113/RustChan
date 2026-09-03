@@ -46,8 +46,9 @@ pnpm-debug.log*
 /temp/
 /.tmp*/
 
-# Generated browser/play-test evidence, including ad-hoc scripts and fixtures.
-# Keep reusable tests, package manifests/lockfiles, configs, and CI tracked.
+# Playwright tests and generated browser/play-test evidence.
+# Keep package manifests/lockfiles, configs, and CI tracked.
+/tests/e2e/
 /output/
 playwright-report/
 test-results/
