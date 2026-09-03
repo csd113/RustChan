@@ -1,7 +1,0 @@
-$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-manual-yCA9I5/bin/rustchan-cli admin create-admin admin AdminPass123!
-Created settings.toml (/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-manual-yCA9I5/bin/rustchan-data/settings.toml)
-✓ Admin 'admin' created (id=1).
-
-$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-manual-yCA9I5/bin/rustchan-cli admin create-board pub Public 
-✓ Board /pub/ — Public created (id=1).  images:yes video:yes audio:no
-

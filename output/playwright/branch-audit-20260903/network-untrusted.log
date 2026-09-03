@@ -1,5 +1,0 @@
-Created settings.toml (/private/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-net-audit-jw8f51zo/data/settings.toml)
-✓ Admin 'admin' created (id=1).
-✓ Board /net/ — Network audit created (id=1).  images:yes video:yes audio:no
-2026-09-02 22:26:01.315 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __audit_missing_ffmpeg__
-2026-09-02 22:26:01.316 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __audit_missing_ffprobe__

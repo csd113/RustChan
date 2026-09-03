@@ -1,4 +1,0 @@
-$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-1-Jx5T4J/bin/rustchan-cli admin create-admin admin AdminPass123!
-Created settings.toml (/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-1-Jx5T4J/bin/rustchan-data/settings.toml)
-✓ Admin 'admin' created (id=1).
-

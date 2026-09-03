@@ -1,4 +1,0 @@
-Created settings.toml (/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-manual-4EmIFA/bin/rustchan-data/settings.toml)
-2026-09-02 22:29:00.298 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__
-2026-09-02 22:29:00.300 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__
-2026-09-02 22:29:00.422 [WARN ] [startup ] No admin accounts exist - run: rustchan-cli admin create-admin <username> <password>

@@ -1,0 +1,9 @@
+# RUSTSEC-2023-0071: Marvin Attack timing side-channel in rsa 0.9.x.
+# No fixed version is available. rsa is compiled through Arti; RustChan has no
+# direct RSA usage. A call-site audit found public verification plus generic
+# private-key generation/signing support, but no calls to RSA decryption APIs or
+# decryption oracle, and no evidence that RustChan's v3 onion-service flow
+# invokes private RSA operations. Reviewed 2026-08-27; re-review this temporary
+# exception on every Arti upgrade.
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]

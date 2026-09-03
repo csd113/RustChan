@@ -1,7 +1,0 @@
-$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-manual-LiJYoB/bin/rustchan-cli admin create-board pub Public Board Idempotency regression
-Created settings.toml (/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-manual-LiJYoB/bin/rustchan-data/settings.toml)
-✓ Board /pub/ — Public Board created (id=1).  images:yes video:yes audio:no
-
-2026-09-02 22:35:07.158 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__
-2026-09-02 22:35:07.160 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__
-2026-09-02 22:35:07.273 [WARN ] [startup ] No admin accounts exist - run: rustchan-cli admin create-admin <username> <password>

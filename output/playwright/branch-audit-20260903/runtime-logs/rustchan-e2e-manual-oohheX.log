@@ -1,9 +1,0 @@
-$ /var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-manual-oohheX/bin/rustchan-cli admin create-admin admin AdminPass123!
-Created settings.toml (/var/folders/sl/yxxj_m9n37sgntkntqw0x8yw0000gn/T/rustchan-e2e-manual-oohheX/bin/rustchan-data/settings.toml)
-✓ Admin 'admin' created (id=1).
-
-2026-09-02 22:28:31.634 [WARN ] [config  ] Tor support is enabled, but tor_only=false. RustChan will accept both clearnet and Tor traffic.
-2026-09-02 22:28:31.668 [WARN ] [detect  ] Ffmpeg not detected - video thumbnails and transcoding disabled - available: no, ffmpeg path: __rustchan_e2e_no_ffmpeg__
-2026-09-02 22:28:31.669 [WARN ] [detect  ] Ffprobe not detected - WebM codec inspection will fail for uploads that need it - available: no, ffprobe path: __rustchan_e2e_no_ffprobe__
-2026-09-02 22:28:32.052 [ERROR] [detect  ] Tor: fatal error - error: Tor bootstrap failed: tor: problem with filesystem permissions: Error while trying to access a key store, attempt: 0
-2026-09-02 22:28:32.052 [WARN ] [detect  ] Tor: scheduling restart - retry in: 30s

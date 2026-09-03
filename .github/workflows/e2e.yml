@@ -1,0 +1,122 @@
+name: Browser E2E
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  chromium:
+    name: Chromium
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: e2e-chromium
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install browser dependencies
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Build RustChan
+        run: cargo build --locked --bin rustchan-cli
+
+      - name: Run bounded browser suite
+        env:
+          CI: true
+          RUSTCHAN_E2E_SKIP_BUILD: 1
+        run: npm run test:e2e:ci
+
+      - name: Upload failure traces
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: playwright-chromium-failure
+          path: |
+            playwright-report/
+            test-results/e2e/
+          if-no-files-found: warn
+          retention-days: 7
+
+  mobile-firefox-posting:
+    name: Mobile Firefox posting lifecycle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: e2e-mobile-firefox
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install browser dependencies
+        run: |
+          npm ci
+          npx playwright install --with-deps firefox
+
+      - name: Build RustChan
+        run: cargo build --locked --bin rustchan-cli
+
+      - name: Run bounded mobile Firefox posting lifecycle
+        env:
+          CI: true
+          RUSTCHAN_E2E_SKIP_BUILD: 1
+        run: >-
+          npx playwright test tests/e2e/posting-thread.spec.ts:169
+          --project=mobile-firefox
+          --workers=1
+          --max-failures=1
+
+      - name: Upload failure traces
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: playwright-mobile-firefox-posting-failure
+          path: |
+            playwright-report/
+            test-results/e2e/
+          if-no-files-found: warn
+          retention-days: 7
