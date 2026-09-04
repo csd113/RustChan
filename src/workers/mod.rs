@@ -3723,7 +3723,7 @@ mod tests {
     #[tokio::test]
     async fn delayed_prune_uses_current_archived_limit() -> anyhow::Result<()> {
         let pool = crate::db::init_test_pool()?;
-        let board_id = seed_retention_board(&pool, "archive-policy", 10, 1, true)?;
+        let board_id = seed_retention_board(&pool, "archpol", 10, 1, true)?;
         seed_threads(&pool, board_id, 0, 3)?;
         {
             let conn = pool.get()?;
@@ -3756,10 +3756,18 @@ mod tests {
         seed_threads(&pool, board_id, 3, 2)?;
         {
             let conn = pool.get()?;
+            let invariant_trigger: String = conn.query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger' AND name = 'boards_domain_update'",
+                [],
+                |row| row.get(0),
+            )?;
+            conn.execute_batch("DROP TRIGGER boards_domain_update")?;
             conn.execute(
                 "UPDATE boards SET max_threads = 0 WHERE id = ?1",
                 rusqlite::params![board_id],
             )?;
+            conn.execute_batch(&invariant_trigger)?;
         }
 
         ensure!(prune_threads(board_id, pool.clone()).await.is_err());

@@ -485,7 +485,7 @@ mod tests {
         conn.execute(
             "INSERT INTO boards
              (id, name, short_name, description, access_mode, access_password_hash)
-             VALUES (2, 'Protected', 'protected', '', 'view_password', 'hash')",
+             VALUES (2, 'Protected', 'protect', '', 'view_password', 'hash')",
             [],
         )?;
         conn.execute(
@@ -495,7 +495,7 @@ mod tests {
         )?;
 
         let error =
-            insert_reply_into_thread(&conn, "protected", 2, "RustWave", "secret reply", 123, None)
+            insert_reply_into_thread(&conn, "protect", 2, "RustWave", "secret reply", 123, None)
                 .err()
                 .context("protected board reply must be rejected")?;
         assert!(

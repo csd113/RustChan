@@ -462,7 +462,7 @@ mod tests {
     fn update_theme_renames_board_and_site_default_references() -> Result<()> {
         let pool = crate::db::init_test_pool()?;
         let mut conn = pool.get()?;
-        let board_short = "theme-update";
+        let board_short = "thmup";
         crate::db::boards::create_board(&conn, board_short, "Theme Update", "", false)?;
         super::create_custom_theme(
             &conn,
@@ -515,7 +515,7 @@ mod tests {
     fn delete_custom_theme_clears_dependent_references() -> Result<()> {
         let pool = crate::db::init_test_pool()?;
         let mut conn = pool.get()?;
-        let board_short = "theme-delete";
+        let board_short = "thmdel";
         crate::db::boards::create_board(&conn, board_short, "Theme Delete", "", false)?;
         super::create_custom_theme(
             &conn,

@@ -1743,8 +1743,20 @@ mod tests {
         let db_path = create_snapshot_db()?;
         {
             let conn = rusqlite::Connection::open(&db_path).context("open database snapshot")?;
+            let invariant_trigger: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_schema
+                     WHERE type = 'trigger' AND name = 'boards_domain_update'",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("load board domain trigger")?;
+            conn.execute_batch("DROP TRIGGER boards_domain_update")
+                .context("temporarily remove board domain trigger")?;
             conn.execute("UPDATE boards SET short_name = '../admin'", [])
                 .context("seed invalid board short name")?;
+            conn.execute_batch(&invariant_trigger)
+                .context("restore board domain trigger")?;
         }
         let zip_path = temp_dir.path().join("backup.zip");
         write_full_backup_zip_from_db(&zip_path, &db_path, None, false)?;
@@ -1774,7 +1786,7 @@ mod tests {
 
         match error {
             crate::error::AppError::BadRequest(message) => {
-                ensure!(message.contains("Invalid board short name"));
+                ensure!(message.contains("boards has 1 row(s)"));
             }
             other => bail!("expected BadRequest, got {other:?}"),
         }

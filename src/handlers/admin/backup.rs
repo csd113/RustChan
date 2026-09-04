@@ -1771,6 +1771,72 @@ mod tests {
     }
 
     #[test]
+    fn board_restore_recomputes_untrusted_reply_counts() -> TestResult<()> {
+        let source_pool = crate::db::init_test_pool().context("create source database pool")?;
+        let source_conn = source_pool
+            .get()
+            .context("get source database connection")?;
+        let board_id = crate::db::create_board(&source_conn, "tech", "Technology", "", false)
+            .context("create source board")?;
+        let (thread_id, _, _) = crate::db::create_thread_with_optional_poll(
+            &source_conn,
+            board_id,
+            Some("counter test"),
+            &sample_post(board_id, 0, "op", true),
+            "",
+            None,
+            None,
+        )
+        .context("create source thread")?;
+        crate::db::create_reply_with_thread_update(
+            &source_conn,
+            &sample_post(board_id, thread_id, "reply", false),
+            "",
+            true,
+            None,
+        )
+        .context("create source reply")?;
+        let mut manifest = build_board_backup_manifest(&source_conn, "tech")?;
+        manifest
+            .threads
+            .first_mut()
+            .context("backup manifest should contain the source thread")?
+            .reply_count = 999;
+
+        let target_pool = crate::db::init_test_pool().context("create target database pool")?;
+        let mut target_conn = target_pool
+            .get()
+            .context("get target database connection")?;
+        let upload_dir = tempfile::tempdir().context("create upload directory")?;
+        let upload_dir_str = upload_dir
+            .path()
+            .to_str()
+            .context("upload directory path is not valid UTF-8")?;
+        execute_board_restore(
+            &mut target_conn,
+            upload_dir_str,
+            manifest,
+            |_| Ok(()),
+            "Test reply-count restore",
+            "Test reply-count restore completed",
+        )
+        .context("restore board")?;
+
+        let restored_count = target_conn
+            .query_row(
+                "SELECT threads.reply_count
+                 FROM threads
+                 JOIN boards ON boards.id = threads.board_id
+                 WHERE boards.short_name = 'tech'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("load restored reply count")?;
+        ensure!(restored_count == 1);
+        Ok(())
+    }
+
+    #[test]
     fn older_board_restore_manifests_default_pdf_uploads_off() -> TestResult<()> {
         let json = serde_json::json!({
             "version": 1,

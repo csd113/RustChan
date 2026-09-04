@@ -125,7 +125,6 @@ mod tests {
         Router,
     };
     use axum_extra::extract::cookie::CookieJar;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt as _;
 
     type TestResult = anyhow::Result<()>;
@@ -174,11 +173,15 @@ mod tests {
 
     /// Generate a collision-resistant board name for filesystem tests.
     fn unique_test_board(prefix: &str) -> anyhow::Result<String> {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("system clock predates the Unix epoch")?
-            .as_nanos();
-        Ok(format!("{prefix}{nanos:x}"))
+        let first = prefix
+            .chars()
+            .find(char::is_ascii_alphanumeric)
+            .context("test board prefix has no alphanumeric character")?;
+        let random = uuid::Uuid::new_v4().simple().to_string();
+        let suffix = random
+            .get(..7)
+            .context("UUID test suffix was unexpectedly short")?;
+        Ok(format!("{first}{suffix}"))
     }
 
     /// Extract the first response cookie whose name starts with `prefix`.

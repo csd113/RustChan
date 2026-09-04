@@ -2133,11 +2133,23 @@ mod tests {
         let conn = pool.get().context("get test database connection")?;
         crate::db::create_board(&conn, "tech", "Technology", "", false)
             .context("create test board")?;
+        let invariant_trigger: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger' AND name = 'boards_domain_update'",
+                [],
+                |row| row.get(0),
+            )
+            .context("load board domain trigger")?;
+        conn.execute_batch("DROP TRIGGER boards_domain_update")
+            .context("temporarily remove board domain trigger")?;
         conn.execute(
             "UPDATE boards SET short_name = '../escape' WHERE short_name = 'tech'",
             [],
         )
         .context("corrupt stored board short name")?;
+        conn.execute_batch(&invariant_trigger)
+            .context("restore board domain trigger")?;
 
         let error = super::collect_backup_board_summaries(&conn)
             .err()

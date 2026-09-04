@@ -347,7 +347,7 @@ mod tests {
         state: &crate::middleware::AppState,
     ) -> AnyResult<(i64, std::path::PathBuf, String)> {
         let conn = state.db.get().context("get database connection")?;
-        let board_id = crate::db::create_board(&conn, "securebanner", "Secret", "", false)
+        let board_id = crate::db::create_board(&conn, "secbann", "Secret", "", false)
             .context("create protected board")?;
         let password_hash =
             crate::utils::crypto::hash_password("swordfish").context("hash board password")?;
@@ -366,7 +366,7 @@ mod tests {
         let storage_key = uuid::Uuid::new_v4().simple().to_string();
         let path = crate::banner::banner_storage_path(
             crate::models::BannerScope::Board,
-            Some("securebanner"),
+            Some("secbann"),
             &storage_key,
         )
         .context("build protected board banner path")?;

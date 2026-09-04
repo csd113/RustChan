@@ -816,6 +816,25 @@ where
             insert_or_validate_restored_file_hash(conn, file_hash)?;
         }
 
+        conn.execute(
+            "UPDATE threads
+             SET reply_count = (
+                 SELECT COUNT(*) FROM posts
+                 WHERE posts.thread_id = threads.id AND posts.is_op = 0
+             )
+             WHERE board_id = ?1
+               AND reply_count != (
+                   SELECT COUNT(*) FROM posts
+                   WHERE posts.thread_id = threads.id AND posts.is_op = 0
+               )",
+            [live_board_id],
+        )
+        .map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "Recompute restored thread reply counts: {error}"
+            ))
+        })?;
+
         db::insert_pending_fs_op(conn, &workspace.pending_restore_op)?;
         Ok(())
     })();

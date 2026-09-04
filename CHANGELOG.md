@@ -8,6 +8,15 @@ All notable changes to RustChan will be documented in this file.
 
 - Audited implementation comments across the repository, removing generated and stale narration while retaining security, concurrency, compatibility, and operational rationale.
 - Rebuilt the terminal administration console with responsive layouts, persistent navigation, selectable and scrollable data views, masked in-console and first-run credentials, contextual shortcuts, structured feedback and confirmation states, Unicode-safe clipping, and diff-based rendering.
+- Hardened schema normalization with transactional legacy repairs, semantic schema-drift detection, canonical version metadata, preserved AUTOINCREMENT state, and fresh-versus-migrated equivalence checks.
+
+### Fixed
+
+- Reconciled persisted thread reply counters from posts during startup normalization and board restore so derived state cannot drift from its authoritative rows.
+
+### Security
+
+- Moved closed persisted domains and cross-row relationships into audited SQLite triggers, including boolean and enum values, bounded counters, pending-operation kinds, and post, poll, report, banner, theme, and submission relationships; malformed historical data now fails migration without stamping success.
 
 ## RustChan 1.4.0
 
