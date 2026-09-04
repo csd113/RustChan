@@ -177,16 +177,17 @@ pub fn update_theme(
     enabled: bool,
     custom_css: Option<&str>,
 ) -> Result<()> {
-    let current = get_theme(conn, existing_slug)?
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let current = get_theme(&tx, existing_slug)?
         .ok_or_else(|| anyhow::anyhow!("Theme {existing_slug} not found"))?;
     let css_to_save = if current.is_builtin {
         current.custom_css
     } else {
         custom_css.unwrap_or(&current.custom_css).to_owned()
     };
-    let tx = conn.transaction()?;
-    tx.execute(
-        "UPDATE themes
+    let affected = tx
+        .execute(
+            "UPDATE themes
          SET slug = ?1,
              display_name = ?2,
              description = ?3,
@@ -194,17 +195,20 @@ pub fn update_theme(
              enabled = ?5,
              custom_css = ?6
          WHERE slug = ?7",
-        params![
-            new_slug,
-            display_name,
-            description,
-            swatch_hex,
-            i32::from(enabled),
-            css_to_save,
-            existing_slug,
-        ],
-    )
-    .context("Failed to update theme")?;
+            params![
+                new_slug,
+                display_name,
+                description,
+                swatch_hex,
+                i32::from(enabled),
+                css_to_save,
+                existing_slug,
+            ],
+        )
+        .context("Failed to update theme")?;
+    if affected == 0 {
+        anyhow::bail!("Theme {existing_slug} not found");
+    }
     if existing_slug != new_slug {
         tx.execute(
             "UPDATE boards SET default_theme = ?1 WHERE lower(default_theme) = lower(?2)",
@@ -227,12 +231,15 @@ pub fn update_theme(
 /// # Errors
 /// Returns an error if the theme is missing or cannot be deleted.
 pub fn delete_custom_theme(conn: &mut rusqlite::Connection, slug: &str) -> Result<()> {
-    let theme = get_theme(conn, slug)?.ok_or_else(|| anyhow::anyhow!("Theme not found"))?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let theme = get_theme(&tx, slug)?.ok_or_else(|| anyhow::anyhow!("Theme not found"))?;
     if theme.is_builtin {
         anyhow::bail!("Built-in themes cannot be deleted");
     }
-    let tx = conn.transaction()?;
-    tx.execute("DELETE FROM themes WHERE slug = ?1", params![slug])?;
+    let affected = tx.execute("DELETE FROM themes WHERE slug = ?1", params![slug])?;
+    if affected == 0 {
+        anyhow::bail!("Theme not found");
+    }
     tx.execute(
         "UPDATE boards SET default_theme = '' WHERE lower(default_theme) = lower(?1)",
         params![slug],

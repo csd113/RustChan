@@ -463,12 +463,12 @@ pub fn resolve_report(conn: &rusqlite::Connection, report_id: i64, admin_id: i64
     let n = conn
         .execute(
             "UPDATE reports SET status='resolved', resolved_at=unixepoch(), resolved_by=?1
-             WHERE id = ?2",
+             WHERE id = ?2 AND status = 'open'",
             params![admin_id, report_id],
         )
         .context("Failed to resolve report")?;
     if n == 0 {
-        anyhow::bail!("Report id {report_id} not found");
+        anyhow::bail!("Report id {report_id} not found or already resolved");
     }
     Ok(())
 }
@@ -625,49 +625,55 @@ pub fn get_open_ban_appeals(conn: &rusqlite::Connection) -> Result<Vec<crate::mo
 pub fn dismiss_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64) -> Result<()> {
     let n = conn
         .execute(
-            "UPDATE ban_appeals SET status='dismissed' WHERE id=?1",
+            "UPDATE ban_appeals SET status='dismissed' WHERE id=?1 AND status='open'",
             params![appeal_id],
         )
         .context("Failed to dismiss ban appeal")?;
     if n == 0 {
-        anyhow::bail!("Ban appeal id {appeal_id} not found");
+        anyhow::bail!("Ban appeal id {appeal_id} not found or already handled");
     }
     Ok(())
 }
 
-/// Dismiss appeal AND lift the ban for this `ip_hash`.
+/// Accept an appeal and lift bans for the address stored on that appeal.
 ///
 /// Accepted appeals now set status='accepted' (not 'dismissed')
 /// so the moderation history accurately distinguishes denied vs granted appeals.
 /// The valid status values for `BanAppeal` are: "open" | "dismissed" | "accepted".
 ///
 /// # Errors
-/// Returns an error if the database operation fails.
-pub fn accept_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64, ip_hash: &str) -> Result<()> {
+/// Returns the appealed address hash, or an error if the row is missing,
+/// already handled, or the database operation fails.
+pub fn accept_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64) -> Result<String> {
     // Both updates must succeed atomically; IMMEDIATE prevents write contention.
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin accept-appeal transaction")?;
 
-    let result: Result<()> = (|| {
-        let n = conn
-            .execute(
-                "UPDATE ban_appeals SET status='accepted' WHERE id=?1",
+    let result: Result<String> = (|| {
+        let ip_hash = conn
+            .query_row(
+                "UPDATE ban_appeals
+                 SET status = 'accepted'
+                 WHERE id = ?1 AND status = 'open'
+                 RETURNING ip_hash",
                 params![appeal_id],
+                |row| row.get::<_, String>(0),
             )
-            .context("Failed to accept ban appeal")?;
-        if n == 0 {
-            anyhow::bail!("Ban appeal id {appeal_id} not found");
-        }
+            .optional()
+            .context("Failed to accept ban appeal")?
+            .with_context(|| format!("Ban appeal id {appeal_id} not found or already handled"))?;
         conn.execute("DELETE FROM bans WHERE ip_hash=?1", params![ip_hash])
             .context("Failed to lift ban during appeal acceptance")?;
-        Ok(())
+        Ok(ip_hash)
     })();
 
     match result {
-        Ok(()) => {
-            conn.execute_batch("COMMIT")
-                .context("Failed to commit accept-appeal transaction")?;
-            Ok(())
+        Ok(ip_hash) => {
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                drop(conn.execute_batch("ROLLBACK"));
+                return Err(error).context("Failed to commit accept-appeal transaction");
+            }
+            Ok(ip_hash)
         }
         Err(e) => {
             drop(conn.execute_batch("ROLLBACK"));
@@ -1081,8 +1087,10 @@ pub fn db_repair_aborted_for_backup_failure(
 #[cfg(test)]
 mod tests {
     use super::{
-        attempt_db_repair, check_db_health, db_repair_aborted_for_backup_failure, file_ban_appeal,
-        get_posts_by_ip_hash, BanAppealSubmission, DbRepairBackup,
+        accept_ban_appeal, attempt_db_repair, check_db_health,
+        db_repair_aborted_for_backup_failure, dismiss_ban_appeal, file_ban_appeal, file_report,
+        get_posts_by_ip_hash, resolve_report, BanAppealSubmission, DbRepairBackup,
+        ReportSubmission,
     };
     use crate::db::{create_board, create_thread_with_optional_poll, get_board_by_short, NewPost};
     use anyhow::{Context as _, Result};
@@ -1127,6 +1135,90 @@ mod tests {
             result,
             BanAppealSubmission::NotBanned,
             "unbanned addresses should not create appeals"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn appeal_resolution_uses_the_stored_address_and_is_single_transition() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        crate::db::add_ban(&conn, "appealed-hash", "appealed", None)?;
+        crate::db::add_ban(&conn, "other-hash", "other", None)?;
+        assert_eq!(
+            file_ban_appeal(&conn, "appealed-hash", "please unban")?,
+            BanAppealSubmission::Filed
+        );
+        let appeal_id: i64 = conn.query_row(
+            "SELECT id FROM ban_appeals WHERE ip_hash = 'appealed-hash'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let accepted_hash = accept_ban_appeal(&conn, appeal_id)?;
+
+        assert_eq!(accepted_hash, "appealed-hash");
+        assert!(
+            crate::db::is_banned(&conn, "appealed-hash")?.is_none(),
+            "acceptance should lift the ban named by the appeal row"
+        );
+        assert!(
+            crate::db::is_banned(&conn, "other-hash")?.is_some(),
+            "acceptance must not lift an unrelated caller-selected ban"
+        );
+        assert!(
+            accept_ban_appeal(&conn, appeal_id).is_err(),
+            "an accepted appeal must not transition a second time"
+        );
+        assert!(
+            dismiss_ban_appeal(&conn, appeal_id).is_err(),
+            "an accepted appeal must not be overwritten as dismissed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn report_resolution_is_a_single_state_transition() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        let admin_id = crate::db::create_admin(&conn, "moderator", "password-hash")?;
+        let board_id = create_board(&conn, "reports", "Reports", "", false)?;
+        let thread_id: i64 = conn.query_row(
+            "INSERT INTO threads (board_id, subject) VALUES (?1, 'reported') RETURNING id",
+            [board_id],
+            |row| row.get(0),
+        )?;
+        let post_id: i64 = conn.query_row(
+            "INSERT INTO posts (
+                 thread_id, board_id, body, body_html, deletion_token, is_op
+             ) VALUES (?1, ?2, 'body', '<p>body</p>', 'token', 1)
+             RETURNING id",
+            rusqlite::params![thread_id, board_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            file_report(&conn, post_id, "reason", "reporter")?,
+            ReportSubmission::Filed
+        );
+        let report_id: i64 = conn.query_row(
+            "SELECT id FROM reports WHERE post_id = ?1",
+            [post_id],
+            |row| row.get(0),
+        )?;
+
+        resolve_report(&conn, report_id, admin_id)?;
+
+        assert!(
+            resolve_report(&conn, report_id, admin_id).is_err(),
+            "a resolved report must not transition a second time"
         );
         Ok(())
     }

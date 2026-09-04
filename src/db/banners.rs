@@ -248,7 +248,7 @@ pub fn move_banner_asset(
     banner_id: i64,
     move_up: bool,
 ) -> Result<()> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let asset = get_banner_asset(&tx, banner_id)?
         .ok_or_else(|| anyhow::anyhow!("Banner id {banner_id} not found"))?;
     let ordered_ids = if asset.scope == BannerScope::Board {

@@ -710,12 +710,15 @@ pub fn self_delete_post(
             }
 
             if is_op {
-                let reply_count: i64 = conn.query_row(
-                    "SELECT reply_count FROM threads WHERE id = ?1",
+                let has_replies: bool = conn.query_row(
+                    "SELECT EXISTS (
+                         SELECT 1 FROM posts
+                         WHERE thread_id = ?1 AND is_op = 0
+                     )",
                     params![thread_id],
                     |r| r.get(0),
                 )?;
-                if reply_count > 0 {
+                if has_replies {
                     return Ok((SelfDeleteOutcome::ThreadHasReplies, None));
                 }
 
@@ -1056,12 +1059,13 @@ pub fn get_poll_for_thread(
 
     let mut stmt = conn.prepare_cached(
         "SELECT po.id, po.poll_id, po.text, po.position,
-                COUNT(pv.id) as vote_count
+                (
+                    SELECT COUNT(*)
+                    FROM poll_votes AS pv
+                    WHERE pv.option_id = po.id AND pv.poll_id = po.poll_id
+                ) AS vote_count
          FROM poll_options po
-         LEFT JOIN poll_votes pv ON pv.option_id = po.id
-                                AND pv.poll_id   = po.poll_id
          WHERE po.poll_id = ?1
-         GROUP BY po.id
          ORDER BY po.position ASC",
     )?;
     let options: Vec<crate::models::PollOption> = stmt
@@ -1099,13 +1103,13 @@ pub fn get_poll_for_thread(
 
 /// Cast a vote. Returns true if vote was recorded, false otherwise.
 ///
-/// Validates that `option_id` belongs to `poll_id` inside
-/// the same INSERT statement via a correlated WHERE EXISTS. A mismatched
-/// (`poll_id`, `option_id`) pair inserts nothing and returns false.
+/// Validates that `option_id` belongs to an unexpired `poll_id` inside the same
+/// INSERT statement. A mismatched pair or a poll that closes before this write
+/// inserts nothing and returns false.
 ///
 /// This returns false for two distinct cases:
 ///   1. The voter has already voted (UNIQUE constraint fires INSERT OR IGNORE)
-///   2. The `option_id` does not belong to `poll_id` (EXISTS check fails)
+///   2. The option does not belong to the poll, or the poll has expired
 ///
 /// Callers that need to distinguish these cases should call `cast_vote` and, on
 /// false, separately query whether the IP has voted on this poll. A future
@@ -1122,10 +1126,11 @@ pub fn cast_vote(
     let result = conn.execute(
         "INSERT OR IGNORE INTO poll_votes (poll_id, option_id, ip_hash)
          SELECT ?1, ?2, ?3
-         WHERE EXISTS (
-             SELECT 1 FROM poll_options
-             WHERE id = ?2 AND poll_id = ?1
-         )",
+         FROM poll_options AS po
+         JOIN polls AS p ON p.id = po.poll_id
+         WHERE po.id = ?2
+           AND po.poll_id = ?1
+           AND p.expires_at > unixepoch()",
         params![poll_id, option_id, ip_hash],
     )?;
     Ok(result > 0)
@@ -2639,9 +2644,9 @@ pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        acknowledge_failed_background_jobs, background_job_summary, claim_next_job, complete_job,
-        count_posts_by_media_processing_state, count_search_results, get_post, get_post_submission,
-        get_posts_for_thread, is_stale_media_target_error, persist_media_job,
+        acknowledge_failed_background_jobs, background_job_summary, cast_vote, claim_next_job,
+        complete_job, count_posts_by_media_processing_state, count_search_results, get_post,
+        get_post_submission, get_posts_for_thread, is_stale_media_target_error, persist_media_job,
         recent_background_jobs, record_post_submission, recover_interrupted_background_jobs,
         replace_transcoded_media, search_posts, search_terms, self_delete_post,
         set_post_media_processing_state, to_fts_query, update_post_thumb_path, SelfDeleteOutcome,
@@ -3932,13 +3937,17 @@ mod tests {
             is_op: false,
         };
         create_reply_with_thread_update(&conn, &reply, "", false, None)?;
+        conn.execute(
+            "UPDATE threads SET reply_count = 0 WHERE id = ?1",
+            [thread_id],
+        )?;
 
         let (outcome, deleted) = self_delete_post(&conn, op_id, "op-token", 60)?;
 
         assert_eq!(
             outcome,
             SelfDeleteOutcome::ThreadHasReplies,
-            "opening post with replies should not self-delete"
+            "opening post with real replies should not self-delete even if the cached counter drifted"
         );
         assert!(
             deleted.is_none(),
@@ -3947,6 +3956,65 @@ mod tests {
         assert!(
             get_thread(&conn, thread_id)?.is_some(),
             "rejected deletion should preserve the thread"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn cast_vote_enforces_expiry_and_option_membership_in_the_insert() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "poll", "Poll", "", false)?;
+        let thread_id: i64 = conn.query_row(
+            "INSERT INTO threads (board_id, subject) VALUES (?1, 'poll') RETURNING id",
+            [board_id],
+            |row| row.get(0),
+        )?;
+        let open_poll: i64 = conn.query_row(
+            "INSERT INTO polls (thread_id, question, expires_at)
+             VALUES (?1, 'open', unixepoch() + 60) RETURNING id",
+            [thread_id],
+            |row| row.get(0),
+        )?;
+        let open_option: i64 = conn.query_row(
+            "INSERT INTO poll_options (poll_id, text, position)
+             VALUES (?1, 'yes', 0) RETURNING id",
+            [open_poll],
+            |row| row.get(0),
+        )?;
+        let expired_thread_id: i64 = conn.query_row(
+            "INSERT INTO threads (board_id, subject) VALUES (?1, 'expired poll') RETURNING id",
+            [board_id],
+            |row| row.get(0),
+        )?;
+        let expired_poll: i64 = conn.query_row(
+            "INSERT INTO polls (thread_id, question, expires_at)
+             VALUES (?1, 'expired', unixepoch() - 1) RETURNING id",
+            [expired_thread_id],
+            |row| row.get(0),
+        )?;
+        let expired_option: i64 = conn.query_row(
+            "INSERT INTO poll_options (poll_id, text, position)
+             VALUES (?1, 'late', 0) RETURNING id",
+            [expired_poll],
+            |row| row.get(0),
+        )?;
+
+        assert!(cast_vote(&conn, open_poll, open_option, "viewer")?);
+        assert!(
+            !cast_vote(&conn, open_poll, open_option, "viewer")?,
+            "a duplicate vote should not be inserted"
+        );
+        assert!(
+            !cast_vote(&conn, open_poll, expired_option, "other")?,
+            "an option from another poll should not be inserted"
+        );
+        assert!(
+            !cast_vote(&conn, expired_poll, expired_option, "late")?,
+            "an expired poll should reject the vote in the write statement"
         );
         Ok(())
     }

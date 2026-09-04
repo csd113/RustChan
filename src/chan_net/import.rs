@@ -280,11 +280,11 @@ pub(super) async fn do_import(
     let post_count = validated.posts.len();
     let tx_id = metadata.tx_id;
 
-    let mut conn = state.db.get()?;
-
+    let pool = state.db.clone();
     let commit_guard = processing_guard.clone();
     let commit_result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         let _processing_guard = commit_guard;
+        let mut conn = pool.get()?;
         commit_snapshot(&mut conn, validated, tx_id)
     })
     .await

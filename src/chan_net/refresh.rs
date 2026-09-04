@@ -51,13 +51,14 @@ pub static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 pub async fn chan_refresh(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, super::ChanError> {
-    let conn = state.db.get()?;
-
-    let (zip_bytes, tx_id) =
-        tokio::task::spawn_blocking(move || super::snapshot::build_snapshot(&conn))
-            .await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))? // JoinError
-            .map_err(AppError::from)?; // anyhow::Error from build_snapshot
+    let pool = state.db.clone();
+    let (zip_bytes, tx_id) = tokio::task::spawn_blocking(move || {
+        let conn = pool.get()?;
+        super::snapshot::build_snapshot(&conn)
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))? // JoinError
+    .map_err(AppError::from)?; // anyhow::Error from build_snapshot
 
     // Assemble multipart form
     let part = reqwest::multipart::Part::bytes(zip_bytes)

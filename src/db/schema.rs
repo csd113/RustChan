@@ -1,7 +1,10 @@
 use anyhow::{bail, Context as _, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::migrations::{read_schema_version, stamp_schema_version, BASELINE_SCHEMA_VERSION};
+use super::migrations::{
+    read_schema_version, stamp_schema_version, stamp_schema_version_in_transaction,
+    BASELINE_SCHEMA_VERSION,
+};
 
 /// Complete baseline table definitions for a fresh database.
 const BASE_SCHEMA_SQL: &str = "
@@ -277,8 +280,16 @@ const INDEX_SCHEMA_SQL: &str = "
         ON bans(ip_hash);
     CREATE INDEX IF NOT EXISTS idx_sessions_expires
         ON admin_sessions(expires_at);
-    CREATE INDEX IF NOT EXISTS idx_file_hashes
-        ON file_hashes(sha256);
+    CREATE INDEX IF NOT EXISTS idx_posts_file_path
+        ON posts(file_path) WHERE file_path IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_posts_thumb_path
+        ON posts(thumb_path) WHERE thumb_path IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_posts_audio_file_path
+        ON posts(audio_file_path) WHERE audio_file_path IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_file_hashes_file_path
+        ON file_hashes(file_path);
+    CREATE INDEX IF NOT EXISTS idx_file_hashes_thumb_path
+        ON file_hashes(thumb_path);
     CREATE INDEX IF NOT EXISTS idx_pending_fs_ops_created
         ON pending_fs_ops(created_at ASC);
     CREATE INDEX IF NOT EXISTS idx_jobs_pending
@@ -290,8 +301,14 @@ const INDEX_SCHEMA_SQL: &str = "
         WHERE status = 'open';
     CREATE INDEX IF NOT EXISTS idx_mod_log_created
         ON mod_log(created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_posts_thread_id
-        ON posts(thread_id);
+    CREATE INDEX IF NOT EXISTS idx_poll_options_poll_position
+        ON poll_options(poll_id, position, id);
+    CREATE INDEX IF NOT EXISTS idx_poll_votes_option_poll
+        ON poll_votes(option_id, poll_id);
+    CREATE INDEX IF NOT EXISTS idx_ban_appeals_status_created
+        ON ban_appeals(status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_ban_appeals_ip_created
+        ON ban_appeals(ip_hash, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_posts_media_processing_state
         ON posts(media_processing_state);
     CREATE INDEX IF NOT EXISTS idx_posts_ip_hash
@@ -313,6 +330,20 @@ const INDEX_SCHEMA_SQL: &str = "
 
 /// Obsolete theme index accepted only during the known legacy repair path.
 const LEGACY_THEME_SORT_INDEX: &str = "idx_themes_enabled_sort";
+/// Additive indexes introduced after the first package-version baseline.
+const ADDITIVE_BASELINE_INDEXES: [&str; 9] = [
+    "idx_posts_file_path",
+    "idx_posts_thumb_path",
+    "idx_posts_audio_file_path",
+    "idx_file_hashes_file_path",
+    "idx_file_hashes_thumb_path",
+    "idx_poll_options_poll_position",
+    "idx_poll_votes_option_poll",
+    "idx_ban_appeals_status_created",
+    "idx_ban_appeals_ip_created",
+];
+/// Redundant indexes removed when the additive index set is installed.
+const REDUNDANT_LEGACY_INDEXES: [&str; 2] = ["idx_file_hashes", "idx_posts_thread_id"];
 /// Board columns whose historical default was zero instead of the baseline value.
 const LEGACY_BOARD_ZERO_DEFAULT_COLUMNS: [&str; 4] = [
     "allow_editing",
@@ -324,8 +355,31 @@ const LEGACY_BOARD_ZERO_DEFAULT_COLUMNS: [&str; 4] = [
 /// Install the baseline into a fresh database or normalize an existing database.
 pub(super) fn install_or_migrate_schema(conn: &rusqlite::Connection) -> Result<()> {
     if is_fresh_database(conn)? {
-        install_baseline_schema(conn)?;
-        return Ok(());
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .context("Begin fresh schema installation transaction failed")?;
+        let result = (|| {
+            if !is_fresh_database(conn)? {
+                return Ok(false);
+            }
+            install_baseline_schema_in_transaction(conn)?;
+            Ok(true)
+        })();
+
+        match result {
+            Ok(installed) => {
+                if let Err(error) = conn.execute_batch("COMMIT") {
+                    drop(conn.execute_batch("ROLLBACK"));
+                    return Err(error).context("Commit fresh schema installation failed");
+                }
+                if installed {
+                    return verify_database_schema(conn);
+                }
+            }
+            Err(error) => {
+                drop(conn.execute_batch("ROLLBACK"));
+                return Err(error);
+            }
+        }
     }
 
     normalize_database_schema_version(conn)
@@ -366,10 +420,10 @@ pub(super) fn database_schema_status_label(conn: &rusqlite::Connection) -> Strin
     }
 }
 
-/// Install, stamp, and verify the baseline schema.
-fn install_baseline_schema(conn: &rusqlite::Connection) -> Result<()> {
+/// Install and stamp the baseline while the caller holds an immediate transaction.
+fn install_baseline_schema_in_transaction(conn: &rusqlite::Connection) -> Result<()> {
     create_baseline_schema_objects(conn)?;
-    stamp_schema_version(conn)?;
+    stamp_schema_version_in_transaction(conn)?;
     verify_database_schema(conn)
 }
 
@@ -523,13 +577,11 @@ fn repair_known_legacy_baseline_drift(conn: &rusqlite::Connection) -> Result<()>
 
     let expected = expected_schema_shape()?;
     let actual = schema_shape(conn)?;
-    if !can_repair_known_legacy_baseline_drift(&expected, &actual) {
+    if actual == expected {
         return Ok(());
     }
-
-    if actual.objects.contains_key(LEGACY_THEME_SORT_INDEX) {
-        conn.execute_batch("DROP INDEX IF EXISTS idx_themes_enabled_sort")
-            .context("Drop legacy themes sort index failed")?;
+    if !can_repair_known_legacy_baseline_drift(&expected, &actual) {
+        return Ok(());
     }
 
     if boards_table_requires_baseline_rebuild(&expected, &actual) {
@@ -537,11 +589,14 @@ fn repair_known_legacy_baseline_drift(conn: &rusqlite::Connection) -> Result<()>
         ensure_board_access_invariants(conn)?;
     }
 
-    Ok(())
+    apply_additive_index_repairs(conn)
 }
 
-/// Return whether a recorded numeric version belongs to the repairable legacy range.
+/// Return whether a recorded version belongs to a recognized repairable baseline.
 fn is_known_legacy_schema_version(version: Option<&str>) -> bool {
+    if version == Some(BASELINE_SCHEMA_VERSION) {
+        return true;
+    }
     match version.and_then(|value| value.parse::<i64>().ok()) {
         Some(1..=41) => true,
         Some(_) | None => false,
@@ -554,10 +609,13 @@ fn can_repair_known_legacy_baseline_drift(expected: &SchemaShape, actual: &Schem
         && tables_are_legacy_repairable(expected, actual)
 }
 
-/// Compare schema objects while accepting the one obsolete theme index.
+/// Compare schema objects while accepting only recognized additive index drift.
 fn schema_objects_are_legacy_repairable(expected: &SchemaShape, actual: &SchemaShape) -> bool {
     for (name, expected_object) in &expected.objects {
         let Some(actual_object) = actual.objects.get(name) else {
+            if ADDITIVE_BASELINE_INDEXES.contains(&name.as_str()) {
+                continue;
+            }
             return false;
         };
         if actual_object.kind != expected_object.kind {
@@ -583,10 +641,29 @@ fn schema_objects_are_legacy_repairable(expected: &SchemaShape, actual: &SchemaS
         {
             continue;
         }
+        if REDUNDANT_LEGACY_INDEXES.contains(&name.as_str())
+            && actual_object.kind == "index"
+            && actual_object
+                .sql
+                .as_deref()
+                .is_some_and(|sql| is_redundant_legacy_index(name, sql))
+        {
+            continue;
+        }
         return false;
     }
 
     true
+}
+
+/// Return whether SQL exactly describes a removed redundant index.
+fn is_redundant_legacy_index(name: &str, sql: &str) -> bool {
+    let expected = match name {
+        "idx_file_hashes" => "CREATE INDEX idx_file_hashes ON file_hashes(sha256)",
+        "idx_posts_thread_id" => "CREATE INDEX idx_posts_thread_id ON posts(thread_id)",
+        _ => return false,
+    };
+    sql == normalize_schema_sql(expected)
 }
 
 /// Return whether SQL exactly describes the obsolete theme sort index.
@@ -605,7 +682,7 @@ fn tables_are_legacy_repairable(expected: &SchemaShape, actual: &SchemaShape) ->
         let repairable = match table.as_str() {
             "boards" => boards_table_is_legacy_repairable(expected_table, actual_table),
             "themes" => themes_table_is_legacy_repairable(expected_table, actual_table),
-            _ => actual_table == expected_table,
+            _ => table_is_additive_index_repairable(expected_table, actual_table),
         };
         if !repairable {
             return false;
@@ -613,6 +690,25 @@ fn tables_are_legacy_repairable(expected: &SchemaShape, actual: &SchemaShape) ->
     }
 
     true
+}
+
+/// Compare a table while accepting missing additive and present redundant indexes.
+fn table_is_additive_index_repairable(expected: &TableShape, actual: &TableShape) -> bool {
+    if actual.columns != expected.columns || actual.foreign_keys != expected.foreign_keys {
+        return false;
+    }
+
+    for (name, expected_index) in &expected.indexes {
+        match actual.indexes.get(name) {
+            Some(actual_index) if actual_index == expected_index => {}
+            None if ADDITIVE_BASELINE_INDEXES.contains(&name.as_str()) => {}
+            Some(_) | None => return false,
+        }
+    }
+
+    actual.indexes.keys().all(|name| {
+        expected.indexes.contains_key(name) || REDUNDANT_LEGACY_INDEXES.contains(&name.as_str())
+    })
 }
 
 /// Return whether the themes table differs only by its obsolete sort index.
@@ -624,6 +720,35 @@ fn themes_table_is_legacy_repairable(expected: &TableShape, actual: &TableShape)
     let mut actual_indexes = actual.indexes.clone();
     actual_indexes.remove(LEGACY_THEME_SORT_INDEX);
     actual_indexes == expected.indexes
+}
+
+/// Atomically install the additive indexes and remove exact obsolete indexes.
+fn apply_additive_index_repairs(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("Begin additive index migration failed")?;
+    let result = (|| {
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_themes_enabled_sort;
+             DROP INDEX IF EXISTS idx_file_hashes;
+             DROP INDEX IF EXISTS idx_posts_thread_id;",
+        )
+        .context("Remove obsolete indexes failed")?;
+        create_indexes(conn).context("Install additive indexes failed")
+    })();
+
+    match result {
+        Ok(()) => match conn.execute_batch("COMMIT") {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                drop(conn.execute_batch("ROLLBACK"));
+                Err(error).context("Commit additive index migration failed")
+            }
+        },
+        Err(error) => {
+            drop(conn.execute_batch("ROLLBACK"));
+            Err(error)
+        }
+    }
 }
 
 /// Return whether a legacy boards table can be safely rebuilt.
@@ -1371,6 +1496,12 @@ mod tests {
         )?)
     }
 
+    fn query_plan_details(conn: &rusqlite::Connection, sql: &str) -> Result<Vec<String>> {
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(3))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     fn rebuild_boards_with_historical_v41_shape(conn: &rusqlite::Connection) -> Result<()> {
         conn.execute_batch(
             r"
@@ -1482,6 +1613,12 @@ mod tests {
             object_exists(&conn, "index", "idx_posts_one_op_per_thread")?,
             "one-OP invariant index should be installed"
         );
+        for index in super::ADDITIVE_BASELINE_INDEXES {
+            assert!(
+                object_exists(&conn, "index", index)?,
+                "additive baseline index {index} should be installed"
+            );
+        }
         assert!(
             object_exists(&conn, "index", "idx_banner_assets_scope_sort")?,
             "banner scope index should be installed"
@@ -1499,6 +1636,176 @@ mod tests {
             "board access-mode trigger should be installed"
         );
         verify_database_schema(&conn)?;
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn concurrent_fresh_installers_converge_on_one_complete_schema() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let database_path = temp_dir.path().join("concurrent-install.sqlite3");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let results = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..2 {
+                let path = database_path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                handles.push(scope.spawn(move || -> Result<()> {
+                    let conn = rusqlite::Connection::open(path)?;
+                    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+                    barrier.wait();
+                    install_or_migrate_schema(&conn)
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .map_err(|_| anyhow::anyhow!("schema installer thread panicked"))?
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
+        assert_eq!(results.len(), 2, "both schema installers should finish");
+
+        let conn = rusqlite::Connection::open(database_path)?;
+        verify_database_schema(&conn)?;
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn recognized_baseline_index_drift_is_repaired_without_data_loss() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        create_baseline_schema_objects(&conn)?;
+        for index in super::ADDITIVE_BASELINE_INDEXES {
+            conn.execute_batch(&format!("DROP INDEX {index}"))?;
+        }
+        conn.execute_batch(
+            "CREATE INDEX idx_file_hashes ON file_hashes(sha256);
+             CREATE INDEX idx_posts_thread_id ON posts(thread_id);
+             CREATE TABLE schema_version (version TEXT NOT NULL PRIMARY KEY);",
+        )?;
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?1)",
+            [baseline_schema_version()],
+        )?;
+        conn.execute(
+            "INSERT INTO boards (id, short_name, name) VALUES (1, 'b', 'Random')",
+            [],
+        )?;
+
+        normalize_database_schema_version(&conn)?;
+
+        assert_eq!(
+            conn.query_row("SELECT name FROM boards WHERE id = 1", [], |row| {
+                row.get::<_, String>(0)
+            })?,
+            "Random",
+            "additive index repair must preserve application data"
+        );
+        for index in super::ADDITIVE_BASELINE_INDEXES {
+            assert!(
+                object_exists(&conn, "index", index)?,
+                "missing additive index {index} should be repaired"
+            );
+        }
+        for index in super::REDUNDANT_LEGACY_INDEXES {
+            assert!(
+                !object_exists(&conn, "index", index)?,
+                "redundant legacy index {index} should be removed"
+            );
+        }
+        verify_database_schema(&conn)?;
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn representative_query_plans_use_the_audited_indexes() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        install_or_migrate_schema(&conn)?;
+
+        let media_plan = query_plan_details(
+            &conn,
+            "EXPLAIN QUERY PLAN
+             SELECT 1 FROM posts
+             WHERE file_path = 'b/file.webp'
+                OR thumb_path = 'b/file.webp'
+                OR audio_file_path = 'b/file.webp'
+             LIMIT 1",
+        )?;
+        for index in [
+            "idx_posts_file_path",
+            "idx_posts_thumb_path",
+            "idx_posts_audio_file_path",
+        ] {
+            assert!(
+                media_plan.iter().any(|detail| detail.contains(index)),
+                "media reference plan should use {index}: {media_plan:?}"
+            );
+        }
+
+        let poll_plan = query_plan_details(
+            &conn,
+            "EXPLAIN QUERY PLAN
+             SELECT po.id, po.poll_id, po.text, po.position,
+                    (SELECT COUNT(*) FROM poll_votes AS pv
+                     WHERE pv.option_id = po.id AND pv.poll_id = po.poll_id)
+             FROM poll_options AS po
+             WHERE po.poll_id = 1
+             ORDER BY po.position ASC",
+        )?;
+        for index in [
+            "idx_poll_options_poll_position",
+            "idx_poll_votes_option_poll",
+        ] {
+            assert!(
+                poll_plan.iter().any(|detail| detail.contains(index)),
+                "poll plan should use {index}: {poll_plan:?}"
+            );
+        }
+        assert!(
+            poll_plan
+                .iter()
+                .all(|detail| !detail.contains("USE TEMP B-TREE")),
+            "poll plan should not require temporary grouping or sorting: {poll_plan:?}"
+        );
+
+        let appeal_status_plan = query_plan_details(
+            &conn,
+            "EXPLAIN QUERY PLAN
+             SELECT id FROM ban_appeals
+             WHERE status = 'open' ORDER BY created_at DESC LIMIT 200",
+        )?;
+        assert!(
+            appeal_status_plan
+                .iter()
+                .any(|detail| detail.contains("idx_ban_appeals_status_created")),
+            "open-appeal plan should use the status/time index: {appeal_status_plan:?}"
+        );
+        let appeal_ip_plan = query_plan_details(
+            &conn,
+            "EXPLAIN QUERY PLAN
+             SELECT COUNT(*) FROM ban_appeals
+             WHERE ip_hash = 'address-hash' AND created_at > 1",
+        )?;
+        assert!(
+            appeal_ip_plan
+                .iter()
+                .any(|detail| detail.contains("idx_ban_appeals_ip_created")),
+            "recent-appeal plan should use the address/time index: {appeal_ip_plan:?}"
+        );
         Ok(())
     }
 

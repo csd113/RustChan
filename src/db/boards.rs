@@ -211,12 +211,35 @@ pub fn set_media_prune_settings(
     enabled: bool,
     max_size_bytes: u64,
 ) -> Result<()> {
-    set_site_setting(conn, MEDIA_AUTO_PRUNE_ENABLED_KEY, &enabled.to_string())?;
-    set_site_setting(
-        conn,
-        MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY,
-        &max_size_bytes.to_string(),
-    )
+    conn.execute_batch("SAVEPOINT set_media_prune_settings")
+        .context("Begin media-prune settings savepoint")?;
+    let result = (|| {
+        set_site_setting(conn, MEDIA_AUTO_PRUNE_ENABLED_KEY, &enabled.to_string())?;
+        set_site_setting(
+            conn,
+            MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY,
+            &max_size_bytes.to_string(),
+        )
+    })();
+    match result {
+        Ok(()) => {
+            if let Err(error) = conn.execute_batch("RELEASE SAVEPOINT set_media_prune_settings") {
+                drop(conn.execute_batch(
+                    "ROLLBACK TO SAVEPOINT set_media_prune_settings;
+                     RELEASE SAVEPOINT set_media_prune_settings",
+                ));
+                return Err(error).context("Commit media-prune settings");
+            }
+            Ok(())
+        }
+        Err(error) => {
+            drop(conn.execute_batch(
+                "ROLLBACK TO SAVEPOINT set_media_prune_settings;
+                 RELEASE SAVEPOINT set_media_prune_settings",
+            ));
+            Err(error)
+        }
+    }
 }
 
 /// Returns the admin-configured site name, or falls back to `CONFIG.forum_name`.
@@ -630,7 +653,7 @@ pub fn create_board_with_media_flags(
 /// # Errors
 /// Returns an error if the database operation fails or the board id is not found.
 pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Result<()> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let board_nsfw: bool = tx.query_row(
         "SELECT nsfw FROM boards WHERE id = ?1",
         params![id],
@@ -725,7 +748,7 @@ pub fn update_board_settings(
     access_mode: BoardAccessMode,
     access_password_hash: &str,
 ) -> Result<()> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let current_nsfw: bool = tx.query_row(
         "SELECT nsfw FROM boards WHERE id = ?1",
         params![id],
@@ -1096,10 +1119,43 @@ fn post_table_columns(conn: &rusqlite::Connection) -> Result<HashSet<String>> {
 mod tests {
     use super::{
         create_board, create_board_with_media_flags, delete_board, get_all_boards_with_stats,
-        get_board_by_short, get_site_stats,
+        get_board_by_short, get_site_setting, get_site_stats, set_media_prune_settings,
+        MEDIA_AUTO_PRUNE_ENABLED_KEY, MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY,
     };
     use anyhow::{Context as _, Result};
     use rusqlite::Connection;
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn media_prune_settings_roll_back_when_the_second_write_fails() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        conn.execute_batch(
+            "CREATE TRIGGER fail_media_limit
+             BEFORE INSERT ON site_settings
+             WHEN NEW.key = 'media_max_active_content_size_bytes'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected media setting failure');
+             END;",
+        )?;
+
+        assert!(
+            set_media_prune_settings(&conn, true, 1024).is_err(),
+            "injected second write should fail"
+        );
+        assert!(
+            get_site_setting(&conn, MEDIA_AUTO_PRUNE_ENABLED_KEY)?.is_none(),
+            "the first setting should roll back"
+        );
+        assert!(
+            get_site_setting(&conn, MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY)?.is_none(),
+            "the failing setting should remain absent"
+        );
+        Ok(())
+    }
 
     #[test]
     #[expect(

@@ -1203,27 +1203,12 @@ pub(in crate::server) async fn vote_handler(
             let (poll_id, thread_id, board_short) = db::get_poll_context(&conn, option_id)?
                 .ok_or_else(|| AppError::NotFound("Poll option not found.".into()))?;
 
-            let now = chrono::Utc::now().timestamp();
-            let expires_at: i64 = conn.query_row(
-                "SELECT expires_at FROM polls WHERE id = ?1",
-                rusqlite::params![poll_id],
-                |r| r.get(0),
-            )?;
-            if expires_at <= now {
-                return Err(AppError::BadRequest("This poll has closed.".into()));
+            let recorded = db::cast_vote(&conn, poll_id, option_id, &ip_hash)?;
+            if !recorded {
+                return Err(AppError::BadRequest(
+                    "This poll has closed or you have already voted.".into(),
+                ));
             }
-
-            // Verify option belongs to this poll
-            let belongs: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM poll_options WHERE id = ?1 AND poll_id = ?2",
-                rusqlite::params![option_id, poll_id],
-                |r| r.get(0),
-            )?;
-            if belongs == 0 {
-                return Err(AppError::BadRequest("Invalid poll option.".into()));
-            }
-
-            db::cast_vote(&conn, poll_id, option_id, &ip_hash)?;
             tracing::info!(
                 target: "board",
                 poll_id = poll_id,

@@ -308,7 +308,6 @@ pub(in crate::server) async fn admin_ban_and_delete(
 #[derive(Deserialize)]
 pub(in crate::server) struct AppealActionForm {
     appeal_id: i64,
-    ip_hash: Option<String>,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
@@ -358,8 +357,8 @@ pub(in crate::server) async fn accept_appeal(
             let conn = pool.get()?;
             let (admin_id, admin_name) =
                 super::require_admin_session_with_name(&conn, session_id.as_deref())?;
-            let ip = form.ip_hash.as_deref().unwrap_or("");
-            db::accept_ban_appeal(&conn, form.appeal_id, ip)?;
+            let ip_hash = db::accept_ban_appeal(&conn, form.appeal_id)?;
+            let ip_hash_prefix = ip_hash.chars().take(16).collect::<String>();
             if let Err(error) = db::log_mod_action(
                 &conn,
                 admin_id,
@@ -368,7 +367,10 @@ pub(in crate::server) async fn accept_appeal(
                 "ban",
                 None,
                 "",
-                &format!("appeal {} — ip unban", form.appeal_id),
+                &format!(
+                    "appeal {} — ip_hash={ip_hash_prefix} unbanned",
+                    form.appeal_id
+                ),
             ) {
                 tracing::error!(
                     target: "admin",

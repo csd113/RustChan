@@ -104,10 +104,21 @@ pub fn ensure_setup_available(conn: &rusqlite::Connection) -> Result<SetupState>
 /// # Errors
 /// Returns an error if the reopen marker cannot be persisted.
 pub fn reopen_setup(conn: &rusqlite::Connection, admin_id: i64) -> Result<()> {
-    let now = chrono::Utc::now().timestamp().to_string();
-    super::set_site_setting(conn, SETUP_REOPENED_AT_KEY, &now)?;
-    super::set_site_setting(conn, SETUP_REOPENED_BY_KEY, &admin_id.to_string())?;
-    Ok(())
+    conn.execute_batch("SAVEPOINT reopen_setup")
+        .context("begin reopen setup savepoint")?;
+    let result = (|| {
+        let now = chrono::Utc::now().timestamp().to_string();
+        super::set_site_setting(conn, SETUP_REOPENED_AT_KEY, &now)?;
+        super::set_site_setting(conn, SETUP_REOPENED_BY_KEY, &admin_id.to_string())?;
+        Ok(())
+    })();
+    finish_savepoint(
+        conn,
+        "RELEASE SAVEPOINT reopen_setup",
+        "ROLLBACK TO SAVEPOINT reopen_setup; RELEASE SAVEPOINT reopen_setup",
+        "release reopen setup savepoint",
+        result,
+    )
 }
 
 /// # Errors
@@ -124,15 +135,48 @@ pub fn close_reopened_setup(conn: &rusqlite::Connection) -> Result<()> {
 /// # Errors
 /// Returns an error if the setup completion marker cannot be persisted.
 pub fn mark_setup_complete(conn: &rusqlite::Connection) -> Result<()> {
-    let now = chrono::Utc::now().timestamp().to_string();
-    conn.execute(
-        "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![SETUP_COMPLETED_AT_KEY, now],
+    conn.execute_batch("SAVEPOINT mark_setup_complete")
+        .context("begin setup completion savepoint")?;
+    let result = (|| {
+        let now = chrono::Utc::now().timestamp().to_string();
+        conn.execute(
+            "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![SETUP_COMPLETED_AT_KEY, now],
+        )
+        .context("write setup completion marker")?;
+        close_reopened_setup(conn)
+    })();
+    finish_savepoint(
+        conn,
+        "RELEASE SAVEPOINT mark_setup_complete",
+        "ROLLBACK TO SAVEPOINT mark_setup_complete; RELEASE SAVEPOINT mark_setup_complete",
+        "release setup completion savepoint",
+        result,
     )
-    .context("write setup completion marker")?;
-    close_reopened_setup(conn)?;
-    Ok(())
+}
+
+/// Release a successful savepoint or roll all of its writes back on error.
+fn finish_savepoint<T>(
+    conn: &rusqlite::Connection,
+    release_sql: &'static str,
+    rollback_sql: &'static str,
+    release_context: &'static str,
+    result: Result<T>,
+) -> Result<T> {
+    match result {
+        Ok(value) => {
+            if let Err(error) = conn.execute_batch(release_sql) {
+                drop(conn.execute_batch(rollback_sql));
+                return Err(error).context(release_context);
+            }
+            Ok(value)
+        }
+        Err(error) => {
+            drop(conn.execute_batch(rollback_sql));
+            Err(error)
+        }
+    }
 }
 
 /// # Errors
@@ -283,6 +327,71 @@ mod tests {
         );
         assert!(state.completed, "completion marker should be preserved");
         assert!(!state.reopened, "reopen marker should be cleared");
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn reopen_setup_rolls_back_both_markers_when_the_second_write_fails() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        conn.execute_batch(
+            "CREATE TRIGGER fail_reopen_admin
+             BEFORE INSERT ON site_settings
+             WHEN NEW.key = 'setup_reopened_by'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected reopen failure');
+             END;",
+        )?;
+
+        assert!(
+            reopen_setup(&conn, 1).is_err(),
+            "injected write should fail"
+        );
+        assert!(
+            crate::db::get_site_setting(&conn, SETUP_REOPENED_AT_KEY)?.is_none(),
+            "the timestamp write should roll back"
+        );
+        assert!(
+            crate::db::get_site_setting(&conn, SETUP_REOPENED_BY_KEY)?.is_none(),
+            "the administrator marker should remain absent"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn completion_rolls_back_when_reopen_markers_cannot_be_cleared() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        reopen_setup(&conn, 1)?;
+        conn.execute_batch(
+            "CREATE TRIGGER fail_reopen_delete
+             BEFORE DELETE ON site_settings
+             WHEN OLD.key = 'setup_reopened_at'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected close failure');
+             END;",
+        )?;
+
+        assert!(
+            mark_setup_complete(&conn).is_err(),
+            "injected cleanup should fail"
+        );
+        assert!(
+            crate::db::get_site_setting(&conn, SETUP_COMPLETED_AT_KEY)?.is_none(),
+            "the completion marker should roll back"
+        );
+        assert!(
+            crate::db::get_site_setting(&conn, SETUP_REOPENED_AT_KEY)?.is_some(),
+            "the reopen marker should remain intact"
+        );
         Ok(())
     }
 }

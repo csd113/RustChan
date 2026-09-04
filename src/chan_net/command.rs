@@ -235,10 +235,10 @@ pub async fn chan_command(
     State(state): State<AppState>,
     ChanJson(cmd): ChanJson<Command>,
 ) -> Result<impl IntoResponse, super::ChanError> {
-    let conn = state.db.get()?;
-
+    let pool = state.db.clone();
     let (zip_bytes, filename) =
         tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<u8>, String)> {
+            let conn = pool.get()?;
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
