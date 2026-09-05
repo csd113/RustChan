@@ -1264,8 +1264,10 @@ struct ThreadUpdatesPayload {
     bump_time: i64,
     locked: bool,
     sticky: bool,
+    archived: bool,
     boards_version: u64,
     nav_html: String,
+    mobile_nav_html: String,
 }
 
 struct ActivityBadgeSettings {
@@ -1283,6 +1285,7 @@ struct ThreadUpdatesRender {
     bump_time: i64,
     locked: bool,
     sticky: bool,
+    archived: bool,
     board_id: i64,
     activity_badges: ActivityBadgeSettings,
     latest_thread_marker: Option<(i64, i64)>,
@@ -1443,6 +1446,7 @@ pub(in crate::server) async fn thread_updates(
                 bump_time: thread.bumped_at,
                 locked: thread.locked,
                 sticky: thread.sticky,
+                archived: thread.archived,
                 board_id: board.id,
                 activity_badges,
                 latest_thread_marker,
@@ -1478,6 +1482,8 @@ pub(in crate::server) async fn thread_updates(
     let boards = crate::templates::live_boards_snapshot();
     let nav_html =
         crate::templates::board_nav_html_for_preferences(boards.as_ref(), user_preferences);
+    let mobile_nav_html =
+        crate::templates::mobile_board_nav_html_for_preferences(boards.as_ref(), user_preferences);
     let payload = ThreadUpdatesPayload {
         html: updates.html,
         last_id: updates.last_id,
@@ -1487,8 +1493,10 @@ pub(in crate::server) async fn thread_updates(
         bump_time: updates.bump_time,
         locked: updates.locked,
         sticky: updates.sticky,
+        archived: updates.archived,
         boards_version,
         nav_html,
+        mobile_nav_html,
     };
 
     let mut response = (

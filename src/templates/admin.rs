@@ -1806,7 +1806,16 @@ pub fn admin_ip_history_page(
         data-report-title="Report Hashed IP Post"
         data-report-submit-label="Submit Admin Report"
         data-report-reason-required="1"
-        data-report-label="Report post No.{pid} for hashed IP {ip_hash}">report</button>"#,
+        data-report-label="Report post No.{pid} for hashed IP {ip_hash}">report</button>
+<noscript><form method="POST" action="/admin/ip/report" class="admin-ip-report-fallback">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="post_id" value="{pid}">
+  <input type="hidden" name="thread_id" value="{tid}">
+  <input type="hidden" name="board" value="{board}">
+  <input type="hidden" name="ip_hash" value="{ip_hash}">
+  <label>Report reason<input type="text" name="reason" required maxlength="512"></label>
+  <button type="submit" class="admin-toolbar-btn">report</button>
+</form></noscript>"#,
                 csrf = escape_html(csrf_token),
                 pid = post.id,
                 tid = post.thread_id,
@@ -1894,7 +1903,7 @@ pub fn admin_ip_history_page(
         r#"<div class="admin-panel">
 <h1>[ IP history ]</h1>
 <section class="admin-section">
-<h2>// posts by Hashed IP <code style="font-size:0.9rem">{hash_display}</code></h2>
+<h2>// posts by Hashed IP <code style="font-size:0.9rem;overflow-wrap:anywhere">{hash_display}</code></h2>
 <p style="color:var(--text-dim);font-size:0.85rem">
   {total} post{plural} found across all boards.
 </p>

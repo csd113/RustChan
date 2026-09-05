@@ -553,14 +553,14 @@ fn render_builder_preview(config: &ThemeBuilderConfig, slug: &str) -> String {
         <div class="theme-preview-meta">Reply No.102 <a href="#">>>101</a></div>
         <p>Reply card with metadata, quotelinks, and regular body text.</p>
       </article>
-      <form class="theme-preview-form">
-        <input type="text" value="Name">
-        <textarea rows="3">Body text</textarea>
+      <div class="theme-preview-form">
+        <input type="text" value="Name" aria-label="Preview name">
+        <textarea rows="3" aria-label="Preview body">Body text</textarea>
         <div class="theme-preview-actions">
           <button type="button">Post</button>
           <button type="button" class="theme-preview-secondary">Preview</button>
         </div>
-      </form>
+      </div>
       <div class="theme-preview-flashes">
         <div class="admin-flash flash-ok">Saved theme preview</div>
         <div class="admin-flash flash-error">Validation message preview</div>
@@ -780,7 +780,7 @@ fn render_admin_site_settings_section(
            style="font-family:inherit">
   </label>
   <label>Default theme
-    <select name="default_theme" style="font-family:inherit;padding:0.25rem 0.4rem;background:var(--bg-input);color:var(--text);border:1px solid var(--border)">
+    <select name="default_theme" style="font-family:inherit;padding:0.25rem 0.4rem;background:var(--bg-input);color:var(--text)">
       {enabled_theme_options}
     </select>
   </label>

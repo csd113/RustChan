@@ -355,6 +355,7 @@ pub(in crate::server) async fn board_archive(
 ) -> Result<Response> {
     const ARCHIVE_PER_PAGE: i64 = 20;
     let current_theme = current_theme_from_jar(&jar);
+    let user_preferences = user_preferences_from_jar(&jar);
     let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
@@ -420,14 +421,16 @@ pub(in crate::server) async fn board_archive(
                 &csrf_clone,
                 all_boards.as_ref(),
                 current_theme.as_deref(),
-                board.collapse_greentext,
+                user_preferences,
             ))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(html)).into_response())
+    let mut response = (jar, Html(html)).into_response();
+    crate::cache::insert_vary_cookie(response.headers_mut());
+    Ok(response)
 }
 
 // GET /:board/search

@@ -655,6 +655,7 @@ html:not([data-theme]) .board-nav-link:hover { text-shadow: 0 0 6px var(--green-
   margin: 0;
   color: var(--text-dim);
   font-size: 0.8rem;
+  overflow-wrap: anywhere;
 }
 
 .board-search-summary-results {
@@ -2700,6 +2701,8 @@ html.no-js .post-controls .report-fallback-form {
 }
 
 html.no-js .catalog-meta-row {
+  flex-direction: column;
+  align-items: stretch;
   justify-content: space-between;
   gap: 6px;
   padding: 0;
@@ -2713,7 +2716,9 @@ html.no-js .catalog-item:focus-within .catalog-card-actions {
   pointer-events: auto;
   transform: none;
   z-index: auto;
-  margin-left: auto;
+  margin-left: 0;
+  width: 100%;
+  min-width: 0;
 }
 
 html.no-js .catalog-thread-menu-toggle,
@@ -6646,6 +6651,12 @@ html:not([data-theme]) .thread-board-banner { text-shadow: 0 0 10px rgba(0,255,6
   gap: 5px;
 }
 
+html.no-js .thread-nav-refresh > button,
+html.no-js .thread-nav-refresh > label,
+html.no-js .poll-add-btn {
+  display: none;
+}
+
 .thread-nav-state {
   margin-left: auto;
   justify-content: flex-end;
@@ -6891,6 +6902,7 @@ html:not([data-theme]) .thread-nav-btn.active { text-shadow: 0 0 8px rgba(0,255,
 
 /* Floating new-replies pill */
 .new-replies-pill {
+  border: 0;
   position: fixed;
   bottom: 72px;
   right: 20px;

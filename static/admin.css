@@ -765,6 +765,7 @@ html:not([data-theme]) .admin-panel h1 {
 
 .theme-builder-controls {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.9rem;
 }
 
@@ -1012,6 +1013,8 @@ html:not([data-theme]) .admin-panel h1 {
 .theme-preview-form input,
 .theme-preview-form textarea {
   width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   background: var(--theme-preview-input-bg, var(--bg-input));
   color: var(--theme-preview-input-text, var(--text));
   border: 1px solid var(--theme-preview-input-border, var(--border));
@@ -1596,6 +1599,23 @@ html.js .admin-diagnostics-details[open] .admin-diagnostics-panel {
   flex-wrap: wrap;
   gap: 0.4rem;
   justify-content: flex-end;
+}
+
+.admin-diagnostics-actions button[hidden],
+html.no-js .admin-toolbar-btn[data-action="open-report"] {
+  display: none;
+}
+
+.admin-ip-report-fallback {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.4rem;
+}
+
+.admin-ip-report-fallback input[name="reason"] {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .admin-diagnostics-text {
@@ -2638,7 +2658,7 @@ html.js .admin-diagnostics-details[open] .admin-diagnostics-panel {
 @media (max-width: 900px) {
   .theme-manager-shell,
   .theme-guide-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .admin-banner-row {
@@ -3394,7 +3414,7 @@ html:not([data-theme]) .admin-login h1 {
   .theme-guide-grid,
   .theme-builder-shell,
   .theme-builder-colors-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .theme-builder-preview-card {
@@ -3648,6 +3668,7 @@ html:not([data-theme]) .admin-login h1 {
   .admin-moderation-card .admin-table td {
     display: block;
     width: 100%;
+    min-width: 0;
     box-sizing: border-box;
   }
 

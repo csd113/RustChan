@@ -360,11 +360,18 @@ function initSelfActionCountdowns(root) {
   });
 }
 
+function enablePosterHighlightControls(root) {
+  root.querySelectorAll('.poster-id-btn').forEach(function (button) {
+    button.disabled = false;
+  });
+}
+
 document.addEventListener('DOMContentLoaded', function () {
   applyQueuedPostSubmitAnchor();
   localizePostTimes(document);
   upgradeLegacySpoilers(document);
   initSelfActionCountdowns(document);
+  enablePosterHighlightControls(document);
   wireAudioMiniPlayers(document);
   wireMediaThumbFallbacks(document);
   syncMobileHeaderOffset();
@@ -450,6 +457,7 @@ window.addEventListener('resize', function () {
     localizePostTimes(container);
     upgradeLegacySpoilers(container);
     initSelfActionCountdowns(container);
+    enablePosterHighlightControls(container);
     wireAudioMiniPlayers(container);
     wireMediaThumbFallbacks(container);
     if (_origLocalize) _origLocalize(container);
@@ -1790,13 +1798,14 @@ window.requestConfirmation = requestConfirmation;
     }
   }
 
-  function videoRecorderMimeType() {
+  function videoRecorderMimeType(hasAudio) {
     if (!window.MediaRecorder) return '';
+    // Firefox accepts an Opus MIME type for a silent stream but never emits
+    // recording data. Request audio codecs only when an audio track exists.
+    var audioCodec = hasAudio ? ',opus' : '';
     var types = [
-      'video/webm;codecs=vp9,opus',
-      'video/webm;codecs=vp9',
-      'video/webm;codecs=vp8,opus',
-      'video/webm;codecs=vp8',
+      'video/webm;codecs=vp9' + audioCodec,
+      'video/webm;codecs=vp8' + audioCodec,
       'video/webm'
     ];
     for (var i = 0; i < types.length; i += 1) {
@@ -1891,7 +1900,7 @@ window.requestConfirmation = requestConfirmation;
     var prog = document.getElementById('compress-progress');
     var done = document.getElementById('compress-done-actions');
     if (acts) acts.style.display = which === 'actions' ? 'flex' : 'none';
-    if (prog) prog.style.display = which === 'progress' ? 'block' : 'none';
+    if (prog) prog.style.display = which === 'actions' ? 'none' : 'block';
     if (done) done.style.display = which === 'done' ? 'flex' : 'none';
   }
 
@@ -1958,8 +1967,12 @@ window.requestConfirmation = requestConfirmation;
       if (!window.MediaRecorder) { reject(new Error('MediaRecorder not supported')); return; }
       var mimeType = videoRecorderMimeType();
       if (!mimeType) { reject(new Error('No supported WebM encoder available in this browser')); return; }
-      var url = URL.createObjectURL(file);
       var videoEl = document.createElement('video');
+      if (typeof videoEl.captureStream !== 'function' && typeof videoEl.mozCaptureStream !== 'function') {
+        reject(new Error('Video compression is not supported in this browser. Please use a smaller file.'));
+        return;
+      }
+      var url = URL.createObjectURL(file);
       videoEl.preload = 'auto';
       videoEl.muted = true;
       videoEl.playsInline = true;
@@ -2022,6 +2035,7 @@ window.requestConfirmation = requestConfirmation;
         if (progressTimer) clearInterval(progressTimer);
         if (safetyTimer) clearTimeout(safetyTimer);
         var chunks = [];
+        mimeType = videoRecorderMimeType(stream.getAudioTracks().length > 0);
         try {
           recorder = new MediaRecorder(stream, {
             mimeType: mimeType,
@@ -2039,10 +2053,28 @@ window.requestConfirmation = requestConfirmation;
             currentBitsPerSec = Math.max(Math.floor(currentBitsPerSec * 0.6), 48000);
             _setProgress(12, 'Retrying at lower bitrate\u2026 attempt ' + (attempt + 1));
             window.setTimeout(function () {
+              if (settled) return;
+              stopMediaStream(stream);
+              videoEl.addEventListener('seeked', function restartRecording() {
+                if (settled) return;
+                videoEl.play().then(function () {
+                  if (settled) return;
+                  try {
+                    // Captured tracks end with playback; each retry needs fresh tracks.
+                    stream = videoEl.captureStream ? videoEl.captureStream() : videoEl.mozCaptureStream();
+                    startRecordingAttempt();
+                  } catch (e) {
+                    finish(e);
+                  }
+                }).catch(function (err) {
+                  finish(err || new Error('Video playback failed during compression'));
+                });
+              }, { once: true });
               try {
                 videoEl.currentTime = 0;
-              } catch (e) {}
-              startRecordingAttempt();
+              } catch (e) {
+                finish(e);
+              }
             }, 0);
             return;
           }
@@ -2050,9 +2082,11 @@ window.requestConfirmation = requestConfirmation;
         };
         recorder.onerror = function (e) { finish(e.error || new Error('MediaRecorder error')); };
         try {
-          videoEl.currentTime = 0;
-        } catch (e) {}
-        recorder.start(1000);
+          recorder.start(1000);
+        } catch (e) {
+          finish(e);
+          return;
+        }
         progressTimer = setInterval(function () {
           _setProgress(
             Math.min(10 + Math.round((videoEl.currentTime / duration) * 80), 90),
@@ -2721,6 +2755,35 @@ function clampPopupToViewport(anchor, popup) {
         status.dataset.state = state || '';
       }
 
+      var preferenceSavePending = false;
+      var preferenceSaveQueued = false;
+      var preferenceReloadNeeded = false;
+
+      function saveUserPreferences() {
+        if (preferenceSavePending) {
+          preferenceSaveQueued = true;
+          return;
+        }
+        preferenceSavePending = true;
+        persistUserPreferencesForm(form).then(function (saved) {
+          preferenceSavePending = false;
+          if (preferenceSaveQueued) {
+            preferenceSaveQueued = false;
+            // An older response can set cookies. Reapply the current selection
+            // and save it only after that response, so the newest choice wins.
+            mirrorUserPreferencesToCookies(form);
+            saveUserPreferences();
+            return;
+          }
+          if (!saved) {
+            setPreferenceStatus('Could not save. Try the change again.', 'error');
+            return;
+          }
+          setPreferenceStatus('Saved.', 'saved');
+          if (preferenceReloadNeeded) window.location.reload();
+        });
+      }
+
       form.addEventListener('change', function (event) {
         var control = event.target;
         if (!control || !control.name) return;
@@ -2739,19 +2802,10 @@ function clampPopupToViewport(anchor, popup) {
 
         mirrorUserPreferencesToCookies(form);
         setPreferenceStatus('Saving…', 'saving');
-        persistUserPreferencesForm(form).then(function (saved) {
-          if (!saved) {
-            setPreferenceStatus('Could not save. Try the change again.', 'error');
-            return;
-          }
-          setPreferenceStatus('Saved.', 'saved');
-          if (
-            control.name === 'preferred_board_view' ||
-            (control.name === 'hide_nsfw_boards' && !control.checked && !hadNsfwNodes)
-          ) {
-            window.location.reload();
-          }
-        });
+        preferenceReloadNeeded = preferenceReloadNeeded ||
+          control.name === 'preferred_board_view' ||
+          (control.name === 'hide_nsfw_boards' && !control.checked && !hadNsfwNodes);
+        saveUserPreferences();
       });
     });
   }
@@ -2831,7 +2885,8 @@ function clampPopupToViewport(anchor, popup) {
   var lastBoardsVersion = -1;
 
   // Floating new-replies pill
-  var pill = document.createElement('div');
+  var pill = document.createElement('button');
+  pill.type = 'button';
   pill.id = 'new-replies-pill';
   pill.className = 'new-replies-pill';
   pill.style.display = 'none';
@@ -2907,11 +2962,17 @@ function clampPopupToViewport(anchor, popup) {
       document.querySelectorAll('[data-role="thread-reply-count"]').forEach(function (el) {
         el.textContent = data.reply_count;
       });
+      if (data.reply_count > 0) {
+        container.querySelectorAll('.post.op .self-action-controls .del-btn').forEach(function (link) {
+          var controls = link.closest('.self-action-controls');
+          link.remove();
+          if (controls && !controls.querySelector('a')) {
+            window.clearInterval(controls._selfActionTimer);
+            controls.remove();
+          }
+        });
+      }
     }
-    var lockedEl = document.getElementById('thread-locked-indicator');
-    if (lockedEl && data.locked !== undefined) lockedEl.style.display = data.locked ? '' : 'none';
-    var stickyEl = document.getElementById('thread-sticky-indicator');
-    if (stickyEl && data.sticky !== undefined) stickyEl.style.display = data.sticky ? '' : 'none';
   }
 
   function collectRefreshPostIds() {
@@ -2953,6 +3014,40 @@ function clampPopupToViewport(anchor, popup) {
     fetchWithTimeout(url, { credentials: 'same-origin' }, 30000)
       .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
       .then(function (data) {
+        if (['locked', 'archived'].some(function (state) {
+          return typeof data[state] === 'boolean' && String(data[state]) !== container.dataset[state];
+        })) {
+          // Refresh badges, posting permissions, and moderation controls together.
+          // Persist any draft before replacing the server-rendered thread state.
+          flushReplyDraftStorage();
+          window.location.reload();
+          return;
+        }
+        if (typeof data.sticky === 'boolean' && String(data.sticky) !== container.dataset.sticky) {
+          container.dataset.sticky = String(data.sticky);
+          var meta = container.querySelector('.post.op .post-meta');
+          if (meta) {
+            var badges = meta.querySelector('.thread-state-badges');
+            if (data.sticky) {
+              if (!badges) {
+                badges = document.createElement('span');
+                badges.className = 'thread-state-badges';
+                meta.querySelector('.post-num').insertAdjacentElement('afterend', badges);
+              }
+              badges.insertAdjacentHTML('afterbegin', '<span class="thread-state-badge thread-state-badge-pin" title="Pinned" aria-label="Pinned">&#128204;</span>');
+            } else if (badges) {
+              var pin = badges.querySelector('.thread-state-badge-pin');
+              if (pin) pin.remove();
+              if (!badges.children.length) badges.remove();
+            }
+          }
+          document.querySelectorAll('.admin-toolbar input[name="action"]').forEach(function (input) {
+            if (input.value !== 'sticky' && input.value !== 'unsticky') return;
+            input.value = data.sticky ? 'unsticky' : 'sticky';
+            var button = input.form.querySelector('button[type="submit"]');
+            if (button) button.textContent = '\uD83D\uDCCC ' + (data.sticky ? 'Unsticky' : 'Sticky');
+          });
+        }
         consecutiveUpdateFailures = 0;
         if (autoOn && timer) {
           clearInterval(timer);
@@ -2979,6 +3074,10 @@ function clampPopupToViewport(anchor, popup) {
             var navEl = document.querySelector('nav.board-list');
             if (navEl) navEl.innerHTML = data.nav_html;
           }
+          if (data.mobile_nav_html !== undefined) {
+            var mobileNav = document.getElementById('mobile-board-menu-panel');
+            if (mobileNav) mobileNav.innerHTML = data.mobile_nav_html;
+          }
         }
         setStatus(
           data.count > 0
@@ -2996,9 +3095,8 @@ function clampPopupToViewport(anchor, popup) {
           15000 * Math.pow(2, Math.min(consecutiveUpdateFailures - 1, 2))
         );
         setStatus(
-          error && error.name === 'AbortError'
-            ? 'Update timed out. Retrying in ' + Math.round(delayMs / 1000) + 's.'
-            : 'Update failed. Retrying in ' + Math.round(delayMs / 1000) + 's.',
+          (error && error.name === 'AbortError' ? 'Update timed out. ' : 'Update failed. ') +
+            (autoOn ? 'Retrying in ' + Math.round(delayMs / 1000) + 's.' : 'Use Update now to retry.'),
           { state: 'error', persist: true }
         );
         setUpdateButtonsBusy(false);
@@ -3230,7 +3328,7 @@ function clampPopupToViewport(anchor, popup) {
 
   function syncQuotedPostState(root) {
     (root || document)
-      .querySelectorAll('a.quotelink[data-pid], a.backref[data-pid]')
+      .querySelectorAll('a.quotelink[data-pid]:not(.crosslink), a.backref[data-pid]')
       .forEach(function (link) {
         updatePostRefState(link);
       });
@@ -3284,6 +3382,7 @@ function clampPopupToViewport(anchor, popup) {
     clone.querySelectorAll('.post-controls, .admin-post-controls, .post-toggle-bar').forEach(function (n) { n.remove(); });
     popup.innerHTML = '';
     popup.appendChild(clone);
+    popup.dataset.previewKey = 'local:' + pid;
     popup.style.display = 'block';
     _popupTarget = pid;
     positionPopup(link);
@@ -3303,6 +3402,7 @@ function clampPopupToViewport(anchor, popup) {
   // Missing-post notices reuse the preview popup for consistent positioning.
   function showMissingPostPopup(link, pid) {
     clearTimeout(_hideTimer);
+    popup.dataset.previewKey = 'local:' + pid;
     popup.innerHTML =
       '<div class="missing-post-notice">' +
       '<span class="missing-post-icon">&#x2715;</span> ' +
@@ -3318,7 +3418,7 @@ function clampPopupToViewport(anchor, popup) {
   }
 
   function wireQuotelinks(root) {
-    root.querySelectorAll('a.quotelink[data-pid]').forEach(function (link) {
+    root.querySelectorAll('a.quotelink[data-pid]:not(.crosslink)').forEach(function (link) {
       if (link.dataset.quotelinkWired === '1') return;
       link.dataset.quotelinkWired = '1';
       var pid = link.getAttribute('data-pid');
@@ -3375,7 +3475,7 @@ function clampPopupToViewport(anchor, popup) {
     document.querySelectorAll('#thread-posts .backrefs').forEach(function (span) {
       span.innerHTML = '';
     });
-    document.querySelectorAll('#thread-posts a.quotelink[data-pid]').forEach(function (link) {
+    document.querySelectorAll('#thread-posts a.quotelink[data-pid]:not(.crosslink)').forEach(function (link) {
       var citedPid = link.getAttribute('data-pid');
       var postEl = link.closest('.post');
       if (!postEl) return;
@@ -3425,17 +3525,18 @@ function clampPopupToViewport(anchor, popup) {
     var key = board + ':' + pid;
     var popup = getCbPopup();
     if (!popup) return;
+    popup.dataset.previewKey = key;
     if (_cbCache[key]) {
       popup.innerHTML = _cbCache[key].html;
       popup.style.display = 'block';
       positionCbPopup(link, popup);
       return;
     }
-    if (_cbInFlight[key]) return;
-    _cbInFlight[key] = true;
     popup.innerHTML = '<div style="padding:8px;color:var(--text-dim)">loading\u2026</div>';
     popup.style.display = 'block';
     positionCbPopup(link, popup);
+    if (_cbInFlight[key]) return;
+    _cbInFlight[key] = true;
 
     fetch('/api/post/' + board + '/' + pid, { credentials: 'same-origin' })
       .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
@@ -3447,15 +3548,22 @@ function clampPopupToViewport(anchor, popup) {
           document.querySelectorAll('a.crosslink[data-crossboard="' + board + '"][data-pid="' + pid + '"]')
             .forEach(function (a) { a.href = directHref; });
         }
-        if (popup.style.display !== 'none') {
+        if (popup.style.display !== 'none' && popup.dataset.previewKey === key) {
           popup.innerHTML = _cbCache[key].html;
           positionCbPopup(link, popup);
         }
       })
-      .catch(function () {
+      .catch(function (error) {
         delete _cbInFlight[key];
-        _cbCache[key] = { html: '<div style="padding:8px;color:var(--red,#f55)">Post not found</div>', thread_id: 0 };
-        if (popup.style.display !== 'none') popup.innerHTML = _cbCache[key].html;
+        var missing = error === 404 || error === 410;
+        var errorHtml = '<div class="missing-post-notice">' +
+          (missing ? 'Post not found' : 'Preview unavailable. Click the link to retry.') + '</div>';
+        // A failed connection or permission check is not a missing post.
+        if (missing) _cbCache[key] = { html: errorHtml, thread_id: 0 };
+        if (popup.style.display !== 'none' && popup.dataset.previewKey === key) {
+          popup.innerHTML = errorHtml;
+          positionCbPopup(link, popup);
+        }
       });
   }
 
@@ -3491,34 +3599,37 @@ function clampPopupToViewport(anchor, popup) {
         function navigate(threadId) {
           window.location.href = '/' + board + '/thread/' + threadId + '#p' + pid;
         }
-        function showCbMissingError() {
+        function showCbError(missing) {
           var cbPopup = getCbPopup();
           if (!cbPopup) return;
-          link.classList.add('missing-post-ref');
-          link.setAttribute('title', 'post not found');
+          cbPopup.dataset.previewKey = key;
+          link.classList.toggle('missing-post-ref', missing);
+          if (missing) link.setAttribute('title', 'post not found');
+          else link.removeAttribute('title');
           cbPopup.innerHTML =
             '<div class="missing-post-notice">' +
             '<span class="missing-post-icon">&#x2715;</span> ' +
-            '<strong>&gt;&gt;&gt;/' + board + '/' + pid + '</strong> — post not found' +
-            '<span class="missing-post-sub">it may have been deleted</span>' +
+            '<strong>&gt;&gt;&gt;/' + board + '/' + pid + '</strong> — ' +
+            (missing ? 'post not found<span class="missing-post-sub">it may have been deleted</span>' :
+              'could not load post<span class="missing-post-sub">try the link again</span>') +
             '</div>';
           cbPopup.style.display = 'block';
           positionCbPopup(link, cbPopup);
           setTimeout(function () { if (cbPopup) cbPopup.style.display = 'none'; }, 3000);
         }
         if (_cbCache[key] && _cbCache[key].thread_id) { navigate(_cbCache[key].thread_id); return; }
-        if (_cbCache[key] && !_cbCache[key].thread_id) { showCbMissingError(); return; }
+        if (_cbCache[key] && !_cbCache[key].thread_id) { showCbError(true); return; }
         fetch('/api/post/' + board + '/' + pid, { credentials: 'same-origin' })
           .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
           .then(function (data) {
             if (data.thread_id) {
               navigate(data.thread_id);
             } else {
-              showCbMissingError();
+              showCbError(true);
             }
           })
-          .catch(function () {
-            showCbMissingError();
+          .catch(function (error) {
+            showCbError(error === 404 || error === 410);
           });
       });
     });
@@ -3743,21 +3854,26 @@ function togglePosterHighlights(threadId, posterId) {
 
 // Restore saved catalog controls on page load
 (function () {
+  var sortValue = 'bump';
+  var showComment = 'off';
   try {
-    var sortValue = sessionStorage.getItem('catalog_sort') || 'bump';
-    var sortSelect = document.getElementById('catalog-sort');
-    if (sortSelect) {
-      sortSelect.value = sortValue;
-      sortCatalog(sortValue);
-    }
-
-    var showComment = sessionStorage.getItem('catalog_show_comment') || 'off';
-    var commentSelect = document.getElementById('catalog-show-comment');
-    if (commentSelect) {
-      commentSelect.value = showComment;
-      setCatalogCommentVisibility(showComment);
-    }
+    sortValue = sessionStorage.getItem('catalog_sort') || 'bump';
+    showComment = sessionStorage.getItem('catalog_show_comment') === 'on' ? 'on' : 'off';
   } catch (e) {}
+  // Storage may be unavailable, malformed, or left over from an older version.
+  if (['bump', 'replies', 'created', 'last_reply'].indexOf(sortValue) === -1) sortValue = 'bump';
+  var sortSelect = document.getElementById('catalog-sort');
+  if (sortSelect) {
+    sortSelect.disabled = false;
+    sortSelect.value = sortValue;
+    sortCatalog(sortValue);
+  }
+  var commentSelect = document.getElementById('catalog-show-comment');
+  if (commentSelect) {
+    commentSelect.disabled = false;
+    commentSelect.value = showComment;
+    setCatalogCommentVisibility(showComment);
+  }
 })();
 
 // Centralised event delegation
@@ -3990,6 +4106,35 @@ document.addEventListener('submit', function (e) {
 });
 
 document.addEventListener('keydown', function (e) {
+  if (e.key === 'Tab') {
+    var dialogs = Array.prototype.filter.call(
+      document.querySelectorAll('[role="dialog"][aria-modal="true"]'),
+      function (dialog) { return dialog.getClientRects().length && !dialog.hidden; }
+    );
+    var dialog = dialogs[dialogs.length - 1];
+    if (dialog) {
+      var controls = Array.prototype.filter.call(
+        dialog.querySelectorAll('a[href], button, input, select, textarea, summary, [tabindex]'),
+        function (control) {
+          return !control.disabled && control.tabIndex >= 0 &&
+            !control.closest('[inert]') && control.getClientRects().length &&
+            window.getComputedStyle(control).visibility !== 'hidden';
+        }
+      );
+      var first = controls[0];
+      var last = controls[controls.length - 1];
+      if (!first) {
+        e.preventDefault();
+        dialog.setAttribute('tabindex', '-1');
+        dialog.focus();
+      } else if (!dialog.contains(document.activeElement) ||
+        (e.shiftKey && document.activeElement === first) ||
+        (!e.shiftKey && document.activeElement === last)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      }
+    }
+  }
   if (e.key === 'Escape') {
     if (ensureBanDeleteModal() && isModalOpen(_banDeleteModal)) {
       e.preventDefault();

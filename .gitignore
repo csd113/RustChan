@@ -47,7 +47,11 @@ pnpm-debug.log*
 /.tmp*/
 
 # Playwright tests and generated browser/play-test evidence.
-# Keep package manifests/lockfiles, configs, and CI tracked.
+# All browser-test infrastructure is local-only, including its npm metadata.
+/playwright*.config.*
+/package.json
+/package-lock.json
+/.github/workflows/e2e.yml
 /tests/e2e/
 /output/
 playwright-report/

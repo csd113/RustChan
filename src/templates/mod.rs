@@ -410,6 +410,24 @@ pub fn board_nav_html_for_preferences(boards: &[Board], preferences: UserPrefere
     .join(" ")
 }
 
+/// Renders the mobile navigation items for initial pages and live thread updates.
+pub(crate) fn mobile_board_nav_html_for_preferences(
+    boards: &[Board],
+    preferences: UserPreferences,
+) -> String {
+    let (sfw_boards, nsfw_boards) = board_nav_groups(boards);
+    let mut items = mobile_board_group_html("Boards", &sfw_boards, preferences, false);
+    if !preferences.hide_nsfw_boards {
+        items.push_str(&mobile_board_group_html(
+            "NSFW",
+            &nsfw_boards,
+            preferences,
+            true,
+        ));
+    }
+    items
+}
+
 // Auto-compress modal
 /// Returns the compress-modal overlay HTML.
 /// Dynamic size limits are embedded as data-max-image / data-max-video attributes
@@ -690,21 +708,11 @@ pub fn base_layout_with_preferences(
     current_path: &str,
     preferences: UserPreferences,
 ) -> String {
-    let (sfw_boards, nsfw_boards_all) = board_nav_groups(boards);
-    let nsfw_boards = if preferences.hide_nsfw_boards {
-        Vec::new()
-    } else {
-        nsfw_boards_all
-    };
     let board_links = board_nav_html_for_preferences(boards, preferences);
     let board_menu = if boards.is_empty() {
         String::new()
     } else {
-        let items = format!(
-            "{}{}",
-            mobile_board_group_html("Boards", &sfw_boards, preferences, false),
-            mobile_board_group_html("NSFW", &nsfw_boards, preferences, true)
-        );
+        let items = mobile_board_nav_html_for_preferences(boards, preferences);
         format!(
             r#"<details class="mobile-board-menu">
   <summary class="mobile-board-menu-btn" aria-label="Open board menu" aria-controls="mobile-board-menu-panel"><span class="mobile-board-menu-label">Boards</span></summary>
@@ -1315,6 +1323,9 @@ mod tests {
         assert!(html.contains(r#"<a href="/tech">tech</a>"#));
         assert!(!html.contains(r#"<a href="/tech/catalog">tech</a>"#));
         assert!(!html.contains(r">x</a>"));
+        assert!(html.contains(r#"class="mobile-board-link" href="/tech""#));
+        assert!(!html.contains(r#"href="/x/catalog""#));
+        assert!(!html.contains(r#"href="/x""#));
     }
 
     #[test]

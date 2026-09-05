@@ -22,6 +22,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
 <summary><span>// site health</span></summary>
 <div class="admin-dropdown-content admin-site-health" data-admin-health-jobs-url="/admin/site-health/jobs">
   <div class="admin-health-grid">{rows}</div>
+  <noscript><p class="admin-copy">Live job details require JavaScript. Refresh this page to update the counts.</p></noscript>
   {recent_jobs}
   <div class="admin-subsection admin-subsection-tight admin-health-tor" id="tor-status">
     <div class="admin-card-header">
@@ -46,8 +47,8 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
       <div class="admin-diagnostics-header">
         <h3 id="admin-diagnostics-title">// diagnostics</h3>
         <div class="admin-diagnostics-actions">
-          <button type="button" data-admin-diagnostics-copy>Copy</button>
-          <button type="button" data-admin-diagnostics-close>close</button>
+          <button type="button" data-admin-diagnostics-copy hidden>Copy</button>
+          <button type="button" data-admin-diagnostics-close hidden>close</button>
         </div>
       </div>
       <pre class="admin-diagnostics-text" data-admin-diagnostics-text>{diagnostics}</pre>
@@ -149,7 +150,7 @@ fn append_health_job_row(out: &mut String, label: &str, value: &str, key: &str, 
         };
         let _ = write!(
             out,
-            r#"<div class="admin-health-row admin-health-row-actions"><button type="button" class="admin-health-inspect-button admin-health-count-button" data-admin-health-toggle="failed" aria-expanded="false" aria-controls="admin-health-job-panel-failed"><span>{label} (<strong data-admin-health-job="{key}">{value}</strong>)</span></button><form method="POST" action="/admin/site-health/jobs/dismiss" class="admin-health-dismiss-form"><input type="hidden" name="_csrf" value="{csrf}"><button type="submit" data-admin-health-failed-dismiss{disabled_attr}>dismiss counter</button></form></div>"#,
+            r#"<div class="admin-health-row admin-health-row-actions"><button type="button" class="admin-health-inspect-button admin-health-count-button" data-admin-health-toggle="failed" aria-expanded="false" aria-controls="admin-health-job-panel-failed" disabled><span>{label} (<strong data-admin-health-job="{key}">{value}</strong>)</span></button><form method="POST" action="/admin/site-health/jobs/dismiss" class="admin-health-dismiss-form"><input type="hidden" name="_csrf" value="{csrf}"><button type="submit" data-admin-health-failed-dismiss{disabled_attr}>dismiss counter</button></form></div>"#,
             label = escape_html(label),
             key = escape_html(key),
             value = escape_html(value),
@@ -166,7 +167,7 @@ fn append_health_job_row(out: &mut String, label: &str, value: &str, key: &str, 
         };
         let _ = write!(
             out,
-            r#"<div class="admin-health-row"><button type="button" class="admin-health-inspect-button admin-health-count-button" data-admin-health-toggle="{target}" aria-expanded="false" aria-controls="admin-health-job-panel-{target}"><span>{label} (<strong data-admin-health-job="{key}">{value}</strong>)</span></button></div>"#,
+            r#"<div class="admin-health-row"><button type="button" class="admin-health-inspect-button admin-health-count-button" data-admin-health-toggle="{target}" aria-expanded="false" aria-controls="admin-health-job-panel-{target}" disabled><span>{label} (<strong data-admin-health-job="{key}">{value}</strong>)</span></button></div>"#,
             label = escape_html(label),
             key = escape_html(key),
             target = escape_html(target),

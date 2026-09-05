@@ -115,7 +115,13 @@ function setAdminModalOpen(modal, open, displayValue) {
 
   function openHashTargetDetails() {
     if (!window.location.hash || window.location.hash.length < 2) return;
-    var id = decodeURIComponent(window.location.hash.slice(1));
+    var id;
+    try {
+      id = decodeURIComponent(window.location.hash.slice(1));
+    } catch (error) {
+      // A malformed URL fragment has no matching section; keep the panel usable.
+      return;
+    }
     if (!id) return;
     var target = document.getElementById(id);
     if (!target) return;
@@ -267,6 +273,7 @@ function setAdminModalOpen(modal, open, displayValue) {
       }
 
       if (closeButton) {
+        closeButton.hidden = false;
         closeButton.addEventListener('click', function () {
           details.open = false;
           syncDiagnosticsState();
@@ -277,6 +284,7 @@ function setAdminModalOpen(modal, open, displayValue) {
       }
 
       if (copyButton && text) {
+        copyButton.hidden = false;
         copyButton.addEventListener('click', function () {
           var value = text.textContent || '';
           copyTextToClipboard(value).then(function () {
@@ -1200,6 +1208,7 @@ function setAdminModalOpen(modal, open, displayValue) {
     }
 
     container.querySelectorAll('[data-admin-health-toggle]').forEach(function (button) {
+      button.disabled = false;
       button.addEventListener('click', function () {
         var target = button.getAttribute('data-admin-health-toggle');
         if (!details || !panels[target]) return;

@@ -192,7 +192,7 @@ pub fn delete_post_page(
 }
 
 /// Renders the top or bottom thread navigation controls.
-fn render_thread_nav(board: &Board, reply_count: i64, is_bottom: bool) -> String {
+fn render_thread_nav(board: &Board, thread: &Thread, is_bottom: bool) -> String {
     let jump_link = if is_bottom { "#top" } else { "#bottom" };
     let jump_label = if is_bottom { "Top" } else { "Bottom" };
     let nav_class = if is_bottom {
@@ -208,6 +208,7 @@ fn render_thread_nav(board: &Board, reply_count: i64, is_bottom: bool) -> String
     <a href="{jump_link}">[ {jump_label} ]</a>
   </div>
   <div class="thread-nav-group thread-nav-refresh">
+    <noscript><a href="/{board_short}/thread/{thread_id}">[ Update now ]</a></noscript>
     <button class="thread-nav-btn" type="button" data-action="fetch-updates" data-busy-label="[ Updating… ]">[ Update now ]</button>
     <label class="autoupdate-label">
       <input type="checkbox" data-role="autoupdate-toggle" data-action="autoupdate-toggle">
@@ -224,7 +225,8 @@ fn render_thread_nav(board: &Board, reply_count: i64, is_bottom: bool) -> String
         board_short = escape_html(&board.short_name),
         jump_link = jump_link,
         jump_label = jump_label,
-        reply_count = reply_count,
+        reply_count = thread.reply_count,
+        thread_id = thread.id,
     )
 }
 
@@ -419,7 +421,7 @@ pub fn thread_page(
         bn = escape_html(&board.name),
         access_badge = super::board::board_access_badge(board),
         admin_toolbar = admin_toolbar,
-        top_nav = render_thread_nav(board, thread.reply_count, false)
+        top_nav = render_thread_nav(board, thread, false)
     );
     body.push_str(thread_notice);
 
@@ -430,10 +432,13 @@ pub fn thread_page(
     let last_post_id = posts.iter().map(|p| p.id).max().unwrap_or(0);
     let _ = write!(
         body,
-        r#"<div id="thread-posts" data-activity-page="thread" data-thread-id="{tid}" data-board="{board}" data-last-id="{last}">"#,
+        r#"<div id="thread-posts" data-activity-page="thread" data-thread-id="{tid}" data-board="{board}" data-last-id="{last}" data-locked="{locked}" data-sticky="{sticky}" data-archived="{archived}">"#,
         tid = thread.id,
         board = escape_html(&board.short_name),
-        last = last_post_id
+        last = last_post_id,
+        locked = thread.locked,
+        sticky = thread.sticky,
+        archived = thread.archived,
     );
     for post in posts {
         body.push_str(&render_post(
@@ -446,8 +451,13 @@ pub fn thread_page(
                 admin_csrf_token: admin_csrf_token.map(str::to_owned),
                 show_media: true,
                 allow_editing: board.allow_editing,
-                allow_self_delete: board.allow_self_delete,
-                owned_post_controls: owned_post_controls.get(&post.id).cloned(),
+                allow_self_delete: board.allow_self_delete
+                    && (!post.is_op || thread.reply_count == 0),
+                owned_post_controls: if thread.locked || thread.archived {
+                    None
+                } else {
+                    owned_post_controls.get(&post.id).cloned()
+                },
                 show_poster_ids: board.show_poster_ids,
                 collapse_greentext: board.collapse_greentext,
                 thread_state: Some((thread.sticky, thread.locked, thread.archived)),
@@ -507,7 +517,7 @@ pub fn thread_page(
         ));
     }
     body.push_str("<div id=\"bottom\"></div>\n");
-    body.push_str(&render_thread_nav(board, thread.reply_count, true));
+    body.push_str(&render_thread_nav(board, thread, true));
 
     body.push_str(&compress_modal_script(
         board.max_image_size_bytes(),
@@ -904,7 +914,7 @@ pub fn render_post(
     let poster_id_html = poster_id.as_ref().map_or_else(String::new, |poster_id| {
         let chip_style = poster_id_chip_style(poster_id);
         format!(
-            r#" <button type="button" class="poster-id-btn" style="{chip_style}" data-action="toggle-poster-highlight" data-thread-id="{thread_id}" data-poster-id="{poster_id}">ID: {poster_id}</button>"#,
+            r#" <button type="button" class="poster-id-btn" style="{chip_style}" data-action="toggle-poster-highlight" data-thread-id="{thread_id}" data-poster-id="{poster_id}" disabled>ID: {poster_id}</button>"#,
             chip_style = chip_style,
             thread_id = post.thread_id,
             poster_id = escape_html(poster_id),
@@ -2313,6 +2323,62 @@ mod tests {
         );
         assert!(expiry.is_some(), "expiry should be parseable");
         assert!(expiry.is_some_and(|value| value > 0));
+    }
+
+    #[test]
+    /// Matches owner controls to the server's closed-thread and OP-deletion rules.
+    fn thread_page_hides_unavailable_owned_controls() {
+        let board = crate::models::Board {
+            allow_editing: true,
+            allow_self_delete: true,
+            ..crate::test_fixtures::sample_board()
+        };
+        let post = Post {
+            is_op: true,
+            ..sample_post()
+        };
+        let controls = std::collections::BTreeMap::from([(
+            post.id,
+            OwnedPostControls {
+                expires_at: i64::MAX,
+            },
+        )]);
+        for (locked, archived, replies, can_edit, can_delete) in [
+            (false, false, 0, true, true),
+            (true, false, 0, false, false),
+            (false, true, 0, false, false),
+            (false, false, 1, true, false),
+        ] {
+            let thread = Thread {
+                locked,
+                archived,
+                reply_count: replies,
+                ..sample_thread()
+            };
+            let html = thread_page(
+                &board,
+                &thread,
+                std::slice::from_ref(&post),
+                &controls,
+                "csrf",
+                std::slice::from_ref(&board),
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                true,
+                crate::templates::UserPreferences::default(),
+            );
+            assert_eq!(html.contains(r#"data-action="open-edit-modal""#), can_edit);
+            assert_eq!(html.contains(r#"class="del-btn""#), can_delete);
+            assert!(html.contains(&format!(r#"data-locked="{locked}""#)));
+            assert!(html.contains(&format!(r#"data-archived="{archived}""#)));
+        }
     }
 
     #[test]

@@ -7,7 +7,6 @@
 A self-hosted imageboard written in Rust.
 
 [![CI](https://github.com/csd113/RustChan/actions/workflows/ci.yml/badge.svg)](https://github.com/csd113/RustChan/actions/workflows/ci.yml)
-[![Browser E2E](https://github.com/csd113/RustChan/actions/workflows/e2e.yml/badge.svg)](https://github.com/csd113/RustChan/actions/workflows/e2e.yml)
 
 [Screenshots](#screenshots) · [Features](#features) · [Quick start](#quick-start) · [Configuration](#configuration) · [Administration](#administration-and-recovery) · [Development](#development)
 
@@ -205,15 +204,12 @@ cargo clippy --locked --workspace --all-targets --all-features
 cargo test --locked --workspace --all-features
 ```
 
-Browser tests use Playwright:
-
-```bash
-npm ci
-npx playwright install
-npm run test:e2e:ci
-```
-
-Some media tests need `ffmpeg`, `ffprobe`, and specific codecs. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.
+Browser regression tests use a local-only Playwright harness. Keep its configs,
+package metadata, tests, fixtures, and generated artifacts in the ignored paths
+listed in `.gitignore`; they are not distributed with the repository. When a
+local harness is available, run focused browser checks for UI changes, including
+JavaScript-disabled workflows. Media checks may require `ffmpeg` and `ffprobe`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
 
 ## Documentation
 

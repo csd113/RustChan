@@ -290,6 +290,9 @@ pub(super) fn new_thread_form(
     };
 
     let poll_option_rows = [render_poll_option_row(1), render_poll_option_row(2)].concat();
+    let extra_poll_option_rows: String = (3..=POLL_OPTION_MAX_COUNT)
+        .map(render_poll_option_row)
+        .collect();
     let name_value = prefill.map_or("", |state| state.name.as_str());
     let subject_value = prefill.map_or("", |state| state.subject.as_str());
     let body_value = prefill.map_or("", |state| state.body.as_str());
@@ -333,6 +336,7 @@ pub(super) fn new_thread_form(
             </div>
             <div id="poll-options-list" data-poll-option-maxlength="{poll_option_max_length}" data-poll-option-maxcount="{poll_option_max_count}">
               {poll_option_rows}
+              <noscript><details><summary>More poll options</summary>{extra_poll_option_rows}</details></noscript>
             </div>
             <button type="button" class="poll-add-btn" data-action="add-poll-option">+ Add Option</button>
             <div class="poll-creator-row poll-duration-row">
@@ -556,7 +560,10 @@ mod tests {
         assert!(html.contains(&format!(
             r#"data-poll-option-maxcount="{POLL_OPTION_MAX_COUNT}""#
         )));
-        assert_eq!(html.matches(r#"class="poll-option-input""#).count(), 2);
+        assert_eq!(
+            html.matches(r#"class="poll-option-input""#).count(),
+            POLL_OPTION_MAX_COUNT
+        );
     }
 
     #[test]
