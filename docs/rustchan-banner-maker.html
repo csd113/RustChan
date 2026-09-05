@@ -32,7 +32,7 @@
 
   html {
     background: var(--bg);
-    font-size: 13px;
+    font-size: 14px;
   }
 
   body {
@@ -74,6 +74,42 @@
   button:disabled {
     cursor: not-allowed;
     opacity: 0.55;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--green-bright);
+    outline-offset: 3px;
+  }
+
+  .upload-zone:focus-within {
+    outline: 2px solid var(--green-bright);
+    outline-offset: 3px;
+  }
+
+  .section-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .section-nav a {
+    padding: 6px 10px;
+    border: 1px solid var(--border-strong);
+    color: var(--text);
+  }
+
+  .status-message {
+    color: var(--green-pale);
+    overflow-wrap: anywhere;
+  }
+
+  .status-message:empty {
+    display: none;
+  }
+
+  .status-message.error {
+    color: var(--red);
   }
 
   a {
@@ -209,7 +245,7 @@
 
   .workspace {
     display: grid;
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(340px, 420px);
     gap: 16px;
     align-items: start;
   }
@@ -229,7 +265,7 @@
 
   .sidebar {
     width: 100%;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
     align-items: start;
   }
 
@@ -246,6 +282,7 @@
     border: 1px solid var(--border);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
     min-width: 0;
+    scroll-margin-top: 16px;
   }
 
   .card-head {
@@ -363,6 +400,8 @@
     border: 1px solid var(--border);
     padding: 7px 10px;
     cursor: pointer;
+    width: 100%;
+    text-align: left;
   }
 
   .tone-swatch {
@@ -502,6 +541,8 @@
     cursor: pointer;
     position: relative;
     transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+    text-transform: none;
+    letter-spacing: normal;
   }
 
   .upload-zone:hover,
@@ -547,7 +588,7 @@
 
   .layer-row {
     display: grid;
-    grid-template-columns: 48px minmax(0, 1fr) auto;
+    grid-template-columns: 48px minmax(0, 1fr);
     gap: 10px;
     align-items: center;
     padding: 9px;
@@ -562,6 +603,8 @@
   }
 
   .layer-row.hidden {
+    /* Hidden images remain in the list so they can be shown again. */
+    display: grid !important;
     opacity: 0.55;
   }
 
@@ -577,6 +620,8 @@
     min-width: 0;
     display: grid;
     gap: 2px;
+    text-align: left;
+    padding: 4px;
   }
 
   .layer-name {
@@ -600,6 +645,8 @@
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 4px;
+    grid-column: 1 / -1;
+    justify-content: flex-start;
   }
 
   .icon-btn {
@@ -622,7 +669,7 @@
 
   .panel-note {
     color: var(--text-dim);
-    font-size: 0.78rem;
+    font-size: 0.86rem;
     line-height: 1.6;
   }
 
@@ -648,6 +695,11 @@
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 6px;
+  }
+
+  #canvasSelectionBadge {
+    max-width: 20rem;
+    overflow-wrap: anywhere;
   }
 
   .canvas-shell {
@@ -734,7 +786,7 @@
     background: rgba(0, 0, 0, 0.54);
     border: 1px solid rgba(255, 255, 255, 0.08);
     color: rgba(196, 230, 198, 0.84);
-    font-size: 0.7rem;
+    font-size: 0.8rem;
     line-height: 1.4;
     letter-spacing: 0.02em;
   }
@@ -788,6 +840,7 @@
     display: flex;
     gap: 8px;
     padding: 0 14px 14px;
+    flex-wrap: wrap;
   }
 
   .hidden {
@@ -798,6 +851,13 @@
     margin: 0;
     border: 0;
     border-top: 1px solid var(--border);
+  }
+
+  @media (min-width: 1101px) and (min-height: 650px) {
+    .stage {
+      position: sticky;
+      top: 16px;
+    }
   }
 
   @media (max-width: 1100px) {
@@ -851,6 +911,34 @@
     .canvas-tip {
       max-width: none;
     }
+
+    .card-head {
+      flex-wrap: wrap;
+    }
+
+    .canvas-head-extra {
+      justify-content: flex-start;
+    }
+
+    .canvas-shell, .canvas-frame {
+      padding: 12px;
+    }
+
+    button, .section-nav a, input[type="text"], input[type="number"], select {
+      min-height: 44px;
+    }
+
+    .toggle-switch {
+      width: 48px;
+    }
+
+    .toggle-switch::after {
+      top: 12px;
+    }
+
+    .toggle-switch.on::after {
+      transform: translateX(26px);
+    }
   }
 </style>
 </head>
@@ -860,7 +948,14 @@
     <div class="hero-copy">
       <div class="hero-kicker">RustChan docs utility</div>
       <h1>Layered Banner Builder</h1>
-      <p>Compose 468×60 and 936×120 banners with stacked image overlays, live resize handles, and the same dark terminal feel as the rest of RustChan.</p>
+      <p>Choose a size, add images or text, then download your banner. Everything stays in your browser; download before closing this page.</p>
+      <nav class="section-nav" aria-label="Editor sections">
+        <a href="#canvasSection">Canvas</a>
+        <a href="#backgroundSection">Background</a>
+        <a href="#imagesSection">Images</a>
+        <a href="#textSection">Text</a>
+        <a href="#exportSection">Export</a>
+      </nav>
     </div>
     <div class="hero-meta">
       <div class="badge-row">
@@ -868,7 +963,7 @@
         <span class="badge">Layered export</span>
         <span class="badge">WebP output</span>
       </div>
-      <div class="size-toggle" aria-label="Banner size">
+      <div class="size-toggle" role="group" aria-label="Banner size">
         <button class="size-btn active" data-w="468" data-h="60" type="button">468 × 60</button>
         <button class="size-btn" data-w="936" data-h="120" type="button">936 × 120</button>
       </div>
@@ -876,237 +971,7 @@
   </header>
 
   <main class="workspace">
-    <aside class="sidebar">
-      <section class="card">
-        <div class="card-head">
-          <span class="card-title">Background</span>
-          <span class="mini-note">site-style fill</span>
-        </div>
-        <div class="card-body">
-          <div class="grid grid-2">
-            <div class="field">
-              <label>Base Color</label>
-              <div class="tone-row" data-color-target="bgColor1">
-                <div class="tone-swatch" id="bgSwatch1"></div>
-                <span class="tone-value" id="bgHex1">#0A0F0A</span>
-              </div>
-              <input type="color" id="bgColor1" value="#0a0f0a">
-            </div>
-            <div class="field">
-              <label>Gradient Color</label>
-              <div class="tone-row" data-color-target="bgColor2">
-                <div class="tone-swatch" id="bgSwatch2"></div>
-                <span class="tone-value" id="bgHex2">#101612</span>
-              </div>
-              <input type="color" id="bgColor2" value="#101612">
-            </div>
-          </div>
-          <div class="field">
-            <label>Gradient Direction</label>
-            <div class="btn-group" id="gradDirGroup">
-              <button class="btn-tog active" data-val="none" type="button">None</button>
-              <button class="btn-tog" data-val="lr" type="button">Left to right</button>
-              <button class="btn-tog" data-val="rl" type="button">Right to left</button>
-              <button class="btn-tog" data-val="tb" type="button">Top to bottom</button>
-              <button class="btn-tog" data-val="bt" type="button">Bottom to top</button>
-            </div>
-          </div>
-          <p class="panel-note">Keep the background clean and let the stacked image layers do the heavy lifting when you want a more complex composition.</p>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="card-head">
-          <span class="card-title">Images</span>
-          <span class="mini-note" id="layerCountLabel">0 layers</span>
-        </div>
-        <div class="card-body">
-          <label class="upload-zone" id="uploadZone">
-            <input type="file" id="layerUpload" accept="image/png,image/jpeg,image/gif,image/webp,.png,.jpg,.jpeg,.gif,.webp,image/*" multiple>
-            <div class="upload-main">Drop images or GIFs here or click to upload</div>
-            <div class="upload-sub">Add as many layers as you want. Drag on the canvas to move, and use the handles to resize each image box.</div>
-          </label>
-
-          <div class="layer-list" id="layerList"></div>
-
-          <div id="layerPanel" class="panel-block hidden">
-            <div class="panel-block">
-              <div class="field">
-                <label>Layer Name</label>
-                <input type="text" id="layerName" placeholder="Layer name">
-              </div>
-              <div class="grid grid-2">
-                <div class="field">
-                  <label>Fit Mode</label>
-                  <select id="layerFit">
-                    <option value="contain">Contain</option>
-                    <option value="cover">Cover</option>
-                    <option value="stretch">Stretch</option>
-                  </select>
-                </div>
-                <div class="field">
-                  <label>Opacity</label>
-                  <div class="range-row">
-                    <input type="range" id="layerOpacity" min="0" max="100" value="100">
-                    <span class="range-value" id="layerOpacityVal">100%</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="panel-block">
-              <div class="grid grid-2">
-                <div class="field">
-                  <label>X</label>
-                  <input type="number" id="layerX" step="1">
-                </div>
-                <div class="field">
-                  <label>Y</label>
-                  <input type="number" id="layerY" step="1">
-                </div>
-                <div class="field">
-                  <label>Width</label>
-                  <input type="number" id="layerW" step="1" min="8">
-                </div>
-                <div class="field">
-                  <label>Height</label>
-                  <input type="number" id="layerH" step="1" min="8">
-                </div>
-              </div>
-              <div class="tool-row">
-                <button class="btn-soft" id="layerCenterBtn" type="button">Center</button>
-                <button class="btn-soft" id="layerFitCanvasBtn" type="button">Fit canvas</button>
-              </div>
-              <div class="tool-row">
-                <button class="btn-soft" id="layerUpBtn" type="button">Move up</button>
-                <button class="btn-soft" id="layerDownBtn" type="button">Move down</button>
-                <button class="btn-soft" id="layerDuplicateBtn" type="button">Duplicate</button>
-                <button class="btn-soft" id="layerDeleteBtn" type="button">Delete</button>
-              </div>
-              <p class="panel-note">The image box is what you resize in the viewer. Set the fit mode to control whether the image is preserved, cropped, or stretched inside that box.</p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="card-head">
-          <span class="card-title">Text</span>
-          <span class="mini-note">drag in text mode</span>
-        </div>
-        <div class="card-body">
-          <div class="field span-2">
-            <label>Message</label>
-            <textarea id="textInput" placeholder="Your banner text&#10;Add another line with Enter"></textarea>
-            <p class="panel-note">Switch the canvas mode to text, then drag the text block where you want it. Multi-line copy is supported here.</p>
-          </div>
-
-          <div class="grid grid-2">
-            <div class="field">
-              <label>Text Color</label>
-              <div class="tone-row" data-color-target="textColor">
-                <div class="tone-swatch" id="textSwatch"></div>
-                <span class="tone-value" id="textHex">#C7E7C7</span>
-              </div>
-              <input type="color" id="textColor" value="#c7e7c7">
-            </div>
-            <div class="field">
-              <label>Font Size</label>
-              <div class="range-row">
-                <input type="range" id="fontSize" min="8" max="68" value="24">
-                <span class="range-value" id="fontSizeVal">24px</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="grid grid-2">
-            <div class="field">
-              <label>Font Style</label>
-              <select id="fontStyle">
-                <option value="normal">Normal</option>
-                <option value="bold" selected>Bold</option>
-                <option value="italic">Italic</option>
-                <option value="bold italic">Bold Italic</option>
-              </select>
-            </div>
-            <div class="field">
-              <label>Font</label>
-              <select id="fontFace">
-                <option value="'Courier New', Consolas, 'Lucida Console', monospace" selected>RustChan Mono</option>
-                <option value="Consolas, 'Courier New', monospace">Consolas</option>
-                <option value="'Lucida Console', 'Courier New', monospace">Lucida Console</option>
-                <option value="'Arial Black', sans-serif">Arial Black</option>
-                <option value="Impact, sans-serif">Impact</option>
-                <option value="'Georgia', serif">Georgia</option>
-              </select>
-            </div>
-          </div>
-
-          <div class="field">
-            <label>Text Align</label>
-            <div class="btn-group" id="textAlignGroup">
-              <button class="btn-tog" data-val="left" type="button">Left</button>
-              <button class="btn-tog active" data-val="center" type="button">Center</button>
-              <button class="btn-tog" data-val="right" type="button">Right</button>
-            </div>
-          </div>
-
-          <hr class="soft-divider">
-
-          <div class="toggle-row">
-            <span class="toggle-label">Text shadow</span>
-            <div class="toggle-switch" id="shadowToggle" aria-label="Toggle text shadow"></div>
-          </div>
-
-          <div id="shadowControls" class="panel-block hidden">
-            <div class="grid grid-2">
-              <div class="field">
-                <label>Shadow Color</label>
-                <div class="tone-row" data-color-target="shadowColor">
-                  <div class="tone-swatch" id="shadowSwatch"></div>
-                  <span class="tone-value" id="shadowHex">#000000</span>
-                </div>
-                <input type="color" id="shadowColor" value="#000000">
-              </div>
-              <div class="field">
-                <label>Shadow Blur</label>
-                <div class="range-row">
-                  <input type="range" id="shadowBlur" min="0" max="30" value="6">
-                  <span class="range-value" id="shadowBlurVal">6px</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <p class="panel-note">Text stays above the image layers, which matches the way RustChan banners usually read on the live site.</p>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="card-head">
-          <span class="card-title">Export</span>
-          <span class="mini-note">preview and download</span>
-        </div>
-        <div class="card-body">
-          <button id="exportBtn" class="btn-primary" type="button">Preview and export WebP</button>
-          <div class="preview-wrap" id="previewWrap">
-            <div class="preview-head">
-              <span id="previewDims">preview · 468 × 60</span>
-              <span class="preview-tag">READY</span>
-            </div>
-            <div class="preview-body">
-              <img id="previewImg" alt="banner preview">
-            </div>
-            <div class="preview-actions">
-              <button id="downloadBtn" class="btn-primary" type="button" style="flex:1;">Download WebP</button>
-              <button id="closePreviewBtn" class="btn-ghost" type="button" style="flex:1;">Close preview</button>
-            </div>
-          </div>
-        </div>
-      </section>
-    </aside>
-
-    <section class="stage">
+    <section class="stage" id="canvasSection" tabindex="-1">
       <section class="card canvas-card">
         <div class="card-head">
           <span class="card-title">Canvas</span>
@@ -1129,20 +994,261 @@
             </div>
           </div>
           <div class="tool-row">
-            <div class="btn-group" id="modeGroup" aria-label="Canvas mode">
+            <div class="btn-group" id="modeGroup" role="group" aria-label="Canvas mode">
               <button class="btn-tog active" data-mode="images" type="button">Image layers</button>
               <button class="btn-tog" data-mode="text" type="button">Text drag</button>
             </div>
-            <span class="panel-note" style="margin:0;">Click an image to select it, drag the handles to resize, or switch to text mode to move the copy block.</span>
+            <button class="btn-soft" id="quickExportBtn" type="button">Preview / download</button>
           </div>
           <div class="canvas-frame" id="canvasFrame">
-            <canvas id="bannerCanvas"></canvas>
+            <canvas id="bannerCanvas" tabindex="0" aria-label="Banner editing canvas" aria-describedby="canvasTip canvasKeyboardHelp">Use the image and text controls to compose your banner.</canvas>
           </div>
+          <p class="panel-note" id="canvasKeyboardHelp">Focus the canvas to nudge with arrow keys (Shift = 10 px). Delete removes the selected image. Switch to Text drag to move text.</p>
         </div>
       </section>
     </section>
+    <aside class="sidebar">
+      <section class="card" id="backgroundSection" tabindex="-1">
+        <div class="card-head">
+          <span class="card-title">Background</span>
+          <span class="mini-note">site-style fill</span>
+        </div>
+        <div class="card-body">
+          <div class="grid grid-2">
+            <div class="field">
+              <label for="bgColor1">Base Color</label>
+              <button type="button" aria-label="Base color" class="tone-row" data-color-target="bgColor1">
+                <span class="tone-swatch" id="bgSwatch1"></span>
+                <span class="tone-value" id="bgHex1">#0A0F0A</span>
+              </button>
+              <input type="color" id="bgColor1" tabindex="-1" value="#0a0f0a">
+            </div>
+            <div class="field">
+              <label for="bgColor2">Gradient Color</label>
+              <button type="button" aria-label="Gradient color" class="tone-row" data-color-target="bgColor2">
+                <span class="tone-swatch" id="bgSwatch2"></span>
+                <span class="tone-value" id="bgHex2">#101612</span>
+              </button>
+              <input type="color" id="bgColor2" tabindex="-1" value="#101612">
+            </div>
+          </div>
+          <div class="field">
+            <label>Gradient Direction</label>
+            <div class="btn-group" id="gradDirGroup" role="group" aria-label="Gradient direction">
+              <button class="btn-tog active" data-val="none" type="button">None</button>
+              <button class="btn-tog" data-val="lr" type="button">Left to right</button>
+              <button class="btn-tog" data-val="rl" type="button">Right to left</button>
+              <button class="btn-tog" data-val="tb" type="button">Top to bottom</button>
+              <button class="btn-tog" data-val="bt" type="button">Bottom to top</button>
+            </div>
+          </div>
+          <p class="panel-note">Keep the background clean and let the stacked image layers do the heavy lifting when you want a more complex composition.</p>
+        </div>
+      </section>
+
+      <section class="card" id="imagesSection" tabindex="-1">
+        <div class="card-head">
+          <span class="card-title">Images</span>
+          <span class="mini-note" id="layerCountLabel">0 layers</span>
+        </div>
+        <div class="card-body">
+          <label class="upload-zone" id="uploadZone">
+            <input type="file" id="layerUpload" accept="image/png,image/jpeg,image/gif,image/webp,.png,.jpg,.jpeg,.gif,.webp,image/*" multiple>
+            <div class="upload-main">Drop images or GIFs here or click to upload</div>
+            <div class="upload-sub">Choose one or more images. GIFs export as a still image. Files are kept on this device.</div>
+          </label>
+          <p id="uploadStatus" class="status-message" role="status" aria-live="polite"></p>
+          <p class="panel-note">Layers are listed from back to front. Move up brings an image forward; Hide keeps it available in the list.</p>
+
+          <div class="layer-list" id="layerList"></div>
+
+          <div id="layerPanel" class="panel-block hidden">
+            <div class="panel-block">
+              <div class="field">
+                <label for="layerName">Layer Name</label>
+                <input type="text" id="layerName" placeholder="Layer name">
+              </div>
+              <div class="grid grid-2">
+                <div class="field">
+                  <label for="layerFit">Fit Mode</label>
+                  <select id="layerFit">
+                    <option value="contain">Contain — full image</option>
+                    <option value="cover">Cover — crop to fill</option>
+                    <option value="stretch">Stretch — fill box</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="layerOpacity">Opacity</label>
+                  <div class="range-row">
+                    <input type="range" id="layerOpacity" min="0" max="100" value="100">
+                    <span class="range-value" id="layerOpacityVal">100%</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel-block">
+              <div class="grid grid-2">
+                <div class="field">
+                  <label for="layerX">X</label>
+                  <input type="number" id="layerX" step="1">
+                </div>
+                <div class="field">
+                  <label for="layerY">Y</label>
+                  <input type="number" id="layerY" step="1">
+                </div>
+                <div class="field">
+                  <label for="layerW">Width</label>
+                  <input type="number" id="layerW" step="1" min="8">
+                </div>
+                <div class="field">
+                  <label for="layerH">Height</label>
+                  <input type="number" id="layerH" step="1" min="8">
+                </div>
+              </div>
+              <div class="tool-row">
+                <button class="btn-soft" id="layerCenterBtn" type="button">Center</button>
+                <button class="btn-soft" id="layerFitCanvasBtn" type="button">Fit canvas</button>
+              </div>
+              <div class="tool-row">
+                <button class="btn-soft" id="layerUpBtn" type="button">Move up</button>
+                <button class="btn-soft" id="layerDownBtn" type="button">Move down</button>
+                <button class="btn-soft" id="layerDuplicateBtn" type="button">Duplicate</button>
+                <button class="btn-soft" id="layerDeleteBtn" type="button">Delete</button>
+              </div>
+              <p class="panel-note">The image box is what you resize in the viewer. Set the fit mode to control whether the image is preserved, cropped, or stretched inside that box.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="textSection" tabindex="-1">
+        <div class="card-head">
+          <span class="card-title">Text</span>
+          <span class="mini-note">drag in text mode</span>
+        </div>
+        <div class="card-body">
+          <div class="field span-2">
+            <label for="textInput">Message</label>
+            <textarea id="textInput" placeholder="Your banner text&#10;Add another line with Enter"></textarea>
+            <p class="panel-note">Switch the canvas mode to text, then drag the text block where you want it. Multi-line copy is supported here.</p>
+            <div class="tool-row">
+              <button class="btn-soft" id="textMoveBtn" type="button">Move text on canvas</button>
+              <button class="btn-soft" id="textCenterBtn" type="button">Center text</button>
+            </div>
+          </div>
+
+          <div class="grid grid-2">
+            <div class="field">
+              <label for="textColor">Text Color</label>
+              <button type="button" aria-label="Text color" class="tone-row" data-color-target="textColor">
+                <span class="tone-swatch" id="textSwatch"></span>
+                <span class="tone-value" id="textHex">#C7E7C7</span>
+              </button>
+              <input type="color" id="textColor" tabindex="-1" value="#c7e7c7">
+            </div>
+            <div class="field">
+              <label for="fontSize">Font Size</label>
+              <div class="range-row">
+                <input type="range" id="fontSize" min="8" max="68" value="24">
+                <span class="range-value" id="fontSizeVal">24px</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid grid-2">
+            <div class="field">
+              <label for="fontStyle">Font Style</label>
+              <select id="fontStyle">
+                <option value="normal">Normal</option>
+                <option value="bold" selected>Bold</option>
+                <option value="italic">Italic</option>
+                <option value="bold italic">Bold Italic</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="fontFace">Font</label>
+              <select id="fontFace">
+                <option value="'Courier New', Consolas, 'Lucida Console', monospace" selected>RustChan Mono</option>
+                <option value="Consolas, 'Courier New', monospace">Consolas</option>
+                <option value="'Lucida Console', 'Courier New', monospace">Lucida Console</option>
+                <option value="'Arial Black', sans-serif">Arial Black</option>
+                <option value="Impact, sans-serif">Impact</option>
+                <option value="'Georgia', serif">Georgia</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Text Align</label>
+            <div class="btn-group" id="textAlignGroup" role="group" aria-label="Text alignment">
+              <button class="btn-tog" data-val="left" type="button">Left</button>
+              <button class="btn-tog active" data-val="center" type="button">Center</button>
+              <button class="btn-tog" data-val="right" type="button">Right</button>
+            </div>
+          </div>
+
+          <hr class="soft-divider">
+
+          <div class="toggle-row">
+            <span class="toggle-label">Text shadow</span>
+            <button class="toggle-switch" id="shadowToggle" type="button" role="switch" aria-checked="false" aria-label="Text shadow" aria-controls="shadowControls"></button>
+          </div>
+
+          <div id="shadowControls" class="panel-block hidden">
+            <div class="grid grid-2">
+              <div class="field">
+                <label for="shadowColor">Shadow Color</label>
+                <button type="button" aria-label="Shadow color" class="tone-row" data-color-target="shadowColor">
+                  <span class="tone-swatch" id="shadowSwatch"></span>
+                  <span class="tone-value" id="shadowHex">#000000</span>
+                </button>
+                <input type="color" id="shadowColor" tabindex="-1" value="#000000">
+              </div>
+              <div class="field">
+                <label for="shadowBlur">Shadow Blur</label>
+                <div class="range-row">
+                  <input type="range" id="shadowBlur" min="0" max="30" value="6">
+                  <span class="range-value" id="shadowBlurVal">6px</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <p class="panel-note">Text stays above the image layers, which matches the way RustChan banners usually read on the live site.</p>
+        </div>
+      </section>
+
+      <section class="card export-section" id="exportSection" tabindex="-1">
+        <div class="card-head">
+          <span class="card-title">Export</span>
+          <span class="mini-note">preview and download</span>
+        </div>
+        <div class="card-body">
+          <button id="exportBtn" class="btn-primary" type="button">Preview and export WebP</button>
+          <p class="panel-note">Exports a still image at the selected size, without selection outlines. Shortcut: Ctrl / ⌘ + K.</p>
+          <p id="exportStatus" class="status-message" role="status" aria-live="polite"></p>
+          <div class="preview-wrap" id="previewWrap">
+            <div class="preview-head">
+              <span id="previewDims">preview · 468 × 60</span>
+              <span class="preview-tag">READY</span>
+            </div>
+            <div class="preview-body">
+              <img id="previewImg" alt="banner preview">
+            </div>
+            <div class="preview-actions">
+              <button id="downloadBtn" class="btn-primary" type="button" style="flex:1;">Download WebP</button>
+              <button id="closePreviewBtn" class="btn-ghost" type="button" style="flex:1;">Close preview</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </aside>
+
   </main>
 </div>
+
+<noscript>This banner editor needs JavaScript enabled to draw and download images.</noscript>
 
 <script>
 const canvas = document.getElementById('bannerCanvas');
@@ -1322,7 +1428,8 @@ function getCanvasScale() {
 function applyCanvasSize() {
   canvas.width = W;
   canvas.height = H;
-  const frameWidth = Math.max(0, dom.canvasFrame.clientWidth - 32);
+  const frameStyle = getComputedStyle(dom.canvasFrame);
+  const frameWidth = Math.max(1, dom.canvasFrame.clientWidth - parseFloat(frameStyle.paddingLeft) - parseFloat(frameStyle.paddingRight));
   const scale = Math.min(getCanvasScale(), frameWidth > 0 ? frameWidth / W : getCanvasScale());
   canvas.style.width = `${Math.round(W * scale)}px`;
   canvas.style.height = `${Math.round(H * scale)}px`;
@@ -1348,6 +1455,7 @@ function setInteractionMode(mode) {
   interactionMode = mode;
   dom.modeGroup.querySelectorAll('.btn-tog').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.mode === mode);
+    btn.setAttribute('aria-pressed', String(btn.dataset.mode === mode));
   });
   if (mode === 'text') {
     dom.canvasTip.textContent = 'Text mode: drag the banner copy block on the canvas. Switch back to image mode to select, move, and resize the image layers.';
@@ -1379,6 +1487,12 @@ function setSize(button) {
   textState.y *= ratioH;
   textState.size = Math.max(8, Math.round(textState.size * ratioH));
   textState.shadowBlur = Math.max(0, Math.round(textState.shadowBlur * ratioH));
+  dom.fontSize.max = 68 * (H / 60);
+  dom.shadowBlur.max = 30 * (H / 60);
+  dom.fontSize.value = textState.size;
+  dom.shadowBlur.value = textState.shadowBlur;
+  dom.fontSizeVal.textContent = `${textState.size}px`;
+  dom.shadowBlurVal.textContent = `${textState.shadowBlur}px`;
 
   applyCanvasSize();
   renderLayerList();
@@ -1495,6 +1609,10 @@ function updateLayerPanelFromState() {
 }
 
 function renderLayerList() {
+  const focused = dom.layerList.contains(document.activeElement) ? document.activeElement : null;
+  const focusLayerId = focused?.dataset.layerId;
+  const focusAction = focused?.dataset.action;
+  const focusIndex = layers.findIndex(layer => layer.id === focusLayerId);
   dom.layerList.innerHTML = '';
   if (!layers.length) {
     const empty = document.createElement('div');
@@ -1503,6 +1621,7 @@ function renderLayerList() {
     dom.layerList.appendChild(empty);
     updateLayerCount();
     updateSelectionBadge();
+    if (focused) dom.layerUpload.focus({ preventScroll: true });
     return;
   }
 
@@ -1515,18 +1634,23 @@ function renderLayerList() {
     const thumb = document.createElement('img');
     thumb.className = 'layer-thumb';
     thumb.src = layer.src;
-    thumb.alt = layer.name;
+    thumb.alt = '';
 
-    const meta = document.createElement('div');
+    const meta = document.createElement('button');
+    meta.type = 'button';
     meta.className = 'layer-meta';
+    meta.dataset.layerId = layer.id;
+    meta.dataset.action = 'select';
+    meta.setAttribute('aria-label', `Select ${layer.name}`);
+    meta.setAttribute('aria-pressed', String(layer.id === selectedLayerId));
 
-    const name = document.createElement('div');
+    const name = document.createElement('span');
     name.className = 'layer-name';
     name.textContent = `${index + 1}. ${layer.name}`;
 
-    const sub = document.createElement('div');
+    const sub = document.createElement('span');
     sub.className = 'layer-sub';
-    sub.textContent = `${layer.fit} · ${layer.opacity}% · ${Math.round(layer.w)} × ${Math.round(layer.h)}`;
+    sub.textContent = `${layer.visible ? '' : 'Hidden · '}${layer.fit} · ${layer.opacity}% · ${Math.round(layer.w)} × ${Math.round(layer.h)}`;
 
     meta.appendChild(name);
     meta.appendChild(sub);
@@ -1549,6 +1673,10 @@ function renderLayerList() {
       btn.dataset.action = action;
       btn.dataset.layerId = layer.id;
       btn.textContent = label;
+      const actionNames = { toggle: layer.visible ? 'Hide' : 'Show', up: 'Bring forward', down: 'Send backward', copy: 'Duplicate', delete: 'Delete' };
+      btn.setAttribute('aria-label', `${actionNames[action]} ${layer.name}`);
+      btn.title = `${actionNames[action]} ${layer.name}`;
+      btn.disabled = (action === 'up' && index === layers.length - 1) || (action === 'down' && index === 0);
       actions.appendChild(btn);
     });
 
@@ -1562,6 +1690,7 @@ function renderLayerList() {
       btn.addEventListener('click', event => {
         event.stopPropagation();
         const action = btn.dataset.action;
+        if (action === 'select') setSelectedLayer(layer.id);
         if (action === 'toggle') toggleLayerVisible(layer.id);
         if (action === 'up') moveLayerToIndex(layer.id, index + 1);
         if (action === 'down') moveLayerToIndex(layer.id, index - 1);
@@ -1575,6 +1704,17 @@ function renderLayerList() {
 
   updateLayerCount();
   updateSelectionBadge();
+  const layer = getSelectedLayer();
+  const selectedIndex = layers.indexOf(layer);
+  dom.layerUpBtn.disabled = !layer || selectedIndex === layers.length - 1;
+  dom.layerDownBtn.disabled = !layer || selectedIndex === 0;
+  if (focused) {
+    const buttons = Array.from(dom.layerList.querySelectorAll('button'));
+    const target = buttons.find(btn => btn.dataset.layerId === focusLayerId && btn.dataset.action === focusAction && !btn.disabled)
+      || buttons.find(btn => btn.dataset.layerId === focusLayerId && btn.dataset.action === 'select')
+      || buttons.find(btn => btn.dataset.layerId === layers[Math.max(0, focusIndex)]?.id && btn.dataset.action === 'select');
+    (target || dom.layerUpload).focus({ preventScroll: true });
+  }
 }
 
 function duplicateLayerById(layerId) {
@@ -1593,10 +1733,18 @@ function duplicateLayerById(layerId) {
 }
 
 async function addImageFiles(fileList) {
-  const files = Array.from(fileList || []).filter(isSupportedLayerFile);
-  if (!files.length) return;
+  const allFiles = Array.from(fileList || []);
+  const files = allFiles.filter(isSupportedLayerFile);
+  const unsupported = allFiles.filter(file => !isSupportedLayerFile(file)).map(file => file.name);
+  const status = document.getElementById('uploadStatus');
+  status.classList.remove('error');
+  if (!files.length) {
+    status.textContent = 'No images added. Choose an image file such as PNG, JPEG, GIF, or WebP.';
+    status.classList.add('error');
+    return;
+  }
 
-  dom.canvasTip.textContent = files.length === 1
+  status.textContent = files.length === 1
     ? 'Loading 1 image layer...'
     : `Loading ${files.length} image layers...`;
 
@@ -1607,7 +1755,7 @@ async function addImageFiles(fileList) {
   }));
 
   const added = [];
-  const failed = [];
+  const failed = [...unsupported];
   results.forEach((result, index) => {
     if (result.status === 'fulfilled') {
       added.push(result.value);
@@ -1619,13 +1767,16 @@ async function addImageFiles(fileList) {
   if (added.length) {
     layers.push(...added);
     setSelectedLayer(added[added.length - 1].id);
-    dom.canvasTip.textContent = added.length === 1
+    setInteractionMode('images');
+    status.textContent = added.length === 1
       ? '1 image layer added. Use image mode to move and resize it on the canvas.'
       : `${added.length} image layers added. Use image mode to move and resize them on the canvas.`;
   }
 
+  if (!added.length) status.textContent = 'No images added.';
   if (failed.length) {
-    dom.canvasTip.textContent += ` ${failed.length} file${failed.length === 1 ? '' : 's'} could not be loaded.`;
+    status.textContent += ` Could not load: ${failed.join(', ')}. Choose a supported, readable image file.`;
+    status.classList.add('error');
   }
 
   renderLayerList();
@@ -1681,6 +1832,12 @@ function updateCanvasCursor(point) {
     canvas.style.cursor = 'move';
     return;
   }
+  const selected = getSelectedLayer();
+  const selectedHandle = selected?.visible && hitTestHandle(selected, point);
+  if (selectedHandle) {
+    canvas.style.cursor = selectedHandle === 'nw' || selectedHandle === 'se' ? 'nwse-resize' : 'nesw-resize';
+    return;
+  }
   const layer = hitTestLayer(point);
   if (!layer) {
     canvas.style.cursor = 'default';
@@ -1697,6 +1854,8 @@ function updateCanvasCursor(point) {
 }
 
 function startDrag(event) {
+  if (event.button !== 0) return;
+  canvas.focus({ preventScroll: true });
   const point = getPointerPos(event);
 
   if (interactionMode === 'text') {
@@ -1711,7 +1870,9 @@ function startDrag(event) {
     return;
   }
 
-  const layer = hitTestLayer(point);
+  const selected = getSelectedLayer();
+  const selectedHandle = selected?.visible && hitTestHandle(selected, point);
+  const layer = selectedHandle ? selected : hitTestLayer(point);
   if (!layer) {
     setSelectedLayer(null);
     return;
@@ -1847,6 +2008,9 @@ function drawLayer(layer) {
   if (!layer.visible) return;
   ctx.save();
   ctx.globalAlpha = layer.opacity / 100;
+  ctx.beginPath();
+  ctx.rect(layer.x, layer.y, layer.w, layer.h);
+  ctx.clip();
 
   if (layer.fit === 'stretch') {
     ctx.drawImage(layer.image, layer.x, layer.y, layer.w, layer.h);
@@ -1930,7 +2094,7 @@ function drawText() {
 
 function drawSelection() {
   const layer = getSelectedLayer();
-  if (!layer || interactionMode !== 'images') return;
+  if (!layer || !layer.visible || interactionMode !== 'images') return;
 
   ctx.save();
   ctx.strokeStyle = 'rgba(0, 255, 65, 0.95)';
@@ -1974,30 +2138,72 @@ function draw(includeGuides = true) {
   drawBackground();
   layers.forEach(drawLayer);
   drawText();
+  // Capture a clean preview before drawing editor handles so it always matches the download.
+  if (includeGuides && dom.previewWrap.classList.contains('visible')) {
+    try {
+      updatePreview();
+    } catch (error) {
+      showExportError(error);
+    }
+  }
   if (includeGuides) {
     drawSelection();
     drawTextGuide();
   }
 }
 
-function exportWebP() {
-  draw(false);
-  dom.previewImg.src = canvas.toDataURL(EXPORT_MIME_TYPE, 1);
+function updatePreview() {
+  const data = canvas.toDataURL(EXPORT_MIME_TYPE, 1);
+  if (!data.startsWith(`data:${EXPORT_MIME_TYPE};`)) {
+    throw new Error('WebP export is unavailable in this browser. Try a browser with WebP canvas support.');
+  }
+  dom.previewImg.src = data;
   dom.previewDims.textContent = `preview · ${W} × ${H}`;
-  dom.previewWrap.classList.add('visible');
-  dom.previewWrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function showExportError(error) {
+  const status = document.getElementById('exportStatus');
+  status.textContent = `Unable to export. ${error.message}`;
+  status.classList.add('error');
+  dom.previewWrap.classList.remove('visible');
+}
+
+function exportWebP() {
+  const status = document.getElementById('exportStatus');
+  status.textContent = '';
+  status.classList.remove('error');
+  try {
+    draw(false);
+    updatePreview();
+    dom.previewWrap.classList.add('visible');
+    dom.downloadBtn.focus();
+  } catch (error) {
+    showExportError(error);
+    document.getElementById('exportSection').focus();
+  } finally {
+    draw();
+  }
 }
 
 function downloadBanner() {
-  draw(false);
-  const link = document.createElement('a');
-  link.download = `banner-${W}x${H}.${EXPORT_FILE_EXT}`;
-  link.href = canvas.toDataURL(EXPORT_MIME_TYPE, 1);
-  link.click();
+  try {
+    draw(false);
+    updatePreview();
+    const link = document.createElement('a');
+    link.download = `banner-${W}x${H}.${EXPORT_FILE_EXT}`;
+    link.href = dom.previewImg.src;
+    link.click();
+    document.getElementById('exportStatus').textContent = `Download requested: ${link.download}`;
+  } catch (error) {
+    showExportError(error);
+  } finally {
+    draw();
+  }
 }
 
 function hidePreview() {
   dom.previewWrap.classList.remove('visible');
+  dom.exportBtn.focus();
 }
 
 function setSwatch(input, swatch, hex) {
@@ -2018,13 +2224,17 @@ function bindColor(input, swatch, hex, onUpdate) {
 function syncTextAlignButtons() {
   dom.textAlignGroup.querySelectorAll('.btn-tog').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.val === textState.align);
+    btn.setAttribute('aria-pressed', String(btn.dataset.val === textState.align));
   });
 }
 
 dom.sizeButtons = Array.from(document.querySelectorAll('.size-btn'));
 dom.sizeButtons.forEach(button => {
   button.addEventListener('click', () => {
-    dom.sizeButtons.forEach(btn => btn.classList.remove('active'));
+    dom.sizeButtons.forEach(btn => {
+      btn.classList.remove('active');
+      btn.setAttribute('aria-pressed', String(btn === button));
+    });
     button.classList.add('active');
     setSize(button);
   });
@@ -2033,7 +2243,10 @@ dom.sizeButtons.forEach(button => {
 dom.gradDirGroup.addEventListener('click', event => {
   const btn = event.target.closest('.btn-tog');
   if (!btn) return;
-  dom.gradDirGroup.querySelectorAll('.btn-tog').forEach(item => item.classList.remove('active'));
+  dom.gradDirGroup.querySelectorAll('.btn-tog').forEach(item => {
+    item.classList.remove('active');
+    item.setAttribute('aria-pressed', String(item === btn));
+  });
   btn.classList.add('active');
   gradDir = btn.dataset.val;
   draw();
@@ -2124,20 +2337,29 @@ dom.layerOpacity.addEventListener('input', () => {
 function updateSelectedLayerFromInputs() {
   const layer = getSelectedLayer();
   if (!layer) return;
-  layer.x = Number(dom.layerX.value);
-  layer.y = Number(dom.layerY.value);
-  layer.w = Math.max(8, Number(dom.layerW.value));
-  layer.h = Math.max(8, Number(dom.layerH.value));
+  const inputs = [dom.layerX, dom.layerY, dom.layerW, dom.layerH];
+  const values = inputs.map(input => input.valueAsNumber);
+  if (!values.every(Number.isFinite)) {
+    updateLayerPanelFromState();
+    return;
+  }
+  [layer.x, layer.y] = values;
+  layer.w = Math.max(8, values[2]);
+  layer.h = Math.max(8, values[3]);
   clampLayerToCanvas(layer);
   updateLayerPanelFromState();
   renderLayerList();
   draw();
 }
 
-dom.layerX.addEventListener('input', updateSelectedLayerFromInputs);
-dom.layerY.addEventListener('input', updateSelectedLayerFromInputs);
-dom.layerW.addEventListener('input', updateSelectedLayerFromInputs);
-dom.layerH.addEventListener('input', updateSelectedLayerFromInputs);
+[dom.layerX, dom.layerY, dom.layerW, dom.layerH].forEach(input => {
+  // Commit complete numbers so clearing a field or typing a minus sign does not move the layer.
+  input.addEventListener('change', updateSelectedLayerFromInputs);
+  input.addEventListener('blur', updateLayerPanelFromState);
+  input.addEventListener('keydown', event => {
+    if (event.key === 'Enter') updateSelectedLayerFromInputs();
+  });
+});
 
 dom.layerCenterBtn.addEventListener('click', () => {
   const layer = getSelectedLayer();
@@ -2201,6 +2423,7 @@ dom.fontFace.addEventListener('change', function () {
 dom.shadowToggle.addEventListener('click', () => {
   textState.shadow = !textState.shadow;
   dom.shadowToggle.classList.toggle('on', textState.shadow);
+  dom.shadowToggle.setAttribute('aria-checked', String(textState.shadow));
   dom.shadowControls.classList.toggle('hidden', !textState.shadow);
   draw();
 });
@@ -2212,6 +2435,18 @@ dom.shadowBlur.addEventListener('input', function () {
 });
 
 dom.exportBtn.addEventListener('click', exportWebP);
+document.getElementById('quickExportBtn').addEventListener('click', exportWebP);
+document.getElementById('textMoveBtn').addEventListener('click', () => {
+  setInteractionMode('text');
+  canvas.focus();
+});
+document.getElementById('textCenterBtn').addEventListener('click', () => {
+  textState.x = W / 2;
+  textState.y = H / 2;
+  textState.align = 'center';
+  syncTextAlignButtons();
+  draw();
+});
 dom.downloadBtn.addEventListener('click', downloadBanner);
 dom.closePreviewBtn.addEventListener('click', hidePreview);
 
@@ -2234,6 +2469,9 @@ window.addEventListener('keydown', event => {
   }
 
   if (isTyping) return;
+  // Editing shortcuts belong to the canvas and layer list, not unrelated page controls.
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  if (document.activeElement !== canvas && !dom.layerList.contains(document.activeElement)) return;
 
   if (event.key === 'Delete' || event.key === 'Backspace') {
     const layer = getSelectedLayer();
@@ -2265,6 +2503,9 @@ window.addEventListener('keydown', event => {
 window.addEventListener('resize', applyCanvasSize);
 
 async function bootstrap() {
+  document.querySelectorAll('.size-btn, #gradDirGroup .btn-tog').forEach(button => {
+    button.setAttribute('aria-pressed', String(button.classList.contains('active')));
+  });
   syncTextAlignButtons();
   dom.layerPanel.classList.add('hidden');
   dom.shadowControls.classList.add('hidden');
