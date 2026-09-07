@@ -129,6 +129,29 @@ impl From<std::io::Error> for AppError {
     }
 }
 
+/// Safe error content retained until request-aware rendering, before compression.
+#[derive(Clone, Debug)]
+pub enum ErrorPage {
+    /// Navigation rate-limit notice with its history-return hook.
+    RateLimit,
+    /// Escaped by the shared error template.
+    Message(String),
+    /// A trusted application template awaiting request-aware layout.
+    Content {
+        /// Page title, escaped by the layout.
+        title: String,
+        /// Trusted HTML produced by application templates.
+        body: String,
+    },
+    /// Ban notice and its appeal token.
+    Ban {
+        /// Ban explanation.
+        reason: String,
+        /// Appeal CSRF token.
+        csrf_token: String,
+    },
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let retry_after = matches!(&self, Self::DbBusy);
@@ -139,7 +162,15 @@ impl IntoResponse for AppError {
             Self::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
             Self::BannedUser { reason, csrf_token } => {
                 let html = crate::templates::ban_page(reason, csrf_token);
-                return (StatusCode::FORBIDDEN, Html(html)).into_response();
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Extension(ErrorPage::Ban {
+                        reason: reason.clone(),
+                        csrf_token: csrf_token.clone(),
+                    }),
+                    Html(html),
+                )
+                    .into_response();
             }
             Self::UploadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
             Self::InvalidMediaType(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg.clone()),
@@ -164,7 +195,12 @@ impl IntoResponse for AppError {
         };
 
         let html = crate::templates::error_page(status.as_u16(), &message);
-        let mut response = (status, Html(html)).into_response();
+        let mut response = (
+            status,
+            axum::Extension(ErrorPage::Message(message)),
+            Html(html),
+        )
+            .into_response();
         if retry_after {
             response
                 .headers_mut()

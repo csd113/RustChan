@@ -119,17 +119,13 @@ pub(in crate::server) async fn submit_appeal(
     use axum::response::Html;
 
     if check_csrf_jar(&jar, form.csrf.as_deref()).is_err() {
-        return Html(templates::error_page(403, "CSRF token mismatch.")).into_response();
+        return AppError::Forbidden("CSRF token mismatch.".into()).into_response();
     }
 
     let ip_hash = hash_ip(&identity_key(&client_ip, &jar), &CONFIG.cookie_secret);
     let reason = form.reason.trim().chars().take(512).collect::<String>();
     if reason.is_empty() {
-        return Html(templates::error_page(
-            400,
-            "Appeal message cannot be empty.",
-        ))
-        .into_response();
+        return AppError::BadRequest("Appeal message cannot be empty.".into()).into_response();
     }
 
     let result = tokio::task::spawn_blocking({
@@ -152,18 +148,23 @@ pub(in crate::server) async fn submit_appeal(
         _ => "An error occurred. Please try again.",
     };
 
-    let html = format!(
-        r#"<!DOCTYPE html><html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Appeal Submitted</title>
-<link rel="stylesheet" href="{stylesheet_href}">
-</head><body><div class="page-box error-page">
-<h1>appeal submitted</h1>
-<p>{msg}</p>
-<p><a href="/">return home</a></p>
-</div></body></html>"#,
-        stylesheet_href = templates::static_asset_url("/static/style.css"),
-        msg = crate::utils::sanitize::escape_html(msg)
+    let body = format!(
+        r#"<div class="page-box error-page"><h1>appeal submitted</h1>
+<p>{}</p><p><a href="/">return home</a></p></div>"#,
+        crate::utils::sanitize::escape_html(msg),
+    );
+    let theme = super::current_theme_from_jar(&jar);
+    let boards = templates::live_boards();
+    let html = templates::base_layout(
+        "Appeal Submitted",
+        None,
+        &body,
+        form.csrf.as_deref().unwrap_or(""),
+        &boards,
+        theme.as_deref(),
+        None,
+        false,
+        "/",
     );
     Html(html).into_response()
 }

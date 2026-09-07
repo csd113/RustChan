@@ -481,7 +481,55 @@ pub fn parse_builder_config(css: &str) -> Option<ThemeBuilderConfig> {
     let (_, rest) = after_marker.split_once(BUILDER_DATA_PREFIX)?;
     let (hex_payload, _) = rest.split_once(BUILDER_DATA_SUFFIX)?;
     let bytes = hex::decode(hex_payload).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let config: ThemeBuilderConfig = serde_json::from_slice(&bytes).ok()?;
+    let colors = [
+        &config.background_color,
+        &config.panel_color,
+        &config.card_color,
+        &config.op_card_color,
+        &config.text_color,
+        &config.muted_text_color,
+        &config.link_color,
+        &config.link_hover_color,
+        &config.border_color,
+        &config.input_background_color,
+        &config.input_text_color,
+        &config.input_border_color,
+        &config.button_background_color,
+        &config.button_text_color,
+        &config.button_border_color,
+        &config.button_hover_color,
+        &config.header_background_color,
+        &config.header_text_color,
+        &config.header_border_color,
+        &config.quote_color,
+        &config.meta_text_color,
+        &config.success_color,
+        &config.danger_color,
+    ];
+    if config.border_radius_px > 24
+        || colors.iter().any(|color| {
+            color.len() != 7
+                || !color.starts_with('#')
+                || !color.as_bytes().iter().skip(1).all(u8::is_ascii_hexdigit)
+        })
+    {
+        return None;
+    }
+    Some(config)
+}
+
+/// Choose native controls to match the configured input background.
+pub(crate) fn input_color_scheme(color: &str) -> &'static str {
+    let Ok(rgb) = u32::from_str_radix(color.strip_prefix('#').unwrap_or(""), 16) else {
+        return "dark";
+    };
+    let brightness = ((rgb >> 16) & 255) * 299 + ((rgb >> 8) & 255) * 587 + (rgb & 255) * 114;
+    if brightness >= 128_000 {
+        "light"
+    } else {
+        "dark"
+    }
 }
 
 /// Generates a complete CSS theme and embeds its builder configuration.
@@ -514,7 +562,7 @@ pub fn build_theme_css(slug: &str, config: &ThemeBuilderConfig) -> String {
     format!(
         r#"html[data-theme="{slug}"] {{
   {marker_property}: "{marker_hex}";
-  color-scheme: dark;
+  color-scheme: {color_scheme};
   --bg: {background};
   --bg-panel: {panel};
   --bg-post: {card};
@@ -672,6 +720,7 @@ html[data-theme="{slug}"] .error {{
   color: {danger};
 }}{advanced_block}"#,
         slug = slug,
+        color_scheme = input_color_scheme(&config.input_background_color),
         marker_property = BUILDER_DATA_PROPERTY,
         marker_hex = builder_marker_hex(config),
         background = config.background_color,
@@ -712,6 +761,30 @@ mod tests {
         build_theme_css, builder_defaults_for_preset, builder_marker_hex, parse_builder_config,
         ThemeDensity, ThemeFontFamily,
     };
+
+    #[test]
+    fn builder_theme_native_controls_follow_input_brightness() {
+        for preset in super::BUILDER_PRESETS {
+            let config = builder_defaults_for_preset(preset.slug);
+            let expected = match preset.slug {
+                "forest" | "terminal" | "dorfic" | "deep-orbit" | "neoncubicle" => "dark",
+                _ => "light",
+            };
+            assert!(
+                build_theme_css("audit", &config).contains(&format!("color-scheme: {expected};"))
+            );
+        }
+    }
+
+    #[test]
+    fn builder_theme_metadata_rejects_invalid_colors_and_ranges() {
+        let mut config = builder_defaults_for_preset("forest");
+        config.background_color = "#ffffff; } body { color: red; }".into();
+        assert!(parse_builder_config(&build_theme_css("audit", &config)).is_none());
+        config = builder_defaults_for_preset("forest");
+        config.border_radius_px = 255;
+        assert!(parse_builder_config(&build_theme_css("audit", &config)).is_none());
+    }
 
     #[test]
     fn builder_marker_round_trips_config() {

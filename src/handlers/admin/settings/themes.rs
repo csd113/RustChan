@@ -33,6 +33,7 @@ impl ThemeEditorMode {
 
 #[derive(Deserialize)]
 pub(in crate::server) struct ThemeBuilderFields {
+    pub apply_preset: Option<String>,
     pub base_preset: Option<String>,
     pub background_color: Option<String>,
     pub panel_color: Option<String>,
@@ -211,6 +212,9 @@ fn resolve_builder_config(
         });
 
     let preset_defaults = builder_defaults_for_preset(&requested_preset);
+    if fields.apply_preset.as_deref() == Some("1") {
+        return Ok(preset_defaults);
+    }
     let fallback = existing_config.as_ref().unwrap_or(&preset_defaults);
 
     Ok(ThemeBuilderConfig {
@@ -560,6 +564,7 @@ mod tests {
 
     fn builder_fields() -> ThemeBuilderFields {
         ThemeBuilderFields {
+            apply_preset: None,
             base_preset: Some("forest".into()),
             background_color: Some("#101010".into()),
             panel_color: Some("#202020".into()),
@@ -591,6 +596,19 @@ mod tests {
                 "html[data-theme=\"builder-test\"] .subject { font-style: italic; }".into(),
             ),
         }
+    }
+
+    #[test]
+    fn no_js_preset_action_saves_selected_defaults_instead_of_stale_fields() -> anyhow::Result<()> {
+        let mut fields = builder_fields();
+        fields.base_preset = Some("blue-sky".into());
+        fields.apply_preset = Some("1".into());
+        let config = super::resolve_builder_config(&fields, None)?;
+        anyhow::ensure!(config == crate::theme_builder::builder_defaults_for_preset("blue-sky"));
+        fields.apply_preset = None;
+        let manual = super::resolve_builder_config(&fields, None)?;
+        anyhow::ensure!(manual.background_color == "#101010");
+        Ok(())
     }
 
     #[test]

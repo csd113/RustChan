@@ -606,7 +606,6 @@ html:not([data-theme]) .board-nav-link:hover { text-shadow: 0 0 6px var(--green-
   padding: 7px 9px;
   font-family: var(--font);
   font-size: 0.85rem;
-  outline: none;
   width: 180px;
   min-height: 34px;
   border-radius: var(--radius-sm);
@@ -892,7 +891,6 @@ html:not([data-theme]) .board-thread-header { text-shadow: 0 0 10px rgba(0,255,6
   min-height: 32px;
   padding: 5px 24px 5px 8px;
   cursor: pointer;
-  outline: none;
   appearance: none;
   -webkit-appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2300c840'/%3E%3C/svg%3E");
@@ -990,7 +988,6 @@ html:not([data-theme]) .board-thread-header { text-shadow: 0 0 10px rgba(0,255,6
   text-decoration: none;
   transition: color 0.15s, border-color 0.15s, background 0.15s;
   box-shadow: none;
-  outline: none;
   touch-action: manipulation;
   border-radius: var(--radius-sm);
 }
@@ -1150,7 +1147,6 @@ html.no-js .post-form-wrap {
   font-family: var(--font);
   font-size: 0.85rem;
   width: 100%;
-  outline: none;
   min-height: 36px;
   border-radius: var(--radius-sm);
   transition: border-color 0.2s, box-shadow 0.2s;
@@ -2186,7 +2182,6 @@ html:not([data-theme]) .poster-id-btn {
   padding: 2px 6px;
   font-family: var(--font);
   font-size: 0.75rem;
-  outline: none;
 }
 
 .post-controls .edit-btn,
@@ -3384,9 +3379,9 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
 /* Inline post error banner */
 
 .post-error-banner {
-  background: rgba(180, 30, 30, 0.18);
-  border: 1px solid #c0392b;
-  color: #ff6b6b;
+  background: color-mix(in srgb, var(--red) 12%, var(--bg-panel));
+  border: 1px solid var(--red);
+  color: var(--red);
   font-family: var(--font);
   font-size: 0.82rem;
   padding: 10px 14px;
@@ -3396,9 +3391,9 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
 }
 
 .post-success-banner {
-  background: rgba(24, 122, 73, 0.18);
-  border: 1px solid rgba(71, 186, 116, 0.7);
-  color: #8af0b0;
+  background: color-mix(in srgb, var(--green) 10%, var(--bg-panel));
+  border: 1px solid var(--green);
+  color: var(--green);
   font-family: var(--font);
   font-size: 0.82rem;
   padding: 10px 14px;
@@ -3764,7 +3759,7 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   }
 }
 
-/* Themes selected through data-theme on <html>; FluoroGrid is the default. */
+/* Themes selected through data-theme on <html>; Forest is the fallback default. */
 
 /* Frutiger Aero */
 [data-theme="aero"] {
@@ -4198,7 +4193,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 [data-theme="forest"] .poll-creator-row input:focus,
 [data-theme="forest"] .poll-option-row input:focus {
   border-color: var(--forest-surface-hover-border);
-  outline: none;
 }
 [data-theme="forest"] .name {
   color: #e8d8b0;
@@ -4479,7 +4473,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 [data-theme="blue-sky"] .poll-creator-row input:focus,
 [data-theme="blue-sky"] .poll-option-row input:focus {
   border-color: var(--blue-sky-surface-hover-border);
-  outline: none;
 }
 [data-theme="blue-sky"] button:disabled,
 [data-theme="blue-sky"] .btn:disabled,
@@ -4804,7 +4797,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 [data-theme="deep-orbit"] .poll-creator-row input:focus,
 [data-theme="deep-orbit"] .poll-option-row input:focus {
   border-color: var(--deep-orbit-surface-hover-border);
-  outline: none;
 }
 [data-theme="deep-orbit"] button:disabled,
 [data-theme="deep-orbit"] .btn:disabled,
@@ -5995,7 +5987,7 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   min-width: 0;
 }
 
-.poll-creator-row input:focus { border-color: var(--border-glow); outline: none; }
+.poll-creator-row input:focus { border-color: var(--border-glow); }
 
 .poll-duration-row { flex-direction: row; align-items: center; gap: 8px; }
 .poll-duration-row label { width: auto; flex-direction: row; align-items: center; gap: 6px; }
@@ -6037,7 +6029,7 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   width: 100%;
 }
 
-.poll-option-row input:focus { border-color: var(--border-glow); outline: none; }
+.poll-option-row input:focus { border-color: var(--border-glow); }
 
 .form-field-help {
   color: var(--text-dim);
@@ -6346,7 +6338,6 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
 }
 
 .ban-delete-field input:focus {
-  outline: none;
   border-color: var(--border-glow);
   box-shadow: 0 0 0 2px rgba(0,255,65,0.12);
 }
@@ -6907,8 +6898,9 @@ html:not([data-theme]) .thread-nav-btn.active { text-shadow: 0 0 8px rgba(0,255,
   bottom: 72px;
   right: 20px;
   z-index: 1200;
-  background: var(--green-bright, #00c840);
-  color: #000;
+  background: var(--bg-panel);
+  color: var(--green-bright);
+  border: 1px solid var(--border-glow);
   font-family: var(--font, monospace);
   font-size: 0.82rem;
   font-weight: bold;

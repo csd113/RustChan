@@ -54,6 +54,75 @@ pub(super) async fn request_boundary_middleware(
     next.run(req).await
 }
 
+/// Render application notices with request preferences before response compression.
+pub(super) async fn theme_error_response(
+    secure_context: crate::middleware::SecureCookieContext,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use crate::{error::ErrorPage, handlers::board, templates};
+    let headers = request.headers().clone();
+    let jar = axum_extra::extract::CookieJar::from_headers(&headers);
+    let theme = jar
+        .get("rustchan_theme")
+        .map(|cookie| cookie.value().to_owned());
+    let boards = templates::live_boards();
+    let board_default = request
+        .uri()
+        .path()
+        .split('/')
+        .nth(1)
+        .and_then(|short| boards.iter().find(|board| board.short_name == short))
+        .map(|board| board.default_theme.as_str());
+    let mut response = next.run(request).await;
+    if let Some(page) = response.extensions_mut().remove::<ErrorPage>() {
+        let preferences = board::user_preferences_from_jar(&jar);
+        let (jar, csrf) = board::ensure_csrf_for_request(jar, &headers, secure_context);
+        let html = match page {
+            ErrorPage::RateLimit => templates::rate_limit_page_with_preferences(
+                theme.as_deref(),
+                board_default,
+                &csrf,
+                preferences,
+            ),
+            ErrorPage::Content { title, body } => templates::base_layout_with_preferences(
+                &title,
+                None,
+                &body,
+                &csrf,
+                &boards,
+                theme.as_deref(),
+                board_default,
+                false,
+                "/",
+                preferences,
+            ),
+            ErrorPage::Message(message) => templates::error_page_with_preferences(
+                response.status().as_u16(),
+                &message,
+                theme.as_deref(),
+                board_default,
+                &csrf,
+                preferences,
+            ),
+            ErrorPage::Ban { reason, csrf_token } => templates::ban_page_with_theme(
+                &reason,
+                &csrf_token,
+                theme.as_deref(),
+                board_default,
+            ),
+        };
+        *response.body_mut() = axum::body::Body::from(html);
+        response.headers_mut().remove(header::CONTENT_LENGTH);
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("private, no-store"),
+        );
+        return (jar, response).into_response();
+    }
+    response
+}
+
 /// Return whether a header map exceeds per-value or aggregate limits.
 fn request_headers_exceed_limits(headers: &http::HeaderMap) -> bool {
     let mut total = 0usize;

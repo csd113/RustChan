@@ -1,7 +1,7 @@
 use super::{
     board_access_cookie_from_jar, db, load_board_access_context, templates, unlock_redirect_url,
-    user_preferences_from_jar, AppError, AppState, BoardAccessContext, CookieJar, HeaderMap, Html,
-    Path, Redirect, Response, Result, State, StatusCode, ADMIN_SESSION_COOKIE, CONFIG,
+    user_preferences_from_jar, AppError, AppState, BoardAccessContext, CookieJar, HeaderMap, Path,
+    Redirect, Response, Result, State, StatusCode, ADMIN_SESSION_COOKIE, CONFIG,
 };
 use axum::http::header::{
     HeaderValue, CONTENT_DISPOSITION, CONTENT_SECURITY_POLICY, CONTENT_TYPE,
@@ -396,11 +396,8 @@ pub(in crate::server) async fn redirect_to_post(
         // This is the fallback path when JavaScript is disabled or when
         // a user manually navigates to a quotelink URL after a board
         // restore that assigned new IDs to the restored posts.
-        let html = templates::error_page(
-            404,
-            &format!("Post #{post_id} not found. It may have been deleted or the board was restored from a backup."),
-        );
-        (StatusCode::NOT_FOUND, Html(html)).into_response()
+        AppError::NotFound(format!("Post #{post_id} not found. It may have been deleted or the board was restored from a backup."))
+        .into_response()
     }
 }
 

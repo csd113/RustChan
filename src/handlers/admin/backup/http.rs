@@ -98,22 +98,27 @@ pub(super) fn redirect_page_response(target: &str, message: &str) -> Response {
     let escaped_target = crate::utils::sanitize::escape_html(target);
     let escaped_message = crate::utils::sanitize::escape_html(message);
     let body = format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="0;url={escaped_target}">
-<title>Redirecting</title>
-</head>
-<body>
-<p>{escaped_message}</p>
-<p><a href="{escaped_target}">Continue</a></p>
-</body>
-</html>"#
+        r#"<div class="page-box"><h1>Redirecting</h1><p>{escaped_message}</p>
+<p><a href="{escaped_target}">Continue</a></p></div>"#,
+    );
+    let content = crate::error::ErrorPage::Content {
+        title: "Redirecting".into(),
+        body: body.clone(),
+    };
+    let body = crate::templates::base_layout(
+        "Redirecting",
+        None,
+        &body,
+        "",
+        &crate::templates::live_boards(),
+        None,
+        None,
+        false,
+        "/",
     );
 
     let mut resp = Response::new(axum::body::Body::from(body));
+    resp.extensions_mut().insert(content);
     *resp.status_mut() = StatusCode::OK;
     resp.headers_mut().insert(
         header::CONTENT_TYPE,

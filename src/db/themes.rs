@@ -180,11 +180,20 @@ pub fn update_theme(
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let current = get_theme(&tx, existing_slug)?
         .ok_or_else(|| anyhow::anyhow!("Theme {existing_slug} not found"))?;
-    let css_to_save = if current.is_builtin {
+    let mut css_to_save = if current.is_builtin {
         current.custom_css
     } else {
         custom_css.unwrap_or(&current.custom_css).to_owned()
     };
+    if !current.is_builtin && existing_slug != new_slug {
+        if let Some(mut config) = crate::theme_builder::parse_builder_config(&css_to_save) {
+            config.advanced_css =
+                rename_theme_selectors(&config.advanced_css, existing_slug, new_slug)?;
+            css_to_save = crate::theme_builder::build_theme_css(new_slug, &config);
+        } else {
+            css_to_save = rename_theme_selectors(&css_to_save, existing_slug, new_slug)?;
+        }
+    }
     let affected = tx
         .execute(
             "UPDATE themes
@@ -224,6 +233,20 @@ pub fn update_theme(
     }
     tx.commit()?;
     Ok(())
+}
+
+/// Retarget the documented data-theme selector when a custom theme is renamed.
+fn rename_theme_selectors(css: &str, old_slug: &str, new_slug: &str) -> Result<String> {
+    let old = regex::escape(old_slug);
+    let selector = regex::Regex::new(&format!(
+        r#"(?i)\[data-theme\s*=\s*(?:"{old}"|'{old}'|{old})\s*\]"#,
+    ))?;
+    Ok(selector
+        .replace_all(
+            css,
+            regex::NoExpand(&format!(r#"[data-theme="{new_slug}"]"#)),
+        )
+        .into_owned())
 }
 
 /// Delete a non-built-in theme.
@@ -323,6 +346,20 @@ pub fn theme_css_response(conn: &rusqlite::Connection, slug: &str) -> Result<Opt
             css = theme.custom_css
         )
     };
+    // Older generated light themes hard-coded dark native controls. Correct only
+    // that generated declaration; preserve administrator overrides and stored CSS.
+    let css = if let Some(config) = crate::theme_builder::parse_builder_config(&css) {
+        css.replacen(
+            "color-scheme: dark;\n  --bg:",
+            &format!(
+                "color-scheme: {};\n  --bg:",
+                crate::theme_builder::input_color_scheme(&config.input_background_color)
+            ),
+            1,
+        )
+    } else {
+        css
+    };
     Ok(Some(css))
 }
 
@@ -337,6 +374,53 @@ mod tests {
     use crate::theme_builder::{build_theme_css, builder_defaults_for_preset};
     use anyhow::{Context as _, Result};
     use rusqlite::params;
+
+    #[test]
+    fn custom_theme_rename_retargets_css_and_preserves_other_selectors() -> Result<()> {
+        let css = r#"html[data-theme = 'old'] { --bg: #fff; }
+[data-theme=old] .reply { color: #000; }
+[data-theme="older"] { --bg: #000; }"#;
+        let renamed = super::rename_theme_selectors(css, "old", "new")?;
+        anyhow::ensure!(renamed.matches(r#"[data-theme="new"]"#).count() == 2);
+        anyhow::ensure!(renamed.contains(r#"[data-theme="older"]"#));
+        Ok(())
+    }
+
+    #[test]
+    fn renamed_builder_theme_updates_metadata_and_advanced_selectors() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let mut conn = pool.get()?;
+        let mut config = builder_defaults_for_preset("blue-sky");
+        config.advanced_css = r#"html[data-theme="old"] .reply { font-style: italic; }"#.into();
+        let css = build_theme_css("old", &config);
+        super::create_custom_theme(&conn, "old", "Old", "", "#123456", &css, true)?;
+        super::update_theme(&mut conn, "old", "new", "New", "", "#123456", true, None)?;
+        let served = super::theme_css_response(&conn, "new")?.context("renamed stylesheet")?;
+        let restored =
+            crate::theme_builder::parse_builder_config(&served).context("builder metadata")?;
+        anyhow::ensure!(restored.advanced_css.contains(r#"[data-theme="new"]"#));
+        anyhow::ensure!(!served.contains(r#"[data-theme="old"]"#));
+        Ok(())
+    }
+
+    #[test]
+    fn saved_light_builder_theme_corrects_legacy_native_controls() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        let config = builder_defaults_for_preset("blue-sky");
+        let css = build_theme_css("light", &config)
+            .replace("color-scheme: light;", "color-scheme: dark;");
+        super::create_custom_theme(&conn, "light", "Light", "", "#123456", &css, true)?;
+        let served = super::theme_css_response(&conn, "light")?.context("stylesheet")?;
+        anyhow::ensure!(served.contains("color-scheme: light;"));
+        anyhow::ensure!(
+            super::get_theme(&conn, "light")?
+                .context("saved theme")?
+                .custom_css
+                == css
+        );
+        Ok(())
+    }
 
     #[test]
     fn legacy_default_builtin_list_is_upgraded_with_new_featured_themes() {

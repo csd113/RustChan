@@ -290,7 +290,7 @@ pub(super) fn current_theme_from_jar(jar: &CookieJar) -> Option<String> {
     templates::normalize_theme_slug(cookie.value())
 }
 
-pub(super) fn user_preferences_from_jar(jar: &CookieJar) -> templates::UserPreferences {
+pub(in crate::server) fn user_preferences_from_jar(jar: &CookieJar) -> templates::UserPreferences {
     let default_preferences = templates::UserPreferences::default();
     templates::UserPreferences {
         hide_nsfw_boards: jar
@@ -521,7 +521,8 @@ pub(in crate::server) async fn banned_page(
     } else {
         reason
     };
-    let html = templates::ban_page(&reason, &csrf);
+    let theme = current_theme_from_jar(&jar);
+    let html = templates::ban_page_with_theme(&reason, &csrf, theme.as_deref(), None);
     (jar, Html(html)).into_response()
 }
 

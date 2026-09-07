@@ -417,8 +417,11 @@ window.addEventListener('resize', function () {
   }
 
   function shouldReloadActivityRestore(event) {
+    // Every restored document can have stale cookie-backed theme preferences
+    // or a changed theme catalog, including search and administrative pages.
+    if (event.persisted) return true;
     if (!pageHasActivityBadges() && !pageHasActivityLifecycle()) return false;
-    if (event.persisted || navigationType() === 'back_forward') return true;
+    if (navigationType() === 'back_forward') return true;
     try {
       return window.sessionStorage.getItem(currentRestoreKey()) === '1';
     } catch (e) {
@@ -2450,41 +2453,67 @@ function clampPopupToViewport(anchor, popup) {
     .split(',')
     .filter(function (value) { return value; });
 
-  function persistTheme(t, href) {
-    var url = href || ('/theme/' + encodeURIComponent(t));
-    try {
-      fetch(url, {
-        credentials: 'same-origin',
-        headers: { 'x-rustchan-background': '1' }
-      }).catch(function () {});
-    } catch (e) {}
-  }
+  var CUSTOM_THEMES = (document.documentElement.getAttribute('data-theme-css-slugs') || '').split(',');
+  var themeRequest = 0;
+  var cancelThemeLoad = null;
 
-  function applyThemeStylesheet(t) {
-    var el = document.getElementById('active-theme-stylesheet');
-    if (!t || t === 'terminal') {
-      if (el) el.remove();
-      return;
-    }
-    if (!el) {
-      el = document.createElement('link');
-      el.id = 'active-theme-stylesheet';
-      el.rel = 'stylesheet';
-      document.head.appendChild(el);
-    }
-    el.href = '/theme-css/' + encodeURIComponent(t);
-  }
-
-  function applyTheme(t) {
-    if (t === 'terminal') {
-      document.documentElement.removeAttribute('data-theme');
-    } else {
-      document.documentElement.setAttribute('data-theme', t);
-    }
-    applyThemeStylesheet(t);
-    // Match by data-theme attribute so order in DOM doesn't matter.
+  function syncThemeControls(t) {
+    document.documentElement.setAttribute('data-active-theme', t);
+    document.querySelectorAll('.user-preferences-form select[name="theme"]').forEach(function (select) {
+      select.value = t;
+    });
     document.querySelectorAll('.tp-option').forEach(function (el) {
       el.classList.toggle('active', el.dataset.theme === t);
+      el.setAttribute('aria-current', el.dataset.theme === t ? 'true' : 'false');
+    });
+    try { localStorage.setItem('rustchan_theme', t); } catch (e) {}
+  }
+
+  // Keep the old stylesheet and theme visible until the replacement is loaded.
+  // A later selection invalidates an earlier load, including its error handler.
+  function applyTheme(t) {
+    var request = ++themeRequest;
+    if (cancelThemeLoad) cancelThemeLoad();
+    if (THEMES.indexOf(t) === -1) return Promise.resolve(false);
+    var existing = document.getElementById('active-theme-stylesheet');
+    function commit(link) {
+      if (existing && existing !== link) existing.remove();
+      if (link) {
+        link.id = 'active-theme-stylesheet';
+        link.media = 'all';
+      }
+      if (t === 'terminal') document.documentElement.removeAttribute('data-theme');
+      else document.documentElement.setAttribute('data-theme', t);
+      syncThemeControls(t);
+      return true;
+    }
+    if (t === document.documentElement.getAttribute('data-active-theme')) {
+      syncThemeControls(t);
+      return Promise.resolve(true);
+    }
+    if (CUSTOM_THEMES.indexOf(t) === -1) return Promise.resolve(commit(null));
+    return new Promise(function (resolve) {
+      var link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.media = 'not all';
+      link.href = '/theme-css/' + encodeURIComponent(t);
+      cancelThemeLoad = function () {
+        link.remove();
+        cancelThemeLoad = null;
+        resolve(false);
+      };
+      link.onload = function () {
+        if (request === themeRequest) cancelThemeLoad = null;
+        resolve(request === themeRequest ? commit(link) : false);
+      };
+      link.onerror = function () {
+        link.remove();
+        if (request === themeRequest) {
+          cancelThemeLoad = null;
+        }
+        resolve(false);
+      };
+      document.head.appendChild(link);
     });
   }
 
@@ -2529,7 +2558,8 @@ function clampPopupToViewport(anchor, popup) {
     if (!form) return;
 
     var theme = form.querySelector('select[name="theme"]');
-    if (theme && THEMES.indexOf(theme.value) !== -1) {
+    if (theme && THEMES.indexOf(theme.value) !== -1 &&
+        theme.value === document.documentElement.getAttribute('data-active-theme')) {
       setPublicPreferenceCookie('rustchan_theme', theme.value);
     }
 
@@ -2573,10 +2603,12 @@ function clampPopupToViewport(anchor, popup) {
     });
   }
 
-  window.setTheme = function (t, href) {
-    try { localStorage.setItem('rustchan_theme', t); } catch (e) {}
-    applyTheme(t);
-    persistTheme(t, href);
+  window.setTheme = function (t) {
+    if (THEMES.indexOf(t) === -1) return;
+    var select = document.querySelector('.user-preferences-form select[name="theme"]');
+    if (!select) return;
+    select.value = t;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
     closeThemePicker();
   };
 
@@ -2755,18 +2787,24 @@ function clampPopupToViewport(anchor, popup) {
         status.dataset.state = state || '';
       }
 
+      var themeLoading = false;
+      var themeChange = 0;
       var preferenceSavePending = false;
       var preferenceSaveQueued = false;
       var preferenceReloadNeeded = false;
 
       function saveUserPreferences() {
-        if (preferenceSavePending) {
+        if (themeLoading || preferenceSavePending) {
           preferenceSaveQueued = true;
           return;
         }
         preferenceSavePending = true;
         persistUserPreferencesForm(form).then(function (saved) {
           preferenceSavePending = false;
+          if (themeLoading) {
+            preferenceSaveQueued = true;
+            return;
+          }
           if (preferenceSaveQueued) {
             preferenceSaveQueued = false;
             // An older response can set cookies. Reapply the current selection
@@ -2790,8 +2828,27 @@ function clampPopupToViewport(anchor, popup) {
 
         var hadNsfwNodes = Boolean(document.querySelector('[data-board-nsfw="1"]'));
         if (control.name === 'theme') {
-          try { localStorage.setItem('rustchan_theme', control.value); } catch (e) {}
-          applyTheme(control.value);
+          var change = ++themeChange;
+          themeLoading = true;
+          setPreferenceStatus('Loading theme…', 'saving');
+          applyTheme(control.value).then(function (applied) {
+            if (change !== themeChange) return;
+            themeLoading = false;
+            if (!applied) {
+              syncThemeControls(document.documentElement.getAttribute('data-active-theme'));
+              setPreferenceStatus('Could not load theme. Try the change again.', 'error');
+              if (preferenceSaveQueued) {
+                preferenceSaveQueued = false;
+                mirrorUserPreferencesToCookies(form);
+                saveUserPreferences();
+              }
+              return;
+            }
+            mirrorUserPreferencesToCookies(form);
+            setPreferenceStatus('Saving…', 'saving');
+            saveUserPreferences();
+          });
+          return;
         } else if (control.name === 'hide_nsfw_boards') {
           applyHideNsfwPreference(control.checked);
         } else if (control.name === 'show_activity_badges') {
@@ -2831,22 +2888,9 @@ function clampPopupToViewport(anchor, popup) {
     });
   });
 
-  // The cookie-backed server selection is authoritative on page load. The
-  // localStorage copy only keeps already-open tabs visually in sync with the
-  // last server-rendered theme.
-  (function () {
-    var active = document.documentElement.getAttribute('data-active-theme') ||
-      document.documentElement.getAttribute('data-theme') ||
-      document.documentElement.getAttribute('data-default-theme') ||
-      'forest';
-    if (!active || THEMES.indexOf(active) === -1) {
-      active = document.documentElement.getAttribute('data-default-theme') || 'forest';
-    }
-    if (active && THEMES.indexOf(active) !== -1) {
-      applyTheme(active);
-      try { localStorage.setItem('rustchan_theme', active); } catch (e) {}
-    }
-  }());
+  // Cookie-backed server rendering is authoritative. localStorage is only a
+  // compatibility mirror, never an initialization or persistence source.
+  syncThemeControls(document.documentElement.getAttribute('data-active-theme'));
 
   initUserPreferencesPanels();
   initUserPreferencesForms();

@@ -577,18 +577,26 @@ mod tests {
         let state = crate::test_support::app_state();
         create_test_board(&state)?;
 
-        let ip_key = login_ip_key("127.0.0.1");
+        let ip_key = login_ip_key("192.0.2.44");
         ADMIN_LOGIN_FAILS.remove(&ip_key);
         ADMIN_LOGIN_FAILS.insert(ip_key.clone(), (LOGIN_FAIL_LIMIT, login_now_secs()));
 
         let router = Router::new()
             .route("/admin/login", post(admin_login))
             .with_state(state);
+        // This test installs a lockout, so it must not share other tests' peer.
+        let mut request = admin_login_request(format!(
+            "username=admin&password=wrong&_csrf={}",
+            signed_admin_csrf()
+        ))?;
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [192, 0, 2, 44],
+                41000,
+            ))));
         let response = router
-            .oneshot(admin_login_request(format!(
-                "username=admin&password=wrong&_csrf={}",
-                signed_admin_csrf()
-            ))?)
+            .oneshot(request)
             .await
             .context("send locked-out admin login request")?;
 

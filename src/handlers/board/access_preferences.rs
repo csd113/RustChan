@@ -542,7 +542,7 @@ pub(in crate::server::handlers) fn ensure_csrf_with_secure(
 }
 
 /// Ensure the public CSRF token cookie is scoped for the current transport.
-pub(in crate::server::handlers) fn ensure_csrf_for_request(
+pub(in crate::server) fn ensure_csrf_for_request(
     jar: CookieJar,
     headers: &HeaderMap,
     context: SecureCookieContext,
@@ -781,10 +781,7 @@ pub(in crate::server) async fn serve_theme_css(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("text/css; charset=utf-8"),
             ),
-            (
-                header::CACHE_CONTROL,
-                HeaderValue::from_static(crate::cache::CACHE_CONTROL_STATIC_SHORT),
-            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
         ],
         css,
     )

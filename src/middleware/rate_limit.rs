@@ -28,6 +28,7 @@ fn now_secs() -> u64 {
 pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     let path = req.uri().path();
     if path.starts_with("/static/")
+        || path.starts_with("/theme-css/")
         || path.starts_with("/boards/")
         || path == "/admin/log/live"
         || path == "/admin/backup/progress"
@@ -64,9 +65,19 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     };
 
     if blocked {
+        let jar = axum_extra::extract::CookieJar::from_headers(req.headers());
+        let theme = jar
+            .get("rustchan_theme")
+            .map(axum_extra::extract::cookie::Cookie::value);
         return (
             axum::http::StatusCode::TOO_MANY_REQUESTS,
-            axum::response::Html(rate_limited_toast_page()),
+            axum::Extension(crate::error::ErrorPage::RateLimit),
+            axum::response::Html(crate::templates::rate_limit_page_with_preferences(
+                theme,
+                None,
+                "",
+                crate::templates::UserPreferences::default(),
+            )),
         )
             .into_response();
     }
@@ -82,86 +93,4 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
     }
 
     next.run(req).await
-}
-
-/// Escapes text for inclusion in the rate-limit HTML response.
-fn html_escape(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#x27;"),
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-/// Builds the standalone rate-limit notification page.
-fn rate_limited_toast_page() -> String {
-    let forum_name_escaped = html_escape(&CONFIG.forum_name);
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Slow down — {forum_name_escaped}</title>
-<style>
-  body {{
-    margin: 0;
-    background: #1a1a1a;
-    font-family: sans-serif;
-  }}
-  .toast {{
-    position: fixed;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    background: #2a2a2a;
-    border: 2px solid #c00;
-    border-radius: 8px;
-    padding: 28px 36px;
-    text-align: center;
-    color: #eee;
-    box-shadow: 0 4px 24px rgba(0,0,0,.7);
-    max-width: 380px;
-    width: 90vw;
-    z-index: 9999;
-  }}
-  .toast h2 {{
-    margin: 0 0 12px;
-    font-size: 1.2rem;
-    color: #f55;
-  }}
-  .toast p {{
-    margin: 0 0 18px;
-    font-size: 0.95rem;
-    color: #ccc;
-  }}
-  .toast .bar {{
-    height: 4px;
-    background: #c00;
-    border-radius: 2px;
-    animation: shrink 3s linear forwards;
-  }}
-  @keyframes shrink {{
-    from {{ width: 100%; }}
-    to   {{ width: 0%; }}
-  }}
-</style>
-</head>
-<body data-rate-limit-page="1">
-<div class="toast">
-  <h2>&#9888; Slow down</h2>
-  <p>You are navigating too fast.<br>Taking you back in a moment…</p>
-  <div class="bar"></div>
-</div>
-<script src="{main_js_src}" defer></script>
-</body>
-</html>"#,
-        main_js_src = crate::templates::static_asset_url("/static/main.js")
-    )
 }

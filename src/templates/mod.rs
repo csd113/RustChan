@@ -96,8 +96,10 @@ static LIVE_SITE_NAME: LazyLock<RwLock<Arc<str>>> =
 static LIVE_SITE_SUBTITLE: LazyLock<RwLock<Arc<str>>> =
     LazyLock::new(|| RwLock::new(Arc::from("select board to proceed")));
 
-/// In-memory cache for the admin-configured default theme.
-/// Admin updates publish here so renderers avoid restarts and per-request DB reads.
+/// Invalidates cached selectors and theme assets when the theme catalog changes.
+static LIVE_THEME_VERSION: AtomicU64 = AtomicU64::new(0);
+
+/// Configured site default shared by renderers.
 static LIVE_DEFAULT_THEME: LazyLock<RwLock<Arc<str>>> =
     LazyLock::new(|| RwLock::new(Arc::from("")));
 /// Snapshot of themes currently available to page renderers.
@@ -209,6 +211,7 @@ pub fn set_live_site_subtitle(subtitle: &str) {
 /// Pass an empty string to clear the admin override and fall back to the hard default.
 pub fn set_live_default_theme(theme: &str) {
     *LIVE_DEFAULT_THEME.write() = Arc::from(theme);
+    LIVE_THEME_VERSION.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Read the current live default theme slug.
@@ -219,6 +222,7 @@ pub fn live_default_theme() -> Arc<str> {
 /// Replaces the in-memory theme snapshot.
 pub fn set_live_themes(themes: Vec<Theme>) {
     *LIVE_THEMES.write() = Arc::new(themes);
+    LIVE_THEME_VERSION.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Returns a shared snapshot of the live themes.
@@ -239,25 +243,27 @@ pub fn live_site_subtitle() -> Arc<str> {
 #[must_use]
 /// Resolves a case-insensitive theme slug to its enabled canonical spelling.
 pub fn normalize_theme_slug(theme: &str) -> Option<String> {
-    live_themes()
+    theme_slug_in(&live_themes(), theme)
+}
+
+/// Resolve against a single catalog snapshot so a render cannot mix enablement states.
+fn theme_slug_in(themes: &[Theme], slug: &str) -> Option<String> {
+    themes
         .iter()
-        .find(|candidate| candidate.enabled && candidate.slug.eq_ignore_ascii_case(theme.trim()))
+        .find(|candidate| candidate.enabled && candidate.slug.eq_ignore_ascii_case(slug.trim()))
         .map(|candidate| candidate.slug.clone())
 }
 
-/// Resolves a configured default theme, including the built-in terminal theme.
-fn normalize_configured_default_theme(theme: &str) -> Option<String> {
-    let theme = theme.trim();
-    if theme.eq_ignore_ascii_case("terminal") {
-        return Some("terminal".to_owned());
-    }
-    normalize_theme_slug(theme)
-}
-
-/// Chooses an enabled fallback theme when no configured theme is valid.
-fn fallback_theme_slug() -> String {
-    let themes = live_themes();
-    normalize_theme_slug(crate::theme::HARD_DEFAULT_THEME)
+/// Resolve board, site, and emergency defaults from the same catalog snapshot.
+fn resolve_page_default_theme(
+    themes: &[Theme],
+    site_default: &str,
+    board_default: Option<&str>,
+) -> String {
+    board_default
+        .and_then(|slug| theme_slug_in(themes, slug))
+        .or_else(|| theme_slug_in(themes, site_default))
+        .or_else(|| theme_slug_in(themes, crate::theme::HARD_DEFAULT_THEME))
         .or_else(|| {
             themes
                 .iter()
@@ -267,25 +273,24 @@ fn fallback_theme_slug() -> String {
         .unwrap_or_else(|| crate::theme::HARD_DEFAULT_THEME.to_owned())
 }
 
-/// Resolves the effective default theme for a page.
-fn resolve_page_default_theme(board_default_theme: Option<&str>) -> String {
-    board_default_theme
-        .and_then(normalize_configured_default_theme)
-        .or_else(|| normalize_configured_default_theme(&live_default_theme()))
-        .unwrap_or_else(fallback_theme_slug)
-}
-
 #[must_use]
 /// Produces the theme-dependent fragment used in page `ETag` values.
 pub fn page_theme_etag_fragment(
     current_theme: Option<&str>,
     board_default_theme: Option<&str>,
 ) -> String {
-    let default_theme = resolve_page_default_theme(board_default_theme);
+    let themes = live_themes();
+    let default_theme =
+        resolve_page_default_theme(&themes, &live_default_theme(), board_default_theme);
     let active_theme = current_theme
-        .and_then(normalize_theme_slug)
-        .unwrap_or(default_theme);
-    crate::utils::crypto::sha256_hex(active_theme.as_bytes())
+        .and_then(|slug| theme_slug_in(&themes, slug))
+        .unwrap_or_else(|| default_theme.clone());
+    let state = format!(
+        "{active_theme}:{default_theme}:{}:{}",
+        LIVE_THEME_VERSION.load(Ordering::Relaxed),
+        *STATIC_ASSET_VERSION
+    );
+    crate::utils::crypto::sha256_hex(state.as_bytes())
         .chars()
         .take(12)
         .collect()
@@ -739,9 +744,16 @@ pub fn base_layout_with_preferences(
         .map(|theme| theme.slug.as_str())
         .collect::<Vec<_>>()
         .join(",");
-    let default_theme = resolve_page_default_theme(board_default_theme);
+    let custom_theme_slugs = enabled_themes
+        .iter()
+        .filter(|theme| theme.enabled && !theme.is_builtin)
+        .map(|theme| theme.slug.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let default_theme =
+        resolve_page_default_theme(&enabled_themes, &live_default_theme(), board_default_theme);
     let active_theme = current_theme
-        .and_then(normalize_theme_slug)
+        .and_then(|slug| theme_slug_in(&enabled_themes, slug))
         .unwrap_or_else(|| default_theme.clone());
     let default_theme_attr = format!(r#" data-default-theme="{}""#, escape_html(&default_theme));
     let theme_slugs_attr = format!(
@@ -769,12 +781,12 @@ pub fn base_layout_with_preferences(
     let admin_js_src = static_asset_url("/static/admin.js");
     let is_admin_page = current_path.starts_with("/admin");
     let uses_admin_styles = is_admin_page || current_path.starts_with("/setup");
-    let theme_stylesheet_href = if active_theme == "terminal" {
+    let theme_stylesheet_href = if crate::theme::builtin_theme(&active_theme).is_some() {
         String::new()
     } else {
         theme_css_href(&active_theme)
     };
-    let theme_stylesheet_link = if active_theme == "terminal" {
+    let theme_stylesheet_link = if crate::theme::builtin_theme(&active_theme).is_some() {
         String::new()
     } else {
         format!(
@@ -831,6 +843,19 @@ pub fn base_layout_with_preferences(
             label = escape_html(&theme.display_name)
         );
     }
+    let theme_select_disabled = if theme_select_options.is_empty() {
+        let label = crate::theme::builtin_theme(&active_theme)
+            .map_or(active_theme.as_str(), |theme| theme.display_name);
+        theme_select_options = format!(
+            r#"<option value="{}" selected>{} (fallback)</option>"#,
+            escape_html(&active_theme),
+            escape_html(label)
+        );
+        theme_noscript_buttons = format!("<span>{} (fallback)</span>", escape_html(label));
+        " disabled"
+    } else {
+        ""
+    };
     let hide_nsfw_checked = if preferences.hide_nsfw_boards {
         " checked"
     } else {
@@ -864,7 +889,7 @@ pub fn base_layout_with_preferences(
 
     format!(
         r#"<!DOCTYPE html>
-<html lang="en" class="no-js"{default_theme_attr}{theme_slugs_attr}{active_theme_value_attr}{active_theme_attr}>
+<html lang="en" class="no-js" data-theme-css-slugs="{custom_theme_slugs}"{default_theme_attr}{theme_slugs_attr}{active_theme_value_attr}{active_theme_attr}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -902,7 +927,7 @@ pub fn base_layout_with_preferences(
         <input type="hidden" name="_csrf" value="{csrf_token}">
         <input type="hidden" name="return_to" value="{current_path}">
         <label>Theme
-          <select name="theme">{theme_select_options}</select>
+          <select name="theme"{theme_select_disabled}>{theme_select_options}</select>
         </label>
         <input type="hidden" name="hide_nsfw_boards_present" value="1">
         <label><input type="checkbox" name="hide_nsfw_boards" value="1"{hide_nsfw_checked}> Hide NSFW boards</label>
@@ -996,6 +1021,7 @@ pub fn base_layout_with_preferences(
         theme_slugs_attr = theme_slugs_attr,
         active_theme_value_attr = active_theme_value_attr,
         active_theme_attr = active_theme_attr,
+        custom_theme_slugs = escape_html(&custom_theme_slugs),
         theme_select_options = theme_select_options,
         theme_picker_panel = theme_picker_panel,
         theme_noscript_buttons = theme_noscript_buttons,
@@ -1059,17 +1085,28 @@ pub fn base_layout_with_preferences(
 #[must_use]
 /// Renders the standalone ban notice and appeal form.
 pub fn ban_page(reason: &str, csrf_token: &str) -> String {
-    let enabled_theme_slugs = live_themes()
+    ban_page_with_theme(reason, csrf_token, None, None)
+}
+
+/// Renders a ban notice with the request's validated theme preference.
+pub(crate) fn ban_page_with_theme(
+    reason: &str,
+    csrf_token: &str,
+    current_theme: Option<&str>,
+    board_default: Option<&str>,
+) -> String {
+    let themes = live_themes();
+    let enabled_theme_slugs = themes
         .iter()
         .filter(|theme| theme.enabled)
         .map(|theme| theme.slug.as_str())
         .collect::<Vec<_>>()
         .join(",");
-    let configured_default = resolve_page_default_theme(None);
-    let default_theme_attr = format!(
-        r#" data-default-theme="{}""#,
-        escape_html(&configured_default)
-    );
+    let page_default = resolve_page_default_theme(&themes, &live_default_theme(), board_default);
+    let configured_default = current_theme
+        .and_then(|slug| theme_slug_in(&themes, slug))
+        .unwrap_or_else(|| page_default.clone());
+    let default_theme_attr = format!(r#" data-default-theme="{}""#, escape_html(&page_default));
     let theme_slugs_attr = format!(
         r#" data-theme-slugs="{}""#,
         escape_html(&enabled_theme_slugs)
@@ -1082,7 +1119,7 @@ pub fn ban_page(reason: &str, csrf_token: &str) -> String {
     let stylesheet_href = static_asset_url("/static/style.css");
     let theme_init_src = static_asset_url("/static/theme-init.js");
     let main_js_src = static_asset_url("/static/main.js");
-    let theme_stylesheet_link = if configured_default == "terminal" {
+    let theme_stylesheet_link = if crate::theme::builtin_theme(&configured_default).is_some() {
         String::new()
     } else {
         format!(
@@ -1092,7 +1129,7 @@ pub fn ban_page(reason: &str, csrf_token: &str) -> String {
     };
     format!(
         r#"<!DOCTYPE html>
-<html lang="en" class="no-js"{default_theme_attr}{theme_slugs_attr}{active_theme_attr}>
+<html lang="en" class="no-js" data-active-theme="{active_theme}"{default_theme_attr}{theme_slugs_attr}{active_theme_attr}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1126,6 +1163,7 @@ appeals are reviewed by site staff. one appeal per 24 hours.</p>
         stylesheet_href = stylesheet_href,
         theme_stylesheet_link = theme_stylesheet_link,
         theme_init_src = theme_init_src,
+        active_theme = escape_html(&configured_default),
         reason = escape_html(reason),
         csrf = escape_html(csrf_token),
         main_js_src = main_js_src,
@@ -1135,6 +1173,44 @@ appeals are reviewed by site staff. one appeal per 24 hours.</p>
 #[must_use]
 /// Renders a standalone error page using the shared site layout.
 pub fn error_page(code: u16, message: &str) -> String {
+    error_page_with_preferences(code, message, None, None, "", UserPreferences::default())
+}
+
+/// Renders the rate-limit notice with request preferences and its return hook.
+#[must_use]
+pub fn rate_limit_page_with_preferences(
+    theme: Option<&str>,
+    board_default: Option<&str>,
+    csrf: &str,
+    preferences: UserPreferences,
+) -> String {
+    let body = r#"<div class="page-box error-page">
+<h1>Slow down</h1><p>You are navigating too fast. Please try again shortly.</p>
+<p><a href="/">return home</a></p></div>"#;
+    base_layout_with_preferences(
+        "Slow down",
+        None,
+        body,
+        csrf,
+        &live_boards(),
+        theme,
+        board_default,
+        false,
+        "/",
+        preferences,
+    )
+    .replacen("<body", r#"<body data-rate-limit-page="1""#, 1)
+}
+
+/// Renders an error using the same preference precedence as the failed page.
+pub(crate) fn error_page_with_preferences(
+    code: u16,
+    message: &str,
+    current_theme: Option<&str>,
+    board_default: Option<&str>,
+    csrf: &str,
+    preferences: UserPreferences,
+) -> String {
     // Use base_layout so the error page has the same header, theme picker,
     // and board navigation as every other page.  live_boards() is always
     // up-to-date because every board mutation refreshes the cache.
@@ -1148,16 +1224,17 @@ pub fn error_page(code: u16, message: &str) -> String {
         code = code,
         message = escape_html(message),
     );
-    base_layout(
+    base_layout_with_preferences(
         &format!("Error {code}"),
         None,
         &body,
-        "",
+        csrf,
         &boards,
-        None,
-        None,
+        current_theme,
+        board_default,
         false,
         "/",
+        preferences,
     )
 }
 
@@ -1179,6 +1256,45 @@ mod tests {
             sort_order,
             is_builtin: true,
             custom_css: String::new(),
+        }
+    }
+
+    #[test]
+    fn theme_default_precedence_rejects_disabled_terminal_and_stale_slugs() {
+        let mut terminal = builtin_theme("terminal", "Terminal", 1);
+        terminal.enabled = false;
+        let themes = vec![
+            terminal,
+            builtin_theme("forest", "Forest", 2),
+            builtin_theme("blue-sky", "Blue Sky", 3),
+        ];
+        assert_eq!(
+            super::resolve_page_default_theme(&themes, "blue-sky", Some("terminal")),
+            "blue-sky"
+        );
+        assert_eq!(
+            super::resolve_page_default_theme(&themes, "terminal", Some("deleted")),
+            "forest"
+        );
+        assert_eq!(
+            super::resolve_page_default_theme(&themes, "forest", Some(" BLUE-SKY ")),
+            "blue-sky"
+        );
+        assert_eq!(
+            super::resolve_page_default_theme(&[], "deleted", None),
+            "forest"
+        );
+    }
+
+    #[test]
+    fn theme_normalization_only_accepts_enabled_exact_slugs() {
+        let themes = vec![builtin_theme("forest", "Forest", 1)];
+        assert_eq!(
+            super::theme_slug_in(&themes, " FOREST "),
+            Some("forest".into())
+        );
+        for slug in ["forest/..", "forest;", "<forest>", "deleted", ""] {
+            assert_eq!(super::theme_slug_in(&themes, slug), None);
         }
     }
 

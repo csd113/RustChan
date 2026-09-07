@@ -638,36 +638,45 @@ function setAdminModalOpen(modal, open, displayValue) {
     var font = cssFont(fieldValue(form, 'font_family'));
     var gap = fieldValue(form, 'density') === 'compact' ? '0.35rem' : '0.55rem';
     var pad = fieldValue(form, 'density') === 'compact' ? '0.45rem' : '0.75rem';
-    var radius = fieldValue(form, 'border_radius_px') || '8';
+    var radius = Number(fieldValue(form, 'border_radius_px'));
+    if (!Number.isInteger(radius) || radius < 0 || radius > 24) radius = 8;
+    function color(name) {
+      var value = fieldValue(form, name);
+      return isHexColor(value) ? value : '#888888';
+    }
+    var inputBackground = color('input_background_color');
+    var channels = inputBackground.slice(1).match(/../g).map(function (value) { return parseInt(value, 16); });
+    var scheme = channels[0] * 0.299 + channels[1] * 0.587 + channels[2] * 0.114 >= 128 ? 'light' : 'dark';
     return (
-      selector + ' {' +
-      '--theme-preview-bg:' + fieldValue(form, 'background_color') + ';' +
-      '--theme-preview-panel:' + fieldValue(form, 'panel_color') + ';' +
-      '--theme-preview-card:' + fieldValue(form, 'card_color') + ';' +
-      '--theme-preview-op:' + fieldValue(form, 'op_card_color') + ';' +
-      '--theme-preview-text:' + fieldValue(form, 'text_color') + ';' +
-      '--theme-preview-muted:' + fieldValue(form, 'muted_text_color') + ';' +
-      '--theme-preview-link:' + fieldValue(form, 'link_color') + ';' +
-      '--theme-preview-link-hover:' + fieldValue(form, 'link_hover_color') + ';' +
-      '--theme-preview-border:' + fieldValue(form, 'border_color') + ';' +
-      '--theme-preview-input-bg:' + fieldValue(form, 'input_background_color') + ';' +
-      '--theme-preview-input-text:' + fieldValue(form, 'input_text_color') + ';' +
-      '--theme-preview-input-border:' + fieldValue(form, 'input_border_color') + ';' +
-      '--theme-preview-button-bg:' + fieldValue(form, 'button_background_color') + ';' +
-      '--theme-preview-button-text:' + fieldValue(form, 'button_text_color') + ';' +
-      '--theme-preview-button-border:' + fieldValue(form, 'button_border_color') + ';' +
-      '--theme-preview-button-hover:' + fieldValue(form, 'button_hover_color') + ';' +
-      '--theme-preview-header-bg:' + fieldValue(form, 'header_background_color') + ';' +
-      '--theme-preview-header-text:' + fieldValue(form, 'header_text_color') + ';' +
-      '--theme-preview-header-border:' + fieldValue(form, 'header_border_color') + ';' +
-      '--theme-preview-quote:' + fieldValue(form, 'quote_color') + ';' +
+      selector + ' {color-scheme:' + scheme + ';' +
+      '--theme-preview-bg:' + color('background_color') + ';' +
+      '--theme-preview-panel:' + color('panel_color') + ';' +
+      '--theme-preview-card:' + color('card_color') + ';' +
+      '--theme-preview-op:' + color('op_card_color') + ';' +
+      '--theme-preview-text:' + color('text_color') + ';' +
+      '--theme-preview-muted:' + color('muted_text_color') + ';' +
+      '--theme-preview-link:' + color('link_color') + ';' +
+      '--theme-preview-link-hover:' + color('link_hover_color') + ';' +
+      '--theme-preview-border:' + color('border_color') + ';' +
+      '--theme-preview-input-bg:' + color('input_background_color') + ';' +
+      '--theme-preview-input-text:' + color('input_text_color') + ';' +
+      '--theme-preview-input-border:' + color('input_border_color') + ';' +
+      '--theme-preview-button-bg:' + color('button_background_color') + ';' +
+      '--theme-preview-button-text:' + color('button_text_color') + ';' +
+      '--theme-preview-button-border:' + color('button_border_color') + ';' +
+      '--theme-preview-button-hover:' + color('button_hover_color') + ';' +
+      '--theme-preview-header-bg:' + color('header_background_color') + ';' +
+      '--theme-preview-header-text:' + color('header_text_color') + ';' +
+      '--theme-preview-header-border:' + color('header_border_color') + ';' +
+      '--theme-preview-quote:' + color('quote_color') + ';' +
+      '--theme-preview-meta:' + color('meta_text_color') + ';' +
+      '--theme-preview-success:' + color('success_color') + ';' +
+      '--theme-preview-danger:' + color('danger_color') + ';' +
       '--theme-preview-radius:' + radius + 'px;' +
       '--theme-preview-gap:' + gap + ';' +
       '--theme-preview-pad:' + pad + ';' +
       '--theme-preview-font:' + font + ';' +
-      '} ' +
-      selector + ' .admin-flash.flash-ok { border-color:' + fieldValue(form, 'success_color') + '; color:' + fieldValue(form, 'success_color') + '; } ' +
-      selector + ' .admin-flash.flash-error { border-color:' + fieldValue(form, 'danger_color') + '; color:' + fieldValue(form, 'danger_color') + '; }'
+      '}'
     );
   }
 
@@ -676,6 +685,7 @@ function setAdminModalOpen(modal, open, displayValue) {
     var preview = form.querySelector('[data-theme-preview-slug]');
     if (!styleNode || !preview) return;
     var selector = '[data-theme-preview-slug="' + preview.getAttribute('data-theme-preview-slug') + '"]';
+    preview.removeAttribute('style');
     styleNode.textContent = previewCss(form, selector);
   }
 

@@ -99,9 +99,9 @@
 }
 
 .admin-flash.flash-error {
-  background: rgba(255, 60, 60, 0.1);
-  border-color: #ff4040;
-  color: #ff9090;
+  background: color-mix(in srgb, var(--red) 10%, var(--bg-panel));
+  border-color: var(--red);
+  color: var(--red);
 }
 
 .admin-flash-spaced {
@@ -562,7 +562,6 @@ html:not([data-theme]) .admin-panel h1 {
   padding: 0.5rem 0.65rem;
   font-family: var(--font);
   font-size: 0.82rem;
-  outline: none;
   min-height: 2.35rem;
   min-width: 0;
   max-width: 100%;
@@ -636,7 +635,7 @@ html:not([data-theme]) .admin-panel h1 {
 
 .admin-table td {
   padding: 7px 9px;
-  border-bottom: 1px solid rgba(26,46,26,0.5);
+  border-bottom: 1px solid var(--border);
   color: var(--text);
   vertical-align: middle;
 }
@@ -647,7 +646,7 @@ html:not([data-theme]) .admin-panel h1 {
 }
 
 .admin-table tr:hover td {
-  background: rgba(0,200,64,0.03);
+  background: color-mix(in srgb, var(--green) 3%, transparent);
 }
 
 .admin-table-wrap {
@@ -998,6 +997,7 @@ html:not([data-theme]) .admin-panel h1 {
 }
 
 .theme-preview-meta {
+  color: var(--theme-preview-meta, var(--text-dim));
   margin-bottom: 0.35rem;
 }
 
@@ -1045,6 +1045,18 @@ html:not([data-theme]) .admin-panel h1 {
 .theme-preview-flashes {
   display: grid;
   gap: 0.45rem;
+}
+
+.theme-preview-shell .admin-flash.flash-ok {
+  background: color-mix(in srgb, var(--theme-preview-success) 10%, var(--theme-preview-panel));
+  border-color: var(--theme-preview-success);
+  color: var(--theme-preview-success);
+}
+
+.theme-preview-shell .admin-flash.flash-error {
+  background: color-mix(in srgb, var(--theme-preview-danger) 10%, var(--theme-preview-panel));
+  border-color: var(--theme-preview-danger);
+  color: var(--theme-preview-danger);
 }
 
 .theme-editor-css-panel {
@@ -2779,7 +2791,7 @@ html.no-js .admin-toolbar-btn[data-action="open-report"] {
 
 .admin-subsection + .admin-subsection {
   margin-top: 14px;
-  border-top: 1px solid rgba(26,46,26,0.55);
+  border-top: 1px solid var(--border);
 }
 
 .admin-site-settings-form,
@@ -2855,7 +2867,6 @@ html.no-js .admin-toolbar-btn[data-action="open-report"] {
   padding: 0.5rem 0.65rem;
   font-family: var(--font);
   font-size: 0.82rem;
-  outline: none;
   transition: border-color 0.2s;
   width: 100%;
   box-sizing: border-box;
@@ -3050,7 +3061,6 @@ html:not([data-theme]) .admin-login h1 {
   padding: 0.55rem 0.65rem;
   font-family: var(--font);
   font-size: 0.85rem;
-  outline: none;
   width: 200px;
   min-height: 2.4rem;
 }
@@ -3776,7 +3786,6 @@ html:not([data-theme]) .admin-login h1 {
 [data-theme="forest"] .admin-section select:focus,
 [data-theme="forest"] .admin-section textarea:focus {
   border-color: var(--forest-surface-hover-border);
-  outline: none;
 }
 
 [data-theme="blue-sky"] .admin-section {
@@ -3811,7 +3820,6 @@ html:not([data-theme]) .admin-login h1 {
 [data-theme="blue-sky"] .admin-section select:focus,
 [data-theme="blue-sky"] .admin-section textarea:focus {
   border-color: var(--blue-sky-surface-hover-border);
-  outline: none;
 }
 
 [data-theme="deep-orbit"] .admin-section {
@@ -3846,7 +3854,6 @@ html:not([data-theme]) .admin-login h1 {
 [data-theme="deep-orbit"] .admin-section select:focus,
 [data-theme="deep-orbit"] .admin-section textarea:focus {
   border-color: var(--deep-orbit-surface-hover-border);
-  outline: none;
 }
 
 [data-theme="chanclassic"] .admin-section {
