@@ -289,6 +289,10 @@ pub(super) fn build_backup_id(_scope: BackupScope, scope_label: &str) -> String 
 }
 
 pub(super) fn create_backup_root(backup_id: &str) -> Result<PathBuf> {
+    if let Some(path) = &crate::config::CONFIG.backup_directory {
+        crate::config::prepare_backup_directory(path, &crate::config::CONFIG)
+            .map_err(|error| AppError::BadRequest(format!("{error:#}")))?;
+    }
     let root = backups_root_dir().join(backup_id);
     crate::config::ensure_private_dir(&root).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(

@@ -143,7 +143,12 @@ wal_checkpoint_interval_secs = 3600
 auto_vacuum_interval_hours = 24
 
 # How often (in hours) to create a saved full-site backup automatically.
-# These backups are stored in rustchan-data/backups/full/. Set to 0 to disable.
+# All saved backups use backup_directory, defaulting to <data-dir>/backups/.
+# Optional absolute path on a mounted disk/NAS; restart after changes. No backups are moved.
+# Use a dedicated private directory outside live uploads/runtime data.
+# CHAN_BACKUP_DIRECTORY overrides this setting. Empty paths are invalid; omit for default.
+# backup_directory = "/mnt/backup-disk/rustchan"
+# Set the interval to 0 to disable scheduled backups.
 auto_full_backup_interval_hours = 24
 
 # How many saved full-site backups to keep on disk after a new saved full

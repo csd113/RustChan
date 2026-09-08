@@ -799,7 +799,7 @@ pub(in crate::server) async fn setup_finish(
             db::set_site_setting(
                 &tx,
                 "setup_backup_destination",
-                &crate::config::full_backups_dir().display().to_string(),
+                &crate::config::backups_dir().display().to_string(),
             )?;
             db::set_site_setting(
                 &tx,
@@ -1124,7 +1124,7 @@ fn setup_form_page(
 </div></section>
 <section class="setup-section" aria-labelledby="setup-step-8">
 <div class="setup-section-head"><span class="setup-step">Step 8</span><h2 id="setup-step-8">Backups</h2><p>Set the initial automatic full-backup policy. Automatic backups remain off unless enabled here.</p></div>
-<p class="setup-runtime-note">Default destination: <strong>{backup_dir}</strong></p>
+<p class="setup-runtime-note">Effective destination: <strong>{backup_dir}</strong></p>
 <div class="setup-grid">
 <label class="setup-check"><input type="checkbox" name="auto_backup_enabled" value="1"{auto_backup_enabled}> Enable automatic full backups every 24 hours</label>
 <label><span>Retention count</span><input type="number" name="backup_retention" value="{backup_retention}" min="1" max="1000"></label>
@@ -1181,7 +1181,7 @@ fn setup_form_page(
             checked(form.homepage_new_reply_badges_enabled.as_deref()),
         thread_new_reply_badges_enabled = checked(form.thread_new_reply_badges_enabled.as_deref()),
         hide_nsfw_default = checked(form.hide_nsfw_default.as_deref()),
-        backup_dir = escape_html(&crate::config::full_backups_dir().display().to_string()),
+        backup_dir = escape_html(&crate::config::backups_dir().display().to_string()),
         auto_backup_enabled = checked(form.auto_backup_enabled.as_deref()),
         backup_retention = escape_html(form.backup_retention.as_deref().unwrap_or("1")),
         include_tor_keys_in_backups = checked(form.include_tor_keys_in_backups.as_deref()),

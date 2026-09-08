@@ -10,8 +10,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::sync::{LazyLock, OnceLock};
 
+/// Backup storage validation and settings persistence.
+mod backup_storage;
 /// Settings-file template rendering.
 mod template;
+pub use backup_storage::{prepare_backup_directory, update_settings_file_backup_directory};
 
 #[cfg(test)]
 /// Serializes tests that mutate the process-wide runtime directory layout.
@@ -48,14 +51,19 @@ fn settings_file_path() -> PathBuf {
 
 /// Resolve and validate an operator-provided data-directory override.
 fn resolve_data_dir_override(path: &Path) -> anyhow::Result<PathBuf> {
+    resolve_storage_dir(path, "--data-dir")
+}
+
+/// Resolve a directory against its existing ancestor before filesystem mutation.
+fn resolve_storage_dir(path: &Path, setting: &str) -> anyhow::Result<PathBuf> {
     if !path.is_absolute() {
-        anyhow::bail!("--data-dir must be an absolute path");
+        anyhow::bail!("{setting} must be an absolute path");
     }
     if path
         .components()
         .any(|component| component == Component::ParentDir)
     {
-        anyhow::bail!("--data-dir must not contain '..' components");
+        anyhow::bail!("{setting} must not contain '..' components");
     }
 
     let mut existing_ancestor = path;
@@ -65,13 +73,13 @@ fn resolve_data_dir_override(path: &Path) -> anyhow::Result<PathBuf> {
             Ok(resolved) => {
                 if resolved.parent().is_none() && existing_ancestor.parent().is_some() {
                     anyhow::bail!(
-                        "--data-dir ancestor must not resolve to a filesystem root: {}",
+                        "{setting} ancestor must not resolve to a filesystem root: {}",
                         existing_ancestor.display()
                     );
                 }
                 if !resolved.is_dir() {
                     anyhow::bail!(
-                        "--data-dir ancestor is not a directory: {}",
+                        "{setting} ancestor is not a directory: {}",
                         existing_ancestor.display()
                     );
                 }
@@ -82,7 +90,7 @@ fn resolve_data_dir_override(path: &Path) -> anyhow::Result<PathBuf> {
                     Ok(_) => {
                         return Err(error).with_context(|| {
                             format!(
-                                "could not resolve --data-dir path {}",
+                                "could not resolve {setting} path {}",
                                 existing_ancestor.display()
                             )
                         });
@@ -92,7 +100,7 @@ fn resolve_data_dir_override(path: &Path) -> anyhow::Result<PathBuf> {
                     Err(metadata_error) => {
                         return Err(metadata_error).with_context(|| {
                             format!(
-                                "could not inspect --data-dir path {}",
+                                "could not inspect {setting} path {}",
                                 existing_ancestor.display()
                             )
                         });
@@ -101,14 +109,14 @@ fn resolve_data_dir_override(path: &Path) -> anyhow::Result<PathBuf> {
 
                 let component = existing_ancestor.file_name().ok_or_else(|| {
                     anyhow::anyhow!(
-                        "could not find an existing parent for --data-dir {}",
+                        "could not find an existing parent for {setting} {}",
                         path.display()
                     )
                 })?;
                 missing_components.push(component.to_os_string());
                 existing_ancestor = existing_ancestor.parent().ok_or_else(|| {
                     anyhow::anyhow!(
-                        "could not find an existing parent for --data-dir {}",
+                        "could not find an existing parent for {setting} {}",
                         path.display()
                     )
                 })?;
@@ -116,7 +124,7 @@ fn resolve_data_dir_override(path: &Path) -> anyhow::Result<PathBuf> {
             Err(error) => {
                 return Err(error).with_context(|| {
                     format!(
-                        "could not resolve --data-dir path {}",
+                        "could not resolve {setting} path {}",
                         existing_ancestor.display()
                     )
                 });
@@ -128,7 +136,7 @@ fn resolve_data_dir_override(path: &Path) -> anyhow::Result<PathBuf> {
         resolved.push(component);
     }
     if resolved.parent().is_none() {
-        anyhow::bail!("--data-dir must not resolve to a filesystem root");
+        anyhow::bail!("{setting} must not resolve to a filesystem root");
     }
     Ok(resolved)
 }
@@ -173,7 +181,26 @@ pub fn logs_dir() -> PathBuf {
 #[must_use]
 /// Return the root directory for all backups.
 pub fn backups_dir() -> PathBuf {
+    CONFIG
+        .backup_directory
+        .clone()
+        .unwrap_or_else(default_backups_dir)
+}
+
+#[must_use]
+/// Return the original backup location, independent of custom configuration.
+pub fn default_backups_dir() -> PathBuf {
     data_dir().join("backups")
+}
+
+/// Legacy migration destination; never move existing backups to custom storage.
+fn default_full_backups_dir() -> PathBuf {
+    default_backups_dir().join("full")
+}
+
+/// Legacy board migration destination, independent of custom storage.
+fn default_board_backups_dir() -> PathBuf {
+    default_backups_dir().join("boards")
 }
 
 #[must_use]
@@ -331,8 +358,8 @@ type RuntimeDirMigration = (&'static str, fn() -> PathBuf);
 
 /// Legacy runtime directories migrated into the grouped layout.
 const RUNTIME_LAYOUT_MIGRATIONS: &[RuntimeDirMigration] = &[
-    ("full-backups", full_backups_dir),
-    ("board-backups", board_backups_dir),
+    ("full-backups", default_full_backups_dir),
+    ("board-backups", default_board_backups_dir),
     ("tmp-board-downloads", runtime_temp_board_downloads_dir),
     ("arti_state", runtime_tor_state_dir),
     ("arti_cache", runtime_tor_cache_dir),
@@ -384,9 +411,9 @@ pub fn migrate_runtime_layout_if_needed() -> anyhow::Result<()> {
         runtime_temp_board_downloads_dir(),
         runtime_favicon_dir(),
         runtime_banner_dir(),
-        backups_dir(),
-        full_backups_dir(),
-        board_backups_dir(),
+        default_backups_dir(),
+        default_full_backups_dir(),
+        default_board_backups_dir(),
     ] {
         ensure_private_dir(&dir)?;
     }
@@ -476,6 +503,8 @@ struct SettingsFile {
     /// How often to create a saved full-site backup automatically, in hours.
     /// Set to 0 to disable. Default: 24 (daily).
     auto_full_backup_interval_hours: Option<u64>,
+    /// Custom absolute backup root; omission preserves the original location.
+    backup_directory: Option<PathBuf>,
     /// How many saved full-site backups to keep on disk after a new saved
     /// backup completes. Minimum 1. Default: 1.
     auto_full_backup_copies_to_keep: Option<u64>,
@@ -872,6 +901,8 @@ pub struct Config {
     pub auto_vacuum_interval_hours: u64,
     /// Interval in hours between automatic saved full backups. 0 = disabled.
     pub auto_full_backup_interval_hours: u64,
+    /// Custom backup storage root, applied at process startup.
+    pub backup_directory: Option<PathBuf>,
     /// Maximum number of saved full backups kept on disk after each new saved
     /// full backup completes. Minimum 1.
     pub auto_full_backup_copies_to_keep: u64,
@@ -998,6 +1029,7 @@ impl std::fmt::Debug for Config {
             .field("public_readiness_details", &self.public_readiness_details)
             .field("public_metrics_enabled", &self.public_metrics_enabled)
             .field("public_hosts", &self.public_hosts)
+            .field("backup_directory", &self.backup_directory)
             .field("wal_checkpoint_interval", &self.wal_checkpoint_interval)
             .field(
                 "auto_vacuum_interval_hours",
@@ -1283,6 +1315,9 @@ impl Config {
                 "CHAN_AUTO_VACUUM_HOURS",
                 s.auto_vacuum_interval_hours.unwrap_or(24),
             ),
+            backup_directory: env::var_os("CHAN_BACKUP_DIRECTORY")
+                .map(PathBuf::from)
+                .or(s.backup_directory),
             auto_full_backup_interval_hours: env_parse(
                 "CHAN_AUTO_FULL_BACKUP_HOURS",
                 s.auto_full_backup_interval_hours.unwrap_or(24),
@@ -1499,6 +1534,9 @@ impl Config {
                     "CONFIG ERROR: public_hosts entry '{host}' must be a bare hostname or IP literal."
                 )
             })?;
+        }
+        if let Some(path) = &self.backup_directory {
+            prepare_backup_directory(path, self)?;
         }
         // Verify the upload directory is writable.
         let upload_path = Path::new(&self.upload_dir);
@@ -2327,7 +2365,7 @@ mod tests {
     }
 
     /// Build a complete configuration that passes validation.
-    fn valid_config() -> Config {
+    pub(super) fn valid_config() -> Config {
         const MIB: usize = 1024 * 1024;
         const MIB_U64: u64 = 1024 * 1024;
         Config {
@@ -2370,6 +2408,7 @@ mod tests {
             public_hosts: Vec::new(),
             wal_checkpoint_interval: 3600,
             auto_vacuum_interval_hours: 24,
+            backup_directory: None,
             auto_full_backup_interval_hours: 24,
             auto_full_backup_copies_to_keep: 1,
             auto_full_backup_include_tor_hidden_service_keys: false,

@@ -489,12 +489,12 @@ fn should_store_without_recompress(path: &Path) -> bool {
         })
 }
 
-/// rustchan-data/backups/full/
+/// Legacy full ZIP directory within the configured backup root.
 pub(in crate::server) fn full_backup_dir() -> PathBuf {
     crate::config::full_backups_dir()
 }
 
-/// rustchan-data/backups/boards/
+/// Legacy board ZIP directory within the configured backup root.
 pub(super) fn board_backup_dir() -> PathBuf {
     crate::config::board_backups_dir()
 }
@@ -647,6 +647,198 @@ mod tests {
     use std::io::{Cursor, Write as _};
     use std::path::{Path, PathBuf};
     use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn backup_directory_admin_rejects_unauthenticated_or_invalid_updates() -> TestResult<()> {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().join("not-created");
+        let state = crate::test_support::app_state();
+        let app = Router::new()
+            .route(
+                "/admin/backup/settings",
+                post(crate::handlers::admin::update_full_backup_settings),
+            )
+            .with_state(state.clone());
+        let body = format!(
+            "_csrf={}&backup_directory={}",
+            admin_signed_csrf(),
+            directory.display()
+        );
+        let response = app
+            .clone()
+            .oneshot(admin_form_post("/admin/backup/settings", body)?)
+            .await?;
+        ensure!(response.status() == StatusCode::FORBIDDEN);
+        ensure!(
+            !directory.exists(),
+            "unauthenticated request created a directory"
+        );
+        install_admin_session(&state)?;
+        for path in ["", "relative", "%00"] {
+            let body = format!("_csrf={}&backup_directory={path}", admin_signed_csrf());
+            let response = app
+                .clone()
+                .oneshot(admin_form_post("/admin/backup/settings", body)?)
+                .await?;
+            ensure!(response.status() == StatusCode::BAD_REQUEST);
+            ensure!(response_body_string(response)
+                .await?
+                .contains("backup_directory"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn backup_directory_operations_are_isolated() -> TestResult<()> {
+        if let Some(data) = std::env::var_os("RUSTCHAN_TEST_BACKUP_DATA") {
+            crate::config::configure_data_dir(Some(Path::new(&data)))?;
+            let legacy = Path::new(&data).join("full-backups");
+            std::fs::create_dir_all(&legacy)?;
+            std::fs::write(legacy.join("migration-marker"), b"existing backup")?;
+            crate::config::migrate_runtime_layout_if_needed()?;
+            ensure!(crate::config::default_backups_dir()
+                .join("full/migration-marker")
+                .is_file());
+            crate::config::generate_settings_file_if_missing();
+            let state = crate::test_support::app_state();
+            crate::config::CONFIG.validate()?;
+            return check_backup_storage_operations(&state);
+        }
+        let thread = std::thread::current();
+        let name = thread.name().context("test thread has no name")?;
+        for source in ["default", "settings", "environment"] {
+            let temp = tempfile::tempdir()?;
+            let data = temp.path().join("data");
+            let mut command = std::process::Command::new(std::env::current_exe()?);
+            command
+                .args(["--exact", name, "--nocapture"])
+                .env("RUSTCHAN_TEST_BACKUP_DATA", &data)
+                .env("CHAN_TOR_SUPPORT", "0")
+                .env_remove("CHAN_BACKUP_DIRECTORY");
+            let custom = temp.path().join("disk/custom-backups");
+            if source == "environment" {
+                command.env("CHAN_BACKUP_DIRECTORY", &custom);
+            } else if source == "settings" {
+                std::fs::create_dir(&data)?;
+                std::fs::write(
+                    data.join("settings.toml"),
+                    format!(
+                        "cookie_secret = \"{}\"\nbackup_directory = {}\n",
+                        "a".repeat(64),
+                        toml::Value::String(custom.display().to_string()),
+                    ),
+                )?;
+            }
+            let output = command.output()?;
+            ensure!(
+                output.status.success(),
+                "backup storage child failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            ensure!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        }
+        Ok(())
+    }
+
+    /// Exercise the shared storage resolver with real archives in an isolated process.
+    fn check_backup_storage_operations(state: &crate::middleware::AppState) -> TestResult<()> {
+        install_admin_session(state)?;
+        let root = crate::config::backups_dir();
+        let default = crate::config::default_backups_dir();
+        ensure!(default == crate::config::data_dir().join("backups"));
+        ensure!(
+            root == crate::config::CONFIG
+                .backup_directory
+                .clone()
+                .unwrap_or_else(|| default.clone())
+        );
+        let old = default.join("full/legacy-original.zip");
+        write_sample_full_backup_zip_at(&old, true)?;
+        let legacy = full_backup_dir().join("legacy-active.zip");
+        write_sample_full_backup_zip_at(&legacy, true)?;
+        invalidate_backup_list_cache(&full_backup_dir(), BackupListKind::Full);
+        let listed = super::list_backup_files(&full_backup_dir(), BackupListKind::Full);
+        ensure!(listed
+            .iter()
+            .any(|backup| backup.filename == "legacy-active.zip"));
+        ensure!(
+            listed
+                .iter()
+                .any(|backup| backup.filename == "legacy-original.zip")
+                == (root == default)
+        );
+        for mode in [
+            super::BackupStorageMode::Directory,
+            super::BackupStorageMode::SplitZip,
+        ] {
+            let filename = super::create_full_backup_to_server(
+                &state.db,
+                None,
+                &state.backup_progress,
+                100,
+                false,
+                mode,
+                1024 * 1024 * 1024,
+            )?;
+            let saved = root.join(&filename);
+            ensure!(saved.is_dir());
+            super::saved_backup::verify_saved_v4_root(
+                &saved,
+                &[super::saved_backup::BackupScope::FullSite],
+            )?;
+            let listed = super::list_backup_files(&full_backup_dir(), BackupListKind::Full);
+            ensure!(listed
+                .iter()
+                .any(|backup| backup.backup_ref == filename && backup.verified));
+            ensure!(latest_verified_full_backup_modified_time().is_some());
+            let zip = super::archive::create_temp_legacy_full_backup_from_v4_path(&saved)?;
+            let _cleanup = PathCleanup(zip.clone());
+            let mut archive = zip::ZipArchive::new(std::fs::File::open(zip)?)?;
+            let mut conn = state.db.get()?;
+            super::restore_full::execute_full_restore(
+                &mut conn,
+                1,
+                &crate::config::CONFIG.upload_dir,
+                None,
+                false,
+                &mut archive,
+                "Storage test",
+                "Storage test",
+                "Storage test",
+                "Storage test",
+            )?;
+        }
+        let removed = super::enforce_full_backup_retention(1)?;
+        ensure!(!removed.is_empty());
+        ensure!(super::list_backup_files(&full_backup_dir(), BackupListKind::Full).len() == 1);
+        if root != default {
+            ensure!(
+                old.is_file(),
+                "retention touched the inactive default location"
+            );
+        }
+        saved_board_restore_success_redirects_back_to_restored_board_section()?;
+        let original = root;
+        let next = crate::config::data_dir()
+            .parent()
+            .context("missing data parent")?
+            .join("next-backups");
+        crate::config::update_settings_file_backup_directory(&next)?;
+        ensure!(
+            crate::config::backups_dir() == original,
+            "saving a directory changed an active operation's root"
+        );
+        ensure!(next.join("full").is_dir());
+        ensure!(
+            crate::config::Config::from_env().backup_directory
+                == Some(
+                    std::env::var_os("CHAN_BACKUP_DIRECTORY")
+                        .map_or(next.canonicalize()?, PathBuf::from)
+                )
+        );
+        Ok(())
+    }
 
     fn zip_with_entries(entries: &[(&str, &[u8])]) -> TestResult<zip::ZipArchive<Cursor<Vec<u8>>>> {
         let mut cursor = Cursor::new(Vec::new());

@@ -16,8 +16,12 @@ struct BackupListCacheEntry {
     files: Vec<BackupInfo>,
 }
 
-static BACKUP_LIST_CACHE: LazyLock<parking_lot::Mutex<HashMap<String, BackupListCacheEntry>>> =
-    LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+/// Both legacy and v4 roots identify a listing; never reuse another directory's cache.
+type BackupCacheKey = (PathBuf, PathBuf, BackupListKind);
+
+static BACKUP_LIST_CACHE: LazyLock<
+    parking_lot::Mutex<HashMap<BackupCacheKey, BackupListCacheEntry>>,
+> = LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
 pub(super) fn latest_saved_board_backup_filename(board_short: &str) -> Option<String> {
     list_backup_files(&board_backup_dir(), BackupListKind::Board)
@@ -30,17 +34,14 @@ pub(super) fn latest_saved_board_backup_filename(board_short: &str) -> Option<St
         .map(|info| info.backup_ref)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub(in crate::server) enum BackupListKind {
     Full,
     Board,
 }
 
-fn backup_cache_key(kind: BackupListKind) -> String {
-    match kind {
-        BackupListKind::Full => "full".to_owned(),
-        BackupListKind::Board => "board".to_owned(),
-    }
+fn backup_cache_key(dir: &Path, kind: BackupListKind) -> BackupCacheKey {
+    (dir.to_path_buf(), saved_backup::backups_root_dir(), kind)
 }
 
 fn current_dir_modified(dir: &Path) -> Option<SystemTime> {
@@ -56,8 +57,10 @@ fn current_source_modified(dir: &Path) -> Option<SystemTime> {
     modified
 }
 
-pub(super) fn invalidate_backup_list_cache(_dir: &Path, kind: BackupListKind) {
-    BACKUP_LIST_CACHE.lock().remove(&backup_cache_key(kind));
+pub(super) fn invalidate_backup_list_cache(dir: &Path, kind: BackupListKind) {
+    BACKUP_LIST_CACHE
+        .lock()
+        .remove(&backup_cache_key(dir, kind));
 }
 
 fn modified_string_from_epoch(epoch: Option<i64>) -> String {
@@ -442,7 +445,7 @@ fn list_legacy_zip_backups(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> 
 
 /// List saved backups for the requested kind, newest-first.
 pub(in crate::server) fn list_backup_files(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> {
-    let cache_key = backup_cache_key(kind);
+    let cache_key = backup_cache_key(dir, kind);
     let source_modified = current_source_modified(dir);
     let cached = { BACKUP_LIST_CACHE.lock().get(&cache_key).cloned() };
     if let Some(entry) = cached {

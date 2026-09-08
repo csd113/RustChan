@@ -2869,6 +2869,15 @@ mod tests {
         assert!(html.contains(r#"name="auto_full_backup_storage_mode" value="directory" checked"#));
         assert!(html.contains(r#"name="auto_full_backup_storage_mode" value="split_zip""#));
         assert!(html.contains(r#"name="auto_full_backup_split_zip_part_size_gib""#));
+        assert!(html.contains(r#"name="backup_directory""#));
+        assert!(html.contains("Effective directory:"));
+        assert!(html.contains("Default directory:"));
+        assert!(html.contains("after restarting RustChan"));
+        assert!(html.contains("Existing backups are not moved"));
+        assert!(html.contains(&super::escape_html(
+            &crate::config::backups_dir().display().to_string()
+        )));
+
         assert!(html.contains("<summary>Manual backup</summary>"));
         assert!(html.contains(r#"class="backup-output-fieldset""#));
         assert!(html.contains(r#"type="radio" name="storage_mode" value="directory" checked"#));

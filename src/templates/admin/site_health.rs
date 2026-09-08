@@ -79,6 +79,11 @@ fn render_health_rows(view: &AdminPanelViewModel<'_>) -> String {
     ] {
         append_health_row(&mut rows, label, value);
     }
+    append_health_row(
+        &mut rows,
+        "Backup storage directory",
+        &crate::config::backups_dir().display().to_string(),
+    );
     append_job_rows(&mut rows, view);
     rows
 }

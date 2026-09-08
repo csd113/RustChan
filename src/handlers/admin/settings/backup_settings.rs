@@ -10,6 +10,7 @@ use serde::Deserialize;
 pub(in crate::server) struct FullBackupSettingsForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
+    pub backup_directory: Option<String>,
     pub auto_full_backup_interval_hours: Option<String>,
     pub auto_full_backup_copies_to_keep: Option<String>,
     pub auto_full_backup_include_tor_hidden_service_keys: Option<String>,
@@ -86,6 +87,22 @@ pub(in crate::server) async fn update_full_backup_settings(
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
+    if let Some(directory) = form.backup_directory {
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let conn = state.db.get()?;
+            require_admin_session_sid(&conn, session_id.as_deref())?;
+            crate::config::update_settings_file_backup_directory(std::path::Path::new(&directory))
+                .map_err(|error| AppError::BadRequest(format!("{error:#}")))?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
+        return Ok(admin_panel_redirect_anchor(
+            "Backup directory saved. Restart RustChan to apply it. Existing backups have not been moved. CHAN_BACKUP_DIRECTORY, if set, takes precedence.",
+            "full-backup-restore",
+        ).into_response());
+    }
+
     let settings = parse_full_backup_settings_form(&form)?;
     let interval_hours = settings.interval_hours;
     let copies_to_keep = settings.copies_to_keep;
@@ -145,6 +162,7 @@ mod tests {
     fn automatic_backup_settings_parse_directory_output_mode() -> anyhow::Result<()> {
         let parsed = parse_full_backup_settings_form(&FullBackupSettingsForm {
             csrf: None,
+            backup_directory: None,
             auto_full_backup_interval_hours: Some("12".to_owned()),
             auto_full_backup_copies_to_keep: Some("3".to_owned()),
             auto_full_backup_include_tor_hidden_service_keys: None,
@@ -183,6 +201,7 @@ mod tests {
     fn automatic_backup_settings_parse_split_zip_output_mode() -> anyhow::Result<()> {
         let parsed = parse_full_backup_settings_form(&FullBackupSettingsForm {
             csrf: None,
+            backup_directory: None,
             auto_full_backup_interval_hours: Some("24".to_owned()),
             auto_full_backup_copies_to_keep: Some("5".to_owned()),
             auto_full_backup_include_tor_hidden_service_keys: Some("1".to_owned()),

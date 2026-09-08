@@ -130,6 +130,7 @@ Common runtime options:
 | `enable_any_file_uploads_feature` | Lets individual boards opt into generic file uploads |
 | `[tls].enabled` | Enables the native TLS listener |
 | `auto_full_backup_interval_hours` | Sets the automatic full-backup interval |
+| `backup_directory` | Optional absolute directory for all saved backups; restart to apply |
 
 `CHAN_*` environment variables override matching configuration values. Keep `cookie_secret` stable after launch. Treat the configuration, database, backups, TLS keys, and Tor identity as private data.
 
@@ -174,6 +175,24 @@ rustchan-cli admin db-status
 Run `rustchan-cli admin --help` for arguments and flags.
 
 Full-site and per-board backups can be saved on disk or downloaded. Restores accept uploaded archives and saved backups. RustChan checks archive paths, sizes, structure, and expansion before it changes live data, but you should still keep independent copies and test your restore process.
+
+Configure backup storage in **Admin → Backups → backup storage directory**, or set
+`backup_directory = "/mnt/backup-disk/rustchan"` in `settings.toml`.
+`CHAN_BACKUP_DIRECTORY` takes precedence. Omit both to retain `<data-dir>/backups/`.
+Changes take effect after restarting; existing backups are never moved to the new
+location. Only the active directory is listed, restored from, and pruned. Set the
+path back to the displayed default to access existing default backups again.
+Backup v4 folders live directly in this directory; legacy ZIPs use its `full/`
+and `boards/` subdirectories. Temporary download and restore staging files still
+use runtime temporary storage.
+
+Use a dedicated directory outside live uploads and runtime state. Missing
+directories are created and tested for read/write/delete access; Unix backup
+directories retain mode `0700` and backup files retain their existing private
+permissions. The service user must have suitable ownership/permissions, including
+on NAS mounts. An invalid or inaccessible explicit path fails validation without
+falling back. Mount the storage before starting RustChan; RustChan does not manage
+mounts or verify the identity of the mounted device.
 
 ### Health and metrics
 
