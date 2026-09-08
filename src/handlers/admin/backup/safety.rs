@@ -1,3 +1,5 @@
+//! Backup integrity checks, bounded restore I/O, and shared safety primitives.
+
 use crate::{
     error::{AppError, Result},
     middleware::{backup_phase, BackupProgress},
@@ -374,7 +376,7 @@ pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(
             .by_index(i)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{i}]: {e}")))?;
         let name = entry.name().to_owned();
-        let Some(rel_path) = restore_safe_relative_path_under_prefix(&name, "uploads/")? else {
+        let Some(rel_path) = validate_entry_path_under_prefix(&name, "uploads/")? else {
             continue;
         };
         let target = destination_root.join(&rel_path);
@@ -435,8 +437,8 @@ pub(super) fn validate_restore_safe_entry_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Restores safe relative path under prefix.
-pub(super) fn restore_safe_relative_path_under_prefix(
+/// Validates an archive entry and returns its relative path beneath the prefix.
+pub(super) fn validate_entry_path_under_prefix(
     name: &str,
     prefix: &str,
 ) -> Result<Option<PathBuf>> {
@@ -613,7 +615,7 @@ pub(super) fn read_full_backup_manifest_from_archive<R: std::io::Read + Seek>(
 /// Verifies board backup ZIP.
 pub(super) fn verify_board_backup_zip(
     path: &Path,
-) -> Result<super::types::board_backup_types::BoardBackupManifest> {
+) -> Result<super::board_manifest::BoardBackupManifest> {
     let file = std::fs::File::open(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Open backup {}: {error}", path.display()))
     })?;
@@ -826,7 +828,7 @@ mod tests {
     fn verify_full_backup_zip_accepts_manifest_backed_archive() -> Result<()> {
         let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("full.zip");
-        let db_bytes = super::super::saved_backup::valid_db_snapshot_for_test()?;
+        let db_bytes = super::super::storage::database_snapshot_fixture()?;
         let manifest = FullBackupManifest {
             version: 1,
             generated_at: 1_700_000_000,
@@ -918,7 +920,7 @@ mod tests {
     fn verify_full_backup_zip_defaults_legacy_tor_metadata_to_not_included() -> Result<()> {
         let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("legacy-full.zip");
-        let db_bytes = super::super::saved_backup::valid_db_snapshot_for_test()?;
+        let db_bytes = super::super::storage::database_snapshot_fixture()?;
         let manifest = json!({
             "version": 2,
             "generated_at": 1_700_000_000_i64,
@@ -949,7 +951,7 @@ mod tests {
     fn verify_full_backup_zip_rejects_tor_manifest_mismatch() -> Result<()> {
         let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("tor-mismatch.zip");
-        let db_bytes = super::super::saved_backup::valid_db_snapshot_for_test()?;
+        let db_bytes = super::super::storage::database_snapshot_fixture()?;
         let manifest = FullBackupManifest {
             version: 3,
             generated_at: 1_700_000_000,

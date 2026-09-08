@@ -1,7 +1,6 @@
 use super::{
-    board_backup_dir, common, full_backup_dir, saved_backup, AppError, BackupInfo,
-    BackupStorageMode, Duration, HashMap, Instant, LazyLock, Local, Path, PathBuf, Result,
-    SystemTime,
+    board_backup_dir, full_backup_dir, safety, storage, AppError, BackupInfo, BackupStorageMode,
+    Duration, HashMap, Instant, LazyLock, Local, Path, PathBuf, Result, SystemTime,
 };
 use chrono::TimeZone as _;
 use std::collections::HashSet;
@@ -16,14 +15,14 @@ struct BackupListCacheEntry {
     files: Vec<BackupInfo>,
 }
 
-/// Both legacy and v4 roots identify a listing; never reuse another directory's cache.
-type BackupCacheKey = (PathBuf, PathBuf, BackupListKind);
+/// Both standalone archive and saved backup roots identify a listing.
+type BackupListCacheKey = (PathBuf, PathBuf, BackupListKind);
 
 static BACKUP_LIST_CACHE: LazyLock<
-    parking_lot::Mutex<HashMap<BackupCacheKey, BackupListCacheEntry>>,
+    parking_lot::Mutex<HashMap<BackupListCacheKey, BackupListCacheEntry>>,
 > = LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
-pub(super) fn latest_saved_board_backup_filename(board_short: &str) -> Option<String> {
+pub(super) fn latest_board_backup_reference(board_short: &str) -> Option<String> {
     list_backup_files(&board_backup_dir(), BackupListKind::Board)
         .into_iter()
         .find(|info| {
@@ -40,8 +39,8 @@ pub(in crate::server) enum BackupListKind {
     Board,
 }
 
-fn backup_cache_key(dir: &Path, kind: BackupListKind) -> BackupCacheKey {
-    (dir.to_path_buf(), saved_backup::backups_root_dir(), kind)
+fn backup_list_cache_key(dir: &Path, kind: BackupListKind) -> BackupListCacheKey {
+    (dir.to_path_buf(), storage::backups_root_dir(), kind)
 }
 
 fn current_dir_modified(dir: &Path) -> Option<SystemTime> {
@@ -50,7 +49,7 @@ fn current_dir_modified(dir: &Path) -> Option<SystemTime> {
 
 fn current_source_modified(dir: &Path) -> Option<SystemTime> {
     let mut modified = current_dir_modified(dir);
-    let root_modified = current_dir_modified(&saved_backup::backups_root_dir());
+    let root_modified = current_dir_modified(&storage::backups_root_dir());
     if root_modified > modified {
         modified = root_modified;
     }
@@ -60,7 +59,7 @@ fn current_source_modified(dir: &Path) -> Option<SystemTime> {
 pub(super) fn invalidate_backup_list_cache(dir: &Path, kind: BackupListKind) {
     BACKUP_LIST_CACHE
         .lock()
-        .remove(&backup_cache_key(dir, kind));
+        .remove(&backup_list_cache_key(dir, kind));
 }
 
 fn modified_string_from_epoch(epoch: Option<i64>) -> String {
@@ -74,32 +73,32 @@ fn modified_string_from_epoch(epoch: Option<i64>) -> String {
         .unwrap_or_default()
 }
 
-const fn metadata_scope_matches(kind: BackupListKind, scope: saved_backup::BackupScope) -> bool {
+const fn metadata_scope_matches(kind: BackupListKind, scope: storage::BackupScope) -> bool {
     match kind {
         BackupListKind::Full => matches!(
             scope,
-            saved_backup::BackupScope::FullSite
-                | saved_backup::BackupScope::SelectedBoards
-                | saved_backup::BackupScope::PreMaintenance
+            storage::BackupScope::FullSite
+                | storage::BackupScope::SelectedBoards
+                | storage::BackupScope::PreMaintenance
         ),
-        BackupListKind::Board => matches!(scope, saved_backup::BackupScope::Board),
+        BackupListKind::Board => matches!(scope, storage::BackupScope::Board),
     }
 }
 
-fn scope_label(scope: saved_backup::BackupScope) -> String {
+fn scope_label(scope: storage::BackupScope) -> String {
     match scope {
-        saved_backup::BackupScope::FullSite => "Full site".to_owned(),
-        saved_backup::BackupScope::Board => "Board".to_owned(),
-        saved_backup::BackupScope::SelectedBoards => "Selected boards".to_owned(),
-        saved_backup::BackupScope::PreMaintenance => "Pre-maintenance".to_owned(),
+        storage::BackupScope::FullSite => "Full site".to_owned(),
+        storage::BackupScope::Board => "Board".to_owned(),
+        storage::BackupScope::SelectedBoards => "Selected boards".to_owned(),
+        storage::BackupScope::PreMaintenance => "Pre-maintenance".to_owned(),
     }
 }
 
-/// Validates v4 listing metadata.
-fn validate_v4_listing_metadata(
-    layout: &saved_backup::SavedBackupLayout,
-    metadata: &saved_backup::BackupMetadata,
-    manifest: &saved_backup::BackupManifest,
+/// Validates saved backup metadata for listing without verifying file contents.
+fn validate_saved_backup_metadata(
+    layout: &storage::SavedBackupLayout,
+    metadata: &storage::BackupMetadata,
+    manifest: &storage::BackupManifest,
 ) -> Result<()> {
     if metadata.backup_id != manifest.backup_id {
         return Err(AppError::BadRequest(format!(
@@ -196,8 +195,8 @@ fn validate_v4_listing_metadata(
 
 /// Validates split ZIP listing metadata.
 fn validate_split_zip_listing_metadata(
-    layout: &saved_backup::SavedBackupLayout,
-    manifest: &saved_backup::BackupManifest,
+    layout: &storage::SavedBackupLayout,
+    manifest: &storage::BackupManifest,
 ) -> Result<()> {
     if manifest.parts.is_empty() {
         return Err(AppError::BadRequest(format!(
@@ -272,7 +271,7 @@ fn validate_split_zip_listing_metadata(
                 layout.backup_ref, entry.logical_path
             )));
         }
-        saved_backup::sanitize_logical_path(&entry.logical_path)?;
+        storage::validate_logical_path(&entry.logical_path)?;
         let Some(part_filename) = entry.zip_part.as_deref() else {
             continue;
         };
@@ -286,22 +285,22 @@ fn validate_split_zip_listing_metadata(
             .zip_entry_path
             .as_deref()
             .unwrap_or(&entry.logical_path);
-        saved_backup::sanitize_logical_path(entry_path)?;
+        storage::validate_logical_path(entry_path)?;
     }
     Ok(())
 }
 
-/// Lists v4 backups.
-fn list_v4_backups(kind: BackupListKind) -> Vec<BackupInfo> {
+/// Lists saved backups using their manifests and metadata.
+fn list_saved_backups(kind: BackupListKind) -> Vec<BackupInfo> {
     let mut backups = Vec::new();
-    for layout in saved_backup::iter_saved_backup_layouts() {
-        let Ok(metadata) = saved_backup::load_metadata(&layout.metadata_path) else {
+    for layout in storage::list_saved_backup_layouts() {
+        let Ok(metadata) = storage::load_metadata(&layout.metadata_path) else {
             continue;
         };
-        let Ok(manifest) = saved_backup::load_manifest(&layout.manifest_path) else {
+        let Ok(manifest) = storage::load_manifest(&layout.manifest_path) else {
             continue;
         };
-        let listing_validation = validate_v4_listing_metadata(&layout, &metadata, &manifest);
+        let listing_validation = validate_saved_backup_metadata(&layout, &metadata, &manifest);
         let (modified_epoch, verified, verified_note) = match listing_validation {
             Ok(()) => (
                 metadata.completed_at,
@@ -358,8 +357,8 @@ fn list_v4_backups(kind: BackupListKind) -> Vec<BackupInfo> {
     backups
 }
 
-/// Lists legacy ZIP backups.
-fn list_legacy_zip_backups(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> {
+/// Lists standalone ZIP archives in the requested directory.
+fn list_standalone_archives(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> {
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -379,7 +378,7 @@ fn list_legacy_zip_backups(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> 
                 let modified = modified_string_from_epoch(modified_epoch);
                 let (verification, boards, contains_tor_hidden_service_keys, scope, mode) =
                     match kind {
-                        BackupListKind::Full => match common::verify_full_backup_zip(&path) {
+                        BackupListKind::Full => match safety::verify_full_backup_zip(&path) {
                             Ok(manifest) => (
                                 Ok(format!("verified legacy v{} backup", manifest.version)),
                                 manifest.boards,
@@ -395,7 +394,7 @@ fn list_legacy_zip_backups(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> 
                                 "Legacy ZIP".to_owned(),
                             ),
                         },
-                        BackupListKind::Board => match common::verify_board_backup_zip(&path) {
+                        BackupListKind::Board => match safety::verify_board_backup_zip(&path) {
                             Ok(manifest) => (
                                 Ok(format!(
                                     "verified legacy board /{}/ backup",
@@ -445,7 +444,7 @@ fn list_legacy_zip_backups(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> 
 
 /// List saved backups for the requested kind, newest-first.
 pub(in crate::server) fn list_backup_files(dir: &Path, kind: BackupListKind) -> Vec<BackupInfo> {
-    let cache_key = backup_cache_key(dir, kind);
+    let cache_key = backup_list_cache_key(dir, kind);
     let source_modified = current_source_modified(dir);
     let cached = { BACKUP_LIST_CACHE.lock().get(&cache_key).cloned() };
     if let Some(entry) = cached {
@@ -456,8 +455,8 @@ pub(in crate::server) fn list_backup_files(dir: &Path, kind: BackupListKind) -> 
         }
     }
 
-    let mut files = list_v4_backups(kind);
-    files.extend(list_legacy_zip_backups(dir, kind));
+    let mut files = list_saved_backups(kind);
+    files.extend(list_standalone_archives(dir, kind));
     files.sort_by(|left, right| {
         right
             .modified_epoch
@@ -477,7 +476,7 @@ pub(in crate::server) fn list_backup_files(dir: &Path, kind: BackupListKind) -> 
 }
 
 pub(super) fn safe_saved_backup_dir_for_delete(path: &Path) -> Result<()> {
-    let backup_root = saved_backup::backups_root_dir();
+    let backup_root = storage::backups_root_dir();
     crate::utils::fs_security::assert_dir_no_symlink(path).map_err(|error| {
         AppError::BadRequest(format!(
             "Saved backup directory {} is unsafe to delete: {error}",
@@ -559,7 +558,7 @@ pub(super) fn latest_verified_full_backup_modified_time_in_dir(dir: &Path) -> Op
     let backups = if dir == full_backup_dir().as_path() {
         list_backup_files(dir, BackupListKind::Full)
     } else {
-        list_legacy_zip_backups(dir, BackupListKind::Full)
+        list_standalone_archives(dir, BackupListKind::Full)
     };
     for backup in backups {
         if !backup.verified {
@@ -586,7 +585,7 @@ mod tests {
 
     #[test]
     fn safe_saved_backup_dir_for_delete_rejects_paths_outside_backup_root() -> Result<()> {
-        let backup_root = saved_backup::backups_root_dir();
+        let backup_root = storage::backups_root_dir();
         std::fs::create_dir_all(&backup_root).context("create backup root")?;
         let data_dir = backup_root
             .parent()

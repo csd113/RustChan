@@ -1,21 +1,21 @@
 use super::{
-    archive, banner, canonicalize_restored_banner_dir, common, create_staging_dir,
-    create_temp_legacy_full_backup_from_v4_path,
-    create_temp_legacy_full_backup_from_v4_transfer_zip, db, full_backup_dir, is_xml_http_request,
-    log_restore_upload_started, new_session_id, remove_path_if_exists, render_restored_body_html,
+    archive, banner, canonicalize_restored_banner_dir,
+    convert_transfer_zip_to_full_restore_archive, create_staging_dir, db, full_backup_dir,
+    is_xml_http_request, log_restore_upload_started, new_session_id,
+    prepare_saved_full_restore_archive, remove_path_if_exists, render_restored_body_html,
     require_admin_post_origin_and_csrf, require_admin_session_sid, restore_auth_preflight,
-    restore_error_redirect_target, restore_failure_response,
-    restore_safe_relative_path_under_prefix, restore_start_response,
-    restore_success_redirect_target, restore_upload_parse_response, sanitize_saved_backup_ref,
+    restore_error_redirect_target, restore_failure_response, restore_start_response,
+    restore_success_redirect_target, restore_upload_parse_response, safety,
     should_set_secure_cookie, stream_restore_upload_to_tempfile, validate_board_short_name,
-    validate_full_restore_archive_layout, validate_restore_safe_entry_name,
+    validate_entry_path_under_prefix, validate_full_restore_archive_layout,
+    validate_restore_safe_entry_name, validate_saved_backup_reference,
     validate_streamed_restore_upload, verify_full_backup_archive, AppError, AppState, Backup,
     Cookie, CookieJar, Duration, Form, HashMap, HeaderMap, Multipart, Path, PathBuf, Redirect,
     Request, Response, RestoreKind, RestoreSavedForm, Result, Seek, State, Utc,
     ADMIN_COOKIE_SAME_SITE, BANNER_RESTORE_ENTRY_MAX_BYTES, CONFIG, SESSION_COOKIE, SQLITE_HEADER,
     ZIP_ENTRY_MAX_BYTES,
 };
-use crate::handlers::admin::backup::common::{
+use crate::handlers::admin::backup::safety::{
     copy_limited_with_total_budget, RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
 };
 use axum::{extract::FromRequest as _, response::IntoResponse as _};
@@ -120,7 +120,7 @@ fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Resul
             let Some(path) = path else {
                 continue;
             };
-            let board_short = common::validate_restored_media_path(
+            let board_short = safety::validate_restored_media_path(
                 path,
                 &format!("Restored post {post_id} {label}"),
             )?;
@@ -156,7 +156,7 @@ fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Resul
                 "Restored database has an invalid file_hash row: {error}"
             ))
         })?;
-        let file_board_short = common::validate_restored_media_path(
+        let file_board_short = safety::validate_restored_media_path(
             &file_path,
             &format!("Restored file_hash {sha256} file_path"),
         )?;
@@ -166,7 +166,7 @@ fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Resul
             )));
         }
         if !thumb_path.is_empty() {
-            let thumb_board_short = common::validate_restored_media_path(
+            let thumb_board_short = safety::validate_restored_media_path(
                 &thumb_path,
                 &format!("Restored file_hash {sha256} thumb_path"),
             )?;
@@ -419,13 +419,13 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
         ));
     }
     let live_tor_hidden_service_keys_dir =
-        match common::resolve_tor_hidden_service_keys_restore_target(
+        match safety::resolve_tor_hidden_service_keys_restore_target(
             restore_tor_hidden_service_keys,
             live_tor_hidden_service_keys_dir.map(Path::to_path_buf),
             "Tor hidden service key restore is not available with the current configuration.",
         )? {
-            common::TorHiddenServiceKeysAvailability::Skipped => None,
-            common::TorHiddenServiceKeysAvailability::Available(dir) => Some(dir),
+            safety::TorHiddenServiceKeysAvailability::Skipped => None,
+            safety::TorHiddenServiceKeysAvailability::Available(dir) => Some(dir),
         };
 
     let tmp_id = uuid::Uuid::new_v4().simple().to_string();
@@ -546,7 +546,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
                 ));
             }
             db_extracted = true;
-        } else if let Some(rel_path) = restore_safe_relative_path_under_prefix(&name, "uploads/")? {
+        } else if let Some(rel_path) = validate_entry_path_under_prefix(&name, "uploads/")? {
             let target = staged_upload_root.join(&rel_path);
             if entry.is_dir() {
                 std::fs::create_dir_all(&target).map_err(|error| {
@@ -573,7 +573,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
                     AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display()))
                 })?;
             }
-        } else if let Some(rel_path) = restore_safe_relative_path_under_prefix(&name, "favicon/")? {
+        } else if let Some(rel_path) = validate_entry_path_under_prefix(&name, "favicon/")? {
             favicon_extracted = true;
             let target = staged_global_favicon_dir.join(&rel_path);
             if entry.is_dir() {
@@ -638,10 +638,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
                 AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display()))
             })?;
         } else if let (Some(rel_path), Some(staged_tor_hidden_service_keys_dir)) = (
-            restore_safe_relative_path_under_prefix(
-                &name,
-                common::FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX,
-            )?,
+            validate_entry_path_under_prefix(&name, safety::FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX)?,
             staged_tor_hidden_service_keys_dir.as_ref(),
         ) {
             let target = staged_tor_hidden_service_keys_dir.join(&rel_path);
@@ -975,13 +972,13 @@ pub(in crate::server) async fn admin_restore(
                     .map_err(|error| AppError::Internal(anyhow::anyhow!("Reopen zip: {error}")))?;
                 let mut archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
                     .map_err(|error| AppError::BadRequest(format!("Invalid zip: {error}")))?;
-                let mut temp_v4_transfer_zip_guard = None;
+                let mut transfer_archive_guard = None;
 
                 if let Err(layout_error) = validate_full_restore_archive_layout(&archive) {
                     if archive.by_name("db/rustchan.sqlite3").is_ok() {
                         let legacy_path =
-                            create_temp_legacy_full_backup_from_v4_transfer_zip(&mut archive)?;
-                        temp_v4_transfer_zip_guard =
+                            convert_transfer_zip_to_full_restore_archive(&mut archive)?;
+                        transfer_archive_guard =
                             Some(archive::TempZipCleanupGuard::new(legacy_path.clone()));
                         let legacy_file = std::fs::File::open(&legacy_path).map_err(|error| {
                             AppError::Internal(anyhow::anyhow!(
@@ -1019,7 +1016,7 @@ pub(in crate::server) async fn admin_restore(
                     "Restore",
                     "Restore",
                 )?;
-                drop(temp_v4_transfer_zip_guard);
+                drop(transfer_archive_guard);
                 Ok(fresh_sid)
             }
         })
@@ -1069,7 +1066,7 @@ pub(in crate::server) async fn restore_saved_full_backup(
         .maintenance_gate
         .try_begin(RestoreKind::Full.maintenance_label())?;
 
-    let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
+    let safe_filename = validate_saved_backup_reference(&form.filename)?;
     let upload_dir = CONFIG.upload_dir.clone();
     let restore_tor_hidden_service_keys = form.restore_tor_hidden_service_keys;
     let live_tor_hidden_service_keys_dir = crate::config::configured_tor_hidden_service_keys_dir();
@@ -1081,15 +1078,15 @@ pub(in crate::server) async fn restore_saved_full_backup(
             let admin_id = require_admin_session_sid(&live_conn, session_id.as_deref())?;
             let root_dir = crate::config::backups_dir().join(&safe_filename);
             let legacy_zip_path = full_backup_dir().join(&safe_filename);
-            let temp_v4_zip = if root_dir.is_dir() {
-                Some(create_temp_legacy_full_backup_from_v4_path(&root_dir)?)
+            let restore_archive_path = if root_dir.is_dir() {
+                Some(prepare_saved_full_restore_archive(&root_dir)?)
             } else {
                 None
             };
-            let _temp_v4_zip_guard = temp_v4_zip
+            let _restore_archive_guard = restore_archive_path
                 .as_ref()
                 .map(|path| archive::TempZipCleanupGuard::new(path.clone()));
-            let archive_path = temp_v4_zip.as_deref().unwrap_or(&legacy_zip_path);
+            let archive_path = restore_archive_path.as_deref().unwrap_or(&legacy_zip_path);
 
             let zip_file = std::fs::File::open(archive_path)
                 .map_err(|_error| AppError::NotFound("Backup file not found.".into()))?;
@@ -1374,7 +1371,7 @@ mod tests {
         let file = std::fs::File::create(zip_path).context("create backup ZIP")?;
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
-        zip.start_file(super::super::common::FULL_BACKUP_MANIFEST_NAME, options)
+        zip.start_file(super::super::safety::FULL_BACKUP_MANIFEST_NAME, options)
             .context("start backup manifest entry")?;
         let manifest_bytes =
             serde_json::to_vec(&manifest_json).context("serialize full-backup manifest")?;
@@ -1388,7 +1385,7 @@ mod tests {
                 zip.start_file(
                     format!(
                         "{}{}",
-                        super::super::common::FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX,
+                        super::super::safety::FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX,
                         name
                     ),
                     options,

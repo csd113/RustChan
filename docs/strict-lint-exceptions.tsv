@@ -117,36 +117,36 @@ src/favicon.rs	521	expect	clippy::panic_in_result_fn	test assertions intentional
 src/handlers/admin/auth.rs	108	expect	clippy::significant_drop_tightening	the DashMap entry guard must remain held while its attempt count is updated	fn record_login_fail
 src/handlers/admin/auth.rs	262	expect	clippy::cognitive_complexity	the authentication, lockout, and session issuance branches share one security boundary	fn admin_login
 src/handlers/admin/auth.rs	266	expect	clippy::too_many_lines	authentication, lockout accounting, and session issuance form one security boundary	fn admin_login
-src/handlers/admin/backup/archive.rs	228	expect	clippy::too_many_lines	transfer validation, entry mapping, extraction limits, and archive finalization are one pipeline	fn create_temp_legacy_full_backup_from_v4_transfer_zip
-src/handlers/admin/backup/archive.rs	358	expect	clippy::too_many_lines	verified manifest entries and legacy metadata must be emitted in one deterministic archive pass	fn create_temp_legacy_full_backup_from_verified_v4
+src/handlers/admin/backup/archive.rs	218	expect	clippy::too_many_lines	transfer validation, entry mapping, extraction limits, and archive finalization are one pipeline	fn convert_transfer_zip_to_full_restore_archive
+src/handlers/admin/backup/archive.rs	347	expect	clippy::too_many_lines	verified manifest entries and legacy metadata must be emitted in one deterministic archive pass	fn create_full_restore_archive
 src/handlers/admin/backup/create.rs	16	expect	clippy::cognitive_complexity	full backup stages and cleanup remain together to preserve a fail-closed operation	fn create_full_backup_to_server
 src/handlers/admin/backup/create.rs	20	expect	clippy::too_many_lines	snapshot, manifest, payload publication, and cleanup share one fail-closed backup operation	fn create_full_backup_to_server
-src/handlers/admin/backup/create.rs	304	expect	clippy::too_many_lines	maintenance snapshot, manifest publication, retention, and status updates form one operation	fn create_pre_maintenance_backup_to_server
-src/handlers/admin/backup/create.rs	786	expect	clippy::cognitive_complexity	board backup validation, snapshotting, and packaging form one guarded operation	fn create_board_backup
-src/handlers/admin/backup/create.rs	790	expect	clippy::too_many_lines	board validation, snapshotting, archive publication, and cleanup share one operation	fn create_board_backup
-src/handlers/admin/backup/create.rs	1081	expect	clippy::too_many_lines	the function maps the complete relational board snapshot into one versioned manifest	fn build_board_backup_manifest
-src/handlers/admin/backup/create.rs	1501	expect	clippy::too_many_lines	part sizing, hashing, manifest updates, and partial-output cleanup form one publication step	fn materialize_split_zip_parts
-src/handlers/admin/backup/downloads.rs	160	expect	clippy::too_many_lines	authentication, token validation, checksum verification, and streaming form one download request	fn download_backup
-src/handlers/admin/backup/http.rs	384	expect	clippy::cognitive_complexity	the multipart parser keeps all restore-field limits and duplicate checks at one boundary	fn stream_restore_upload_to_tempfile
-src/handlers/admin/backup/http.rs	388	expect	clippy::too_many_lines	multipart quotas, duplicate checks, temporary-file writes, and metadata parsing share one boundary	fn stream_restore_upload_to_tempfile
-src/handlers/admin/backup/restore_board.rs	356	expect	clippy::too_many_lines	board replacement and media staging share one transaction and rollback boundary	fn execute_board_restore
-src/handlers/admin/backup/restore_board.rs	917	expect	clippy::too_many_lines	authentication, source verification, extraction, and download issuance form one request	fn extract_board_from_full_backup
-src/handlers/admin/backup/restore_board.rs	1148	expect	clippy::cognitive_complexity	board restore validation, mutation, and rollback remain one guarded operation	fn board_restore
-src/handlers/admin/backup/restore_board.rs	1152	expect	clippy::too_many_lines	restore upload validation, mutation, rollback, and response handling form one guarded request	fn board_restore
+src/handlers/admin/backup/create.rs	303	expect	clippy::too_many_lines	maintenance snapshot, manifest publication, retention, and status updates form one operation	fn create_pre_maintenance_backup_to_server
+src/handlers/admin/backup/create.rs	767	expect	clippy::cognitive_complexity	board backup validation, snapshotting, and packaging form one guarded operation	fn create_board_backup
+src/handlers/admin/backup/create.rs	771	expect	clippy::too_many_lines	board validation, snapshotting, archive publication, and cleanup share one operation	fn create_board_backup
+src/handlers/admin/backup/create.rs	1060	expect	clippy::too_many_lines	the function maps the complete relational board snapshot into one versioned manifest	fn build_board_backup_manifest
+src/handlers/admin/backup/create.rs	1473	expect	clippy::too_many_lines	part sizing, hashing, manifest updates, and partial-output cleanup form one publication step	fn materialize_split_zip_parts
+src/handlers/admin/backup/downloads.rs	146	expect	clippy::too_many_lines	authentication, token validation, checksum verification, and streaming form one download request	fn download_backup
+src/handlers/admin/backup/http.rs	367	expect	clippy::cognitive_complexity	the multipart parser keeps all restore-field limits and duplicate checks at one boundary	fn stream_restore_upload_to_tempfile
+src/handlers/admin/backup/http.rs	371	expect	clippy::too_many_lines	multipart quotas, duplicate checks, temporary-file writes, and metadata parsing share one boundary	fn stream_restore_upload_to_tempfile
+src/handlers/admin/backup/restore_board.rs	346	expect	clippy::too_many_lines	board replacement and media staging share one transaction and rollback boundary	fn execute_board_restore
+src/handlers/admin/backup/restore_board.rs	909	expect	clippy::too_many_lines	authentication, source verification, extraction, and download issuance form one request	fn extract_board_from_full_backup
+src/handlers/admin/backup/restore_board.rs	1134	expect	clippy::cognitive_complexity	board restore validation, mutation, and rollback remain one guarded operation	fn board_restore
+src/handlers/admin/backup/restore_board.rs	1138	expect	clippy::too_many_lines	restore upload validation, mutation, rollback, and response handling form one guarded request	fn board_restore
 src/handlers/admin/backup/restore_full.rs	57	expect	clippy::too_many_lines	all restored-database trust checks remain contiguous before any live-state mutation	fn validate_full_restore_db_trust_boundary
-src/handlers/admin/backup/restore_full.rs	411	expect	clippy::cognitive_complexity	full restore validation, replacement, and rollback remain one fail-closed operation	fn execute_full_restore
-src/handlers/admin/backup/restore_full.rs	415	expect	clippy::too_many_arguments,clippy::too_many_lines	full restore inputs and ordered rollback phases must remain visible at one trust boundary	fn execute_full_restore
-src/handlers/admin/backup/restore_full.rs	941	expect	clippy::too_many_lines	authentication, upload validation, job execution, and failure responses form one restore request	fn admin_restore
-src/handlers/admin/backup/saved_backup.rs	117	expect	clippy::struct_excessive_bools	the flags are independent backup-content selections serialized in the manifest	struct BackupIncludeFlags
-src/handlers/admin/backup/saved_backup.rs	895	expect	clippy::too_many_lines	the checks jointly validate one declared file against its manifest and verified source	fn validate_declared_file_metadata
-src/handlers/admin/backup/saved_backup.rs	1327	expect	clippy::too_many_lines	split-part names, sizes, hashes, ZIP members, and aggregate limits are one trust boundary	fn verify_split_zip_files
-src/handlers/admin/backup/saved_backup.rs	1531	expect	clippy::too_many_lines	root metadata, manifest, payload, path, and checksum checks form one fail-closed verifier	fn verify_saved_v4_root
-src/handlers/admin/backup/types.rs	9	expect	clippy::struct_excessive_bools	the fields mirror independent persisted board settings in the backup schema	struct BoardRow
-src/handlers/admin/backup.rs	149	expect	clippy::too_many_lines	database snapshotting, archive creation, and temporary-file cleanup form one operation	fn admin_backup
-src/handlers/admin/backup.rs	1226	expect	clippy::too_many_lines	the end-to-end test keeps its fixture setup and ordered assertions in one scenario	fn saved_board_restore_success_redirects_back_to_restored_board_section
-src/handlers/admin/backup.rs	1443	expect	clippy::too_many_lines	the end-to-end test keeps its fixture setup and ordered assertions in one scenario	fn extract_board_from_full_backup_download_redirects_and_cleans_up_temp_file
-src/handlers/admin/backup.rs	2261	expect	clippy::too_many_lines	the ID-sequence regression keeps source padding, restore, and post-restore allocation checks in one scenario	fn board_restore_preserves_free_ids_above_target_sequence
-src/handlers/admin/backup.rs	2384	expect	clippy::too_many_lines	the end-to-end test keeps its fixture setup and ordered assertions in one scenario	fn board_restore_fallback_remaps_same_board_crosslinks_when_ids_collide
+src/handlers/admin/backup/restore_full.rs	393	expect	clippy::cognitive_complexity	full restore validation, replacement, and rollback remain one fail-closed operation	fn execute_full_restore
+src/handlers/admin/backup/restore_full.rs	397	expect	clippy::too_many_arguments,clippy::too_many_lines	full restore inputs and ordered rollback phases must remain visible at one trust boundary	fn execute_full_restore
+src/handlers/admin/backup/restore_full.rs	916	expect	clippy::too_many_lines	authentication, upload validation, job execution, and failure responses form one restore request	fn admin_restore
+src/handlers/admin/backup/storage.rs	89	expect	clippy::struct_excessive_bools	the flags are independent backup-content selections serialized in the manifest	struct BackupIncludeFlags
+src/handlers/admin/backup/storage.rs	747	expect	clippy::too_many_lines	the checks jointly validate one declared file against its manifest and verified source	fn validate_declared_file_metadata
+src/handlers/admin/backup/storage.rs	1177	expect	clippy::too_many_lines	split-part names, sizes, hashes, ZIP members, and aggregate limits are one trust boundary	fn verify_split_zip_files
+src/handlers/admin/backup/storage.rs	1381	expect	clippy::too_many_lines	root metadata, manifest, payload, path, and checksum checks form one fail-closed verifier	fn verify_saved_backup
+src/handlers/admin/backup/board_manifest.rs	7	expect	clippy::struct_excessive_bools	the fields mirror independent persisted board settings in the backup schema	struct BoardRow
+src/handlers/admin/backup.rs	132	expect	clippy::too_many_lines	database snapshotting, archive creation, and temporary-file cleanup form one operation	fn admin_backup
+src/handlers/admin/backup.rs	1389	expect	clippy::too_many_lines	the end-to-end test keeps its fixture setup and ordered assertions in one scenario	fn saved_board_restore_success_redirects_back_to_restored_board_section
+src/handlers/admin/backup.rs	1606	expect	clippy::too_many_lines	the end-to-end test keeps its fixture setup and ordered assertions in one scenario	fn extract_board_from_full_backup_download_redirects_and_cleans_up_temp_file
+src/handlers/admin/backup.rs	2488	expect	clippy::too_many_lines	the ID-sequence regression keeps source padding, restore, and post-restore allocation checks in one scenario	fn board_restore_preserves_free_ids_above_target_sequence
+src/handlers/admin/backup.rs	2611	expect	clippy::too_many_lines	the end-to-end test keeps its fixture setup and ordered assertions in one scenario	fn board_restore_fallback_remaps_same_board_crosslinks_when_ids_collide
 src/handlers/admin/content.rs	467	expect	clippy::cognitive_complexity	post deletion keeps authorization, database mutation, file cleanup, and audit logging together	fn admin_delete_post
 src/handlers/admin/mod.rs	630	expect	clippy::struct_excessive_bools	the snapshot carries independent feature and health flags into the admin template	struct AdminPanelSnapshot
 src/handlers/admin/mod.rs	974	expect	clippy::struct_excessive_bools	the fields mirror independent appearance toggles stored in site settings	struct AppearanceDomainData

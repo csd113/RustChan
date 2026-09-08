@@ -1,9 +1,9 @@
 use super::{
-    add_dir_to_zip, admin_panel_redirect_anchor_open, banner, board_backup_dir, board_backup_types,
-    common, count_files_in_dir, db, enforce_full_backup_retention, full_backup_dir, header,
+    add_dir_to_zip, admin_panel_redirect_anchor_open, banner, board_backup_dir, board_manifest,
+    count_files_in_dir, db, enforce_full_backup_retention, full_backup_dir, header,
     invalidate_backup_list_cache, local_backup_timestamp_label, log_backup_phase,
     log_backup_progress, new_session_id, prune_stale_temp_board_downloads,
-    require_admin_post_origin_and_csrf, require_admin_session_sid, saved_backup,
+    require_admin_post_origin_and_csrf, require_admin_session_sid, safety, storage,
     temp_board_download_dir, unique_backup_filename, validate_board_short_name,
     write_temp_board_download_token, zip_file_options_for_path, AppError, AppState, BackupListKind,
     BackupStorageMode, CookieJar, Form, HeaderMap, Ordering, Path, PathBuf, Redirect, Response,
@@ -38,13 +38,13 @@ pub(in crate::server) fn create_full_backup_to_server(
     let uploads_base = Path::new(&CONFIG.upload_dir);
     let global_favicon_dir = crate::favicon::global_backup_source_dir();
     let mut tor_hidden_service_keys_dir = if include_tor_hidden_service_keys {
-        match common::resolve_tor_hidden_service_keys_availability(
+        match safety::resolve_tor_hidden_service_keys_availability(
             true,
             crate::config::configured_tor_hidden_service_keys_dir(),
             "Tor hidden service key backups are not available with the current configuration.",
         ) {
-            Ok(common::TorHiddenServiceKeysAvailability::Skipped) => None,
-            Ok(common::TorHiddenServiceKeysAvailability::Available(dir)) => Some(dir),
+            Ok(safety::TorHiddenServiceKeysAvailability::Skipped) => None,
+            Ok(safety::TorHiddenServiceKeysAvailability::Available(dir)) => Some(dir),
             Err(error) if automated => {
                 tracing::warn!(
                     target: "admin",
@@ -93,8 +93,8 @@ pub(in crate::server) fn create_full_backup_to_server(
         .saturating_add(favicon_file_count)
         .saturating_add(banner_file_count)
         .saturating_add(tor_hidden_service_key_file_count);
-    let backup_id = saved_backup::build_backup_id(saved_backup::BackupScope::FullSite, "full-site");
-    let root_dir = saved_backup::create_backup_root(&backup_id)?;
+    let backup_id = storage::build_backup_id(storage::BackupScope::FullSite, "full-site");
+    let root_dir = storage::create_backup_root(&backup_id)?;
     let db_dir = root_dir.join("db");
     let config_dir = root_dir.join("config");
     ensure_backup_dir(&db_dir)?;
@@ -113,15 +113,15 @@ pub(in crate::server) fn create_full_backup_to_server(
     let db_snapshot_size = std::fs::metadata(&db_snapshot_path)
         .map(|metadata| metadata.len())
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {error}")))?;
-    let db_snapshot_sha = saved_backup::sha256_hex_for_file(&db_snapshot_path)?;
+    let db_snapshot_sha = storage::sha256_hex_for_file(&db_snapshot_path)?;
 
     let mut files = Vec::new();
-    push_v4_file_entry(
+    append_manifest_file(
         &mut files,
         "db/rustchan.sqlite3".to_owned(),
         None,
         None,
-        saved_backup::BackupFileKind::Db,
+        storage::BackupFileKind::Db,
         db_snapshot_size,
         db_snapshot_sha.clone(),
     );
@@ -131,12 +131,12 @@ pub(in crate::server) fn create_full_backup_to_server(
     if settings_path.is_file() {
         let destination = config_dir.join("settings.toml");
         let (size, sha256) = copy_regular_file_to_backup(&settings_path, &destination)?;
-        push_v4_file_entry(
+        append_manifest_file(
             &mut files,
             "config/settings.toml".to_owned(),
             None,
             None,
-            saved_backup::BackupFileKind::Settings,
+            storage::BackupFileKind::Settings,
             size,
             sha256,
         );
@@ -151,10 +151,10 @@ pub(in crate::server) fn create_full_backup_to_server(
     for board in &boards {
         validate_board_short_name(&board.short_name)?;
         let board_manifest = build_board_backup_manifest(&conn, &board.short_name)?;
-        write_board_exports_to_v4_dir(&root_dir, &board_manifest, &mut files)?;
+        write_board_exports(&root_dir, &board_manifest, &mut files)?;
     }
 
-    copy_runtime_tree_into_v4_dir(
+    copy_runtime_tree_to_backup(
         uploads_base,
         &root_dir,
         &mut files,
@@ -164,7 +164,7 @@ pub(in crate::server) fn create_full_backup_to_server(
             })?;
             validate_board_short_name(board_short)?;
             let (logical_path, kind) =
-                saved_backup::runtime_upload_path_to_logical(board_short, runtime_rel)?;
+                storage::runtime_upload_path_to_logical(board_short, runtime_rel)?;
             Ok((
                 logical_path,
                 Some(runtime_rel.to_owned()),
@@ -175,7 +175,7 @@ pub(in crate::server) fn create_full_backup_to_server(
         Some(progress),
     )?;
 
-    copy_runtime_tree_into_v4_dir(
+    copy_runtime_tree_to_backup(
         &global_favicon_dir,
         &root_dir,
         &mut files,
@@ -185,13 +185,13 @@ pub(in crate::server) fn create_full_backup_to_server(
                 logical_path,
                 Some(format!("favicon/{runtime_rel}")),
                 None,
-                saved_backup::BackupFileKind::Favicon,
+                storage::BackupFileKind::Favicon,
             ))
         },
         Some(progress),
     )?;
 
-    copy_runtime_tree_into_v4_dir(
+    copy_runtime_tree_to_backup(
         &global_banner_dir,
         &root_dir,
         &mut files,
@@ -201,14 +201,14 @@ pub(in crate::server) fn create_full_backup_to_server(
                 logical_path,
                 Some(format!("banner/{runtime_rel}")),
                 None,
-                saved_backup::BackupFileKind::Banner,
+                storage::BackupFileKind::Banner,
             ))
         },
         Some(progress),
     )?;
 
     if let Some(tor_hidden_service_keys_dir) = tor_hidden_service_keys_dir.as_ref() {
-        copy_runtime_tree_into_v4_dir(
+        copy_runtime_tree_to_backup(
             tor_hidden_service_keys_dir,
             &root_dir,
             &mut files,
@@ -218,24 +218,24 @@ pub(in crate::server) fn create_full_backup_to_server(
                     logical_path,
                     Some(runtime_rel.to_owned()),
                     None,
-                    saved_backup::BackupFileKind::TorKey,
+                    storage::BackupFileKind::TorKey,
                 ))
             },
             Some(progress),
         )?;
     }
 
-    let mut manifest = saved_backup::BackupManifest {
-        format: saved_backup::BACKUP_V4_FORMAT.to_owned(),
-        archive_container: saved_backup::BACKUP_V4_ARCHIVE_CONTAINER.to_owned(),
+    let mut manifest = storage::BackupManifest {
+        format: storage::BACKUP_V4_FORMAT.to_owned(),
+        archive_container: storage::ARCHIVE_CONTAINER.to_owned(),
         backup_id,
         created_at: Utc::now().timestamp(),
         completed_at: None,
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
-        scope: saved_backup::BackupScope::FullSite,
+        scope: storage::BackupScope::FullSite,
         storage_mode,
         included_boards: boards,
-        includes: saved_backup::BackupIncludeFlags {
+        includes: storage::BackupIncludeFlags {
             database: true,
             settings: settings_path.is_file(),
             uploads: true,
@@ -244,7 +244,7 @@ pub(in crate::server) fn create_full_backup_to_server(
             board_exports: true,
             file_inventory: true,
         },
-        db_snapshot: Some(saved_backup::DbSnapshotInfo {
+        db_snapshot: Some(storage::DatabaseSnapshotInfo {
             path: "db/rustchan.sqlite3".to_owned(),
             size: db_snapshot_size,
             sha256: db_snapshot_sha,
@@ -260,7 +260,7 @@ pub(in crate::server) fn create_full_backup_to_server(
     }
     drop(conn);
 
-    let backup_ref = finalize_v4_backup_root(&root_dir, manifest)?;
+    let backup_ref = finalize_saved_backup(&root_dir, manifest)?;
     invalidate_backup_list_cache(&full_backup_dir(), BackupListKind::Full);
 
     match enforce_full_backup_retention(copies_to_keep) {
@@ -283,7 +283,7 @@ pub(in crate::server) fn create_full_backup_to_server(
         }
     }
 
-    let size = saved_backup::scan_dir_stats(&root_dir).bytes;
+    let size = storage::scan_dir_stats(&root_dir).bytes;
     tracing::info!(
         target: "admin",
         backup_id = %backup_ref,
@@ -312,9 +312,8 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
     reason: &str,
 ) -> Result<String> {
     let conn = pool.get()?;
-    let backup_id =
-        saved_backup::build_backup_id(saved_backup::BackupScope::PreMaintenance, "pre-repair-db");
-    let root_dir = saved_backup::create_backup_root(&backup_id)?;
+    let backup_id = storage::build_backup_id(storage::BackupScope::PreMaintenance, "pre-repair-db");
+    let root_dir = storage::create_backup_root(&backup_id)?;
     let db_dir = root_dir.join("db");
     let config_dir = root_dir.join("config");
     let maintenance_dir = root_dir.join("maintenance");
@@ -336,15 +335,15 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
     let db_snapshot_size = std::fs::metadata(&db_snapshot_path)
         .map(|metadata| metadata.len())
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {error}")))?;
-    let db_snapshot_sha = saved_backup::sha256_hex_for_file(&db_snapshot_path)?;
+    let db_snapshot_sha = storage::sha256_hex_for_file(&db_snapshot_path)?;
 
     let mut files = Vec::new();
-    push_v4_file_entry(
+    append_manifest_file(
         &mut files,
         "db/rustchan.sqlite3".to_owned(),
         None,
         None,
-        saved_backup::BackupFileKind::Db,
+        storage::BackupFileKind::Db,
         db_snapshot_size,
         db_snapshot_sha.clone(),
     );
@@ -353,12 +352,12 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
     if settings_path.is_file() {
         let destination = config_dir.join("settings.toml");
         let (size, sha256) = copy_regular_file_to_backup(&settings_path, &destination)?;
-        push_v4_file_entry(
+        append_manifest_file(
             &mut files,
             "config/settings.toml".to_owned(),
             None,
             None,
-            saved_backup::BackupFileKind::Settings,
+            storage::BackupFileKind::Settings,
             size,
             sha256,
         );
@@ -377,38 +376,38 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
     });
     let (request_size, request_sha) =
         write_pretty_json_file(&repair_request_path, &repair_request)?;
-    push_v4_file_entry(
+    append_manifest_file(
         &mut files,
         "maintenance/repair-request.json".to_owned(),
         None,
         None,
-        saved_backup::BackupFileKind::Maintenance,
+        storage::BackupFileKind::Maintenance,
         request_size,
         request_sha,
     );
 
     let integrity_path = maintenance_dir.join("pre-integrity-check.txt");
     write_backup_bytes(&integrity_path, pre_integrity.as_bytes())?;
-    push_v4_file_entry(
+    append_manifest_file(
         &mut files,
         "maintenance/pre-integrity-check.txt".to_owned(),
         None,
         None,
-        saved_backup::BackupFileKind::Maintenance,
+        storage::BackupFileKind::Maintenance,
         u64::try_from(pre_integrity.len()).unwrap_or(u64::MAX),
-        saved_backup::sha256_hex_for_bytes(pre_integrity.as_bytes()),
+        storage::sha256_hex_for_bytes(pre_integrity.as_bytes()),
     );
 
     let foreign_key_path = maintenance_dir.join("pre-foreign-key-check.txt");
     write_backup_bytes(&foreign_key_path, pre_foreign_key.as_bytes())?;
-    push_v4_file_entry(
+    append_manifest_file(
         &mut files,
         "maintenance/pre-foreign-key-check.txt".to_owned(),
         None,
         None,
-        saved_backup::BackupFileKind::Maintenance,
+        storage::BackupFileKind::Maintenance,
         u64::try_from(pre_foreign_key.len()).unwrap_or(u64::MAX),
-        saved_backup::sha256_hex_for_bytes(pre_foreign_key.as_bytes()),
+        storage::sha256_hex_for_bytes(pre_foreign_key.as_bytes()),
     );
 
     let schema_dump = {
@@ -434,14 +433,14 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
     };
     let schema_path = maintenance_dir.join("pre-schema.sql");
     write_backup_bytes(&schema_path, schema_dump.as_bytes())?;
-    push_v4_file_entry(
+    append_manifest_file(
         &mut files,
         "maintenance/pre-schema.sql".to_owned(),
         None,
         None,
-        saved_backup::BackupFileKind::Maintenance,
+        storage::BackupFileKind::Maintenance,
         u64::try_from(schema_dump.len()).unwrap_or(u64::MAX),
-        saved_backup::sha256_hex_for_bytes(schema_dump.as_bytes()),
+        storage::sha256_hex_for_bytes(schema_dump.as_bytes()),
     );
 
     let pending_fs_ops = db::list_pending_fs_ops(&conn)
@@ -459,12 +458,12 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
             })
             .collect::<Vec<_>>();
         let (size, sha256) = write_pretty_json_file(&pending_fs_path, &snapshot)?;
-        push_v4_file_entry(
+        append_manifest_file(
             &mut files,
             "maintenance/pending-fs-ops.json".to_owned(),
             None,
             None,
-            saved_backup::BackupFileKind::PendingFsOps,
+            storage::BackupFileKind::PendingFsOps,
             size,
             sha256,
         );
@@ -473,17 +472,17 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
     progress.reset(crate::middleware::backup_phase::DONE);
     log_backup_phase(crate::middleware::backup_phase::DONE);
 
-    let manifest = saved_backup::BackupManifest {
-        format: saved_backup::BACKUP_V4_FORMAT.to_owned(),
-        archive_container: saved_backup::BACKUP_V4_ARCHIVE_CONTAINER.to_owned(),
+    let manifest = storage::BackupManifest {
+        format: storage::BACKUP_V4_FORMAT.to_owned(),
+        archive_container: storage::ARCHIVE_CONTAINER.to_owned(),
         backup_id,
         created_at: Utc::now().timestamp(),
         completed_at: None,
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
-        scope: saved_backup::BackupScope::PreMaintenance,
+        scope: storage::BackupScope::PreMaintenance,
         storage_mode: BackupStorageMode::Directory,
         included_boards: Vec::new(),
-        includes: saved_backup::BackupIncludeFlags {
+        includes: storage::BackupIncludeFlags {
             database: true,
             settings: settings_path.is_file(),
             uploads: false,
@@ -492,7 +491,7 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
             board_exports: false,
             file_inventory: false,
         },
-        db_snapshot: Some(saved_backup::DbSnapshotInfo {
+        db_snapshot: Some(storage::DatabaseSnapshotInfo {
             path: "db/rustchan.sqlite3".to_owned(),
             size: db_snapshot_size,
             sha256: db_snapshot_sha,
@@ -501,7 +500,7 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
         }),
         files,
         parts: Vec::new(),
-        maintenance: Some(saved_backup::MaintenanceMetadata {
+        maintenance: Some(storage::MaintenanceMetadata {
             operation: Some(operation.to_owned()),
             job_id: Some(job_id),
             requested_at: Some(Utc::now().timestamp()),
@@ -515,7 +514,7 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
         }),
     };
 
-    finalize_v4_backup_root(&root_dir, manifest)
+    finalize_saved_backup(&root_dir, manifest)
 }
 
 /// Counts required private files.
@@ -618,7 +617,7 @@ fn write_pretty_json_file<T: serde::Serialize>(path: &Path, value: &T) -> Result
     write_backup_bytes(path, &bytes)?;
     Ok((
         u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-        saved_backup::sha256_hex_for_bytes(&bytes),
+        storage::sha256_hex_for_bytes(&bytes),
     ))
 }
 
@@ -642,7 +641,7 @@ fn copy_regular_file_to_backup(source: &Path, destination: &Path) -> Result<(u64
         AppError::Internal(anyhow::anyhow!("Create {}: {error}", destination.display()))
     })?;
     restrict_backup_file(destination)?;
-    saved_backup::copy_file_and_hash(source, &mut output)
+    storage::copy_file_and_hash(source, &mut output)
 }
 
 fn snapshot_db_health_output(conn: &rusqlite::Connection, pragma: &str) -> Option<String> {
@@ -660,7 +659,7 @@ fn snapshot_db_health_output(conn: &rusqlite::Connection, pragma: &str) -> Optio
 
 #[derive(Deserialize)]
 pub(in crate::server) struct FullBackupCreateForm {
-    #[serde(default, deserialize_with = "super::form_checkbox_bool")]
+    #[serde(default, deserialize_with = "super::deserialize_form_checkbox")]
     include_tor_hidden_service_keys: bool,
     #[serde(default)]
     storage_mode: Option<String>,
@@ -869,7 +868,7 @@ pub(in crate::server) async fn create_board_backup(
                     return Err(error);
                 }
 
-                if let Err(error) = common::verify_board_backup_zip(&tmp_path) {
+                if let Err(error) = safety::verify_board_backup_zip(&tmp_path) {
                     drop(std::fs::remove_file(&tmp_path));
                     return Err(error);
                 }
@@ -905,27 +904,27 @@ pub(in crate::server) async fn create_board_backup(
                 .files_total
                 .store(file_count.saturating_add(1), Ordering::Relaxed);
 
-            let backup_id = saved_backup::build_backup_id(
-                saved_backup::BackupScope::Board,
+            let backup_id = storage::build_backup_id(
+                storage::BackupScope::Board,
                 &format!("board-{board_short}"),
             );
-            let root_dir = saved_backup::create_backup_root(&backup_id)?;
+            let root_dir = storage::create_backup_root(&backup_id)?;
             let boards = vec![crate::models::BackupBoardSummary {
                 short_name: manifest.board.short_name.clone(),
                 name: manifest.board.name.clone(),
             }];
             let mut files = Vec::new();
 
-            write_board_exports_to_v4_dir(&root_dir, &manifest, &mut files)?;
+            write_board_exports(&root_dir, &manifest, &mut files)?;
 
-            copy_runtime_tree_into_v4_dir(
+            copy_runtime_tree_to_backup(
                 &board_upload_path,
                 &root_dir,
                 &mut files,
                 |_path, runtime_rel| {
                     let runtime_rel = format!("{board_short}/{runtime_rel}");
                     let (logical_path, kind) =
-                        saved_backup::runtime_upload_path_to_logical(&board_short, &runtime_rel)?;
+                        storage::runtime_upload_path_to_logical(&board_short, &runtime_rel)?;
                     Ok((
                         logical_path,
                         Some(runtime_rel),
@@ -936,17 +935,17 @@ pub(in crate::server) async fn create_board_backup(
                 Some(&progress),
             )?;
 
-            let manifest_v4 = saved_backup::BackupManifest {
-                format: saved_backup::BACKUP_V4_FORMAT.to_owned(),
-                archive_container: saved_backup::BACKUP_V4_ARCHIVE_CONTAINER.to_owned(),
+            let manifest_v4 = storage::BackupManifest {
+                format: storage::BACKUP_V4_FORMAT.to_owned(),
+                archive_container: storage::ARCHIVE_CONTAINER.to_owned(),
                 backup_id,
                 created_at: Utc::now().timestamp(),
                 completed_at: None,
                 rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
-                scope: saved_backup::BackupScope::Board,
+                scope: storage::BackupScope::Board,
                 storage_mode: BackupStorageMode::Directory,
                 included_boards: boards,
-                includes: saved_backup::BackupIncludeFlags {
+                includes: storage::BackupIncludeFlags {
                     database: false,
                     settings: false,
                     uploads: true,
@@ -961,10 +960,10 @@ pub(in crate::server) async fn create_board_backup(
                 maintenance: None,
             };
 
-            let backup_ref = finalize_v4_backup_root(&root_dir, manifest_v4)?;
+            let backup_ref = finalize_saved_backup(&root_dir, manifest_v4)?;
             invalidate_backup_list_cache(&board_backup_dir(), BackupListKind::Board);
 
-            let size = saved_backup::scan_dir_stats(&root_dir).bytes;
+            let size = storage::scan_dir_stats(&root_dir).bytes;
             tracing::info!(
                 target: "admin",
                 board = %board_short,
@@ -1034,7 +1033,7 @@ pub(super) fn build_full_backup_manifest(
     banner_file_count: u64,
     tor_hidden_service_keys_included: bool,
     tor_hidden_service_key_file_count: u64,
-) -> Result<common::FullBackupManifest> {
+) -> Result<safety::FullBackupManifest> {
     let boards = collect_all_rows(
         conn,
         "SELECT short_name, name FROM boards ORDER BY short_name ASC",
@@ -1044,7 +1043,7 @@ pub(super) fn build_full_backup_manifest(
             Ok(crate::models::BackupBoardSummary { short_name, name })
         },
     )?;
-    Ok(common::FullBackupManifest {
+    Ok(safety::FullBackupManifest {
         version: 3,
         generated_at: Utc::now().timestamp(),
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -1065,8 +1064,8 @@ pub(super) fn build_full_backup_manifest(
 pub(super) fn build_board_backup_manifest(
     conn: &rusqlite::Connection,
     board_short: &str,
-) -> Result<board_backup_types::BoardBackupManifest> {
-    use board_backup_types::{
+) -> Result<board_manifest::BoardBackupManifest> {
+    use board_manifest::{
         BannerRow, BoardBackupManifest, BoardRow, FileHashRow, PollOptionRow, PollRow, PollVoteRow,
         PostRow, ThreadRow,
     };
@@ -1399,16 +1398,16 @@ fn collect_backup_board_summaries(
     Ok(boards)
 }
 
-fn push_v4_file_entry(
-    entries: &mut Vec<saved_backup::BackupFileEntry>,
+fn append_manifest_file(
+    entries: &mut Vec<storage::BackupFileEntry>,
     logical_path: String,
     runtime_logical_path: Option<String>,
     board: Option<String>,
-    kind: saved_backup::BackupFileKind,
+    kind: storage::BackupFileKind,
     size: u64,
     sha256: String,
 ) {
-    entries.push(saved_backup::BackupFileEntry {
+    entries.push(storage::BackupFileEntry {
         logical_path,
         runtime_logical_path,
         board,
@@ -1429,13 +1428,13 @@ struct SplitZipPlannedPart {
 }
 
 fn plan_split_zip_parts(
-    files: &[saved_backup::BackupFileEntry],
+    files: &[storage::BackupFileEntry],
     target_part_size: u64,
 ) -> Vec<SplitZipPlannedPart> {
     let mut ordered = files
         .iter()
         .enumerate()
-        .collect::<Vec<(usize, &saved_backup::BackupFileEntry)>>();
+        .collect::<Vec<(usize, &storage::BackupFileEntry)>>();
     ordered.sort_by(|left, right| left.1.logical_path.cmp(&right.1.logical_path));
 
     let mut parts = Vec::new();
@@ -1477,10 +1476,10 @@ fn plan_split_zip_parts(
 )]
 fn materialize_split_zip_parts(
     root_dir: &Path,
-    manifest: &mut saved_backup::BackupManifest,
+    manifest: &mut storage::BackupManifest,
     target_part_size: u64,
 ) -> Result<()> {
-    let parts_dir = root_dir.join(saved_backup::PARTS_DIR_NAME);
+    let parts_dir = root_dir.join(storage::PARTS_DIR_NAME);
     ensure_backup_dir(&parts_dir)?;
     let planned_parts = plan_split_zip_parts(&manifest.files, target_part_size);
     let total_parts = u32::try_from(planned_parts.len()).unwrap_or(u32::MAX);
@@ -1558,7 +1557,7 @@ fn materialize_split_zip_parts(
             .map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Inspect {}: {error}", part_path.display()))
             })?;
-        let part_sha = saved_backup::sha256_hex_for_file(&part_path)?;
+        let part_sha = storage::sha256_hex_for_file(&part_path)?;
         for file_index in &planned.files {
             let entry = manifest.files.get_mut(*file_index).ok_or_else(|| {
                 AppError::Internal(anyhow::anyhow!("Invalid split ZIP planner index"))
@@ -1567,7 +1566,7 @@ fn materialize_split_zip_parts(
             entry.zip_entry_path = Some(entry.logical_path.clone());
             entry.compression_method = Some("zip".to_owned());
         }
-        part_infos.push(saved_backup::BackupPartInfo {
+        part_infos.push(storage::BackupPartInfo {
             filename: part_filename,
             part_index,
             total_parts,
@@ -1597,11 +1596,11 @@ fn materialize_split_zip_parts(
     Ok(())
 }
 
-/// Copies runtime tree into v4 dir.
-fn copy_runtime_tree_into_v4_dir<F>(
+/// Copies runtime files into saved backup storage and records their checksums.
+fn copy_runtime_tree_to_backup<F>(
     source_root: &Path,
     destination_root: &Path,
-    entries: &mut Vec<saved_backup::BackupFileEntry>,
+    entries: &mut Vec<storage::BackupFileEntry>,
     mut map_entry: F,
     progress: Option<&crate::middleware::BackupProgress>,
 ) -> Result<()>
@@ -1613,14 +1612,14 @@ where
         String,
         Option<String>,
         Option<String>,
-        saved_backup::BackupFileKind,
+        storage::BackupFileKind,
     )>,
 {
     fn visit<F>(
         current: &Path,
         source_root: &Path,
         destination_root: &Path,
-        entries: &mut Vec<saved_backup::BackupFileEntry>,
+        entries: &mut Vec<storage::BackupFileEntry>,
         map_entry: &mut F,
         progress: Option<&crate::middleware::BackupProgress>,
     ) -> Result<()>
@@ -1632,7 +1631,7 @@ where
             String,
             Option<String>,
             Option<String>,
-            saved_backup::BackupFileKind,
+            storage::BackupFileKind,
         )>,
     {
         let dir_entries = std::fs::read_dir(current).map_err(|error| {
@@ -1670,10 +1669,10 @@ where
             }
             let runtime_rel = relative_path_string(&path, source_root)?;
             let (logical_path, runtime_logical_path, board, kind) = map_entry(&path, &runtime_rel)?;
-            saved_backup::sanitize_logical_path(&logical_path)?;
+            storage::validate_logical_path(&logical_path)?;
             let destination = destination_root.join(&logical_path);
             let (size, sha256) = copy_regular_file_to_backup(&path, &destination)?;
-            push_v4_file_entry(
+            append_manifest_file(
                 entries,
                 logical_path,
                 runtime_logical_path,
@@ -1704,11 +1703,11 @@ where
     )
 }
 
-/// Writes board exports to v4 dir.
-fn write_board_exports_to_v4_dir(
+/// Writes board exports and records their manifest entries.
+fn write_board_exports(
     destination_root: &Path,
-    manifest: &board_backup_types::BoardBackupManifest,
-    entries: &mut Vec<saved_backup::BackupFileEntry>,
+    manifest: &board_manifest::BoardBackupManifest,
+    entries: &mut Vec<storage::BackupFileEntry>,
 ) -> Result<()> {
     validate_board_short_name(&manifest.board.short_name)?;
     let board_root = destination_root
@@ -1718,62 +1717,59 @@ fn write_board_exports_to_v4_dir(
 
     let board_json_path = board_root.join("board.json");
     let (board_json_size, board_json_sha) = write_pretty_json_file(&board_json_path, manifest)?;
-    push_v4_file_entry(
+    append_manifest_file(
         entries,
         format!("boards/{}/board.json", manifest.board.short_name),
         None,
         Some(manifest.board.short_name.clone()),
-        saved_backup::BackupFileKind::BoardJson,
+        storage::BackupFileKind::BoardJson,
         board_json_size,
         board_json_sha,
     );
 
     let threads_path = board_root.join("threads.jsonl");
     let (threads_size, threads_sha) = write_jsonl_file(&threads_path, &manifest.threads)?;
-    push_v4_file_entry(
+    append_manifest_file(
         entries,
         format!("boards/{}/threads.jsonl", manifest.board.short_name),
         None,
         Some(manifest.board.short_name.clone()),
-        saved_backup::BackupFileKind::ThreadExport,
+        storage::BackupFileKind::ThreadExport,
         threads_size,
         threads_sha,
     );
 
     let posts_path = board_root.join("posts.jsonl");
     let (posts_size, posts_sha) = write_jsonl_file(&posts_path, &manifest.posts)?;
-    push_v4_file_entry(
+    append_manifest_file(
         entries,
         format!("boards/{}/posts.jsonl", manifest.board.short_name),
         None,
         Some(manifest.board.short_name.clone()),
-        saved_backup::BackupFileKind::PostExport,
+        storage::BackupFileKind::PostExport,
         posts_size,
         posts_sha,
     );
 
     let files_path = board_root.join("files.jsonl");
     let (files_size, files_sha) = write_jsonl_file(&files_path, &manifest.file_hashes)?;
-    push_v4_file_entry(
+    append_manifest_file(
         entries,
         format!("boards/{}/files.jsonl", manifest.board.short_name),
         None,
         Some(manifest.board.short_name.clone()),
-        saved_backup::BackupFileKind::FileInventoryExport,
+        storage::BackupFileKind::FileInventoryExport,
         files_size,
         files_sha,
     );
     Ok(())
 }
 
-fn finalize_v4_backup_root(
-    root_dir: &Path,
-    mut manifest: saved_backup::BackupManifest,
-) -> Result<String> {
+fn finalize_saved_backup(root_dir: &Path, mut manifest: storage::BackupManifest) -> Result<String> {
     manifest.completed_at = Some(Utc::now().timestamp());
 
-    let mut metadata = saved_backup::BackupMetadata {
-        format: saved_backup::BACKUP_V4_FORMAT.to_owned(),
+    let mut metadata = storage::BackupMetadata {
+        format: storage::BACKUP_V4_FORMAT.to_owned(),
         backup_id: manifest.backup_id.clone(),
         scope: manifest.scope,
         storage_mode: manifest.storage_mode,
@@ -1786,20 +1782,20 @@ fn finalize_v4_backup_root(
         included_boards: manifest.included_boards.clone(),
         manifest_path: Some(
             root_dir
-                .join(saved_backup::MANIFEST_FILE_NAME)
+                .join(storage::MANIFEST_FILE_NAME)
                 .display()
                 .to_string(),
         ),
     };
 
-    let manifest_path = root_dir.join(saved_backup::MANIFEST_FILE_NAME);
-    let metadata_path = root_dir.join(saved_backup::BACKUP_METADATA_FILE_NAME);
-    let readme_path = root_dir.join(saved_backup::README_FILE_NAME);
+    let manifest_path = root_dir.join(storage::MANIFEST_FILE_NAME);
+    let metadata_path = root_dir.join(storage::BACKUP_METADATA_FILE_NAME);
+    let readme_path = root_dir.join(storage::README_FILE_NAME);
 
-    saved_backup::write_json_pretty(&manifest_path, &manifest)?;
-    saved_backup::write_json_pretty(&metadata_path, &metadata)?;
-    let readme = saved_backup::build_readme(&manifest, &metadata, manifest.includes.tor_keys);
-    saved_backup::write_text(&readme_path, &readme)?;
+    storage::write_json_pretty(&manifest_path, &manifest)?;
+    storage::write_json_pretty(&metadata_path, &metadata)?;
+    let readme = storage::build_readme(&manifest, &metadata, manifest.includes.tor_keys);
+    storage::write_text(&readme_path, &readme)?;
 
     let part_paths = manifest
         .parts
@@ -1807,10 +1803,10 @@ fn finalize_v4_backup_root(
         .map(|part| root_dir.join(&part.filename))
         .collect::<Vec<_>>();
     let part_path_refs = part_paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-    saved_backup::write_root_checksums(root_dir, &part_path_refs)?;
-    metadata.total_size_bytes = saved_backup::scan_dir_stats(root_dir).bytes;
-    saved_backup::write_json_pretty(&metadata_path, &metadata)?;
-    saved_backup::write_root_checksums(root_dir, &part_path_refs)?;
+    storage::write_root_checksums(root_dir, &part_path_refs)?;
+    metadata.total_size_bytes = storage::scan_dir_stats(root_dir).bytes;
+    storage::write_json_pretty(&metadata_path, &metadata)?;
+    storage::write_root_checksums(root_dir, &part_path_refs)?;
     Ok(manifest.backup_id)
 }
 
@@ -1819,12 +1815,12 @@ mod tests {
     #[cfg(unix)]
     use super::copy_regular_file_to_backup;
     use super::{build_full_backup_manifest, count_required_private_files, FullBackupCreateForm};
-    use crate::handlers::admin::backup::common::{
+    use crate::handlers::admin::backup::safety::{
         resolve_tor_hidden_service_keys_availability, verify_full_backup_zip,
         TorHiddenServiceKeysAvailability, FULL_BACKUP_MANIFEST_NAME,
         FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX,
     };
-    use crate::handlers::admin::backup::saved_backup;
+    use crate::handlers::admin::backup::storage;
     use anyhow::{bail, ensure, Context as _, Result as TestResult};
     use axum::{
         body::{to_bytes, Body},
@@ -2000,7 +1996,7 @@ mod tests {
                 &mut zip,
                 &tor_keys_dir,
                 &tor_keys_dir,
-                super::super::common::FULL_BACKUP_TOR_KEYS_PREFIX,
+                super::super::safety::FULL_BACKUP_TOR_KEYS_PREFIX,
                 options,
                 &crate::middleware::BackupProgress::new(),
             )
@@ -2074,22 +2070,22 @@ mod tests {
     #[test]
     fn split_zip_part_planner_does_not_create_empty_parts() {
         let files = vec![
-            saved_backup::BackupFileEntry {
+            storage::BackupFileEntry {
                 logical_path: "b.txt".to_owned(),
                 runtime_logical_path: None,
                 board: None,
-                kind: saved_backup::BackupFileKind::Settings,
+                kind: storage::BackupFileKind::Settings,
                 size: 6,
                 sha256: "b".to_owned(),
                 zip_part: None,
                 zip_entry_path: None,
                 compression_method: None,
             },
-            saved_backup::BackupFileEntry {
+            storage::BackupFileEntry {
                 logical_path: "a.txt".to_owned(),
                 runtime_logical_path: None,
                 board: None,
-                kind: saved_backup::BackupFileKind::Settings,
+                kind: storage::BackupFileKind::Settings,
                 size: 6,
                 sha256: "a".to_owned(),
                 zip_part: None,
@@ -2106,11 +2102,11 @@ mod tests {
 
     #[test]
     fn split_zip_part_planner_marks_oversized_single_file_part() -> TestResult<()> {
-        let files = vec![saved_backup::BackupFileEntry {
+        let files = vec![storage::BackupFileEntry {
             logical_path: "huge.bin".to_owned(),
             runtime_logical_path: None,
             board: None,
-            kind: saved_backup::BackupFileKind::OriginalMedia,
+            kind: storage::BackupFileKind::OriginalMedia,
             size: 128,
             sha256: "huge".to_owned(),
             zip_part: None,
@@ -2161,50 +2157,49 @@ mod tests {
 
     #[test]
     fn board_export_writer_rejects_unsafe_manifest_short_name_before_path_join() -> TestResult<()> {
-        let manifest =
-            crate::handlers::admin::backup::types::board_backup_types::BoardBackupManifest {
-                version: 1,
-                board: crate::handlers::admin::backup::types::board_backup_types::BoardRow {
-                    id: 1,
-                    short_name: "a/b".to_owned(),
-                    name: "Bad".to_owned(),
-                    description: String::new(),
-                    nsfw: false,
-                    max_threads: 100,
-                    max_archived_threads: 150,
-                    bump_limit: 300,
-                    allow_images: true,
-                    allow_video: true,
-                    allow_audio: false,
-                    allow_pdf: false,
-                    allow_any_files: false,
-                    allow_tripcodes: true,
-                    edit_window_secs: 300,
-                    allow_editing: false,
-                    allow_self_delete: false,
-                    allow_archive: true,
-                    allow_video_embeds: false,
-                    allow_captcha: false,
-                    show_poster_ids: false,
-                    collapse_greentext: false,
-                    post_cooldown_secs: 0,
-                    banner_mode: "inherit".to_owned(),
-                    access_mode: "public".to_owned(),
-                    access_password_hash: String::new(),
-                    created_at: 1,
-                },
-                threads: Vec::new(),
-                posts: Vec::new(),
-                polls: Vec::new(),
-                poll_options: Vec::new(),
-                poll_votes: Vec::new(),
-                file_hashes: Vec::new(),
-                banners: Vec::new(),
-            };
+        let manifest = crate::handlers::admin::backup::board_manifest::BoardBackupManifest {
+            version: 1,
+            board: crate::handlers::admin::backup::board_manifest::BoardRow {
+                id: 1,
+                short_name: "a/b".to_owned(),
+                name: "Bad".to_owned(),
+                description: String::new(),
+                nsfw: false,
+                max_threads: 100,
+                max_archived_threads: 150,
+                bump_limit: 300,
+                allow_images: true,
+                allow_video: true,
+                allow_audio: false,
+                allow_pdf: false,
+                allow_any_files: false,
+                allow_tripcodes: true,
+                edit_window_secs: 300,
+                allow_editing: false,
+                allow_self_delete: false,
+                allow_archive: true,
+                allow_video_embeds: false,
+                allow_captcha: false,
+                show_poster_ids: false,
+                collapse_greentext: false,
+                post_cooldown_secs: 0,
+                banner_mode: "inherit".to_owned(),
+                access_mode: "public".to_owned(),
+                access_password_hash: String::new(),
+                created_at: 1,
+            },
+            threads: Vec::new(),
+            posts: Vec::new(),
+            polls: Vec::new(),
+            poll_options: Vec::new(),
+            poll_votes: Vec::new(),
+            file_hashes: Vec::new(),
+            banners: Vec::new(),
+        };
         let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let mut entries = Vec::new();
 
-        let error = super::write_board_exports_to_v4_dir(temp_dir.path(), &manifest, &mut entries)
+        let error = super::write_board_exports(temp_dir.path(), &manifest, &mut entries)
             .err()
             .context("unsafe manifest board short name was unexpectedly accepted")?;
 

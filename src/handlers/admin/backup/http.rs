@@ -2,7 +2,7 @@
 const LOG_TARGET: &str = concat!(env!("CARGO_CRATE_NAME"), "::handlers::admin::backup::http");
 
 use super::{
-    check_admin_csrf_jar, common, header, require_admin_session_sid, require_same_origin_request,
+    check_admin_csrf_jar, header, require_admin_session_sid, require_same_origin_request, safety,
     AdminPanelTarget, AppError, AppState, CookieJar, HeaderMap, HeaderValue, Multipart, Next, Path,
     Request, Response, Result, Seek, StatusCode, BOARD_BACKUP_RESTORE_SECTION,
     FULL_BACKUP_RESTORE_SECTION, SESSION_COOKIE,
@@ -455,7 +455,7 @@ pub(super) async fn stream_restore_upload_to_tempfile(
                     ensure_restore_upload_within_budget(
                         kind,
                         uploaded_bytes,
-                        common::RESTORE_UPLOAD_MAX_BYTES,
+                        safety::RESTORE_UPLOAD_MAX_BYTES,
                     )?;
                     writer.write_all(&chunk).await.map_err(|error| {
                         AppError::Internal(anyhow::anyhow!("Write chunk: {error}"))
@@ -546,7 +546,7 @@ pub(super) fn validate_streamed_restore_upload(
             "Uploaded backup file is empty.".into(),
         ));
     }
-    ensure_restore_upload_within_budget(kind, file_size, common::RESTORE_UPLOAD_MAX_BYTES)?;
+    ensure_restore_upload_within_budget(kind, file_size, safety::RESTORE_UPLOAD_MAX_BYTES)?;
 
     tracing::info!(
         target: "admin",
@@ -562,7 +562,7 @@ pub(super) fn validate_streamed_restore_upload(
     Ok(file_size)
 }
 
-pub(super) fn sanitize_backup_zip_filename(filename: &str) -> Result<String> {
+pub(super) fn validate_backup_zip_filename(filename: &str) -> Result<String> {
     let safe_filename: String = filename
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
@@ -578,7 +578,7 @@ pub(super) fn sanitize_backup_zip_filename(filename: &str) -> Result<String> {
     Ok(safe_filename)
 }
 
-pub(super) fn sanitize_saved_backup_ref(value: &str) -> Result<String> {
+pub(super) fn validate_saved_backup_reference(value: &str) -> Result<String> {
     let safe_value: String = value
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')

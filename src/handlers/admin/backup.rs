@@ -42,24 +42,17 @@ use super::{
 };
 
 mod archive;
-mod common;
+mod board_manifest;
 mod create;
 mod downloads;
 mod http;
 mod listing;
 mod restore_board;
 mod restore_full;
-mod saved_backup;
-mod types;
-pub(in crate::server) use saved_backup::BackupStorageMode;
+mod safety;
+mod storage;
+pub(in crate::server) use storage::BackupStorageMode;
 
-use common::{
-    copy_limited, create_staging_dir, extract_uploads_to_dir, log_backup_phase,
-    log_backup_progress, read_limited_bytes, remap_body_quotelinks, remove_path_if_exists,
-    render_restored_body_html, restore_safe_relative_path_under_prefix, validate_board_short_name,
-    validate_restore_safe_entry_name, verify_full_backup_archive, BANNER_RESTORE_ENTRY_MAX_BYTES,
-    BANNER_RESTORE_TOTAL_MAX_BYTES, BOARD_MANIFEST_MAX_BYTES, ZIP_ENTRY_MAX_BYTES,
-};
 pub(in crate::server) use create::*;
 pub(in crate::server) use downloads::{backup_progress_json, delete_backup, download_backup};
 pub(in crate::server) use http::backup_request_logging_middleware;
@@ -68,7 +61,13 @@ pub(in crate::server) use restore_board::{
     board_restore, extract_board_from_full_backup, restore_saved_board_backup,
 };
 pub(in crate::server) use restore_full::{admin_restore, restore_saved_full_backup};
-use types::board_backup_types;
+use safety::{
+    copy_limited, create_staging_dir, extract_uploads_to_dir, log_backup_phase,
+    log_backup_progress, read_limited_bytes, remap_body_quotelinks, remove_path_if_exists,
+    render_restored_body_html, validate_board_short_name, validate_entry_path_under_prefix,
+    validate_restore_safe_entry_name, verify_full_backup_archive, BANNER_RESTORE_ENTRY_MAX_BYTES,
+    BANNER_RESTORE_TOTAL_MAX_BYTES, BOARD_MANIFEST_MAX_BYTES, ZIP_ENTRY_MAX_BYTES,
+};
 
 /// Full backup restore section used by this handler.
 const FULL_BACKUP_RESTORE_SECTION: &str = "full-backup-restore";
@@ -80,13 +79,13 @@ const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 #[derive(Deserialize)]
 pub(in crate::server) struct RestoreSavedForm {
     filename: String,
-    #[serde(default, deserialize_with = "form_checkbox_bool")]
+    #[serde(default, deserialize_with = "deserialize_form_checkbox")]
     restore_tor_hidden_service_keys: bool,
     #[serde(rename = "_csrf")]
     csrf: Option<String>,
 }
 
-fn form_checkbox_bool<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+fn deserialize_form_checkbox<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -101,11 +100,10 @@ fn form_checkbox_value_is_on(value: Option<&str>) -> bool {
 }
 
 use archive::{
-    canonicalize_restored_banner_dir, create_temp_board_backup_from_full_backup_path,
-    create_temp_legacy_board_backup_from_saved_full_v4_path,
-    create_temp_legacy_board_backup_from_v4_path, create_temp_legacy_full_backup_from_v4_path,
-    create_temp_legacy_full_backup_from_v4_transfer_zip, parse_board_backup_manifest_from_zip,
-    validate_full_restore_archive_layout,
+    canonicalize_restored_banner_dir, convert_transfer_zip_to_full_restore_archive,
+    extract_board_archive_from_full_backup, extract_board_archive_from_saved_full_backup,
+    parse_board_backup_manifest_from_zip, prepare_saved_board_restore_archive,
+    prepare_saved_full_restore_archive, validate_full_restore_archive_layout,
 };
 #[cfg(test)]
 use downloads::{consume_temp_board_download_token, temp_board_download_token_path};
@@ -116,13 +114,12 @@ use http::{
     is_xml_http_request, log_restore_upload_started, redirect_page_response,
     restore_auth_preflight, restore_error_redirect_target, restore_failure_response,
     restore_start_response, restore_success_redirect_target, restore_upload_parse_response,
-    sanitize_backup_zip_filename, sanitize_board_short_value, sanitize_saved_backup_ref,
-    stream_restore_upload_to_tempfile, validate_streamed_restore_upload, RestoreKind,
+    sanitize_board_short_value, stream_restore_upload_to_tempfile, validate_backup_zip_filename,
+    validate_saved_backup_reference, validate_streamed_restore_upload, RestoreKind,
 };
 pub(in crate::server) use listing::latest_verified_full_backup_modified_time;
 use listing::{
-    enforce_full_backup_retention, invalidate_backup_list_cache,
-    latest_saved_board_backup_filename as latest_board_backup_filename,
+    enforce_full_backup_retention, invalidate_backup_list_cache, latest_board_backup_reference,
 };
 #[cfg(test)]
 use listing::{latest_verified_full_backup_modified_time_in_dir, prune_full_backup_dir_to_limit};
@@ -223,7 +220,7 @@ pub(in crate::server) async fn admin_backup(
                 let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(|e| {
                     AppError::Internal(anyhow::anyhow!("Serialize full backup manifest: {e}"))
                 })?;
-                zip.start_file(common::FULL_BACKUP_MANIFEST_NAME, opts)
+                zip.start_file(safety::FULL_BACKUP_MANIFEST_NAME, opts)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip backup manifest: {e}")))?;
                 zip.write_all(&manifest_json).map_err(|e| {
                     AppError::Internal(anyhow::anyhow!("Write backup manifest: {e}"))
@@ -285,7 +282,7 @@ pub(in crate::server) async fn admin_backup(
                 return Err(error);
             }
 
-            if let Err(error) = common::verify_full_backup_zip(zip_tmp.path()) {
+            if let Err(error) = safety::verify_full_backup_zip(zip_tmp.path()) {
                 drop(std::fs::remove_file(&temp_db));
                 return Err(error);
             }
@@ -574,7 +571,7 @@ pub(in crate::server) async fn board_backup(
             )
             .map_err(|_error| AppError::NotFound(format!("Board '{safe_board}' not found")))?;
 
-            latest_board_backup_filename(&safe_board).ok_or_else(|| {
+            latest_board_backup_reference(&safe_board).ok_or_else(|| {
                 AppError::NotFound(format!(
                     "No saved backup found for /{safe_board}/. Create one from the admin panel first."
                 ))
@@ -584,10 +581,10 @@ pub(in crate::server) async fn board_backup(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    let v4_root = crate::config::backups_dir().join(&filename);
-    if v4_root.is_dir() {
+    let saved_root = crate::config::backups_dir().join(&filename);
+    if saved_root.is_dir() {
         let (temp_zip, temp_name) =
-            create_temp_legacy_board_backup_from_v4_path(&v4_root, Some(&safe_board))?;
+            prepare_saved_board_restore_archive(&saved_root, Some(&safe_board))?;
         let mut temp_zip_guard = archive::TempZipCleanupGuard::new(temp_zip.clone());
         let download_token = new_session_id();
         write_temp_board_download_token(&temp_name, &download_token)?;
@@ -624,9 +621,9 @@ pub(in crate::server) async fn board_backup(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_board_backup_manifest, consume_temp_board_download_token,
-        create_temp_board_backup_from_full_backup_path, execute_board_restore, full_backup_dir,
-        invalidate_backup_list_cache, latest_verified_full_backup_modified_time,
+        build_board_backup_manifest, consume_temp_board_download_token, execute_board_restore,
+        extract_board_archive_from_full_backup, full_backup_dir, invalidate_backup_list_cache,
+        latest_verified_full_backup_modified_time,
         latest_verified_full_backup_modified_time_in_dir, refresh_live_site_state_from_db,
         render_restored_body_html, should_store_without_recompress, temp_board_download_dir,
         temp_board_download_token_path, validate_full_restore_archive_layout,
@@ -783,16 +780,13 @@ mod tests {
             )?;
             let saved = root.join(&filename);
             ensure!(saved.is_dir());
-            super::saved_backup::verify_saved_v4_root(
-                &saved,
-                &[super::saved_backup::BackupScope::FullSite],
-            )?;
+            super::storage::verify_saved_backup(&saved, &[super::storage::BackupScope::FullSite])?;
             let listed = super::list_backup_files(&full_backup_dir(), BackupListKind::Full);
             ensure!(listed
                 .iter()
                 .any(|backup| backup.backup_ref == filename && backup.verified));
             ensure!(latest_verified_full_backup_modified_time().is_some());
-            let zip = super::archive::create_temp_legacy_full_backup_from_v4_path(&saved)?;
+            let zip = super::archive::prepare_saved_full_restore_archive(&saved)?;
             let _cleanup = PathCleanup(zip.clone());
             let mut archive = zip::ZipArchive::new(std::fs::File::open(zip)?)?;
             let mut conn = state.db.get()?;
@@ -1476,7 +1470,7 @@ mod tests {
         ensure!(create_location.contains("open=board-backup-restore"));
         ensure!(create_location.contains(&format!("#board-backup-{board_short}")));
 
-        let filename = super::latest_board_backup_filename(&board_short)
+        let filename = super::latest_board_backup_reference(&board_short)
             .context("created backup filename not found")?;
         let backup_path = crate::config::backups_dir().join(&filename);
         let _backup_cleanup = PathCleanup(backup_path.clone());
@@ -2069,7 +2063,7 @@ mod tests {
             "banners": []
         });
 
-        let manifest: super::types::board_backup_types::BoardBackupManifest =
+        let manifest: super::board_manifest::BoardBackupManifest =
             serde_json::from_value(json).context("deserialize legacy manifest")?;
 
         ensure!(!manifest.board.allow_pdf);
@@ -2223,7 +2217,7 @@ mod tests {
                 .context("vacuum database into snapshot")?;
         }
 
-        let manifest = super::common::FullBackupManifest {
+        let manifest = super::safety::FullBackupManifest {
             version: if indexed_boards { 2 } else { 1 },
             generated_at: 1_700_000_000,
             rustchan_version: "1.1.3".into(),
@@ -2251,7 +2245,7 @@ mod tests {
             let file = std::fs::File::create(zip_path).context("create backup ZIP")?;
             let mut zip = zip::ZipWriter::new(file);
             let options = zip::write::SimpleFileOptions::default();
-            zip.start_file(super::common::FULL_BACKUP_MANIFEST_NAME, options)
+            zip.start_file(super::safety::FULL_BACKUP_MANIFEST_NAME, options)
                 .context("start manifest ZIP entry")?;
             zip.write_all(&manifest_json)
                 .context("write manifest ZIP entry")?;
@@ -2339,7 +2333,7 @@ mod tests {
             }
         }
 
-        let backup_root = crate::handlers::admin::backup::saved_backup::backups_root_dir();
+        let backup_root = crate::handlers::admin::backup::storage::backups_root_dir();
         std::fs::create_dir_all(&backup_root).context("create backup root")?;
         let older_completed_dir = backup_root.join("2099-01-01_000001_full-site-newer-mtime-test");
         let newer_dir_mtime_dir =
@@ -2348,18 +2342,18 @@ mod tests {
             older_completed_dir.clone(),
             newer_dir_mtime_dir.clone(),
         ]);
-        crate::handlers::admin::backup::saved_backup::write_saved_v4_fixture_for_test(
+        crate::handlers::admin::backup::storage::write_saved_backup_fixture(
             &older_completed_dir,
-            crate::handlers::admin::backup::saved_backup::BackupScope::FullSite,
-            crate::handlers::admin::backup::saved_backup::board_fixture_files_for_test(),
+            crate::handlers::admin::backup::storage::BackupScope::FullSite,
+            crate::handlers::admin::backup::storage::board_file_fixtures(),
             Some(b"sqlite".to_vec()),
             4_102_444_800,
         )?;
         std::thread::sleep(std::time::Duration::from_millis(20));
-        crate::handlers::admin::backup::saved_backup::write_saved_v4_fixture_for_test(
+        crate::handlers::admin::backup::storage::write_saved_backup_fixture(
             &newer_dir_mtime_dir,
-            crate::handlers::admin::backup::saved_backup::BackupScope::FullSite,
-            crate::handlers::admin::backup::saved_backup::board_fixture_files_for_test(),
+            crate::handlers::admin::backup::storage::BackupScope::FullSite,
+            crate::handlers::admin::backup::storage::board_file_fixtures(),
             Some(b"sqlite".to_vec()),
             4_102_444_700,
         )?;
@@ -2379,11 +2373,10 @@ mod tests {
     #[test]
     fn full_backup_can_extract_board_backup() -> TestResult<()> {
         let zip_path = build_sample_full_backup_zip(true)?;
-        let (board_zip_path, filename) =
-            create_temp_board_backup_from_full_backup_path(&zip_path, "tech")?;
+        let (board_zip_path, filename) = extract_board_archive_from_full_backup(&zip_path, "tech")?;
 
         ensure!(filename.contains("from-full"));
-        let manifest = super::common::verify_board_backup_zip(&board_zip_path)?;
+        let manifest = super::safety::verify_board_backup_zip(&board_zip_path)?;
         ensure!(manifest.board.short_name == "tech");
 
         let file = std::fs::File::open(&board_zip_path).context("open board ZIP")?;
@@ -2398,10 +2391,9 @@ mod tests {
     #[test]
     fn older_full_backup_without_board_index_still_extracts_board_backup() -> TestResult<()> {
         let zip_path = build_sample_full_backup_zip(false)?;
-        let (board_zip_path, _) =
-            create_temp_board_backup_from_full_backup_path(&zip_path, "tech")?;
+        let (board_zip_path, _) = extract_board_archive_from_full_backup(&zip_path, "tech")?;
 
-        let manifest = super::common::verify_board_backup_zip(&board_zip_path)?;
+        let manifest = super::safety::verify_board_backup_zip(&board_zip_path)?;
         ensure!(manifest.board.short_name == "tech");
 
         drop(std::fs::remove_file(board_zip_path));

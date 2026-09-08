@@ -597,7 +597,7 @@ Tracked changed paths, grouped without omitting files:
 - src/db/{admin.rs,banners.rs,boards.rs,chan_net.rs,fs_ops.rs,migrations.rs,mod.rs,pool.rs,posts.rs,schema.rs,setup.rs,themes.rs,threads.rs,types.rs,user_thread_prefs.rs}.
 - src/handlers/{banner.rs,board.rs,captcha.rs,favicon.rs,mod.rs,posting.rs,render.rs,setup.rs,thread.rs}.
 - src/handlers/admin/{auth.rs,backup.rs,content.rs,mod.rs,moderation.rs,settings.rs}.
-- src/handlers/admin/backup/{archive.rs,common.rs,create.rs,downloads.rs,http.rs,listing.rs,restore_board.rs,restore_full.rs,saved_backup.rs,types.rs}.
+- src/handlers/admin/backup/{archive.rs,board_manifest.rs,create.rs,downloads.rs,http.rs,listing.rs,restore_board.rs,restore_full.rs,safety.rs,storage.rs}.
 - src/handlers/admin/settings/{appearance.rs,backup_settings.rs,banners.rs,board.rs,maintenance.rs,site.rs,themes.rs}.
 - src/handlers/board/{access_preferences.rs,catalog.rs,create_thread.rs,media.rs,pages.rs,reports.rs,tests.rs}.
 - src/media/{convert.rs,ffmpeg.rs,mod.rs,prune.rs,thumbnail.rs}.

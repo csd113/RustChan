@@ -1,9 +1,10 @@
 use super::{
     board_backup_dir, full_backup_dir, header, invalidate_backup_list_cache, listing,
-    require_admin_post_origin_and_csrf, require_admin_session_sid, sanitize_backup_zip_filename,
-    sanitize_saved_backup_ref, saved_backup, temp_board_download_dir, AppError, AppState,
-    BackupListKind, Context, CookieJar, Duration, Form, HeaderMap, Ordering, Path, PathBuf, Pin,
-    Poll, Query, ReaderStream, Redirect, Response, Result, State, Stream, SESSION_COOKIE,
+    require_admin_post_origin_and_csrf, require_admin_session_sid, storage,
+    temp_board_download_dir, validate_backup_zip_filename, validate_saved_backup_reference,
+    AppError, AppState, BackupListKind, Context, CookieJar, Duration, Form, HeaderMap, Ordering,
+    Path, PathBuf, Pin, Poll, Query, ReaderStream, Redirect, Response, Result, State, Stream,
+    SESSION_COOKIE,
 };
 use axum::response::IntoResponse as _;
 use serde::Deserialize;
@@ -94,12 +95,12 @@ fn safe_backup_file_path(root: &Path, filename: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-struct TempFileStream {
+struct DeleteOnDropFileStream {
     inner: Option<ReaderStream<tokio::fs::File>>,
     cleanup_path: Option<PathBuf>,
 }
 
-impl TempFileStream {
+impl DeleteOnDropFileStream {
     fn new(file: tokio::fs::File, cleanup_path: PathBuf) -> Self {
         Self {
             inner: Some(ReaderStream::new(file)),
@@ -108,7 +109,7 @@ impl TempFileStream {
     }
 }
 
-impl Stream for TempFileStream {
+impl Stream for DeleteOnDropFileStream {
     type Item = std::result::Result<axum::body::Bytes, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -118,7 +119,7 @@ impl Stream for TempFileStream {
     }
 }
 
-impl Drop for TempFileStream {
+impl Drop for DeleteOnDropFileStream {
     fn drop(&mut self) {
         drop(self.inner.take());
         if let Some(path) = self.cleanup_path.take() {
@@ -155,9 +156,9 @@ pub(in crate::server) async fn download_backup(
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
 
     let safe_filename = if query.part.is_some() && matches!(kind.as_str(), "full" | "board") {
-        sanitize_saved_backup_ref(&filename)?
+        validate_saved_backup_reference(&filename)?
     } else {
-        sanitize_backup_zip_filename(&filename)?
+        validate_backup_zip_filename(&filename)?
     };
 
     let requires_temp_token = match kind.as_str() {
@@ -196,18 +197,18 @@ pub(in crate::server) async fn download_backup(
                 "Backup parts are not available for this download kind.".into(),
             ));
         }
-        let safe_part = sanitize_backup_zip_filename(part_name)?;
+        let safe_part = validate_backup_zip_filename(part_name)?;
         let backup_root = crate::config::backups_dir().join(&safe_filename);
-        let expected_scopes: &[saved_backup::BackupScope] = match kind.as_str() {
-            "full" => &[saved_backup::BackupScope::FullSite],
-            "board" => &[saved_backup::BackupScope::Board],
+        let expected_scopes: &[storage::BackupScope] = match kind.as_str() {
+            "full" => &[storage::BackupScope::FullSite],
+            "board" => &[storage::BackupScope::Board],
             _ => {
                 return Err(AppError::BadRequest(
                     "Backup parts are not available for this download kind.".into(),
                 ));
             }
         };
-        let verified = saved_backup::verify_saved_v4_root(&backup_root, expected_scopes)?;
+        let verified = storage::verify_saved_backup(&backup_root, expected_scopes)?;
         let part_filename = format!("parts/{safe_part}");
         let part = verified
             .manifest
@@ -231,7 +232,7 @@ pub(in crate::server) async fn download_backup(
                 "Backup part size changed since verification.".into(),
             ));
         }
-        let file_sha256 = saved_backup::sha256_hex_for_file(&resolved)?;
+        let file_sha256 = storage::sha256_hex_for_file(&resolved)?;
         if file_sha256 != part.sha256 {
             return Err(AppError::BadRequest(
                 "Backup part checksum changed since verification.".into(),
@@ -274,7 +275,7 @@ pub(in crate::server) async fn download_backup(
     let stream: Pin<
         Box<dyn Stream<Item = std::result::Result<axum::body::Bytes, std::io::Error>> + Send>,
     > = if cleanup_temp {
-        Box::pin(TempFileStream::new(file, path.clone()))
+        Box::pin(DeleteOnDropFileStream::new(file, path.clone()))
     } else {
         Box::pin(ReaderStream::new(file))
     };
@@ -336,7 +337,7 @@ pub(in crate::server) async fn delete_backup(
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let _maintenance_guard = state.maintenance_gate.try_begin("Saved backup deletion")?;
 
-    let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
+    let safe_filename = validate_saved_backup_reference(&form.filename)?;
 
     let (backup_dir, backup_kind) = match form.kind.as_str() {
         "full" => (full_backup_dir(), BackupListKind::Full),
@@ -350,11 +351,11 @@ pub(in crate::server) async fn delete_backup(
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
 
-            let v4_root = crate::config::backups_dir().join(&safe_filename);
+            let saved_root = crate::config::backups_dir().join(&safe_filename);
             let legacy_path = backup_dir.join(&safe_filename);
-            if v4_root.is_dir() {
-                listing::safe_saved_backup_dir_for_delete(&v4_root)?;
-                std::fs::remove_dir_all(&v4_root)
+            if saved_root.is_dir() {
+                listing::safe_saved_backup_dir_for_delete(&saved_root)?;
+                std::fs::remove_dir_all(&saved_root)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Delete backup: {e}")))?;
                 invalidate_backup_list_cache(&backup_dir, backup_kind);
                 tracing::info!(target: "admin", backup_ref = %safe_filename, "Backup directory deleted");

@@ -1,18 +1,18 @@
 use super::{
-    admin_panel_redirect_anchor_open, archive, banner, board_backup_dir, board_backup_types,
-    common, create_staging_dir, create_temp_board_backup_from_full_backup_path,
-    create_temp_legacy_board_backup_from_saved_full_v4_path,
-    create_temp_legacy_board_backup_from_v4_path, db, extract_uploads_to_dir, full_backup_dir,
+    admin_panel_redirect_anchor_open, archive, banner, board_backup_dir, board_manifest,
+    create_staging_dir, db, extract_board_archive_from_full_backup,
+    extract_board_archive_from_saved_full_backup, extract_uploads_to_dir, full_backup_dir,
     is_xml_http_request, log_restore_upload_started, new_session_id,
-    parse_board_backup_manifest_from_zip, read_limited_bytes, redirect_page_response,
-    remap_body_quotelinks, remove_path_if_exists, render_restored_body_html,
-    require_admin_post_origin_and_csrf, require_admin_session_sid, restore_auth_preflight,
-    restore_db_from_snapshot, restore_error_redirect_target, restore_failure_response,
-    restore_start_response, restore_success_redirect_target, restore_upload_parse_response,
-    sanitize_board_short_value, sanitize_saved_backup_ref, stream_restore_upload_to_tempfile,
-    temp_board_download_dir, validate_board_short_name, validate_streamed_restore_upload,
-    verify_password, write_temp_board_download_token, AppError, AppState, BoardAccessMode,
-    CookieJar, Form, HeaderMap, Multipart, Path, PathBuf, Redirect, Request, Response, RestoreKind,
+    parse_board_backup_manifest_from_zip, prepare_saved_board_restore_archive, read_limited_bytes,
+    redirect_page_response, remap_body_quotelinks, remove_path_if_exists,
+    render_restored_body_html, require_admin_post_origin_and_csrf, require_admin_session_sid,
+    restore_auth_preflight, restore_db_from_snapshot, restore_error_redirect_target,
+    restore_failure_response, restore_start_response, restore_success_redirect_target,
+    restore_upload_parse_response, safety, sanitize_board_short_value,
+    stream_restore_upload_to_tempfile, temp_board_download_dir, validate_board_short_name,
+    validate_saved_backup_reference, validate_streamed_restore_upload, verify_password,
+    write_temp_board_download_token, AppError, AppState, BoardAccessMode, CookieJar, Form,
+    HeaderMap, Multipart, Path, PathBuf, Redirect, Request, Response, RestoreKind,
     RestoreSavedForm, Result, State, BOARD_BACKUP_RESTORE_SECTION, BOARD_MANIFEST_MAX_BYTES,
     CONFIG, SESSION_COOKIE,
 };
@@ -22,20 +22,20 @@ use serde::Deserialize;
 
 /// Validates board restore media metadata.
 fn validate_board_restore_media_metadata(
-    manifest: &board_backup_types::BoardBackupManifest,
+    manifest: &board_manifest::BoardBackupManifest,
 ) -> Result<()> {
     let board_short = manifest.board.short_name.as_str();
 
     for post in &manifest.posts {
         if let Some(file_path) = post.file_path.as_deref() {
-            common::validate_restored_media_path_for_board(
+            safety::validate_restored_media_path_for_board(
                 file_path,
                 board_short,
                 "Board backup post file_path",
             )?;
         }
         if let Some(thumb_path) = post.thumb_path.as_deref() {
-            common::validate_restored_media_path_for_board(
+            safety::validate_restored_media_path_for_board(
                 thumb_path,
                 board_short,
                 "Board backup post thumb_path",
@@ -44,13 +44,13 @@ fn validate_board_restore_media_metadata(
     }
 
     for file_hash in &manifest.file_hashes {
-        common::validate_restored_media_path_for_board(
+        safety::validate_restored_media_path_for_board(
             &file_hash.file_path,
             board_short,
             "Board backup file_hash file_path",
         )?;
         if !file_hash.thumb_path.is_empty() {
-            common::validate_restored_media_path_for_board(
+            safety::validate_restored_media_path_for_board(
                 &file_hash.thumb_path,
                 board_short,
                 "Board backup file_hash thumb_path",
@@ -63,7 +63,7 @@ fn validate_board_restore_media_metadata(
 
 /// Validates board backup access settings.
 fn validate_board_backup_access_settings(
-    manifest: &mut board_backup_types::BoardBackupManifest,
+    manifest: &mut board_manifest::BoardBackupManifest,
 ) -> Result<()> {
     let access_mode =
         BoardAccessMode::from_db_str(&manifest.board.access_mode).ok_or_else(|| {
@@ -237,7 +237,7 @@ fn sync_autoincrement_sequence(
 /// Inserts or validate restored file hash.
 fn insert_or_validate_restored_file_hash(
     conn: &rusqlite::Connection,
-    file_hash: &board_backup_types::FileHashRow,
+    file_hash: &board_manifest::FileHashRow,
 ) -> Result<()> {
     match conn.execute(
         "INSERT INTO file_hashes
@@ -350,7 +350,7 @@ impl BoardRestoreWorkspace {
 pub(super) fn execute_board_restore<F>(
     conn: &mut rusqlite::Connection,
     upload_dir: &str,
-    mut manifest: board_backup_types::BoardBackupManifest,
+    mut manifest: board_manifest::BoardBackupManifest,
     mut extract_uploads: F,
     restore_label: &str,
     completion_log: &str,
@@ -929,7 +929,7 @@ pub(in crate::server) async fn extract_board_from_full_backup(
         None
     };
 
-    let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
+    let safe_filename = validate_saved_backup_reference(&form.filename)?;
     let safe_board = sanitize_board_short_value(&form.board_short)?;
     let action = form.action.clone();
     let upload_dir = CONFIG.upload_dir.clone();
@@ -945,11 +945,10 @@ pub(in crate::server) async fn extract_board_from_full_backup(
             let (temp_board_backup_path, temp_board_backup_filename) = if full_backup_dir_path
                 .is_dir()
             {
-                let (temp_zip_path, filename) =
-                    create_temp_legacy_board_backup_from_saved_full_v4_path(
-                        &full_backup_dir_path,
-                        &safe_board,
-                    )?;
+                let (temp_zip_path, filename) = extract_board_archive_from_saved_full_backup(
+                    &full_backup_dir_path,
+                    &safe_board,
+                )?;
                 let mut temp_zip_guard = archive::TempZipCleanupGuard::new(temp_zip_path.clone());
                 let staged_path = temp_board_download_dir().join(&filename);
                 std::fs::rename(&temp_zip_path, &staged_path).map_err(|error| {
@@ -961,7 +960,7 @@ pub(in crate::server) async fn extract_board_from_full_backup(
                 temp_zip_guard.disarm();
                 (staged_path, filename)
             } else {
-                create_temp_board_backup_from_full_backup_path(&full_backup_path, &safe_board)?
+                extract_board_archive_from_full_backup(&full_backup_path, &safe_board)?
             };
 
             match action.as_str() {
@@ -1066,7 +1065,7 @@ pub(in crate::server) async fn restore_saved_board_backup(
         .maintenance_gate
         .try_begin(RestoreKind::Board.maintenance_label())?;
 
-    let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
+    let safe_filename = validate_saved_backup_reference(&form.filename)?;
 
     let upload_dir = CONFIG.upload_dir.clone();
 
@@ -1077,17 +1076,16 @@ pub(in crate::server) async fn restore_saved_board_backup(
             require_admin_session_sid(&conn, session_id.as_deref())?;
             let root_dir = crate::config::backups_dir().join(&safe_filename);
             let legacy_zip_path = board_backup_dir().join(&safe_filename);
-            let temp_v4_zip = if root_dir.is_dir() {
-                let (path, _filename) =
-                    create_temp_legacy_board_backup_from_v4_path(&root_dir, None)?;
+            let restore_archive_path = if root_dir.is_dir() {
+                let (path, _filename) = prepare_saved_board_restore_archive(&root_dir, None)?;
                 Some(path)
             } else {
                 None
             };
-            let _temp_v4_zip_guard = temp_v4_zip
+            let _restore_archive_guard = restore_archive_path
                 .as_ref()
                 .map(|path| archive::TempZipCleanupGuard::new(path.clone()));
-            let archive_path = temp_v4_zip.as_deref().unwrap_or(&legacy_zip_path);
+            let archive_path = restore_archive_path.as_deref().unwrap_or(&legacy_zip_path);
 
             let zip_file = std::fs::File::open(archive_path)
                 .map_err(|_error| AppError::NotFound("Backup file not found.".into()))?;
@@ -1282,7 +1280,7 @@ pub(in crate::server) async fn board_restore(
                         BOARD_MANIFEST_MAX_BYTES,
                         "board.json manifest",
                     )?;
-                    let manifest: board_backup_types::BoardBackupManifest =
+                    let manifest: board_manifest::BoardBackupManifest =
                         serde_json::from_slice(&buf).map_err(|e| {
                             AppError::BadRequest(format!("Invalid board.json: {e}"))
                         })?;
@@ -1347,7 +1345,7 @@ pub(in crate::server) async fn board_restore(
 #[cfg(test)]
 mod tests {
     use super::validate_board_restore_media_metadata;
-    use crate::handlers::admin::backup::types::board_backup_types::{
+    use crate::handlers::admin::backup::board_manifest::{
         BannerRow, BoardBackupManifest, BoardRow, FileHashRow, PollOptionRow, PollRow, PollVoteRow,
         PostRow, ThreadRow,
     };
