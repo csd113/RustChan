@@ -2315,7 +2315,7 @@ mod tests {
         clippy::panic_in_result_fn,
         reason = "test assertions intentionally panic on failure"
     )]
-    fn fresh_database_installs_140_baseline_directly() -> Result<()> {
+    fn fresh_database_installs_release_baseline_directly() -> Result<()> {
         let conn = rusqlite::Connection::open_in_memory()?;
         install_or_migrate_schema(&conn)?;
 
@@ -2546,7 +2546,7 @@ mod tests {
         clippy::panic_in_result_fn,
         reason = "test assertions intentionally panic on failure"
     )]
-    fn existing_current_schema_is_adopted_as_140_without_data_loss() -> Result<()> {
+    fn existing_current_schema_is_adopted_as_release_baseline_without_data_loss() -> Result<()> {
         let conn = rusqlite::Connection::open_in_memory()?;
         create_baseline_schema_objects(&conn)?;
         conn.execute_batch(
@@ -2583,7 +2583,7 @@ mod tests {
         clippy::panic_in_result_fn,
         reason = "test assertions intentionally panic on failure"
     )]
-    fn historical_v41_schema_drift_repairs_to_140_baseline_without_data_loss() -> Result<()> {
+    fn historical_v41_schema_drift_repairs_to_release_baseline_without_data_loss() -> Result<()> {
         let conn = rusqlite::Connection::open_in_memory()?;
         create_baseline_schema_objects(&conn)?;
         conn.execute(
@@ -2778,7 +2778,7 @@ mod tests {
         clippy::panic_in_result_fn,
         reason = "test assertions intentionally panic on failure"
     )]
-    fn invalid_structural_change_does_not_stamp_140() -> Result<()> {
+    fn invalid_structural_change_does_not_stamp_release_baseline() -> Result<()> {
         let conn = rusqlite::Connection::open_in_memory()?;
         create_baseline_schema_objects(&conn)?;
         conn.execute_batch(

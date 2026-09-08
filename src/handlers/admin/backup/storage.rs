@@ -1877,11 +1877,6 @@ fn verify_db_snapshot_schema(snapshot: &VerifiedDatabaseSnapshot) -> Result<()> 
 
 #[cfg(test)]
 pub(super) fn database_snapshot_fixture() -> anyhow::Result<Vec<u8>> {
-    database_snapshot_fixture_result()
-}
-
-#[cfg(test)]
-fn database_snapshot_fixture_result() -> anyhow::Result<Vec<u8>> {
     use anyhow::Context as _;
 
     let temp_dir = tempfile::tempdir().context("create database snapshot fixture directory")?;
@@ -1899,17 +1894,6 @@ fn database_snapshot_fixture_result() -> anyhow::Result<Vec<u8>> {
 
 #[cfg(test)]
 pub(super) fn write_saved_backup_fixture(
-    root_dir: &Path,
-    scope: BackupScope,
-    files: Vec<(BackupFileEntry, Vec<u8>)>,
-    db_snapshot: Option<Vec<u8>>,
-    completed_at: i64,
-) -> anyhow::Result<(BackupMetadata, BackupManifest)> {
-    write_saved_backup_fixture_result(root_dir, scope, files, db_snapshot, completed_at)
-}
-
-#[cfg(test)]
-fn write_saved_backup_fixture_result(
     root_dir: &Path,
     scope: BackupScope,
     files: Vec<(BackupFileEntry, Vec<u8>)>,

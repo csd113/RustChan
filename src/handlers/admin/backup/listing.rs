@@ -174,23 +174,16 @@ fn validate_saved_backup_metadata(
         )));
     }
 
-    match metadata.storage_mode {
-        BackupStorageMode::Directory if !manifest.parts.is_empty() => {
-            Err(AppError::BadRequest(format!(
-                "Saved backup {} is directory mode but contains split ZIP metadata.",
-                layout.backup_ref
-            )))
-        }
-        BackupStorageMode::SplitZip => validate_split_zip_listing_metadata(layout, manifest),
-        BackupStorageMode::Directory => Ok(()),
-        BackupStorageMode::SingleZip | BackupStorageMode::LegacyZip => {
-            Err(AppError::BadRequest(format!(
-                "Saved backup {} uses unsupported saved-v4 storage mode '{}'.",
-                layout.backup_ref,
-                metadata.storage_mode.display_name()
-            )))
-        }
+    if metadata.storage_mode == BackupStorageMode::Directory && !manifest.parts.is_empty() {
+        return Err(AppError::BadRequest(format!(
+            "Saved backup {} is directory mode but contains split ZIP metadata.",
+            layout.backup_ref
+        )));
     }
+    if metadata.storage_mode == BackupStorageMode::SplitZip {
+        validate_split_zip_listing_metadata(layout, manifest)?;
+    }
+    Ok(())
 }
 
 /// Validates split ZIP listing metadata.
@@ -582,6 +575,39 @@ pub(in crate::server) fn latest_verified_full_backup_modified_time() -> Option<S
 mod tests {
     use super::*;
     use anyhow::{ensure, Context as _, Result};
+
+    #[test]
+    fn saved_backup_listing_rejects_standalone_zip_modes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("listing-modes");
+        let (mut metadata, mut manifest) = storage::write_saved_backup_fixture(
+            &root,
+            storage::BackupScope::Board,
+            storage::board_file_fixtures(),
+            None,
+            1_700_000_000,
+        )?;
+        let layout = storage::SavedBackupLayout {
+            backup_ref: metadata.backup_id.clone(),
+            manifest_path: root.join(storage::MANIFEST_FILE_NAME),
+            metadata_path: root.join(storage::BACKUP_METADATA_FILE_NAME),
+            root_dir: root,
+        };
+        validate_saved_backup_metadata(&layout, &metadata, &manifest)?;
+
+        for mode in [BackupStorageMode::SingleZip, BackupStorageMode::LegacyZip] {
+            metadata.storage_mode = mode;
+            manifest.storage_mode = mode;
+            let error = validate_saved_backup_metadata(&layout, &metadata, &manifest)
+                .err()
+                .context("standalone ZIP mode was accepted as a saved-v4 directory")?;
+            ensure!(matches!(error, AppError::BadRequest(_)));
+            ensure!(error
+                .to_string()
+                .contains("unsupported saved-v4 storage mode"));
+        }
+        Ok(())
+    }
 
     #[test]
     fn safe_saved_backup_dir_for_delete_rejects_paths_outside_backup_root() -> Result<()> {
