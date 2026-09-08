@@ -40,7 +40,7 @@ path  = "src/lib.rs"
 axum       = { version = "0.8.9",  features = ["multipart"] }
 axum-extra = { version = "0.12.6", features = ["cookie"] }
 tower      = "0.5.3"
-tower-http = { version = "0.7.0", features = ["fs", "set-header", "compression-full", "limit", "trace"] }
+tower-http = { version = "0.7.1", features = ["fs", "set-header", "compression-full", "limit", "trace"] }
 tokio      = { version = "1.53.1", features = ["full"] }
 tokio-util = "0.7.19"
 captcha    = { version = "1.0.0", default-features = false }
@@ -51,12 +51,12 @@ captcha    = { version = "1.0.0", default-features = false }
 rusqlite    = { version = "0.39.0", features = ["bundled", "backup"] }
 r2d2        = "0.8.10"
 r2d2_sqlite = "0.34.0"
-time        = "0.3.54"
+time        = "0.3.55"
 
 serde      = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 # toml 1.0: serde parsing is built-in, no feature flag needed.
-toml  = "1.1.4"
+toml  = "1.1.5"
 
 argon2  = "0.5.3"
 sha2    = "0.11.0"
@@ -74,15 +74,15 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 # Apply JPEG Orientation tags before thumbnailing so phone photos display upright.
 kamadak-exif = "0.6.1"
 
-clap = { version = "4.6.4", features = ["derive"] }
+clap = { version = "4.6.6", features = ["derive"] }
 
-uuid      = { version = "1.24.0", features = ["v4", "serde"] }
+uuid      = { version = "1.26.0", features = ["v4", "serde"] }
 chrono    = { version = "0.4.45", features = ["serde"] }
 dashmap      = "6.2.1"
 parking_lot  = "0.12.5"
 anyhow       = "1.0.104"
 regex     = "1.13.1"
-ipnet     = "2.12.0"
+ipnet     = "2.12.2"
 
 # Backup preflight scans use `file_names()` without decompressing entries.
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
@@ -99,13 +99,13 @@ reqwest = { version = "0.13.4", default-features = false, features = ["multipart
 # Keep a direct lower bound on the RUSTSEC-2026-0049 CRL
 # distribution-point fix. The crate is consumed transitively through rustls;
 # this declaration intentionally constrains future lockfile regeneration.
-rustls-webpki = { version = "0.103.13", default-features = false }
+rustls-webpki = { version = "0.103.15", default-features = false }
 
 tracing            = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 tracing-appender   = "0.2.5"
 
-thiserror = "2.0.19"
+thiserror = "2.0.20"
 tempfile  = "3.27.0"
 
 # Tor / onion-service stack
@@ -121,20 +121,20 @@ tempfile  = "3.27.0"
 # Verification:
 #   cargo tree --edges features | grep -iE "openssl|native.tls"   # expect nothing
 #   cargo tree -i openssl-sys                                       # expect error: not found
-# Arti 0.45.0 requires Rust 1.91 and makes its stable congestion control a
-# default. Enable flowctl-cc explicitly because defaults stay disabled for TLS.
-arti-client = { version = "0.45.0", default-features = false, features = ["tokio", "rustls", "onion-service-service", "flowctl-cc"] }
+# Arti 0.46.0 requires Rust 1.91. Congestion control is now unconditional;
+# the former flowctl-cc feature has been removed upstream.
+arti-client = { version = "0.46.0", default-features = false, features = ["tokio", "rustls", "onion-service-service"] }
 
 # tor-hsservice / tor-cell: also part of the arti workspace.  Their `full`
 # default feature bundle can activate the native-tls TLS backend through
 # tor-rtcompat.  Disable defaults; add back only what the build requires.
 # If compilation fails with "feature X not found", re-add that feature here.
-tor-hsservice = { version = "0.45.0", default-features = false }
-tor-cell      = { version = "0.45.0", default-features = false }
+tor-hsservice = { version = "0.46.0", default-features = false }
+tor-cell      = { version = "0.46.0", default-features = false }
 
-futures       = "0.3.33"
+futures       = "0.3.34"
 sha3          = "0.12.0"
-data-encoding = "2.11.0"
+data-encoding = "2.11.1"
 
 # TLS
 # rustls-pki-types provides the certificate and key types used by src/tls/mod.rs.
@@ -142,18 +142,18 @@ rustls-pki-types = "1.15.1"
 # RustChan installs rustls's ring provider explicitly at startup. Keep every
 # TLS consumer on that provider instead of also compiling the unused aws-lc-rs
 # defaults; logging, TLS 1.2, and the system-independent root set stay enabled.
-tokio-rustls   = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
-rustls         = { version = "0.23.43", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+tokio-rustls   = { version = "0.26.5", default-features = false, features = ["logging", "ring", "tls12"] }
+rustls         = { version = "0.23.44", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 
 # Optional — gated by Cargo features
-rustls-acme    = { version = "0.15.3", default-features = false, features = ["ring", "tls12", "tokio", "webpki-roots"], optional = true }
-rcgen          = { version = "0.14.8", optional = true }
+rustls-acme    = { version = "0.15.4", default-features = false, features = ["ring", "tls12", "tokio", "webpki-roots"], optional = true }
+rcgen          = { version = "0.14.10", optional = true }
 pem-rfc7468    = { version = "1.0.0", optional = true, features = ["std"] }
 x509-cert      = { version = "0.3.0", optional = true }
 
 # HTTPS listen integration for Axum (handles Static cert path)
 axum-server    = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
-hyper          = { version = "1.11.0", features = ["http1", "http2", "server"], optional = true }
+hyper          = { version = "1.11.1", features = ["http1", "http2", "server"], optional = true }
 hyper-util     = { version = "0.1.20", features = ["tokio", "server"] }
 
 # Terminal UI

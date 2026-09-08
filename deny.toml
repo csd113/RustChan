@@ -13,8 +13,8 @@ yanked = "deny"
 # direct RSA usage. A call-site audit found public verification plus generic
 # private-key generation/signing support, but no calls to RSA decryption APIs or
 # decryption oracle, and no evidence that RustChan's v3 onion-service flow
-# invokes private RSA operations. Reviewed 2026-08-27; this temporary exception
-# must be re-reviewed on every Arti upgrade.
+# invokes private RSA operations. Re-reviewed with Arti 0.46.0 on 2026-09-08;
+# this temporary exception must be re-reviewed on every Arti upgrade.
 [[advisories.ignore]]
 id = "RUSTSEC-2023-0071"
 
@@ -22,7 +22,8 @@ id = "RUSTSEC-2023-0071"
 # paste is a transitive proc-macro dep of arti-client / tor-hsservice. It runs
 # during compilation but is not linked into RustChan's runtime; no known
 # vulnerability or runtime exploit is associated with this maintenance notice.
-# This exception is temporary and must be re-reviewed on every Arti upgrade.
+# Re-reviewed with Arti 0.46.0 on 2026-09-08. This exception is temporary and
+# must be re-reviewed on every Arti upgrade.
 [[advisories.ignore]]
 id = "RUSTSEC-2024-0436"
 

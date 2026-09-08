@@ -3,7 +3,7 @@
 # direct RSA usage. A call-site audit found public verification plus generic
 # private-key generation/signing support, but no calls to RSA decryption APIs or
 # decryption oracle, and no evidence that RustChan's v3 onion-service flow
-# invokes private RSA operations. Reviewed 2026-08-27; re-review this temporary
-# exception on every Arti upgrade.
+# invokes private RSA operations. Re-reviewed with Arti 0.46.0 on 2026-09-08;
+# re-review this temporary exception on every Arti upgrade.
 [advisories]
 ignore = ["RUSTSEC-2023-0071"]
