@@ -23,7 +23,7 @@ pub use state::{
     AppState, AutoFullBackupSettings, AutoFullBackupSettingsSnapshot, DbMaintenanceJobPhase,
     DbMaintenanceJobStatus, DbMaintenanceJobs, MaintenanceGate,
 };
-pub(crate) use state::{ChanImportGate, ChanImportGuard, MediaUploadGate, MediaUploadGuard};
+pub(crate) use state::{MediaUploadGate, MediaUploadGuard};
 pub use transport::{RequestTransport, SecureCookieContext};
 
 /// Returns whether a trusted proxy reported HTTPS for the request.

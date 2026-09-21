@@ -57,14 +57,6 @@ pub(super) fn should_set_public_secure_cookie(
     crate::handlers::admin::should_set_secure_cookie(headers, context)
 }
 
-pub(super) type OptionalConnectInfoPeer = SecureCookieContext;
-
-pub(super) const fn optional_connect_info_peer(
-    peer: OptionalConnectInfoPeer,
-) -> SecureCookieContext {
-    peer
-}
-
 /// Preview replies used by this handler.
 const PREVIEW_REPLIES: i64 = 3;
 /// Threads per page used by this handler.
@@ -506,9 +498,9 @@ pub(in crate::server) async fn banned_page(
     Query(query): Query<BannedPageQuery>,
     jar: CookieJar,
     req_headers: HeaderMap,
-    peer: OptionalConnectInfoPeer,
+    peer: SecureCookieContext,
 ) -> Response {
-    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
     let reason = query
         .reason
         .unwrap_or_else(|| "No reason given".to_owned())

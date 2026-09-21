@@ -585,8 +585,7 @@ pub fn file_ban_appeal(
 
     match result {
         Ok(outcome) => {
-            conn.execute_batch("COMMIT")
-                .context("Failed to commit ban-appeal transaction")?;
+            super::commit_transaction(conn, "Failed to commit ban-appeal transaction")?;
             Ok(outcome)
         }
         Err(error) => {

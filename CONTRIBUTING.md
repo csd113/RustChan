@@ -114,7 +114,7 @@ flow. Security-sensitive changes need negative tests and failure-path coverage.
 
 Update `README.md`, `SETUP.md`, generated configuration guidance, or other
 operator documentation when behavior, defaults, features, storage, Tor, TLS,
-backups, moderation, or ChanNet changes. Add a concise entry under the matching
+backups, or moderation changes. Add a concise entry under the matching
 subsection in the top `CHANGELOG.md` section for notable changes. Do not promise
 anonymity, perfect security, availability, legal compliance, or protection from
 a malicious operator.
@@ -129,11 +129,11 @@ artifacts and temporary validation evidence.
 ### Sensitive paths
 
 Treat public posts, uploads, archive contents, paths, cookies, headers,
-environment variables, configuration, databases, backups, and ChanNet payloads
-as untrusted. Validate them before filesystem mutation, database writes,
-redirects, restore operations, or process execution. Backup, restore,
-migration, authentication, administration, and moderation changes should avoid
-partial-success states and fail closed where safety is uncertain.
+environment variables, configuration, and databases as untrusted. Validate them
+before filesystem mutation, database writes, redirects, restore operations, or
+process execution. Backup, restore, migration, authentication, administration,
+and moderation changes should avoid partial-success states and fail closed where
+safety is uncertain.
 
 Never commit runtime data, `rustchan-data/`, SQLite databases, backups, logs,
 credentials, tokens, TLS private keys, Tor/onion private keys, private media,

@@ -238,7 +238,6 @@ Binary:
 
 ```bash
 ./target/release/rustchan-cli --port 9090
-./target/release/rustchan-cli serve --chan-net
 ./target/release/rustchan-cli --data-dir /absolute/path/to/rustchan-data
 ```
 
@@ -466,7 +465,6 @@ Detailed readiness and metrics include operational state such as database schema
 | 56 | Public metrics | observability | `false` | false | No | Yes | Keep off unless `/metrics` is behind a trusted scrape path. |
 | 60 | Include Tor hidden-service keys in automatic full backups | backup / Tor | `true` | true | Yes | Yes | Admin saves rewrite `settings.toml`; existing installs keep their current configured value until changed. |
 | 66 | Archive before prune | maintenance / archive | `true` | true | No | Yes | Global override: prune archives instead of hard-deletes. |
-| 72 | ChanNet API key set | ChanNet | `""` | false | No | Yes | Empty disables the protected ChanNet endpoints. |
 | 75 | New banner enabled flag | banner | `true` | true | Yes | No | Applies to newly uploaded global, board, and home banners. |
 | 76 | New global/board banner shows on board index | banner | `true` | true | Yes | No | Home banners do not use this placement flag. |
 | 77 | New global/board banner shows on catalog | banner | `true` | true | Yes | No | Home banners do not use this placement flag. |

@@ -507,7 +507,7 @@ pub fn normalize_internal_board_path(value: &str) -> Option<String> {
 /// Normalize an external HTTP(S) URL.
 pub fn normalize_external_url(value: &str) -> Option<String> {
     let trimmed = value.trim();
-    let parsed = reqwest::Url::parse(trimmed).ok()?;
+    let parsed = url::Url::parse(trimmed).ok()?;
     matches!(parsed.scheme(), "http" | "https").then(|| parsed.to_string())
 }
 

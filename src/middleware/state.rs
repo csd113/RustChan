@@ -191,61 +191,6 @@ impl Default for MediaUploadGate {
     }
 }
 
-#[derive(Clone, Debug)]
-/// Serializes authenticated federation snapshot import and poll processing.
-#[expect(
-    clippy::redundant_pub_crate,
-    reason = "this type is intentionally re-exported from the private state module"
-)]
-pub(crate) struct ChanImportGate {
-    /// Single permit held while a snapshot is fetched, parsed, and committed.
-    semaphore: Arc<tokio::sync::Semaphore>,
-}
-
-impl ChanImportGate {
-    /// Creates a gate that permits one snapshot import or poll operation at a time.
-    #[must_use]
-    pub(crate) fn new() -> Self {
-        Self {
-            semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
-        }
-    }
-
-    /// Begins snapshot processing or returns a retryable overload response.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppError::DbBusy`] while another import or poll owns the gate.
-    pub(crate) fn try_begin(&self) -> Result<ChanImportGuard, AppError> {
-        let permit = Arc::clone(&self.semaphore)
-            .try_acquire_owned()
-            .map_err(|_error| AppError::DbBusy)?;
-        Ok(ChanImportGuard {
-            _permit: Arc::new(permit),
-        })
-    }
-}
-
-impl Default for ChanImportGate {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Clone, Debug)]
-/// Permit held for the duration of authenticated snapshot processing.
-///
-/// Clones keep the permit alive in detached blocking work if its request future
-/// is cancelled while decompression, JSON parsing, or database writes continue.
-#[expect(
-    clippy::redundant_pub_crate,
-    reason = "the guard crosses the private state-module boundary and blocking tasks"
-)]
-pub(crate) struct ChanImportGuard {
-    /// Shared owned permit released after the final guard clone is dropped.
-    _permit: Arc<tokio::sync::OwnedSemaphorePermit>,
-}
-
 #[derive(Debug)]
 /// Permit held for the duration of one public media-processing operation.
 #[expect(
@@ -474,12 +419,8 @@ pub struct AppState {
     pub maintenance_gate: MaintenanceGate,
     /// Gate limiting concurrent public media parsing and processing.
     pub(crate) media_upload_gate: MediaUploadGate,
-    /// Gate serializing authenticated federation snapshot imports and polls.
-    pub(crate) chan_import_gate: ChanImportGate,
     /// State of database maintenance jobs.
     pub db_maintenance_jobs: DbMaintenanceJobs,
-    /// Optional transaction ledger for federation operations.
-    pub chan_ledger: Option<Arc<parking_lot::Mutex<crate::chan_net::ledger::TxLedger>>>,
     /// Current Tor onion address, when onion service is enabled.
     pub onion_address: Arc<tokio::sync::RwLock<Option<String>>>,
 }
@@ -487,8 +428,8 @@ pub struct AppState {
 #[cfg(test)]
 mod tests {
     use super::{
-        AutoFullBackupSettings, ChanImportGate, DbMaintenanceJobPhase, DbMaintenanceJobStatus,
-        DbMaintenanceJobs, MediaUploadGate,
+        AutoFullBackupSettings, DbMaintenanceJobPhase, DbMaintenanceJobStatus, DbMaintenanceJobs,
+        MediaUploadGate,
     };
 
     #[test]
@@ -504,28 +445,6 @@ mod tests {
         assert!(
             gate.try_begin().is_ok(),
             "media gate should reopen after the active upload finishes"
-        );
-    }
-
-    #[test]
-    fn chan_import_gate_rejects_overlap_until_last_guard_clone_drops() {
-        let gate = ChanImportGate::new();
-        let first = gate.try_begin().ok();
-        assert!(
-            first.is_some(),
-            "first snapshot operation should acquire the gate"
-        );
-        let blocking_guard = first.clone();
-        drop(first);
-
-        assert!(
-            matches!(gate.try_begin(), Err(crate::error::AppError::DbBusy)),
-            "overlapping snapshot processing should receive retryable backpressure"
-        );
-        drop(blocking_guard);
-        assert!(
-            gate.try_begin().is_ok(),
-            "snapshot gate should reopen after the last guard clone drops"
         );
     }
 

@@ -164,18 +164,12 @@ fn append_health_job_row(out: &mut String, label: &str, value: &str, key: &str, 
         );
         return;
     }
-    if matches!(key, "failed_jobs" | "recent_completed_jobs") {
-        let target = if key == "failed_jobs" {
-            "failed"
-        } else {
-            "completed"
-        };
+    if key == "recent_completed_jobs" {
         let _ = write!(
             out,
-            r#"<div class="admin-health-row"><button type="button" class="admin-health-inspect-button admin-health-count-button" data-admin-health-toggle="{target}" aria-expanded="false" aria-controls="admin-health-job-panel-{target}" disabled><span>{label} (<strong data-admin-health-job="{key}">{value}</strong>)</span></button></div>"#,
+            r#"<div class="admin-health-row"><button type="button" class="admin-health-inspect-button admin-health-count-button" data-admin-health-toggle="completed" aria-expanded="false" aria-controls="admin-health-job-panel-completed" disabled><span>{label} (<strong data-admin-health-job="{key}">{value}</strong>)</span></button></div>"#,
             label = escape_html(label),
             key = escape_html(key),
-            target = escape_html(target),
             value = escape_html(value),
         );
         return;
