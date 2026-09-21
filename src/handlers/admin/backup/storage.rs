@@ -1,4 +1,4 @@
-//! Saved Backup v4 format definitions, filesystem layout helpers, and strict verification.
+//! Saved backup metadata, filesystem layouts, and strict content verification.
 
 use crate::error::{AppError, Result};
 use serde::{Deserialize, Serialize};
@@ -8,38 +8,32 @@ use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-/// Backup v4 format used by this handler.
-pub(crate) const BACKUP_V4_FORMAT: &str = "rustchan-backup-v4";
-/// Backup v4 archive container used by this handler.
-pub(crate) const BACKUP_V4_ARCHIVE_CONTAINER: &str = "zip";
+/// Exact on-disk format identifier; the version is part of the compatibility contract.
+pub(super) const BACKUP_V4_FORMAT: &str = "rustchan-backup-v4";
+/// Archive container supported for saved backup parts.
+pub(super) const ARCHIVE_CONTAINER: &str = "zip";
 /// Parts dir name used by this handler.
-pub(crate) const PARTS_DIR_NAME: &str = "parts";
+pub(super) const PARTS_DIR_NAME: &str = "parts";
 /// Manifest file name used by this handler.
-pub(crate) const MANIFEST_FILE_NAME: &str = "manifest.json";
+pub(super) const MANIFEST_FILE_NAME: &str = "manifest.json";
 /// Backup metadata file name used by this handler.
-pub(crate) const BACKUP_METADATA_FILE_NAME: &str = "backup.json";
+pub(super) const BACKUP_METADATA_FILE_NAME: &str = "backup.json";
 /// Checksums file name used by this handler.
-pub(crate) const CHECKSUMS_FILE_NAME: &str = "checksums.sha256";
+const CHECKSUMS_FILE_NAME: &str = "checksums.sha256";
 /// Readme file name used by this handler.
-pub(crate) const README_FILE_NAME: &str = "README.txt";
+pub(super) const README_FILE_NAME: &str = "README.txt";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-/// Variants supported by the backup scope workflow.
-pub(crate) enum BackupScope {
-    /// Represents the full site case.
+pub(super) enum BackupScope {
     FullSite,
-    /// Represents the board case.
     Board,
-    /// Represents the selected boards case.
     SelectedBoards,
-    /// Represents the pre maintenance case.
     PreMaintenance,
 }
 
 impl BackupScope {
     #[must_use]
-    /// Performs the slug handler operation.
     pub(crate) const fn slug(self) -> &'static str {
         match self {
             Self::FullSite => "full-site",
@@ -52,21 +46,15 @@ impl BackupScope {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-/// Variants supported by the backup storage mode workflow.
-pub(crate) enum BackupStorageMode {
-    /// Represents the single ZIP case.
+pub(in crate::server) enum BackupStorageMode {
     SingleZip,
-    /// Represents the split ZIP case.
     SplitZip,
-    /// Represents the directory case.
     Directory,
-    /// Represents the legacy ZIP case.
     LegacyZip,
 }
 
 impl BackupStorageMode {
     #[must_use]
-    /// Performs the display name handler operation.
     pub(crate) const fn display_name(self) -> &'static str {
         match self {
             Self::SingleZip => "Single ZIP",
@@ -79,37 +67,21 @@ impl BackupStorageMode {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-/// Variants supported by the backup file kind workflow.
-pub(crate) enum BackupFileKind {
-    /// Represents the database case.
+pub(super) enum BackupFileKind {
     Db,
-    /// Represents the settings case.
     Settings,
-    /// Represents the board JSON case.
     BoardJson,
-    /// Represents the thread export case.
     ThreadExport,
-    /// Represents the post export case.
     PostExport,
-    /// Represents the file inventory export case.
     FileInventoryExport,
-    /// Represents the original media case.
     OriginalMedia,
-    /// Represents the thumbnail case.
     Thumbnail,
-    /// Represents the audio case.
     Audio,
-    /// Represents the banner case.
     Banner,
-    /// Represents the favicon case.
     Favicon,
-    /// Represents the Tor key case.
     TorKey,
-    /// Represents the maintenance case.
     Maintenance,
-    /// Represents the pending fs ops case.
     PendingFsOps,
-    /// Represents the log case.
     Log,
 }
 
@@ -119,208 +91,132 @@ pub(crate) enum BackupFileKind {
     reason = "the flags are independent backup-content selections serialized in the manifest"
 )]
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-/// Data used by the backup include flags workflow.
-pub(crate) struct BackupIncludeFlags {
-    /// Whether the database setting is active.
+pub(super) struct BackupIncludeFlags {
     pub database: bool,
-    /// Whether the settings setting is active.
     pub settings: bool,
-    /// Whether the uploads setting is active.
     pub uploads: bool,
-    /// Whether the thumbnails setting is active.
     pub thumbnails: bool,
-    /// Whether the Tor keys setting is active.
     pub tor_keys: bool,
-    /// Whether the board exports setting is active.
     pub board_exports: bool,
-    /// Whether the file inventory setting is active.
     pub file_inventory: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-/// Data used by the database snapshot info workflow.
-pub(crate) struct DbSnapshotInfo {
-    /// The path.
+pub(super) struct DatabaseSnapshotInfo {
     pub path: String,
-    /// The size.
     pub size: u64,
-    /// The SHA-256.
     pub sha256: String,
-    /// The optional integrity check.
     pub integrity_check: Option<String>,
-    /// The optional foreign key check.
     pub foreign_key_check: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-/// Data used by the backup file entry workflow.
-pub(crate) struct BackupFileEntry {
-    /// The logical path.
+pub(super) struct BackupFileEntry {
     pub logical_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The runtime logical path.
     pub runtime_logical_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional board.
     pub board: Option<String>,
-    /// The kind.
     pub kind: BackupFileKind,
-    /// The size.
     pub size: u64,
-    /// The SHA-256.
     pub sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional ZIP part.
     pub zip_part: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The ZIP entry path.
     pub zip_entry_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional compression method.
     pub compression_method: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-/// Data used by the backup part info workflow.
-pub(crate) struct BackupPartInfo {
-    /// The filename.
+pub(super) struct BackupPartInfo {
     pub filename: String,
-    /// The part index.
     pub part_index: u32,
-    /// The total parts.
     pub total_parts: u32,
-    /// The backup identifier.
     pub backup_id: String,
-    /// The size.
     pub size: u64,
-    /// The SHA-256.
     pub sha256: String,
-    /// The target part size.
     pub target_part_size: u64,
-    /// Whether the oversized setting is active.
     pub oversized: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-/// Data used by the maintenance metadata workflow.
-pub(crate) struct MaintenanceMetadata {
+pub(super) struct MaintenanceMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional operation.
     pub operation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The job identifier.
     pub job_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The requested timestamp.
     pub requested_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional risk class.
     pub risk_class: Option<String>,
-    /// Whether the includes uploads setting is active.
     pub includes_uploads: bool,
-    /// Whether the includes file inventory setting is active.
     pub includes_file_inventory: bool,
-    /// Whether the includes Tor keys setting is active.
     pub includes_tor_keys: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional reason.
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional pre integrity check.
     pub pre_integrity_check: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional pre foreign key check.
     pub pre_foreign_key_check: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Manifest data for backup.
-pub(crate) struct BackupManifest {
-    /// The format.
+pub(super) struct BackupManifest {
     pub format: String,
-    /// The archive container.
     pub archive_container: String,
-    /// The backup identifier.
     pub backup_id: String,
-    /// The created timestamp.
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The completed timestamp.
     pub completed_at: Option<i64>,
-    /// The rustchan version.
     pub rustchan_version: String,
-    /// The scope.
     pub scope: BackupScope,
-    /// The storage mode.
     pub storage_mode: BackupStorageMode,
     #[serde(default)]
-    /// The included boards collection.
     pub included_boards: Vec<crate::models::BackupBoardSummary>,
-    /// The includes.
     pub includes: BackupIncludeFlags,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional database snapshot.
-    pub db_snapshot: Option<DbSnapshotInfo>,
+    pub db_snapshot: Option<DatabaseSnapshotInfo>,
     #[serde(default)]
-    /// The files collection.
     pub files: Vec<BackupFileEntry>,
     #[serde(default)]
-    /// The parts collection.
     pub parts: Vec<BackupPartInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The optional maintenance.
     pub maintenance: Option<MaintenanceMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-/// Data used by the backup metadata workflow.
-pub(crate) struct BackupMetadata {
-    /// The format.
+pub(super) struct BackupMetadata {
     pub format: String,
-    /// The backup identifier.
     pub backup_id: String,
-    /// The scope.
     pub scope: BackupScope,
-    /// The storage mode.
     pub storage_mode: BackupStorageMode,
-    /// The created timestamp.
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The completed timestamp.
     pub completed_at: Option<i64>,
-    /// The total size size in bytes.
     pub total_size_bytes: u64,
-    /// Whether this item passed verification.
     pub verified: bool,
-    /// The number of parts.
     pub part_count: u32,
-    /// Whether the includes Tor keys setting is active.
     pub includes_tor_keys: bool,
     #[serde(default)]
-    /// The included boards collection.
     pub included_boards: Vec<crate::models::BackupBoardSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// The manifest path.
     pub manifest_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// Data used by the directory stats workflow.
-pub(crate) struct DirectoryStats {
-    /// The files.
+pub(super) struct DirectoryStats {
     pub files: u64,
-    /// The bytes.
     pub bytes: u64,
 }
 
 impl DirectoryStats {
     #[must_use]
-    /// Performs the zero handler operation.
     pub(crate) const fn zero() -> Self {
         Self { files: 0, bytes: 0 }
     }
 
-    /// Performs the saturating add assign handler operation.
     pub(crate) const fn saturating_add_assign(&mut self, other: &Self) {
         self.files = self.files.saturating_add(other.files);
         self.bytes = self.bytes.saturating_add(other.bytes);
@@ -328,95 +224,63 @@ impl DirectoryStats {
 }
 
 #[derive(Debug, Clone)]
-/// Data used by the saved backup layout workflow.
-pub(crate) struct SavedBackupLayout {
-    /// The root directory.
+pub(super) struct SavedBackupLayout {
     pub root_dir: PathBuf,
-    /// The backup ref.
     pub backup_ref: String,
-    /// The manifest path.
     pub manifest_path: PathBuf,
-    /// The metadata path.
     pub metadata_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
-/// Data used by the verified saved v4 file workflow.
-pub(crate) struct VerifiedSavedV4File {
-    /// The logical path.
+pub(super) struct VerifiedFile {
     pub logical_path: String,
-    /// The optional board.
     pub board: Option<String>,
-    /// The kind.
     pub kind: BackupFileKind,
-    /// The size.
     pub size: u64,
-    /// The SHA-256.
     pub sha256: String,
-    /// The source.
-    pub source: VerifiedSavedV4FileSource,
+    pub source: VerifiedFileSource,
 }
 
 #[derive(Debug, Clone)]
-/// Variants supported by the verified saved v4 file source workflow.
-pub(crate) enum VerifiedSavedV4FileSource {
-    /// Represents the root file case.
+pub(super) enum VerifiedFileSource {
     RootFile(PathBuf),
-    /// Represents the ZIP entry case.
     ZipEntry {
-        /// The part path.
         part_path: PathBuf,
-        /// The entry path.
         entry_path: String,
     },
 }
 
 #[derive(Debug, Clone)]
-/// Point-in-time data for verified saved v4 database.
-pub(crate) struct VerifiedSavedV4DbSnapshot {
-    /// The file.
-    pub file: VerifiedSavedV4File,
+/// A verified point-in-time database snapshot.
+pub(super) struct VerifiedDatabaseSnapshot {
+    pub file: VerifiedFile,
 }
 
 #[derive(Debug, Clone)]
-/// Data used by the verified saved v4 board layout workflow.
-pub(crate) struct VerifiedSavedV4BoardLayout {
-    /// The board JSON.
-    pub board_json: VerifiedSavedV4File,
-    /// The upload files collection.
-    pub upload_files: Vec<VerifiedSavedV4File>,
+pub(super) struct VerifiedBoard {
+    pub board_json: VerifiedFile,
+    pub upload_files: Vec<VerifiedFile>,
 }
 
 #[derive(Debug, Clone)]
-/// Data used by the verified saved v4 root workflow.
-pub(crate) struct VerifiedSavedV4Root {
-    /// The metadata.
+pub(super) struct VerifiedBackup {
     pub metadata: BackupMetadata,
-    /// The manifest.
     pub manifest: BackupManifest,
-    /// The completed timestamp.
     pub completed_at: i64,
-    /// The optional database snapshot.
-    pub db_snapshot: Option<VerifiedSavedV4DbSnapshot>,
-    /// The site favicon files collection.
-    pub site_favicon_files: Vec<VerifiedSavedV4File>,
-    /// The site banner files collection.
-    pub site_banner_files: Vec<VerifiedSavedV4File>,
-    /// The Tor key files collection.
-    pub tor_key_files: Vec<VerifiedSavedV4File>,
-    /// The boards collection.
-    pub boards: HashMap<String, VerifiedSavedV4BoardLayout>,
+    pub db_snapshot: Option<VerifiedDatabaseSnapshot>,
+    pub site_favicon_files: Vec<VerifiedFile>,
+    pub site_banner_files: Vec<VerifiedFile>,
+    pub tor_key_files: Vec<VerifiedFile>,
+    pub boards: HashMap<String, VerifiedBoard>,
 }
 
 #[must_use]
-/// Performs the backups root dir handler operation.
-pub(crate) fn backups_root_dir() -> PathBuf {
+pub(super) fn backups_root_dir() -> PathBuf {
     crate::config::backups_dir()
 }
 
 #[must_use]
-/// Builds backup ID.
-pub(crate) fn build_backup_id(_scope: BackupScope, scope_label: &str) -> String {
+pub(super) fn build_backup_id(_scope: BackupScope, scope_label: &str) -> String {
     let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M").to_string();
     let short = uuid::Uuid::new_v4().simple().to_string();
     let short = short.get(..6).unwrap_or(&short);
@@ -424,8 +288,11 @@ pub(crate) fn build_backup_id(_scope: BackupScope, scope_label: &str) -> String 
     format!("{timestamp}_{scope_label}_{short}").replace("__", "_")
 }
 
-/// Creates backup root.
-pub(crate) fn create_backup_root(backup_id: &str) -> Result<PathBuf> {
+pub(super) fn create_backup_root(backup_id: &str) -> Result<PathBuf> {
+    if let Some(path) = &crate::config::CONFIG.backup_directory {
+        crate::config::prepare_backup_directory(path, &crate::config::CONFIG)
+            .map_err(|error| AppError::BadRequest(format!("{error:#}")))?;
+    }
     let root = backups_root_dir().join(backup_id);
     crate::config::ensure_private_dir(&root).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
@@ -436,8 +303,7 @@ pub(crate) fn create_backup_root(backup_id: &str) -> Result<PathBuf> {
     Ok(root)
 }
 
-/// Performs the detect saved backup layout handler operation.
-pub(crate) fn detect_saved_backup_layout(root: &Path) -> Option<SavedBackupLayout> {
+fn detect_saved_backup_layout(root: &Path) -> Option<SavedBackupLayout> {
     if !root.is_dir() {
         return None;
     }
@@ -454,8 +320,7 @@ pub(crate) fn detect_saved_backup_layout(root: &Path) -> Option<SavedBackupLayou
     })
 }
 
-/// Performs the iter saved backup layouts handler operation.
-pub(crate) fn iter_saved_backup_layouts() -> Vec<SavedBackupLayout> {
+pub(super) fn list_saved_backup_layouts() -> Vec<SavedBackupLayout> {
     let mut layouts = Vec::new();
     let Ok(entries) = std::fs::read_dir(backups_root_dir()) else {
         return layouts;
@@ -469,8 +334,7 @@ pub(crate) fn iter_saved_backup_layouts() -> Vec<SavedBackupLayout> {
     layouts
 }
 
-/// Loads manifest.
-pub(crate) fn load_manifest(path: &Path) -> Result<BackupManifest> {
+pub(super) fn load_manifest(path: &Path) -> Result<BackupManifest> {
     let bytes = std::fs::read(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Read manifest {}: {error}", path.display()))
     })?;
@@ -482,8 +346,7 @@ pub(crate) fn load_manifest(path: &Path) -> Result<BackupManifest> {
     })
 }
 
-/// Loads metadata.
-pub(crate) fn load_metadata(path: &Path) -> Result<BackupMetadata> {
+pub(super) fn load_metadata(path: &Path) -> Result<BackupMetadata> {
     let bytes = std::fs::read(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
             "Read backup metadata {}: {error}",
@@ -499,7 +362,7 @@ pub(crate) fn load_metadata(path: &Path) -> Result<BackupMetadata> {
 }
 
 /// Writes JSON pretty.
-pub(crate) fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub(super) fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Serialize {}: {error}", path.display()))
     })?;
@@ -510,22 +373,20 @@ pub(crate) fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<
 }
 
 /// Writes text.
-pub(crate) fn write_text(path: &Path, text: &str) -> Result<()> {
+pub(super) fn write_text(path: &Path, text: &str) -> Result<()> {
     crate::config::write_private_file(path, text.as_bytes()).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Write {}: {error}", path.display()))
     })?;
     Ok(())
 }
 
-/// Performs the SHA-256 hex for bytes handler operation.
-pub(crate) fn sha256_hex_for_bytes(bytes: &[u8]) -> String {
+pub(super) fn sha256_hex_for_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
 }
 
-/// Performs the SHA-256 hex for file handler operation.
-pub(crate) fn sha256_hex_for_file(path: &Path) -> Result<String> {
+pub(super) fn sha256_hex_for_file(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
             "Open {} for hashing: {error}",
@@ -535,8 +396,7 @@ pub(crate) fn sha256_hex_for_file(path: &Path) -> Result<String> {
     sha256_hex_for_reader(&mut file)
 }
 
-/// Performs the SHA-256 hex for reader handler operation.
-pub(crate) fn sha256_hex_for_reader<R: Read>(reader: &mut R) -> Result<String> {
+fn sha256_hex_for_reader<R: Read>(reader: &mut R) -> Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024].into_boxed_slice();
     loop {
@@ -557,7 +417,7 @@ pub(crate) fn sha256_hex_for_reader<R: Read>(reader: &mut R) -> Result<String> {
 }
 
 /// Copies file and hash.
-pub(crate) fn copy_file_and_hash<W: Write>(
+pub(super) fn copy_file_and_hash<W: Write>(
     source_path: &Path,
     writer: &mut W,
 ) -> Result<(u64, String)> {
@@ -568,7 +428,7 @@ pub(crate) fn copy_file_and_hash<W: Write>(
 }
 
 /// Copies reader and hash.
-pub(crate) fn copy_reader_and_hash<R: Read, W: Write>(
+fn copy_reader_and_hash<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
 ) -> Result<(u64, String)> {
@@ -601,8 +461,7 @@ pub(crate) fn copy_reader_and_hash<R: Read, W: Write>(
     Ok((written, hex::encode(hasher.finalize())))
 }
 
-/// Performs the scan dir stats handler operation.
-pub(crate) fn scan_dir_stats(dir: &Path) -> DirectoryStats {
+pub(super) fn scan_dir_stats(dir: &Path) -> DirectoryStats {
     if crate::utils::fs_security::assert_dir_no_symlink(dir).is_err() {
         return DirectoryStats::zero();
     }
@@ -633,7 +492,7 @@ pub(crate) fn scan_dir_stats(dir: &Path) -> DirectoryStats {
 }
 
 /// Validates backup ID matches parts.
-pub(crate) fn validate_backup_id_matches_parts(manifest: &BackupManifest) -> Result<()> {
+fn validate_backup_id_matches_parts(manifest: &BackupManifest) -> Result<()> {
     for part in &manifest.parts {
         if part.backup_id != manifest.backup_id {
             return Err(AppError::BadRequest(format!(
@@ -645,8 +504,7 @@ pub(crate) fn validate_backup_id_matches_parts(manifest: &BackupManifest) -> Res
     Ok(())
 }
 
-/// Builds readme.
-pub(crate) fn build_readme(
+pub(super) fn build_readme(
     manifest: &BackupManifest,
     metadata: &BackupMetadata,
     has_tor_keys: bool,
@@ -685,7 +543,7 @@ pub(crate) fn build_readme(
 }
 
 /// Writes root checksums.
-pub(crate) fn write_root_checksums(root_dir: &Path, extra_paths: &[&Path]) -> Result<()> {
+pub(super) fn write_root_checksums(root_dir: &Path, extra_paths: &[&Path]) -> Result<()> {
     let mut lines = String::new();
     for name in [
         README_FILE_NAME,
@@ -710,8 +568,7 @@ pub(crate) fn write_root_checksums(root_dir: &Path, extra_paths: &[&Path]) -> Re
     write_text(&root_dir.join(CHECKSUMS_FILE_NAME), &lines)
 }
 
-/// Sanitizes logical path.
-pub(crate) fn sanitize_logical_path(path: &str) -> Result<()> {
+pub(super) fn validate_logical_path(path: &str) -> Result<()> {
     const SLASH_LIKE_SEPARATORS: [char; 5] =
         ['\u{2044}', '\u{2215}', '\u{29f8}', '\u{29f9}', '\u{ff0f}'];
 
@@ -746,12 +603,11 @@ pub(crate) fn sanitize_logical_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Performs the runtime upload path to logical handler operation.
-pub(crate) fn runtime_upload_path_to_logical(
+pub(super) fn runtime_upload_path_to_logical(
     board_short: &str,
     runtime_relative_path: &str,
 ) -> Result<(String, BackupFileKind)> {
-    super::common::validate_restored_media_path_for_board(
+    super::safety::validate_restored_media_path_for_board(
         runtime_relative_path,
         board_short,
         "Backup v4 runtime media path",
@@ -764,38 +620,37 @@ pub(crate) fn runtime_upload_path_to_logical(
     })?;
 
     if let Some(favicon_rel) = suffix.strip_prefix("_favicon/") {
-        sanitize_logical_path(favicon_rel)?;
+        validate_logical_path(favicon_rel)?;
         return Ok((
             format!("boards/{board_short}/favicon/{favicon_rel}"),
             BackupFileKind::Favicon,
         ));
     }
     if let Some(banner_rel) = suffix.strip_prefix("_banner/") {
-        sanitize_logical_path(banner_rel)?;
+        validate_logical_path(banner_rel)?;
         return Ok((
             format!("boards/{board_short}/banner/{banner_rel}"),
             BackupFileKind::Banner,
         ));
     }
     if let Some(thumb_rel) = suffix.strip_prefix("thumbs/") {
-        sanitize_logical_path(thumb_rel)?;
+        validate_logical_path(thumb_rel)?;
         return Ok((
             format!("boards/{board_short}/media/thumbs/{thumb_rel}"),
             BackupFileKind::Thumbnail,
         ));
     }
-    sanitize_logical_path(suffix)?;
+    validate_logical_path(suffix)?;
     Ok((
         format!("boards/{board_short}/media/src/{suffix}"),
         BackupFileKind::OriginalMedia,
     ))
 }
 
-/// Performs the logical upload path to runtime handler operation.
-pub(crate) fn logical_upload_path_to_runtime(
+pub(super) fn logical_upload_path_to_runtime(
     logical_path: &str,
 ) -> Result<(String, BackupFileKind)> {
-    sanitize_logical_path(logical_path)?;
+    validate_logical_path(logical_path)?;
     let parts = logical_path.split('/').collect::<Vec<_>>();
     if parts.len() < 4 || parts.first() != Some(&"boards") {
         return Err(AppError::BadRequest(format!(
@@ -807,14 +662,14 @@ pub(crate) fn logical_upload_path_to_runtime(
             "Backup v4 logical media path '{logical_path}' is invalid."
         )));
     };
-    super::common::validate_board_short_name(board_short)?;
+    super::safety::validate_board_short_name(board_short)?;
 
     match (parts.get(2).copied(), parts.get(3).copied()) {
         (Some("media"), Some("src")) => {
             let suffix = parts
                 .get(4..)
                 .map_or_else(String::new, |rest| rest.join("/"));
-            sanitize_logical_path(&suffix)?;
+            validate_logical_path(&suffix)?;
             Ok((
                 format!("{board_short}/{suffix}"),
                 BackupFileKind::OriginalMedia,
@@ -824,21 +679,21 @@ pub(crate) fn logical_upload_path_to_runtime(
             let suffix = parts
                 .get(4..)
                 .map_or_else(String::new, |rest| rest.join("/"));
-            sanitize_logical_path(&suffix)?;
+            validate_logical_path(&suffix)?;
             Ok((
                 format!("{board_short}/thumbs/{suffix}"),
                 BackupFileKind::Thumbnail,
             ))
         }
         (Some("favicon"), Some(file_name)) => {
-            sanitize_logical_path(file_name)?;
+            validate_logical_path(file_name)?;
             Ok((
                 format!("{board_short}/_favicon/{file_name}"),
                 BackupFileKind::Favicon,
             ))
         }
         (Some("banner"), Some(file_name)) => {
-            sanitize_logical_path(file_name)?;
+            validate_logical_path(file_name)?;
             Ok((
                 format!("{board_short}/_banner/{file_name}"),
                 BackupFileKind::Banner,
@@ -850,7 +705,6 @@ pub(crate) fn logical_upload_path_to_runtime(
     }
 }
 
-/// Performs the scope label handler operation.
 const fn scope_label(scope: BackupScope) -> &'static str {
     match scope {
         BackupScope::FullSite => "full_site",
@@ -860,7 +714,6 @@ const fn scope_label(scope: BackupScope) -> &'static str {
     }
 }
 
-/// Performs the expected scope label handler operation.
 fn expected_scope_label(expected_scopes: &[BackupScope]) -> String {
     expected_scopes
         .iter()
@@ -869,9 +722,8 @@ fn expected_scope_label(expected_scopes: &[BackupScope]) -> String {
         .join(" or ")
 }
 
-/// Resolves saved v4 file.
-fn resolve_saved_v4_file(root_dir: &Path, declared_path: &str, context: &str) -> Result<PathBuf> {
-    sanitize_logical_path(declared_path)?;
+fn resolve_declared_file(root_dir: &Path, declared_path: &str, context: &str) -> Result<PathBuf> {
+    validate_logical_path(declared_path)?;
     let candidate = root_dir.join(declared_path);
     if !candidate.exists() {
         return Err(AppError::BadRequest(format!(
@@ -904,10 +756,10 @@ fn validate_declared_file_metadata(
     runtime_logical_path: Option<&str>,
     size: u64,
     sha256: &str,
-    source: VerifiedSavedV4FileSource,
-) -> Result<VerifiedSavedV4File> {
+    source: VerifiedFileSource,
+) -> Result<VerifiedFile> {
     if let Some(board_short) = board {
-        super::common::validate_board_short_name(board_short)?;
+        super::safety::validate_board_short_name(board_short)?;
     }
 
     match kind {
@@ -923,7 +775,7 @@ fn validate_declared_file_metadata(
                     "Backup v4 file '{logical_path}' is missing its board owner."
                 ))
             })?;
-            super::common::validate_restored_media_path_for_board(
+            super::safety::validate_restored_media_path_for_board(
                 &runtime_path,
                 board_short,
                 "Backup v4 board media path",
@@ -1055,7 +907,7 @@ fn validate_declared_file_metadata(
         }
     }
 
-    Ok(VerifiedSavedV4File {
+    Ok(VerifiedFile {
         logical_path: logical_path.to_owned(),
         board: board.map(ToOwned::to_owned),
         kind,
@@ -1074,8 +926,8 @@ fn verify_root_declared_file(
     runtime_logical_path: Option<&str>,
     expected_size: u64,
     expected_sha256: &str,
-) -> Result<VerifiedSavedV4File> {
-    let resolved_path = resolve_saved_v4_file(root_dir, logical_path, "Backup v4 file")?;
+) -> Result<VerifiedFile> {
+    let resolved_path = resolve_declared_file(root_dir, logical_path, "Backup v4 file")?;
     let metadata = std::fs::metadata(&resolved_path).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
             "Inspect verified Backup v4 file {}: {error}",
@@ -1101,17 +953,17 @@ fn verify_root_declared_file(
         runtime_logical_path,
         expected_size,
         expected_sha256,
-        VerifiedSavedV4FileSource::RootFile(resolved_path),
+        VerifiedFileSource::RootFile(resolved_path),
     )
 }
 
 /// Copies verified file to writer.
-pub(crate) fn copy_verified_file_to_writer<W: Write>(
-    file: &VerifiedSavedV4File,
+pub(super) fn copy_verified_file_to_writer<W: Write>(
+    file: &VerifiedFile,
     writer: &mut W,
 ) -> Result<()> {
     match &file.source {
-        VerifiedSavedV4FileSource::RootFile(path) => {
+        VerifiedFileSource::RootFile(path) => {
             let mut source = std::fs::File::open(path).map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Open {}: {error}", path.display()))
             })?;
@@ -1119,7 +971,7 @@ pub(crate) fn copy_verified_file_to_writer<W: Write>(
                 AppError::Internal(anyhow::anyhow!("Copy verified file: {error}"))
             })?;
         }
-        VerifiedSavedV4FileSource::ZipEntry {
+        VerifiedFileSource::ZipEntry {
             part_path,
             entry_path,
         } => {
@@ -1146,21 +998,20 @@ pub(crate) fn copy_verified_file_to_writer<W: Write>(
 }
 
 /// Reads verified file.
-pub(crate) fn read_verified_file(file: &VerifiedSavedV4File) -> Result<Vec<u8>> {
+pub(super) fn read_verified_file(file: &VerifiedFile) -> Result<Vec<u8>> {
     let capacity = usize::try_from(file.size).unwrap_or(usize::MAX);
     let mut bytes = Vec::with_capacity(capacity.min(1024 * 1024));
     copy_verified_file_to_writer(file, &mut bytes)?;
     Ok(bytes)
 }
 
-/// Performs the verified file is root stored handler operation.
-const fn verified_file_is_root_stored(file: &VerifiedSavedV4File) -> bool {
-    matches!(file.source, VerifiedSavedV4FileSource::RootFile(_))
+const fn verified_file_is_root_stored(file: &VerifiedFile) -> bool {
+    matches!(file.source, VerifiedFileSource::RootFile(_))
 }
 
 /// Validates board JSON identity.
 fn validate_board_json_identity(
-    board_json_file: &VerifiedSavedV4File,
+    board_json_file: &VerifiedFile,
     expected_short_name: &str,
     expected_name: &str,
 ) -> Result<()> {
@@ -1186,7 +1037,7 @@ fn validate_board_json_identity(
                 "Invalid board.json for /{expected_short_name}/ in Backup v4: missing board.short_name."
             ))
         })?;
-    super::common::validate_board_short_name(actual_short_name)?;
+    super::safety::validate_board_short_name(actual_short_name)?;
     if actual_short_name != expected_short_name {
         return Err(AppError::BadRequest(format!(
             "Backup v4 board.json identity mismatch: selected /{expected_short_name}/ contains /{actual_short_name}/."
@@ -1258,7 +1109,7 @@ fn collect_unexpected_files(
 
 /// Verifies split part path.
 fn verify_split_part_path(root_dir: &Path, filename: &str) -> Result<PathBuf> {
-    sanitize_logical_path(filename)?;
+    validate_logical_path(filename)?;
     let parts = filename.split('/').collect::<Vec<_>>();
     if parts.len() != 2 || parts.first() != Some(&PARTS_DIR_NAME) {
         return Err(AppError::BadRequest(format!(
@@ -1266,10 +1117,9 @@ fn verify_split_part_path(root_dir: &Path, filename: &str) -> Result<PathBuf> {
         )));
     }
     parse_split_part_index(filename)?;
-    resolve_saved_v4_file(root_dir, filename, "Backup v4 split ZIP part")
+    resolve_declared_file(root_dir, filename, "Backup v4 split ZIP part")
 }
 
-/// Parses split part index.
 fn parse_split_part_index(filename: &str) -> Result<u32> {
     let Some(name) = filename.strip_prefix("parts/") else {
         return Err(AppError::BadRequest(format!(
@@ -1310,7 +1160,7 @@ fn parse_split_part_index(filename: &str) -> Result<u32> {
 
 /// Verifies ZIP entry name.
 fn verify_zip_entry_name(entry_name: &str) -> Result<()> {
-    sanitize_logical_path(entry_name)?;
+    validate_logical_path(entry_name)?;
     if entry_name.starts_with("parts/")
         || entry_name == MANIFEST_FILE_NAME
         || entry_name == BACKUP_METADATA_FILE_NAME
@@ -1333,7 +1183,7 @@ fn verify_split_zip_files(
     root_dir: &Path,
     manifest: &BackupManifest,
     layout_ref: &str,
-) -> Result<(HashMap<String, VerifiedSavedV4File>, HashSet<String>)> {
+) -> Result<(HashMap<String, VerifiedFile>, HashSet<String>)> {
     let mut allowed_files = HashSet::new();
     let mut part_indexes = HashSet::new();
     let mut part_filenames = HashSet::new();
@@ -1507,7 +1357,7 @@ fn verify_split_zip_files(
                 manifest_entry.runtime_logical_path.as_deref(),
                 manifest_entry.size,
                 &manifest_entry.sha256,
-                VerifiedSavedV4FileSource::ZipEntry {
+                VerifiedFileSource::ZipEntry {
                     part_path: part_path.clone(),
                     entry_path: entry_name,
                 },
@@ -1532,11 +1382,11 @@ fn verify_split_zip_files(
     clippy::too_many_lines,
     reason = "root metadata, manifest, payload, path, and checksum checks form one fail-closed verifier"
 )]
-/// Verifies saved v4 root.
-pub(crate) fn verify_saved_v4_root(
+/// Verifies the saved backup metadata, declared files, and content integrity.
+pub(super) fn verify_saved_backup(
     root_dir: &Path,
     expected_scopes: &[BackupScope],
-) -> Result<VerifiedSavedV4Root> {
+) -> Result<VerifiedBackup> {
     crate::utils::fs_security::assert_dir_no_symlink(root_dir).map_err(|error| {
         AppError::BadRequest(format!(
             "Saved Backup v4 root {} is unsafe: {error}",
@@ -1597,7 +1447,7 @@ pub(crate) fn verify_saved_v4_root(
             manifest.storage_mode.display_name()
         )));
     }
-    if manifest.archive_container != BACKUP_V4_ARCHIVE_CONTAINER {
+    if manifest.archive_container != ARCHIVE_CONTAINER {
         return Err(AppError::BadRequest(format!(
             "Saved backup {} uses unsupported archive container '{}'.",
             layout.backup_ref, manifest.archive_container
@@ -1740,7 +1590,7 @@ pub(crate) fn verify_saved_v4_root(
                     &snapshot.sha256,
                 )?
             };
-            Some(VerifiedSavedV4DbSnapshot { file: db_file })
+            Some(VerifiedDatabaseSnapshot { file: db_file })
         }
         None => None,
     };
@@ -1789,7 +1639,7 @@ pub(crate) fn verify_saved_v4_root(
     let mut threads_jsonl = HashMap::new();
     let mut posts_jsonl = HashMap::new();
     let mut files_jsonl = HashMap::new();
-    let mut board_uploads: HashMap<String, Vec<VerifiedSavedV4File>> = HashMap::new();
+    let mut board_uploads: HashMap<String, Vec<VerifiedFile>> = HashMap::new();
     let mut site_favicon_files = Vec::new();
     let mut site_banner_files = Vec::new();
     let mut tor_key_files = Vec::new();
@@ -1935,7 +1785,7 @@ pub(crate) fn verify_saved_v4_root(
         validate_board_json_identity(&board_json_file, board_short, &board_summary.name)?;
         boards.insert(
             board_short.clone(),
-            VerifiedSavedV4BoardLayout {
+            VerifiedBoard {
                 board_json: board_json_file,
                 upload_files: board_uploads.remove(board_short).unwrap_or_default(),
             },
@@ -1992,7 +1842,7 @@ pub(crate) fn verify_saved_v4_root(
         )));
     }
 
-    Ok(VerifiedSavedV4Root {
+    Ok(VerifiedBackup {
         metadata,
         manifest,
         completed_at: completed_at.0,
@@ -2005,7 +1855,7 @@ pub(crate) fn verify_saved_v4_root(
 }
 
 /// Verifies database snapshot schema.
-fn verify_db_snapshot_schema(snapshot: &VerifiedSavedV4DbSnapshot) -> Result<()> {
+fn verify_db_snapshot_schema(snapshot: &VerifiedDatabaseSnapshot) -> Result<()> {
     let mut temp_db = tempfile::NamedTempFile::new().map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
             "Create temporary Backup v4 DB validation file: {error}"
@@ -2026,12 +1876,7 @@ fn verify_db_snapshot_schema(snapshot: &VerifiedSavedV4DbSnapshot) -> Result<()>
 }
 
 #[cfg(test)]
-pub(crate) fn valid_db_snapshot_for_test() -> anyhow::Result<Vec<u8>> {
-    valid_db_snapshot_for_test_result()
-}
-
-#[cfg(test)]
-fn valid_db_snapshot_for_test_result() -> anyhow::Result<Vec<u8>> {
+pub(super) fn database_snapshot_fixture() -> anyhow::Result<Vec<u8>> {
     use anyhow::Context as _;
 
     let temp_dir = tempfile::tempdir().context("create database snapshot fixture directory")?;
@@ -2048,18 +1893,7 @@ fn valid_db_snapshot_for_test_result() -> anyhow::Result<Vec<u8>> {
 }
 
 #[cfg(test)]
-pub(crate) fn write_saved_v4_fixture_for_test(
-    root_dir: &Path,
-    scope: BackupScope,
-    files: Vec<(BackupFileEntry, Vec<u8>)>,
-    db_snapshot: Option<Vec<u8>>,
-    completed_at: i64,
-) -> anyhow::Result<(BackupMetadata, BackupManifest)> {
-    write_saved_v4_fixture_for_test_result(root_dir, scope, files, db_snapshot, completed_at)
-}
-
-#[cfg(test)]
-fn write_saved_v4_fixture_for_test_result(
+pub(super) fn write_saved_backup_fixture(
     root_dir: &Path,
     scope: BackupScope,
     files: Vec<(BackupFileEntry, Vec<u8>)>,
@@ -2087,7 +1921,7 @@ fn write_saved_v4_fixture_for_test_result(
     let created_at = completed_at - 60;
     let mut manifest_files = Vec::new();
     let includes_database = db_snapshot.is_some();
-    let db_snapshot_info = db_snapshot.as_deref().map(|bytes| DbSnapshotInfo {
+    let db_snapshot_info = db_snapshot.as_deref().map(|bytes| DatabaseSnapshotInfo {
         path: "db/rustchan.sqlite3".to_owned(),
         size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
         sha256: sha256_hex_for_bytes(bytes),
@@ -2097,7 +1931,7 @@ fn write_saved_v4_fixture_for_test_result(
     if let Some(db_bytes) = db_snapshot {
         let db_path = "db/rustchan.sqlite3";
         write_file(&root_dir.join(db_path), &db_bytes)?;
-        manifest_files.push(test_file_entry_for_test(
+        manifest_files.push(file_entry_fixture(
             db_path,
             None,
             BackupFileKind::Db,
@@ -2119,7 +1953,7 @@ fn write_saved_v4_fixture_for_test_result(
     };
     let manifest = BackupManifest {
         format: BACKUP_V4_FORMAT.to_owned(),
-        archive_container: BACKUP_V4_ARCHIVE_CONTAINER.to_owned(),
+        archive_container: ARCHIVE_CONTAINER.to_owned(),
         backup_id: backup_id.clone(),
         created_at,
         completed_at: Some(completed_at),
@@ -2165,7 +1999,7 @@ fn write_saved_v4_fixture_for_test_result(
 }
 
 #[cfg(test)]
-pub(crate) fn test_file_entry_for_test(
+pub(super) fn file_entry_fixture(
     logical_path: &str,
     board: Option<&str>,
     kind: BackupFileKind,
@@ -2185,11 +2019,11 @@ pub(crate) fn test_file_entry_for_test(
 }
 
 #[cfg(test)]
-pub(crate) fn board_fixture_files_for_test() -> Vec<(BackupFileEntry, Vec<u8>)> {
+pub(super) fn board_file_fixtures() -> Vec<(BackupFileEntry, Vec<u8>)> {
     let board_json = br#"{"version":1,"board":{"id":1,"short_name":"tech","name":"Technology","description":"","nsfw":false,"max_threads":100,"max_archived_threads":150,"bump_limit":300,"allow_images":true,"allow_video":true,"allow_audio":false,"allow_any_files":false,"allow_tripcodes":true,"edit_window_secs":300,"allow_editing":false,"allow_self_delete":false,"allow_archive":true,"allow_video_embeds":false,"allow_captcha":false,"show_poster_ids":false,"collapse_greentext":false,"post_cooldown_secs":0,"banner_mode":"inherit","access_mode":"public","access_password_hash":"","created_at":1},"threads":[],"posts":[],"polls":[],"poll_options":[],"poll_votes":[],"file_hashes":[],"banners":[]}"#;
     vec![
         (
-            test_file_entry_for_test(
+            file_entry_fixture(
                 "boards/tech/board.json",
                 Some("tech"),
                 BackupFileKind::BoardJson,
@@ -2198,7 +2032,7 @@ pub(crate) fn board_fixture_files_for_test() -> Vec<(BackupFileEntry, Vec<u8>)> 
             board_json.to_vec(),
         ),
         (
-            test_file_entry_for_test(
+            file_entry_fixture(
                 "boards/tech/threads.jsonl",
                 Some("tech"),
                 BackupFileKind::ThreadExport,
@@ -2207,7 +2041,7 @@ pub(crate) fn board_fixture_files_for_test() -> Vec<(BackupFileEntry, Vec<u8>)> 
             b"{}\n".to_vec(),
         ),
         (
-            test_file_entry_for_test(
+            file_entry_fixture(
                 "boards/tech/posts.jsonl",
                 Some("tech"),
                 BackupFileKind::PostExport,
@@ -2216,7 +2050,7 @@ pub(crate) fn board_fixture_files_for_test() -> Vec<(BackupFileEntry, Vec<u8>)> 
             b"{}\n".to_vec(),
         ),
         (
-            test_file_entry_for_test(
+            file_entry_fixture(
                 "boards/tech/files.jsonl",
                 Some("tech"),
                 BackupFileKind::FileInventoryExport,
@@ -2225,7 +2059,7 @@ pub(crate) fn board_fixture_files_for_test() -> Vec<(BackupFileEntry, Vec<u8>)> 
             b"{}\n".to_vec(),
         ),
         (
-            test_file_entry_for_test(
+            file_entry_fixture(
                 "boards/tech/media/src/example.txt",
                 Some("tech"),
                 BackupFileKind::OriginalMedia,
@@ -2244,11 +2078,11 @@ mod tests {
     fn saved_full_fixture(label: &str) -> TestResult<(tempfile::TempDir, PathBuf, BackupManifest)> {
         let dir = tempfile::tempdir().context("create saved-backup fixture directory")?;
         let root = dir.path().join(label);
-        let (_metadata, manifest) = write_saved_v4_fixture_for_test(
+        let (_metadata, manifest) = write_saved_backup_fixture(
             &root,
             BackupScope::FullSite,
-            board_fixture_files_for_test(),
-            Some(valid_db_snapshot_for_test()?),
+            board_file_fixtures(),
+            Some(database_snapshot_fixture()?),
             1_715_000_000_i64,
         )?;
         Ok((dir, root, manifest))
@@ -2430,18 +2264,18 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_accepts_valid_full_backup() -> TestResult<()> {
+    fn verify_saved_backup_accepts_valid_full_backup() -> TestResult<()> {
         let dir = tempfile::tempdir().context("create temporary directory")?;
         let root = dir.path().join("2026-05-06_full-site_abcd12");
-        write_saved_v4_fixture_for_test(
+        write_saved_backup_fixture(
             &root,
             BackupScope::FullSite,
-            board_fixture_files_for_test(),
-            Some(valid_db_snapshot_for_test()?),
+            board_file_fixtures(),
+            Some(database_snapshot_fixture()?),
             1_715_000_000_i64,
         )?;
 
-        let verified = verify_saved_v4_root(&root, &[BackupScope::FullSite])?;
+        let verified = verify_saved_backup(&root, &[BackupScope::FullSite])?;
         ensure!(verified.completed_at == 1_715_000_000_i64);
         ensure!(verified.db_snapshot.is_some());
         ensure!(verified.boards.contains_key("tech"));
@@ -2449,19 +2283,19 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_logical_path_rejects_encoded_and_unicode_separator_tricks() {
-        assert!(sanitize_logical_path("../db.sqlite").is_err());
-        assert!(sanitize_logical_path("..%2fdb.sqlite").is_err());
-        assert!(sanitize_logical_path("boards\u{2215}tech/file").is_err());
+    fn validate_logical_path_rejects_encoded_and_unicode_separator_tricks() {
+        assert!(validate_logical_path("../db.sqlite").is_err());
+        assert!(validate_logical_path("..%2fdb.sqlite").is_err());
+        assert!(validate_logical_path("boards\u{2215}tech/file").is_err());
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_size_mismatch() -> TestResult<()> {
+    fn verify_saved_backup_rejects_size_mismatch() -> TestResult<()> {
         let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_size")?;
         media_entry_mut(&mut manifest)?.size = 999;
         rewrite_manifest(&root, &manifest)?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("size mismatch was unexpectedly accepted")?;
         ensure!(error.to_string().contains("size mismatch"));
@@ -2469,12 +2303,12 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_absolute_path() -> TestResult<()> {
+    fn verify_saved_backup_rejects_absolute_path() -> TestResult<()> {
         let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_absolute")?;
         media_entry_mut(&mut manifest)?.logical_path = "/tmp/escape.txt".to_owned();
         rewrite_manifest(&root, &manifest)?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("absolute path was unexpectedly accepted")?;
         ensure!(error.to_string().contains("suspicious logical path"));
@@ -2482,13 +2316,13 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_backslash_path() -> TestResult<()> {
+    fn verify_saved_backup_rejects_backslash_path() -> TestResult<()> {
         let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_backslash")?;
         media_entry_mut(&mut manifest)?.logical_path =
             "boards\\tech\\media\\src\\example.txt".to_owned();
         rewrite_manifest(&root, &manifest)?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("backslash path was unexpectedly accepted")?;
         ensure!(error.to_string().contains("suspicious logical path"));
@@ -2496,12 +2330,12 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_windows_drive_path() -> TestResult<()> {
+    fn verify_saved_backup_rejects_windows_drive_path() -> TestResult<()> {
         let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_drive")?;
         media_entry_mut(&mut manifest)?.logical_path = "C:/backup/example.txt".to_owned();
         rewrite_manifest(&root, &manifest)?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("Windows drive path was unexpectedly accepted")?;
         ensure!(error.to_string().contains("suspicious logical path"));
@@ -2509,13 +2343,13 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_non_regular_declared_file() -> TestResult<()> {
+    fn verify_saved_backup_rejects_non_regular_declared_file() -> TestResult<()> {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_nonregular")?;
         let media_path = root.join("boards/tech/media/src/example.txt");
         std::fs::remove_file(&media_path).context("remove media file")?;
         std::fs::create_dir(&media_path).context("replace media file with directory")?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("non-regular declared file was unexpectedly accepted")?;
         ensure!(error.to_string().contains("unsafe"));
@@ -2523,7 +2357,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_tor_key_outside_tor_keys_scope() -> TestResult<()> {
+    fn verify_saved_backup_rejects_tor_key_outside_tor_keys_scope() -> TestResult<()> {
         let (_dir, root, mut manifest) = saved_full_fixture("2026-05-06_full-site_tor-scope")?;
         let tor_bytes = b"secret";
         let tor_path = root.join("config/hs_ed25519_secret_key");
@@ -2533,7 +2367,7 @@ mod tests {
         std::fs::create_dir_all(tor_parent).context("create config directory")?;
         std::fs::write(&tor_path, tor_bytes).context("write Tor key outside scope")?;
         manifest.includes.tor_keys = true;
-        manifest.files.push(test_file_entry_for_test(
+        manifest.files.push(file_entry_fixture(
             "config/hs_ed25519_secret_key",
             None,
             BackupFileKind::TorKey,
@@ -2546,7 +2380,7 @@ mod tests {
         write_json_pretty(&root.join(BACKUP_METADATA_FILE_NAME), &metadata)
             .context("rewrite fixture metadata")?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("Tor key outside tor-keys scope was unexpectedly accepted")?;
         ensure!(error.to_string().contains("escapes the tor-keys/ scope"));
@@ -2554,20 +2388,20 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_checksum_mismatch() -> TestResult<()> {
+    fn verify_saved_backup_rejects_checksum_mismatch() -> TestResult<()> {
         let dir = tempfile::tempdir().context("create temporary directory")?;
         let root = dir.path().join("2026-05-06_full-site_checksum");
-        write_saved_v4_fixture_for_test(
+        write_saved_backup_fixture(
             &root,
             BackupScope::FullSite,
-            board_fixture_files_for_test(),
-            Some(valid_db_snapshot_for_test()?),
+            board_file_fixtures(),
+            Some(database_snapshot_fixture()?),
             1_715_000_100_i64,
         )?;
         std::fs::write(root.join("boards/tech/media/src/example.txt"), b"other")
             .context("tamper fixture file")?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("checksum mismatch was unexpectedly accepted")?;
         let message = error.to_string();
@@ -2576,20 +2410,20 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_missing_declared_file() -> TestResult<()> {
+    fn verify_saved_backup_rejects_missing_declared_file() -> TestResult<()> {
         let dir = tempfile::tempdir().context("create temporary directory")?;
         let root = dir.path().join("2026-05-06_full-site_missing");
-        write_saved_v4_fixture_for_test(
+        write_saved_backup_fixture(
             &root,
             BackupScope::FullSite,
-            board_fixture_files_for_test(),
-            Some(valid_db_snapshot_for_test()?),
+            board_file_fixtures(),
+            Some(database_snapshot_fixture()?),
             1_715_000_200_i64,
         )?;
         std::fs::remove_file(root.join("boards/tech/media/src/example.txt"))
             .context("remove declared fixture file")?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("missing declared file was unexpectedly accepted")?;
         ensure!(error.to_string().contains("missing declared file"));
@@ -2597,19 +2431,19 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_accepts_valid_split_zip_backup() -> TestResult<()> {
+    fn verify_saved_backup_accepts_valid_split_zip_backup() -> TestResult<()> {
         let dir = tempfile::tempdir().context("create temporary directory")?;
         let root = dir.path().join("2026-05-06_full-site_split");
-        write_saved_v4_fixture_for_test(
+        write_saved_backup_fixture(
             &root,
             BackupScope::FullSite,
-            board_fixture_files_for_test(),
-            Some(valid_db_snapshot_for_test()?),
+            board_file_fixtures(),
+            Some(database_snapshot_fixture()?),
             1_715_000_250_i64,
         )?;
         convert_fixture_to_split(&root, 16)?;
 
-        let verified = verify_saved_v4_root(&root, &[BackupScope::FullSite])?;
+        let verified = verify_saved_backup(&root, &[BackupScope::FullSite])?;
         ensure!(verified.metadata.storage_mode == BackupStorageMode::SplitZip);
         ensure!(!verified.manifest.parts.is_empty());
         ensure!(verified.boards.contains_key("tech"));
@@ -2617,7 +2451,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_split_board_json_identity_mismatch() -> TestResult<()> {
+    fn verify_saved_backup_rejects_split_board_json_identity_mismatch() -> TestResult<()> {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_board-json")?;
         let mut manifest = convert_fixture_to_split(&root, 16)?;
         let mismatched_board_json = br#"{"version":1,"board":{"id":1,"short_name":"b","name":"Random","description":"","nsfw":false,"max_threads":100,"max_archived_threads":150,"bump_limit":300,"allow_images":true,"allow_video":true,"allow_audio":false,"allow_any_files":false,"allow_tripcodes":true,"edit_window_secs":300,"allow_editing":false,"allow_self_delete":false,"allow_archive":true,"allow_video_embeds":false,"allow_captcha":false,"show_poster_ids":false,"collapse_greentext":false,"post_cooldown_secs":0,"banner_mode":"inherit","access_mode":"public","access_password_hash":"","created_at":1},"threads":[],"posts":[],"polls":[],"poll_options":[],"poll_votes":[],"file_hashes":[],"banners":[]}"#;
@@ -2628,7 +2462,7 @@ mod tests {
             mismatched_board_json,
         )?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("mismatched board.json identity was unexpectedly accepted")?;
         ensure!(error.to_string().contains("board.json identity mismatch"));
@@ -2636,7 +2470,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_missing_split_part() -> TestResult<()> {
+    fn verify_saved_backup_rejects_missing_split_part() -> TestResult<()> {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_missing-part")?;
         let manifest = convert_fixture_to_split(&root, 16)?;
         let part = root.join(
@@ -2648,7 +2482,7 @@ mod tests {
         );
         std::fs::remove_file(part).context("remove split part")?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("missing split part was unexpectedly accepted")?;
         ensure!(error.to_string().contains("missing declared file"));
@@ -2656,7 +2490,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_corrupt_split_part_hash() -> TestResult<()> {
+    fn verify_saved_backup_rejects_corrupt_split_part_hash() -> TestResult<()> {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_corrupt-part")?;
         let manifest = convert_fixture_to_split(&root, 16)?;
         let part = root.join(
@@ -2668,7 +2502,7 @@ mod tests {
         );
         std::fs::write(part, b"not a zip").context("corrupt split part")?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("corrupt split-part hash was unexpectedly accepted")?;
         let message = error.to_string();
@@ -2677,7 +2511,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_zip_backed_file_duplicate_at_root() -> TestResult<()> {
+    fn verify_saved_backup_rejects_zip_backed_file_duplicate_at_root() -> TestResult<()> {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_duplicate-root")?;
         convert_fixture_to_split(&root, 16)?;
         let duplicate = root.join("boards/tech/media/src/example.txt");
@@ -2687,7 +2521,7 @@ mod tests {
         std::fs::create_dir_all(duplicate_parent).context("create duplicate parent")?;
         std::fs::write(duplicate, b"media").context("write duplicate root payload")?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("duplicate root payload was unexpectedly accepted")?;
         ensure!(error.to_string().contains("unexpected files"));
@@ -2695,7 +2529,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_nested_split_part_path() -> TestResult<()> {
+    fn verify_saved_backup_rejects_nested_split_part_path() -> TestResult<()> {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_nested-part")?;
         let mut manifest = convert_fixture_to_split(&root, 16)?;
         manifest
@@ -2705,7 +2539,7 @@ mod tests {
             .filename = "parts/nested/part-0001.zip".to_owned();
         rewrite_manifest(&root, &manifest)?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("nested split-part path was unexpectedly accepted")?;
         ensure!(error.to_string().contains("part-0001.zip"));
@@ -2713,7 +2547,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_bad_split_part_name() -> TestResult<()> {
+    fn verify_saved_backup_rejects_bad_split_part_name() -> TestResult<()> {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_bad-part-name")?;
         let mut manifest = convert_fixture_to_split(&root, 16)?;
         manifest
@@ -2723,7 +2557,7 @@ mod tests {
             .filename = "parts/foo.zip".to_owned();
         rewrite_manifest(&root, &manifest)?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("bad split-part name was unexpectedly accepted")?;
         ensure!(error.to_string().contains("part-0001.zip"));
@@ -2731,7 +2565,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_duplicate_split_part_filename() -> TestResult<()> {
+    fn verify_saved_backup_rejects_duplicate_split_part_filename() -> TestResult<()> {
         let (_dir, root, _manifest) =
             saved_full_fixture("2026-05-06_full-site_duplicate-part-file")?;
         let mut manifest = convert_fixture_to_split(&root, 16)?;
@@ -2748,7 +2582,7 @@ mod tests {
             .filename = duplicate_filename;
         rewrite_manifest(&root, &manifest)?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("duplicate split-part filename was unexpectedly accepted")?;
         ensure!(error
@@ -2758,7 +2592,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_duplicate_split_part_index() -> TestResult<()> {
+    fn verify_saved_backup_rejects_duplicate_split_part_index() -> TestResult<()> {
         let (_dir, root, _manifest) =
             saved_full_fixture("2026-05-06_full-site_duplicate-part-index")?;
         let mut manifest = convert_fixture_to_split(&root, 16)?;
@@ -2774,7 +2608,7 @@ mod tests {
             .part_index = duplicate_index;
         rewrite_manifest(&root, &manifest)?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("duplicate split-part index was unexpectedly accepted")?;
         ensure!(error.to_string().contains("duplicate split ZIP part index"));
@@ -2782,7 +2616,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_split_part_total_mismatch() -> TestResult<()> {
+    fn verify_saved_backup_rejects_split_part_total_mismatch() -> TestResult<()> {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_part-total")?;
         let mut manifest = convert_fixture_to_split(&root, 16)?;
         let wrong_total = manifest
@@ -2798,7 +2632,7 @@ mod tests {
             .total_parts = wrong_total;
         rewrite_manifest(&root, &manifest)?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("split-part total mismatch was unexpectedly accepted")?;
         ensure!(error.to_string().contains("total_parts"));
@@ -2806,7 +2640,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_non_contiguous_split_part_index() -> TestResult<()> {
+    fn verify_saved_backup_rejects_non_contiguous_split_part_index() -> TestResult<()> {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_part-gap")?;
         let mut manifest = convert_fixture_to_split(&root, 16)?;
         manifest.parts.remove(0);
@@ -2817,7 +2651,7 @@ mod tests {
         rewrite_manifest(&root, &manifest)?;
         rewrite_metadata_part_count(&root, new_total)?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("non-contiguous split-part index was unexpectedly accepted")?;
         let message = error.to_string();
@@ -2826,7 +2660,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_split_part_filename_index_mismatch() -> TestResult<()> {
+    fn verify_saved_backup_rejects_split_part_filename_index_mismatch() -> TestResult<()> {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_part-name-index")?;
         let mut manifest = convert_fixture_to_split(&root, 16)?;
         let original_filename = manifest
@@ -2845,7 +2679,7 @@ mod tests {
         std::fs::copy(original, root.join(replacement_filename)).context("copy split part")?;
         rewrite_manifest(&root, &manifest)?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("split-part filename/index mismatch was unexpectedly accepted")?;
         ensure!(error.to_string().contains("filename"));
@@ -2853,7 +2687,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_zero_split_part_index() -> TestResult<()> {
+    fn verify_saved_backup_rejects_zero_split_part_index() -> TestResult<()> {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_part-zero")?;
         let mut manifest = convert_fixture_to_split(&root, 16)?;
         manifest
@@ -2863,7 +2697,7 @@ mod tests {
             .part_index = 0;
         rewrite_manifest(&root, &manifest)?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("zero split-part index was unexpectedly accepted")?;
         ensure!(error.to_string().contains("outside 1..="));
@@ -2871,7 +2705,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_undeclared_split_zip_entry() -> TestResult<()> {
+    fn verify_saved_backup_rejects_undeclared_split_zip_entry() -> TestResult<()> {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_extra-entry")?;
         let mut manifest = convert_fixture_to_split(&root, 16)?;
         let part_filename = manifest
@@ -2899,7 +2733,7 @@ mod tests {
         write_json_pretty(&root.join(MANIFEST_FILE_NAME), &manifest)
             .context("rewrite fixture manifest")?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("undeclared split ZIP entry was unexpectedly accepted")?;
         ensure!(error.to_string().contains("undeclared ZIP entry"));
@@ -2907,7 +2741,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_unsafe_split_zip_entry_path() -> TestResult<()> {
+    fn verify_saved_backup_rejects_unsafe_split_zip_entry_path() -> TestResult<()> {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_unsafe-entry")?;
         let mut manifest = convert_fixture_to_split(&root, 16)?;
         let part_path = root.join(
@@ -2934,7 +2768,7 @@ mod tests {
         write_json_pretty(&root.join(MANIFEST_FILE_NAME), &manifest)
             .context("rewrite fixture manifest")?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("unsafe split ZIP entry path was unexpectedly accepted")?;
         ensure!(error.to_string().contains("suspicious logical path"));
@@ -2942,14 +2776,14 @@ mod tests {
     }
 
     #[test]
-    fn verify_saved_v4_root_rejects_duplicate_logical_paths() -> TestResult<()> {
+    fn verify_saved_backup_rejects_duplicate_logical_paths() -> TestResult<()> {
         let dir = tempfile::tempdir().context("create temporary directory")?;
         let root = dir.path().join("2026-05-06_full-site_duplicate");
-        let (_metadata, mut manifest) = write_saved_v4_fixture_for_test(
+        let (_metadata, mut manifest) = write_saved_backup_fixture(
             &root,
             BackupScope::FullSite,
-            board_fixture_files_for_test(),
-            Some(valid_db_snapshot_for_test()?),
+            board_file_fixtures(),
+            Some(database_snapshot_fixture()?),
             1_715_000_300_i64,
         )?;
         manifest.files.push(
@@ -2963,7 +2797,7 @@ mod tests {
         write_json_pretty(&root.join(MANIFEST_FILE_NAME), &manifest)
             .context("rewrite fixture manifest")?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("duplicate logical paths were unexpectedly accepted")?;
         ensure!(error.to_string().contains("duplicate logical path"));
@@ -2972,16 +2806,16 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn verify_saved_v4_root_rejects_symlink_components() -> TestResult<()> {
+    fn verify_saved_backup_rejects_symlink_components() -> TestResult<()> {
         use std::os::unix::fs as unix_fs;
 
         let dir = tempfile::tempdir().context("create temporary directory")?;
         let root = dir.path().join("2026-05-06_full-site_symlink");
-        let (_metadata, mut manifest) = write_saved_v4_fixture_for_test(
+        let (_metadata, mut manifest) = write_saved_backup_fixture(
             &root,
             BackupScope::FullSite,
-            board_fixture_files_for_test(),
-            Some(valid_db_snapshot_for_test()?),
+            board_file_fixtures(),
+            Some(database_snapshot_fixture()?),
             1_715_000_400_i64,
         )?;
         let outside_dir = dir.path().join("outside");
@@ -3003,7 +2837,7 @@ mod tests {
         write_json_pretty(&root.join(MANIFEST_FILE_NAME), &manifest)
             .context("rewrite fixture manifest")?;
 
-        let error = verify_saved_v4_root(&root, &[BackupScope::FullSite])
+        let error = verify_saved_backup(&root, &[BackupScope::FullSite])
             .err()
             .context("symlink component was unexpectedly accepted")?;
         ensure!(error.to_string().contains("unsafe"));

@@ -11,8 +11,7 @@ use super::{
     report_modal_script, urlencoding_simple,
 };
 
-// ─── Site index (board list) ──────────────────────────────────────────────────
-
+// Site index (board list)
 /// Renders administrator controls for moving a board within its content group.
 fn board_reorder_controls(
     board: &Board,
@@ -399,7 +398,6 @@ fn render_catalog_thumb(thread: &Thread) -> String {
     format!(r#"<div class="catalog-card-media">{media}{badges}</div>"#)
 }
 
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the action menu accepts independent labels and form values for two actions"
@@ -476,7 +474,6 @@ fn render_catalog_actions(
     )
 }
 
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the card combines thread state with independent action labels and values"
@@ -652,12 +649,10 @@ fn board_cards<S: std::hash::BuildHasher>(
 }
 
 #[must_use]
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "the homepage keeps its board groups, statistics, and modals together"
 )]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the homepage consumes distinct board, activity, consent, and admin contexts"
@@ -854,16 +849,13 @@ pub fn index_page<S: std::hash::BuildHasher>(
     )
 }
 
-// ─── Board index ──────────────────────────────────────────────────────────────
-
+// Board index
 #[must_use]
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     clippy::fn_params_excessive_bools,
     reason = "the board index keeps its forms, navigation, and thread list together"
 )]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the board index consumes distinct paging, moderation, activity, and visitor contexts"
@@ -1012,8 +1004,7 @@ pub fn board_page<S: std::hash::BuildHasher>(
     )
 }
 
-// ─── Thread summary (used by board_page) ─────────────────────────────────────
-
+// Thread summary (used by board_page)
 #[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -1239,8 +1230,7 @@ fn render_thread_summary(
     html
 }
 
-// ─── Catalog page ─────────────────────────────────────────────────────────────
-
+// Catalog page
 #[must_use]
 // These flags map directly to render or DB inputs, so bundling them would make the call sites less clear.
 #[expect(
@@ -1248,7 +1238,6 @@ fn render_thread_summary(
     clippy::too_many_lines,
     reason = "the catalog keeps its card grid, forms, navigation, and hidden-view state together"
 )]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the catalog consumes distinct filtering, moderation, activity, and visitor contexts"
@@ -1327,7 +1316,7 @@ pub fn catalog_page<S: std::hash::BuildHasher>(
 <div class="catalog-controls">
   <div class="catalog-control-group">
     <label class="catalog-sort-label" for="catalog-sort">Sort By:</label>
-    <select id="catalog-sort" class="catalog-sort-select" data-action="sort-catalog">
+    <select id="catalog-sort" class="catalog-sort-select" data-action="sort-catalog" disabled>
     <option value="bump" selected>bump order</option>
     <option value="replies">reply count</option>
     <option value="created">creation date</option>
@@ -1336,11 +1325,12 @@ pub fn catalog_page<S: std::hash::BuildHasher>(
   </div>
   <div class="catalog-control-group">
     <label class="catalog-sort-label" for="catalog-show-comment">Show OP Comment:</label>
-    <select id="catalog-show-comment" class="catalog-sort-select" data-action="catalog-show-comment">
-      <option value="on">On</option>
-      <option value="off" selected>Off</option>
+    <select id="catalog-show-comment" class="catalog-sort-select" data-action="catalog-show-comment" disabled>
+      <option value="on" selected>On</option>
+      <option value="off">Off</option>
     </select>
   </div>
+  <noscript><p class="form-field-help">Sorting and comment toggles require JavaScript. Threads use bump order with comments shown.</p></noscript>
 </div>
 <div class="board-nav"><a class="board-nav-link" href="/{bs}">[Index]</a><a class="board-nav-link{catalog_active}" href="/{bs}/catalog">[Catalog]</a>{nav_archive}{hidden_nav}</div>"#,
         bs = bs,
@@ -1468,10 +1458,8 @@ pub fn catalog_page<S: std::hash::BuildHasher>(
     )
 }
 
-// ─── Search results ───────────────────────────────────────────────────────────
-
+// Search results
 #[must_use]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "search rendering consumes distinct result, paging, theme, and visitor contexts"
@@ -1572,8 +1560,7 @@ pub fn search_page(
     )
 }
 
-// ─── Archive page ─────────────────────────────────────────────────────────────
-
+// Archive page
 #[must_use]
 /// Renders a board's paginated archived-thread list.
 pub fn archive_page(
@@ -1583,7 +1570,7 @@ pub fn archive_page(
     csrf_token: &str,
     boards: &[Board],
     current_theme: Option<&str>,
-    collapse_greentext: bool,
+    user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let bs = escape_html(&board.short_name);
     let bn = escape_html(&board.name);
@@ -1620,7 +1607,7 @@ pub fn archive_page(
         ));
     }
 
-    base_layout(
+    base_layout_with_preferences(
         &format!("/{}/  archive", board.short_name),
         Some(&board.short_name),
         &body,
@@ -1628,8 +1615,9 @@ pub fn archive_page(
         boards,
         current_theme,
         Some(&board.default_theme),
-        collapse_greentext,
+        board.collapse_greentext,
         &format!("/{}/archive", board.short_name),
+        user_preferences,
     )
 }
 
@@ -2236,7 +2224,7 @@ mod tests {
             "csrf",
             std::slice::from_ref(&board),
             None,
-            false,
+            crate::templates::UserPreferences::default(),
         );
 
         assert!(html.contains("archive-row-media"));

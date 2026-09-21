@@ -1,17 +1,152 @@
+# OS metadata and editor scratch files.
 .DS_Store
-/target
-/.codex-pet-runs
-/node_modules
-/playwright-report
-/test-results
-/npm-debug.log*
-/rustchan-data
-package-lock.json
-package.json
-playwright.config.ts
-# Keep ad-hoc browser artifacts ignored while tracking the Rust CLI integration
-# test target used by the workspace validation matrix.
-/tests/*
-!/tests/cli_runtime.rs
+._*
+Thumbs.db
+Desktop.ini
+.idea/
+*.swp
+*.swo
+*~
+*.orig
+*.rej
+
+# Build output, dependency caches, coverage, and profiling output.
+target/
+node_modules/
+/dist/
+/build/
+/coverage/
+/.nyc_output/
+/lcov.info
+/tarpaulin-report.*
+*.profraw
+*.profdata
+/flamegraph.svg
+/perf.data*
+/criterion/
+# Binaries copied out of target/ and their macOS debug bundles.
+/rustchan-cli
+/rustchan-cli.exe
+/rustchan-cli.dSYM/
+__pycache__/
+*.py[cod]
+/.venv/
+/.pytest_cache/
+/.mypy_cache/
+/.ruff_cache/
+/.npm/
+/.cache/
+
+# Logs, process state, and temporary files.
+*.log
+*.log.*
+*.pid
+*.pid.lock
+*.sock
+*.socket
+*.tmp
+*.temp
+*.bak
+/tmp/
+/temp/
+/.tmp*/
+/core
+/core.[0-9]*
+/rustchan-cli*.dmp
+
+# Playwright tests and generated browser/play-test evidence.
+# All browser-test infrastructure is local-only, including its npm metadata.
+/playwright*.config.*
+/package.json
+/package-lock.json
 /.github/workflows/e2e.yml
-/.cargo/audit.toml
+/tests/e2e/
+/output/
+playwright-report/
+test-results/
+blob-report/
+browser-report/
+browser-artifacts/
+.playwright/
+.playwright-cli/
+.playwright-mcp/
+.auth/
+/browser-results.json
+/browser-summary.json
+/browser-versions.json
+/instance.json
+/*-instance.json
+/storage-state*.json
+/storageState*.json
+/*browser-state*.json
+/screenshots/
+/videos/
+/traces/
+/downloads/
+/audit-output/
+/audit-reports/
+/.codex-pet-runs/
+
+# Local task handoff referencing ignored browser evidence and temporary logs.
+# Keep published security records and maintained policy ledgers in docs tracked.
+/docs/theme-system-audit-2026-09-06.md
+
+# RustChan runtime trees (also next to copied binaries) and disposable instances.
+rustchan-data/
+rustchan-e2e-*/
+/runtime/
+/runtimes/
+/uploads/
+/boards/
+/backups/
+/backup-*/
+/restore-*/
+/extracted-*/
+/logs/
+/tls/
+/tor/
+/certs/
+
+# Loose runtime data, backups, keys, and browser state at the repository root.
+# Root anchoring keeps deliberately versioned fixtures/examples trackable.
+/settings.toml
+/*.db
+/*.db-*
+/*.sqlite
+/*.sqlite-*
+/*.sqlite3
+/*.sqlite3-*
+/*.zip
+/*.tar
+/*.tar.*
+/*.tgz
+/*.7z
+/*.pem
+/*.crt
+/*.cer
+/*.key
+/*.p12
+/*.pfx
+/id_rsa
+/id_ed25519
+/hs_ed25519_*
+/cookies.txt
+/*.cookies
+
+# Local secrets; sanitized environment examples remain eligible for tracking.
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.sample
+!.env.*.sample
+!.env.template
+!.env.*.template
+/secrets/
+/.secrets/
+/.netrc
+/.cargo/credentials
+/.cargo/credentials.toml
+
+# Personal working instructions.
+/rules.md

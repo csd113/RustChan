@@ -76,21 +76,14 @@ cargo clippy --locked --workspace --all-targets --all-features
 cargo test --locked --workspace --all-features
 ```
 
-The browser harness uses Playwright. For public UI, admin UI, media, backup and
-restore, moderation, Tor/proxy, or no-JavaScript behavior, install the pinned
-Node dependencies and relevant browsers, then run the focused spec or bounded
-CI suite:
-
-```sh
-npm ci
-npx playwright install
-npx playwright test path/to/relevant.spec.ts --project=chromium
-npm run test:e2e:ci
-```
-
-Use `npm run test:e2e` only when the full local browser matrix is warranted.
+Use a local Playwright harness for public UI, admin UI, media, backup and restore,
+moderation, Tor/proxy, and no-JavaScript changes. Browser-test infrastructure is
+local-only: keep package manifests, configs, scripts, fixtures, and artifacts
+under the matching `.gitignore` rules. Do not add them to commits or CI workflows.
+Run focused scenarios first and the available browser matrix for broad changes.
 Some media tests require `ffmpeg`, `ffprobe`, and specific codecs; do not replace
-deterministic fixtures with private uploads from a live site.
+deterministic fixtures with private uploads from a live site. Permanent Rust
+unit and integration tests remain normal repository source.
 
 Run the full Rust validation sequence before handoff for application changes.
 Documentation-only changes may use the repository's applicable documentation,

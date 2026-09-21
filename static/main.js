@@ -1,4 +1,3 @@
-// main.js — RustChan client-side logic.
 // Dynamic per-page values are passed via data-* attributes on HTML elements
 // and read here at runtime.
 
@@ -186,8 +185,7 @@ function applyQueuedPostSubmitAnchor() {
   }
 }
 
-// ─── Tor address copy control ────────────────────────────────────────────────
-
+// Tor address copy control
 function copyTextWithTextareaFallback(text) {
   return new Promise(function (resolve, reject) {
     var textarea = document.createElement('textarea');
@@ -269,8 +267,7 @@ function initTorCopyButtons(root) {
 
 initTorCopyButtons(document);
 
-// ─── Localize post timestamps to device timezone ──────────────────────────────
-
+// Localize post timestamps to device timezone
 function padTwoDigits(value) {
   value = String(value);
   return value.length < 2 ? '0' + value : value;
@@ -299,13 +296,13 @@ function localizePostTimes(root) {
     } else {
       el.textContent = local;
     }
-    el.removeAttribute('data-utc'); // prevent double-processing
+    el.removeAttribute('data-utc');
   });
 }
 
 function upgradeLegacySpoilers(root) {
   (root || document).querySelectorAll('.spoiler:not([data-action])').forEach(function (el) {
-    // Older posts were rendered with inline onclick handlers that are blocked by CSP.
+    // Legacy markup may contain inline handlers blocked by the current CSP.
     el.dataset.action = 'toggle-spoiler';
     el.removeAttribute('onclick');
   });
@@ -363,11 +360,18 @@ function initSelfActionCountdowns(root) {
   });
 }
 
+function enablePosterHighlightControls(root) {
+  root.querySelectorAll('.poster-id-btn').forEach(function (button) {
+    button.disabled = false;
+  });
+}
+
 document.addEventListener('DOMContentLoaded', function () {
   applyQueuedPostSubmitAnchor();
   localizePostTimes(document);
   upgradeLegacySpoilers(document);
   initSelfActionCountdowns(document);
+  enablePosterHighlightControls(document);
   wireAudioMiniPlayers(document);
   wireMediaThumbFallbacks(document);
   syncMobileHeaderOffset();
@@ -413,8 +417,11 @@ window.addEventListener('resize', function () {
   }
 
   function shouldReloadActivityRestore(event) {
+    // Every restored document can have stale cookie-backed theme preferences
+    // or a changed theme catalog, including search and administrative pages.
+    if (event.persisted) return true;
     if (!pageHasActivityBadges() && !pageHasActivityLifecycle()) return false;
-    if (event.persisted || navigationType() === 'back_forward') return true;
+    if (navigationType() === 'back_forward') return true;
     try {
       return window.sessionStorage.getItem(currentRestoreKey()) === '1';
     } catch (e) {
@@ -453,14 +460,14 @@ window.addEventListener('resize', function () {
     localizePostTimes(container);
     upgradeLegacySpoilers(container);
     initSelfActionCountdowns(container);
+    enablePosterHighlightControls(container);
     wireAudioMiniPlayers(container);
     wireMediaThumbFallbacks(container);
     if (_origLocalize) _origLocalize(container);
   };
 }());
 
-// ─── Post form toggle & mobile drawer ────────────────────────────────────────
-
+// Post form toggle & mobile drawer
 function togglePostForm() {
   var wrap = document.getElementById('post-form-wrap');
   if (!wrap) return;
@@ -1212,8 +1219,7 @@ function captchaNonceMissing(form) {
   return !!(answerField && !answerField.value.trim());
 }
 
-// ─── NSFW disclaimer overlay ────────────────────────────────────────────────
-
+// NSFW disclaimer overlay
 function openNsfwDisclaimer(returnTo, boardLabel) {
   var overlay = document.getElementById('nsfw-disclaimer-overlay');
   if (!overlay) return;
@@ -1244,8 +1250,7 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 });
 
-// ─── Media expand / collapse ─────────────────────────────────────────────────
-
+// Media expand / collapse
 function expandMedia(preview) {
   var container = preview.closest('.file-container');
   var expanded = container.querySelector('.media-expanded');
@@ -1481,7 +1486,7 @@ function collapseVideoEmbed(btn) {
   }
 }
 
-// ─── Auto-compress modal ─────────────────────────────────────────────────────
+// Auto-compress modal
 // Dynamic limits (MAX_IMAGE / MAX_VIDEO) are read from data-max-image /
 // data-max-video attributes on the #compress-modal element, injected by the
 // Rust template at render time.
@@ -1796,13 +1801,14 @@ window.requestConfirmation = requestConfirmation;
     }
   }
 
-  function videoRecorderMimeType() {
+  function videoRecorderMimeType(hasAudio) {
     if (!window.MediaRecorder) return '';
+    // Firefox accepts an Opus MIME type for a silent stream but never emits
+    // recording data. Request audio codecs only when an audio track exists.
+    var audioCodec = hasAudio ? ',opus' : '';
     var types = [
-      'video/webm;codecs=vp9,opus',
-      'video/webm;codecs=vp9',
-      'video/webm;codecs=vp8,opus',
-      'video/webm;codecs=vp8',
+      'video/webm;codecs=vp9' + audioCodec,
+      'video/webm;codecs=vp8' + audioCodec,
       'video/webm'
     ];
     for (var i = 0; i < types.length; i += 1) {
@@ -1897,7 +1903,7 @@ window.requestConfirmation = requestConfirmation;
     var prog = document.getElementById('compress-progress');
     var done = document.getElementById('compress-done-actions');
     if (acts) acts.style.display = which === 'actions' ? 'flex' : 'none';
-    if (prog) prog.style.display = which === 'progress' ? 'block' : 'none';
+    if (prog) prog.style.display = which === 'actions' ? 'none' : 'block';
     if (done) done.style.display = which === 'done' ? 'flex' : 'none';
   }
 
@@ -1964,8 +1970,12 @@ window.requestConfirmation = requestConfirmation;
       if (!window.MediaRecorder) { reject(new Error('MediaRecorder not supported')); return; }
       var mimeType = videoRecorderMimeType();
       if (!mimeType) { reject(new Error('No supported WebM encoder available in this browser')); return; }
-      var url = URL.createObjectURL(file);
       var videoEl = document.createElement('video');
+      if (typeof videoEl.captureStream !== 'function' && typeof videoEl.mozCaptureStream !== 'function') {
+        reject(new Error('Video compression is not supported in this browser. Please use a smaller file.'));
+        return;
+      }
+      var url = URL.createObjectURL(file);
       videoEl.preload = 'auto';
       videoEl.muted = true;
       videoEl.playsInline = true;
@@ -2028,6 +2038,7 @@ window.requestConfirmation = requestConfirmation;
         if (progressTimer) clearInterval(progressTimer);
         if (safetyTimer) clearTimeout(safetyTimer);
         var chunks = [];
+        mimeType = videoRecorderMimeType(stream.getAudioTracks().length > 0);
         try {
           recorder = new MediaRecorder(stream, {
             mimeType: mimeType,
@@ -2045,10 +2056,28 @@ window.requestConfirmation = requestConfirmation;
             currentBitsPerSec = Math.max(Math.floor(currentBitsPerSec * 0.6), 48000);
             _setProgress(12, 'Retrying at lower bitrate\u2026 attempt ' + (attempt + 1));
             window.setTimeout(function () {
+              if (settled) return;
+              stopMediaStream(stream);
+              videoEl.addEventListener('seeked', function restartRecording() {
+                if (settled) return;
+                videoEl.play().then(function () {
+                  if (settled) return;
+                  try {
+                    // Captured tracks end with playback; each retry needs fresh tracks.
+                    stream = videoEl.captureStream ? videoEl.captureStream() : videoEl.mozCaptureStream();
+                    startRecordingAttempt();
+                  } catch (e) {
+                    finish(e);
+                  }
+                }).catch(function (err) {
+                  finish(err || new Error('Video playback failed during compression'));
+                });
+              }, { once: true });
               try {
                 videoEl.currentTime = 0;
-              } catch (e) {}
-              startRecordingAttempt();
+              } catch (e) {
+                finish(e);
+              }
             }, 0);
             return;
           }
@@ -2056,9 +2085,11 @@ window.requestConfirmation = requestConfirmation;
         };
         recorder.onerror = function (e) { finish(e.error || new Error('MediaRecorder error')); };
         try {
-          videoEl.currentTime = 0;
-        } catch (e) {}
-        recorder.start(1000);
+          recorder.start(1000);
+        } catch (e) {
+          finish(e);
+          return;
+        }
         progressTimer = setInterval(function () {
           _setProgress(
             Math.min(10 + Math.round((videoEl.currentTime / duration) * 80), 90),
@@ -2085,8 +2116,7 @@ window.requestConfirmation = requestConfirmation;
   }
 })();
 
-// ─── Report modal ─────────────────────────────────────────────────────────────
-
+// Report modal
 var _reportActiveTrigger = null;
 var _editModalActiveTrigger = null;
 
@@ -2417,48 +2447,73 @@ function clampPopupToViewport(anchor, popup) {
   return { left: left, top: top };
 }
 
-// ─── Theme picker ─────────────────────────────────────────────────────────────
-
+// Theme picker
 (function () {
   var THEMES = (document.documentElement.getAttribute('data-theme-slugs') || '')
     .split(',')
     .filter(function (value) { return value; });
 
-  function persistTheme(t, href) {
-    var url = href || ('/theme/' + encodeURIComponent(t));
-    try {
-      fetch(url, {
-        credentials: 'same-origin',
-        headers: { 'x-rustchan-background': '1' }
-      }).catch(function () {});
-    } catch (e) {}
-  }
+  var CUSTOM_THEMES = (document.documentElement.getAttribute('data-theme-css-slugs') || '').split(',');
+  var themeRequest = 0;
+  var cancelThemeLoad = null;
 
-  function applyThemeStylesheet(t) {
-    var el = document.getElementById('active-theme-stylesheet');
-    if (!t || t === 'terminal') {
-      if (el) el.remove();
-      return;
-    }
-    if (!el) {
-      el = document.createElement('link');
-      el.id = 'active-theme-stylesheet';
-      el.rel = 'stylesheet';
-      document.head.appendChild(el);
-    }
-    el.href = '/theme-css/' + encodeURIComponent(t);
-  }
-
-  function applyTheme(t) {
-    if (t === 'terminal') {
-      document.documentElement.removeAttribute('data-theme');
-    } else {
-      document.documentElement.setAttribute('data-theme', t);
-    }
-    applyThemeStylesheet(t);
-    // Match by data-theme attribute so order in DOM doesn't matter.
+  function syncThemeControls(t) {
+    document.documentElement.setAttribute('data-active-theme', t);
+    document.querySelectorAll('.user-preferences-form select[name="theme"]').forEach(function (select) {
+      select.value = t;
+    });
     document.querySelectorAll('.tp-option').forEach(function (el) {
       el.classList.toggle('active', el.dataset.theme === t);
+      el.setAttribute('aria-current', el.dataset.theme === t ? 'true' : 'false');
+    });
+    try { localStorage.setItem('rustchan_theme', t); } catch (e) {}
+  }
+
+  // Keep the old stylesheet and theme visible until the replacement is loaded.
+  // A later selection invalidates an earlier load, including its error handler.
+  function applyTheme(t) {
+    var request = ++themeRequest;
+    if (cancelThemeLoad) cancelThemeLoad();
+    if (THEMES.indexOf(t) === -1) return Promise.resolve(false);
+    var existing = document.getElementById('active-theme-stylesheet');
+    function commit(link) {
+      if (existing && existing !== link) existing.remove();
+      if (link) {
+        link.id = 'active-theme-stylesheet';
+        link.media = 'all';
+      }
+      if (t === 'terminal') document.documentElement.removeAttribute('data-theme');
+      else document.documentElement.setAttribute('data-theme', t);
+      syncThemeControls(t);
+      return true;
+    }
+    if (t === document.documentElement.getAttribute('data-active-theme')) {
+      syncThemeControls(t);
+      return Promise.resolve(true);
+    }
+    if (CUSTOM_THEMES.indexOf(t) === -1) return Promise.resolve(commit(null));
+    return new Promise(function (resolve) {
+      var link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.media = 'not all';
+      link.href = '/theme-css/' + encodeURIComponent(t);
+      cancelThemeLoad = function () {
+        link.remove();
+        cancelThemeLoad = null;
+        resolve(false);
+      };
+      link.onload = function () {
+        if (request === themeRequest) cancelThemeLoad = null;
+        resolve(request === themeRequest ? commit(link) : false);
+      };
+      link.onerror = function () {
+        link.remove();
+        if (request === themeRequest) {
+          cancelThemeLoad = null;
+        }
+        resolve(false);
+      };
+      document.head.appendChild(link);
     });
   }
 
@@ -2503,7 +2558,8 @@ function clampPopupToViewport(anchor, popup) {
     if (!form) return;
 
     var theme = form.querySelector('select[name="theme"]');
-    if (theme && THEMES.indexOf(theme.value) !== -1) {
+    if (theme && THEMES.indexOf(theme.value) !== -1 &&
+        theme.value === document.documentElement.getAttribute('data-active-theme')) {
       setPublicPreferenceCookie('rustchan_theme', theme.value);
     }
 
@@ -2547,10 +2603,12 @@ function clampPopupToViewport(anchor, popup) {
     });
   }
 
-  window.setTheme = function (t, href) {
-    try { localStorage.setItem('rustchan_theme', t); } catch (e) {}
-    applyTheme(t);
-    persistTheme(t, href);
+  window.setTheme = function (t) {
+    if (THEMES.indexOf(t) === -1) return;
+    var select = document.querySelector('.user-preferences-form select[name="theme"]');
+    if (!select) return;
+    select.value = t;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
     closeThemePicker();
   };
 
@@ -2729,14 +2787,68 @@ function clampPopupToViewport(anchor, popup) {
         status.dataset.state = state || '';
       }
 
+      var themeLoading = false;
+      var themeChange = 0;
+      var preferenceSavePending = false;
+      var preferenceSaveQueued = false;
+      var preferenceReloadNeeded = false;
+
+      function saveUserPreferences() {
+        if (themeLoading || preferenceSavePending) {
+          preferenceSaveQueued = true;
+          return;
+        }
+        preferenceSavePending = true;
+        persistUserPreferencesForm(form).then(function (saved) {
+          preferenceSavePending = false;
+          if (themeLoading) {
+            preferenceSaveQueued = true;
+            return;
+          }
+          if (preferenceSaveQueued) {
+            preferenceSaveQueued = false;
+            // An older response can set cookies. Reapply the current selection
+            // and save it only after that response, so the newest choice wins.
+            mirrorUserPreferencesToCookies(form);
+            saveUserPreferences();
+            return;
+          }
+          if (!saved) {
+            setPreferenceStatus('Could not save. Try the change again.', 'error');
+            return;
+          }
+          setPreferenceStatus('Saved.', 'saved');
+          if (preferenceReloadNeeded) window.location.reload();
+        });
+      }
+
       form.addEventListener('change', function (event) {
         var control = event.target;
         if (!control || !control.name) return;
 
         var hadNsfwNodes = Boolean(document.querySelector('[data-board-nsfw="1"]'));
         if (control.name === 'theme') {
-          try { localStorage.setItem('rustchan_theme', control.value); } catch (e) {}
-          applyTheme(control.value);
+          var change = ++themeChange;
+          themeLoading = true;
+          setPreferenceStatus('Loading theme…', 'saving');
+          applyTheme(control.value).then(function (applied) {
+            if (change !== themeChange) return;
+            themeLoading = false;
+            if (!applied) {
+              syncThemeControls(document.documentElement.getAttribute('data-active-theme'));
+              setPreferenceStatus('Could not load theme. Try the change again.', 'error');
+              if (preferenceSaveQueued) {
+                preferenceSaveQueued = false;
+                mirrorUserPreferencesToCookies(form);
+                saveUserPreferences();
+              }
+              return;
+            }
+            mirrorUserPreferencesToCookies(form);
+            setPreferenceStatus('Saving…', 'saving');
+            saveUserPreferences();
+          });
+          return;
         } else if (control.name === 'hide_nsfw_boards') {
           applyHideNsfwPreference(control.checked);
         } else if (control.name === 'show_activity_badges') {
@@ -2747,19 +2859,10 @@ function clampPopupToViewport(anchor, popup) {
 
         mirrorUserPreferencesToCookies(form);
         setPreferenceStatus('Saving…', 'saving');
-        persistUserPreferencesForm(form).then(function (saved) {
-          if (!saved) {
-            setPreferenceStatus('Could not save. Try the change again.', 'error');
-            return;
-          }
-          setPreferenceStatus('Saved.', 'saved');
-          if (
-            control.name === 'preferred_board_view' ||
-            (control.name === 'hide_nsfw_boards' && !control.checked && !hadNsfwNodes)
-          ) {
-            window.location.reload();
-          }
-        });
+        preferenceReloadNeeded = preferenceReloadNeeded ||
+          control.name === 'preferred_board_view' ||
+          (control.name === 'hide_nsfw_boards' && !control.checked && !hadNsfwNodes);
+        saveUserPreferences();
       });
     });
   }
@@ -2785,29 +2888,15 @@ function clampPopupToViewport(anchor, popup) {
     });
   });
 
-  // The cookie-backed server selection is authoritative on page load. The
-  // localStorage copy only keeps already-open tabs visually in sync with the
-  // last server-rendered theme.
-  (function () {
-    var active = document.documentElement.getAttribute('data-active-theme') ||
-      document.documentElement.getAttribute('data-theme') ||
-      document.documentElement.getAttribute('data-default-theme') ||
-      'forest';
-    if (!active || THEMES.indexOf(active) === -1) {
-      active = document.documentElement.getAttribute('data-default-theme') || 'forest';
-    }
-    if (active && THEMES.indexOf(active) !== -1) {
-      applyTheme(active);
-      try { localStorage.setItem('rustchan_theme', active); } catch (e) {}
-    }
-  }());
+  // Cookie-backed server rendering is authoritative. localStorage is only a
+  // compatibility mirror, never an initialization or persistence source.
+  syncThemeControls(document.documentElement.getAttribute('data-active-theme'));
 
   initUserPreferencesPanels();
   initUserPreferencesForms();
 })();
 
-// ─── Collapse greentext blocks ────────────────────────────────────────────────
-
+// Collapse greentext blocks
 (function () {
   if (document.body && document.body.getAttribute('data-collapse-greentext') === '1') {
     document.querySelectorAll('details.greentext-block').forEach(function (el) {
@@ -2816,8 +2905,7 @@ function clampPopupToViewport(anchor, popup) {
   }
 })();
 
-// ─── Thread auto-update ───────────────────────────────────────────────────────
-
+// Thread auto-update
 (function () {
   var container = document.getElementById('thread-posts');
   var statusEls = Array.prototype.slice.call(
@@ -2841,7 +2929,8 @@ function clampPopupToViewport(anchor, popup) {
   var lastBoardsVersion = -1;
 
   // Floating new-replies pill
-  var pill = document.createElement('div');
+  var pill = document.createElement('button');
+  pill.type = 'button';
   pill.id = 'new-replies-pill';
   pill.className = 'new-replies-pill';
   pill.style.display = 'none';
@@ -2917,11 +3006,17 @@ function clampPopupToViewport(anchor, popup) {
       document.querySelectorAll('[data-role="thread-reply-count"]').forEach(function (el) {
         el.textContent = data.reply_count;
       });
+      if (data.reply_count > 0) {
+        container.querySelectorAll('.post.op .self-action-controls .del-btn').forEach(function (link) {
+          var controls = link.closest('.self-action-controls');
+          link.remove();
+          if (controls && !controls.querySelector('a')) {
+            window.clearInterval(controls._selfActionTimer);
+            controls.remove();
+          }
+        });
+      }
     }
-    var lockedEl = document.getElementById('thread-locked-indicator');
-    if (lockedEl && data.locked !== undefined) lockedEl.style.display = data.locked ? '' : 'none';
-    var stickyEl = document.getElementById('thread-sticky-indicator');
-    if (stickyEl && data.sticky !== undefined) stickyEl.style.display = data.sticky ? '' : 'none';
   }
 
   function collectRefreshPostIds() {
@@ -2963,6 +3058,40 @@ function clampPopupToViewport(anchor, popup) {
     fetchWithTimeout(url, { credentials: 'same-origin' }, 30000)
       .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
       .then(function (data) {
+        if (['locked', 'archived'].some(function (state) {
+          return typeof data[state] === 'boolean' && String(data[state]) !== container.dataset[state];
+        })) {
+          // Refresh badges, posting permissions, and moderation controls together.
+          // Persist any draft before replacing the server-rendered thread state.
+          flushReplyDraftStorage();
+          window.location.reload();
+          return;
+        }
+        if (typeof data.sticky === 'boolean' && String(data.sticky) !== container.dataset.sticky) {
+          container.dataset.sticky = String(data.sticky);
+          var meta = container.querySelector('.post.op .post-meta');
+          if (meta) {
+            var badges = meta.querySelector('.thread-state-badges');
+            if (data.sticky) {
+              if (!badges) {
+                badges = document.createElement('span');
+                badges.className = 'thread-state-badges';
+                meta.querySelector('.post-num').insertAdjacentElement('afterend', badges);
+              }
+              badges.insertAdjacentHTML('afterbegin', '<span class="thread-state-badge thread-state-badge-pin" title="Pinned" aria-label="Pinned">&#128204;</span>');
+            } else if (badges) {
+              var pin = badges.querySelector('.thread-state-badge-pin');
+              if (pin) pin.remove();
+              if (!badges.children.length) badges.remove();
+            }
+          }
+          document.querySelectorAll('.admin-toolbar input[name="action"]').forEach(function (input) {
+            if (input.value !== 'sticky' && input.value !== 'unsticky') return;
+            input.value = data.sticky ? 'unsticky' : 'sticky';
+            var button = input.form.querySelector('button[type="submit"]');
+            if (button) button.textContent = '\uD83D\uDCCC ' + (data.sticky ? 'Unsticky' : 'Sticky');
+          });
+        }
         consecutiveUpdateFailures = 0;
         if (autoOn && timer) {
           clearInterval(timer);
@@ -2989,6 +3118,10 @@ function clampPopupToViewport(anchor, popup) {
             var navEl = document.querySelector('nav.board-list');
             if (navEl) navEl.innerHTML = data.nav_html;
           }
+          if (data.mobile_nav_html !== undefined) {
+            var mobileNav = document.getElementById('mobile-board-menu-panel');
+            if (mobileNav) mobileNav.innerHTML = data.mobile_nav_html;
+          }
         }
         setStatus(
           data.count > 0
@@ -3006,9 +3139,8 @@ function clampPopupToViewport(anchor, popup) {
           15000 * Math.pow(2, Math.min(consecutiveUpdateFailures - 1, 2))
         );
         setStatus(
-          error && error.name === 'AbortError'
-            ? 'Update timed out. Retrying in ' + Math.round(delayMs / 1000) + 's.'
-            : 'Update failed. Retrying in ' + Math.round(delayMs / 1000) + 's.',
+          (error && error.name === 'AbortError' ? 'Update timed out. ' : 'Update failed. ') +
+            (autoOn ? 'Retrying in ' + Math.round(delayMs / 1000) + 's.' : 'Use Update now to retry.'),
           { state: 'error', persist: true }
         );
         setUpdateButtonsBusy(false);
@@ -3038,8 +3170,7 @@ function clampPopupToViewport(anchor, popup) {
   window._toggleAutoUpdate = toggleAutoUpdate;
 })();
 
-// ─── "(You)" post tracking ────────────────────────────────────────────────────
-
+// "(You)" post tracking
 (function () {
   var container = document.getElementById('thread-posts');
   if (!container) return;
@@ -3166,8 +3297,7 @@ function clampPopupToViewport(anchor, popup) {
   });
 })();
 
-// ─── Quotelink hover preview ──────────────────────────────────────────────────
-
+// Quotelink hover preview
 (function () {
   var _highlighted = null;
   var _missingHashNotice = null;
@@ -3242,7 +3372,7 @@ function clampPopupToViewport(anchor, popup) {
 
   function syncQuotedPostState(root) {
     (root || document)
-      .querySelectorAll('a.quotelink[data-pid], a.backref[data-pid]')
+      .querySelectorAll('a.quotelink[data-pid]:not(.crosslink), a.backref[data-pid]')
       .forEach(function (link) {
         updatePostRefState(link);
       });
@@ -3296,6 +3426,7 @@ function clampPopupToViewport(anchor, popup) {
     clone.querySelectorAll('.post-controls, .admin-post-controls, .post-toggle-bar').forEach(function (n) { n.remove(); });
     popup.innerHTML = '';
     popup.appendChild(clone);
+    popup.dataset.previewKey = 'local:' + pid;
     popup.style.display = 'block';
     _popupTarget = pid;
     positionPopup(link);
@@ -3312,11 +3443,10 @@ function clampPopupToViewport(anchor, popup) {
     _popupTarget = null;
   }
 
-  // Show an inline "post not found" notice anchored to the clicked quotelink.
-  // Reuses the existing hover popup element so the style is identical to a
-  // real post preview — no new DOM structure needed.
+  // Missing-post notices reuse the preview popup for consistent positioning.
   function showMissingPostPopup(link, pid) {
     clearTimeout(_hideTimer);
+    popup.dataset.previewKey = 'local:' + pid;
     popup.innerHTML =
       '<div class="missing-post-notice">' +
       '<span class="missing-post-icon">&#x2715;</span> ' +
@@ -3332,7 +3462,7 @@ function clampPopupToViewport(anchor, popup) {
   }
 
   function wireQuotelinks(root) {
-    root.querySelectorAll('a.quotelink[data-pid]').forEach(function (link) {
+    root.querySelectorAll('a.quotelink[data-pid]:not(.crosslink)').forEach(function (link) {
       if (link.dataset.quotelinkWired === '1') return;
       link.dataset.quotelinkWired = '1';
       var pid = link.getAttribute('data-pid');
@@ -3342,8 +3472,6 @@ function clampPopupToViewport(anchor, popup) {
       link.addEventListener('click', function (e) {
         var target = document.getElementById('p' + pid);
         if (!target) {
-          // Post is not on this page (deleted or in another thread).
-          // Prevent navigation and show an inline error anchored to the link.
           e.preventDefault();
           e.stopPropagation();
           showMissingPostPopup(link, pid);
@@ -3391,7 +3519,7 @@ function clampPopupToViewport(anchor, popup) {
     document.querySelectorAll('#thread-posts .backrefs').forEach(function (span) {
       span.innerHTML = '';
     });
-    document.querySelectorAll('#thread-posts a.quotelink[data-pid]').forEach(function (link) {
+    document.querySelectorAll('#thread-posts a.quotelink[data-pid]:not(.crosslink)').forEach(function (link) {
       var citedPid = link.getAttribute('data-pid');
       var postEl = link.closest('.post');
       if (!postEl) return;
@@ -3429,8 +3557,7 @@ function clampPopupToViewport(anchor, popup) {
   };
 })();
 
-// ─── Cross-board quotelink hover preview ─────────────────────────────────────
-
+// Cross-board quotelink hover preview
 (function () {
   var _cbCache = {};
   var _cbInFlight = {};
@@ -3442,17 +3569,18 @@ function clampPopupToViewport(anchor, popup) {
     var key = board + ':' + pid;
     var popup = getCbPopup();
     if (!popup) return;
+    popup.dataset.previewKey = key;
     if (_cbCache[key]) {
       popup.innerHTML = _cbCache[key].html;
       popup.style.display = 'block';
       positionCbPopup(link, popup);
       return;
     }
-    if (_cbInFlight[key]) return;
-    _cbInFlight[key] = true;
     popup.innerHTML = '<div style="padding:8px;color:var(--text-dim)">loading\u2026</div>';
     popup.style.display = 'block';
     positionCbPopup(link, popup);
+    if (_cbInFlight[key]) return;
+    _cbInFlight[key] = true;
 
     fetch('/api/post/' + board + '/' + pid, { credentials: 'same-origin' })
       .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
@@ -3464,15 +3592,22 @@ function clampPopupToViewport(anchor, popup) {
           document.querySelectorAll('a.crosslink[data-crossboard="' + board + '"][data-pid="' + pid + '"]')
             .forEach(function (a) { a.href = directHref; });
         }
-        if (popup.style.display !== 'none') {
+        if (popup.style.display !== 'none' && popup.dataset.previewKey === key) {
           popup.innerHTML = _cbCache[key].html;
           positionCbPopup(link, popup);
         }
       })
-      .catch(function () {
+      .catch(function (error) {
         delete _cbInFlight[key];
-        _cbCache[key] = { html: '<div style="padding:8px;color:var(--red,#f55)">Post not found</div>', thread_id: 0 };
-        if (popup.style.display !== 'none') popup.innerHTML = _cbCache[key].html;
+        var missing = error === 404 || error === 410;
+        var errorHtml = '<div class="missing-post-notice">' +
+          (missing ? 'Post not found' : 'Preview unavailable. Click the link to retry.') + '</div>';
+        // A failed connection or permission check is not a missing post.
+        if (missing) _cbCache[key] = { html: errorHtml, thread_id: 0 };
+        if (popup.style.display !== 'none' && popup.dataset.previewKey === key) {
+          popup.innerHTML = errorHtml;
+          positionCbPopup(link, popup);
+        }
       });
   }
 
@@ -3508,38 +3643,37 @@ function clampPopupToViewport(anchor, popup) {
         function navigate(threadId) {
           window.location.href = '/' + board + '/thread/' + threadId + '#p' + pid;
         }
-        function showCbMissingError() {
+        function showCbError(missing) {
           var cbPopup = getCbPopup();
           if (!cbPopup) return;
-          link.classList.add('missing-post-ref');
-          link.setAttribute('title', 'post not found');
+          cbPopup.dataset.previewKey = key;
+          link.classList.toggle('missing-post-ref', missing);
+          if (missing) link.setAttribute('title', 'post not found');
+          else link.removeAttribute('title');
           cbPopup.innerHTML =
             '<div class="missing-post-notice">' +
             '<span class="missing-post-icon">&#x2715;</span> ' +
-            '<strong>&gt;&gt;&gt;/' + board + '/' + pid + '</strong> — post not found' +
-            '<span class="missing-post-sub">it may have been deleted</span>' +
+            '<strong>&gt;&gt;&gt;/' + board + '/' + pid + '</strong> — ' +
+            (missing ? 'post not found<span class="missing-post-sub">it may have been deleted</span>' :
+              'could not load post<span class="missing-post-sub">try the link again</span>') +
             '</div>';
           cbPopup.style.display = 'block';
           positionCbPopup(link, cbPopup);
           setTimeout(function () { if (cbPopup) cbPopup.style.display = 'none'; }, 3000);
         }
-        // If we already know the thread ID from a prior hover-preview fetch, navigate directly.
         if (_cbCache[key] && _cbCache[key].thread_id) { navigate(_cbCache[key].thread_id); return; }
-        // If a prior fetch already confirmed the post is gone, show error inline.
-        if (_cbCache[key] && !_cbCache[key].thread_id) { showCbMissingError(); return; }
+        if (_cbCache[key] && !_cbCache[key].thread_id) { showCbError(true); return; }
         fetch('/api/post/' + board + '/' + pid, { credentials: 'same-origin' })
           .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
           .then(function (data) {
             if (data.thread_id) {
               navigate(data.thread_id);
             } else {
-              // API returned success but no thread_id — post is orphaned/deleted.
-              showCbMissingError();
+              showCbError(true);
             }
           })
-          .catch(function () {
-            // 404 or network error — post is gone; show error inline.
-            showCbMissingError();
+          .catch(function (error) {
+            showCbError(error === 404 || error === 410);
           });
       });
     });
@@ -3553,8 +3687,7 @@ function clampPopupToViewport(anchor, popup) {
   };
 })();
 
-// ─── Admin ban+delete ─────────────────────────────────────────────────────────
-
+// Admin ban+delete
 function clearBanDeletePreparation(form) {
   if (!form) return;
   form.dataset.banDeletePrepared = '';
@@ -3665,8 +3798,7 @@ function submitBanDeleteModal() {
   requestFormSubmit(targetForm, targetSubmitter);
 }
 
-// ─── Poll management ──────────────────────────────────────────────────────────
-
+// Poll management
 function getPollOptionMaxLength(list) {
   if (!list) return 200;
   return parseInt(list.dataset.pollOptionMaxlength, 10) || 200;
@@ -3709,8 +3841,7 @@ function updateRemoveButtons() {
   });
 }
 
-// ─── Catalog sort ─────────────────────────────────────────────────────────────
-
+// Catalog sort
 function sortCatalog(mode) {
   try { sessionStorage.setItem('catalog_sort', mode); } catch (e) {}
   var grid = document.getElementById('catalog-grid');
@@ -3767,26 +3898,29 @@ function togglePosterHighlights(threadId, posterId) {
 
 // Restore saved catalog controls on page load
 (function () {
+  var sortValue = 'bump';
+  var showComment = 'off';
   try {
-    var sortValue = sessionStorage.getItem('catalog_sort') || 'bump';
-    var sortSelect = document.getElementById('catalog-sort');
-    if (sortSelect) {
-      sortSelect.value = sortValue;
-      sortCatalog(sortValue);
-    }
-
-    var showComment = sessionStorage.getItem('catalog_show_comment') || 'off';
-    var commentSelect = document.getElementById('catalog-show-comment');
-    if (commentSelect) {
-      commentSelect.value = showComment;
-      setCatalogCommentVisibility(showComment);
-    }
+    sortValue = sessionStorage.getItem('catalog_sort') || 'bump';
+    showComment = sessionStorage.getItem('catalog_show_comment') === 'on' ? 'on' : 'off';
   } catch (e) {}
+  // Storage may be unavailable, malformed, or left over from an older version.
+  if (['bump', 'replies', 'created', 'last_reply'].indexOf(sortValue) === -1) sortValue = 'bump';
+  var sortSelect = document.getElementById('catalog-sort');
+  if (sortSelect) {
+    sortSelect.disabled = false;
+    sortSelect.value = sortValue;
+    sortCatalog(sortValue);
+  }
+  var commentSelect = document.getElementById('catalog-show-comment');
+  if (commentSelect) {
+    commentSelect.disabled = false;
+    commentSelect.value = showComment;
+    setCatalogCommentVisibility(showComment);
+  }
 })();
 
-// ─── Centralised event delegation ────────────────────────────────────────────
-// Replaces all inline onclick=/onchange=/onsubmit= attribute handlers.
-
+// Centralised event delegation
 document.addEventListener('click', function (e) {
   if (
     e.target === document.getElementById('ban-delete-modal') ||
@@ -4016,6 +4150,35 @@ document.addEventListener('submit', function (e) {
 });
 
 document.addEventListener('keydown', function (e) {
+  if (e.key === 'Tab') {
+    var dialogs = Array.prototype.filter.call(
+      document.querySelectorAll('[role="dialog"][aria-modal="true"]'),
+      function (dialog) { return dialog.getClientRects().length && !dialog.hidden; }
+    );
+    var dialog = dialogs[dialogs.length - 1];
+    if (dialog) {
+      var controls = Array.prototype.filter.call(
+        dialog.querySelectorAll('a[href], button, input, select, textarea, summary, [tabindex]'),
+        function (control) {
+          return !control.disabled && control.tabIndex >= 0 &&
+            !control.closest('[inert]') && control.getClientRects().length &&
+            window.getComputedStyle(control).visibility !== 'hidden';
+        }
+      );
+      var first = controls[0];
+      var last = controls[controls.length - 1];
+      if (!first) {
+        e.preventDefault();
+        dialog.setAttribute('tabindex', '-1');
+        dialog.focus();
+      } else if (!dialog.contains(document.activeElement) ||
+        (e.shiftKey && document.activeElement === first) ||
+        (!e.shiftKey && document.activeElement === last)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      }
+    }
+  }
   if (e.key === 'Escape') {
     if (ensureBanDeleteModal() && isModalOpen(_banDeleteModal)) {
       e.preventDefault();
@@ -4060,18 +4223,16 @@ if (window.visualViewport) {
     var url  = span.getAttribute('data-url') || span.textContent.trim();
     if (!type || !id) return;
 
-    // Validate: only allow known embed types to prevent arbitrary iframe injection
+    // Allow only known embed types to prevent arbitrary iframe injection.
     if (type !== 'youtube' && type !== 'streamable') return;
 
-    // Validate YouTube ID format: 11 alphanumeric / dash / underscore chars
+    // Constrain provider IDs before interpolating them into embed URLs.
     if (type === 'youtube' && !/^[A-Za-z0-9_-]{11}$/.test(id)) return;
     if (type === 'streamable' && !/^[A-Za-z0-9_-]{1,16}$/.test(id)) return;
 
-    // ── outer container: matches .file-container webm layout ─────────────
     var container = document.createElement('div');
     container.className = 'file-container video-embed-container';
 
-    // ── file-info row (link + close button) ───────────────────────────────
     var info = document.createElement('div');
     info.className = 'file-info';
     var a = document.createElement('a');
@@ -4091,7 +4252,6 @@ if (window.visualViewport) {
     info.appendChild(closeBtn);
     container.appendChild(info);
 
-    // ── thumbnail preview (styled like webm .media-preview) ───────────────
     var preview = document.createElement('button');
     preview.type = 'button';
     preview.className = 'media-preview';
@@ -4124,7 +4284,6 @@ if (window.visualViewport) {
     });
     container.appendChild(preview);
 
-    // ── move container before the post-body; remove span from body text ───
     var postBody = span.closest('.post-body');
     if (postBody && postBody.parentNode) {
       span.remove();
@@ -4148,7 +4307,7 @@ if (window.visualViewport) {
   };
 })();
 
-// ─── Draft autosave ───────────────────────────────────────────────────────────
+// Draft autosave
 // The draft key is read from data-draft-key on #thread-config.
 
 (function () {
@@ -4166,7 +4325,6 @@ if (window.visualViewport) {
   // restore runs.
   consumeSubmittedReplyDraft();
 
-  // Restore saved draft on page load
   try {
     var saved = localStorage.getItem(DRAFT_KEY);
     var savedMode = localStorage.getItem(DRAFT_META_KEY);
@@ -4213,7 +4371,7 @@ if (window.visualViewport) {
   }
 })();
 
-// ─── Report modal backdrop click ──────────────────────────────────────────────
+// Report modal backdrop click
 document.addEventListener('click', function (e) {
   var editModal = document.getElementById('edit-modal');
   if (editModal && e.target === editModal.querySelector('.edit-modal-backdrop')) {
@@ -4223,8 +4381,7 @@ document.addEventListener('click', function (e) {
   if (modal && e.target === modal) closeReportModal();
 });
 
-// ─── Appeal page: fill CSRF from cookie ──────────────────────────────────────
-// Replaces the inline <script> that was previously on the ban/appeal page.
+// Appeal page: fill CSRF from cookie
 (function () {
   var field = document.getElementById('appeal-csrf-field');
   if (!field) return;
@@ -4232,7 +4389,7 @@ document.addEventListener('click', function (e) {
   if (c) field.value = c.split('=')[1];
 })();
 
-// ─── Rate-limit page redirect ────────────────────────────────────────────────
+// Rate-limit page redirect
 (function () {
   if (!document.body || document.body.dataset.rateLimitPage !== '1') return;
   setTimeout(function () {

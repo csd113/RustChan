@@ -62,10 +62,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     };
 
     format!(
-        r#"<!-- ═══════════════════════════════════════════════════════════════════════════
-     // control center
-     ═══════════════════════════════════════════════════════════════════════════ -->
-<section class="admin-section admin-section-collapsible" id="control-center" aria-labelledby="control-center-title">
+        r#"<section class="admin-section admin-section-collapsible" id="control-center" aria-labelledby="control-center-title">
 <details class="admin-dropdown" data-admin-dropdown-key="control-center"{default_open_attr}{open_attr}>
 <summary><h2 id="control-center-title"><span>// control center</span><span class="admin-dropdown-badges">{overall_status}</span></h2></summary>
 <div class="admin-dropdown-content admin-control-center">

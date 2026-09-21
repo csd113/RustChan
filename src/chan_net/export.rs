@@ -16,13 +16,14 @@ use axum::{extract::State, http::header, response::IntoResponse};
 pub async fn chan_export(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, super::ChanError> {
-    let conn = state.db.get()?;
-
-    let (zip_bytes, _tx_id) =
-        tokio::task::spawn_blocking(move || super::snapshot::build_snapshot(&conn))
-            .await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-            .map_err(AppError::from)?;
+    let pool = state.db.clone();
+    let (zip_bytes, _tx_id) = tokio::task::spawn_blocking(move || {
+        let conn = pool.get()?;
+        super::snapshot::build_snapshot(&conn)
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
+    .map_err(AppError::from)?;
 
     Ok((
         axum::http::StatusCode::OK,

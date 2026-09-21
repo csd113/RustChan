@@ -2,6 +2,9 @@
 // Covers full-site backups, board-level backups, streaming downloads,
 // saved-backup restoration, and live board.json restore.
 
+/// Original tracing target, retained for existing `RUST_LOG` filters.
+const LOG_TARGET: &str = concat!(env!("CARGO_CRATE_NAME"), "::handlers::admin::backup");
+
 use crate::{
     banner,
     config::CONFIG,
@@ -38,45 +41,33 @@ use super::{
     AdminPanelTarget, ADMIN_COOKIE_SAME_SITE, SESSION_COOKIE,
 };
 
-/// Implements archive handler support.
 mod archive;
-/// Implements common handler support.
-mod common;
-/// Implements create handler support.
+mod board_manifest;
 mod create;
-/// Implements downloads handler support.
 mod downloads;
-/// Implements HTTP handler support.
 mod http;
-/// Implements listing handler support.
 mod listing;
-/// Implements restore board handler support.
 mod restore_board;
-/// Implements restore full handler support.
 mod restore_full;
-mod saved_backup;
-/// Implements types handler support.
-mod types;
-pub(crate) use saved_backup::BackupStorageMode;
+mod safety;
+mod storage;
+pub(in crate::server) use storage::BackupStorageMode;
 
-use common::{
+pub(in crate::server) use create::*;
+pub(in crate::server) use downloads::{backup_progress_json, delete_backup, download_backup};
+pub(in crate::server) use http::backup_request_logging_middleware;
+pub(in crate::server) use listing::{list_backup_files, BackupListKind};
+pub(in crate::server) use restore_board::{
+    board_restore, extract_board_from_full_backup, restore_saved_board_backup,
+};
+pub(in crate::server) use restore_full::{admin_restore, restore_saved_full_backup};
+use safety::{
     copy_limited, create_staging_dir, extract_uploads_to_dir, log_backup_phase,
     log_backup_progress, read_limited_bytes, remap_body_quotelinks, remove_path_if_exists,
-    render_restored_body_html, restore_safe_relative_path_under_prefix, validate_board_short_name,
+    render_restored_body_html, validate_board_short_name, validate_entry_path_under_prefix,
     validate_restore_safe_entry_name, verify_full_backup_archive, BANNER_RESTORE_ENTRY_MAX_BYTES,
     BANNER_RESTORE_TOTAL_MAX_BYTES, BOARD_MANIFEST_MAX_BYTES, ZIP_ENTRY_MAX_BYTES,
 };
-pub(crate) use create::*;
-pub(crate) use downloads::{
-    backup_progress_json, delete_backup, download_backup, write_temp_board_download_token,
-};
-pub(crate) use http::backup_request_logging_middleware;
-pub(crate) use listing::{invalidate_backup_list_cache, list_backup_files, BackupListKind};
-pub(crate) use restore_board::{
-    board_restore, extract_board_from_full_backup, restore_saved_board_backup,
-};
-pub(crate) use restore_full::{admin_restore, restore_saved_full_backup};
-use types::board_backup_types;
 
 /// Full backup restore section used by this handler.
 const FULL_BACKUP_RESTORE_SECTION: &str = "full-backup-restore";
@@ -86,20 +77,15 @@ const BOARD_BACKUP_RESTORE_SECTION: &str = "board-backup-restore";
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 #[derive(Deserialize)]
-/// Form fields accepted by the restore saved request.
-pub(crate) struct RestoreSavedForm {
-    /// The filename.
+pub(in crate::server) struct RestoreSavedForm {
     filename: String,
-    #[serde(default, deserialize_with = "form_checkbox_bool")]
-    /// Whether to restore Tor hidden service keys.
+    #[serde(default, deserialize_with = "deserialize_form_checkbox")]
     restore_tor_hidden_service_keys: bool,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
-/// Performs the form checkbox bool handler operation.
-fn form_checkbox_bool<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+fn deserialize_form_checkbox<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -107,7 +93,6 @@ where
     Ok(form_checkbox_value_is_on(value.as_deref()))
 }
 
-/// Performs the form checkbox value is on handler operation.
 fn form_checkbox_value_is_on(value: Option<&str>) -> bool {
     value == Some("1")
         || value.is_some_and(|item| item.eq_ignore_ascii_case("on"))
@@ -115,27 +100,26 @@ fn form_checkbox_value_is_on(value: Option<&str>) -> bool {
 }
 
 use archive::{
-    canonicalize_restored_banner_dir, create_temp_board_backup_from_full_backup_path,
-    create_temp_legacy_board_backup_from_saved_full_v4_path,
-    create_temp_legacy_board_backup_from_v4_path, create_temp_legacy_full_backup_from_v4_path,
-    create_temp_legacy_full_backup_from_v4_transfer_zip, parse_board_backup_manifest_from_zip,
-    validate_full_restore_archive_layout,
+    canonicalize_restored_banner_dir, convert_transfer_zip_to_full_restore_archive,
+    extract_board_archive_from_full_backup, extract_board_archive_from_saved_full_backup,
+    parse_board_backup_manifest_from_zip, prepare_saved_board_restore_archive,
+    prepare_saved_full_restore_archive, validate_full_restore_archive_layout,
 };
-use downloads::prune_stale_temp_board_downloads;
 #[cfg(test)]
 use downloads::{consume_temp_board_download_token, temp_board_download_token_path};
+use downloads::{prune_stale_temp_board_downloads, write_temp_board_download_token};
 #[cfg(test)]
 use http::admin_xhr_error_response;
 use http::{
     is_xml_http_request, log_restore_upload_started, redirect_page_response,
     restore_auth_preflight, restore_error_redirect_target, restore_failure_response,
     restore_start_response, restore_success_redirect_target, restore_upload_parse_response,
-    sanitize_backup_zip_filename, sanitize_board_short_value, sanitize_saved_backup_ref,
-    stream_restore_upload_to_tempfile, validate_streamed_restore_upload, RestoreKind,
+    sanitize_board_short_value, stream_restore_upload_to_tempfile, validate_backup_zip_filename,
+    validate_saved_backup_reference, validate_streamed_restore_upload, RestoreKind,
 };
-use listing::latest_saved_board_backup_filename as latest_board_backup_filename;
-pub(crate) use listing::{
-    enforce_full_backup_retention, latest_verified_full_backup_modified_time,
+pub(in crate::server) use listing::latest_verified_full_backup_modified_time;
+use listing::{
+    enforce_full_backup_retention, invalidate_backup_list_cache, latest_board_backup_reference,
 };
 #[cfg(test)]
 use listing::{latest_verified_full_backup_modified_time_in_dir, prune_full_backup_dir_to_limit};
@@ -145,13 +129,11 @@ use restore_board::execute_board_restore;
 use restore_full::refresh_live_site_state_from_db;
 use restore_full::restore_db_from_snapshot;
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "database snapshotting, archive creation, and temporary-file cleanup form one operation"
 )]
-/// Handles the admin backup request.
-pub(crate) async fn admin_backup(
+pub(in crate::server) async fn admin_backup(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Response> {
@@ -238,13 +220,13 @@ pub(crate) async fn admin_backup(
                 let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(|e| {
                     AppError::Internal(anyhow::anyhow!("Serialize full backup manifest: {e}"))
                 })?;
-                zip.start_file(common::FULL_BACKUP_MANIFEST_NAME, opts)
+                zip.start_file(safety::FULL_BACKUP_MANIFEST_NAME, opts)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip backup manifest: {e}")))?;
                 zip.write_all(&manifest_json).map_err(|e| {
                     AppError::Internal(anyhow::anyhow!("Write backup manifest: {e}"))
                 })?;
 
-                // ── Database snapshot (streamed, not read into RAM) ────────
+                // Database snapshot (streamed, not read into RAM)
                 zip.start_file("chan.db", opts)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip DB entry: {e}")))?;
                 let mut db_src = std::fs::File::open(&temp_db)
@@ -257,7 +239,7 @@ pub(crate) async fn admin_backup(
                 progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
                 log_backup_progress(&progress);
 
-                // ── Upload files (streamed file-by-file via io::copy) ──────
+                // Upload files (streamed file-by-file via io::copy)
                 if uploads_base.exists() {
                     add_dir_to_zip(&mut zip, uploads_base, uploads_base, opts, &progress)?;
                 }
@@ -300,7 +282,7 @@ pub(crate) async fn admin_backup(
                 return Err(error);
             }
 
-            if let Err(error) = common::verify_full_backup_zip(zip_tmp.path()) {
+            if let Err(error) = safety::verify_full_backup_zip(zip_tmp.path()) {
                 drop(std::fs::remove_file(&temp_db));
                 return Err(error);
             }
@@ -402,7 +384,6 @@ fn add_dir_to_zip<W: Write + Seek>(
     add_dir_to_zip_with_prefix(zip, base, dir, "uploads", opts, progress)
 }
 
-/// Performs the add dir to ZIP with prefix handler operation.
 pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
     zip: &mut zip::ZipWriter<W>,
     base: &Path,
@@ -421,7 +402,7 @@ pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
             AppError::Internal(anyhow::anyhow!("inspect {}: {error}", path.display()))
         })?;
         if metadata.file_type().is_symlink() {
-            tracing::warn!(path = %path.display(), "skipping symlink during backup traversal");
+            tracing::warn!(target: LOG_TARGET, path = %path.display(), "skipping symlink during backup traversal");
             continue;
         }
 
@@ -437,7 +418,7 @@ pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
             add_dir_to_zip_with_prefix(zip, base, &path, prefix, opts, progress)?;
         } else if metadata.file_type().is_file() {
             if crate::utils::fs_security::assert_regular_file_no_symlink(&path).is_err() {
-                tracing::warn!(path = %path.display(), "skipping unsafe runtime file during backup");
+                tracing::warn!(target: LOG_TARGET, path = %path.display(), "skipping unsafe runtime file during backup");
                 continue;
             }
             // MEM-FIX: open file, stream through io::copy — no Vec<u8> allocation.
@@ -457,7 +438,6 @@ pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
     Ok(())
 }
 
-/// Performs the ZIP file options for path handler operation.
 fn zip_file_options_for_path(path: &Path) -> zip::write::SimpleFileOptions {
     let method = if should_store_without_recompress(path) {
         zip::CompressionMethod::Stored
@@ -467,7 +447,6 @@ fn zip_file_options_for_path(path: &Path) -> zip::write::SimpleFileOptions {
     zip::write::SimpleFileOptions::default().compression_method(method)
 }
 
-/// Performs the should store without recompress handler operation.
 fn should_store_without_recompress(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -507,23 +486,21 @@ fn should_store_without_recompress(path: &Path) -> bool {
         })
 }
 
-/// rustchan-data/backups/full/
-pub(crate) fn full_backup_dir() -> PathBuf {
+/// Legacy full ZIP directory within the configured backup root.
+pub(in crate::server) fn full_backup_dir() -> PathBuf {
     crate::config::full_backups_dir()
 }
 
-/// rustchan-data/backups/boards/
-pub(crate) fn board_backup_dir() -> PathBuf {
+/// Legacy board ZIP directory within the configured backup root.
+pub(super) fn board_backup_dir() -> PathBuf {
     crate::config::board_backups_dir()
 }
 
-/// Performs the local backup timestamp label handler operation.
 pub(super) fn local_backup_timestamp_label() -> String {
     Local::now().format("%Y%m%d_%H%M%S").to_string()
 }
 
-/// Performs the unique backup filename handler operation.
-pub(crate) fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
+fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
     let candidate = dir.join(base_name);
     if !candidate.exists() {
         return base_name.to_owned();
@@ -548,17 +525,14 @@ pub(crate) fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
 }
 
 /// rustchan-data/runtime/tmp/board-downloads/
-pub(crate) fn temp_board_download_dir() -> PathBuf {
+fn temp_board_download_dir() -> PathBuf {
     crate::config::runtime_temp_board_downloads_dir()
 }
 
-// ─── Board-level backup / restore ─────────────────────────────────────────────
-
+// Board-level backup / restore
 #[derive(Deserialize)]
-/// Query parameters accepted by the board backup download request.
-pub(crate) struct BoardBackupDownloadQuery {
+pub(in crate::server) struct BoardBackupDownloadQuery {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
@@ -566,7 +540,7 @@ pub(crate) struct BoardBackupDownloadQuery {
 ///
 /// MEM-FIX: Same approach as `admin_backup` — build zip into a `NamedTempFile` on
 /// disk, then stream the result in 64 KiB chunks.
-pub(crate) async fn board_backup(
+pub(in crate::server) async fn board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     Query(query): Query<BoardBackupDownloadQuery>,
@@ -597,7 +571,7 @@ pub(crate) async fn board_backup(
             )
             .map_err(|_error| AppError::NotFound(format!("Board '{safe_board}' not found")))?;
 
-            latest_board_backup_filename(&safe_board).ok_or_else(|| {
+            latest_board_backup_reference(&safe_board).ok_or_else(|| {
                 AppError::NotFound(format!(
                     "No saved backup found for /{safe_board}/. Create one from the admin panel first."
                 ))
@@ -607,10 +581,10 @@ pub(crate) async fn board_backup(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    let v4_root = crate::config::backups_dir().join(&filename);
-    if v4_root.is_dir() {
+    let saved_root = crate::config::backups_dir().join(&filename);
+    if saved_root.is_dir() {
         let (temp_zip, temp_name) =
-            create_temp_legacy_board_backup_from_v4_path(&v4_root, Some(&safe_board))?;
+            prepare_saved_board_restore_archive(&saved_root, Some(&safe_board))?;
         let mut temp_zip_guard = archive::TempZipCleanupGuard::new(temp_zip.clone());
         let download_token = new_session_id();
         write_temp_board_download_token(&temp_name, &download_token)?;
@@ -647,9 +621,9 @@ pub(crate) async fn board_backup(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_board_backup_manifest, consume_temp_board_download_token,
-        create_temp_board_backup_from_full_backup_path, execute_board_restore, full_backup_dir,
-        invalidate_backup_list_cache, latest_verified_full_backup_modified_time,
+        build_board_backup_manifest, consume_temp_board_download_token, execute_board_restore,
+        extract_board_archive_from_full_backup, full_backup_dir, invalidate_backup_list_cache,
+        latest_verified_full_backup_modified_time,
         latest_verified_full_backup_modified_time_in_dir, refresh_live_site_state_from_db,
         render_restored_body_html, should_store_without_recompress, temp_board_download_dir,
         temp_board_download_token_path, validate_full_restore_archive_layout,
@@ -670,6 +644,195 @@ mod tests {
     use std::io::{Cursor, Write as _};
     use std::path::{Path, PathBuf};
     use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn backup_directory_admin_rejects_unauthenticated_or_invalid_updates() -> TestResult<()> {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().join("not-created");
+        let state = crate::test_support::app_state();
+        let app = Router::new()
+            .route(
+                "/admin/backup/settings",
+                post(crate::handlers::admin::update_full_backup_settings),
+            )
+            .with_state(state.clone());
+        let body = format!(
+            "_csrf={}&backup_directory={}",
+            admin_signed_csrf(),
+            directory.display()
+        );
+        let response = app
+            .clone()
+            .oneshot(admin_form_post("/admin/backup/settings", body)?)
+            .await?;
+        ensure!(response.status() == StatusCode::FORBIDDEN);
+        ensure!(
+            !directory.exists(),
+            "unauthenticated request created a directory"
+        );
+        install_admin_session(&state)?;
+        for path in ["", "relative", "%00"] {
+            let body = format!("_csrf={}&backup_directory={path}", admin_signed_csrf());
+            let response = app
+                .clone()
+                .oneshot(admin_form_post("/admin/backup/settings", body)?)
+                .await?;
+            ensure!(response.status() == StatusCode::BAD_REQUEST);
+            ensure!(response_body_string(response)
+                .await?
+                .contains("backup_directory"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn backup_directory_operations_are_isolated() -> TestResult<()> {
+        if let Some(data) = std::env::var_os("RUSTCHAN_TEST_BACKUP_DATA") {
+            crate::config::configure_data_dir(Some(Path::new(&data)))?;
+            let legacy = Path::new(&data).join("full-backups");
+            std::fs::create_dir_all(&legacy)?;
+            std::fs::write(legacy.join("migration-marker"), b"existing backup")?;
+            crate::config::migrate_runtime_layout_if_needed()?;
+            ensure!(crate::config::default_backups_dir()
+                .join("full/migration-marker")
+                .is_file());
+            crate::config::generate_settings_file_if_missing();
+            let state = crate::test_support::app_state();
+            crate::config::CONFIG.validate()?;
+            return check_backup_storage_operations(&state);
+        }
+        let thread = std::thread::current();
+        let name = thread.name().context("test thread has no name")?;
+        for source in ["default", "settings", "environment"] {
+            let temp = tempfile::tempdir()?;
+            let data = temp.path().join("data");
+            let mut command = std::process::Command::new(std::env::current_exe()?);
+            command
+                .args(["--exact", name, "--nocapture"])
+                .env("RUSTCHAN_TEST_BACKUP_DATA", &data)
+                .env("CHAN_TOR_SUPPORT", "0")
+                .env_remove("CHAN_BACKUP_DIRECTORY");
+            let custom = temp.path().join("disk/custom-backups");
+            if source == "environment" {
+                command.env("CHAN_BACKUP_DIRECTORY", &custom);
+            } else if source == "settings" {
+                std::fs::create_dir(&data)?;
+                std::fs::write(
+                    data.join("settings.toml"),
+                    format!(
+                        "cookie_secret = \"{}\"\nbackup_directory = {}\n",
+                        "a".repeat(64),
+                        toml::Value::String(custom.display().to_string()),
+                    ),
+                )?;
+            }
+            let output = command.output()?;
+            ensure!(
+                output.status.success(),
+                "backup storage child failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            ensure!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        }
+        Ok(())
+    }
+
+    /// Exercise the shared storage resolver with real archives in an isolated process.
+    fn check_backup_storage_operations(state: &crate::middleware::AppState) -> TestResult<()> {
+        install_admin_session(state)?;
+        let root = crate::config::backups_dir();
+        let default = crate::config::default_backups_dir();
+        ensure!(default == crate::config::data_dir().join("backups"));
+        ensure!(
+            root == crate::config::CONFIG
+                .backup_directory
+                .clone()
+                .unwrap_or_else(|| default.clone())
+        );
+        let old = default.join("full/legacy-original.zip");
+        write_sample_full_backup_zip_at(&old, true)?;
+        let legacy = full_backup_dir().join("legacy-active.zip");
+        write_sample_full_backup_zip_at(&legacy, true)?;
+        invalidate_backup_list_cache(&full_backup_dir(), BackupListKind::Full);
+        let listed = super::list_backup_files(&full_backup_dir(), BackupListKind::Full);
+        ensure!(listed
+            .iter()
+            .any(|backup| backup.filename == "legacy-active.zip"));
+        ensure!(
+            listed
+                .iter()
+                .any(|backup| backup.filename == "legacy-original.zip")
+                == (root == default)
+        );
+        for mode in [
+            super::BackupStorageMode::Directory,
+            super::BackupStorageMode::SplitZip,
+        ] {
+            let filename = super::create_full_backup_to_server(
+                &state.db,
+                None,
+                &state.backup_progress,
+                100,
+                false,
+                mode,
+                1024 * 1024 * 1024,
+            )?;
+            let saved = root.join(&filename);
+            ensure!(saved.is_dir());
+            super::storage::verify_saved_backup(&saved, &[super::storage::BackupScope::FullSite])?;
+            let listed = super::list_backup_files(&full_backup_dir(), BackupListKind::Full);
+            ensure!(listed
+                .iter()
+                .any(|backup| backup.backup_ref == filename && backup.verified));
+            ensure!(latest_verified_full_backup_modified_time().is_some());
+            let zip = super::archive::prepare_saved_full_restore_archive(&saved)?;
+            let _cleanup = PathCleanup(zip.clone());
+            let mut archive = zip::ZipArchive::new(std::fs::File::open(zip)?)?;
+            let mut conn = state.db.get()?;
+            super::restore_full::execute_full_restore(
+                &mut conn,
+                1,
+                &crate::config::CONFIG.upload_dir,
+                None,
+                false,
+                &mut archive,
+                "Storage test",
+                "Storage test",
+                "Storage test",
+                "Storage test",
+            )?;
+        }
+        let removed = super::enforce_full_backup_retention(1)?;
+        ensure!(!removed.is_empty());
+        ensure!(super::list_backup_files(&full_backup_dir(), BackupListKind::Full).len() == 1);
+        if root != default {
+            ensure!(
+                old.is_file(),
+                "retention touched the inactive default location"
+            );
+        }
+        saved_board_restore_success_redirects_back_to_restored_board_section()?;
+        let original = root;
+        let next = crate::config::data_dir()
+            .parent()
+            .context("missing data parent")?
+            .join("next-backups");
+        crate::config::update_settings_file_backup_directory(&next)?;
+        ensure!(
+            crate::config::backups_dir() == original,
+            "saving a directory changed an active operation's root"
+        );
+        ensure!(next.join("full").is_dir());
+        ensure!(
+            crate::config::Config::from_env().backup_directory
+                == Some(
+                    std::env::var_os("CHAN_BACKUP_DIRECTORY")
+                        .map_or(next.canonicalize()?, PathBuf::from)
+                )
+        );
+        Ok(())
+    }
 
     fn zip_with_entries(entries: &[(&str, &[u8])]) -> TestResult<zip::ZipArchive<Cursor<Vec<u8>>>> {
         let mut cursor = Cursor::new(Vec::new());
@@ -1307,7 +1470,7 @@ mod tests {
         ensure!(create_location.contains("open=board-backup-restore"));
         ensure!(create_location.contains(&format!("#board-backup-{board_short}")));
 
-        let filename = super::latest_board_backup_filename(&board_short)
+        let filename = super::latest_board_backup_reference(&board_short)
             .context("created backup filename not found")?;
         let backup_path = crate::config::backups_dir().join(&filename);
         let _backup_cleanup = PathCleanup(backup_path.clone());
@@ -1794,6 +1957,72 @@ mod tests {
     }
 
     #[test]
+    fn board_restore_recomputes_untrusted_reply_counts() -> TestResult<()> {
+        let source_pool = crate::db::init_test_pool().context("create source database pool")?;
+        let source_conn = source_pool
+            .get()
+            .context("get source database connection")?;
+        let board_id = crate::db::create_board(&source_conn, "tech", "Technology", "", false)
+            .context("create source board")?;
+        let (thread_id, _, _) = crate::db::create_thread_with_optional_poll(
+            &source_conn,
+            board_id,
+            Some("counter test"),
+            &sample_post(board_id, 0, "op", true),
+            "",
+            None,
+            None,
+        )
+        .context("create source thread")?;
+        crate::db::create_reply_with_thread_update(
+            &source_conn,
+            &sample_post(board_id, thread_id, "reply", false),
+            "",
+            true,
+            None,
+        )
+        .context("create source reply")?;
+        let mut manifest = build_board_backup_manifest(&source_conn, "tech")?;
+        manifest
+            .threads
+            .first_mut()
+            .context("backup manifest should contain the source thread")?
+            .reply_count = 999;
+
+        let target_pool = crate::db::init_test_pool().context("create target database pool")?;
+        let mut target_conn = target_pool
+            .get()
+            .context("get target database connection")?;
+        let upload_dir = tempfile::tempdir().context("create upload directory")?;
+        let upload_dir_str = upload_dir
+            .path()
+            .to_str()
+            .context("upload directory path is not valid UTF-8")?;
+        execute_board_restore(
+            &mut target_conn,
+            upload_dir_str,
+            manifest,
+            |_| Ok(()),
+            "Test reply-count restore",
+            "Test reply-count restore completed",
+        )
+        .context("restore board")?;
+
+        let restored_count = target_conn
+            .query_row(
+                "SELECT threads.reply_count
+                 FROM threads
+                 JOIN boards ON boards.id = threads.board_id
+                 WHERE boards.short_name = 'tech'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("load restored reply count")?;
+        ensure!(restored_count == 1);
+        Ok(())
+    }
+
+    #[test]
     fn older_board_restore_manifests_default_pdf_uploads_off() -> TestResult<()> {
         let json = serde_json::json!({
             "version": 1,
@@ -1834,7 +2063,7 @@ mod tests {
             "banners": []
         });
 
-        let manifest: super::types::board_backup_types::BoardBackupManifest =
+        let manifest: super::board_manifest::BoardBackupManifest =
             serde_json::from_value(json).context("deserialize legacy manifest")?;
 
         ensure!(!manifest.board.allow_pdf);
@@ -1988,7 +2217,7 @@ mod tests {
                 .context("vacuum database into snapshot")?;
         }
 
-        let manifest = super::common::FullBackupManifest {
+        let manifest = super::safety::FullBackupManifest {
             version: if indexed_boards { 2 } else { 1 },
             generated_at: 1_700_000_000,
             rustchan_version: "1.1.3".into(),
@@ -2016,7 +2245,7 @@ mod tests {
             let file = std::fs::File::create(zip_path).context("create backup ZIP")?;
             let mut zip = zip::ZipWriter::new(file);
             let options = zip::write::SimpleFileOptions::default();
-            zip.start_file(super::common::FULL_BACKUP_MANIFEST_NAME, options)
+            zip.start_file(super::safety::FULL_BACKUP_MANIFEST_NAME, options)
                 .context("start manifest ZIP entry")?;
             zip.write_all(&manifest_json)
                 .context("write manifest ZIP entry")?;
@@ -2104,7 +2333,7 @@ mod tests {
             }
         }
 
-        let backup_root = crate::handlers::admin::backup::saved_backup::backups_root_dir();
+        let backup_root = crate::handlers::admin::backup::storage::backups_root_dir();
         std::fs::create_dir_all(&backup_root).context("create backup root")?;
         let older_completed_dir = backup_root.join("2099-01-01_000001_full-site-newer-mtime-test");
         let newer_dir_mtime_dir =
@@ -2113,18 +2342,18 @@ mod tests {
             older_completed_dir.clone(),
             newer_dir_mtime_dir.clone(),
         ]);
-        crate::handlers::admin::backup::saved_backup::write_saved_v4_fixture_for_test(
+        crate::handlers::admin::backup::storage::write_saved_backup_fixture(
             &older_completed_dir,
-            crate::handlers::admin::backup::saved_backup::BackupScope::FullSite,
-            crate::handlers::admin::backup::saved_backup::board_fixture_files_for_test(),
+            crate::handlers::admin::backup::storage::BackupScope::FullSite,
+            crate::handlers::admin::backup::storage::board_file_fixtures(),
             Some(b"sqlite".to_vec()),
             4_102_444_800,
         )?;
         std::thread::sleep(std::time::Duration::from_millis(20));
-        crate::handlers::admin::backup::saved_backup::write_saved_v4_fixture_for_test(
+        crate::handlers::admin::backup::storage::write_saved_backup_fixture(
             &newer_dir_mtime_dir,
-            crate::handlers::admin::backup::saved_backup::BackupScope::FullSite,
-            crate::handlers::admin::backup::saved_backup::board_fixture_files_for_test(),
+            crate::handlers::admin::backup::storage::BackupScope::FullSite,
+            crate::handlers::admin::backup::storage::board_file_fixtures(),
             Some(b"sqlite".to_vec()),
             4_102_444_700,
         )?;
@@ -2144,11 +2373,10 @@ mod tests {
     #[test]
     fn full_backup_can_extract_board_backup() -> TestResult<()> {
         let zip_path = build_sample_full_backup_zip(true)?;
-        let (board_zip_path, filename) =
-            create_temp_board_backup_from_full_backup_path(&zip_path, "tech")?;
+        let (board_zip_path, filename) = extract_board_archive_from_full_backup(&zip_path, "tech")?;
 
         ensure!(filename.contains("from-full"));
-        let manifest = super::common::verify_board_backup_zip(&board_zip_path)?;
+        let manifest = super::safety::verify_board_backup_zip(&board_zip_path)?;
         ensure!(manifest.board.short_name == "tech");
 
         let file = std::fs::File::open(&board_zip_path).context("open board ZIP")?;
@@ -2163,10 +2391,9 @@ mod tests {
     #[test]
     fn older_full_backup_without_board_index_still_extracts_board_backup() -> TestResult<()> {
         let zip_path = build_sample_full_backup_zip(false)?;
-        let (board_zip_path, _) =
-            create_temp_board_backup_from_full_backup_path(&zip_path, "tech")?;
+        let (board_zip_path, _) = extract_board_archive_from_full_backup(&zip_path, "tech")?;
 
-        let manifest = super::common::verify_board_backup_zip(&board_zip_path)?;
+        let manifest = super::safety::verify_board_backup_zip(&board_zip_path)?;
         ensure!(manifest.board.short_name == "tech");
 
         drop(std::fs::remove_file(board_zip_path));

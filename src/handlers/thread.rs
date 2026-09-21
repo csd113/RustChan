@@ -1,6 +1,7 @@
-// handlers/thread.rs
-//
-// Handles:
+/// Original tracing target, retained for existing `RUST_LOG` filters.
+const LOG_TARGET: &str = concat!(env!("CARGO_CRATE_NAME"), "::handlers::thread");
+
+// Routes:
 //   GET  /:board/thread/:id   — view thread with all posts
 //   POST /:board/thread/:id   — post a reply
 //   POST /vote                — cast a poll vote
@@ -14,7 +15,7 @@ use crate::{
             admin_scoped_csrf_token, check_csrf_jar, ensure_csrf_for_request,
             ensure_csrf_with_secure,
         },
-        parse_post_multipart, posting, render,
+        parse_post_multipart, posting, render, PostFormData,
     },
     middleware::AppState,
     utils::crypto::hash_ip,
@@ -27,7 +28,6 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 
-/// Composite value returned by thread view load result.
 type ThreadViewLoadResult = (
     String,
     render::ThreadPageData,
@@ -38,7 +38,6 @@ type ThreadViewLoadResult = (
     Option<(i64, i64)>,
 );
 
-/// Returns whether xml HTTP request.
 fn is_xml_http_request(headers: &HeaderMap) -> bool {
     headers
         .get("x-requested-with")
@@ -46,14 +45,12 @@ fn is_xml_http_request(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("XMLHttpRequest"))
 }
 
-// ─── GET /:board/thread/:id ───────────────────────────────────────────────────
-
+// GET /:board/thread/:id
 #[expect(
     clippy::too_many_lines,
     reason = "access control, thread loading, unread-state calculation, and rendering form one request"
 )]
-/// Handles the view thread request.
-pub(crate) async fn view_thread(
+pub(in crate::server) async fn view_thread(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
     Query(params): Query<ThreadPageQuery>,
@@ -212,7 +209,7 @@ pub(crate) async fn view_thread(
         jar
     };
 
-    // 3.2: Return 304 Not Modified when client's cached copy is still current.
+    // Reuse the client's current cached representation.
     let client_etag = req_headers
         .get("if-none-match")
         .and_then(|v| v.to_str().ok())
@@ -271,14 +268,16 @@ pub(crate) async fn view_thread(
     Ok((jar, resp).into_response())
 }
 
-// ─── POST /:board/thread/:id — post reply ────────────────────────────────────
-
+// POST /:board/thread/:id — post reply
 #[expect(
     clippy::too_many_lines,
     reason = "access checks, multipart validation, transactional reply creation, and cookies form one request"
 )]
-/// Handles the post reply request.
-pub(crate) async fn post_reply(
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "the media permit intentionally moves from the parsed form into non-cancellable blocking submission work"
+)]
+pub(in crate::server) async fn post_reply(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
     secure_context: crate::middleware::SecureCookieContext,
@@ -322,6 +321,7 @@ pub(crate) async fn post_reply(
             access_context.board.max_video_size_bytes(),
             access_context.board.max_audio_size_bytes(),
             access_context.board.max_pdf_size_bytes(),
+            &state.media_upload_gate,
         ),
     )
     .await
@@ -347,6 +347,24 @@ pub(crate) async fn post_reply(
 
     let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
     let identity_key_err = identity_key.clone();
+    let PostFormData {
+        media_upload_guard,
+        csrf_verified: _,
+        submission_token,
+        name,
+        subject: _,
+        body,
+        deletion_token,
+        file,
+        audio_file,
+        image_file,
+        poll_question: _,
+        poll_options: _,
+        poll_duration_secs: _,
+        sage,
+        captcha_id,
+        captcha_answer,
+    } = form;
     let result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = std::sync::Arc::clone(&state.job_queue);
@@ -354,29 +372,30 @@ pub(crate) async fn post_reply(
         let ffprobe_available = state.ffprobe_available;
         let ffmpeg_webp_available = state.ffmpeg_webp_available;
         move || -> Result<posting::SubmitPostResult> {
+            // `spawn_blocking` work is not cancelled when its join handle is
+            // dropped. Keep the permit inside this closure so a disconnected
+            // request cannot release the media gate while parsing continues.
+            let _media_upload_guard = media_upload_guard;
             let conn = pool.get()?;
             posting::submit_post(
                 &conn,
                 &job_queue,
                 posting::SubmitPostCommand {
-                    mode: posting::SubmitPostMode::Reply {
-                        thread_id,
-                        sage: form.sage,
-                    },
+                    mode: posting::SubmitPostMode::Reply { thread_id, sage },
                     board_short,
                     identity_key,
                     cookie_secret: CONFIG.cookie_secret.clone(),
                     admin_session_id,
                     ban_csrf_token,
-                    submission_token: form.submission_token,
-                    name: form.name,
-                    body: form.body,
-                    deletion_token: form.deletion_token,
-                    captcha_id: form.captcha_id,
-                    captcha_answer: form.captcha_answer,
-                    image_file_data: form.image_file,
-                    file_data: form.file,
-                    audio_file_data: form.audio_file,
+                    submission_token,
+                    name,
+                    body,
+                    deletion_token,
+                    captcha_id,
+                    captcha_answer,
+                    image_file_data: image_file,
+                    file_data: file,
+                    audio_file_data: audio_file,
                     upload_dir: CONFIG.upload_dir.clone(),
                     thumb_size: CONFIG.thumb_size,
                     ffmpeg_available,
@@ -474,27 +493,18 @@ pub(crate) async fn post_reply(
 }
 
 #[derive(Deserialize, Default)]
-/// Query parameters accepted by the thread page request.
-pub(crate) struct ThreadPageQuery {
-    /// The optional reported.
+pub(in crate::server) struct ThreadPageQuery {
     pub reported: Option<String>,
 }
 
-/// Template data for self action post context.
 struct SelfActionPostContext {
-    /// The board.
     board: crate::models::Board,
-    /// The thread.
     thread: crate::models::Thread,
-    /// The post.
     post: crate::models::Post,
-    /// Whether the requester can post.
     can_post: bool,
-    /// Whether the thread allows self actions setting is active.
     thread_allows_self_actions: bool,
 }
 
-/// Handles the load self action post context request.
 async fn load_self_action_post_context(
     state: &AppState,
     board_short: &str,
@@ -540,25 +550,16 @@ async fn load_self_action_post_context(
     .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?
 }
 
-/// Data used by the edit post error page request workflow.
 struct EditPostErrorPageRequest<'a> {
-    /// The board short.
     board_short: &'a str,
-    /// The post identifier.
     post_id: i64,
-    /// The jar.
     jar: &'a CookieJar,
-    /// The admin session identifier.
     admin_session_id: Option<String>,
-    /// The body.
     body: &'a str,
-    /// The message.
     message: &'a str,
-    /// Whether the CSRF cookie secure setting is active.
     csrf_cookie_secure: bool,
 }
 
-/// Handles the render edit post error page request.
 async fn render_edit_post_error_page(
     state: &AppState,
     request: EditPostErrorPageRequest<'_>,
@@ -598,8 +599,7 @@ async fn render_edit_post_error_page(
     Ok((jar, response).into_response())
 }
 
-/// Handles the edit post get request.
-pub(crate) async fn edit_post_get(
+pub(in crate::server) async fn edit_post_get(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
@@ -693,23 +693,17 @@ pub(crate) async fn edit_post_get(
     Ok((jar, response).into_response())
 }
 
-// ─── POST /:board/post/:id/edit — submit edit ─────────────────────────────────
-
+// POST /:board/post/:id/edit — submit edit
 #[derive(Deserialize)]
-/// Form fields accepted by the edit request.
-pub(crate) struct EditForm {
+pub(in crate::server) struct EditForm {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
-    /// The body.
     pub body: String,
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the delete post request.
-pub(crate) struct DeletePostForm {
+pub(in crate::server) struct DeletePostForm {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
@@ -717,8 +711,7 @@ pub(crate) struct DeletePostForm {
     clippy::too_many_lines,
     reason = "ownership checks, edit validation, transactional update, media cleanup, and jobs form one request"
 )]
-/// Handles the edit post post request.
-pub(crate) async fn edit_post_post(
+pub(in crate::server) async fn edit_post_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
@@ -891,8 +884,7 @@ pub(crate) async fn edit_post_post(
     }
 }
 
-/// Handles the delete post get request.
-pub(crate) async fn delete_post_get(
+pub(in crate::server) async fn delete_post_get(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
@@ -991,8 +983,7 @@ pub(crate) async fn delete_post_get(
     clippy::too_many_lines,
     reason = "ownership checks, deletion rules, transactional mutation, and media cleanup form one request"
 )]
-/// Handles the delete own post request.
-pub(crate) async fn delete_own_post(
+pub(in crate::server) async fn delete_own_post(
     State(state): State<AppState>,
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
@@ -1083,7 +1074,7 @@ pub(crate) async fn delete_own_post(
                     deleted.pending_fs_op_id.as_deref(),
                     &deleted.paths,
                 ) {
-                    tracing::error!(
+                    tracing::error!(target: LOG_TARGET,
                         post_id,
                         error = %error,
                         "self-delete post cleanup did not fully complete"
@@ -1137,20 +1128,15 @@ pub(crate) async fn delete_own_post(
     }
 }
 
-// ─── POST /vote — cast poll vote ──────────────────────────────────────────────
-
+// POST /vote — cast poll vote
 #[derive(Deserialize)]
-/// Form fields accepted by the vote request.
-pub(crate) struct VoteForm {
+pub(in crate::server) struct VoteForm {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
-    /// The option identifier.
     pub option_id: i64,
 }
 
-/// Handles the vote handler request.
-pub(crate) async fn vote_handler(
+pub(in crate::server) async fn vote_handler(
     State(state): State<AppState>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
@@ -1217,28 +1203,12 @@ pub(crate) async fn vote_handler(
             let (poll_id, thread_id, board_short) = db::get_poll_context(&conn, option_id)?
                 .ok_or_else(|| AppError::NotFound("Poll option not found.".into()))?;
 
-            // Check poll has not expired
-            let now = chrono::Utc::now().timestamp();
-            let expires_at: i64 = conn.query_row(
-                "SELECT expires_at FROM polls WHERE id = ?1",
-                rusqlite::params![poll_id],
-                |r| r.get(0),
-            )?;
-            if expires_at <= now {
-                return Err(AppError::BadRequest("This poll has closed.".into()));
+            let recorded = db::cast_vote(&conn, poll_id, option_id, &ip_hash)?;
+            if !recorded {
+                return Err(AppError::BadRequest(
+                    "This poll has closed or you have already voted.".into(),
+                ));
             }
-
-            // Verify option belongs to this poll
-            let belongs: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM poll_options WHERE id = ?1 AND poll_id = ?2",
-                rusqlite::params![option_id, poll_id],
-                |r| r.get(0),
-            )?;
-            if belongs == 0 {
-                return Err(AppError::BadRequest("Invalid poll option.".into()));
-            }
-
-            db::cast_vote(&conn, poll_id, option_id, &ip_hash)?;
             tracing::info!(
                 target: "board",
                 poll_id = poll_id,
@@ -1254,8 +1224,7 @@ pub(crate) async fn vote_handler(
     Ok(Redirect::to(&redirect_url).into_response())
 }
 
-// ─── GET /:board/thread/:id/updates?since=N ──────────────────────────────────
-//
+// GET /:board/thread/:id/updates?since=N
 // Delta-compressed polling endpoint for the thread auto-update toggle.
 //
 // Returns a JSON envelope with:
@@ -1274,85 +1243,54 @@ pub(crate) async fn vote_handler(
 // controls so the response is auth-state-independent (safe to cache).
 
 #[derive(Deserialize)]
-/// Query parameters accepted by the updates request.
-pub(crate) struct UpdatesQuery {
-    /// The since.
+pub(in crate::server) struct UpdatesQuery {
     since: i64,
-    /// The optional refresh.
     refresh: Option<String>,
 }
 
 #[derive(serde::Serialize)]
-/// Data used by the refreshed post payload workflow.
 struct RefreshedPostPayload {
-    /// The record identifier.
     id: i64,
-    /// The HTML.
     html: String,
 }
 
 #[derive(serde::Serialize)]
-/// Data used by the thread updates payload workflow.
 struct ThreadUpdatesPayload {
-    /// The HTML.
     html: String,
-    /// The last identifier.
     last_id: i64,
-    /// The count.
     count: usize,
-    /// The refreshed posts collection.
     refreshed_posts: Vec<RefreshedPostPayload>,
-    /// The number of replies.
     reply_count: i64,
-    /// The bump time.
     bump_time: i64,
-    /// Whether the locked setting is active.
     locked: bool,
-    /// Whether the sticky setting is active.
     sticky: bool,
-    /// The boards version.
+    archived: bool,
     boards_version: u64,
-    /// The nav HTML.
     nav_html: String,
+    mobile_nav_html: String,
 }
 
-/// Data used by the activity badge settings workflow.
 struct ActivityBadgeSettings {
-    /// Whether thread badges is enabled.
     thread_badges_enabled: bool,
-    /// Whether homepage thread badges is enabled.
     homepage_thread_badges_enabled: bool,
-    /// Whether homepage reply badges is enabled.
     homepage_reply_badges_enabled: bool,
 }
 
-/// Data used by the thread updates render workflow.
 struct ThreadUpdatesRender {
-    /// The HTML.
     html: String,
-    /// The last identifier.
     last_id: i64,
-    /// The count.
     count: usize,
-    /// The refreshed posts collection.
     refreshed_posts: Vec<RefreshedPostPayload>,
-    /// The number of replies.
     reply_count: i64,
-    /// The bump time.
     bump_time: i64,
-    /// Whether the locked setting is active.
     locked: bool,
-    /// Whether the sticky setting is active.
     sticky: bool,
-    /// The board identifier.
+    archived: bool,
     board_id: i64,
-    /// The activity badges.
     activity_badges: ActivityBadgeSettings,
-    /// The optional latest thread marker.
     latest_thread_marker: Option<(i64, i64)>,
 }
 
-/// Parses refresh post IDs.
 fn parse_refresh_post_ids(raw: Option<&str>) -> Vec<i64> {
     let mut ids = raw
         .unwrap_or("")
@@ -1370,8 +1308,7 @@ fn parse_refresh_post_ids(raw: Option<&str>) -> Vec<i64> {
     clippy::too_many_lines,
     reason = "access checks, update filtering, unread state, and response rendering form one polling request"
 )]
-/// Handles the thread updates request.
-pub(crate) async fn thread_updates(
+pub(in crate::server) async fn thread_updates(
     State(state): State<AppState>,
     Path((board_short, thread_id)): Path<(String, i64)>,
     Query(params): Query<UpdatesQuery>,
@@ -1418,7 +1355,6 @@ pub(crate) async fn thread_updates(
         move || -> Result<ThreadUpdatesRender> {
             let conn = pool.get()?;
 
-            // Validate board + thread exist (returns 404 for bad URLs).
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound("Board not found.".into()))?;
             let thread = db::get_thread(&conn, thread_id)?
@@ -1510,6 +1446,7 @@ pub(crate) async fn thread_updates(
                 bump_time: thread.bumped_at,
                 locked: thread.locked,
                 sticky: thread.sticky,
+                archived: thread.archived,
                 board_id: board.id,
                 activity_badges,
                 latest_thread_marker,
@@ -1545,6 +1482,8 @@ pub(crate) async fn thread_updates(
     let boards = crate::templates::live_boards_snapshot();
     let nav_html =
         crate::templates::board_nav_html_for_preferences(boards.as_ref(), user_preferences);
+    let mobile_nav_html =
+        crate::templates::mobile_board_nav_html_for_preferences(boards.as_ref(), user_preferences);
     let payload = ThreadUpdatesPayload {
         html: updates.html,
         last_id: updates.last_id,
@@ -1554,8 +1493,10 @@ pub(crate) async fn thread_updates(
         bump_time: updates.bump_time,
         locked: updates.locked,
         sticky: updates.sticky,
+        archived: updates.archived,
         boards_version,
         nav_html,
+        mobile_nav_html,
     };
 
     let mut response = (

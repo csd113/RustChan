@@ -2,30 +2,15 @@
     unused_crate_dependencies,
     reason = "Cargo exposes the companion chan library and the transitive rustls-webpki security floor to this standalone binary target"
 )]
+#![cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "private items are documented only when comments add rationale beyond their names and types"
+    )
+)]
 
 //! Single-binary `RustChan` entry point.
-//
-// Run modes (via subcommands):
-//   rustchan-cli                               → start the web server (default)
-//   rustchan-cli serve --chan-net              → start server + ChanNet API listener
-//   rustchan-cli admin create-admin  <u> <p>   → create an admin user
-//   rustchan-cli admin reset-password <u> <p>  → reset admin password
-//   rustchan-cli admin list-admins             → list admins
-//   rustchan-cli admin create-board  <s> <n> [desc] [--nsfw] [--audio]
-//   rustchan-cli admin delete-board  <short>
-//   rustchan-cli admin list-boards
-//   rustchan-cli admin ban    <ip_hash> <reason> [hours]
-//   rustchan-cli admin unban  <ban_id>
-//   rustchan-cli admin list-bans
-//   rustchan-cli admin db-status
-//
-// Data defaults to <exe-dir>/rustchan-data/ (override the root with --data-dir)
-// Static CSS is compiled into the binary — no external files needed.
-//
-// All HTTP server logic lives in server/server.rs.
-// CLI types and admin commands live in server/cli.rs.
-// Terminal console and startup banner live in server/console/.
-// ChanNet / RustWave gateway lives in chan_net/mod.rs (second listener, port 7070).
 
 use clap::Parser as _;
 use std::io::{self, Write as _};
@@ -49,7 +34,7 @@ pub mod error;
 /// Favicon validation and storage.
 pub mod favicon;
 /// Browser-facing and administration HTTP handlers.
-pub mod handlers;
+pub use server::handlers;
 /// Structured application, dependency, and console logging.
 pub mod logging;
 /// Uploaded-media inspection and conversion.
@@ -69,7 +54,7 @@ pub mod templates;
 pub mod test_fixtures;
 #[cfg(test)]
 /// Shared state and request builders for crate-local tests.
-pub(crate) mod test_support;
+pub(crate) use test_fixtures as test_support;
 /// Built-in theme metadata.
 pub mod theme;
 /// Custom theme configuration and CSS generation.
@@ -151,8 +136,7 @@ fn relaunch_in_terminal_if_needed() -> anyhow::Result<bool> {
     Ok(false)
 }
 
-// ─── Entry point ─────────────────────────────────────────────────────────────
-//
+// Entry point
 // `#[tokio::main]` does not expose `max_blocking_threads`, so we build the
 // runtime manually.  The blocking thread pool (used by every `spawn_blocking`
 // call — page renders, DB queries, file I/O) defaults to logical CPUs × 4 but
@@ -166,7 +150,7 @@ fn main() -> anyhow::Result<()> {
     let cli = server::cli::Cli::parse();
     config::configure_data_dir(cli.data_dir.as_deref())?;
 
-    // ── Double-click / no-TTY guard ───────────────────────────────────────────
+    // Double-click / no-TTY guard
     // When launched from a file manager (Linux) or Explorer (Windows), stdout
     // is not a TTY. Re-attach to a terminal so the banner, first-run wizard,
     // and keyboard console are visible to the user.

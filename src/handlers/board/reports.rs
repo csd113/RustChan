@@ -6,23 +6,16 @@ use super::{
 use axum::response::IntoResponse as _;
 
 #[derive(serde::Deserialize)]
-/// Form fields accepted by the report request.
-pub(crate) struct ReportForm {
-    /// The post identifier.
+pub(in crate::server) struct ReportForm {
     pub post_id: i64,
-    /// The thread identifier.
     pub thread_id: i64,
-    /// The board.
     pub board: String,
-    /// The optional reason.
     pub reason: Option<String>,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
-/// Handles the file report request.
-pub(crate) async fn file_report(
+pub(in crate::server) async fn file_report(
     State(state): State<AppState>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
@@ -100,11 +93,9 @@ pub(crate) async fn file_report(
     .into_response())
 }
 
-// ─── GET /boards/{*media_path} — serve media with mp4→webm redirect ──────────
-//
+// GET /boards/{*media_path} — serve media with mp4→webm redirect
 
-// ─── Content-Type helper for board media ─────────────────────────────────────
-
+// Content-Type helper for board media
 /// Return the correct `Content-Type` value for a board media file based solely
 /// on its extension.  Used to override whatever `mime_guess` / `ServeFile`
 /// produces, because some builds of `mime_guess` do not include `.webp`,
@@ -113,16 +104,13 @@ pub(crate) async fn file_report(
 /// rather than display or play it inline.
 
 #[derive(serde::Deserialize)]
-pub(crate) struct AppealForm {
-    /// The reason.
+pub(in crate::server) struct AppealForm {
     pub reason: String,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
-/// Handles the submit appeal request.
-pub(crate) async fn submit_appeal(
+pub(in crate::server) async fn submit_appeal(
     State(state): State<AppState>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
@@ -131,17 +119,13 @@ pub(crate) async fn submit_appeal(
     use axum::response::Html;
 
     if check_csrf_jar(&jar, form.csrf.as_deref()).is_err() {
-        return Html(templates::error_page(403, "CSRF token mismatch.")).into_response();
+        return AppError::Forbidden("CSRF token mismatch.".into()).into_response();
     }
 
     let ip_hash = hash_ip(&identity_key(&client_ip, &jar), &CONFIG.cookie_secret);
     let reason = form.reason.trim().chars().take(512).collect::<String>();
     if reason.is_empty() {
-        return Html(templates::error_page(
-            400,
-            "Appeal message cannot be empty.",
-        ))
-        .into_response();
+        return AppError::BadRequest("Appeal message cannot be empty.".into()).into_response();
     }
 
     let result = tokio::task::spawn_blocking({
@@ -164,18 +148,23 @@ pub(crate) async fn submit_appeal(
         _ => "An error occurred. Please try again.",
     };
 
-    let html = format!(
-        r#"<!DOCTYPE html><html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Appeal Submitted</title>
-<link rel="stylesheet" href="{stylesheet_href}">
-</head><body><div class="page-box error-page">
-<h1>appeal submitted</h1>
-<p>{msg}</p>
-<p><a href="/">return home</a></p>
-</div></body></html>"#,
-        stylesheet_href = templates::static_asset_url("/static/style.css"),
-        msg = crate::utils::sanitize::escape_html(msg)
+    let body = format!(
+        r#"<div class="page-box error-page"><h1>appeal submitted</h1>
+<p>{}</p><p><a href="/">return home</a></p></div>"#,
+        crate::utils::sanitize::escape_html(msg),
+    );
+    let theme = super::current_theme_from_jar(&jar);
+    let boards = templates::live_boards();
+    let html = templates::base_layout(
+        "Appeal Submitted",
+        None,
+        &body,
+        form.csrf.as_deref().unwrap_or(""),
+        &boards,
+        theme.as_deref(),
+        None,
+        false,
+        "/",
     );
     Html(html).into_response()
 }

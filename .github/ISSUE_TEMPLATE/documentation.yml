@@ -23,7 +23,7 @@ body:
     attributes:
       label: RustChan version or commit
       description: Enter Not version-specific if applicable.
-      placeholder: "1.4.0, commit SHA, or Not version-specific"
+      placeholder: "1.4.1, commit SHA, or Not version-specific"
     validations:
       required: true
 

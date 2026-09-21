@@ -104,18 +104,15 @@ fn base64url_encode(input: &[u8]) -> String {
     let capacity = input.len().div_ceil(3) * 4;
     let mut output = String::with_capacity(capacity);
 
-    let mut chunks = input.chunks_exact(3);
-    for chunk in &mut chunks {
-        let [byte_0, byte_1, byte_2] = chunk else {
-            continue;
-        };
-        output.push(base64url_char(*byte_0 >> 2));
-        output.push(base64url_char(((*byte_0 & 0x03) << 4) | (*byte_1 >> 4)));
-        output.push(base64url_char(((*byte_1 & 0x0f) << 2) | (*byte_2 >> 6)));
-        output.push(base64url_char(*byte_2 & 0x3f));
+    let (chunks, remainder) = input.as_chunks::<3>();
+    for &[byte_0, byte_1, byte_2] in chunks {
+        output.push(base64url_char(byte_0 >> 2));
+        output.push(base64url_char(((byte_0 & 0x03) << 4) | (byte_1 >> 4)));
+        output.push(base64url_char(((byte_1 & 0x0f) << 2) | (byte_2 >> 6)));
+        output.push(base64url_char(byte_2 & 0x3f));
     }
 
-    match chunks.remainder() {
+    match remainder {
         [byte_0, byte_1] => {
             output.push(base64url_char(*byte_0 >> 2));
             output.push(base64url_char(((*byte_0 & 0x03) << 4) | (*byte_1 >> 4)));

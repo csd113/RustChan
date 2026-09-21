@@ -26,7 +26,7 @@ const OWNED_POSTS_COOKIE_MAX: usize = 16;
 /// Owned posts cookie max len used by this handler.
 const OWNED_POSTS_COOKIE_MAX_LEN: usize = 3_800;
 /// Self delete window secs used by this handler.
-pub(crate) const SELF_DELETE_WINDOW_SECS: i64 = 60;
+pub(in crate::server::handlers) const SELF_DELETE_WINDOW_SECS: i64 = 60;
 /// Board activity cookie used by this handler.
 const BOARD_ACTIVITY_COOKIE: &str = "rustchan_board_activity";
 /// Thread activity cookie used by this handler.
@@ -47,60 +47,41 @@ const BOARD_ACTIVITY_TTL_SECS: i64 = 180 * 24 * 60 * 60;
 const THREAD_ACTIVITY_TTL_SECS: i64 = 90 * 24 * 60 * 60;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-/// Data used by the owned post grant workflow.
-pub(crate) struct OwnedPostGrant {
-    /// The post identifier.
+pub(in crate::server::handlers) struct OwnedPostGrant {
     pub post_id: i64,
-    /// The thread identifier.
     pub thread_id: i64,
-    /// The board short.
     pub board_short: String,
-    /// The deletion token.
     pub deletion_token: String,
-    /// The expires timestamp.
     pub expires_at: i64,
 }
 
 #[derive(Serialize, Deserialize)]
-/// Data used by the owned posts cookie payload workflow.
 struct OwnedPostsCookiePayload {
-    /// The grants collection.
     grants: Vec<OwnedPostGrant>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Data used by the board activity marker workflow.
-pub(crate) struct BoardActivityMarker {
-    /// The board identifier.
+pub(super) struct BoardActivityMarker {
     pub board_id: i64,
-    /// The seen thread created timestamp.
     pub seen_thread_created_at: i64,
-    /// The seen thread identifier.
     pub seen_thread_id: i64,
-    /// The updated timestamp.
     pub updated_at: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Data used by the thread activity marker workflow.
-pub(crate) struct ThreadActivityMarker {
-    /// The thread identifier.
+pub(super) struct ThreadActivityMarker {
     pub thread_id: i64,
-    /// The number of seen replies.
     pub seen_reply_count: i64,
-    /// The updated timestamp.
     pub updated_at: i64,
 }
 
 /// Thread activity marker limit used by this handler.
-pub(crate) const THREAD_ACTIVITY_MARKER_LIMIT: usize = THREAD_ACTIVITY_COOKIE_MAX;
+pub(super) const THREAD_ACTIVITY_MARKER_LIMIT: usize = THREAD_ACTIVITY_COOKIE_MAX;
 
-/// Performs the owned posts cookie signature handler operation.
 fn owned_posts_cookie_signature(payload_hex: &str) -> String {
     sha256_hex(format!("{}:owned-posts:{payload_hex}", CONFIG.cookie_secret).as_bytes())
 }
 
-/// Parses owned posts cookie.
 fn parse_owned_posts_cookie(value: &str) -> Vec<OwnedPostGrant> {
     if value.len() > OWNED_POSTS_COOKIE_MAX_LEN {
         return Vec::new();
@@ -126,7 +107,6 @@ fn parse_owned_posts_cookie(value: &str) -> Vec<OwnedPostGrant> {
         .collect()
 }
 
-/// Performs the owned posts cookie value handler operation.
 fn owned_posts_cookie_value(grants: &[OwnedPostGrant]) -> Option<String> {
     if grants.is_empty() {
         return None;
@@ -141,7 +121,6 @@ fn owned_posts_cookie_value(grants: &[OwnedPostGrant]) -> Option<String> {
     (value.len() <= OWNED_POSTS_COOKIE_MAX_LEN).then_some(value)
 }
 
-/// Performs the owned posts cookie handler operation.
 fn owned_posts_cookie(grants: &[OwnedPostGrant], secure: bool) -> Option<Cookie<'static>> {
     let value = owned_posts_cookie_value(grants)?;
     let mut cookie = Cookie::new(OWNED_POSTS_COOKIE, value);
@@ -153,7 +132,6 @@ fn owned_posts_cookie(grants: &[OwnedPostGrant], secure: bool) -> Option<Cookie<
     Some(cookie)
 }
 
-/// Prunes owned post grants for cookie.
 fn prune_owned_post_grants_for_cookie(mut grants: Vec<OwnedPostGrant>) -> Vec<OwnedPostGrant> {
     grants.sort_by(|a, b| {
         b.expires_at
@@ -167,16 +145,16 @@ fn prune_owned_post_grants_for_cookie(mut grants: Vec<OwnedPostGrant>) -> Vec<Ow
     grants
 }
 
-/// Performs the owned post grants from jar handler operation.
-pub(crate) fn owned_post_grants_from_jar(jar: &CookieJar) -> Vec<OwnedPostGrant> {
+pub(in crate::server::handlers) fn owned_post_grants_from_jar(
+    jar: &CookieJar,
+) -> Vec<OwnedPostGrant> {
     jar.get(OWNED_POSTS_COOKIE)
         .map(Cookie::value)
         .map(parse_owned_posts_cookie)
         .unwrap_or_default()
 }
 
-/// Performs the owned post grant from jar handler operation.
-pub(crate) fn owned_post_grant_from_jar(
+pub(in crate::server::handlers) fn owned_post_grant_from_jar(
     jar: &CookieJar,
     board_short: &str,
     post_id: i64,
@@ -187,7 +165,7 @@ pub(crate) fn owned_post_grant_from_jar(
 }
 
 #[cfg(test)]
-pub(crate) fn remember_owned_post_until(
+pub(in crate::server::handlers) fn remember_owned_post_until(
     jar: CookieJar,
     board_short: &str,
     thread_id: i64,
@@ -206,8 +184,7 @@ pub(crate) fn remember_owned_post_until(
     )
 }
 
-/// Performs the remember owned post until with secure handler operation.
-pub(crate) fn remember_owned_post_until_with_secure(
+pub(in crate::server::handlers) fn remember_owned_post_until_with_secure(
     jar: CookieJar,
     board_short: &str,
     thread_id: i64,
@@ -240,8 +217,7 @@ pub(crate) fn remember_owned_post_until_with_secure(
     }
 }
 
-/// Performs the forget owned post with secure handler operation.
-pub(crate) fn forget_owned_post_with_secure(
+pub(in crate::server::handlers) fn forget_owned_post_with_secure(
     jar: CookieJar,
     board_short: &str,
     post_id: i64,
@@ -258,12 +234,10 @@ pub(crate) fn forget_owned_post_with_secure(
     }
 }
 
-/// Performs the now ts handler operation.
 fn now_ts() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
-/// Parses activity cookie entries.
 fn parse_activity_cookie_entries(raw: &str) -> impl Iterator<Item = &str> {
     raw.strip_prefix(&format!("{ACTIVITY_COOKIE_VERSION}|"))
         .into_iter()
@@ -271,7 +245,6 @@ fn parse_activity_cookie_entries(raw: &str) -> impl Iterator<Item = &str> {
         .filter(|entry| !entry.is_empty())
 }
 
-/// Parses board activity marker.
 fn parse_board_activity_marker(entry: &str, now: i64) -> Option<BoardActivityMarker> {
     let mut parts = entry.split('.');
     let board_id = parts.next()?.parse::<i64>().ok()?;
@@ -292,7 +265,6 @@ fn parse_board_activity_marker(entry: &str, now: i64) -> Option<BoardActivityMar
     })
 }
 
-/// Parses thread activity marker.
 fn parse_thread_activity_marker(entry: &str, now: i64) -> Option<ThreadActivityMarker> {
     let mut parts = entry.split('.');
     let thread_id = parts.next()?.parse::<i64>().ok()?;
@@ -311,7 +283,6 @@ fn parse_thread_activity_marker(entry: &str, now: i64) -> Option<ThreadActivityM
     })
 }
 
-/// Parses board activity cookie.
 fn parse_board_activity_cookie(value: &str) -> HashMap<i64, BoardActivityMarker> {
     if value.len() > ACTIVITY_COOKIE_MAX_LEN {
         return HashMap::new();
@@ -326,7 +297,6 @@ fn parse_board_activity_cookie(value: &str) -> HashMap<i64, BoardActivityMarker>
     markers
 }
 
-/// Parses thread activity cookie.
 fn parse_thread_activity_cookie(value: &str) -> HashMap<i64, ThreadActivityMarker> {
     if value.len() > ACTIVITY_COOKIE_MAX_LEN {
         return HashMap::new();
@@ -341,7 +311,6 @@ fn parse_thread_activity_cookie(value: &str) -> HashMap<i64, ThreadActivityMarke
     markers
 }
 
-/// Performs the board activity cookie handler operation.
 fn board_activity_cookie(markers: &[BoardActivityMarker]) -> Option<Cookie<'static>> {
     if markers.is_empty() {
         return None;
@@ -379,7 +348,6 @@ fn board_activity_cookie(markers: &[BoardActivityMarker]) -> Option<Cookie<'stat
     Some(cookie)
 }
 
-/// Performs the thread activity cookie handler operation.
 fn thread_activity_cookie(markers: &[ThreadActivityMarker]) -> Option<Cookie<'static>> {
     if markers.is_empty() {
         return None;
@@ -414,7 +382,6 @@ fn thread_activity_cookie(markers: &[ThreadActivityMarker]) -> Option<Cookie<'st
     Some(cookie)
 }
 
-/// Performs the activity cookie removal handler operation.
 fn activity_cookie_removal(name: &'static str) -> Cookie<'static> {
     let mut cookie = Cookie::from(name);
     cookie.set_path("/");
@@ -423,8 +390,7 @@ fn activity_cookie_removal(name: &'static str) -> Cookie<'static> {
     cookie
 }
 
-/// Performs the board activity markers from jar handler operation.
-pub(crate) fn board_activity_markers_from_jar(
+pub(super) fn board_activity_markers_from_jar(
     jar: &CookieJar,
 ) -> HashMap<i64, BoardActivityMarker> {
     jar.get(BOARD_ACTIVITY_COOKIE)
@@ -433,8 +399,7 @@ pub(crate) fn board_activity_markers_from_jar(
         .unwrap_or_default()
 }
 
-/// Performs the thread activity markers from jar handler operation.
-pub(crate) fn thread_activity_markers_from_jar(
+pub(super) fn thread_activity_markers_from_jar(
     jar: &CookieJar,
 ) -> HashMap<i64, ThreadActivityMarker> {
     jar.get(THREAD_ACTIVITY_COOKIE)
@@ -443,8 +408,7 @@ pub(crate) fn thread_activity_markers_from_jar(
         .unwrap_or_default()
 }
 
-/// Performs the remember board activity handler operation.
-pub(crate) fn remember_board_activity(
+pub(in crate::server::handlers) fn remember_board_activity(
     jar: CookieJar,
     board_id: i64,
     seen_thread_created_at: i64,
@@ -470,8 +434,7 @@ pub(crate) fn remember_board_activity(
     }
 }
 
-/// Prunes board activity markers.
-pub(crate) fn prune_board_activity_markers(
+pub(super) fn prune_board_activity_markers(
     jar: CookieJar,
     known_board_ids: &HashSet<i64>,
 ) -> CookieJar {
@@ -486,8 +449,7 @@ pub(crate) fn prune_board_activity_markers(
     }
 }
 
-/// Performs the remember thread activity handler operation.
-pub(crate) fn remember_thread_activity(
+pub(in crate::server::handlers) fn remember_thread_activity(
     jar: CookieJar,
     thread_id: i64,
     seen_reply_count: i64,
@@ -511,8 +473,7 @@ pub(crate) fn remember_thread_activity(
     }
 }
 
-/// Performs the remember visible thread activity handler operation.
-pub(crate) fn remember_visible_thread_activity<I>(jar: CookieJar, visible_threads: I) -> CookieJar
+pub(super) fn remember_visible_thread_activity<I>(jar: CookieJar, visible_threads: I) -> CookieJar
 where
     I: IntoIterator<Item = (i64, i64)>,
 {
@@ -539,10 +500,12 @@ where
     }
 }
 
-// ─── CSRF cookie helper ───────────────────────────────────────────────────────
-
+// CSRF cookie helper
 /// Ensure the CSRF token cookie is set. Returns (`updated_jar`, `token_string`).
-pub(crate) fn ensure_csrf_with_secure(jar: CookieJar, secure: bool) -> (CookieJar, String) {
+pub(in crate::server::handlers) fn ensure_csrf_with_secure(
+    jar: CookieJar,
+    secure: bool,
+) -> (CookieJar, String) {
     let mut jar = jar;
     if jar.get(VISITOR_ID_COOKIE).is_none() {
         let mut visitor_cookie = Cookie::new(VISITOR_ID_COOKIE, new_csrf_token());
@@ -579,7 +542,7 @@ pub(crate) fn ensure_csrf_with_secure(jar: CookieJar, secure: bool) -> (CookieJa
 }
 
 /// Ensure the public CSRF token cookie is scoped for the current transport.
-pub(crate) fn ensure_csrf_for_request(
+pub(in crate::server) fn ensure_csrf_for_request(
     jar: CookieJar,
     headers: &HeaderMap,
     context: SecureCookieContext,
@@ -588,17 +551,13 @@ pub(crate) fn ensure_csrf_for_request(
 }
 
 #[derive(serde::Deserialize)]
-/// Query parameters accepted by the theme preference request.
-pub(crate) struct ThemePreferenceQuery {
-    /// The optional return to.
+pub(in crate::server) struct ThemePreferenceQuery {
     pub return_to: Option<String>,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
-/// Handles the set theme request.
-pub(crate) async fn set_theme(
+pub(in crate::server) async fn set_theme(
     Path(theme): Path<String>,
     Query(params): Query<ThemePreferenceQuery>,
     jar: CookieJar,
@@ -615,7 +574,7 @@ pub(crate) async fn set_theme(
         check_csrf_jar(&jar, params.csrf.as_deref())?;
     }
 
-    let mut cookie = Cookie::new(USER_THEME_COOKIE, theme.clone());
+    let mut cookie = Cookie::new(USER_THEME_COOKIE, theme);
     cookie.set_http_only(false);
     cookie.set_same_site(SameSite::Lax);
     cookie.set_path("/");
@@ -641,32 +600,20 @@ pub(crate) async fn set_theme(
 }
 
 #[derive(serde::Deserialize)]
-/// Form fields accepted by the user preferences request.
-pub(crate) struct UserPreferencesForm {
+pub(in crate::server) struct UserPreferencesForm {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
-    /// The optional preferences form.
     pub preferences_form: Option<String>,
-    /// The optional return to.
     pub return_to: Option<String>,
-    /// The optional theme.
     pub theme: Option<String>,
-    /// The optional hide NSFW boards present.
     pub hide_nsfw_boards_present: Option<String>,
-    /// The optional hide NSFW boards.
     pub hide_nsfw_boards: Option<String>,
-    /// The optional video audio.
     pub video_audio: Option<String>,
-    /// The optional preferred board view.
     pub preferred_board_view: Option<String>,
-    /// The optional show activity badges present.
     pub show_activity_badges_present: Option<String>,
-    /// The optional show activity badges.
     pub show_activity_badges: Option<String>,
 }
 
-/// Performs the public preference cookie handler operation.
 fn public_preference_cookie(name: &'static str, value: String, secure: bool) -> Cookie<'static> {
     let mut cookie = Cookie::new(name, value);
     cookie.set_http_only(false);
@@ -677,8 +624,7 @@ fn public_preference_cookie(name: &'static str, value: String, secure: bool) -> 
     cookie
 }
 
-/// Handles the set user preferences request.
-pub(crate) async fn set_user_preferences(
+pub(in crate::server) async fn set_user_preferences(
     jar: CookieJar,
     headers: HeaderMap,
     secure_context: SecureCookieContext,
@@ -779,7 +725,6 @@ pub(crate) async fn set_user_preferences(
     Ok((jar, Redirect::to(&redirect_to)).into_response())
 }
 
-/// Performs the safe referer return to handler operation.
 fn safe_referer_return_to(headers: &HeaderMap) -> Option<String> {
     let request_host = headers
         .get(header::HOST)
@@ -796,7 +741,6 @@ fn safe_referer_return_to(headers: &HeaderMap) -> Option<String> {
         .then(|| path_and_query.to_owned())
 }
 
-/// Performs the hosts match for same origin handler operation.
 fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
     if source_host.eq_ignore_ascii_case(request_host) {
         return true;
@@ -805,7 +749,6 @@ fn hosts_match_for_same_origin(source_host: &str, request_host: &str) -> bool {
     is_loopback_alias(source_host) && is_loopback_alias(request_host)
 }
 
-/// Returns whether loopback alias.
 fn is_loopback_alias(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") {
         return true;
@@ -814,8 +757,7 @@ fn is_loopback_alias(host: &str) -> bool {
     host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
-/// Handles the serve theme CSS request.
-pub(crate) async fn serve_theme_css(
+pub(in crate::server) async fn serve_theme_css(
     State(state): State<AppState>,
     Path(theme): Path<String>,
 ) -> Result<Response> {
@@ -839,10 +781,7 @@ pub(crate) async fn serve_theme_css(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("text/css; charset=utf-8"),
             ),
-            (
-                header::CACHE_CONTROL,
-                HeaderValue::from_static(crate::cache::CACHE_CONTROL_STATIC_SHORT),
-            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
         ],
         css,
     )
@@ -850,17 +789,13 @@ pub(crate) async fn serve_theme_css(
 }
 
 #[derive(serde::Deserialize)]
-/// Form fields accepted by the NSFW consent request.
-pub(crate) struct NsfwConsentForm {
+pub(in crate::server) struct NsfwConsentForm {
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
-    /// The optional return to.
     pub return_to: Option<String>,
 }
 
-/// Handles the accept NSFW request.
-pub(crate) async fn accept_nsfw(
+pub(in crate::server) async fn accept_nsfw(
     jar: CookieJar,
     Form(form): Form<NsfwConsentForm>,
 ) -> Result<Response> {
@@ -878,26 +813,19 @@ pub(crate) async fn accept_nsfw(
 }
 
 #[derive(serde::Deserialize)]
-/// Query parameters accepted by the board unlock request.
-pub(crate) struct BoardUnlockQuery {
-    /// The optional return to.
+pub(in crate::server) struct BoardUnlockQuery {
     pub return_to: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
-/// Form fields accepted by the board unlock request.
-pub(crate) struct BoardUnlockForm {
-    /// The password.
+pub(in crate::server) struct BoardUnlockForm {
     pub password: String,
-    /// The optional return to.
     pub return_to: Option<String>,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
-/// Handles the board unlock page request.
-pub(crate) async fn board_unlock_page(
+pub(in crate::server) async fn board_unlock_page(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     Query(query): Query<BoardUnlockQuery>,
@@ -971,8 +899,7 @@ pub(crate) async fn board_unlock_page(
     clippy::too_many_lines,
     reason = "rate limiting, credential checks, signed access grants, and redirect validation form one request"
 )]
-/// Handles the unlock board access request.
-pub(crate) async fn unlock_board_access(
+pub(in crate::server) async fn unlock_board_access(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
@@ -1129,7 +1056,6 @@ pub(crate) async fn unlock_board_access(
     Ok((jar.add(cookie), Redirect::to(&return_to)).into_response())
 }
 
-/// Performs the board access cookie handler operation.
 fn board_access_cookie(cookie_name: String, cookie_value: String, secure: bool) -> Cookie<'static> {
     let mut cookie = Cookie::new(cookie_name, cookie_value);
     cookie.set_http_only(true);
@@ -1141,23 +1067,16 @@ fn board_access_cookie(cookie_name: String, cookie_value: String, secure: bool) 
 }
 
 #[derive(serde::Deserialize)]
-/// Form fields accepted by the thread preference request.
-pub(crate) struct ThreadPreferenceForm {
-    /// The thread identifier.
+pub(in crate::server) struct ThreadPreferenceForm {
     pub thread_id: i64,
-    /// The board.
     pub board: String,
-    /// The action.
     pub action: String,
-    /// The optional return to.
     pub return_to: Option<String>,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     pub csrf: Option<String>,
 }
 
-/// Handles the update thread preference request.
-pub(crate) async fn update_thread_preference(
+pub(in crate::server) async fn update_thread_preference(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
@@ -1227,8 +1146,7 @@ pub(crate) async fn update_thread_preference(
     Ok(Redirect::to(&redirect_to).into_response())
 }
 
-// ─── POST /report ─────────────────────────────────────────────────────────────
-
+// POST /report
 #[cfg(test)]
 mod tests {
     use super::{

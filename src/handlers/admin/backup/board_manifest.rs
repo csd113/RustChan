@@ -1,0 +1,185 @@
+//! Board export manifest and serialized database rows.
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+// This type mirrors serialized or render state, so the boolean count is an intentional tradeoff.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the fields mirror independent persisted board settings in the backup schema"
+)]
+pub(in crate::server::handlers::admin::backup) struct BoardRow {
+    pub id: i64,
+    pub short_name: String,
+    pub name: String,
+    pub description: String,
+    pub nsfw: bool,
+    pub max_threads: i64,
+    #[serde(default = "default_max_archived_threads")]
+    pub max_archived_threads: i64,
+    pub bump_limit: i64,
+    #[serde(default = "default_true")]
+    pub allow_images: bool,
+    #[serde(default = "default_true")]
+    pub allow_video: bool,
+    #[serde(default)]
+    pub allow_audio: bool,
+    #[serde(default)]
+    pub allow_pdf: bool,
+    #[serde(default)]
+    pub allow_any_files: bool,
+    #[serde(default = "default_true")]
+    pub allow_tripcodes: bool,
+    #[serde(default = "default_edit_window_secs")]
+    pub edit_window_secs: i64,
+    #[serde(default)]
+    pub allow_editing: bool,
+    #[serde(default)]
+    pub allow_self_delete: bool,
+    #[serde(default = "default_true")]
+    pub allow_archive: bool,
+    #[serde(default)]
+    pub allow_video_embeds: bool,
+    #[serde(default)]
+    pub allow_captcha: bool,
+    #[serde(default)]
+    pub show_poster_ids: bool,
+    #[serde(default)]
+    pub collapse_greentext: bool,
+    #[serde(default)]
+    pub post_cooldown_secs: i64,
+    #[serde(default = "default_banner_mode")]
+    pub banner_mode: String,
+    #[serde(default = "default_access_mode")]
+    pub access_mode: String,
+    #[serde(default)]
+    pub access_password_hash: String,
+    pub created_at: i64,
+}
+
+/// Returns the default true.
+const fn default_true() -> bool {
+    true
+}
+
+/// Returns the default edit window secs.
+const fn default_edit_window_secs() -> i64 {
+    300
+}
+
+/// Returns the default max archived threads.
+const fn default_max_archived_threads() -> i64 {
+    150
+}
+
+/// Returns the default access mode.
+fn default_access_mode() -> String {
+    "public".to_owned()
+}
+
+/// Returns the default banner mode.
+fn default_banner_mode() -> String {
+    "inherit".to_owned()
+}
+
+#[derive(Serialize, Deserialize)]
+pub(in crate::server::handlers::admin::backup) struct ThreadRow {
+    pub id: i64,
+    pub board_id: i64,
+    pub subject: Option<String>,
+    pub created_at: i64,
+    pub bumped_at: i64,
+    pub locked: bool,
+    pub sticky: bool,
+    #[serde(default)]
+    pub archived: bool,
+    pub reply_count: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(in crate::server::handlers::admin::backup) struct PostRow {
+    pub id: i64,
+    pub thread_id: i64,
+    pub board_id: i64,
+    pub name: String,
+    pub tripcode: Option<String>,
+    pub subject: Option<String>,
+    pub body: String,
+    pub body_html: String,
+    pub ip_hash: Option<String>,
+    pub file_path: Option<String>,
+    pub file_name: Option<String>,
+    pub file_size: Option<i64>,
+    pub thumb_path: Option<String>,
+    pub mime_type: Option<String>,
+    pub media_type: Option<String>,
+    pub created_at: i64,
+    pub deletion_token: String,
+    pub is_op: bool,
+    pub media_processing_state: Option<String>,
+    pub media_processing_error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(in crate::server::handlers::admin::backup) struct PollRow {
+    pub id: i64,
+    pub thread_id: i64,
+    pub question: String,
+    pub expires_at: i64,
+    pub created_at: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(in crate::server::handlers::admin::backup) struct PollOptionRow {
+    pub id: i64,
+    pub poll_id: i64,
+    pub text: String,
+    pub position: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(in crate::server::handlers::admin::backup) struct PollVoteRow {
+    pub id: i64,
+    pub poll_id: i64,
+    pub option_id: i64,
+    pub ip_hash: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(in crate::server::handlers::admin::backup) struct FileHashRow {
+    pub sha256: String,
+    pub file_path: String,
+    pub thumb_path: String,
+    pub mime_type: String,
+    pub created_at: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(in crate::server::handlers::admin::backup) struct BannerRow {
+    pub storage_key: String,
+    pub width: i64,
+    pub height: i64,
+    pub file_size: i64,
+    pub enabled: bool,
+    pub sort_order: i64,
+    pub target_type: String,
+    pub target_value: String,
+    pub show_on_index: bool,
+    pub show_on_catalog: bool,
+    pub created_at: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+/// Manifest data for board backup.
+pub(in crate::server::handlers::admin::backup) struct BoardBackupManifest {
+    pub version: u32,
+    pub board: BoardRow,
+    pub threads: Vec<ThreadRow>,
+    pub posts: Vec<PostRow>,
+    pub polls: Vec<PollRow>,
+    pub poll_options: Vec<PollOptionRow>,
+    pub poll_votes: Vec<PollVoteRow>,
+    pub file_hashes: Vec<FileHashRow>,
+    #[serde(default)]
+    pub banners: Vec<BannerRow>,
+}

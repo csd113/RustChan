@@ -1,29 +1,6 @@
-// workers/mod.rs — Background job queue and worker pool.
-//
-// Architecture:
-//   • SQLite-backed persistent job queue (table: background_jobs).
-//     Jobs survive a server restart — they are picked up again on next boot.
-//   • Worker pool: N Tokio tasks (min(available_cpus, 4)).
-//   • Jobs are claimed atomically via UPDATE … RETURNING so multiple workers
-//     never process the same job even under concurrent access in WAL mode.
-//   • Workers sleep until a Notify fires or a 5-second poll timeout elapses.
-//   • Failed jobs are retried up to the shared job retry budget; then marked "failed"
-//     with the last error message recorded for inspection.
-//   • A CancellationToken is threaded through every worker so that a graceful
-//     shutdown drains in-progress jobs before exiting (#7).
-//
-// Job types:
-//   VideoTranscode — MP4/MKV → WebM (VP9 + Opus) via ffmpeg (off the hot path)
-//   AudioWaveform  — waveform PNG from audio via ffmpeg (off the hot path)
-//   ThreadPrune    — delete overflow threads from a board asynchronously
-//   SpamCheck      — lightweight abuse signal logging
-//
-// Integration (handlers):
-//   1. save_upload() saves the raw file and returns processing_pending=true
-//      when async post-processing is needed.
-//   2. After db::create_post / db::create_thread_with_op, the handler calls
-//      job_queue.enqueue(…) with the now-known post_id.
-//   3. Workers update posts.file_path / posts.thumb_path on completion.
+// Jobs persist in SQLite and are claimed atomically with UPDATE … RETURNING.
+// Cancellation tokens let graceful shutdown drain in-progress work; failures
+// retain their last error and retry only within the shared budget.
 
 use crate::config::CONFIG;
 use crate::db::DbPool;
@@ -37,6 +14,7 @@ use std::process::Output;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::io::AsyncReadExt as _;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::Notify;
 use tokio::time::{sleep, Duration};
@@ -64,39 +42,123 @@ pub(crate) enum AsyncWaitOutcome {
     Cancelled,
 }
 
+/// Exit state observed while racing a media subprocess against its deadline.
+enum MediaChildWaitOutcome {
+    /// The direct child exited with this status.
+    Exited(std::process::ExitStatus),
+    /// The configured execution deadline elapsed.
+    TimedOut,
+    /// Application shutdown or explicit cancellation was requested.
+    Cancelled,
+}
+
 /// Waits for an `FFmpeg` child while racing its deadline and cancellation token.
 pub(crate) async fn wait_for_ffmpeg_output(
-    child: tokio::process::Child,
+    mut child: tokio::process::Child,
     timeout: Duration,
     cancel: CancellationToken,
 ) -> Result<AsyncWaitOutcome> {
     let mut process_group = crate::media::process::ProcessGroupGuard::new(child.id());
-    let wait = child.wait_with_output();
-    tokio::pin!(wait);
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(|stdout| tokio::spawn(read_bounded_async_pipe(stdout)));
+    let stderr_reader = child
+        .stderr
+        .take()
+        .map(|stderr| tokio::spawn(read_bounded_async_pipe(stderr)));
 
     let outcome = tokio::select! {
         biased;
-        () = cancel.cancelled() => AsyncWaitOutcome::Cancelled,
-        result = &mut wait => {
-            let output = result.context("media subprocess I/O error")?;
-            process_group.terminate_remaining();
-            return Ok(AsyncWaitOutcome::Exited(output));
-        }
-        () = sleep(timeout) => AsyncWaitOutcome::TimedOut,
+        () = cancel.cancelled() => MediaChildWaitOutcome::Cancelled,
+        result = child.wait() => MediaChildWaitOutcome::Exited(
+            result.context("media subprocess wait failed")?
+        ),
+        () = sleep(timeout) => MediaChildWaitOutcome::TimedOut,
     };
 
-    process_group.terminate_remaining();
-    // The group signal closes inherited pipes. Awaiting the original future
-    // reaps the direct child and prevents zombies before returning to callers.
-    drop((&mut wait).await);
-    Ok(outcome)
+    match outcome {
+        MediaChildWaitOutcome::Exited(status) => {
+            process_group.terminate_remaining();
+            let (stdout, stderr) = tokio::join!(
+                join_async_pipe_reader(stdout_reader, "stdout"),
+                join_async_pipe_reader(stderr_reader, "stderr")
+            );
+            Ok(AsyncWaitOutcome::Exited(Output {
+                status,
+                stdout: stdout?,
+                stderr: stderr?,
+            }))
+        }
+        terminal @ (MediaChildWaitOutcome::TimedOut | MediaChildWaitOutcome::Cancelled) => {
+            process_group.terminate_remaining();
+            // Kill the direct child as a non-Unix fallback and protection
+            // against a process-group setup race, then reap it before return.
+            drop(child.start_kill());
+            drop(child.wait().await);
+            let (stdout_result, stderr_result) = tokio::join!(
+                join_async_pipe_reader(stdout_reader, "stdout"),
+                join_async_pipe_reader(stderr_reader, "stderr")
+            );
+            drop(stdout_result);
+            drop(stderr_result);
+
+            Ok(match terminal {
+                MediaChildWaitOutcome::TimedOut => AsyncWaitOutcome::TimedOut,
+                MediaChildWaitOutcome::Cancelled => AsyncWaitOutcome::Cancelled,
+                MediaChildWaitOutcome::Exited(_) => {
+                    return Err(anyhow::anyhow!(
+                        "media subprocess exit state changed unexpectedly"
+                    ));
+                }
+            })
+        }
+    }
+}
+
+/// Drains an asynchronous child pipe while retaining a bounded prefix.
+async fn read_bounded_async_pipe(
+    mut pipe: impl tokio::io::AsyncRead + Unpin,
+) -> std::io::Result<Vec<u8>> {
+    const READ_BUFFER_BYTES: usize = 8 * 1024;
+
+    let mut bytes = Vec::with_capacity(READ_BUFFER_BYTES);
+    let mut chunk = [0_u8; READ_BUFFER_BYTES];
+    loop {
+        let read = pipe.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+
+        let remaining =
+            crate::media::process::MEDIA_SUBPROCESS_OUTPUT_LIMIT_BYTES.saturating_sub(bytes.len());
+        let retain = remaining.min(read);
+        let retained = chunk.get(..retain).ok_or_else(|| {
+            std::io::Error::other("media output retention exceeded its read buffer")
+        })?;
+        bytes.extend_from_slice(retained);
+    }
+    Ok(bytes)
+}
+
+/// Resolves an optional asynchronous pipe reader with contextual errors.
+async fn join_async_pipe_reader(
+    reader: Option<tokio::task::JoinHandle<std::io::Result<Vec<u8>>>>,
+    pipe_name: &str,
+) -> Result<Vec<u8>> {
+    let Some(reader) = reader else {
+        return Ok(Vec::new());
+    };
+    reader
+        .await
+        .with_context(|| format!("media subprocess {pipe_name} reader task failed"))?
+        .with_context(|| format!("media subprocess {pipe_name} read failed"))
 }
 
 /// How long a worker sleeps when the queue is empty.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-// ─── Job definitions ──────────────────────────────────────────────────────────
-
+// Job definitions
 /// All job variants the worker pool can process.
 /// Serialised to JSON and stored in `background_jobs.payload`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,8 +257,7 @@ fn log_thread_prune_schedule(board_id: i64, schedule: crate::db::ThreadPruneSche
     }
 }
 
-// ─── Job queue ────────────────────────────────────────────────────────────────
-
+// Job queue
 /// Cheaply-cloneable handle to the shared job queue.
 /// Clone this into every handler that needs to enqueue work.
 #[derive(Clone, Debug)]
@@ -457,8 +518,7 @@ impl JobQueue {
     }
 }
 
-// ─── Worker pool startup ──────────────────────────────────────────────────────
-
+// Worker pool startup
 /// Spawn the background worker pool. Call exactly once at server startup.
 ///
 /// Returns a vec of `JoinHandles`, one per worker, so the caller can await all
@@ -502,8 +562,7 @@ pub fn start_worker_pool(
         .collect()
 }
 
-// ─── Worker loop ─────────────────────────────────────────────────────────────
-
+// Worker loop
 /// Outcome of executing a claimed job before its status is persisted.
 #[derive(Clone)]
 enum JobCompletion {
@@ -1072,8 +1131,7 @@ fn backoff_duration(consecutive_errors: u32) -> Duration {
     Duration::from_millis(base + jitter)
 }
 
-// ─── Job dispatch ─────────────────────────────────────────────────────────────
-
+// Job dispatch
 #[expect(
     clippy::cognitive_complexity,
     clippy::too_many_arguments,
@@ -1099,7 +1157,7 @@ async fn handle_job(
             file_path,
             board_short,
         } => {
-            // 2.2: Skip if this file_path is already being processed.
+            // Avoid scheduling the same source path twice.
             if in_progress.contains_key(&file_path) {
                 warn!(
                     "VideoTranscode: skipping duplicate job for post {} ({}): already in flight",
@@ -1131,7 +1189,7 @@ async fn handle_job(
             file_path,
             board_short,
         } => {
-            // 2.2: Skip if this file_path is already being processed.
+            // Avoid scheduling the same source path twice.
             if in_progress.contains_key(&file_path) {
                 warn!(
                     "AudioWaveform: skipping duplicate job for post {} ({}): already in flight",
@@ -1203,8 +1261,7 @@ fn media_job_identity(job: &Job) -> Option<MediaJobIdentity> {
     }
 }
 
-// ─── VideoTranscode ───────────────────────────────────────────────────────────
-
+// VideoTranscode
 /// Transcode an MP4 upload to `WebM` (VP9 + Opus), then update the post's
 /// `file_path` and `mime_type`. The original MP4 is deleted on success.
 ///
@@ -1256,7 +1313,7 @@ async fn transcode_video(
     let timeout_secs = crate::config::ffmpeg_timeout_secs();
     let ffmpeg_timeout = Duration::from_secs(timeout_secs);
 
-    // Phase 1: prepare (file checks, codec probe, temp file creation) — blocking.
+    // File checks, codec probing, and temporary-file creation are blocking.
     let prepare_result = {
         let file_path2 = file_path.clone();
         let board_short2 = board_short.clone();
@@ -1268,13 +1325,10 @@ async fn transcode_video(
     }?;
 
     let Some((args, src_path, webm_abs, webm_rel, _webm_name, tmp)) = prepare_result else {
-        return Ok(JobExecution::NeedsCompletion); // skip gracefully
+        return Ok(JobExecution::NeedsCompletion);
     };
 
-    // Phase 2: run ffmpeg via tokio::process::Command with kill_on_drop(true).
-    // When the timeout future is dropped, the Child is dropped, and kill_on_drop
-    // ensures the OS process receives SIGKILL immediately — unlike the previous
-    // spawn_blocking approach where the OS process kept running after timeout.
+    // `kill_on_drop` terminates ffmpeg when its timeout future is dropped.
     let mut command = ffmpeg_command();
     command
         .args(&args)
@@ -1309,7 +1363,7 @@ async fn transcode_video(
         }
     }
 
-    // Phase 3: persist temp file + DB updates — blocking.
+    // File persistence and database updates are blocking.
     let finalise_result = tokio::task::spawn_blocking(move || {
         transcode_video_finalise(
             job_id, post_id, &file_path, &src_path, &webm_abs, &webm_rel, tmp, &pool,
@@ -1740,8 +1794,7 @@ fn validate_transcoded_webm_output(
     Ok(TranscodeOutputDecision::Accept)
 }
 
-// ─── AudioWaveform ────────────────────────────────────────────────────────────
-
+// AudioWaveform
 /// Generate a waveform PNG thumbnail for an audio upload via ffmpeg.
 ///
 /// Same `kill_on_drop` fix as `transcode_video`. Uses
@@ -1775,7 +1828,7 @@ async fn generate_waveform(
     let timeout_secs = crate::config::ffmpeg_timeout_secs();
     let ffmpeg_timeout = Duration::from_secs(timeout_secs);
 
-    // Phase 1: prepare (file I/O, temp file creation) — blocking.
+    // File I/O and temporary-file creation are blocking.
     let (args, png_abs, png_rel, src_path, expected_file_path, tmp_png) = {
         let file_path2 = file_path.clone();
         let board_short2 = board_short.clone();
@@ -1784,7 +1837,7 @@ async fn generate_waveform(
             .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in waveform prepare: {e}"))??
     };
 
-    // Phase 2: run ffmpeg with kill_on_drop.
+    // `kill_on_drop` terminates ffmpeg when its timeout future is dropped.
     let mut command = ffmpeg_command();
     command
         .args(&args)
@@ -1820,7 +1873,7 @@ async fn generate_waveform(
         }
     }
 
-    // Phase 3: persist + DB update — blocking.
+    // File persistence and the database update are blocking.
     let finalise_result = tokio::task::spawn_blocking(move || {
         waveform_finalise(
             job_id,
@@ -2088,8 +2141,7 @@ fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-// ─── ThreadPrune ─────────────────────────────────────────────────────────────
-
+// ThreadPrune
 #[expect(
     clippy::cognitive_complexity,
     reason = "archive, prune, and filesystem finalization remain one consistency operation"
@@ -2106,7 +2158,7 @@ async fn prune_threads(board_id: i64, pool: DbPool) -> Result<()> {
             );
             return Ok(());
         };
-        // 2.5: archive_before_prune acts as a global safety net — when true,
+        // `archive_before_prune` is a global safety net: when true,
         // overflow threads are always archived rather than hard-deleted, even
         // on boards where allow_archive = false.  This closes the silent data
         // loss gap where a thread could disappear simply because a board hit
@@ -2730,14 +2782,12 @@ pub fn reconcile_media_job_states(
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             drop(active_stmt);
             let has_compatible = active_payloads.iter().any(|(stored_type, payload)| {
-                serde_json::from_str::<Job>(payload)
-                    .ok()
-                    .is_some_and(|job| {
-                        job.type_str() == stored_type
-                            && media_job_identity(&job).is_some_and(|identity| {
-                                identity.post_id == post_id && identity.expected_source == source
-                            })
-                    })
+                serde_json::from_str::<Job>(payload).is_ok_and(|job| {
+                    job.type_str() == stored_type
+                        && media_job_identity(&job).is_some_and(|identity| {
+                            identity.post_id == post_id && identity.expected_source == source
+                        })
+                })
             });
             if has_compatible {
                 continue;
@@ -2862,8 +2912,7 @@ pub fn reconcile_media_job_states(
     }
 }
 
-// ─── SpamCheck ────────────────────────────────────────────────────────────────
-
+// SpamCheck
 /// Records lightweight abuse signals for later operational review.
 fn run_spam_check(post_id: i64, ip_hash: &str, body_len: usize) {
     if body_len > 3500 {
@@ -2875,8 +2924,7 @@ fn run_spam_check(post_id: i64, ip_hash: &str, body_len: usize) {
     let _ = ip_hash;
 }
 
-// ─── Thumbnail / waveform cache eviction ─────────────────────────────────────
-
+// Thumbnail / waveform cache eviction
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 /// Result of one database-aware thumbnail-cache eviction pass.
 pub struct ThumbCacheEvictionReport {
@@ -3675,7 +3723,7 @@ mod tests {
     #[tokio::test]
     async fn delayed_prune_uses_current_archived_limit() -> anyhow::Result<()> {
         let pool = crate::db::init_test_pool()?;
-        let board_id = seed_retention_board(&pool, "archive-policy", 10, 1, true)?;
+        let board_id = seed_retention_board(&pool, "archpol", 10, 1, true)?;
         seed_threads(&pool, board_id, 0, 3)?;
         {
             let conn = pool.get()?;
@@ -3708,10 +3756,18 @@ mod tests {
         seed_threads(&pool, board_id, 3, 2)?;
         {
             let conn = pool.get()?;
+            let invariant_trigger: String = conn.query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger' AND name = 'boards_domain_update'",
+                [],
+                |row| row.get(0),
+            )?;
+            conn.execute_batch("DROP TRIGGER boards_domain_update")?;
             conn.execute(
                 "UPDATE boards SET max_threads = 0 WHERE id = ?1",
                 rusqlite::params![board_id],
             )?;
+            conn.execute_batch(&invariant_trigger)?;
         }
 
         ensure!(prune_threads(board_id, pool.clone()).await.is_err());

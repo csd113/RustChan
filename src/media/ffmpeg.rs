@@ -1,17 +1,6 @@
-// media/ffmpeg.rs
-//
-// FFmpeg binary detection and subprocess execution helpers.
-//
-// Design notes:
-//   • Detection is done by running `ffmpeg -version` and checking the exit code.
-//   • All subprocess invocations use `std::process::Command` with explicit
-//     argument arrays — never shell strings — to eliminate injection surfaces.
-//   • This module is called from synchronous contexts (spawn_blocking), so
-//     std::process::Command is used instead of tokio::process::Command.
-//   • Temp files passed to ffmpeg are created by the caller; this module only
-//     executes the subprocess and reports success or failure.
-//   • If ffmpeg exits non-zero, the error includes the trimmed stderr so
-//     operators can diagnose codec or format issues without reading raw logs.
+// Subprocesses receive explicit argument arrays and server-generated paths,
+// never shell strings. These helpers run in synchronous or `spawn_blocking`
+// contexts, and include bounded stderr in failures for operator diagnostics.
 
 use anyhow::{Context as _, Result};
 use std::borrow::Cow;
@@ -441,8 +430,7 @@ pub fn build_vp9_transcode_args(input: &str, output: &str) -> Vec<String> {
     );
     args
 }
-// ─── Internal helpers ──────────────────────────────────────────────────────────
-
+// Internal helpers
 /// Choose bounded VP9 encoder settings from available host parallelism.
 fn detect_vp9_encoding_profile() -> Vp9EncodingProfile {
     let threads = available_parallelism()

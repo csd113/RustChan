@@ -181,7 +181,6 @@ fn render_board_appearance_cards(view: &AdminPanelViewModel<'_>) -> String {
     board_appearance_cards
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 /// Renders theme-builder preset options and marks the selected preset.
 fn render_preset_options(selected_slug: &str) -> String {
     let mut out = String::new();
@@ -248,6 +247,8 @@ fn render_builder_sections(config: &ThemeBuilderConfig) -> String {
     <label>Starting preset
       <select name="base_preset" data-theme-builder-field="base_preset">{preset_options}</select>
       <small>Pick the built-in theme that is closest to what you want, then tune from there.</small>
+      <noscript><small>To start from the selected preset, fill in the theme name and slug, then save its defaults. Use the regular save button to keep your manual color edits.</small>
+      <button type="submit" name="apply_preset" value="1">Save preset defaults</button></noscript>
     </label>
     <label>Compactness
       <select name="density" data-theme-builder-field="density">
@@ -528,6 +529,47 @@ fn render_builder_sections(config: &ThemeBuilderConfig) -> String {
 
 /// Renders a representative live preview for a guided theme.
 fn render_builder_preview(config: &ThemeBuilderConfig, slug: &str) -> String {
+    let mut preview_style = format!(
+        "color-scheme:{};",
+        crate::theme_builder::input_color_scheme(&config.input_background_color)
+    );
+    for (property, value) in [
+        ("bg", &config.background_color),
+        ("panel", &config.panel_color),
+        ("card", &config.card_color),
+        ("op", &config.op_card_color),
+        ("text", &config.text_color),
+        ("muted", &config.muted_text_color),
+        ("link", &config.link_color),
+        ("link-hover", &config.link_hover_color),
+        ("border", &config.border_color),
+        ("input-bg", &config.input_background_color),
+        ("input-text", &config.input_text_color),
+        ("input-border", &config.input_border_color),
+        ("button-bg", &config.button_background_color),
+        ("button-text", &config.button_text_color),
+        ("button-border", &config.button_border_color),
+        ("button-hover", &config.button_hover_color),
+        ("header-bg", &config.header_background_color),
+        ("header-text", &config.header_text_color),
+        ("header-border", &config.header_border_color),
+        ("quote", &config.quote_color),
+        ("meta", &config.meta_text_color),
+        ("success", &config.success_color),
+        ("danger", &config.danger_color),
+    ] {
+        let _ = write!(preview_style, "--theme-preview-{property}:{value};");
+    }
+    let (gap, padding) = match config.density {
+        ThemeDensity::Compact => ("0.35rem", "0.45rem"),
+        ThemeDensity::Cozy => ("0.55rem", "0.75rem"),
+    };
+    let _ = write!(
+        preview_style,
+        "--theme-preview-radius:{}px;--theme-preview-font:{};--theme-preview-gap:{gap};--theme-preview-pad:{padding};",
+        config.border_radius_px,
+        config.font_family.css_stack(),
+    );
     format!(
         r##"<section class="theme-builder-preview-card">
   <div class="admin-card-header">
@@ -535,7 +577,7 @@ fn render_builder_preview(config: &ThemeBuilderConfig, slug: &str) -> String {
     <p>Representative RustChan surfaces update when JavaScript is available. Saving still posts the form normally.</p>
   </div>
   <style data-theme-preview-style></style>
-  <div class="theme-preview-shell" data-theme-preview data-theme-preview-slug="{slug}" data-theme-preview-preset="{preset}">
+  <div class="theme-preview-shell" style="{preview_style}" data-theme-preview data-theme-preview-slug="{slug}" data-theme-preview-preset="{preset}">
     <div class="theme-preview-header">
       <span class="theme-preview-title">RustChan</span>
       <nav class="theme-preview-nav"><a href="#">/tech/</a> <a href="#">/art/</a> <a href="#">/mu/</a></nav>
@@ -554,14 +596,14 @@ fn render_builder_preview(config: &ThemeBuilderConfig, slug: &str) -> String {
         <div class="theme-preview-meta">Reply No.102 <a href="#">>>101</a></div>
         <p>Reply card with metadata, quotelinks, and regular body text.</p>
       </article>
-      <form class="theme-preview-form">
-        <input type="text" value="Name">
-        <textarea rows="3">Body text</textarea>
+      <div class="theme-preview-form">
+        <input type="text" value="Name" aria-label="Preview name">
+        <textarea rows="3" aria-label="Preview body">Body text</textarea>
         <div class="theme-preview-actions">
           <button type="button">Post</button>
           <button type="button" class="theme-preview-secondary">Preview</button>
         </div>
-      </form>
+      </div>
       <div class="theme-preview-flashes">
         <div class="admin-flash flash-ok">Saved theme preview</div>
         <div class="admin-flash flash-error">Validation message preview</div>
@@ -571,6 +613,7 @@ fn render_builder_preview(config: &ThemeBuilderConfig, slug: &str) -> String {
 </section>"##,
         slug = escape_html(slug),
         preset = escape_html(&config.base_preset),
+        preview_style = escape_html(&preview_style),
     )
 }
 
@@ -645,7 +688,6 @@ fn render_theme_metadata_fields(theme: &crate::models::Theme) -> String {
     }
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 /// Renders built-in and custom theme cards as separate HTML groups.
 fn render_theme_cards(view: &AdminPanelViewModel<'_>) -> (String, String) {
     let mut builtin_theme_cards = String::new();
@@ -745,7 +787,6 @@ fn render_public_url_copy_button(public_url: &str) -> String {
     }
 }
 
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the section interpolates independent pre-rendered controls into fixed HTML"
@@ -769,9 +810,6 @@ fn render_admin_site_settings_section(
     let public_url_copy_button = render_public_url_copy_button(public_url);
     format!(
         r#"<div class="admin-panel-site-settings" id="site-settings-panel">
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     // site settings
-     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section" id="site-settings">
 <h2>// site settings</h2>
 <form method="POST" action="/admin/site/settings" class="admin-site-settings-form">
@@ -786,7 +824,7 @@ fn render_admin_site_settings_section(
            style="font-family:inherit">
   </label>
   <label>Default theme
-    <select name="default_theme" style="font-family:inherit;padding:0.25rem 0.4rem;background:var(--bg-input);color:var(--text);border:1px solid var(--border)">
+    <select name="default_theme" style="font-family:inherit;padding:0.25rem 0.4rem;background:var(--bg-input);color:var(--text)">
       {enabled_theme_options}
     </select>
   </label>
@@ -865,12 +903,10 @@ fn render_admin_site_settings_section(
     )
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "the appearance section is one stable server-rendered HTML fragment"
 )]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the section interpolates independent pre-rendered appearance controls"

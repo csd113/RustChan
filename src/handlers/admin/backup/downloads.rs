@@ -1,20 +1,20 @@
 use super::{
     board_backup_dir, full_backup_dir, header, invalidate_backup_list_cache, listing,
-    require_admin_post_origin_and_csrf, require_admin_session_sid, sanitize_backup_zip_filename,
-    sanitize_saved_backup_ref, saved_backup, temp_board_download_dir, AppError, AppState,
-    BackupListKind, Context, CookieJar, Duration, Form, HeaderMap, Ordering, Path, PathBuf, Pin,
-    Poll, Query, ReaderStream, Redirect, Response, Result, State, Stream, SESSION_COOKIE,
+    require_admin_post_origin_and_csrf, require_admin_session_sid, storage,
+    temp_board_download_dir, validate_backup_zip_filename, validate_saved_backup_reference,
+    AppError, AppState, BackupListKind, Context, CookieJar, Duration, Form, HeaderMap, Ordering,
+    Path, PathBuf, Pin, Poll, Query, ReaderStream, Redirect, Response, Result, State, Stream,
+    SESSION_COOKIE,
 };
 use axum::response::IntoResponse as _;
 use serde::Deserialize;
 
-/// Performs the temp board download token path handler operation.
 pub(super) fn temp_board_download_token_path(filename: &str) -> PathBuf {
     temp_board_download_dir().join(format!("{filename}.token"))
 }
 
 /// Writes temp board download token.
-pub(crate) fn write_temp_board_download_token(filename: &str, token: &str) -> Result<()> {
+pub(super) fn write_temp_board_download_token(filename: &str, token: &str) -> Result<()> {
     crate::config::ensure_private_dir(&temp_board_download_dir()).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create temp board backup dir: {error}"))
     })?;
@@ -45,7 +45,6 @@ pub(super) fn consume_temp_board_download_token(filename: &str, token: &str) -> 
     Ok(true)
 }
 
-/// Prunes stale temp board downloads.
 pub(super) fn prune_stale_temp_board_downloads() {
     let dir = temp_board_download_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -84,7 +83,6 @@ pub(super) fn prune_stale_temp_board_downloads() {
     }
 }
 
-/// Performs the safe backup file path handler operation.
 fn safe_backup_file_path(root: &Path, filename: &str) -> Result<PathBuf> {
     let path = root.join(filename);
     if !path.exists() {
@@ -97,16 +95,12 @@ fn safe_backup_file_path(root: &Path, filename: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-/// Data used by the temp file stream workflow.
-struct TempFileStream {
-    /// The optional inner.
+struct DeleteOnDropFileStream {
     inner: Option<ReaderStream<tokio::fs::File>>,
-    /// The cleanup path.
     cleanup_path: Option<PathBuf>,
 }
 
-impl TempFileStream {
-    /// Creates a new value.
+impl DeleteOnDropFileStream {
     fn new(file: tokio::fs::File, cleanup_path: PathBuf) -> Self {
         Self {
             inner: Some(ReaderStream::new(file)),
@@ -115,7 +109,7 @@ impl TempFileStream {
     }
 }
 
-impl Stream for TempFileStream {
+impl Stream for DeleteOnDropFileStream {
     type Item = std::result::Result<axum::body::Bytes, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -125,7 +119,7 @@ impl Stream for TempFileStream {
     }
 }
 
-impl Drop for TempFileStream {
+impl Drop for DeleteOnDropFileStream {
     fn drop(&mut self) {
         drop(self.inner.take());
         if let Some(path) = self.cleanup_path.take() {
@@ -135,25 +129,17 @@ impl Drop for TempFileStream {
 }
 
 #[derive(Default, Deserialize)]
-/// Query parameters accepted by the download backup request.
-pub(crate) struct DownloadBackupQuery {
-    /// The optional cleanup.
+pub(in crate::server) struct DownloadBackupQuery {
     cleanup: Option<String>,
-    /// The optional token.
     token: Option<String>,
-    /// The optional part.
     part: Option<String>,
 }
 
 #[derive(Deserialize)]
-/// Form fields accepted by the delete backup request.
-pub(crate) struct DeleteBackupForm {
-    /// The kind.
+pub(in crate::server) struct DeleteBackupForm {
     kind: String,
-    /// The filename.
     filename: String,
     #[serde(rename = "_csrf")]
-    /// The submitted CSRF token, if present.
     csrf: Option<String>,
 }
 
@@ -161,8 +147,7 @@ pub(crate) struct DeleteBackupForm {
     clippy::too_many_lines,
     reason = "authentication, token validation, checksum verification, and streaming form one download request"
 )]
-/// Handles the download backup request.
-pub(crate) async fn download_backup(
+pub(in crate::server) async fn download_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     Query(query): Query<DownloadBackupQuery>,
@@ -171,9 +156,9 @@ pub(crate) async fn download_backup(
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
 
     let safe_filename = if query.part.is_some() && matches!(kind.as_str(), "full" | "board") {
-        sanitize_saved_backup_ref(&filename)?
+        validate_saved_backup_reference(&filename)?
     } else {
-        sanitize_backup_zip_filename(&filename)?
+        validate_backup_zip_filename(&filename)?
     };
 
     let requires_temp_token = match kind.as_str() {
@@ -212,18 +197,18 @@ pub(crate) async fn download_backup(
                 "Backup parts are not available for this download kind.".into(),
             ));
         }
-        let safe_part = sanitize_backup_zip_filename(part_name)?;
+        let safe_part = validate_backup_zip_filename(part_name)?;
         let backup_root = crate::config::backups_dir().join(&safe_filename);
-        let expected_scopes: &[saved_backup::BackupScope] = match kind.as_str() {
-            "full" => &[saved_backup::BackupScope::FullSite],
-            "board" => &[saved_backup::BackupScope::Board],
+        let expected_scopes: &[storage::BackupScope] = match kind.as_str() {
+            "full" => &[storage::BackupScope::FullSite],
+            "board" => &[storage::BackupScope::Board],
             _ => {
                 return Err(AppError::BadRequest(
                     "Backup parts are not available for this download kind.".into(),
                 ));
             }
         };
-        let verified = saved_backup::verify_saved_v4_root(&backup_root, expected_scopes)?;
+        let verified = storage::verify_saved_backup(&backup_root, expected_scopes)?;
         let part_filename = format!("parts/{safe_part}");
         let part = verified
             .manifest
@@ -247,7 +232,7 @@ pub(crate) async fn download_backup(
                 "Backup part size changed since verification.".into(),
             ));
         }
-        let file_sha256 = saved_backup::sha256_hex_for_file(&resolved)?;
+        let file_sha256 = storage::sha256_hex_for_file(&resolved)?;
         if file_sha256 != part.sha256 {
             return Err(AppError::BadRequest(
                 "Backup part checksum changed since verification.".into(),
@@ -290,7 +275,7 @@ pub(crate) async fn download_backup(
     let stream: Pin<
         Box<dyn Stream<Item = std::result::Result<axum::body::Bytes, std::io::Error>> + Send>,
     > = if cleanup_temp {
-        Box::pin(TempFileStream::new(file, path.clone()))
+        Box::pin(DeleteOnDropFileStream::new(file, path.clone()))
     } else {
         Box::pin(ReaderStream::new(file))
     };
@@ -308,8 +293,7 @@ pub(crate) async fn download_backup(
         .into_response())
 }
 
-/// Handles the backup progress JSON request.
-pub(crate) async fn backup_progress_json(
+pub(in crate::server) async fn backup_progress_json(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Response> {
@@ -342,8 +326,7 @@ pub(crate) async fn backup_progress_json(
         .into_response())
 }
 
-/// Handles the delete backup request.
-pub(crate) async fn delete_backup(
+pub(in crate::server) async fn delete_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
@@ -354,7 +337,7 @@ pub(crate) async fn delete_backup(
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let _maintenance_guard = state.maintenance_gate.try_begin("Saved backup deletion")?;
 
-    let safe_filename = sanitize_saved_backup_ref(&form.filename)?;
+    let safe_filename = validate_saved_backup_reference(&form.filename)?;
 
     let (backup_dir, backup_kind) = match form.kind.as_str() {
         "full" => (full_backup_dir(), BackupListKind::Full),
@@ -368,11 +351,11 @@ pub(crate) async fn delete_backup(
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
 
-            let v4_root = crate::config::backups_dir().join(&safe_filename);
+            let saved_root = crate::config::backups_dir().join(&safe_filename);
             let legacy_path = backup_dir.join(&safe_filename);
-            if v4_root.is_dir() {
-                listing::safe_saved_backup_dir_for_delete(&v4_root)?;
-                std::fs::remove_dir_all(&v4_root)
+            if saved_root.is_dir() {
+                listing::safe_saved_backup_dir_for_delete(&saved_root)?;
+                std::fs::remove_dir_all(&saved_root)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Delete backup: {e}")))?;
                 invalidate_backup_list_cache(&backup_dir, backup_kind);
                 tracing::info!(target: "admin", backup_ref = %safe_filename, "Backup directory deleted");

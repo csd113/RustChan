@@ -1212,6 +1212,53 @@ async fn create_thread_rejects_truncated_png_with_422_inline_error() -> anyhow::
 }
 
 #[tokio::test]
+async fn homepage_renders_zero_statistics_on_empty_database() -> anyhow::Result<()> {
+    let state = crate::test_support::app_state();
+    let router = activity_router(state);
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())
+                .context("request")?,
+        )
+        .await
+        .context("response")?;
+
+    ensure_eq!(response.status(), StatusCode::OK);
+    let body = response_body_string(response).await?;
+    anyhow::ensure!(
+        body.contains("index-empty"),
+        "fresh site should have no boards"
+    );
+    anyhow::ensure!(
+        !body.contains("index-stats-unavailable"),
+        "empty site should not render the unavailable statistics fallback"
+    );
+    anyhow::ensure!(
+        body.contains("index-stats-grid"),
+        "statistics should render"
+    );
+    for (label, value) in [
+        ("total posts", "0"),
+        ("images uploaded", "0"),
+        ("videos uploaded", "0"),
+        ("audio files uploaded", "0"),
+        ("active content", "0.00 GB"),
+    ] {
+        anyhow::ensure!(
+            body.contains(&format!(
+                "<span class=\"index-stat-value\">{value}</span><span class=\"index-stat-label\">{label}</span>"
+            )),
+            "empty site should render {label} as {value}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn homepage_and_thread_badges_default_to_enabled() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     let conn = state.db.get().context("db connection")?;

@@ -1,22 +1,10 @@
-// db/posts.rs — Post queries, file deduplication, polls, and the background
-//               job queue (including worker-side update helpers).
-//
-// Dependency notes:
-//   create_post_inner  is pub(super) — threads.rs calls it inside
-//                      create_thread_with_op's manual transaction.
-//   delete_post        calls super::paths_safe_to_delete.
-//
 use crate::models::Post;
 use anyhow::{Context as _, Result};
 use rusqlite::{params, OptionalExtension as _};
 use std::collections::HashMap;
 use std::fmt;
 
-// ─── Retry budget constant ────────────────────────────────────────────────────
-
-/// Single source of truth for the job retry budget.
-/// Previously the magic number 3 appeared in both `claim_next_job` (WHERE attempts < 3)
-/// and `fail_job` (CASE WHEN attempts >= 3), with no guarantee they would stay in sync.
+/// Shared retry budget for job claiming and terminal-failure transitions.
 const MAX_JOB_ATTEMPTS: i64 = 3;
 /// Shared projection used to decode a complete post.
 const POST_SELECT_COLUMNS: &str = "id, thread_id, board_id, name, tripcode, subject, body, \
@@ -116,8 +104,7 @@ pub struct RecentBackgroundJob {
     pub updated_at: i64,
 }
 
-// ─── Row mapper ───────────────────────────────────────────────────────────────
-
+// Row mapper
 /// Map a full post row (25 columns, selected in the canonical order used
 /// throughout this module) into a Post struct.
 ///
@@ -179,8 +166,7 @@ pub(super) fn map_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<Post> {
     })
 }
 
-// ─── Post queries ─────────────────────────────────────────────────────────────
-
+// Post queries
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Vec<Post>> {
@@ -512,13 +498,8 @@ pub fn get_post_on_board(
 
 /// Delete a post by id; returns file paths safe to remove from disk.
 ///
-/// The previous implementation had a SELECT → DELETE TOCTOU race:
-/// if the post was concurrently deleted between the `get_post` call and the
-/// DELETE, the function silently returned an empty path list rather than an
-/// error, and the caller would skip file cleanup assuming there was nothing to
-/// clean. Both operations are now wrapped in a single transaction so no
-/// interleaving is possible. `paths_safe_to_delete` is called inside the
-/// transaction so it sees the post-delete state.
+/// Selection, deletion, and `paths_safe_to_delete` share a transaction so a
+/// concurrent delete cannot invalidate the returned cleanup paths.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -729,12 +710,15 @@ pub fn self_delete_post(
             }
 
             if is_op {
-                let reply_count: i64 = conn.query_row(
-                    "SELECT reply_count FROM threads WHERE id = ?1",
+                let has_replies: bool = conn.query_row(
+                    "SELECT EXISTS (
+                         SELECT 1 FROM posts
+                         WHERE thread_id = ?1 AND is_op = 0
+                     )",
                     params![thread_id],
                     |r| r.get(0),
                 )?;
-                if reply_count > 0 {
+                if has_replies {
                     return Ok((SelfDeleteOutcome::ThreadHasReplies, None));
                 }
 
@@ -766,15 +750,8 @@ pub fn self_delete_post(
 /// Returns `Ok(true)` on success, `Ok(false)` if the token is wrong or the
 /// edit window has closed; `Err` for database failures.
 ///
-/// Upgraded from DEFERRED (`unchecked_transaction`) to IMMEDIATE by
-/// issuing BEGIN IMMEDIATE explicitly. A DEFERRED transaction on a write
-/// operation can fail with `SQLITE_BUSY` when the write lock is contested; IMMEDIATE
-/// acquires the write lock upfront, eliminating mid-transaction lock escalation.
-///
-/// The previous two-round-trip design (one SELECT for the token,
-/// a second SELECT for `created_at`) introduced a race window: the post could be
-/// deleted between the token check and the timestamp fetch. Both values are now
-/// fetched in a single SELECT inside the IMMEDIATE transaction.
+/// An immediate transaction acquires the write lock before validation, and one
+/// query reads both the token and timestamp so deletion cannot race either check.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -798,7 +775,6 @@ pub fn edit_post(
         .context("Failed to begin IMMEDIATE transaction for edit_post")?;
 
     let result: Result<bool> = (|| {
-        // Fetch token and created_at in a single round-trip.
         let row: Option<(String, i64, bool, bool)> = conn
             .query_row(
                 "SELECT p.deletion_token, p.created_at, t.locked, t.archived
@@ -858,10 +834,8 @@ pub fn edit_post(
 
 /// Constant-time byte slice comparison to prevent timing side-channel attacks.
 ///
-/// The previous implementation returned false immediately when
-/// lengths differed, leaking token length as a timing signal. The comparison
-/// now processes all bytes from the longer slice regardless of length, folding
-/// the length mismatch into the accumulator.
+/// Length mismatch is folded into the accumulator while every byte from the
+/// longer slice is processed.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     let max_len = a.len().max(b.len());
     // Non-zero when lengths differ.
@@ -874,8 +848,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-// ─── LIKE escape helper ───────────────────────────────────────────────────────
-
+// LIKE escape helper
 /// Extract conservative FTS-safe tokens from free-form user input.
 ///
 /// `SQLite` FTS5 treats punctuation-heavy input as query syntax, so raw tokens like
@@ -921,8 +894,7 @@ fn to_fts_query(query: &str) -> Option<String> {
     (!terms.is_empty()).then(|| terms.join(" AND "))
 }
 
-// ─── Search ───────────────────────────────────────────────────────────────────
-
+// Search
 /// Full-text search across post bodies.
 ///
 /// # Errors
@@ -977,8 +949,7 @@ pub fn count_search_results(
     )?)
 }
 
-// ─── File deduplication ───────────────────────────────────────────────────────
-
+// File deduplication
 /// Look up an existing upload by its SHA-256 hash.
 ///
 /// # Errors
@@ -1028,12 +999,8 @@ pub fn find_file_by_hash(
 
 /// Record a newly saved upload in the deduplication table.
 ///
-/// Uses INSERT OR REPLACE so that if the same SHA-256 was previously stored
-/// with an unconverted format (e.g. image/jpeg stored before WebP conversion
-/// was enabled), re-uploading the same bytes will update the cache to point
-/// at the converted file and mime type. Without OR REPLACE, the stale
-/// cache entry would be returned on every subsequent upload of that image,
-/// silently skipping conversion forever.
+/// `INSERT OR REPLACE` refreshes stale metadata when the same content hash is
+/// re-uploaded after conversion policy changes.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -1052,8 +1019,7 @@ pub fn record_file_hash(
     Ok(())
 }
 
-// ─── Poll queries ─────────────────────────────────────────────────────────────
-
+// Poll queries
 /// Fetch the full poll for a thread including vote counts and the user's choice.
 ///
 /// Note: poll expiry is checked against the application clock (`chrono::Utc::now`)
@@ -1093,12 +1059,13 @@ pub fn get_poll_for_thread(
 
     let mut stmt = conn.prepare_cached(
         "SELECT po.id, po.poll_id, po.text, po.position,
-                COUNT(pv.id) as vote_count
+                (
+                    SELECT COUNT(*)
+                    FROM poll_votes AS pv
+                    WHERE pv.option_id = po.id AND pv.poll_id = po.poll_id
+                ) AS vote_count
          FROM poll_options po
-         LEFT JOIN poll_votes pv ON pv.option_id = po.id
-                                AND pv.poll_id   = po.poll_id
          WHERE po.poll_id = ?1
-         GROUP BY po.id
          ORDER BY po.position ASC",
     )?;
     let options: Vec<crate::models::PollOption> = stmt
@@ -1136,13 +1103,13 @@ pub fn get_poll_for_thread(
 
 /// Cast a vote. Returns true if vote was recorded, false otherwise.
 ///
-/// Validates that `option_id` belongs to `poll_id` inside
-/// the same INSERT statement via a correlated WHERE EXISTS. A mismatched
-/// (`poll_id`, `option_id`) pair inserts nothing and returns false.
+/// Validates that `option_id` belongs to an unexpired `poll_id` inside the same
+/// INSERT statement. A mismatched pair or a poll that closes before this write
+/// inserts nothing and returns false.
 ///
 /// This returns false for two distinct cases:
 ///   1. The voter has already voted (UNIQUE constraint fires INSERT OR IGNORE)
-///   2. The `option_id` does not belong to `poll_id` (EXISTS check fails)
+///   2. The option does not belong to the poll, or the poll has expired
 ///
 /// Callers that need to distinguish these cases should call `cast_vote` and, on
 /// false, separately query whether the IP has voted on this poll. A future
@@ -1159,10 +1126,11 @@ pub fn cast_vote(
     let result = conn.execute(
         "INSERT OR IGNORE INTO poll_votes (poll_id, option_id, ip_hash)
          SELECT ?1, ?2, ?3
-         WHERE EXISTS (
-             SELECT 1 FROM poll_options
-             WHERE id = ?2 AND poll_id = ?1
-         )",
+         FROM poll_options AS po
+         JOIN polls AS p ON p.id = po.poll_id
+         WHERE po.id = ?2
+           AND po.poll_id = ?1
+           AND p.expires_at > unixepoch()",
         params![poll_id, option_id, ip_hash],
     )?;
     Ok(result > 0)
@@ -1190,8 +1158,7 @@ pub fn get_poll_context(
         .optional()?)
 }
 
-// ─── Poll maintenance ─────────────────────────────────────────────────────────
-
+// Poll maintenance
 /// Delete vote rows for polls whose `expires_at` is older than the given cutoff timestamp.
 ///
 /// The poll question and options are preserved for historical display; only
@@ -1219,8 +1186,7 @@ pub fn cleanup_expired_poll_votes(
     Ok(n)
 }
 
-// ─── Background job queue ─────────────────────────────────────────────────────
-//
+// Background job queue
 // Jobs flow through: pending → running → done | failed
 // claim_next_job uses UPDATE … RETURNING for atomic claim with no TOCTOU race.
 
@@ -1228,8 +1194,6 @@ pub fn cleanup_expired_poll_votes(
 const FAILED_BACKGROUND_JOBS_ACK_ID_KEY: &str = "failed_background_jobs_acknowledged_through_id";
 
 /// Persist a new job in the pending state. Returns the new row id.
-///
-/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -1666,10 +1630,7 @@ pub fn claim_next_job(conn: &rusqlite::Connection) -> Result<Option<(i64, String
     Ok(result)
 }
 
-/// Mark a job as successfully completed.
-///
-/// Added rows-affected check — silently succeeding for an unknown
-/// `job_id` made double-complete bugs invisible.
+/// Mark a running job as successfully completed.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -1686,10 +1647,7 @@ pub fn complete_job(conn: &rusqlite::Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Record a job failure. After `MAX_JOB_ATTEMPTS` the job stays "failed" permanently.
-///
-/// Added rows-affected check.
-/// Uses `MAX_JOB_ATTEMPTS` constant instead of duplicating the magic number.
+/// Record a job failure. After `MAX_JOB_ATTEMPTS` the job stays failed permanently.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -2216,8 +2174,7 @@ pub fn count_posts_by_media_processing_state(
     Ok(n)
 }
 
-// ─── Post update helpers (used by background workers) ────────────────────────
-
+// Post update helpers (used by background workers)
 /// Update a post's `thumb_path` after background waveform / thumbnail generation.
 ///
 /// # Errors
@@ -2687,9 +2644,9 @@ pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        acknowledge_failed_background_jobs, background_job_summary, claim_next_job, complete_job,
-        count_posts_by_media_processing_state, count_search_results, get_post, get_post_submission,
-        get_posts_for_thread, is_stale_media_target_error, persist_media_job,
+        acknowledge_failed_background_jobs, background_job_summary, cast_vote, claim_next_job,
+        complete_job, count_posts_by_media_processing_state, count_search_results, get_post,
+        get_post_submission, get_posts_for_thread, is_stale_media_target_error, persist_media_job,
         recent_background_jobs, record_post_submission, recover_interrupted_background_jobs,
         replace_transcoded_media, search_posts, search_terms, self_delete_post,
         set_post_media_processing_state, to_fts_query, update_post_thumb_path, SelfDeleteOutcome,
@@ -3980,13 +3937,17 @@ mod tests {
             is_op: false,
         };
         create_reply_with_thread_update(&conn, &reply, "", false, None)?;
+        conn.execute(
+            "UPDATE threads SET reply_count = 0 WHERE id = ?1",
+            [thread_id],
+        )?;
 
         let (outcome, deleted) = self_delete_post(&conn, op_id, "op-token", 60)?;
 
         assert_eq!(
             outcome,
             SelfDeleteOutcome::ThreadHasReplies,
-            "opening post with replies should not self-delete"
+            "opening post with real replies should not self-delete even if the cached counter drifted"
         );
         assert!(
             deleted.is_none(),
@@ -3995,6 +3956,65 @@ mod tests {
         assert!(
             get_thread(&conn, thread_id)?.is_some(),
             "rejected deletion should preserve the thread"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn cast_vote_enforces_expiry_and_option_membership_in_the_insert() -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "poll", "Poll", "", false)?;
+        let thread_id: i64 = conn.query_row(
+            "INSERT INTO threads (board_id, subject) VALUES (?1, 'poll') RETURNING id",
+            [board_id],
+            |row| row.get(0),
+        )?;
+        let open_poll: i64 = conn.query_row(
+            "INSERT INTO polls (thread_id, question, expires_at)
+             VALUES (?1, 'open', unixepoch() + 60) RETURNING id",
+            [thread_id],
+            |row| row.get(0),
+        )?;
+        let open_option: i64 = conn.query_row(
+            "INSERT INTO poll_options (poll_id, text, position)
+             VALUES (?1, 'yes', 0) RETURNING id",
+            [open_poll],
+            |row| row.get(0),
+        )?;
+        let expired_thread_id: i64 = conn.query_row(
+            "INSERT INTO threads (board_id, subject) VALUES (?1, 'expired poll') RETURNING id",
+            [board_id],
+            |row| row.get(0),
+        )?;
+        let expired_poll: i64 = conn.query_row(
+            "INSERT INTO polls (thread_id, question, expires_at)
+             VALUES (?1, 'expired', unixepoch() - 1) RETURNING id",
+            [expired_thread_id],
+            |row| row.get(0),
+        )?;
+        let expired_option: i64 = conn.query_row(
+            "INSERT INTO poll_options (poll_id, text, position)
+             VALUES (?1, 'late', 0) RETURNING id",
+            [expired_poll],
+            |row| row.get(0),
+        )?;
+
+        assert!(cast_vote(&conn, open_poll, open_option, "viewer")?);
+        assert!(
+            !cast_vote(&conn, open_poll, open_option, "viewer")?,
+            "a duplicate vote should not be inserted"
+        );
+        assert!(
+            !cast_vote(&conn, open_poll, expired_option, "other")?,
+            "an option from another poll should not be inserted"
+        );
+        assert!(
+            !cast_vote(&conn, expired_poll, expired_option, "late")?,
+            "an expired poll should reject the vote in the write statement"
         );
         Ok(())
     }

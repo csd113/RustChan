@@ -24,13 +24,10 @@ const VERSIONED_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_IMMUTABLE_MEDI
 const UNVERSIONED_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_STATIC_SHORT;
 
 #[derive(Deserialize, Default)]
-/// Query parameters accepted by the external banner request.
-pub(crate) struct ExternalBannerQuery {
-    /// The optional return to.
+pub(in crate::server) struct ExternalBannerQuery {
     pub return_to: Option<String>,
 }
 
-/// Loads accessible banner asset.
 fn load_accessible_banner_asset(
     conn: &rusqlite::Connection,
     banner_id: i64,
@@ -62,8 +59,7 @@ fn load_accessible_banner_asset(
     Ok((asset, false))
 }
 
-/// Handles the serve banner asset request.
-pub(crate) async fn serve_banner_asset(
+pub(in crate::server) async fn serve_banner_asset(
     State(state): State<AppState>,
     Path(banner_id): Path<i64>,
     jar: CookieJar,
@@ -138,8 +134,7 @@ pub(crate) async fn serve_banner_asset(
     response
 }
 
-/// Handles the external banner warning page request.
-pub(crate) async fn external_banner_warning_page(
+pub(in crate::server) async fn external_banner_warning_page(
     State(state): State<AppState>,
     Path(banner_id): Path<i64>,
     Query(query): Query<ExternalBannerQuery>,
@@ -214,8 +209,7 @@ pub(crate) async fn external_banner_warning_page(
     Ok((jar, response).into_response())
 }
 
-/// Handles the external banner continue request.
-pub(crate) async fn external_banner_continue(
+pub(in crate::server) async fn external_banner_continue(
     State(state): State<AppState>,
     Path(banner_id): Path<i64>,
     Query(_query): Query<ExternalBannerQuery>,
@@ -353,7 +347,7 @@ mod tests {
         state: &crate::middleware::AppState,
     ) -> AnyResult<(i64, std::path::PathBuf, String)> {
         let conn = state.db.get().context("get database connection")?;
-        let board_id = crate::db::create_board(&conn, "securebanner", "Secret", "", false)
+        let board_id = crate::db::create_board(&conn, "secbann", "Secret", "", false)
             .context("create protected board")?;
         let password_hash =
             crate::utils::crypto::hash_password("swordfish").context("hash board password")?;
@@ -372,7 +366,7 @@ mod tests {
         let storage_key = uuid::Uuid::new_v4().simple().to_string();
         let path = crate::banner::banner_storage_path(
             crate::models::BannerScope::Board,
-            Some("securebanner"),
+            Some("secbann"),
             &storage_key,
         )
         .context("build protected board banner path")?;

@@ -24,6 +24,7 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
     let behind_proxy = crate::config::CONFIG.behind_proxy;
 
     Router::new()
+        .fallback(|| async { crate::error::AppError::NotFound("Page not found.".into()) })
         .route("/static/style.css", get(serve_css))
         .route("/static/main.js", get(serve_main_js))
         .route("/static/admin.css", get(serve_admin_css))
@@ -35,6 +36,9 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
             crate::middleware::rate_limit_middleware,
         ))
         .layer(axum_middleware::from_fn(track_requests))
+        .layer(axum_middleware::from_fn(
+            super::headers::theme_error_response,
+        ))
         .layer(
             tower_http::compression::CompressionLayer::new()
                 .compress_when(text_response_compression_predicate),
@@ -125,10 +129,8 @@ mod tests {
         Router,
     };
     use axum_extra::extract::cookie::CookieJar;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt as _;
 
-    /// Standard fallible test result.
     type TestResult = anyhow::Result<()>;
 
     /// Seed a public board and refresh the template board cache.
@@ -175,11 +177,15 @@ mod tests {
 
     /// Generate a collision-resistant board name for filesystem tests.
     fn unique_test_board(prefix: &str) -> anyhow::Result<String> {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("system clock predates the Unix epoch")?
-            .as_nanos();
-        Ok(format!("{prefix}{nanos:x}"))
+        let first = prefix
+            .chars()
+            .find(char::is_ascii_alphanumeric)
+            .context("test board prefix has no alphanumeric character")?;
+        let random = uuid::Uuid::new_v4().simple().to_string();
+        let suffix = random
+            .get(..7)
+            .context("UUID test suffix was unexpectedly short")?;
+        Ok(format!("{first}{suffix}"))
     }
 
     /// Extract the first response cookie whose name starts with `prefix`.

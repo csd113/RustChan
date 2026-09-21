@@ -8,37 +8,24 @@ use crate::{
 };
 use sha2::{Digest as _, Sha256};
 
-/// Data used by the board page data workflow.
-pub(crate) struct BoardPageData {
-    /// The board.
+pub(super) struct BoardPageData {
     pub board: Board,
-    /// The pagination.
     pub pagination: Pagination,
-    /// The summaries collection.
     pub summaries: Vec<ThreadSummary>,
-    /// Whether this value is admin.
     pub is_admin: bool,
 }
 
-/// Data used by the thread page data workflow.
-pub(crate) struct ThreadPageData {
-    /// The board.
+pub(super) struct ThreadPageData {
     pub board: Board,
-    /// The thread.
     pub thread: Thread,
-    /// The posts collection.
     pub posts: Vec<crate::models::Post>,
-    /// The optional poll.
     pub poll: Option<PollData>,
-    /// Whether this value is admin.
     pub is_admin: bool,
-    /// The owned post controls collection.
     pub owned_post_controls: std::collections::BTreeMap<i64, templates::thread::OwnedPostControls>,
 }
 
 #[must_use]
-/// Performs the board page etag signature handler operation.
-pub(crate) fn board_page_etag_signature(data: &BoardPageData) -> String {
+pub(super) fn board_page_etag_signature(data: &BoardPageData) -> String {
     let mut hasher = Sha256::new();
     for summary in &data.summaries {
         update_thread_signature(&mut hasher, &summary.thread);
@@ -51,8 +38,7 @@ pub(crate) fn board_page_etag_signature(data: &BoardPageData) -> String {
 }
 
 #[must_use]
-/// Performs the thread page etag signature handler operation.
-pub(crate) fn thread_page_etag_signature(data: &ThreadPageData) -> String {
+pub(super) fn thread_page_etag_signature(data: &ThreadPageData) -> String {
     let mut hasher = Sha256::new();
     update_thread_signature(&mut hasher, &data.thread);
     for post in &data.posts {
@@ -64,13 +50,11 @@ pub(crate) fn thread_page_etag_signature(data: &ThreadPageData) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Updates sig field.
 fn update_sig_field(hasher: &mut Sha256, value: &str) {
     hasher.update(value.as_bytes());
     hasher.update([0]);
 }
 
-/// Updates thread signature.
 fn update_thread_signature(hasher: &mut Sha256, thread: &Thread) {
     update_sig_field(hasher, &thread.id.to_string());
     update_sig_field(hasher, &thread.bumped_at.to_string());
@@ -82,7 +66,6 @@ fn update_thread_signature(hasher: &mut Sha256, thread: &Thread) {
     update_sig_field(hasher, thread.op_thumb.as_deref().unwrap_or(""));
 }
 
-/// Updates post signature.
 fn update_post_signature(hasher: &mut Sha256, post: &crate::models::Post) {
     update_sig_field(hasher, &post.id.to_string());
     update_sig_field(hasher, &post.edited_at.unwrap_or(0).to_string());
@@ -95,7 +78,6 @@ fn update_post_signature(hasher: &mut Sha256, post: &crate::models::Post) {
     update_sig_field(hasher, post.media_processing_error.as_deref().unwrap_or(""));
 }
 
-/// Updates poll signature.
 fn update_poll_signature(hasher: &mut Sha256, poll_data: &PollData) {
     update_sig_field(hasher, &poll_data.poll.id.to_string());
     update_sig_field(hasher, &poll_data.poll.thread_id.to_string());
@@ -117,8 +99,7 @@ fn update_poll_signature(hasher: &mut Sha256, poll_data: &PollData) {
     }
 }
 
-/// Loads board page data.
-pub(crate) fn load_board_page_data(
+pub(super) fn load_board_page_data(
     conn: &rusqlite::Connection,
     board_short: &str,
     page: i64,
@@ -159,8 +140,7 @@ pub(crate) fn load_board_page_data(
     clippy::too_many_arguments,
     reason = "the renderer accepts distinct request-scoped security, preference, and pagination inputs"
 )]
-/// Renders board page.
-pub(crate) fn render_board_page(
+pub(super) fn render_board_page(
     data: &BoardPageData,
     csrf_token: &str,
     admin_csrf_token: Option<&str>,
@@ -194,8 +174,7 @@ pub(crate) fn render_board_page(
     )
 }
 
-/// Loads thread page data.
-pub(crate) fn load_thread_page_data(
+pub(super) fn load_thread_page_data(
     conn: &rusqlite::Connection,
     board_short: &str,
     thread_id: i64,
@@ -228,8 +207,7 @@ pub(crate) fn load_thread_page_data(
     clippy::too_many_arguments,
     reason = "the renderer accepts distinct request-scoped security, preference, and thread-state inputs"
 )]
-/// Renders thread page.
-pub(crate) fn render_thread_page(
+pub(super) fn render_thread_page(
     data: &ThreadPageData,
     csrf_token: &str,
     admin_csrf_token: Option<&str>,

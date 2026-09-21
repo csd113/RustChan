@@ -16,9 +16,9 @@ use serde_json::json;
 pub async fn chan_status(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, super::ChanError> {
-    let conn = state.db.get()?;
-
+    let pool = state.db.clone();
     let (boards, posts) = tokio::task::spawn_blocking(move || -> anyhow::Result<(i64, i64)> {
+        let conn = pool.get()?;
         let boards = conn.query_row("SELECT COUNT(*) FROM boards", [], |r| r.get(0))?;
         let posts = conn.query_row("SELECT COUNT(*) FROM posts", [], |r| r.get(0))?;
         Ok((boards, posts))

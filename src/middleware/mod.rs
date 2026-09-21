@@ -1,5 +1,3 @@
-// src/middleware/mod.rs
-
 /// Backup-operation progress shared with status endpoints.
 mod backup_progress;
 /// Cross-site request forgery token validation.
@@ -25,6 +23,7 @@ pub use state::{
     AppState, AutoFullBackupSettings, AutoFullBackupSettingsSnapshot, DbMaintenanceJobPhase,
     DbMaintenanceJobStatus, DbMaintenanceJobs, MaintenanceGate,
 };
+pub(crate) use state::{ChanImportGate, ChanImportGuard, MediaUploadGate, MediaUploadGuard};
 pub use transport::{RequestTransport, SecureCookieContext};
 
 /// Returns whether a trusted proxy reported HTTPS for the request.

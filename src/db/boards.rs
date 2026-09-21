@@ -1,8 +1,3 @@
-// db/boards.rs — Board-level queries and site settings.
-//
-// Covers: site_settings table, boards CRUD, delete_board (with file-safety
-// guard via super::paths_safe_to_delete), and aggregate site statistics.
-//
 use crate::models::{Board, BoardAccessMode, BoardBannerMode};
 use anyhow::{Context as _, Result};
 use rusqlite::{params, OptionalExtension as _};
@@ -27,8 +22,6 @@ const BOARD_SELECT_COLUMNS_WITH_ALIAS: &str = "b.id, b.display_order, b.short_na
     b.allow_self_delete, b.allow_archive, b.allow_video_embeds, b.allow_captcha, \
     b.show_poster_ids, b.collapse_greentext, b.post_cooldown_secs, \
     b.default_theme, b.banner_mode, b.access_mode, b.access_password_hash, b.created_at";
-
-// ─── Row mapper ───────────────────────────────────────────────────────────────
 
 /// Decode a board from the shared board-column projection.
 pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
@@ -156,12 +149,10 @@ fn normalize_board_group_order(
     Ok(())
 }
 
-// ─── Site settings ────────────────────────────────────────────────────────────
-
-/// Read a site-wide setting by key. Returns None if the key has never been set.
+// Site settings
+/// Read a site-wide setting by key. Returns `None` if the key has never been set.
 ///
-/// Switched to `prepare_cached` — convenience helpers (`get_site_name`,
-/// `get_site_subtitle`, etc.) call this on every page render.
+/// The statement is cached because convenience helpers call this on every page render.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -220,12 +211,35 @@ pub fn set_media_prune_settings(
     enabled: bool,
     max_size_bytes: u64,
 ) -> Result<()> {
-    set_site_setting(conn, MEDIA_AUTO_PRUNE_ENABLED_KEY, &enabled.to_string())?;
-    set_site_setting(
-        conn,
-        MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY,
-        &max_size_bytes.to_string(),
-    )
+    conn.execute_batch("SAVEPOINT set_media_prune_settings")
+        .context("Begin media-prune settings savepoint")?;
+    let result = (|| {
+        set_site_setting(conn, MEDIA_AUTO_PRUNE_ENABLED_KEY, &enabled.to_string())?;
+        set_site_setting(
+            conn,
+            MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY,
+            &max_size_bytes.to_string(),
+        )
+    })();
+    match result {
+        Ok(()) => {
+            if let Err(error) = conn.execute_batch("RELEASE SAVEPOINT set_media_prune_settings") {
+                drop(conn.execute_batch(
+                    "ROLLBACK TO SAVEPOINT set_media_prune_settings;
+                     RELEASE SAVEPOINT set_media_prune_settings",
+                ));
+                return Err(error).context("Commit media-prune settings");
+            }
+            Ok(())
+        }
+        Err(error) => {
+            drop(conn.execute_batch(
+                "ROLLBACK TO SAVEPOINT set_media_prune_settings;
+                 RELEASE SAVEPOINT set_media_prune_settings",
+            ));
+            Err(error)
+        }
+    }
 }
 
 /// Returns the admin-configured site name, or falls back to `CONFIG.forum_name`.
@@ -330,8 +344,7 @@ pub fn get_thread_new_reply_badges_enabled(conn: &rusqlite::Connection) -> bool 
     )
 }
 
-// ─── Board queries ────────────────────────────────────────────────────────────
-
+// Board queries
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
@@ -344,10 +357,7 @@ pub fn get_all_boards(conn: &rusqlite::Connection) -> Result<Vec<Board>> {
     Ok(boards)
 }
 
-/// Like `get_all_boards` but also returns live thread count for each board.
-///
-/// Previously issued one COUNT(*) query per board (N+1). Replaced
-/// with a single LEFT JOIN query that computes all counts in one pass.
+/// Return every board with its live thread count in one joined query.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -528,7 +538,7 @@ pub fn get_board_by_short(conn: &rusqlite::Connection, short: &str) -> Result<Op
     Ok(stmt.query_row(params![short], map_board).optional()?)
 }
 
-/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
+/// Create a test board and return its database identifier.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -574,8 +584,6 @@ pub fn create_board(
 
 /// Create a board with explicit per-media-type toggles.
 /// Used by the CLI and console board bootstrap paths.
-///
-/// INSERT … RETURNING id replaces execute + `last_insert_rowid()`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -645,7 +653,7 @@ pub fn create_board_with_media_flags(
 /// # Errors
 /// Returns an error if the database operation fails or the board id is not found.
 pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Result<()> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let board_nsfw: bool = tx.query_row(
         "SELECT nsfw FROM boards WHERE id = ?1",
         params![id],
@@ -692,8 +700,6 @@ pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Re
 }
 
 /// Update all per-board settings from the admin panel.
-///
-/// Added rows-affected check.
 ///
 /// # Errors
 /// Returns an error if the database operation fails or the board id is not found.
@@ -742,7 +748,7 @@ pub fn update_board_settings(
     access_mode: BoardAccessMode,
     access_password_hash: &str,
 ) -> Result<()> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let current_nsfw: bool = tx.query_row(
         "SELECT nsfw FROM boards WHERE id = ?1",
         params![id],
@@ -855,8 +861,8 @@ pub fn update_board_settings(
 /// Returns how many seconds have elapsed since `ip_hash` last posted on `board_id`.
 /// Returns None if they have never posted on this board.
 ///
-/// Switched to `prepare_cached` — this is on the hot path (called
-/// for every post submission when a cooldown is configured).
+/// The statement is cached because this runs for every submission on boards
+/// with a posting cooldown.
 ///
 /// Note: `unixepoch()` requires `SQLite` ≥ 3.38.0 (2022-02-22).
 ///
@@ -880,16 +886,9 @@ pub fn get_seconds_since_last_post(
 
 /// Delete a board and return on-disk paths that are now safe to remove.
 ///
-/// Wrapped the entire operation in a transaction. Previously,
-/// file paths were collected before the CASCADE DELETE with no transaction
-/// guard, so a concurrent insert could race between the SELECT and the DELETE.
-///
-/// Replaced the three-way join (posts → threads → boards) with a
-/// direct query on `posts.board_id`. Posts already carry `board_id` so the threads
-/// join was both unnecessary and could hide orphaned posts.
-///
-/// Added an affected-rows check so callers see an error when
-/// trying to delete a board that doesn't exist.
+/// Path collection and the cascading delete share a transaction so concurrent
+/// inserts cannot make a collected path live again before deletion. Paths are
+/// selected directly by `posts.board_id`, including any orphaned posts.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -970,14 +969,18 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<super::Delet
     }
 }
 
-// ─── Per-board stats (terminal display) ──────────────────────────────────────
-
+// Per-board stats (terminal display)
 /// Per-board thread and post counts for the terminal stats display.
-pub fn get_per_board_stats(conn: &rusqlite::Connection) -> Vec<(String, i64, i64)> {
+///
+/// # Errors
+/// Returns an error if any board statistic cannot be read.
+pub fn get_per_board_stats(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<Vec<(String, i64, i64)>> {
     // Replace N+1 correlated subqueries (2 subqueries × boards)
     // with a single LEFT JOIN … GROUP BY pass. For a forum with 20 boards the
     // old query executed 41 SQL statements; this executes 1.
-    let Ok(mut stmt) = conn.prepare(
+    let mut stmt = conn.prepare(
         "SELECT b.short_name, \
                 COUNT(DISTINCT t.id) AS tc, \
                 COUNT(DISTINCT p.id) AS pc \
@@ -986,31 +989,20 @@ pub fn get_per_board_stats(conn: &rusqlite::Connection) -> Vec<(String, i64, i64
          LEFT JOIN posts   p ON p.thread_id = t.id \
          GROUP BY b.id \
          ORDER BY b.short_name",
-    ) else {
-        return vec![];
-    };
-    stmt.query_map([], |row| {
+    )?;
+    let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, i64>(1)?,
             row.get::<_, i64>(2)?,
         ))
-    })
-    .map(|rows| rows.flatten().collect())
-    .unwrap_or_default()
+    })?;
+    rows.collect()
 }
 
-// ─── Site statistics ──────────────────────────────────────────────────────────
-
-/// Gather aggregate site-wide statistics for the home page.
-///
-/// Previously issued five separate full-table scans (one COUNT(*)
-/// overall, three filtered COUNTs by `media_type`, one SUM). All five are now
-/// computed in a single aggregate pass over the posts table.
-///
-/// `active_bytes` now sums both `file_size` and `audio_file_size` so
-/// image+audio combo posts are fully accounted for. The previous query only
-/// summed `file_size` and silently under-reported disk usage.
+// Site statistics
+/// Gather aggregate site-wide statistics for the home page in one table scan.
+/// `active_bytes` includes both primary and audio attachment sizes.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -1080,9 +1072,9 @@ pub fn get_site_stats(conn: &rusqlite::Connection) -> Result<crate::models::Site
     let query = format!(
         "SELECT
              COUNT(*)                                                           AS total_posts,
-             {total_images_expr}                                                AS total_images,
-             {total_videos_expr}                                                AS total_videos,
-             {total_audio_expr}                                                 AS total_audio,
+             COALESCE({total_images_expr}, 0)                                   AS total_images,
+             COALESCE({total_videos_expr}, 0)                                   AS total_videos,
+             COALESCE({total_audio_expr}, 0)                                    AS total_audio,
              COALESCE(
                  SUM(CASE WHEN file_path IS NOT NULL AND file_size IS NOT NULL{active_file_bytes_filter}
                           THEN file_size ELSE 0 END),
@@ -1127,10 +1119,43 @@ fn post_table_columns(conn: &rusqlite::Connection) -> Result<HashSet<String>> {
 mod tests {
     use super::{
         create_board, create_board_with_media_flags, delete_board, get_all_boards_with_stats,
-        get_board_by_short, get_site_stats,
+        get_board_by_short, get_site_setting, get_site_stats, set_media_prune_settings,
+        MEDIA_AUTO_PRUNE_ENABLED_KEY, MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY,
     };
     use anyhow::{Context as _, Result};
     use rusqlite::Connection;
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn media_prune_settings_roll_back_when_the_second_write_fails() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        conn.execute_batch(
+            "CREATE TRIGGER fail_media_limit
+             BEFORE INSERT ON site_settings
+             WHEN NEW.key = 'media_max_active_content_size_bytes'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected media setting failure');
+             END;",
+        )?;
+
+        assert!(
+            set_media_prune_settings(&conn, true, 1024).is_err(),
+            "injected second write should fail"
+        );
+        assert!(
+            get_site_setting(&conn, MEDIA_AUTO_PRUNE_ENABLED_KEY)?.is_none(),
+            "the first setting should roll back"
+        );
+        assert!(
+            get_site_setting(&conn, MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES_KEY)?.is_none(),
+            "the failing setting should remain absent"
+        );
+        Ok(())
+    }
 
     #[test]
     #[expect(
@@ -1168,11 +1193,38 @@ mod tests {
     }
 
     #[test]
+    fn site_stats_empty_database_returns_zeroes() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+
+        let stats = get_site_stats(&conn)?;
+
+        anyhow::ensure!(stats.total_posts == 0, "empty site should have zero posts");
+        anyhow::ensure!(
+            stats.total_images == 0,
+            "empty site should have zero images"
+        );
+        anyhow::ensure!(
+            stats.total_videos == 0,
+            "empty site should have zero videos"
+        );
+        anyhow::ensure!(
+            stats.total_audio == 0,
+            "empty site should have zero audio uploads"
+        );
+        anyhow::ensure!(
+            stats.active_bytes == 0,
+            "empty site should have zero active bytes"
+        );
+        Ok(())
+    }
+
+    #[test]
     #[expect(
         clippy::panic_in_result_fn,
         reason = "test assertions intentionally panic on failure"
     )]
-    fn site_stats_count_audio_primary_and_combo_uploads() -> Result<()> {
+    fn site_stats_count_posts_and_media_uploads() -> Result<()> {
         let pool = crate::db::init_test_pool()?;
         let conn = pool.get()?;
 
@@ -1193,7 +1245,11 @@ mod tests {
              (1, 1, 1, 'audio post', '<p>audio</p>', 'tok1', 0,
               'test/track.mp3', 'track.mp3', 1234, 'audio/mpeg', 'audio'),
              (2, 1, 1, 'combo post', '<p>combo</p>', 'tok2', 0,
-              'test/cover.png', 'cover.png', 4321, 'image/png', 'image')",
+              'test/cover.png', 'cover.png', 4321, 'image/png', 'image'),
+             (3, 1, 1, 'video post', '<p>video</p>', 'tok3', 0,
+              'test/clip.webm', 'clip.webm', 2048, 'video/webm', 'video'),
+             (4, 1, 1, 'text post', '<p>text</p>', 'tok4', 0,
+              NULL, NULL, NULL, NULL, NULL)",
             [],
         )?;
         conn.execute(
@@ -1207,9 +1263,16 @@ mod tests {
         )?;
 
         let stats = get_site_stats(&conn)?;
+        assert_eq!(stats.total_posts, 4, "all posts should be counted");
+        assert_eq!(stats.total_images, 1, "the combo image should be counted");
+        assert_eq!(stats.total_videos, 1, "the video should be counted");
         assert_eq!(
             stats.total_audio, 2,
             "primary and companion audio should both be counted"
+        );
+        assert_eq!(
+            stats.active_bytes, 13_281,
+            "primary and companion media bytes should all be counted"
         );
         Ok(())
     }

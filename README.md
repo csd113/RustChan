@@ -1,119 +1,66 @@
 <div align="center">
 
-<p align="center">
-  <img width="320" alt="rustchan mascot" src="https://github.com/user-attachments/assets/c22e3e72-c2f5-4932-8565-72839b67bce3" />
-</p>
+<img width="420" alt="RustChan mascot holding a laptop above the RustChan wordmark" src="docs/assets/branding/rust-chan-mascot.png">
 
 # RustChan
 
-### A self-hosted imageboard for people who want their own corner of the web without adopting a whole infrastructure hobby.
+A self-hosted imageboard written in Rust.
 
-One binary. One data folder. SQLite only. The rest is features.
+[![CI](https://github.com/csd113/RustChan/actions/workflows/ci.yml/badge.svg)](https://github.com/csd113/RustChan/actions/workflows/ci.yml)
 
-RustChan is built in Rust, ships with bundled SQLite, and is designed to be understandable, movable, and fun to run.
-
-Current development version: `1.4.0`.
-
-[What is RustChan?](#what-is-rustchan) ·
-[Why it exists](#why-it-exists) ·
-[Core features](#core-features) ·
-[Screenshots](#screenshots) ·
-[Quick start](#quick-start) ·
-[Configuration](#configuration-and-data) ·
-[Admin panel](#admin-panel-and-cli) ·
-[Tor and ChanNet](#tor-and-channet) ·
-[Under the hood](#under-the-hood) ·
-[More reading](#more-reading)
+[Screenshots](#screenshots) · [Features](#features) · [Quick start](#quick-start) · [Configuration](#configuration) · [Administration](#administration-and-recovery) · [Development](#development)
 
 </div>
+
+RustChan gives you boards, threads, replies, media uploads, moderation, backups, themes, and an admin panel without requiring a stack of services. It runs as one binary, uses bundled SQLite, and keeps its runtime files in one data directory.
+
+Current version: `1.4.1`. Minimum supported Rust version: `1.91`.
 
 ## Screenshots
 
 <p align="center">
-  <img width="100%" alt="RustChan home page with multiple boards and site stats" src="docs/screenshots/rustchan-home.png" />
+  <img width="100%" alt="RustChan home page with boards and site statistics" src="docs/screenshots/rustchan-home.png">
 </p>
 
 <p align="center">
-  <img width="100%" alt="RustChan board catalog with thread cards and media thumbnails" src="docs/screenshots/rustchan-catalog.png" />
+  <img width="100%" alt="RustChan thread with replies, quote links, media, and post controls" src="docs/screenshots/rustchan-thread.png">
+</p>
+
+<details>
+<summary>Catalog, admin panel, and mobile views</summary>
+
+<p align="center">
+  <img width="100%" alt="RustChan board catalog with thread cards and media thumbnails" src="docs/screenshots/rustchan-catalog.png">
 </p>
 
 <p align="center">
-  <img width="100%" alt="RustChan thread page with replies, quote links, media preview, and post controls" src="docs/screenshots/rustchan-thread.png" />
+  <img width="100%" alt="RustChan admin dashboard settings view" src="docs/screenshots/rustchan-admin.png">
 </p>
 
 <p align="center">
-  <img width="100%" alt="RustChan admin dashboard settings view" src="docs/screenshots/rustchan-admin.png" />
+  <img width="420" alt="RustChan mobile thread view" src="docs/screenshots/rustchan-mobile.png">
 </p>
 
-<p align="center">
-  <img width="60%" alt="RustChan mobile thread view" src="docs/screenshots/rustchan-mobile.png" />
-</p>
+</details>
 
-## What Is RustChan?
+## Features
 
-RustChan is a self-hosted imageboard server. It gives you boards, threads, replies, media uploads, moderation, backups, and the usual imageboard nonsense, all in a single Rust binary.
+- Multiple boards with their own access, posting, media, cooldown, captcha, and archive settings
+- Threads, replies, catalogs, archives, board search, polls, tripcodes, sage, spoilers, poster IDs, and quote links
+- JPEG, PNG, GIF, WebP, HEIC, HEIF, BMP, TIFF, SVG, MP4, WebM, MP3, OGG, FLAC, WAV, M4A, and AAC uploads
+- Optional PDF and generic file uploads, controlled globally and per board
+- Streaming upload validation, image thumbnails, video thumbnails, audio waveforms, and optional MP4-to-WebM transcoding
+- Browser-based moderation, reports, appeals, bans, themes, banners, favicons, backups, restores, and maintenance
+- Full-site and per-board backups, scheduled backups, integrity checks, repair helpers, and media reconciliation
+- Built-in Arti onion service, optional native TLS, and an optional ChanNet listener
+- Hashed client IPs, Argon2id admin passwords, CSRF protection, secure sessions, rate limiting, and security headers
+- Responsive pages with JavaScript enhancements and supported no-JavaScript fallbacks
 
-It stays deliberately small in the parts that matter:
+No Docker, Postgres, or Redis is required.
 
-- one binary
-- one SQLite database
-- one `rustchan-data/` directory
-- one browser admin panel
+## Quick start
 
-No Docker. No Postgres. No Redis. No pile of sidecars hiding in the bushes.
-
-## Why It Exists
-
-RustChan is for people who want a forum they can actually understand and keep running without needing a distributed-systems side quest.
-
-| If you want... | RustChan gives you... |
-|---|---|
-| Something simple to host | A single binary with bundled SQLite and very few moving parts |
-| Something easy to manage | A browser admin panel for boards, moderation, themes, backups, and maintenance |
-| Something with personality | Built-in themes, custom themes, board defaults, and banner support |
-| Something media-friendly | Images, video, audio, thumbnails, waveforms, and optional embeds |
-| Something resilient | Full-site backups, board backups, restore tools, and repair helpers |
-| Something private by default | Hashed IPs, CSRF protection, secure sessions, and rate limiting |
-| Something that can live on small hardware | A good fit for a VPS, homelab, or tiny server |
-
-## Core Features
-
-### Boards and posting
-
-- Multiple boards with per-board settings and access controls
-- Threads, replies, catalog view, archive view, and search
-- Polls, tripcodes, sage, spoiler tags, poster IDs, edit windows, and a 60-second self-delete timer for your own posts
-- Board-specific media rules, cooldowns, captcha, and archive behavior
-- Mobile-friendly layouts that still make sense on a phone
-
-### Media
-
-- Image uploads: JPEG, PNG, GIF, WebP, HEIC, HEIF, BMP, TIFF, and SVG
-- Video uploads: MP4 and WebM
-- Audio uploads: MP3, OGG, FLAC, WAV, M4A, and AAC
-- Automatic thumbnails and audio waveforms when `ffmpeg` is available
-- Optional MP4 to WebM transcoding when the needed codecs are present
-- Streaming uploads with validation so large files do not get buffered into RAM
-
-### Admin and recovery
-
-- Create, delete, and reorder boards from the browser
-- Configure site settings, themes, favicons, board banners, and the home page banner
-- Moderate posts, review reports, process appeals, and inspect IP history
-- Run full-site backups and per-board backups
-- Restore from uploaded backups or backups already on disk
-- Run integrity checks, repair tools, VACUUM, and other maintenance jobs
-
-### Safety and privacy
-
-- Argon2id password hashing for admin accounts
-- `HttpOnly` and `SameSite=Strict` sessions
-- CSRF protection with constant-time token comparison
-- Security headers and CSP-friendly page behavior
-- Raw IPs are not stored or logged; RustChan uses a keyed hash instead
-- Restore protections against zip bombs, path traversal, malformed archives, and oversized uploads
-
-## Quick Start
+You need Rust `1.91` or newer. RustChan works without `ffmpeg`, but installing `ffmpeg` and `ffprobe` enables the full media pipeline.
 
 ```bash
 git clone https://github.com/csd113/RustChan.git
@@ -127,27 +74,15 @@ cargo build --release
 ./target/release/rustchan-cli
 ```
 
-Then open:
+Open `http://localhost:8080`. The admin panel is at `http://localhost:8080/admin`.
 
-- `http://localhost:8080`
-- admin panel: `http://localhost:8080/admin`
+On Windows, use `target/release/rustchan-cli.exe`. For a service installation, give RustChan an absolute data directory such as `--data-dir /var/lib/rustchan`.
 
-On first run, RustChan creates `<exe-dir>/rustchan-data/settings.toml`, the database, logs, backups, and the rest of its runtime layout automatically.
+The full installation and deployment walkthrough is in [SETUP.md](SETUP.md). It covers Rust and `ffmpeg` installation, systemd, reverse proxies, TLS, Tor, updates, and troubleshooting.
 
-Helpful notes:
+## Configuration
 
-- HTTPS is disabled in the generated configuration. For local testing, set `[tls].enabled = true` to use `https://localhost:8443` with a self-signed development certificate; your browser will warn about that certificate.
-- On Windows, the binary is `target/release/rustchan-cli.exe`.
-- If you want another port, pass `--port`, for example `./target/release/rustchan-cli --port 9090`.
-- For a service installation, pass an absolute data root such as `--data-dir /var/lib/rustchan`.
-- If you want the optional second listener, add `--chan-net`.
-
-## Configuration And Data
-
-By default, RustChan keeps its runtime state in `<exe-dir>/rustchan-data/` next
-to the binary. Pass `--data-dir /absolute/path` to select a different complete
-runtime root. The live process reads `settings.toml` from the selected data
-directory, not from the current working directory.
+On first run, RustChan creates `rustchan-data/` next to the executable. Pass `--data-dir /absolute/path` to put the complete runtime somewhere else. The server reads `settings.toml` from that selected directory, not from the current working directory.
 
 ```text
 rustchan-data/
@@ -165,15 +100,9 @@ rustchan-data/
 └── boards/
 ```
 
-That folder is the thing to back up if you want to move the site or keep it safe.
+Back up the whole directory if you want to move or recover a site.
 
-For RustChan `1.4.0`, fresh databases are created directly from the `1.4.0`
-baseline schema. Earlier internal development migrations were squashed before
-release; a database that already matches the baseline is marked as schema
-version `1.4.0`, while partial or unknown schemas fail closed without deleting
-data.
-
-`settings.toml` is generated automatically on first run and documents the available options inline. A few of the more important ones:
+Fresh configuration files document the available settings inline. A basic configuration looks like this:
 
 ```toml
 forum_name = "RustChan"
@@ -189,118 +118,123 @@ require_https = false
 port = 8443
 ```
 
-Worth knowing:
+Common runtime options:
 
-- These stay TOML-owned at runtime: ports, Tor, arbitrary-file upload gate, ffmpeg/ffprobe paths, backup cadence, and other operational toggles.
-- `CHAN_*` environment variables still override the matching values from `settings.toml` at runtime.
-- Without `--data-dir`, a copied or temporary binary uses its adjacent `rustchan-data/settings.toml`; do not rely on a cwd-local decoy file.
-- `enable_tor_support` is on by default in the generated config.
-- `tor_only = true` makes RustChan bind to loopback only and serve through Tor.
-- `[tls].require_https = true` opts into disabling public plaintext application access when native TLS is enabled.
-- `require_ffmpeg = true` makes startup fail if `ffmpeg` is missing.
-- `cookie_secret` is auto-generated on first run and should not be changed casually once the site is live.
-- `auto_full_backup_interval_hours` and `auto_full_backup_copies_to_keep` control saved full-site backups.
+| Option | What it does |
+|---|---|
+| `--data-dir /absolute/path` | Selects the complete runtime directory |
+| `--port 9090` | Overrides the main listener port |
+| `enable_tor_support` | Starts the built-in Arti onion service |
+| `tor_only` | Binds the application to loopback and serves it through Tor |
+| `require_ffmpeg` | Fails startup if the enhanced media tools are unavailable |
+| `enable_any_file_uploads_feature` | Lets individual boards opt into generic file uploads |
+| `[tls].enabled` | Enables the native TLS listener |
+| `auto_full_backup_interval_hours` | Sets the automatic full-backup interval |
+| `backup_directory` | Optional absolute directory for all saved backups; restart to apply |
 
-If you want the full setup and deployment walkthrough, read [SETUP.md](SETUP.md). It covers Rust installation, `ffmpeg`, Linux service setup, reverse proxy notes, Tor, TLS, and troubleshooting.
+`CHAN_*` environment variables override matching configuration values. Keep `cookie_secret` stable after launch. Treat the configuration, database, backups, TLS keys, and Tor identity as private data.
 
-## Admin Panel And CLI
+### Tor and ChanNet
 
-RustChan is intended to be managed from the browser, but the CLI is there for bootstrap and shell-friendly admin work.
+RustChan can run an onion service through Arti, so it does not need a separate `tor` daemon. Its persistent onion identity is stored under `rustchan-data/runtime/tor/state/`; include that directory in backups if you want to keep the same onion address.
 
-Browser admin panel features include:
-
-- board creation and board settings
-- moderation and ban management
-- report review and appeals
-- themes, banners, favicon, and site settings
-- backup, restore, and maintenance tools
-
-CLI admin commands include:
-
-- `rustchan-cli admin create-admin`
-- `rustchan-cli admin reset-password`
-- `rustchan-cli admin list-admins`
-- `rustchan-cli admin create-board`
-- `rustchan-cli admin delete-board`
-- `rustchan-cli admin list-boards`
-- `rustchan-cli admin ban`
-- `rustchan-cli admin unban`
-- `rustchan-cli admin list-bans`
-- `rustchan-cli admin db-status`
-
-Run `rustchan-cli admin --help` for the full command list and flags.
-
-## Observability Endpoints
-
-`/healthz` is intentionally public and minimal for liveness checks. `/readyz` returns only readiness status by default, and `/metrics` returns `404` unless explicitly enabled.
-
-If a trusted Prometheus scraper or private load balancer needs detailed internals, enable the public surface in `settings.toml` and restrict access at your reverse proxy or network boundary:
-
-```toml
-public_readiness_details = true
-public_metrics_enabled = true
-```
-
-The detailed readiness and metrics output includes operational state such as database schema health, backup freshness, media backlog, maintenance state, and Tor readiness. Do not expose those endpoints directly to the public internet or onion visitors.
-
-## Tor And ChanNet
-
-RustChan includes built-in Tor onion service support via Arti. You do not need to install or manage a separate `tor` daemon.
-
-The generated config enables Tor support by default. On first start, RustChan creates the Tor runtime layout and persists the onion identity under `rustchan-data/runtime/tor/state/`. If you care about the onion address, back that directory up.
-
-If you want Tor-only mode:
+For a Tor-only site:
 
 ```toml
 enable_tor_support = true
 tor_only = true
 ```
 
-RustChan also has an optional second listener for ChanNet and RustWave integration. It is off by default. When enabled, it listens on `127.0.0.1:7070` unless you change it in `settings.toml`.
+ChanNet is a separate, optional listener for snapshot transfer, content polling, remote refresh, and RustWave integration. It is disabled by default and listens on `127.0.0.1:7070` unless reconfigured. If you are not using it, leave it off. If you are, keep it behind a trusted network boundary.
 
-The ChanNet interface is text-only by design and exposes endpoints for:
+### Media tools
 
-- exporting and importing ZIP snapshots
-- refreshing from a remote peer
-- polling for new content
-- a typed JSON command gateway for RustWave
+Without `ffmpeg`, RustChan still validates and stores supported media and can create basic image thumbnails. With compatible `ffmpeg` and `ffprobe` builds, it can also create video thumbnails and audio waveforms, use the enhanced WebP path, and transcode MP4 uploads to WebM when the required VP9 and Opus encoders are present.
 
-New ChanNet gateways should include a stable, globally unique UUID
-`message_id` with every `reply_push`. RustChan uses it as the durable replay
-key. The field remains optional for older gateways, whose legacy
-content-and-timestamp fingerprint cannot distinguish identical replies created
-within the same timestamp second.
+Set `require_ffmpeg = true` if those capabilities are mandatory for your deployment.
 
-If you are not using federation, keep it off or firewall it properly.
+## Administration and recovery
 
-## Under The Hood
+Most day-to-day work happens in the browser admin panel. It covers boards, access rules, media limits, reports, appeals, bans, themes, banners, favicons, storage, background jobs, backups, restores, and maintenance.
 
-For the technically curious, RustChan currently leans on:
+Bootstrap and shell-friendly commands include:
 
-| Layer | What it uses |
-|---|---|
-| Web framework | Axum |
-| Runtime | Tokio |
-| Database | SQLite via `rusqlite` |
-| Rendering | Rust templates in `src/templates/` |
-| Media | `image`, EXIF handling, and optional `ffmpeg` / `ffprobe` |
-| TLS | `rustls`, self-signed dev certs, optional ACME or manual certs |
-| Tor | Arti |
-| Logging | `tracing` with daily main log rotation and `dep_log.log` for dependency noise |
-| Background work | In-process worker queue |
+```text
+rustchan-cli admin create-admin
+rustchan-cli admin reset-password
+rustchan-cli admin list-admins
+rustchan-cli admin create-board
+rustchan-cli admin delete-board
+rustchan-cli admin list-boards
+rustchan-cli admin ban
+rustchan-cli admin unban
+rustchan-cli admin list-bans
+rustchan-cli admin db-status
+```
 
-The architecture is intentionally compact. That is the point.
+Run `rustchan-cli admin --help` for arguments and flags.
 
-## More Reading
+Full-site and per-board backups can be saved on disk or downloaded. Restores accept uploaded archives and saved backups. RustChan checks archive paths, sizes, structure, and expansion before it changes live data, but you should still keep independent copies and test your restore process.
 
-- [SETUP.md](SETUP.md) for installation, deployment, Tor, TLS, and troubleshooting
-- [CONTRIBUTING.md](CONTRIBUTING.md) for contribution workflow and validation
-- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for conduct in project-managed spaces
-- [SECURITY.md](SECURITY.md) for vulnerability-reporting scope and safe handling
-- [SUPPORT.md](SUPPORT.md) for support boundaries and operator responsibilities
-- [CHANGELOG.md](CHANGELOG.md) for release history
-- [LICENSE](LICENSE) for the MIT license
+Configure backup storage in **Admin → Backups → backup storage directory**, or set
+`backup_directory = "/mnt/backup-disk/rustchan"` in `settings.toml`.
+`CHAN_BACKUP_DIRECTORY` takes precedence. Omit both to retain `<data-dir>/backups/`.
+Changes take effect after restarting; existing backups are never moved to the new
+location. Only the active directory is listed, restored from, and pruned. Set the
+path back to the displayed default to access existing default backups again.
+Backup v4 folders live directly in this directory; legacy ZIPs use its `full/`
+and `boards/` subdirectories. Temporary download and restore staging files still
+use runtime temporary storage.
 
----
+Use a dedicated directory outside live uploads and runtime state. Missing
+directories are created and tested for read/write/delete access; Unix backup
+directories retain mode `0700` and backup files retain their existing private
+permissions. The service user must have suitable ownership/permissions, including
+on NAS mounts. An invalid or inaccessible explicit path fails validation without
+falling back. Mount the storage before starting RustChan; RustChan does not manage
+mounts or verify the identity of the mounted device.
 
-RustChan is for people who want to run their own little corner of the internet without turning it into a full-time maintenance ritual.
+### Health and metrics
+
+`/healthz` is a minimal public liveness check. `/readyz` only reports readiness by default, and `/metrics` returns `404` unless you enable it.
+
+```toml
+public_readiness_details = true
+public_metrics_enabled = true
+```
+
+Detailed readiness and metrics can reveal database health, backup age, media queues, maintenance state, and Tor status. Restrict them at a trusted reverse proxy or network boundary.
+
+## Security notes
+
+RustChan hashes client IP addresses instead of storing or logging them directly. Admin passwords use Argon2id; sessions are `HttpOnly` and `SameSite=Strict`; state-changing forms use CSRF tokens; uploads and restores are checked before filesystem or database changes.
+
+Those controls do not make an operator, server, proxy, or deployment trustworthy. Operators are still responsible for secrets, moderation, backups, network configuration, and local law. See [SECURITY.md](SECURITY.md) for the project's security policy and reporting scope.
+
+## Development
+
+RustChan uses Axum, Tokio, bundled SQLite through `rusqlite`, server-rendered Rust templates, `rustls`, Arti, and an in-process worker queue.
+
+Run the Rust checks before submitting changes:
+
+```bash
+cargo fmt --all --check
+cargo clippy --locked --workspace --all-targets --all-features
+cargo test --locked --workspace --all-features
+```
+
+Browser regression tests use a local-only Playwright harness. Keep its configs,
+package metadata, tests, fixtures, and generated artifacts in the ignored paths
+listed in `.gitignore`; they are not distributed with the repository. When a
+local harness is available, run focused browser checks for UI changes, including
+JavaScript-disabled workflows. Media checks may require `ffmpeg` and `ffprobe`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
+
+## Documentation
+
+- [SETUP.md](SETUP.md) — installation, deployment, Tor, TLS, and troubleshooting
+- [CONTRIBUTING.md](CONTRIBUTING.md) — development and contribution workflow
+- [SECURITY.md](SECURITY.md) — security policy and reporting scope
+- [SUPPORT.md](SUPPORT.md) — support boundaries and operator responsibilities
+- [CHANGELOG.md](CHANGELOG.md) — release history
+- [LICENSE](LICENSE) — MIT license

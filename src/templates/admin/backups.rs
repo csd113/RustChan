@@ -61,7 +61,6 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     )
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "each backup row keeps its related restore, download, and audit controls together"
@@ -424,12 +423,10 @@ fn split_zip_part_size_options(selected_gib: u64) -> String {
     options
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "the backup section is one stable server-rendered HTML fragment"
 )]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the section interpolates independent pre-rendered backup controls"
@@ -466,16 +463,25 @@ fn render_admin_backups_section(
     let manual_part_options = split_zip_part_size_options(4);
     format!(
         r#"<div class="admin-panel-backups" id="backups">
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     // full site backup & restore
-     ═══════════════════════════════════════════════════════════════════════════ -->
 <section class="admin-section admin-section-collapsible" id="full-backup-restore">
 <details class="admin-dropdown" data-admin-dropdown-key="full-backup-restore"{full_backup_open_attr}>
 <summary><span>// full site backup &amp; restore</span></summary>
 <div class="admin-dropdown-content">
-<p class="admin-copy">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores a Backup v4 folder under <code>rustchan-data/backups/&lt;backup_id&gt;/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer. Saved full backups can also be used to extract or directly restore a single board without scheduling separate per-board backups.</p>
+<p class="admin-copy">Full backups include the complete database and all uploaded files. <strong>Save to server</strong> stores a Backup v4 folder under <code>{effective_backup_directory}/&lt;backup_id&gt;/</code> on the server filesystem (listed below). <strong>Restore from local file</strong> uploads a zip from your computer. Saved full backups can also be used to extract or directly restore a single board without scheduling separate per-board backups.</p>
 {backup_warning_html}
 <p class="admin-copy"><strong>Backup health:</strong> {backup_status_line}</p>
+<div class="admin-subsection">
+  <div class="admin-card-header"><h3>// backup storage directory</h3></div>
+  <p class="admin-copy">Effective directory: <code>{effective_backup_directory}</code><br>Default directory: <code>{default_backup_directory}</code></p>
+  <form method="POST" action="/admin/backup/settings" class="admin-site-settings-form">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <label>Backup directory (absolute server filesystem path)
+      <input type="text" name="backup_directory" value="{effective_backup_directory}" required>
+    </label>
+    <button type="submit">save backup directory</button>
+  </form>
+  <p class="admin-meta-note">Applies to all saved backups after restarting RustChan. Existing backups are not moved; only the active directory is listed. Enter the default directory shown above to return to existing default backups. Use a dedicated directory on the mounted disk or NAS; RustChan must be able to set private permissions and read, write, and delete files. The CHAN_BACKUP_DIRECTORY environment variable takes precedence over settings.toml.</p>
+</div>
 <div class="admin-subsection">
   <div class="admin-card-header">
     <h3>// automated full backups</h3>
@@ -592,7 +598,7 @@ fn render_admin_backups_section(
 </div>
 <details class="backup-extract-details"{board_backup_open_attr}>
 <summary>advanced: board backup and restore</summary>
-<p class="admin-copy">Board backups cover a single board. Use the per-board tools here to store a Backup v4 folder under <code>rustchan-data/backups/&lt;backup_id&gt;/</code>, or use the table below to restore or delete saved backups. <strong>Restore from local file</strong> uploads a zip from your computer.</p>
+<p class="admin-copy">Board backups cover a single board. Use the per-board tools here to store a Backup v4 folder under <code>{effective_backup_directory}/&lt;backup_id&gt;/</code>, or use the table below to restore or delete saved backups. <strong>Restore from local file</strong> uploads a zip from your computer.</p>
 <div class="admin-subsection">
   <div class="admin-card-header">
     <h3>// create board backups</h3>
@@ -634,6 +640,10 @@ fn render_admin_backups_section(
 </details>
 </section>
 </div>"#,
+        effective_backup_directory =
+            escape_html(&crate::config::backups_dir().display().to_string()),
+        default_backup_directory =
+            escape_html(&crate::config::default_backups_dir().display().to_string()),
         csrf = escape_html(csrf_token),
         backup_warning_html = backup_warning_html,
         backup_status_line = backup_status_line,

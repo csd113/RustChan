@@ -10,8 +10,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::sync::{LazyLock, OnceLock};
 
+/// Backup storage validation and settings persistence.
+mod backup_storage;
 /// Settings-file template rendering.
 mod template;
+pub use backup_storage::{prepare_backup_directory, update_settings_file_backup_directory};
 
 #[cfg(test)]
 /// Serializes tests that mutate the process-wide runtime directory layout.
@@ -48,14 +51,19 @@ fn settings_file_path() -> PathBuf {
 
 /// Resolve and validate an operator-provided data-directory override.
 fn resolve_data_dir_override(path: &Path) -> anyhow::Result<PathBuf> {
+    resolve_storage_dir(path, "--data-dir")
+}
+
+/// Resolve a directory against its existing ancestor before filesystem mutation.
+fn resolve_storage_dir(path: &Path, setting: &str) -> anyhow::Result<PathBuf> {
     if !path.is_absolute() {
-        anyhow::bail!("--data-dir must be an absolute path");
+        anyhow::bail!("{setting} must be an absolute path");
     }
     if path
         .components()
         .any(|component| component == Component::ParentDir)
     {
-        anyhow::bail!("--data-dir must not contain '..' components");
+        anyhow::bail!("{setting} must not contain '..' components");
     }
 
     let mut existing_ancestor = path;
@@ -65,13 +73,13 @@ fn resolve_data_dir_override(path: &Path) -> anyhow::Result<PathBuf> {
             Ok(resolved) => {
                 if resolved.parent().is_none() && existing_ancestor.parent().is_some() {
                     anyhow::bail!(
-                        "--data-dir ancestor must not resolve to a filesystem root: {}",
+                        "{setting} ancestor must not resolve to a filesystem root: {}",
                         existing_ancestor.display()
                     );
                 }
                 if !resolved.is_dir() {
                     anyhow::bail!(
-                        "--data-dir ancestor is not a directory: {}",
+                        "{setting} ancestor is not a directory: {}",
                         existing_ancestor.display()
                     );
                 }
@@ -82,7 +90,7 @@ fn resolve_data_dir_override(path: &Path) -> anyhow::Result<PathBuf> {
                     Ok(_) => {
                         return Err(error).with_context(|| {
                             format!(
-                                "could not resolve --data-dir path {}",
+                                "could not resolve {setting} path {}",
                                 existing_ancestor.display()
                             )
                         });
@@ -92,7 +100,7 @@ fn resolve_data_dir_override(path: &Path) -> anyhow::Result<PathBuf> {
                     Err(metadata_error) => {
                         return Err(metadata_error).with_context(|| {
                             format!(
-                                "could not inspect --data-dir path {}",
+                                "could not inspect {setting} path {}",
                                 existing_ancestor.display()
                             )
                         });
@@ -101,14 +109,14 @@ fn resolve_data_dir_override(path: &Path) -> anyhow::Result<PathBuf> {
 
                 let component = existing_ancestor.file_name().ok_or_else(|| {
                     anyhow::anyhow!(
-                        "could not find an existing parent for --data-dir {}",
+                        "could not find an existing parent for {setting} {}",
                         path.display()
                     )
                 })?;
                 missing_components.push(component.to_os_string());
                 existing_ancestor = existing_ancestor.parent().ok_or_else(|| {
                     anyhow::anyhow!(
-                        "could not find an existing parent for --data-dir {}",
+                        "could not find an existing parent for {setting} {}",
                         path.display()
                     )
                 })?;
@@ -116,7 +124,7 @@ fn resolve_data_dir_override(path: &Path) -> anyhow::Result<PathBuf> {
             Err(error) => {
                 return Err(error).with_context(|| {
                     format!(
-                        "could not resolve --data-dir path {}",
+                        "could not resolve {setting} path {}",
                         existing_ancestor.display()
                     )
                 });
@@ -128,7 +136,7 @@ fn resolve_data_dir_override(path: &Path) -> anyhow::Result<PathBuf> {
         resolved.push(component);
     }
     if resolved.parent().is_none() {
-        anyhow::bail!("--data-dir must not resolve to a filesystem root");
+        anyhow::bail!("{setting} must not resolve to a filesystem root");
     }
     Ok(resolved)
 }
@@ -173,7 +181,26 @@ pub fn logs_dir() -> PathBuf {
 #[must_use]
 /// Return the root directory for all backups.
 pub fn backups_dir() -> PathBuf {
+    CONFIG
+        .backup_directory
+        .clone()
+        .unwrap_or_else(default_backups_dir)
+}
+
+#[must_use]
+/// Return the original backup location, independent of custom configuration.
+pub fn default_backups_dir() -> PathBuf {
     data_dir().join("backups")
+}
+
+/// Legacy migration destination; never move existing backups to custom storage.
+fn default_full_backups_dir() -> PathBuf {
+    default_backups_dir().join("full")
+}
+
+/// Legacy board migration destination, independent of custom storage.
+fn default_board_backups_dir() -> PathBuf {
+    default_backups_dir().join("boards")
 }
 
 #[must_use]
@@ -331,8 +358,8 @@ type RuntimeDirMigration = (&'static str, fn() -> PathBuf);
 
 /// Legacy runtime directories migrated into the grouped layout.
 const RUNTIME_LAYOUT_MIGRATIONS: &[RuntimeDirMigration] = &[
-    ("full-backups", full_backups_dir),
-    ("board-backups", board_backups_dir),
+    ("full-backups", default_full_backups_dir),
+    ("board-backups", default_board_backups_dir),
     ("tmp-board-downloads", runtime_temp_board_downloads_dir),
     ("arti_state", runtime_tor_state_dir),
     ("arti_cache", runtime_tor_cache_dir),
@@ -384,9 +411,9 @@ pub fn migrate_runtime_layout_if_needed() -> anyhow::Result<()> {
         runtime_temp_board_downloads_dir(),
         runtime_favicon_dir(),
         runtime_banner_dir(),
-        backups_dir(),
-        full_backups_dir(),
-        board_backups_dir(),
+        default_backups_dir(),
+        default_full_backups_dir(),
+        default_board_backups_dir(),
     ] {
         ensure_private_dir(&dir)?;
     }
@@ -398,7 +425,7 @@ pub fn migrate_runtime_layout_if_needed() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ─── Settings file structure ──────────────────────────────────────────────────
+// Settings file structure
 #[derive(Deserialize, Default)]
 /// Optional values deserialized from `settings.toml`.
 struct SettingsFile {
@@ -476,6 +503,8 @@ struct SettingsFile {
     /// How often to create a saved full-site backup automatically, in hours.
     /// Set to 0 to disable. Default: 24 (daily).
     auto_full_backup_interval_hours: Option<u64>,
+    /// Custom absolute backup root; omission preserves the original location.
+    backup_directory: Option<PathBuf>,
     /// How many saved full-site backups to keep on disk after a new saved
     /// backup completes. Minimum 1. Default: 1.
     auto_full_backup_copies_to_keep: Option<u64>,
@@ -528,7 +557,7 @@ struct SettingsFile {
     /// `SQLite` connection pool size. Default: 8.
     /// Increase on high-traffic deployments; each connection uses ~32 MiB page cache.
     db_pool_size: Option<u32>,
-    // ── ChanNet / RustWave gateway ────────────────────────────────────────────
+    // ChanNet / RustWave gateway
     /// Base URL of the connected `RustWave` instance.
     /// Must begin with http:// or https://. Default: <http://localhost:7071>.
     rustwave_url: Option<String>,
@@ -624,7 +653,7 @@ pub fn generate_settings_file_if_missing() {
     }
 }
 
-// ─── TLS configuration ───────────────────────────────────────────────────────
+// TLS configuration
 #[derive(Debug, Clone, serde::Deserialize)]
 /// HTTPS listener and certificate-source configuration.
 pub struct TlsConfig {
@@ -724,7 +753,6 @@ fn default_acme_dir() -> String {
     "runtime/tls/acme".into()
 }
 
-// ─── Runtime config ───────────────────────────────────────────────────────────
 /// Lazily loaded process-wide runtime configuration.
 pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::from_env);
 /// Runtime-adjustable `FFmpeg` timeout.
@@ -784,7 +812,7 @@ pub fn describe_timeout_secs(timeout_secs: u64) -> String {
 )]
 /// Fully resolved runtime configuration.
 pub struct Config {
-    // ── Loaded from settings.toml (env vars still override) ──────────────────
+    // Loaded from settings.toml (env vars still override)
     /// Public forum name.
     pub forum_name: String,
     /// Initial subtitle shown on the home page; seeds the DB on first run and
@@ -817,7 +845,7 @@ pub struct Config {
     pub max_video_size: usize, // bytes
     /// Maximum accepted audio upload size in bytes.
     pub max_audio_size: usize, // bytes,
-    // ── External tool settings ────────────────────────────────────────────────
+    // External tool settings
     /// When true, Tor is probed at startup and hints are printed.
     pub enable_tor_support: bool,
     /// When true, the server binds to loopback only and is reachable exclusively
@@ -838,7 +866,7 @@ pub struct Config {
     /// Global feature gate for arbitrary uploads. Boards can only enable the
     /// per-board toggle when this is true.
     pub enable_any_file_uploads_feature: bool,
-    // ── Internal / env-only settings ─────────────────────────────────────────
+    // Internal / env-only settings
     /// Interface or host used by the primary listener.
     pub bind_addr: String,
     /// `SQLite` database file path.
@@ -873,6 +901,8 @@ pub struct Config {
     pub auto_vacuum_interval_hours: u64,
     /// Interval in hours between automatic saved full backups. 0 = disabled.
     pub auto_full_backup_interval_hours: u64,
+    /// Custom backup storage root, applied at process startup.
+    pub backup_directory: Option<PathBuf>,
     /// Maximum number of saved full backups kept on disk after each new saved
     /// full backup completes. Minimum 1.
     pub auto_full_backup_copies_to_keep: u64,
@@ -916,7 +946,7 @@ pub struct Config {
     pub blocking_threads: usize,
     /// `SQLite` `r2d2` connection pool size (default 8).
     pub db_pool_size: u32,
-    // ── ChanNet / RustWave gateway ───────────────────────────────────────────
+    // ChanNet / RustWave gateway
     /// Base URL of the connected `RustWave` instance (must begin with http:// or https://).
     /// Validated at startup by `Config::validate()`.
     pub rustwave_url: String,
@@ -931,7 +961,7 @@ pub struct Config {
     /// Pre-shared key required on X-ChanNet-Key header for /chan/refresh and
     /// /chan/poll. An empty string means those endpoints are disabled entirely.
     pub chan_net_api_key: String,
-    // ── TLS / HTTPS ───────────────────────────────────────────────────────────
+    // TLS / HTTPS
     /// TLS configuration. Defaults to disabled so existing installs are unaffected.
     pub tls: TlsConfig,
 }
@@ -999,6 +1029,7 @@ impl std::fmt::Debug for Config {
             .field("public_readiness_details", &self.public_readiness_details)
             .field("public_metrics_enabled", &self.public_metrics_enabled)
             .field("public_hosts", &self.public_hosts)
+            .field("backup_directory", &self.backup_directory)
             .field("wal_checkpoint_interval", &self.wal_checkpoint_interval)
             .field(
                 "auto_vacuum_interval_hours",
@@ -1080,7 +1111,6 @@ impl std::fmt::Debug for Config {
 impl Config {
     /// Load settings and environment overrides into one validated runtime shape.
     #[must_use]
-    // This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
     #[expect(
         clippy::too_many_lines,
         reason = "configuration loading keeps precedence and defaults together for auditability"
@@ -1192,8 +1222,7 @@ impl Config {
             );
             hex::encode(b)
         };
-        // ── ChanNet fields ───────────────────────────────────────────────────
-        // Use as_deref() to borrow rather than move the Option<String> fields.
+        // ChanNet fields
         let rustwave_url = env::var("CHAN_RUSTWAVE_URL").unwrap_or_else(|_| {
             s.rustwave_url
                 .as_deref()
@@ -1286,6 +1315,9 @@ impl Config {
                 "CHAN_AUTO_VACUUM_HOURS",
                 s.auto_vacuum_interval_hours.unwrap_or(24),
             ),
+            backup_directory: env::var_os("CHAN_BACKUP_DIRECTORY")
+                .map(PathBuf::from)
+                .or(s.backup_directory),
             auto_full_backup_interval_hours: env_parse(
                 "CHAN_AUTO_FULL_BACKUP_HOURS",
                 s.auto_full_backup_interval_hours.unwrap_or(24),
@@ -1405,13 +1437,12 @@ impl Config {
     )]
     pub fn validate(&self) -> anyhow::Result<()> {
         fn url_host_is_loopback(url: &str) -> bool {
-            reqwest::Url::parse(url).ok().is_some_and(|parsed| {
+            reqwest::Url::parse(url).is_ok_and(|parsed| {
                 parsed.host_str().is_some_and(|host| {
                     host.eq_ignore_ascii_case("localhost")
                         || host
                             .parse::<std::net::IpAddr>()
-                            .ok()
-                            .is_some_and(|ip| ip.is_loopback())
+                            .is_ok_and(|ip| ip.is_loopback())
                 })
             })
         }
@@ -1504,6 +1535,9 @@ impl Config {
                 )
             })?;
         }
+        if let Some(path) = &self.backup_directory {
+            prepare_backup_directory(path, self)?;
+        }
         // Verify the upload directory is writable.
         let upload_path = Path::new(&self.upload_dir);
         if upload_path.exists() {
@@ -1516,9 +1550,7 @@ impl Config {
             }
             drop(std::fs::remove_file(probe));
         }
-        // F-13: Pre-flight writability check for Arti data directories.
-        // Without this, a permissions error on these dirs only surfaces ~30 s
-        // into bootstrap as a cryptic internal error — invisible at startup.
+        // Fail startup before Tor bootstrap when its private directories are unusable.
         if self.enable_tor_support {
             for dir in [runtime_tor_state_dir(), runtime_tor_cache_dir()] {
                 ensure_private_dir(&dir).map_err(|e| {
@@ -1938,7 +1970,6 @@ pub fn update_settings_file_media_pruning(enabled: bool, max_size_bytes: u64) {
     );
 }
 
-// ─── Cookie secret rotation check ────────────────────────────────────────────
 /// Check whether the `cookie_secret` has changed since the last run by comparing
 /// a SHA-256 hash stored in the DB against the currently loaded secret.
 ///
@@ -1980,7 +2011,6 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
     ));
 }
 
-// ─── Env helpers ──────────────────────────────────────────────────────────────
 /// Read a string environment override or clone its default.
 fn env_str(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_owned())
@@ -2115,7 +2145,6 @@ mod tests {
     /// Serializes tests that replace the process-wide settings file.
     static SETTINGS_FILE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Standard fallible test result.
     type TestResult = anyhow::Result<()>;
 
     /// Original settings-file state restored after a mutating test.
@@ -2336,7 +2365,7 @@ mod tests {
     }
 
     /// Build a complete configuration that passes validation.
-    fn valid_config() -> Config {
+    pub(super) fn valid_config() -> Config {
         const MIB: usize = 1024 * 1024;
         const MIB_U64: u64 = 1024 * 1024;
         Config {
@@ -2379,6 +2408,7 @@ mod tests {
             public_hosts: Vec::new(),
             wal_checkpoint_interval: 3600,
             auto_vacuum_interval_hours: 24,
+            backup_directory: None,
             auto_full_backup_interval_hours: 24,
             auto_full_backup_copies_to_keep: 1,
             auto_full_backup_include_tor_hidden_service_keys: false,
@@ -2521,7 +2551,7 @@ auto_full_backup_copies_to_keep = 1
         let input = r#"# RustChan settings.toml
 forum_name = "RustChan"
 
-# ── Federation / ChanNet gateway ──────────────────────────────────────────────
+# ── Federation / ChanNet gateway ─────────────────────────────────────────────
 [tls]
 enabled = false
 "#;
@@ -2573,7 +2603,7 @@ homepage_new_thread_badges_enabled = true
 homepage_new_reply_badges_enabled = true
 thread_new_reply_badges_enabled = true
 
-# ── Network / web server ──────────────────────────────────────────────────────
+# ── Network / web server ─────────────────────────────────────────────────────
 port = 8080
 "#;
 

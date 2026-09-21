@@ -29,7 +29,8 @@ const CREATE_PENDING_FS_OPS_SQL: &str = r"
 /// Returns an error if the table or index cannot be created.
 pub fn ensure_pending_fs_ops_table(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch(CREATE_PENDING_FS_OPS_SQL)
-        .context("Create pending_fs_ops table failed")
+        .context("Create pending_fs_ops table failed")?;
+    super::schema::ensure_pending_fs_op_invariants(conn)
 }
 
 /// Insert or replace a durable pending filesystem operation.
@@ -243,6 +244,15 @@ mod tests {
         assert!(
             !pending_ops.iter().any(|op| op.id == "trigger-evil"),
             "hostile restored trigger should not be able to reseed the queue"
+        );
+        let invalid_kind = crate::pending_fs::PendingFsOpInsert {
+            id: "invalid-kind".into(),
+            kind: "untrusted_operation",
+            payload_json: "{}".into(),
+        };
+        assert!(
+            insert_pending_fs_op(&conn, &invalid_kind).is_err(),
+            "the trusted rebuild must reinstall the operation-kind invariant"
         );
         Ok(())
     }

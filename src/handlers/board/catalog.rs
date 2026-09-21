@@ -13,7 +13,6 @@ use super::{
 use axum::response::IntoResponse as _;
 use std::fmt::Write as _;
 
-/// Composite value returned by catalog load result.
 type CatalogLoadResult = (
     CatalogRenderData,
     crate::banner::BannerSelection,
@@ -27,8 +26,7 @@ type CatalogLoadResult = (
     clippy::too_many_lines,
     reason = "access control, catalog loading, unread-state calculation, and rendering form one request"
 )]
-/// Handles the catalog request.
-pub(crate) async fn catalog(
+pub(in crate::server) async fn catalog(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
@@ -65,10 +63,7 @@ pub(crate) async fn catalog(
         }
     };
 
-    // Add ETag caching to the catalog. Previously every request
-    // fetched up to 200 full thread rows and re-rendered the entire page
-    // regardless of whether anything changed. The ETag is derived from the
-    // most-recently-bumped thread, mirroring the board index handler.
+    // The most-recently-bumped thread drives the ETag, matching the board index.
     let thread_activity_markers = thread_activity_markers_from_jar(&jar);
     let catalog_data = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -271,8 +266,7 @@ pub(crate) async fn catalog(
     Ok((jar, resp).into_response())
 }
 
-/// Handles the hidden threads request.
-pub(crate) async fn hidden_threads(
+pub(in crate::server) async fn hidden_threads(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
@@ -350,10 +344,8 @@ pub(crate) async fn hidden_threads(
     Ok((jar, Html(html)).into_response())
 }
 
-// ─── GET /:board/archive ──────────────────────────────────────────────────────
-
-/// Handles the board archive request.
-pub(crate) async fn board_archive(
+// GET /:board/archive
+pub(in crate::server) async fn board_archive(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     Query(params): Query<HashMap<String, String>>,
@@ -363,6 +355,7 @@ pub(crate) async fn board_archive(
 ) -> Result<Response> {
     const ARCHIVE_PER_PAGE: i64 = 20;
     let current_theme = current_theme_from_jar(&jar);
+    let user_preferences = user_preferences_from_jar(&jar);
     let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
@@ -428,20 +421,20 @@ pub(crate) async fn board_archive(
                 &csrf_clone,
                 all_boards.as_ref(),
                 current_theme.as_deref(),
-                board.collapse_greentext,
+                user_preferences,
             ))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(html)).into_response())
+    let mut response = (jar, Html(html)).into_response();
+    crate::cache::insert_vary_cookie(response.headers_mut());
+    Ok(response)
 }
 
-// ─── GET /:board/search ───────────────────────────────────────────────────────
-
-/// Handles the search request.
-pub(crate) async fn search(
+// GET /:board/search
+pub(in crate::server) async fn search(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     Query(q): Query<SearchQuery>,

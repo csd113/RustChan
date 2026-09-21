@@ -32,8 +32,7 @@ impl WebmEncoderStatus {
     }
 }
 
-// ─── ffmpeg ───────────────────────────────────────────────────────────────────
-
+// ffmpeg
 /// Probes the configured `ffmpeg` executable and reports its status.
 pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
     let ok = probe_tool(&crate::config::CONFIG.ffmpeg_path);
@@ -308,15 +307,7 @@ fn webm_install_hint(has_vp9: bool, has_opus: bool) -> String {
     s
 }
 
-// ─── Tor (Arti in-process) ────────────────────────────────────────────────────
-//
-// Previously: spawned the system `tor` binary as a subprocess, wrote a torrc,
-// created two directories with chmod 0700, and polled for the hostname file
-// for up to 120 seconds.
-//
-// Now: spawns one Tokio task that bootstraps Arti in-process, launches the
-// onion service, and proxies incoming connections to the local HTTP server.
-// No subprocess, no torrc, no hostname file, no polling loop.
+// Arti onion service
 
 use arti_client::{config::TorClientConfigBuilder, TorClient};
 use dashmap::DashMap;
@@ -328,8 +319,7 @@ use tokio_util::sync::CancellationToken;
 use tor_cell::relaycell::msg::Connected;
 use tor_hsservice::{config::OnionServiceConfigBuilder, handle_rend_requests, HsId, StreamRequest};
 
-// ─── Per-stream identity map ──────────────────────────────────────────────────
-//
+// Per-stream identity map
 // random pseudonymous token.
 //
 // How it works:
@@ -377,17 +367,14 @@ impl Drop for TokenGuard {
 
 /// Spawn the Arti in-process Tor task.
 ///
-/// Returns `Some(JoinHandle)` when Tor support is enabled — the handle should
-/// be stored and awaited during graceful shutdown (F-04). The onion address
-/// becomes available in `onion_address` roughly 30 seconds after startup on
-/// first run, or ~5 seconds on subsequent runs (consensus served from cache).
+/// Returns a handle when Tor is enabled. Retain and await it during graceful
+/// shutdown; the onion address is published asynchronously through
+/// `onion_address`.
 ///
 /// Returns `None` when `enable_tor_support` is false.
 ///
-/// # fix
-/// Accepts a `CancellationToken` so the retry loop and backoff sleep both
-/// respond to graceful shutdown. Without this the task had no cancel path and
-/// was abandoned with a hard 10-second timeout, leaving Tor circuits open.
+/// The cancellation token stops both the retry loop and backoff sleep so Tor
+/// circuits can close during graceful shutdown.
 pub fn detect_tor(
     enable_tor_support: bool,
     bind_port: u16,
@@ -401,16 +388,10 @@ pub fn detect_tor(
 
     let data_dir = data_dir.to_path_buf();
 
-    // F-02: Retry loop with cancellation support.
-    // Backoff: 30 s, 60 s, 120 s, 240 s, 480 s (capped at 2^4 × 30 s).
-    // clean exits don't accumulate backoff identically to crash loops.
+    // Crash loops back off from 30 to 480 seconds. Runs lasting at least one
+    // minute reset the backoff before reconnecting.
     let handle = tokio::spawn(async move {
-        // Yield briefly before emitting any output. detect_tor() is called
-        // after the first-run admin wizard (which is synchronous), but the Tokio
-        // runtime schedules this task immediately after tokio::spawn returns.
-        // A short sleep lets the startup banner and any queued tracing events
-        // flush to the terminal before Tor starts printing, preventing
-        // interleaving with interactive prompts or the keyboard handler startup.
+        // Let queued startup output flush before Tor begins logging.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let mut attempt = 0u32;
@@ -432,7 +413,7 @@ pub fn detect_tor(
 
             match result {
                 Ok(()) => {
-                    // a crash — reset attempt so backoff stays short on reconnect.
+                    // Stable runs reconnect without inheriting an old crash-loop backoff.
                     if run_start.elapsed() >= Duration::from_mins(1) {
                         attempt = 0;
                     }
@@ -466,8 +447,7 @@ pub fn detect_tor(
     Some(handle)
 }
 
-// ─── Core Arti task ───────────────────────────────────────────────────────────
-
+// Core Arti task
 #[expect(
     clippy::cognitive_complexity,
     reason = "the Tor bootstrap and onion-service lifecycle is a single fail-closed state machine"
@@ -502,12 +482,10 @@ async fn run_arti(
         "Tor: bootstrapping — first run downloads ~2 MB of directory data"
     );
 
-    // F-01: Wrap bootstrap in a timeout. Without this, a captive portal,
-    // strict firewall, or Tor directory downtime hangs this task forever.
-    // so operators on censored networks can increase it via settings.toml.
+    // Bound captive-portal, firewall, and directory-outage stalls. Operators on
+    // censored networks can raise the timeout in settings.toml.
     let bootstrap_timeout = Duration::from_secs(crate::config::CONFIG.tor_bootstrap_timeout_secs);
-    // KEEP ALIVE: dropping the final Tor client handle closes all Tor circuits
-    // and kills the onion service.
+    // This handle owns the Tor circuits and must outlive the onion service.
     let tor_client: Arc<TorClient<_>> =
         tokio::time::timeout(bootstrap_timeout, TorClient::create_bootstrapped(config))
             .await
@@ -522,13 +500,7 @@ async fn run_arti(
 
     tracing::info!(target: "rustchan::detect", "Tor: connected to the Tor network");
 
-    // Security hardening options available in OnionServiceConfigBuilder (Arti 0.44):
-    //   .pow_resistance(...)          — proof-of-work DoS resistance
-    //   .rate_limit_num_intro_points  — cap introduction point abuse
-    // Currently left at defaults. Consider exposing these in settings.toml (F-18).
-    //
-    // "rustchan") so operators running multiple instances with a shared
-    // runtime/tor/state/ directory can assign distinct names and avoid key collisions.
+    // Configurable nicknames distinguish instances that share Arti state.
     let key_dir = crate::config::runtime_tor_hidden_service_keys_dir();
     tracing::info!(
         target: "rustchan::detect",
@@ -540,14 +512,12 @@ async fn run_arti(
         .nickname(crate::config::CONFIG.tor_service_nickname.parse()?)
         .build()?;
 
-    // KEEP ALIVE: dropping onion_service deregisters the service from the Tor network.
+    // This handle keeps the onion service registered with the Tor network.
     let (onion_service, rend_requests) = tor_client
         .launch_onion_service(svc_config)?
         .ok_or("launch_onion_service returned None — unexpected with code-only config")?;
 
-    // F-03: onion_address() can return None during early bringup in Arti;
-    // key material is not guaranteed to be readable synchronously at launch time.
-    // Retry up to 10 times at 500 ms intervals (5 s total) before failing.
+    // Arti may expose the service before its address is synchronously readable.
     let hsid = {
         let mut found = None;
         for i in 0..10u32 {
@@ -562,10 +532,8 @@ async fn run_arti(
     };
     let onion_name = hsid_to_onion_address(hsid);
 
-    // F-05: Cap concurrent proxy tasks to prevent file-descriptor exhaustion
-    // under a connection flood. Excess connections are dropped (Arti sends
-    // RELAY_END automatically when stream_req is dropped).
-    // recompiling, e.g. to reduce FD pressure on resource-constrained hosts.
+    // Bound proxy tasks to cap file-descriptor use during connection floods.
+    // Dropping excess requests makes Arti send RELAY_END automatically.
     let max_streams = crate::config::CONFIG.tor_max_concurrent_streams;
     let sem = Arc::new(tokio::sync::Semaphore::new(max_streams));
 
@@ -617,8 +585,7 @@ async fn run_arti(
     Ok(())
 }
 
-// ─── Onion address publication ────────────────────────────────────────────────
-
+// Onion address publication
 /// Log the active onion address, write it to the shared state, and print the
 /// TTY banner. Extracted from `run_arti` to keep that function under the
 /// clippy line-count limit.
@@ -684,8 +651,7 @@ fn spawn_tor_stream_proxy(
     });
 }
 
-// ─── Connection proxy ─────────────────────────────────────────────────────────
-
+// Connection proxy
 /// Proxies one accepted Tor stream to the local HTTP listener.
 async fn proxy_tor_stream(
     stream_req: StreamRequest,
@@ -719,8 +685,7 @@ async fn proxy_tor_stream(
     Ok(())
 }
 
-// ─── Onion address encoding ───────────────────────────────────────────────────
-
+// Onion address encoding
 /// Encode an [`HsId`] (Ed25519 public key) as a v3 `.onion` address string.
 ///
 /// [`HsId`] does not implement `std::fmt::Display` in arti-client.
@@ -737,8 +702,6 @@ fn hsid_to_onion_address(hsid: HsId) -> String {
     hasher.update(b".onion checksum");
     hasher.update(pubkey);
     hasher.update([version]);
-    // unwrap_or(0). Sha3_256 always produces 32 bytes — the fallback was dead
-    // code that masked potential logic errors if the digest size ever changed.
     let hash: [u8; 32] = hasher.finalize().into();
     let [checksum_first, checksum_second, ..] = hash;
 
@@ -754,8 +717,7 @@ fn hsid_to_onion_address(hsid: HsId) -> String {
     format!("{encoded}.onion")
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
-
+// Tests
 #[cfg(test)]
 mod tests {
     use super::*;

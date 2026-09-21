@@ -1,75 +1,78 @@
-//! Full-screen terminal console.
+//! Full-screen, responsive terminal administration console.
 
-/// Dashboard and secondary-screen rendering.
+/// Ratatui rendering and log-tail loading.
 pub mod dashboard;
 /// Blocking terminal-input adapter.
 pub mod input;
-/// Interactive administration wizards.
+/// Typed navigation, form, dialog, and feedback state.
+pub mod state;
+/// Administrative operation execution and first-run setup.
 pub mod wizard;
 
-use crossterm::{cursor, execute, terminal};
+use crossterm::{cursor, event, execute, terminal};
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
 use std::io::stdout;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify, RwLock};
 
-// ─── Raw-mode safety flag ─────────────────────────────────────────────────────
+pub use state::{ConsoleAction, ConsoleState, OperationRequest};
+pub use wizard::prompt_create_first_admin;
 
-/// True once raw mode is active. `cleanup()` CAS-es it to false so a second call
-/// is a guaranteed no-op even under concurrent access.
+/// True while raw mode and the alternate screen are active.
 static RAW_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-// ─── Console mode ─────────────────────────────────────────────────────────────
+/// Whether the first-run line editor owns raw mode (without an alternate screen).
+static LINE_INPUT_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-/// Active full-screen console view.
-pub enum ConsoleMode {
-    /// Main operational dashboard.
-    Dashboard,
-    /// Live application log.
-    LogView,
-    /// Keyboard reference.
-    Help,
-    /// Per-board statistics.
-    BoardList,
-    /// Graceful-shutdown confirmation.
-    ConfirmQuit,
-    /// Blocking administration wizard.
-    Wizard(WizardKind),
+/// Serialize drawing and restoration, including reentry from a draw panic.
+static TERMINAL_IO: parking_lot::ReentrantMutex<()> = parking_lot::ReentrantMutex::new(());
+
+/// Whether input and drawing still belong to an active console session.
+pub(super) fn is_active() -> bool {
+    RAW_MODE_ACTIVE.load(Ordering::SeqCst)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-/// Interactive administration wizard.
-pub enum WizardKind {
-    /// Board-creation wizard.
-    CreateBoard,
-    /// Administrator-creation wizard.
-    CreateAdmin,
-    /// Thread-deletion wizard.
-    DeleteThread,
+/// Start raw first-run input under the same panic/exit cleanup as the TUI.
+pub(super) fn start_line_input() -> std::io::Result<()> {
+    let _terminal_guard = TERMINAL_IO.lock();
+    terminal::enable_raw_mode()?;
+    LINE_INPUT_ACTIVE.store(true, Ordering::SeqCst);
+    crate::logging::set_tui_active(true);
+    if let Err(error) = execute!(stdout(), event::EnableBracketedPaste) {
+        cleanup();
+        return Err(error);
+    }
+    Ok(())
 }
 
-/// Concurrently shared console view.
-pub type SharedConsoleMode = Arc<RwLock<ConsoleMode>>;
+/// Whether first-run input can continue after a shutdown signal.
+pub(super) fn line_input_active() -> bool {
+    LINE_INPUT_ACTIVE.load(Ordering::SeqCst)
+}
 
-// ─── Force-reload notifier ────────────────────────────────────────────────────
-
-/// Shared between the key-dispatch task and the stats-refresh task.
-/// Sending a notification causes the refresh task to skip its next sleep
-/// and collect stats immediately.
-pub type ForceReload = Arc<Notify>;
-
-// ─── Shared stats ─────────────────────────────────────────────────────────────
-
-/// Concurrently shared console-statistics snapshot.
+/// Concurrently shared console interaction state.
+pub type SharedConsoleState = Arc<RwLock<ConsoleState>>;
+/// Concurrently shared statistics snapshot.
 pub type SharedStats = Arc<RwLock<ChanStats>>;
+/// Render-task wakeup used for immediate input and state feedback.
+pub type RedrawSignal = Arc<Notify>;
 
 /// Operational values rendered by the console dashboard.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ChanStats {
+    /// Whether the first collection attempt has completed.
+    pub is_ready: bool,
+    /// Monotonic time of the most recent collection.
+    pub sampled_at: Option<Instant>,
+    /// Recoverable collection failure, when metrics are degraded.
+    pub collection_error: Option<String>,
     /// Process uptime in seconds.
     pub uptime_secs: u64,
+    /// Actual bound HTTP port, including a command-line override.
+    pub http_port: u16,
     /// Total handled requests.
     pub req_count: u64,
     /// Requests handled per second during the latest sample.
@@ -96,16 +99,20 @@ pub struct ChanStats {
     pub active_uploads: u64,
     /// Video-processing jobs currently running.
     pub active_ffmpeg_videos: u64,
-    /// Current upload-spinner frame index.
+    /// Current progress-spinner frame index.
     pub spinner_tick: u8,
-    /// Live onion address once Tor has bootstrapped, None while bootstrapping.
+    /// Live onion address once Tor has bootstrapped.
     pub onion_address: Option<String>,
 }
 
 impl Default for ChanStats {
     fn default() -> Self {
         Self {
+            is_ready: false,
+            sampled_at: None,
+            collection_error: None,
             uptime_secs: 0,
+            http_port: 8080,
             req_count: 0,
             rps: 0.0,
             in_flight: 0,
@@ -116,7 +123,7 @@ impl Default for ChanStats {
             db_bytes: 0,
             upload_bytes: 0,
             mem_bytes: 0,
-            board_rows: vec![],
+            board_rows: Vec::new(),
             active_uploads: 0,
             active_ffmpeg_videos: 0,
             spinner_tick: 0,
@@ -125,151 +132,160 @@ impl Default for ChanStats {
     }
 }
 
-// ─── cleanup() ───────────────────────────────────────────────────────────────
-
-/// Restore the terminal unconditionally. Safe to call from panic hooks, signal
-/// handlers, and normal shutdown paths. Uses CAS so a second call is a no-op.
+/// Restore the terminal after normal shutdown, Ctrl-C, or a panic.
+///
+/// The compare-and-swap makes repeated cleanup calls safe.
 pub fn cleanup() {
+    let _terminal_guard = TERMINAL_IO.lock();
+    if LINE_INPUT_ACTIVE.swap(false, Ordering::SeqCst) {
+        drop(terminal::disable_raw_mode());
+        drop(execute!(stdout(), event::DisableBracketedPaste));
+        crate::logging::set_tui_active(false);
+    }
     if RAW_MODE_ACTIVE
         .compare_exchange(true, false, Ordering::SeqCst, Ordering::Relaxed)
         .is_ok()
     {
-        crate::logging::set_tui_active(false);
         drop(terminal::disable_raw_mode());
         drop(execute!(
             stdout(),
+            event::DisableBracketedPaste,
             terminal::LeaveAlternateScreen,
             cursor::Show
         ));
+        crate::logging::set_tui_active(false);
     }
 }
 
-// ─── render() ────────────────────────────────────────────────────────────────
-
-/// Render one frame. Returns immediately when mode is Wizard so wizard I/O
-/// is uncontested. Uses last-rendered diffing to skip identical frames.
-async fn render(mode: &SharedConsoleMode, stats: &SharedStats, last_rendered: &mut String) {
-    use std::io::Write as _;
-
-    let current_mode = mode.read().await.clone();
-
-    let frame = {
-        let snap = stats.read().await;
-        match current_mode {
-            ConsoleMode::Wizard(_) => return,
-            ConsoleMode::Dashboard => dashboard::render_dashboard(&snap),
-            ConsoleMode::LogView => dashboard::render_log_view(),
-            ConsoleMode::Help => dashboard::render_help(),
-            ConsoleMode::BoardList => dashboard::render_board_list(&snap),
-            ConsoleMode::ConfirmQuit => dashboard::render_confirm_quit(),
-        }
-    };
-
-    if frame == *last_rendered {
-        return;
-    }
-    last_rendered.clone_from(&frame);
-
-    // In raw mode \n moves the cursor down but does NOT return to column 0.
-    // Every bare \n must become \r\n so lines start at the left edge.
-    let frame_crlf = normalise_newlines(&frame);
-
-    drop(execute!(
-        stdout(),
-        cursor::MoveTo(0, 0),
-        terminal::Clear(terminal::ClearType::All),
-    ));
-    drop(stdout().write_all(frame_crlf.as_bytes()));
-    drop(stdout().flush());
-}
-
-/// Replace every bare `\n` (not already preceded by `\r`) with `\r\n`.
-/// Called once per frame so the cost is negligible.
-fn normalise_newlines(s: &str) -> String {
-    let mut out = String::with_capacity(s.len().saturating_add(64));
-    let mut prev = '\0';
-    for ch in s.chars() {
-        if ch == '\n' && prev != '\r' {
-            out.push('\r');
-        }
-        out.push(ch);
-        prev = ch;
-    }
-    out
-}
-
-// ─── start() ─────────────────────────────────────────────────────────────────
-
-/// Minimum terminal width for the dashboard to render without wrapping.
-const MIN_COLS: u16 = 90;
-/// Minimum terminal height for the dashboard to render without wrapping.
-const MIN_ROWS: u16 = 36;
-
-/// Enter the full-screen TUI. Spawns:
-///   1. Input task  — reads crossterm events, sends `KeyEvent` over the returned channel.
-///   2. Render task — redraws every 500 ms.
+/// Enter the alternate screen and start input and diff-render tasks.
 ///
-/// Returns `(key_rx, force_reload)` so `server.rs` can drive mode transitions and
-/// trigger immediate stats refreshes on [R].
+/// Unlike the previous console implementation, this never resizes the user's
+/// terminal. Layout adaptation happens inside the renderer.
+///
+/// # Errors
+///
+/// Returns an error when raw mode, alternate-screen setup, or the Ratatui
+/// backend cannot be initialized.
 pub fn start(
-    stats: &SharedStats,
-    mode: &SharedConsoleMode,
-) -> (mpsc::UnboundedReceiver<input::KeyEvent>, ForceReload) {
-    drop(terminal::enable_raw_mode());
-    RAW_MODE_ACTIVE.store(true, Ordering::SeqCst);
-    drop(execute!(
+    shared_metrics: &SharedStats,
+    shared_app: &SharedConsoleState,
+) -> anyhow::Result<(mpsc::Receiver<input::KeyEvent>, RedrawSignal)> {
+    let _terminal_guard = TERMINAL_IO.lock();
+    terminal::enable_raw_mode()?;
+    crate::logging::set_tui_active(true);
+    if let Err(error) = execute!(
         stdout(),
         terminal::EnterAlternateScreen,
+        event::EnableBracketedPaste,
         cursor::Hide
-    ));
-
-    // Ensure the window is wide and tall enough to display the dashboard
-    // without wrapping or truncation.  Only resize if the current dimensions
-    // are smaller than the minimum — never shrink a larger window.
-    if let Ok((cols, rows)) = terminal::size() {
-        let new_cols = cols.max(MIN_COLS);
-        let new_rows = rows.max(MIN_ROWS);
-        if new_cols != cols || new_rows != rows {
-            drop(execute!(stdout(), terminal::SetSize(new_cols, new_rows)));
-        }
+    ) {
+        drop(execute!(
+            stdout(),
+            event::DisableBracketedPaste,
+            terminal::LeaveAlternateScreen,
+            cursor::Show
+        ));
+        drop(terminal::disable_raw_mode());
+        crate::logging::set_tui_active(false);
+        return Err(error.into());
     }
-    // Signal to the rest of the codebase that the TUI owns the screen.
-    // Any code that would print banners or boxes (e.g. detect.rs Tor box)
-    // must check is_tui_active() and skip its output.
+    RAW_MODE_ACTIVE.store(true, Ordering::SeqCst);
     crate::logging::set_tui_active(true);
 
-    let (key_tx, key_rx) = mpsc::unbounded_channel::<input::KeyEvent>();
-    if let Err(e) = input::spawn(key_tx) {
-        tracing::error!(target: "console", error = %e, "Failed to spawn console-input thread");
+    let backend = CrosstermBackend::new(stdout());
+    let mut terminal = match Terminal::new(backend) {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            cleanup();
+            return Err(error.into());
+        }
+    };
+    let redraw = Arc::new(Notify::new());
+    let (key_tx, key_rx) = mpsc::channel::<input::KeyEvent>(256);
+    if let Err(error) = input::spawn(key_tx, Arc::clone(&redraw)) {
+        cleanup();
+        return Err(error.into());
     }
 
-    let stats_r = Arc::clone(stats);
-    let mode_r = Arc::clone(mode);
+    let metrics_reader = Arc::clone(shared_metrics);
+    let app_writer = Arc::clone(shared_app);
+    let redraw_for_render = Arc::clone(&redraw);
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(500));
-        let mut last_rendered = String::new();
+        let mut spinner_tick = 0u8;
+        let mut logs = dashboard::LogSnapshot::default();
+        let mut last_log_refresh = None;
+        let mut animated = false;
         loop {
-            interval.tick().await;
-            render(&mode_r, &stats_r, &mut last_rendered).await;
+            let frame_delay = if animated {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_secs(1)
+            };
+            tokio::select! {
+                () = tokio::time::sleep(frame_delay) => {}
+                () = redraw_for_render.notified() => {}
+            }
+            if !RAW_MODE_ACTIVE.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let mut snapshot = metrics_reader.read().await.clone();
+            spinner_tick = spinner_tick.wrapping_add(1) % 10;
+            snapshot.spinner_tick = spinner_tick;
+
+            let (active_screen, follow_logs) = {
+                let app = app_writer.read().await;
+                (app.screen, app.logs.follow)
+            };
+            if active_screen == state::Screen::Logs
+                && (follow_logs || last_log_refresh.is_none())
+                && last_log_refresh
+                    .is_none_or(|last: Instant| last.elapsed() >= Duration::from_secs(1))
+            {
+                let next_logs = tokio::task::block_in_place(dashboard::load_log_snapshot);
+                // Input can pause while disk IO is in flight. Do not replace
+                // the snapshot the operator has just chosen to inspect.
+                if app_writer.read().await.logs.follow || last_log_refresh.is_none() {
+                    logs = next_logs;
+                    last_log_refresh = Some(Instant::now());
+                }
+            }
+
+            let mut app = app_writer.write().await;
+            app.expire_notice(Instant::now());
+            animated = matches!(app.dialog, Some(state::Dialog::Progress { .. }))
+                || snapshot.active_uploads > 0;
+            let draw_result = {
+                let _terminal_guard = TERMINAL_IO.lock();
+                if !is_active() {
+                    return;
+                }
+                terminal.draw(|frame| {
+                    dashboard::render(frame, &mut app, &snapshot, &logs);
+                })
+            };
+            drop(app);
+            if let Err(error) = draw_result {
+                cleanup();
+                tracing::error!(target: "console", error = %error, "Console disabled after render failure");
+                return;
+            }
         }
     });
 
-    let force_reload = Arc::new(Notify::new());
-    (key_rx, force_reload)
+    redraw.notify_one();
+    Ok((key_rx, redraw))
 }
 
-// ─── collect_stats() ─────────────────────────────────────────────────────────
-
-/// Collect a fresh `ChanStats` snapshot from the DB and global atomics.
-/// Mutates the delta-tracking locals in place so req/s and other deltas
-/// are accurate across calls. Runs on the calling thread — use
-/// `tokio::task::block_in_place` at the call site when inside an async context.
+/// Collect a fresh statistics snapshot from the database and process atomics.
+///
+/// Delta-tracking values are mutated in place so request-rate samples remain
+/// accurate across collection calls.
 #[expect(
     clippy::as_conversions,
     clippy::cast_precision_loss,
     reason = "request-rate display intentionally converts a monotonic counter delta to floating point"
 )]
-// The signature mirrors the data passed between layers, so a wrapper would add more noise than clarity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the collector receives the complete sampling state maintained by its caller"
@@ -283,86 +299,83 @@ pub fn collect_stats(
     prev_threads: &mut i64,
     prev_posts: &mut i64,
     onion_address: Option<String>,
+    http_port: u16,
 ) -> ChanStats {
-    use std::sync::atomic::Ordering;
-
-    let uptime = start.elapsed().as_secs();
-
-    // req/s delta since previous call
-    let now_instant = Instant::now();
-    let elapsed_secs = now_instant
-        .duration_since(*prev_tick)
-        .as_secs_f64()
-        .max(0.001);
-    let curr_reqs = crate::server::REQUEST_COUNT.load(Ordering::Relaxed);
-    let req_delta = curr_reqs.saturating_sub(*prev_req);
-    let rps = req_delta as f64 / elapsed_secs;
-    *prev_req = curr_reqs;
-    *prev_tick = now_instant;
+    let uptime_secs = start.elapsed().as_secs();
+    let now = Instant::now();
+    let elapsed_secs = now.duration_since(*prev_tick).as_secs_f64().max(0.001);
+    let req_count = crate::server::REQUEST_COUNT.load(Ordering::Relaxed);
+    let request_delta = req_count.saturating_sub(*prev_req);
+    let rps = request_delta as f64 / elapsed_secs;
+    *prev_req = req_count;
+    *prev_tick = now;
 
     let in_flight = crate::server::IN_FLIGHT.load(Ordering::Relaxed);
     let active_uploads = crate::server::ACTIVE_UPLOADS.load(Ordering::Relaxed);
     let active_ffmpeg_videos = job_queue.active_video_count();
     let online = crate::server::ACTIVE_IPS.len();
-    let spinner_tick =
-        u8::try_from(crate::server::SPINNER_TICK.fetch_add(1, Ordering::Relaxed) % 10)
-            .unwrap_or_default();
 
-    let (boards, threads, posts, db_bytes, board_rows) = pool.get().map_or_else(
-        |_| (0i64, 0i64, 0i64, 0i64, vec![]),
-        |conn| {
-            let b: i64 = conn
-                .query_row("SELECT COUNT(*) FROM boards", [], |r| r.get(0))
-                .unwrap_or(0);
-            let t: i64 = conn
-                .query_row("SELECT COUNT(*) FROM threads WHERE archived = 0", [], |r| {
-                    r.get(0)
-                })
-                .unwrap_or(0);
-            let p: i64 = conn
-                .query_row("SELECT COUNT(*) FROM posts", [], |r| r.get(0))
-                .unwrap_or(0);
-            let db: i64 = {
-                let pc: i64 = conn
-                    .query_row("PRAGMA page_count", [], |r| r.get(0))
-                    .unwrap_or(0);
-                let ps: i64 = conn
-                    .query_row("PRAGMA page_size", [], |r| r.get(0))
-                    .unwrap_or(4096);
-                pc * ps
-            };
-            let rows = crate::db::get_per_board_stats(&conn);
-            (b, t, p, db, rows)
-        },
-    );
+    let database = match read_database_stats(pool) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(target: "console", error = %error, "Console database metrics unavailable");
+            ChanStats {
+                boards: -1,
+                threads: -1,
+                posts: -1,
+                db_bytes: -1,
+                collection_error: Some("Database metrics are temporarily unavailable.".to_owned()),
+                ..ChanStats::default()
+            }
+        }
+    };
 
-    *prev_threads = threads;
-    *prev_posts = posts;
-
-    let upload_bytes = dir_size_bytes(&crate::config::CONFIG.upload_dir);
-    let mem_bytes = process_rss_kb().cast_signed().saturating_mul(1024);
+    *prev_threads = database.threads;
+    *prev_posts = database.posts;
 
     ChanStats {
-        uptime_secs: uptime,
-        req_count: curr_reqs,
+        is_ready: true,
+        sampled_at: Some(now),
+        uptime_secs,
+        http_port,
+        req_count,
         rps,
         in_flight,
         online,
-        boards,
-        threads,
-        posts,
-        db_bytes,
-        upload_bytes,
-        mem_bytes,
-        board_rows,
+        upload_bytes: dir_size_bytes(&crate::config::CONFIG.upload_dir),
+        mem_bytes: process_rss_kb().cast_signed().saturating_mul(1_024),
         active_uploads,
         active_ffmpeg_videos,
-        spinner_tick,
+        spinner_tick: 0,
         onion_address,
+        ..database
     }
 }
 
-// ─── Utility helpers ──────────────────────────────────────────────────────────
+/// Read all database metrics from one consistent snapshot, preserving failures.
+fn read_database_stats(pool: &crate::db::DbPool) -> anyhow::Result<ChanStats> {
+    let connection = pool.get()?;
+    let transaction = connection.unchecked_transaction()?;
+    let boards = transaction.query_row("SELECT COUNT(*) FROM boards", [], |row| row.get(0))?;
+    let threads = transaction.query_row(
+        "SELECT COUNT(*) FROM threads WHERE archived = 0",
+        [],
+        |row| row.get(0),
+    )?;
+    let posts = transaction.query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))?;
+    let page_count: i64 = transaction.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+    let page_size: i64 = transaction.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+    let board_rows = crate::db::get_per_board_stats(&transaction)?;
+    transaction.commit()?;
+    Ok(ChanStats {
+        boards,
+        threads,
+        posts,
+        db_bytes: page_count.saturating_mul(page_size),
+        board_rows,
+        ..ChanStats::default()
+    })
+}
 
 /// Return a directory tree's total size as a signed display value.
 fn dir_size_bytes(path: &str) -> i64 {
@@ -376,11 +389,11 @@ fn walkdir_size(path: &std::path::Path) -> u64 {
     };
     entries
         .flatten()
-        .map(|e| {
-            if e.file_type().is_ok_and(|ft| ft.is_dir()) {
-                walkdir_size(&e.path())
+        .map(|entry| {
+            if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+                walkdir_size(&entry.path())
             } else {
-                e.metadata().map_or(0, |m| m.len())
+                entry.metadata().map_or(0, |metadata| metadata.len())
             }
         })
         .sum()
@@ -390,13 +403,13 @@ fn walkdir_size(path: &std::path::Path) -> u64 {
 fn process_rss_kb() -> u64 {
     #[cfg(target_os = "linux")]
     {
-        if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
-            for line in s.lines() {
-                if let Some(val) = line.strip_prefix("VmRSS:") {
-                    return val
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if let Some(value) = line.strip_prefix("VmRSS:") {
+                    return value
                         .split_whitespace()
                         .next()
-                        .and_then(|n| n.parse().ok())
+                        .and_then(|number| number.parse().ok())
                         .unwrap_or(0);
                 }
             }
@@ -405,239 +418,50 @@ fn process_rss_kb() -> u64 {
     #[cfg(target_os = "macos")]
     {
         let pid = std::process::id().to_string();
-        if let Ok(out) = std::process::Command::new("ps")
+        if let Ok(output) = std::process::Command::new("ps")
             .args(["-o", "rss=", "-p", &pid])
             .output()
         {
-            let s = String::from_utf8_lossy(&out.stdout);
-            if let Ok(kb) = s.trim().parse::<u64>() {
-                return kb;
+            let value = String::from_utf8_lossy(&output.stdout);
+            if let Ok(kibibytes) = value.trim().parse::<u64>() {
+                return kibibytes;
             }
         }
     }
     0
 }
 
-// ─── prompt_create_first_admin() helpers ─────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-// These are module-level private functions (not inner functions) so that
-// the `clippy::items_after_statements` lint is satisfied — inner `fn` items
-// defined after the first statement in a function body trigger that lint.
-
-/// Return an ANSI code only when colored output is enabled.
-fn first_admin_c(code: &'static str) -> &'static str {
-    if crate::logging::ansi_enabled() {
-        code
-    } else {
-        ""
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions verify that query failures cannot be displayed as healthy zero metrics"
+    )]
+    fn database_snapshot_propagates_schema_and_row_errors() -> anyhow::Result<()> {
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        let pool = r2d2::Pool::builder().max_size(1).build(manager)?;
+        let connection = pool.get()?;
+        connection.execute_batch("CREATE TABLE boards (id INTEGER, short_name TEXT); CREATE TABLE threads (id INTEGER, board_id INTEGER, archived INTEGER); CREATE TABLE posts (id INTEGER, thread_id INTEGER); INSERT INTO boards VALUES (1, 'test');")?;
+        drop(connection);
+        let snapshot = read_database_stats(&pool)?;
+        assert_eq!(snapshot.boards, 1, "healthy board count must be retained");
+        let connection = pool.get()?;
+        connection.execute("UPDATE boards SET short_name = NULL", [])?;
+        drop(connection);
+        assert!(
+            read_database_stats(&pool).is_err(),
+            "a malformed board row must fail the whole snapshot"
+        );
+        let connection = pool.get()?;
+        connection.execute("DROP TABLE posts", [])?;
+        drop(connection);
+        assert!(
+            read_database_stats(&pool).is_err(),
+            "SQL errors must not turn into healthy zero counts"
+        );
+        Ok(())
     }
-}
-
-/// Return the platform-appropriate success marker.
-#[cfg(windows)]
-const fn first_admin_ok() -> &'static str {
-    "OK"
-}
-
-/// Return the platform-appropriate success marker.
-#[cfg(not(windows))]
-const fn first_admin_ok() -> &'static str {
-    "\u{2713}"
-}
-
-/// Return the platform-appropriate error marker.
-#[cfg(windows)]
-const fn first_admin_err() -> &'static str {
-    "x"
-}
-
-/// Return the platform-appropriate error marker.
-#[cfg(not(windows))]
-const fn first_admin_err() -> &'static str {
-    "\u{2717}"
-}
-
-/// Prompt for and validate the first administrator username.
-fn first_admin_prompt_u(reader: &mut dyn std::io::BufRead) -> Option<String> {
-    loop {
-        crate::logging::console_prompt(&format!(
-            "  {}Username:{} ",
-            first_admin_c("\x1b[36m"),
-            first_admin_c("\x1b[0m")
-        ));
-        let mut s = String::new();
-        match reader.read_line(&mut s) {
-            Ok(0) | Err(_) => {
-                crate::logging::console_println(
-                    "\n  Skipped — run: rustchan-cli admin create-admin <user> <pass>",
-                );
-                return None;
-            }
-            Ok(_) => {}
-        }
-        let u = s.trim().to_owned();
-        if u.is_empty() {
-            crate::logging::console_println("  Username cannot be empty.");
-            continue;
-        }
-        if u.len() > 32 {
-            crate::logging::console_println("  Username must be 32 characters or fewer.");
-            continue;
-        }
-        if !u
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-        {
-            crate::logging::console_println(
-                "  Username must be alphanumeric (underscores and hyphens allowed).",
-            );
-            continue;
-        }
-        return Some(u);
-    }
-}
-
-/// Prompt for and validate the first administrator password.
-fn first_admin_prompt_p(reader: &mut dyn std::io::BufRead) -> Option<String> {
-    loop {
-        crate::logging::console_prompt(&format!(
-            "  {}Password (min 8 chars):{} ",
-            first_admin_c("\x1b[36m"),
-            first_admin_c("\x1b[0m")
-        ));
-        let mut p1 = String::new();
-        match reader.read_line(&mut p1) {
-            Ok(0) | Err(_) => {
-                crate::logging::console_println("\n  Skipped.");
-                return None;
-            }
-            Ok(_) => {}
-        }
-        let p1 = p1.trim().to_owned();
-        if let Err(e) = crate::utils::crypto::validate_password(&p1) {
-            crate::logging::console_println(&format!(
-                "  {}{}{} {e}",
-                first_admin_c("\x1b[31m"),
-                first_admin_err(),
-                first_admin_c("\x1b[0m")
-            ));
-            continue;
-        }
-        crate::logging::console_prompt(&format!(
-            "  {}Confirm password:{}   ",
-            first_admin_c("\x1b[36m"),
-            first_admin_c("\x1b[0m")
-        ));
-        let mut p2 = String::new();
-        if reader.read_line(&mut p2).is_err() {
-            crate::logging::console_println("\n  Skipped.");
-            return None;
-        }
-        let p2 = p2.trim().to_owned();
-        if p1 != p2 {
-            crate::logging::console_println(&format!(
-                "  {}{}{} Passwords do not match. Try again.",
-                first_admin_c("\x1b[31m"),
-                first_admin_err(),
-                first_admin_c("\x1b[0m")
-            ));
-            continue;
-        }
-        return Some(p1);
-    }
-}
-
-// ─── prompt_create_first_admin() ─────────────────────────────────────────────
-
-/// First-run wizard. Called before the TUI starts, so stdout is in normal
-/// terminal mode — no raw mode toggling needed here.
-pub fn prompt_create_first_admin(pool: &crate::db::DbPool, reader: &mut dyn std::io::BufRead) {
-    crate::logging::console_print_raw(&format!(
-        "\n\
-        {}------------------------------------------------------\n\
-        |         FIRST RUN - CREATE ADMIN ACCOUNT             |\n\
-        |------------------------------------------------------|\n\
-        |  No admin accounts found.                            |\n\
-        |  Create one now to access the admin panel at /admin  |\n\
-        |  after the server starts. (Ctrl+C to skip for now.)  |\n\
-        ------------------------------------------------------{}\n\n",
-        first_admin_c("\x1b[36m"),
-        first_admin_c("\x1b[0m")
-    ));
-
-    if crate::logging::is_tty() {
-        crate::logging::console_println(&format!(
-            "  {}Note: password input is visible - this is a one-time setup.{}",
-            first_admin_c("\x1b[33m"),
-            first_admin_c("\x1b[0m")
-        ));
-    }
-
-    let Some(username) = first_admin_prompt_u(reader) else {
-        return;
-    };
-    let Some(password) = first_admin_prompt_p(reader) else {
-        return;
-    };
-
-    let Ok(hash) = crate::utils::crypto::hash_password(&password) else {
-        crate::logging::console_println(&format!(
-            "  {}[err]{} Failed to hash password.",
-            first_admin_c("\x1b[31m"),
-            first_admin_c("\x1b[0m")
-        ));
-        return;
-    };
-    let Ok(conn) = pool.get() else {
-        crate::logging::console_println(&format!(
-            "  {}[err]{} DB connection failed.",
-            first_admin_c("\x1b[31m"),
-            first_admin_c("\x1b[0m")
-        ));
-        return;
-    };
-
-    match crate::db::create_admin(&conn, &username, &hash) {
-        Ok(id) => {
-            tracing::info!(
-                target: "startup",
-                username = %username,
-                id = id,
-                "First admin account created via setup wizard"
-            );
-            crate::logging::console_print_raw(&format!(
-                "\n  {}{}{} Admin '{}{username}{}' created (id={id}).\n\
-                   {}->{} Log in at /admin once the server is running.\n\n",
-                first_admin_c("\x1b[32m"),
-                first_admin_ok(),
-                first_admin_c("\x1b[0m"),
-                first_admin_c("\x1b[1m"),
-                first_admin_c("\x1b[0m"),
-                first_admin_c("\x1b[36m"),
-                first_admin_c("\x1b[0m")
-            ));
-        }
-        Err(e) => {
-            crate::logging::console_println(&format!(
-                "  {}[err]{} Failed to create admin: {e}",
-                first_admin_c("\x1b[31m"),
-                first_admin_c("\x1b[0m")
-            ));
-            return;
-        }
-    }
-
-    crate::logging::console_prompt(&format!(
-        "  {}Create a board now?{} [y/N]: ",
-        first_admin_c("\x1b[36m"),
-        first_admin_c("\x1b[0m")
-    ));
-    let mut ans = String::new();
-    if reader.read_line(&mut ans).is_ok()
-        && matches!(ans.trim().to_lowercase().as_str(), "y" | "yes")
-    {
-        crate::logging::console_println("");
-        wizard::kb_create_board(pool, reader);
-    }
-    crate::logging::console_println("");
 }

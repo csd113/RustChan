@@ -86,6 +86,16 @@ fn render_captcha_row(board_short: &str, reply_suffix: &str, refresh_href: &str)
     let board = escape_html(board_short);
     let image_src = format!("/captcha/{captcha_id}?board={board}");
     let answer_id = format!("captcha-answer-{board}{reply_suffix}");
+    let (refresh_path, fragment) = refresh_href
+        .split_once('#')
+        .map_or((refresh_href, None), |(path, fragment)| {
+            (path, Some(fragment))
+        });
+    let query_separator = if refresh_path.contains('?') { '&' } else { '?' };
+    let refresh_href = format!(
+        "{refresh_path}{query_separator}captcha_refresh={captcha_id}{}",
+        fragment.map_or_else(String::new, |value| format!("#{value}"))
+    );
     format!(
         r#"    <tr id="captcha-row-{board}{suffix}"><td><label for="{answer_id}">captcha</label></td>
         <td>
@@ -103,7 +113,7 @@ fn render_captcha_row(board_short: &str, reply_suffix: &str, refresh_href: &str)
         answer_id = escape_html(&answer_id),
         image_src = escape_html(&image_src),
         captcha_id = escape_html(&captcha_id),
-        refresh_href = escape_html(refresh_href),
+        refresh_href = escape_html(&refresh_href),
     )
 }
 
@@ -280,6 +290,9 @@ pub(super) fn new_thread_form(
     };
 
     let poll_option_rows = [render_poll_option_row(1), render_poll_option_row(2)].concat();
+    let extra_poll_option_rows: String = (3..=POLL_OPTION_MAX_COUNT)
+        .map(render_poll_option_row)
+        .collect();
     let name_value = prefill.map_or("", |state| state.name.as_str());
     let subject_value = prefill.map_or("", |state| state.subject.as_str());
     let body_value = prefill.map_or("", |state| state.body.as_str());
@@ -312,6 +325,7 @@ pub(super) fn new_thread_form(
     {upload_row}
     {upload_progress_row}
     {captcha_row}
+    <tr class="poll-row">
         <td colspan="2">
         <span class="post-form-mobile-label">Poll</span>
         <details class="poll-creator">
@@ -322,6 +336,7 @@ pub(super) fn new_thread_form(
             </div>
             <div id="poll-options-list" data-poll-option-maxlength="{poll_option_max_length}" data-poll-option-maxcount="{poll_option_max_count}">
               {poll_option_rows}
+              <noscript><details><summary>More poll options</summary>{extra_poll_option_rows}</details></noscript>
             </div>
             <button type="button" class="poll-add-btn" data-action="add-poll-option">+ Add Option</button>
             <div class="poll-creator-row poll-duration-row">
@@ -434,8 +449,8 @@ pub(super) fn reply_form(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_upload_form_policy, new_thread_form, render_poll_option_row, reply_form,
-        PostFormState, AUDIO_ACCEPT, POLL_OPTION_MAX_COUNT, POLL_OPTION_MAX_LENGTH,
+        build_upload_form_policy, new_thread_form, render_captcha_row, render_poll_option_row,
+        reply_form, PostFormState, AUDIO_ACCEPT, POLL_OPTION_MAX_COUNT, POLL_OPTION_MAX_LENGTH,
     };
 
     fn uploads_disabled_board() -> crate::models::Board {
@@ -545,7 +560,21 @@ mod tests {
         assert!(html.contains(&format!(
             r#"data-poll-option-maxcount="{POLL_OPTION_MAX_COUNT}""#
         )));
-        assert_eq!(html.matches(r#"class="poll-option-input""#).count(), 2);
+        assert_eq!(
+            html.matches(r#"class="poll-option-input""#).count(),
+            POLL_OPTION_MAX_COUNT
+        );
+    }
+
+    #[test]
+    fn poll_creator_is_wrapped_in_a_valid_table_row() {
+        let html = new_thread_form("test", "csrf", &uploads_disabled_board(), None, "/test");
+
+        assert!(html.contains(
+            r#"<tr class="poll-row">
+        <td colspan="2">
+        <span class="post-form-mobile-label">Poll</span>"#,
+        ));
     }
 
     #[test]
@@ -593,7 +622,16 @@ mod tests {
         assert!(html.contains("name=\"captcha_id\""));
         assert!(html.contains("name=\"captcha_answer\""));
         assert!(html.contains("/captcha/"));
+        assert!(html.contains("?captcha_refresh="));
         assert!(html.contains("new challenge"));
         assert!(!html.contains("pow_nonce"));
+    }
+
+    #[test]
+    fn captcha_refresh_query_precedes_reply_form_fragment() {
+        let html = render_captcha_row("test", "-reply", "/test/thread/7#post-form-wrap");
+
+        assert!(html.contains("/test/thread/7?captcha_refresh="));
+        assert!(html.contains("#post-form-wrap\">new challenge</a>"));
     }
 }

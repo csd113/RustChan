@@ -11,26 +11,6 @@ pub struct UserThreadPreference {
     pub hidden: bool,
 }
 
-/// Insert or update a preference row.
-fn upsert_preference(
-    conn: &rusqlite::Connection,
-    user_hash: &str,
-    thread_id: i64,
-    pinned: bool,
-    hidden: bool,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO user_thread_preferences (user_hash, thread_id, pinned, hidden, updated_at)
-         VALUES (?1, ?2, ?3, ?4, unixepoch())
-         ON CONFLICT(user_hash, thread_id) DO UPDATE SET
-            pinned = excluded.pinned,
-            hidden = excluded.hidden,
-            updated_at = unixepoch()",
-        params![user_hash, thread_id, i32::from(pinned), i32::from(hidden)],
-    )?;
-    Ok(())
-}
-
 /// Remove a preference row when both values are at their defaults.
 fn cleanup_if_default(conn: &rusqlite::Connection, user_hash: &str, thread_id: i64) -> Result<()> {
     conn.execute(
@@ -51,8 +31,14 @@ pub fn set_thread_hidden(
     thread_id: i64,
     hidden: bool,
 ) -> Result<()> {
-    let current = get_thread_preference(conn, user_hash, thread_id)?.unwrap_or_default();
-    upsert_preference(conn, user_hash, thread_id, current.pinned, hidden)?;
+    conn.execute(
+        "INSERT INTO user_thread_preferences (user_hash, thread_id, pinned, hidden, updated_at)
+         VALUES (?1, ?2, 0, ?3, unixepoch())
+         ON CONFLICT(user_hash, thread_id) DO UPDATE SET
+            hidden = excluded.hidden,
+            updated_at = unixepoch()",
+        params![user_hash, thread_id, i32::from(hidden)],
+    )?;
     cleanup_if_default(conn, user_hash, thread_id)?;
     Ok(())
 }
@@ -67,8 +53,14 @@ pub fn set_thread_pinned(
     thread_id: i64,
     pinned: bool,
 ) -> Result<()> {
-    let current = get_thread_preference(conn, user_hash, thread_id)?.unwrap_or_default();
-    upsert_preference(conn, user_hash, thread_id, pinned, current.hidden)?;
+    conn.execute(
+        "INSERT INTO user_thread_preferences (user_hash, thread_id, pinned, hidden, updated_at)
+         VALUES (?1, ?2, ?3, 0, unixepoch())
+         ON CONFLICT(user_hash, thread_id) DO UPDATE SET
+            pinned = excluded.pinned,
+            updated_at = unixepoch()",
+        params![user_hash, thread_id, i32::from(pinned)],
+    )?;
     cleanup_if_default(conn, user_hash, thread_id)?;
     Ok(())
 }
@@ -132,4 +124,89 @@ pub fn get_preferences_for_board(
         prefs.insert(thread_id, pref);
     }
     Ok(prefs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{get_thread_preference, set_thread_hidden, set_thread_pinned};
+    use anyhow::{Context as _, Result};
+    use std::sync::{Arc, Barrier};
+
+    fn seeded_thread(pool: &crate::db::DbPool) -> Result<i64> {
+        let conn = pool.get()?;
+        let board_id = crate::db::create_board(&conn, "prefs", "Preferences", "", false)?;
+        conn.query_row(
+            "INSERT INTO threads (board_id, subject) VALUES (?1, 'preferences') RETURNING id",
+            [board_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn independent_preference_updates_preserve_the_other_flag() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let thread_id = seeded_thread(&pool)?;
+        let conn = pool.get()?;
+
+        set_thread_pinned(&conn, "viewer", thread_id, true)?;
+        set_thread_hidden(&conn, "viewer", thread_id, true)?;
+        let preference = get_thread_preference(&conn, "viewer", thread_id)?
+            .context("preference row should exist")?;
+
+        assert!(
+            preference.pinned,
+            "hidden update must preserve pinned state"
+        );
+        assert!(preference.hidden, "hidden state should be persisted");
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test assertions intentionally panic on failure"
+    )]
+    fn concurrent_preference_updates_do_not_lose_flags() -> Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let thread_id = seeded_thread(&pool)?;
+        let barrier = Arc::new(Barrier::new(2));
+
+        std::thread::scope(|scope| {
+            let pinned_pool = pool.clone();
+            let pinned_barrier = Arc::clone(&barrier);
+            let pinned = scope.spawn(move || -> Result<()> {
+                let conn = pinned_pool.get()?;
+                pinned_barrier.wait();
+                set_thread_pinned(&conn, "viewer", thread_id, true)
+            });
+
+            let hidden_pool = pool.clone();
+            let hidden_barrier = Arc::clone(&barrier);
+            let hidden = scope.spawn(move || -> Result<()> {
+                let conn = hidden_pool.get()?;
+                hidden_barrier.wait();
+                set_thread_hidden(&conn, "viewer", thread_id, true)
+            });
+
+            pinned
+                .join()
+                .map_err(|_| anyhow::anyhow!("pinned preference thread panicked"))??;
+            hidden
+                .join()
+                .map_err(|_| anyhow::anyhow!("hidden preference thread panicked"))??;
+            Result::<()>::Ok(())
+        })?;
+
+        let conn = pool.get()?;
+        let preference = get_thread_preference(&conn, "viewer", thread_id)?
+            .context("preference row should exist")?;
+        assert!(preference.pinned, "concurrent pin should not be lost");
+        assert!(preference.hidden, "concurrent hide should not be lost");
+        Ok(())
+    }
 }

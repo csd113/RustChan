@@ -83,15 +83,13 @@ async fn readyz_response(state: AppState, include_details: bool) -> Response {
     if !include_details {
         let database_ready = tokio::task::spawn_blocking({
             let pool = state.db.clone();
-            move || match pool.get() {
-                Ok(conn) => {
+            move || {
+                pool.get().is_ok_and(|conn| {
                     let ready = conn
                         .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
-                        .ok()
-                        .is_some_and(|value| value == 1);
+                        .is_ok_and(|value| value == 1);
                     ready && crate::db::verify_database_schema(&conn).is_ok()
-                }
-                Err(_) => false,
+                })
             }
         })
         .await
@@ -130,12 +128,18 @@ async fn readyz_response(state: AppState, include_details: bool) -> Response {
                     .modified_epoch
                     .map(|ts| chrono::Utc::now().timestamp().saturating_sub(ts).max(0) / 3600)
             });
-            match pool.get() {
-                Ok(conn) => {
+            pool.get().map_or(
+                (
+                    false,
+                    false,
+                    0,
+                    latest_full_backup_verified,
+                    latest_full_backup_age_hours,
+                ),
+                |conn| {
                     let ready = conn
                         .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
-                        .ok()
-                        .is_some_and(|value| value == 1);
+                        .is_ok_and(|value| value == 1);
                     let schema_valid = crate::db::verify_database_schema(&conn).is_ok();
                     let failed = crate::db::count_posts_by_media_processing_state(
                         &conn,
@@ -149,15 +153,8 @@ async fn readyz_response(state: AppState, include_details: bool) -> Response {
                         latest_full_backup_verified,
                         latest_full_backup_age_hours,
                     )
-                }
-                Err(_) => (
-                    false,
-                    false,
-                    0,
-                    latest_full_backup_verified,
-                    latest_full_backup_age_hours,
-                ),
-            }
+                },
+            )
         }
     })
     .await
@@ -232,8 +229,16 @@ async fn metrics_response(state: AppState) -> Response {
                 .map_or(-1, |ts| {
                     chrono::Utc::now().timestamp().saturating_sub(ts).max(0)
                 });
-            match pool.get() {
-                Ok(conn) => {
+            pool.get().map_or(
+                (
+                    0,
+                    0,
+                    false,
+                    full_backup_count,
+                    latest_full_backup_verified,
+                    latest_full_backup_age_seconds,
+                ),
+                |conn| {
                     let database_schema_valid = crate::db::verify_database_schema(&conn).is_ok();
                     (
                         crate::db::count_posts_by_media_processing_state(
@@ -251,16 +256,8 @@ async fn metrics_response(state: AppState) -> Response {
                         latest_full_backup_verified,
                         latest_full_backup_age_seconds,
                     )
-                }
-                Err(_) => (
-                    0,
-                    0,
-                    false,
-                    full_backup_count,
-                    latest_full_backup_verified,
-                    latest_full_backup_age_seconds,
-                ),
-            }
+                },
+            )
         }
     })
     .await
@@ -474,13 +471,17 @@ mod tests {
         );
         let body = to_bytes(response.into_body(), usize::MAX).await?;
         let body = String::from_utf8(body.to_vec())?;
+        let schema_metric = format!(
+            "rustchan_database_schema_valid{{version=\"{}\"}} 1",
+            crate::db::baseline_schema_version()
+        );
 
         for metric in [
             "rustchan_requests_total",
             "rustchan_job_queue_pending",
             "rustchan_media_reconcile_files_scanned_total",
             "rustchan_media_reconcile_repair_conflicts_total",
-            "rustchan_database_schema_valid{version=\"1.4.0\"} 1",
+            schema_metric.as_str(),
         ] {
             assert!(
                 body.contains(metric),

@@ -2,7 +2,6 @@
     unused_crate_dependencies,
     reason = "Cargo exposes binary-only dependencies to the library target, including the intentional rustls-webpki security floor for RUSTSEC-2026-0049"
 )]
-
 //! Shared `RustChan` domain and rendering modules.
 //!
 //! The standalone CLI builds the same source modules in its binary crate while
@@ -30,7 +29,7 @@ pub mod error;
 pub mod favicon;
 #[cfg(test)]
 /// Browser-facing and administration handlers used by crate-level tests.
-pub mod handlers;
+pub use server::handlers;
 #[cfg(test)]
 /// Structured application and console logging used by crate-level tests.
 pub mod logging;
@@ -53,7 +52,7 @@ pub mod templates;
 pub mod test_fixtures;
 #[cfg(test)]
 /// Shared state and request builders for crate-local tests.
-pub(crate) mod test_support;
+pub(crate) use test_fixtures as test_support;
 /// Built-in theme metadata.
 pub mod theme;
 /// Custom theme configuration and CSS generation.

@@ -1,5 +1,3 @@
-// src/middleware/csrf.rs
-
 use crate::{
     config::CONFIG,
     utils::crypto::{sign_csrf_token, sign_scoped_csrf_token},

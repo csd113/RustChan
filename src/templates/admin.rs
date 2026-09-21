@@ -10,8 +10,7 @@ use std::fmt::Write as _;
 
 use super::{base_layout, fmt_ts, fmt_ts_short, render_pagination, urlencoding_simple};
 
-// ─── Admin login ──────────────────────────────────────────────────────────────
-
+// Admin login
 #[must_use]
 /// Renders the administrator login form and an optional authentication error.
 pub fn admin_login_page(
@@ -65,8 +64,7 @@ pub fn admin_login_page(
     )
 }
 
-// ─── Admin panel ──────────────────────────────────────────────────────────────
-
+// Admin panel
 /// Appearance-section rendering.
 mod appearance;
 /// Backup-section rendering.
@@ -774,7 +772,6 @@ fn render_board_backup_actions(board: &Board, csrf_token: &str) -> String {
     )
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "the board settings card preserves one cohesive form and its stable field hooks"
@@ -1169,8 +1166,7 @@ pub fn admin_panel_page(view: &AdminPanelViewModel<'_>) -> String {
     layout::render(view)
 }
 
-// ─── Moderation log ───────────────────────────────────────────────────────────
-
+// Moderation log
 #[must_use]
 /// Renders the paginated moderation log.
 pub fn mod_log_page(
@@ -1251,8 +1247,7 @@ pub fn mod_log_page(
     )
 }
 
-// ─── VACUUM result ────────────────────────────────────────────────────────────
-
+// VACUUM result
 #[must_use]
 /// Renders the space reclaimed by a completed `SQLite` `VACUUM`.
 pub fn admin_vacuum_result_page(
@@ -1310,7 +1305,6 @@ pub fn admin_vacuum_result_page(
     )
 }
 
-// This function/module is intentionally long; splitting it further would make the routing or template flow harder to follow.
 #[expect(
     clippy::too_many_lines,
     reason = "the health report keeps one cohesive diagnostic result document"
@@ -1705,8 +1699,7 @@ fn render_db_check_result(label: &str, result: &crate::db::DbCheckResult) -> Str
     )
 }
 
-// ─── IP history ───────────────────────────────────────────────────────────────
-
+// IP history
 #[expect(
     clippy::too_many_lines,
     reason = "the investigation page keeps its summary, results, and controls together"
@@ -1813,7 +1806,16 @@ pub fn admin_ip_history_page(
         data-report-title="Report Hashed IP Post"
         data-report-submit-label="Submit Admin Report"
         data-report-reason-required="1"
-        data-report-label="Report post No.{pid} for hashed IP {ip_hash}">report</button>"#,
+        data-report-label="Report post No.{pid} for hashed IP {ip_hash}">report</button>
+<noscript><form method="POST" action="/admin/ip/report" class="admin-ip-report-fallback">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="post_id" value="{pid}">
+  <input type="hidden" name="thread_id" value="{tid}">
+  <input type="hidden" name="board" value="{board}">
+  <input type="hidden" name="ip_hash" value="{ip_hash}">
+  <label>Report reason<input type="text" name="reason" required maxlength="512"></label>
+  <button type="submit" class="admin-toolbar-btn">report</button>
+</form></noscript>"#,
                 csrf = escape_html(csrf_token),
                 pid = post.id,
                 tid = post.thread_id,
@@ -1901,7 +1903,7 @@ pub fn admin_ip_history_page(
         r#"<div class="admin-panel">
 <h1>[ IP history ]</h1>
 <section class="admin-section">
-<h2>// posts by Hashed IP <code style="font-size:0.9rem">{hash_display}</code></h2>
+<h2>// posts by Hashed IP <code style="font-size:0.9rem;overflow-wrap:anywhere">{hash_display}</code></h2>
 <p style="color:var(--text-dim);font-size:0.85rem">
   {total} post{plural} found across all boards.
 </p>
@@ -2151,10 +2153,21 @@ mod tests {
     }
 
     fn sample_site_health() -> AdminPanelSiteHealthView<'static> {
+        static SCHEMA_STATUS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            format!("{} baseline verified", crate::db::baseline_schema_version())
+        });
+        static DIAGNOSTICS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            format!(
+                "RustChan version: {}\nDatabase schema: {}\nRecent warnings:\n  none",
+                env!("CARGO_PKG_VERSION"),
+                SCHEMA_STATUS.as_str()
+            )
+        });
+
         AdminPanelSiteHealthView {
             server_status: "ready",
-            rustchan_version: "1.4.0",
-            database_schema_status: "1.4.0 baseline verified",
+            rustchan_version: env!("CARGO_PKG_VERSION"),
+            database_schema_status: SCHEMA_STATUS.as_str(),
             database_integrity_status: "not checked",
             last_successful_backup: "none saved",
             next_scheduled_backup: "not scheduled",
@@ -2179,14 +2192,13 @@ mod tests {
             failed_jobs: 0,
             backup_jobs: "idle",
             restore_jobs: "not available",
-            diagnostics_text:
-                "RustChan version: 1.4.0\nDatabase schema: 1.4.0 baseline verified\nRecent warnings:\n  none",
+            diagnostics_text: DIAGNOSTICS.as_str(),
         }
     }
 
     fn sample_dashboard() -> AdminPanelDashboardView<'static> {
         AdminPanelDashboardView {
-            version: "1.4.0",
+            version: env!("CARGO_PKG_VERSION"),
             build: "test/test",
             setup_status: "complete",
             setup_detail: "Public setup routes are blocked.",
@@ -2570,9 +2582,12 @@ mod tests {
         assert!(html.contains("Database integrity status"));
         assert!(html.contains("open media panel"));
         assert!(html.contains("copy diagnostics"));
-        assert!(html.contains("RustChan version: 1.4.0"));
+        assert!(html.contains(&format!("RustChan version: {}", env!("CARGO_PKG_VERSION"))));
         assert!(html.contains("Database schema"));
-        assert!(html.contains("1.4.0 baseline verified"));
+        assert!(html.contains(&format!(
+            "{} baseline verified",
+            crate::db::baseline_schema_version()
+        )));
         assert!(html.contains(r#"data-admin-health-jobs-url="/admin/site-health/jobs""#));
         assert!(html.contains(r#"data-admin-health-job="running_jobs""#));
         assert!(html.contains(r#"data-admin-health-job="queued_jobs""#));
@@ -2760,7 +2775,10 @@ mod tests {
             before: DbHealthSnapshot {
                 schema: DbCheckResult {
                     ok: true,
-                    messages: vec!["1.4.0 baseline verified".into()],
+                    messages: vec![format!(
+                        "{} baseline verified",
+                        crate::db::baseline_schema_version()
+                    )],
                 },
                 integrity: DbCheckResult {
                     ok: false,
@@ -2851,6 +2869,15 @@ mod tests {
         assert!(html.contains(r#"name="auto_full_backup_storage_mode" value="directory" checked"#));
         assert!(html.contains(r#"name="auto_full_backup_storage_mode" value="split_zip""#));
         assert!(html.contains(r#"name="auto_full_backup_split_zip_part_size_gib""#));
+        assert!(html.contains(r#"name="backup_directory""#));
+        assert!(html.contains("Effective directory:"));
+        assert!(html.contains("Default directory:"));
+        assert!(html.contains("after restarting RustChan"));
+        assert!(html.contains("Existing backups are not moved"));
+        assert!(html.contains(&super::escape_html(
+            &crate::config::backups_dir().display().to_string()
+        )));
+
         assert!(html.contains("<summary>Manual backup</summary>"));
         assert!(html.contains(r#"class="backup-output-fieldset""#));
         assert!(html.contains(r#"type="radio" name="storage_mode" value="directory" checked"#));
