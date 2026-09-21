@@ -958,8 +958,7 @@ pub fn delete_board(conn: &rusqlite::Connection, id: i64) -> Result<super::Delet
 
     match result {
         Ok(safe) => {
-            conn.execute_batch("COMMIT")
-                .context("Failed to commit delete_board transaction")?;
+            super::commit_transaction(conn, "Failed to commit delete_board transaction")?;
             Ok(safe)
         }
         Err(e) => {

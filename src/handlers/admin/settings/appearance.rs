@@ -1,9 +1,10 @@
 use super::{
-    admin_panel_error_redirect_anchor, admin_panel_redirect_anchor,
-    admin_panel_redirect_anchor_open, check_admin_csrf_jar, format_favicon_upload_error,
-    read_limited_upload_bytes, read_text_field, require_admin_post_origin_and_csrf,
-    require_admin_session_sid, require_same_origin_request, AppError, AppState, CookieJar, Form,
-    HeaderMap, Multipart, Response, Result, State, MAX_FAVICON_UPLOAD_BYTES, SESSION_COOKIE,
+    admin_panel_error_redirect_anchor, admin_panel_error_redirect_anchor_open,
+    admin_panel_redirect_anchor, admin_panel_redirect_anchor_open, check_admin_csrf_jar,
+    format_favicon_upload_error, read_limited_upload_bytes, read_text_field,
+    require_admin_post_origin_and_csrf, require_admin_session_sid, require_same_origin_request,
+    AppError, AppState, CookieJar, Form, HeaderMap, Multipart, Response, Result, State,
+    MAX_FAVICON_UPLOAD_BYTES, SESSION_COOKIE,
 };
 use axum::response::IntoResponse as _;
 use serde::Deserialize;
@@ -184,9 +185,10 @@ pub(in crate::server) async fn update_board_favicon(
             "board-banners",
         )
         .into_response()),
-        Err(AppError::Internal(error)) => Ok(admin_panel_error_redirect_anchor(
+        Err(AppError::Internal(error)) => Ok(admin_panel_error_redirect_anchor_open(
             &format_favicon_upload_error(&error),
-            "site-settings",
+            "board-banners",
+            "board-banners",
         )
         .into_response()),
         Err(error) => Err(error),

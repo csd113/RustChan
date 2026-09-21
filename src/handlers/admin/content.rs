@@ -13,11 +13,16 @@ use axum::{
     response::{IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
+use rusqlite::OptionalExtension as _;
 use serde::Deserialize;
 #[cfg(test)]
 use std::path::{Path, PathBuf};
 
-fn sanitize_board_short_value(board_short: &str) -> String {
+/// Reduce a board short name to its safe character set for display or URL use.
+///
+/// Unlike the restore-side `sanitize_board_short_value`, this is infallible and
+/// may return an empty string; callers must treat emptiness as missing input.
+fn board_short_fragment(board_short: &str) -> String {
     board_short
         .chars()
         .filter(char::is_ascii_alphanumeric)
@@ -45,7 +50,7 @@ fn resolve_board_short_name(
     boards
         .and_then(|boards| boards.iter().find(|board| board.id == board_id))
         .map_or_else(
-            || sanitize_board_short_value(fallback_board),
+            || board_short_fragment(fallback_board),
             |board| board.short_name.clone(),
         )
 }
@@ -209,13 +214,15 @@ pub(in crate::server) async fn delete_board(
 
             // Fetch the board's short_name before deletion so we can remove
             // its upload directory entirely after cleaning tracked files.
+            // A lookup error must abort the destructive delete rather than
+            // skip the health preflight below.
             let short_name: Option<String> = conn
                 .query_row(
                     "SELECT short_name FROM boards WHERE id = ?1",
                     rusqlite::params![form.board_id],
                     |r| r.get(0),
                 )
-                .ok();
+                .optional()?;
             if let Some(short) = &short_name {
                 let health = db::check_db_health(&conn);
                 if !health.before.ok() {
@@ -401,7 +408,7 @@ pub(in crate::server) async fn thread_action(
             }
             // Fallback: sanitize the user-supplied board name to prevent open-redirect.
             // Only allow alphanumeric characters (matching the board short_name format).
-            Ok(sanitize_board_short_value(&form.board))
+            Ok(board_short_fragment(&form.board))
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;

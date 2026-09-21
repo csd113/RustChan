@@ -1193,8 +1193,7 @@ fn commit_upload_finalize_metadata(
     })();
     match result {
         Ok(post_ids) => {
-            conn.execute_batch("COMMIT")
-                .context("Commit upload finalization metadata transaction")?;
+            crate::db::commit_transaction(conn, "Commit upload finalization metadata transaction")?;
             Ok(post_ids)
         }
         Err(error) => {

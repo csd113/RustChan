@@ -22,7 +22,7 @@ availability. Examples include:
   behavior;
 - disclosure or replacement of credentials, database contents, private media,
   backup material, or Tor/onion-service identity keys;
-- request parsing, reverse-proxy, TLS, Tor, or ChanNet defects with a concrete
+- request parsing, reverse-proxy, TLS, or Tor defects with a concrete
   security impact;
 - remote code execution, injection, traversal, cross-site scripting, or
   meaningful denial of service; and
@@ -65,12 +65,12 @@ Once a private channel is available, include:
 
 - the affected RustChan version or commit;
 - operating system, architecture, installation method, enabled Cargo features,
-  and relevant reverse-proxy, TLS, Tor, database, media-toolchain, or ChanNet
+  and relevant reverse-proxy, TLS, Tor, database, or media-toolchain
   configuration;
 - minimal, deterministic reproduction steps;
 - expected behavior, actual behavior, and security impact;
 - whether public posting, admin access, moderation, media, backups/restores,
-  storage, Tor identity, or ChanNet is involved; and
+  storage, or Tor identity is involved; and
 - sanitized logs, requests, stack traces, or a minimal proof of concept.
 
 Before transmission, remove or replace all credentials, tokens, cookies,

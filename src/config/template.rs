@@ -197,23 +197,6 @@ blocking_threads = 0
 # Increase this on high-traffic deployments; each connection uses extra memory.
 db_pool_size = 8
 
-
-# ── Federation / ChanNet gateway ─────────────────────────────────────────────
-# Uncomment these only if you are using the ChanNet / RustWave integration.
-
-# Base URL of the connected RustWave instance.
-# Must begin with http:// or https://.
-# rustwave_url = "http://localhost:7071"
-
-# Address for the secondary ChanNet TCP listener.
-# Keep this on loopback unless RustWave runs on another machine.
-# chan_net_bind = "127.0.0.1:7070"
-
-# Pre-shared API key for /chan/refresh and /chan/poll.
-# Must be at least 32 characters. Leave unset to disable those endpoints.
-# chan_net_api_key = "replace-with-a-long-random-secret"
-
-
 # TLS / HTTPS
 # Built-in HTTPS listener. On first run a self-signed localhost certificate is
 # generated automatically in rustchan-data/runtime/tls/dev/.

@@ -2,12 +2,12 @@ use super::{
     activity_html_cache_control, admin_scoped_csrf_token, board_access_cookie_from_jar,
     board_access_denied_response, board_access_preflight, board_activity_markers_from_jar,
     can_view_board, current_theme_from_jar, db, ensure_csrf_for_request, has_nsfw_consent, header,
-    latest_visible_thread_marker_tuple, optional_connect_info_peer, prune_board_activity_markers,
-    remember_board_activity, remember_visible_thread_activity, render, sha256_hex, templates,
+    latest_visible_thread_marker_tuple, prune_board_activity_markers, remember_board_activity,
+    remember_visible_thread_activity, render, sha256_hex, templates,
     thread_activity_markers_from_jar, user_preferences_from_jar, AppError, AppState,
-    BoardAccessDecision, BoardAccessRequirement, CookieJar, HashMap, HashSet, HeaderMap,
-    HeaderValue, Html, OptionalConnectInfoPeer, Path, Query, Redirect, Response, Result, State,
-    StatusCode, ADMIN_SESSION_COOKIE, CONFIG, PREVIEW_REPLIES, THREADS_PER_PAGE,
+    BoardAccessContext, BoardAccessDecision, BoardAccessRequirement, CookieJar, HashMap, HashSet,
+    HeaderMap, HeaderValue, Html, Path, Query, Redirect, Response, Result, SecureCookieContext,
+    State, StatusCode, ADMIN_SESSION_COOKIE, CONFIG, PREVIEW_REPLIES, THREADS_PER_PAGE,
 };
 use axum::response::IntoResponse as _;
 
@@ -41,11 +41,11 @@ pub(in crate::server) async fn index(
     Query(params): Query<HashMap<String, String>>,
     jar: CookieJar,
     req_headers: HeaderMap,
-    peer: OptionalConnectInfoPeer,
+    peer: SecureCookieContext,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
     let user_preferences = user_preferences_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
     let mut jar = jar;
     let nsfw_consent = has_nsfw_consent(&jar);
     let board_activity_markers = board_activity_markers_from_jar(&jar);
@@ -229,11 +229,11 @@ pub(in crate::server) async fn board_index(
     Query(params): Query<HashMap<String, String>>,
     jar: CookieJar,
     req_headers: HeaderMap,
-    peer: OptionalConnectInfoPeer,
+    peer: SecureCookieContext,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
     let user_preferences = user_preferences_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
@@ -272,20 +272,24 @@ pub(in crate::server) async fn board_index(
     };
 
     let thread_activity_markers = thread_activity_markers_from_jar(&jar);
+    let BoardAccessContext {
+        board,
+        is_admin,
+        can_post,
+        can_view: _,
+    } = access_context;
     let page_data = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let board_short = board_short.clone();
-        let admin_session_id = admin_session_id.clone();
         let current_path = return_to.clone();
         move || -> Result<BoardIndexLoadResult> {
             let conn = pool.get()?;
             let page_data = render::load_board_page_data(
                 &conn,
-                &board_short,
+                board,
                 page,
                 THREADS_PER_PAGE,
                 PREVIEW_REPLIES,
-                admin_session_id.as_deref(),
+                is_admin,
             )?;
             let banner_selection = crate::banner::resolve_board_banner(
                 &conn,
@@ -315,7 +319,6 @@ pub(in crate::server) async fn board_index(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    let can_post = access_context.can_post;
     let (
         page_sig,
         page_data,
@@ -426,19 +429,24 @@ pub(in crate::server) async fn board_index(
         "board-banner-slot",
         "board-banner-image",
     );
-    let html = render::render_board_page(
-        &page_data,
-        &csrf,
-        admin_csrf.as_deref(),
-        None,
-        None,
-        &thread_badges,
-        thread_badges_enabled,
-        &banner_html,
-        current_theme.as_deref(),
-        can_post,
-        user_preferences,
-    );
+    // HTML assembly is CPU work on already-owned data; keep it off the async workers.
+    let html = tokio::task::spawn_blocking(move || {
+        render::render_board_page(
+            &page_data,
+            &csrf,
+            admin_csrf.as_deref(),
+            None,
+            None,
+            &thread_badges,
+            thread_badges_enabled,
+            &banner_html,
+            current_theme.as_deref(),
+            can_post,
+            user_preferences,
+        )
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
     let mut resp = Html(html).into_response();
     if let Ok(v) = HeaderValue::from_str(&etag) {
         resp.headers_mut().insert("etag", v);

@@ -2,6 +2,44 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## RustChan v1.5
+
+### Removed
+
+- Removed the obsolete ChanNet integration and all associated runtime, configuration, UI, and documentation paths. Existing databases keep their historical `chan_net_*` tables as inert schema for upgrade and backup-restore compatibility; no current code reads or writes them.
+
+### Reliability and correctness
+
+- Fixed transaction handling so a failed `COMMIT` rolls back and returns the pooled SQLite connection cleanly instead of leaving an open transaction or stale write lock behind.
+- Locked and archived threads now reject replies through a typed error instead of matching English error text, so those responses keep their exact status.
+- Malformed background media-job payloads are logged and left pending instead of being resolved as stale duplicates.
+- Spam-check jobs that cannot be enqueued are logged instead of silently dropped.
+- Fixed a duplicate-claim race so two workers cannot transcode or analyze the same source file at the same time.
+- Board deletion now aborts when the board lookup fails instead of skipping the pre-delete database health check.
+- Maintenance backups record PRAGMA inspection failures as diagnostic evidence instead of writing empty output that looked clean.
+- Trailing-slash redirect normalization no longer emits an empty `Location` for an all-slash path (which browsers resolved into a redirect loop).
+- Password minimum length is now counted in characters rather than UTF-8 bytes.
+
+### Performance and resource use
+
+- Board and thread pages reuse the board and admin session resolved during access checks instead of repeating those database and session lookups.
+- Page HTML assembly runs on the blocking pool so long thread and board pages do not occupy async workers.
+- Log-tail handling is consolidated into one implementation that reads only the requested tail of large logs, removing a redundant full-file read from the admin live log.
+- `/readyz` performs a lightweight readiness check instead of deep database integrity scans on every probe; startup, the detailed readiness response, and the admin health view still verify the schema.
+- Active-media pruning validates the upload root once per pass instead of once per candidate file.
+- Thread preview posts are moved out of their lookup map rather than cloned, and page `ETag` signatures no longer allocate a temporary string for every integer field.
+
+### Cleanup and maintainability
+
+- Removed duplicate log-tail implementations, duplicate checkbox parsing, an obsolete peer-helper indirection, and an unreachable site-health branch.
+- Removed the unreachable theme-picker panel UI while preserving the supported programmatic theme-switch hook.
+- Consolidated board settings form identifiers and clarified the two board-short sanitizers.
+- Board favicon upload failures now return the administrator to the board appearance section instead of global site settings.
+
+### Testing and validation
+
+- Added regression coverage for failed-commit rollback, lightweight readiness behavior, trailing-slash normalization, large-file log-tail handling, character-count password validation, and typed locked/archived-thread rejection; the existing thread-state tests were strengthened to assert that rejection.
+
 ## RustChan 1.4.1
 
 ### Improved

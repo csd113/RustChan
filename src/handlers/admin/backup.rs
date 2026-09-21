@@ -90,13 +90,7 @@ where
     D: serde::Deserializer<'de>,
 {
     let value = Option::<String>::deserialize(deserializer)?;
-    Ok(form_checkbox_value_is_on(value.as_deref()))
-}
-
-fn form_checkbox_value_is_on(value: Option<&str>) -> bool {
-    value == Some("1")
-        || value.is_some_and(|item| item.eq_ignore_ascii_case("on"))
-        || value.is_some_and(|item| item.eq_ignore_ascii_case("true"))
+    Ok(super::settings::checkbox_is_on(value.as_deref()))
 }
 
 use archive::{

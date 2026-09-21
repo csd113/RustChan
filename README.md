@@ -52,7 +52,7 @@ Current version: `1.4.1`. Minimum supported Rust version: `1.91`.
 - Streaming upload validation, image thumbnails, video thumbnails, audio waveforms, and optional MP4-to-WebM transcoding
 - Browser-based moderation, reports, appeals, bans, themes, banners, favicons, backups, restores, and maintenance
 - Full-site and per-board backups, scheduled backups, integrity checks, repair helpers, and media reconciliation
-- Built-in Arti onion service, optional native TLS, and an optional ChanNet listener
+- Built-in Arti onion service and optional native TLS
 - Hashed client IPs, Argon2id admin passwords, CSRF protection, secure sessions, rate limiting, and security headers
 - Responsive pages with JavaScript enhancements and supported no-JavaScript fallbacks
 
@@ -134,7 +134,7 @@ Common runtime options:
 
 `CHAN_*` environment variables override matching configuration values. Keep `cookie_secret` stable after launch. Treat the configuration, database, backups, TLS keys, and Tor identity as private data.
 
-### Tor and ChanNet
+### Tor
 
 RustChan can run an onion service through Arti, so it does not need a separate `tor` daemon. Its persistent onion identity is stored under `rustchan-data/runtime/tor/state/`; include that directory in backups if you want to keep the same onion address.
 
@@ -144,8 +144,6 @@ For a Tor-only site:
 enable_tor_support = true
 tor_only = true
 ```
-
-ChanNet is a separate, optional listener for snapshot transfer, content polling, remote refresh, and RustWave integration. It is disabled by default and listens on `127.0.0.1:7070` unless reconfigured. If you are not using it, leave it off. If you are, keep it behind a trusted network boundary.
 
 ### Media tools
 

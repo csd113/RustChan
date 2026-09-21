@@ -2,6 +2,37 @@ use crate::models::Thread;
 use anyhow::{Context as _, Result};
 use rusqlite::{params, OptionalExtension as _};
 
+/// Authoritative thread-state rejection for a reply or federated import.
+///
+/// Callers match on this type instead of parsing error text so that a locked or
+/// archived thread keeps mapping to its exact HTTP status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadClosed {
+    /// The thread is locked against new replies.
+    Locked,
+    /// The thread has been archived.
+    Archived,
+}
+
+impl ThreadClosed {
+    /// Return the operator-facing message for this rejection.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::Locked => "This thread is locked.",
+            Self::Archived => "This thread is archived.",
+        }
+    }
+}
+
+impl std::fmt::Display for ThreadClosed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl std::error::Error for ThreadClosed {}
+
 #[derive(Debug)]
 /// Optional poll values inserted alongside a new thread.
 pub struct PollInsert<'a> {
@@ -320,8 +351,10 @@ pub(crate) fn create_thread_submission(
 
     match result {
         Ok(ids) => {
-            conn.execute_batch("COMMIT")
-                .context("Failed to commit create_thread_with_optional_poll transaction")?;
+            super::commit_transaction(
+                conn,
+                "Failed to commit create_thread_with_optional_poll transaction",
+            )?;
             Ok(ids)
         }
         Err(e) => {
@@ -397,10 +430,10 @@ pub(crate) fn create_reply_submission(
             );
         };
         if locked {
-            anyhow::bail!("This thread is locked.");
+            return Err(anyhow::Error::new(ThreadClosed::Locked));
         }
         if archived {
-            anyhow::bail!("This thread is archived.");
+            return Err(anyhow::Error::new(ThreadClosed::Archived));
         }
 
         let post_id = super::posts::create_post_inner(conn, post)?;
@@ -445,8 +478,10 @@ pub(crate) fn create_reply_submission(
 
     match result {
         Ok(outcome) => {
-            conn.execute_batch("COMMIT")
-                .context("Failed to commit create_reply_with_thread_update transaction")?;
+            super::commit_transaction(
+                conn,
+                "Failed to commit create_reply_with_thread_update transaction",
+            )?;
             Ok(outcome)
         }
         Err(error) => {
@@ -596,8 +631,7 @@ pub fn delete_thread(
 
     match result {
         Ok(safe) => {
-            conn.execute_batch("COMMIT")
-                .context("Failed to commit delete_thread transaction")?;
+            super::commit_transaction(conn, "Failed to commit delete_thread transaction")?;
             Ok(safe)
         }
         Err(e) => {
@@ -672,8 +706,7 @@ pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64)
             Ok(0)
         }
         Ok(count) => {
-            conn.execute_batch("COMMIT")
-                .context("Failed to commit archive_old_threads transaction")?;
+            super::commit_transaction(conn, "Failed to commit archive_old_threads transaction")?;
             Ok(count)
         }
         Err(e) => {
@@ -757,8 +790,7 @@ pub fn prune_old_threads(
 
     match result {
         Ok(result) => {
-            conn.execute_batch("COMMIT")
-                .context("Failed to commit prune_old_threads transaction")?;
+            super::commit_transaction(conn, "Failed to commit prune_old_threads transaction")?;
             Ok(result)
         }
         Err(e) => {
@@ -833,8 +865,10 @@ pub fn prune_old_archived_threads(
 
     match result {
         Ok(result) => {
-            conn.execute_batch("COMMIT")
-                .context("Failed to commit prune_old_archived_threads transaction")?;
+            super::commit_transaction(
+                conn,
+                "Failed to commit prune_old_archived_threads transaction",
+            )?;
             Ok(result)
         }
         Err(e) => {
@@ -886,7 +920,7 @@ mod tests {
     use super::{
         count_threads_for_board, create_reply_with_thread_update, create_thread_submission,
         delete_thread, prune_old_archived_threads, prune_old_threads, validate_deduplicated_paths,
-        PostFilesystemCommit,
+        PostFilesystemCommit, ThreadClosed,
     };
     use crate::db::{create_board, create_thread_with_optional_poll, get_board_by_short, NewPost};
     use crate::error::AppError;
@@ -1245,6 +1279,11 @@ mod tests {
             .err()
             .context("locked thread should reject reply")?;
 
+        assert_eq!(
+            error.downcast_ref::<ThreadClosed>(),
+            Some(&ThreadClosed::Locked),
+            "the rejection must stay downcastable for the reply status mapping"
+        );
         assert!(
             error.to_string().contains("This thread is locked."),
             "the rejection should identify the locked state"
@@ -1287,6 +1326,11 @@ mod tests {
             .err()
             .context("archived thread should reject reply")?;
 
+        assert_eq!(
+            error.downcast_ref::<ThreadClosed>(),
+            Some(&ThreadClosed::Archived),
+            "the rejection must stay downcastable for the reply status mapping"
+        );
         assert!(
             error.to_string().contains("This thread is archived."),
             "the rejection should identify the archived state"

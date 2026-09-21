@@ -1,5 +1,5 @@
 use super::{
-    board_access_cookie_from_jar, board_access_preflight, current_theme_from_jar,
+    board_access_cookie_from_jar, board_access_preflight, current_theme_from_jar, db,
     handled_post_error_status, identity_key, is_xml_http_request, make_scoped_csrf_form_token,
     parse_post_multipart, posting, remember_owned_post_until_with_secure, render,
     should_set_public_secure_cookie, templates, unlock_redirect_url, user_preferences_from_jar,
@@ -177,13 +177,19 @@ pub(in crate::server) async fn create_thread(
             let current_theme = current_theme.clone();
             let html = tokio::task::spawn_blocking(move || -> Result<String> {
                 let conn = pool.get()?;
+                // Error re-render only: resolve the board for this request.
+                let board =
+                    db::get_board_by_short(&conn, &board_short_render)?.ok_or_else(|| {
+                        AppError::NotFound(format!("Board /{board_short_render}/ not found"))
+                    })?;
+                let is_admin = posting::is_admin_session(&conn, admin_session_err.as_deref());
                 let page_data = render::load_board_page_data(
                     &conn,
-                    &board_short_render,
+                    board,
                     1,
                     THREADS_PER_PAGE,
                     PREVIEW_REPLIES,
-                    admin_session_err.as_deref(),
+                    is_admin,
                 )?;
                 let banner_selection = crate::banner::resolve_board_banner(
                     &conn,

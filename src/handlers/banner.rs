@@ -3,9 +3,8 @@ use crate::{
     error::{AppError, Result},
     handlers::board::{
         board_access_cookie_from_jar, current_theme_from_jar, ensure_csrf_for_request,
-        optional_connect_info_peer, OptionalConnectInfoPeer,
     },
-    middleware::AppState,
+    middleware::{AppState, SecureCookieContext},
     templates,
 };
 use axum::{
@@ -140,13 +139,13 @@ pub(in crate::server) async fn external_banner_warning_page(
     Query(query): Query<ExternalBannerQuery>,
     jar: CookieJar,
     req_headers: HeaderMap,
-    peer: OptionalConnectInfoPeer,
+    peer: SecureCookieContext,
 ) -> Result<Response> {
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     let current_theme = current_theme_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
     let return_to = banner::safe_return_to(query.return_to.as_deref().unwrap_or("/"));
     let asset = tokio::task::spawn_blocking({
         let pool = state.db.clone();

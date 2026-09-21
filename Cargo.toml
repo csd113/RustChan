@@ -87,14 +87,8 @@ ipnet     = "2.12.2"
 # Backup preflight scans use `file_names()` without decompressing entries.
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
-# HTTP client
-# reqwest handles federation push and pull.
-# default-features = false  →  prevents the default "native-tls" backend from
-#                               being compiled in.
-# rustls-no-provider keeps the build on the pure-Rust TLS stack and avoids
-# pulling in native-tls/OpenSSL.
-# Verify: cargo tree --edges features | grep -iE "openssl|native.tls"
-reqwest = { version = "0.13.4", default-features = false, features = ["multipart", "json", "rustls-no-provider"] }
+# URL validation for admin-supplied external banner links.
+url = "2.5.8"
 
 # Keep a direct lower bound on the RUSTSEC-2026-0049 CRL
 # distribution-point fix. The crate is consumed transitively through rustls;
@@ -166,6 +160,13 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 [target.'cfg(unix)'.dependencies]
 # Safe in-process filesystem-capacity queries for upload disk-space preflights.
 rustix = { version = "1.1.4", features = ["fs"] }
+
+[dev-dependencies]
+# The CLI runtime integration test needs a TLS-capable HTTP client to drive the
+# built binary over HTTPS. Production targets no longer link an HTTP client.
+# default-features = false prevents the native-tls backend from being compiled
+# in; rustls-no-provider keeps the test build on the pure-Rust TLS stack.
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider"] }
 
 [features]
 default         = ["tls-self-signed"]
