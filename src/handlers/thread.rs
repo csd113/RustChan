@@ -1189,11 +1189,18 @@ pub(in crate::server) async fn vote_handler(
     }
 
     let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
+    let ban_csrf_token = jar
+        .get("csrf_token")
+        .map(|cookie| cookie.value().to_owned())
+        .unwrap_or_default();
     let redirect_url = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
             let ip_hash = hash_ip(&identity_key, &cookie_secret);
+            // Voting is persisted participation in the thread, so the same ban
+            // gate as posting applies; CSRF was validated above.
+            crate::handlers::board::ensure_actor_not_banned(&conn, &ip_hash, ban_csrf_token)?;
             let (poll_id, thread_id, board_short) = db::get_poll_context(&conn, option_id)?
                 .ok_or_else(|| AppError::NotFound("Poll option not found.".into()))?;
 

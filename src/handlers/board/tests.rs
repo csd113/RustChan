@@ -3002,6 +3002,250 @@ async fn duplicate_report_redirects_back_without_500() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Return the actor identity hash used by loopback handler tests.
+fn loopback_ip_hash() -> String {
+    crate::utils::crypto::hash_ip("127.0.0.1", &crate::config::CONFIG.cookie_secret)
+}
+
+/// Seed a public board with one thread and one reportable post.
+fn seed_reportable_post(state: &crate::middleware::AppState) -> anyhow::Result<(i64, i64)> {
+    let conn = state.db.get().context("db connection")?;
+    let board_id =
+        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
+    let post = crate::db::NewPost {
+        thread_id: 0,
+        board_id,
+        name: "anon".to_owned(),
+        tripcode: None,
+        subject: Some("subject".to_owned()),
+        body: "report me".to_owned(),
+        body_html: "report me".to_owned(),
+        ip_hash: None,
+        file_path: None,
+        file_name: None,
+        file_size: None,
+        thumb_path: None,
+        mime_type: None,
+        media_type: None,
+        audio_file_path: None,
+        audio_file_name: None,
+        audio_file_size: None,
+        audio_mime_type: None,
+        deletion_token: "token".to_owned(),
+        is_op: true,
+    };
+    let (thread_id, post_id, _) =
+        crate::db::create_thread_with_optional_poll(&conn, board_id, None, &post, "", None, None)
+            .context("create thread")?;
+    Ok((thread_id, post_id))
+}
+
+/// Count the persisted rows matching a `WHERE` clause.
+fn count_rows(state: &crate::middleware::AppState, sql: &str) -> anyhow::Result<i64> {
+    let conn = state.db.get().context("db connection")?;
+    Ok(conn.query_row(sql, [], |row| row.get(0))?)
+}
+
+#[tokio::test]
+async fn banned_actor_cannot_file_reports_and_unban_restores_reporting() -> anyhow::Result<()> {
+    let state = crate::test_support::app_state();
+    let (thread_id, post_id) = seed_reportable_post(&state)?;
+    let ip_hash = loopback_ip_hash();
+    {
+        let conn = state.db.get().context("db connection")?;
+        crate::db::add_ban(&conn, &ip_hash, "report ban reason", None).context("add ban")?;
+    }
+
+    let router = Router::new()
+        .route("/report", post(super::file_report))
+        .with_state(state.clone());
+    let report_request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/report")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::COOKIE, "csrf_token=csrf123")
+            .extension(crate::test_support::connect_info())
+            .body(Body::from(format!(
+                "post_id={post_id}&thread_id={thread_id}&board=test&reason=spam&_csrf=csrf123"
+            )))
+            .context("request")
+    };
+
+    let banned = router
+        .clone()
+        .oneshot(report_request()?)
+        .await
+        .context("banned report response")?;
+    ensure_eq!(banned.status(), StatusCode::FORBIDDEN);
+    let banned_body = String::from_utf8(
+        to_bytes(banned.into_body(), usize::MAX)
+            .await
+            .context("banned report body")?
+            .to_vec(),
+    )
+    .context("utf8 banned report body")?;
+    anyhow::ensure!(
+        banned_body.contains("you are banned"),
+        "banned report response should render the ban notice"
+    );
+    anyhow::ensure!(
+        banned_body.contains("report ban reason"),
+        "banned report response should carry the ban reason"
+    );
+    ensure_eq!(
+        count_rows(&state, "SELECT COUNT(*) FROM reports")?,
+        0,
+        "a banned identity must not create a report row"
+    );
+
+    {
+        let conn = state.db.get().context("db connection")?;
+        conn.execute(
+            "DELETE FROM bans WHERE ip_hash = ?1",
+            rusqlite::params![ip_hash],
+        )
+        .context("remove ban")?;
+    }
+
+    let after_unban = router
+        .oneshot(report_request()?)
+        .await
+        .context("unbanned report response")?;
+    ensure_eq!(after_unban.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(
+        count_rows(&state, "SELECT COUNT(*) FROM reports")?,
+        1,
+        "ordinary reporting still works after the ban is lifted"
+    );
+    Ok(())
+}
+
+/// Seed a public board with one thread that carries a two-option poll.
+///
+/// Returns the first poll option id.
+fn seed_votable_poll(state: &crate::middleware::AppState) -> anyhow::Result<i64> {
+    let conn = state.db.get().context("db connection")?;
+    let board_id =
+        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
+    let post = crate::db::NewPost {
+        thread_id: 0,
+        board_id,
+        name: "anon".to_owned(),
+        tripcode: None,
+        subject: Some("poll thread".to_owned()),
+        body: "vote here".to_owned(),
+        body_html: "vote here".to_owned(),
+        ip_hash: None,
+        file_path: None,
+        file_name: None,
+        file_size: None,
+        thumb_path: None,
+        mime_type: None,
+        media_type: None,
+        audio_file_path: None,
+        audio_file_name: None,
+        audio_file_size: None,
+        audio_mime_type: None,
+        deletion_token: "token".to_owned(),
+        is_op: true,
+    };
+    let poll = crate::db::threads::PollInsert {
+        question: "pick one",
+        options: &["yes".to_owned(), "no".to_owned()],
+        expires_at: chrono::Utc::now().timestamp() + 3600,
+    };
+    let (_, _, poll_id) = crate::db::create_thread_with_optional_poll(
+        &conn,
+        board_id,
+        Some("poll thread"),
+        &post,
+        "",
+        Some(&poll),
+        None,
+    )
+    .context("create poll thread")?;
+    conn.query_row(
+        "SELECT id FROM poll_options WHERE poll_id = ?1 ORDER BY id LIMIT 1",
+        rusqlite::params![poll_id.context("poll id")?],
+        |row| row.get(0),
+    )
+    .context("poll option id")
+}
+
+#[tokio::test]
+async fn banned_actor_cannot_vote_and_unban_restores_voting() -> anyhow::Result<()> {
+    let state = crate::test_support::app_state();
+    let option_id = seed_votable_poll(&state)?;
+    let ip_hash = loopback_ip_hash();
+    {
+        let conn = state.db.get().context("db connection")?;
+        crate::db::add_ban(&conn, &ip_hash, "vote ban reason", None).context("add ban")?;
+    }
+
+    let router = Router::new()
+        .route("/vote", post(crate::handlers::thread::vote_handler))
+        .with_state(state.clone());
+    let vote_request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/vote")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::COOKIE, "csrf_token=csrf123")
+            .extension(crate::test_support::connect_info())
+            .body(Body::from(format!("option_id={option_id}&_csrf=csrf123")))
+            .context("request")
+    };
+
+    let banned = router
+        .clone()
+        .oneshot(vote_request()?)
+        .await
+        .context("banned vote response")?;
+    ensure_eq!(banned.status(), StatusCode::FORBIDDEN);
+    let banned_body = String::from_utf8(
+        to_bytes(banned.into_body(), usize::MAX)
+            .await
+            .context("banned vote body")?
+            .to_vec(),
+    )
+    .context("utf8 banned vote body")?;
+    anyhow::ensure!(
+        banned_body.contains("you are banned"),
+        "banned vote response should render the ban notice"
+    );
+    anyhow::ensure!(
+        banned_body.contains("vote ban reason"),
+        "banned vote response should carry the ban reason"
+    );
+    ensure_eq!(
+        count_rows(&state, "SELECT COUNT(*) FROM poll_votes")?,
+        0,
+        "a banned identity must not record a vote"
+    );
+
+    {
+        let conn = state.db.get().context("db connection")?;
+        conn.execute(
+            "DELETE FROM bans WHERE ip_hash = ?1",
+            rusqlite::params![ip_hash],
+        )
+        .context("remove ban")?;
+    }
+
+    let after_unban = router
+        .oneshot(vote_request()?)
+        .await
+        .context("unbanned vote response")?;
+    ensure_eq!(after_unban.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(
+        count_rows(&state, "SELECT COUNT(*) FROM poll_votes")?,
+        1,
+        "ordinary voting still works after the ban is lifted"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn create_thread_rejects_uploads_on_upload_disabled_board() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();

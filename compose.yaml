@@ -1,0 +1,16 @@
+services:
+  rustchan:
+    image: ${RUSTCHAN_IMAGE:-ghcr.io/csd113/rustchan:latest}
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      CHAN_HOST: 0.0.0.0
+      CHAN_PORT: "8080"
+      CHAN_TOR_SUPPORT: "false"
+    volumes:
+      - rustchan-data:/data
+    stop_grace_period: 30s
+
+volumes:
+  rustchan-data:

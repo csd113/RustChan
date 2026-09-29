@@ -46,6 +46,10 @@ pub(in crate::server) async fn file_report(
     let access_cookie = board_access_cookie_from_jar(&jar, &board_raw);
 
     let board_raw_closure = board_raw.clone();
+    let csrf_cookie = jar
+        .get("csrf_token")
+        .map(|cookie| cookie.value().to_owned())
+        .unwrap_or_default();
     let db_thread_id = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<i64> {
@@ -61,6 +65,9 @@ pub(in crate::server) async fn file_report(
                     "This board requires a password.".into(),
                 ));
             }
+            // Banned identities must not file reports. CSRF has already been
+            // validated above, so the ban notice can render its appeal form.
+            super::ensure_actor_not_banned(&conn, &ip_hash, csrf_cookie)?;
             let board = access_context.board;
             // Verify post exists and belongs to this board to prevent spoofed reports.
             let post = db::get_post(&conn, post_id)?

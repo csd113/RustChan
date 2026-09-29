@@ -396,6 +396,49 @@ fn can_post_to_board(board: &Board, is_admin: bool, access_cookie: Option<&str>)
         )
 }
 
+/// Normalize a stored ban reason for display.
+fn normalized_ban_reason(reason: String) -> String {
+    if reason.is_empty() {
+        "No reason given".to_owned()
+    } else {
+        reason
+    }
+}
+
+/// Return the current ban reason for an actor identity, if the identity is
+/// banned.
+///
+/// This is the single source of truth for the ban policy shared by the public
+/// participation routes. A banned identity is refused with
+/// [`AppError::BannedUser`], which renders the standalone ban notice (and its
+/// appeal form) instead of performing the action. Reading remains allowed, and
+/// the appeal route stays available so a banned identity can ask for review.
+pub(super) fn actor_ban_reason(
+    conn: &rusqlite::Connection,
+    ip_hash: &str,
+) -> Result<Option<String>> {
+    Ok(db::is_banned(conn, ip_hash)?.map(normalized_ban_reason))
+}
+
+/// Refuse a banned actor's participation request with the ban notice.
+///
+/// `ban_csrf_token` is the request's CSRF token, embedded so the rendered
+/// appeal form can submit. Callers must have validated CSRF before calling
+/// this, otherwise an attacker could use the ban page as an oracle.
+pub(super) fn ensure_actor_not_banned(
+    conn: &rusqlite::Connection,
+    ip_hash: &str,
+    ban_csrf_token: String,
+) -> Result<()> {
+    if let Some(reason) = actor_ban_reason(conn, ip_hash)? {
+        return Err(AppError::BannedUser {
+            reason,
+            csrf_token: ban_csrf_token,
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn load_board_access_context(
     conn: &rusqlite::Connection,
     board_short: &str,
