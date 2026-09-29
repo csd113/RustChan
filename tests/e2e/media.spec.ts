@@ -73,12 +73,19 @@ test.describe('media upload handling', () => {
       await expectSafePage(page);
     }
 
+    expect((await fsp.stat(files.oversized)).size).toBeGreaterThan(1024 * 1024);
     await page.goto(`${app.baseURL}/${board}`);
     await page.locator('.post-toggle-btn[data-action="toggle-post-form"]').click();
     await page.locator(`form[action="/${board}"] textarea[name="body"]`).fill('oversized');
     await page.locator(`form[action="/${board}"] input[type="file"]`).setInputFiles(files.oversized);
+    expectHttpError({
+      method: 'POST',
+      path: `/${board}`,
+      status: 413,
+      reason: 'the uncompressed PNG exceeds the board upload size limit',
+    });
     await page.locator(`form[action="/${board}"] button[type="submit"]`).click();
-    await expect(page.locator('.post-error-banner, body').first()).toContainText(/too large|maximum/i);
+    await expect(page.locator('.post-error-banner:not([hidden])').first()).toContainText(/too large|maximum/i);
     await expectSafePage(page);
 
     const traversal = await page.request.get(`${app.baseURL}/boards/${board}/../../settings.toml`);

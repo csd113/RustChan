@@ -269,7 +269,9 @@ export class RustChanServer {
   runCli(args: string[]): void {
     const result = spawnSync(this.binaryPath, args, {
       cwd: this.binDir,
-      env: this.env,
+      // CLI commands only need one connection; avoid eight concurrent WAL
+      // initializers competing within the one-second pool startup bound.
+      env: { ...this.env, CHAN_DB_POOL_SIZE: '1' },
       encoding: 'utf8',
       killSignal: 'SIGKILL',
       timeout: 30_000,
@@ -477,7 +479,8 @@ export class RustChanServer {
       '%PDF-1.1\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] >>\nendobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \ntrailer\n<< /Root 1 0 R /Size 4 >>\nstartxref\n186\n%%EOF\n',
     ));
     await fsp.writeFile(path.join(this.fixtureDir, 'invalid.txt'), 'plain text is not an accepted media file');
-    await fsp.writeFile(path.join(this.fixtureDir, 'oversized.bin'), pngRgba(900, 900, (index) => (index * 37 + 19) % 256));
+    // Store PNG data without compression so its wire size exceeds 1 MiB.
+    await fsp.writeFile(path.join(this.fixtureDir, 'oversized.bin'), pngRgba(900, 900, (index) => (index * 37 + 19) % 256, 0));
     await fsp.writeFile(this.fixtures().oddNamePng, tinyPng);
   }
 
@@ -527,14 +530,19 @@ export class RustChanServer {
 }
 
 export const test = base.extend<{ app: RustChanServer; serverLogOnFailure: void }>({
-  app: [async ({}, use, workerInfo) => {
+  app: [async ({ context }, use, workerInfo) => {
     const app = await RustChanServer.create(workerInfo);
     try {
       await app.initializeDefaultData();
       await app.start();
       await use(app);
     } finally {
-      await app.dispose();
+      // Cancel page reloads and background polling while the server is alive.
+      try {
+        await context.close();
+      } finally {
+        await app.dispose();
+      }
     }
   }, { timeout: 120_000 }],
 
@@ -592,13 +600,20 @@ export async function gotoAppPage(page: Page, url: string): Promise<void> {
 }
 
 export async function adminLogin(page: Page, app: RustChanServer): Promise<void> {
-  await gotoAppPage(page, `${app.baseURL}/admin`);
+  // WebKit can apply autofocus after DOMContentLoaded and steal the password
+  // fill into the username field. Let the login page finish loading first.
+  await page.goto(`${app.baseURL}/admin`, { waitUntil: 'load' });
   if (page.url().includes('/admin/panel')) {
     await expectSafePage(page, { allowAdminInternals: true });
     return;
   }
-  await page.getByLabel('Username').fill(ADMIN_USERNAME);
-  await page.getByLabel('Password').fill(ADMIN_PASSWORD);
+  const username = page.getByLabel('Username');
+  const password = page.getByLabel('Password');
+  await expect(username).toBeFocused();
+  await username.fill(ADMIN_USERNAME);
+  await password.fill(ADMIN_PASSWORD);
+  await expect(username).toHaveValue(ADMIN_USERNAME);
+  await expect(password).toHaveValue(ADMIN_PASSWORD);
   await Promise.all([
     page.waitForURL(/\/admin\/panel/),
     page.getByRole('button', { name: 'authenticate' }).click(),
@@ -1170,7 +1185,7 @@ async function waitForReady(baseURL: string, child: ChildProcess): Promise<void>
   throw new Error(`rustchan did not become ready: ${String(lastError)}`);
 }
 
-function pngRgba(width: number, height: number, pixelByte: (index: number) => number): Buffer {
+function pngRgba(width: number, height: number, pixelByte: (index: number) => number, compressionLevel = zlib.constants.Z_DEFAULT_COMPRESSION): Buffer {
   const raw = Buffer.alloc((width * 4 + 1) * height);
   let sourceIndex = 0;
   for (let y = 0; y < height; y += 1) {
@@ -1193,7 +1208,7 @@ function pngRgba(width: number, height: number, pixelByte: (index: number) => nu
   return Buffer.concat([
     signature,
     pngChunk('IHDR', ihdr),
-    pngChunk('IDAT', zlib.deflateSync(raw)),
+    pngChunk('IDAT', zlib.deflateSync(raw, { level: compressionLevel })),
     pngChunk('IEND', Buffer.alloc(0)),
   ]);
 }

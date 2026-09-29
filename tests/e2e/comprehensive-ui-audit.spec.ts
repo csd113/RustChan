@@ -57,7 +57,9 @@ test('audit: long public surfaces and expanded admin sections fit every release 
     expect(clipped, `${width}px admin cards must not clip their content`).toEqual([]);
     if ([320, 768, 1440].includes(width)) {
       for (const section of ['site-settings', 'boards', 'moderation', 'appearance', 'backups', 'maintenance']) {
-        await page.locator(`#${section}`).scrollIntoViewIfNeeded();
+        // Group wrappers change height as live diagnostics refresh. Scroll the
+        // first heading/summary, whose bounds stay stable, for the screenshot.
+        await page.locator(`#${section}`).locator('h2, summary').first().scrollIntoViewIfNeeded({ timeout: 15_000 });
         await page.screenshot({ path: testInfo.outputPath(`${width}-admin-${section}.png`) });
       }
     }

@@ -240,6 +240,8 @@ test.describe('password-protected boards', () => {
       accessMode: 'view_password',
       accessPassword: 'old-secret',
     });
+    // Leave the polling admin panel before removing its session cookie.
+    await page.goto('about:blank');
     await page.context().clearCookies();
     await unlockBoard(page, app, board, 'old-secret');
 
@@ -247,6 +249,8 @@ test.describe('password-protected boards', () => {
       accessMode: 'view_password',
       accessPassword: 'new-secret',
     });
+    // Leave the polling admin panel before removing its session cookie.
+    await page.goto('about:blank');
     await page.context().clearCookies();
     const fresh = await page.context().browser()!.newContext();
     const freshPage = await fresh.newPage();
