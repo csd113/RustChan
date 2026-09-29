@@ -223,12 +223,22 @@ cargo clippy --locked --workspace --all-targets --all-features
 cargo test --locked --workspace --all-features
 ```
 
-Browser regression tests use a local-only Playwright harness. Keep its configs,
-package metadata, tests, fixtures, and generated artifacts in the ignored paths
-listed in `.gitignore`; they are not distributed with the repository. When a
-local harness is available, run focused browser checks for UI changes, including
-JavaScript-disabled workflows. Media checks may require `ffmpeg` and `ffprobe`.
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
+Browser regression tests use the maintained Playwright harness in
+`tests/e2e/`; its source and configuration are tracked, while run artifacts stay
+in the ignored paths listed in `.gitignore`. Install and run it with:
+
+```bash
+npm install
+npx playwright install
+npm run test:e2e:ci   # normal regression mode (bounded Chromium pass)
+```
+
+Normal regression mode and the full deep audit matrix, including the
+Firefox-on-macOS 27 note, are documented in
+[tests/e2e/README.md](tests/e2e/README.md). Run focused browser checks for UI
+changes, including JavaScript-disabled workflows. Media checks may require
+`ffmpeg` and `ffprobe`. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+development workflow.
 
 ## Documentation
 

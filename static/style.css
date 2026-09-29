@@ -3431,7 +3431,11 @@ html:is([data-theme="chanclassic"], [data-theme="aero"], [data-theme="neoncubicl
 }
 html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5); }
 
-.error-page p { color: var(--text-dim); margin-top: 12px; font-size: 0.92rem; line-height: 1.55; }
+/* Long unbroken tokens in error text (ban reasons, URLs, identifiers) must
+   wrap instead of widening the document on narrow viewports. `anywhere` only
+   breaks a word when it would otherwise overflow, so normal prose is
+   unaffected. */
+.error-page p { color: var(--text-dim); margin-top: 12px; font-size: 0.92rem; line-height: 1.55; overflow-wrap: anywhere; }
 
 .error-page a {
   display: inline-flex;

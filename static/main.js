@@ -1220,16 +1220,28 @@ function captchaNonceMissing(form) {
 }
 
 // NSFW disclaimer overlay
-function openNsfwDisclaimer(returnTo, boardLabel) {
+var _nsfwActiveTrigger = null;
+
+function focusNsfwDisclaimerControl(overlay) {
+  var cancel = overlay.querySelector('[data-action="close-nsfw-disclaimer"]');
+  if (cancel && typeof cancel.focus === 'function') cancel.focus();
+}
+
+function openNsfwDisclaimer(returnTo, boardLabel, trigger) {
   var overlay = document.getElementById('nsfw-disclaimer-overlay');
   if (!overlay) return;
   var returnField = document.getElementById('nsfw-return-to');
   var boardEl = document.getElementById('nsfw-board-label');
   if (returnField && returnTo) returnField.value = returnTo;
   if (boardEl) boardEl.textContent = boardLabel || '';
+  if (!isModalOpen(overlay)) {
+    // WebKit does not focus a clicked link, so prefer the explicit trigger.
+    _nsfwActiveTrigger = trigger || document.activeElement;
+  }
   setModalOpen(overlay, true);
   overlay.classList.add('is-open');
   document.body.classList.add('mobile-overlay-open');
+  window.setTimeout(function () { focusNsfwDisclaimerControl(overlay); }, 0);
 }
 
 function closeNsfwDisclaimer() {
@@ -1238,6 +1250,12 @@ function closeNsfwDisclaimer() {
   setModalOpen(overlay, false);
   overlay.classList.remove('is-open');
   document.body.classList.remove('mobile-overlay-open');
+  var trigger = _nsfwActiveTrigger;
+  _nsfwActiveTrigger = null;
+  if (trigger && trigger !== document.body && document.contains(trigger) &&
+    typeof trigger.focus === 'function') {
+    trigger.focus();
+  }
   if (window.location.pathname === '/' && window.location.search.indexOf('nsfw=') !== -1 && window.history && window.history.replaceState) {
     window.history.replaceState({}, document.title, '/');
   }
@@ -1247,6 +1265,7 @@ document.addEventListener('DOMContentLoaded', function () {
   var overlay = document.getElementById('nsfw-disclaimer-overlay');
   if (overlay && !overlay.hidden) {
     document.body.classList.add('mobile-overlay-open');
+    window.setTimeout(function () { focusNsfwDisclaimerControl(overlay); }, 0);
   }
 });
 
@@ -3970,7 +3989,7 @@ document.addEventListener('click', function (e) {
         break;
       case 'open-nsfw-disclaimer':
         e.preventDefault();
-        openNsfwDisclaimer(t.dataset.returnTo, t.dataset.boardLabel);
+        openNsfwDisclaimer(t.dataset.returnTo, t.dataset.boardLabel, t);
         break;
       case 'close-nsfw-disclaimer':
         e.preventDefault();

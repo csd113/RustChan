@@ -76,10 +76,14 @@ cargo clippy --locked --workspace --all-targets --all-features
 cargo test --locked --workspace --all-features
 ```
 
-Use a local Playwright harness for public UI, admin UI, media, backup and restore,
-moderation, Tor/proxy, and no-JavaScript changes. Browser-test infrastructure is
-local-only: keep package manifests, configs, scripts, fixtures, and artifacts
-under the matching `.gitignore` rules. Do not add them to commits or CI workflows.
+Use the Playwright harness under `tests/e2e/` for public UI, admin UI, media,
+backup and restore, moderation, Tor/proxy, and no-JavaScript changes. The
+maintained harness source is tracked: `playwright.config.ts`, `package.json`,
+`package-lock.json`, `tests/e2e/**`, and `.github/workflows/e2e.yml`. Generated
+evidence is not: keep reports, traces, screenshots, videos, storage state,
+runtime databases, preserved fixture roots, audit output, and other browser
+artifacts under the matching `.gitignore` rules and out of commits. See
+`tests/e2e/README.md` for the normal regression and deep audit commands.
 Run focused scenarios first and the available browser matrix for broad changes.
 Some media tests require `ffmpeg`, `ffprobe`, and specific codecs; do not replace
 deterministic fixtures with private uploads from a live site. Permanent Rust

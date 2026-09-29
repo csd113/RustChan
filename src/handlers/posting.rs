@@ -565,16 +565,7 @@ pub(super) fn submit_post(
     };
 
     let ip_hash = hash_ip(&identity_key, &cookie_secret);
-    if let Some(reason) = db::is_banned(conn, &ip_hash)? {
-        return Err(AppError::BannedUser {
-            reason: if reason.is_empty() {
-                "No reason given".to_owned()
-            } else {
-                reason
-            },
-            csrf_token: ban_csrf_token,
-        });
-    }
+    crate::handlers::board::ensure_actor_not_banned(conn, &ip_hash, ban_csrf_token)?;
     if let Some(existing) = db::get_post_submission(conn, &submission_token, &ip_hash, board.id)? {
         return existing_submission_result(conn, board.short_name, existing);
     }

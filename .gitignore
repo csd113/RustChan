@@ -54,13 +54,10 @@ __pycache__/
 /core.[0-9]*
 /rustchan-cli*.dmp
 
-# Playwright tests and generated browser/play-test evidence.
-# All browser-test infrastructure is local-only, including its npm metadata.
-/playwright*.config.*
-/package.json
-/package-lock.json
-/.github/workflows/e2e.yml
-/tests/e2e/
+# Playwright browser tests: the maintained harness source is tracked
+# (playwright.config.ts, package.json, package-lock.json, tests/e2e/**,
+# .github/workflows/e2e.yml). Generated run evidence, browser state, npm
+# caches, and runtime output stay ignored below.
 /output/
 playwright-report/
 test-results/
