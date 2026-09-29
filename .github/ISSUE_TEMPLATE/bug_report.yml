@@ -53,8 +53,8 @@ body:
     id: deployment
     attributes:
       label: Relevant deployment configuration
-      description: Describe reverse proxy, TLS, Tor/onion service, ports, and ChanNet only where relevant. Use placeholders instead of real hostnames, addresses, keys, or secrets.
-      placeholder: "Direct HTTP / nginx TLS termination / Tor enabled / ChanNet disabled"
+      description: Describe reverse proxy, TLS, Tor/onion service, and ports only where relevant. Use placeholders instead of real hostnames, addresses, keys, or secrets.
+      placeholder: "Direct HTTP / nginx TLS termination / Tor enabled"
     validations:
       required: true
 

@@ -528,8 +528,7 @@ pub struct Post {
     pub body: String,
     /// Sanitized, pre-rendered post-body HTML.
     pub body_html: String,
-    /// SHA-256(IP + secret). `None` for gateway-inserted federation posts
-    /// which have no inbound client IP.
+    /// SHA-256(IP + secret). `None` when the post has no inbound client IP.
     pub ip_hash: Option<String>,
     /// Relative path to the primary attachment.
     pub file_path: Option<String>,
@@ -819,7 +818,7 @@ pub struct ReportWithContext {
     /// First 120 chars of the reported post body for preview
     pub post_preview: String,
     /// IP hash of the post's author (for quick ban from the inbox).
-    /// `None` for gateway-inserted federation posts which have no client IP.
+    /// `None` when the post has no inbound client IP.
     pub post_ip_hash: Option<String>,
 }
 
@@ -907,59 +906,6 @@ pub struct BanAppeal {
     pub status: String,
     /// Creation time as a Unix timestamp.
     pub created_at: i64,
-}
-
-// ChanNet federation snapshot types
-// These live in the shared model layer so database code does not depend on the
-// handler-only `chan_net` module.
-
-/// A single board entry in a federation snapshot.
-/// `id` is the board's `short_name` (e.g. "tech", "b").
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SnapshotBoard {
-    /// Board short name used as the portable identifier.
-    pub id: String,
-    /// Human-readable board title.
-    pub title: String,
-}
-
-/// A single post in a federation snapshot.
-///
-/// SECURITY: Text content only. File paths, MIME types, thumbnail paths, and
-/// binary data must NEVER be added to this struct.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SnapshotPost {
-    /// Public post number.
-    pub post_id: u64,
-    /// Short name of the post's board.
-    pub board: String,
-    /// Display name included in the snapshot.
-    pub author: String,
-    /// Plain-text post content.
-    pub content: String,
-    /// Creation time as a Unix timestamp.
-    pub timestamp: u64,
-}
-
-/// Metadata block written into every federation snapshot ZIP.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SnapshotMetadata {
-    /// Snapshot generation time as a Unix timestamp.
-    pub generated_at: u64,
-    /// `RustChan` version that produced the snapshot.
-    pub rustchan_version: String,
-    /// Number of posts contained in the snapshot.
-    pub post_count: u64,
-    /// Unique identifier for the snapshot transaction.
-    pub tx_id: uuid::Uuid,
-    /// Optional detached signature over the snapshot.
-    pub signature: Option<String>,
-    /// Starting timestamp for a delta snapshot, absent for a full snapshot.
-    pub since: Option<u64>,
-    /// Whether the snapshot contains only changes since a prior point.
-    pub is_delta: bool,
-    /// Whether archived threads are included.
-    pub includes_archive: bool,
 }
 
 // Tests

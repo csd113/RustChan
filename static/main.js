@@ -2462,10 +2462,6 @@ function clampPopupToViewport(anchor, popup) {
     document.querySelectorAll('.user-preferences-form select[name="theme"]').forEach(function (select) {
       select.value = t;
     });
-    document.querySelectorAll('.tp-option').forEach(function (el) {
-      el.classList.toggle('active', el.dataset.theme === t);
-      el.setAttribute('aria-current', el.dataset.theme === t ? 'true' : 'false');
-    });
     try { localStorage.setItem('rustchan_theme', t); } catch (e) {}
   }
 
@@ -2603,42 +2599,15 @@ function clampPopupToViewport(anchor, popup) {
     });
   }
 
+  // Programmatic theme switch kept as a stable hook for existing local browser
+  // tests; the removed picker panel was its last in-page caller.
   window.setTheme = function (t) {
     if (THEMES.indexOf(t) === -1) return;
     var select = document.querySelector('.user-preferences-form select[name="theme"]');
     if (!select) return;
     select.value = t;
     select.dispatchEvent(new Event('change', { bubbles: true }));
-    closeThemePicker();
   };
-
-  function setThemePickerOpen(open, opts) {
-    opts = opts || {};
-    var p = document.getElementById('theme-picker-panel');
-    var btn = document.getElementById('theme-picker-btn');
-    if (!p) return;
-    p.classList.toggle('open', open);
-    p.hidden = !open;
-    setElementAriaHidden(p, !open);
-    setElementInert(p, !open);
-    document.body.classList.toggle('theme-picker-open', open);
-    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-    if (!open && opts.restoreFocus && btn && typeof btn.focus === 'function') {
-      btn.focus();
-    }
-  }
-
-  window.toggleThemePicker = function () {
-    var p = document.getElementById('theme-picker-panel');
-    if (!p) return;
-    setThemePickerOpen(!p.classList.contains('open'));
-  };
-
-  function closeThemePicker(opts) {
-    var p = document.getElementById('theme-picker-panel');
-    if (!p || !p.classList.contains('open')) return;
-    setThemePickerOpen(false, opts);
-  }
 
   var userPreferencesScrollLock = {
     active: false,
@@ -2868,12 +2837,6 @@ function clampPopupToViewport(anchor, popup) {
   }
 
   document.addEventListener('click', function (e) {
-    var btn = document.getElementById('theme-picker-btn');
-    var panel = document.getElementById('theme-picker-panel');
-    if (btn && panel && !btn.contains(e.target) && !panel.contains(e.target)) {
-      closeThemePicker();
-    }
-
     var preferences = document.querySelector('.user-preferences-panel[open]');
     if (preferences && !preferences.contains(e.target)) {
       closeUserPreferencesPanel(preferences);
@@ -2882,7 +2845,6 @@ function clampPopupToViewport(anchor, popup) {
 
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Escape') return;
-    closeThemePicker({ restoreFocus: true });
     document.querySelectorAll('.user-preferences-panel[open]').forEach(function (preferences) {
       closeUserPreferencesPanel(preferences, { restoreFocus: true });
     });
@@ -3964,14 +3926,6 @@ document.addEventListener('click', function (e) {
         e.preventDefault();
         e.stopPropagation();
         toggleThreadMenu(t);
-        break;
-      case 'toggle-theme-picker':
-        e.preventDefault();
-        window.toggleThemePicker && window.toggleThemePicker();
-        break;
-      case 'set-theme':
-        e.preventDefault();
-        window.setTheme && window.setTheme(t.dataset.theme, t.getAttribute('href'));
         break;
       case 'remove-poll-option':  removePollOption(t); break;
       case 'add-poll-option':     addPollOption(); break;

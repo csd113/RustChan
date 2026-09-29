@@ -13,7 +13,7 @@ use crate::{
     handlers::{
         board::{
             admin_scoped_csrf_token, check_csrf_jar, ensure_csrf_for_request,
-            ensure_csrf_with_secure,
+            ensure_csrf_with_secure, BoardAccessContext,
         },
         parse_post_multipart, posting, render, PostFormData,
     },
@@ -57,15 +57,11 @@ pub(in crate::server) async fn view_thread(
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
-    peer: crate::handlers::board::OptionalConnectInfoPeer,
+    peer: crate::middleware::SecureCookieContext,
 ) -> Result<Response> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let user_preferences = crate::handlers::board::user_preferences_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf_for_request(
-        jar,
-        &req_headers,
-        crate::handlers::board::optional_connect_info_peer(peer),
-    );
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
     let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
     let owned_post_grants = crate::handlers::board::owned_post_grants_from_jar(&jar);
     let admin_session_id = jar
@@ -94,19 +90,23 @@ pub(in crate::server) async fn view_thread(
         }
     };
 
+    let BoardAccessContext {
+        board,
+        is_admin,
+        can_post,
+        can_view: _,
+    } = access_context;
     let page_data = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        let board_short = board_short.clone();
-        let admin_session_id = admin_session_id.clone();
         move || -> Result<ThreadViewLoadResult> {
             let conn = pool.get()?;
             let page_data = render::load_thread_page_data(
                 &conn,
-                &board_short,
+                board,
                 thread_id,
                 &identity_key,
-                admin_session_id.as_deref(),
                 &CONFIG.cookie_secret,
+                is_admin,
             )?;
             let is_admin = page_data.is_admin;
             let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
@@ -131,7 +131,6 @@ pub(in crate::server) async fn view_thread(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    let can_post = access_context.can_post;
     let (
         thread_sig,
         mut page_data,
@@ -237,23 +236,28 @@ pub(in crate::server) async fn view_thread(
         return Ok((jar, resp).into_response());
     }
 
-    let success_message = params
-        .reported
-        .as_deref()
-        .filter(|value| *value == "1")
-        .map(|_| "Report submitted. Thank you.");
-    let html = render::render_thread_page(
-        &page_data,
-        &csrf,
-        admin_csrf.as_deref(),
-        None,
-        success_message,
-        None,
-        None,
-        current_theme.as_deref(),
-        can_post,
-        user_preferences,
-    );
+    let success_message = if params.reported.as_deref() == Some("1") {
+        Some("Report submitted. Thank you.")
+    } else {
+        None
+    };
+    // HTML assembly is CPU work on already-owned data; keep it off the async workers.
+    let html = tokio::task::spawn_blocking(move || {
+        render::render_thread_page(
+            &page_data,
+            &csrf,
+            admin_csrf.as_deref(),
+            None,
+            success_message,
+            None,
+            None,
+            current_theme.as_deref(),
+            can_post,
+            user_preferences,
+        )
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
     let mut resp = Html(html).into_response();
     if let Ok(v) = HeaderValue::from_str(&etag) {
         resp.headers_mut().insert("etag", v);
@@ -430,13 +434,18 @@ pub(in crate::server) async fn post_reply(
             let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
             let html = tokio::task::spawn_blocking(move || -> Result<String> {
                 let conn = db_pool.get()?;
+                // Error re-render only: resolve the board for this request.
+                let board = db::get_board_by_short(&conn, &board_short_err)?.ok_or_else(|| {
+                    AppError::NotFound(format!("Board /{board_short_err}/ not found"))
+                })?;
+                let is_admin = posting::is_admin_session(&conn, admin_session_err.as_deref());
                 let page_data = render::load_thread_page_data(
                     &conn,
-                    &board_short_err,
+                    board,
                     thread_id,
                     &identity_key_err,
-                    admin_session_err.as_deref(),
                     &CONFIG.cookie_secret,
+                    is_admin,
                 )?;
                 let admin_csrf_for_error = if page_data.is_admin {
                     admin_session_err.as_deref().map(|session_id| {
@@ -604,14 +613,10 @@ pub(in crate::server) async fn edit_post_get(
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
     req_headers: HeaderMap,
-    peer: crate::handlers::board::OptionalConnectInfoPeer,
+    peer: crate::middleware::SecureCookieContext,
 ) -> Result<Response> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf_for_request(
-        jar,
-        &req_headers,
-        crate::handlers::board::optional_connect_info_peer(peer),
-    );
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
@@ -716,11 +721,10 @@ pub(in crate::server) async fn edit_post_post(
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
     req_headers: HeaderMap,
-    peer: crate::handlers::board::OptionalConnectInfoPeer,
+    peer: crate::middleware::SecureCookieContext,
     Form(form): Form<EditForm>,
 ) -> Result<Response> {
     let xhr_request = is_xml_http_request(&req_headers);
-    let peer = crate::handlers::board::optional_connect_info_peer(peer);
     check_csrf_jar(&jar, form.csrf.as_deref())?;
     let owned_grant =
         crate::handlers::board::owned_post_grant_from_jar(&jar, &board_short, post_id).ok_or_else(
@@ -889,14 +893,10 @@ pub(in crate::server) async fn delete_post_get(
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
     req_headers: HeaderMap,
-    peer: crate::handlers::board::OptionalConnectInfoPeer,
+    peer: crate::middleware::SecureCookieContext,
 ) -> Result<Response> {
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf_for_request(
-        jar,
-        &req_headers,
-        crate::handlers::board::optional_connect_info_peer(peer),
-    );
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
@@ -1040,19 +1040,13 @@ pub(in crate::server) async fn delete_own_post(
             let conn = pool.get()?;
             let post = db::get_post(&conn, post_id)?
                 .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
-            if post.board_id
-                != db::get_board_by_short(&conn, &board_short_for_delete)?
-                    .ok_or_else(|| {
-                        AppError::NotFound(format!("Board /{board_short_for_delete}/ not found"))
-                    })?
-                    .id
-            {
-                return Err(AppError::NotFound("Post not found in this board.".into()));
-            }
             let board =
                 db::get_board_by_short(&conn, &board_short_for_delete)?.ok_or_else(|| {
                     AppError::NotFound(format!("Board /{board_short_for_delete}/ not found"))
                 })?;
+            if post.board_id != board.id {
+                return Err(AppError::NotFound("Post not found in this board.".into()));
+            }
             if !board.allow_self_delete {
                 return Err(AppError::Forbidden(
                     "Users cannot delete their own posts on this board.".into(),

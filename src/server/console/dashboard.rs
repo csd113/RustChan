@@ -15,7 +15,6 @@ use ratatui::widgets::{
     TableState, Tabs, Widget, Wrap,
 };
 use ratatui::Frame;
-use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 /// Smallest size that can retain useful hierarchy and interaction hints.
@@ -1515,7 +1514,7 @@ pub fn load_log_snapshot() -> LogSnapshot {
         .and_then(|name| name.to_str())
         .unwrap_or("current log")
         .to_owned();
-    match read_log_tail(&path, LOG_TAIL_BYTES) {
+    match crate::logging::read_log_tail(&path, LOG_TAIL_BYTES) {
         Ok((content, truncated)) => LogSnapshot {
             source: Some(source),
             lines: content.lines().map(str::to_owned).collect(),
@@ -1544,39 +1543,6 @@ fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
         })
         .max()
         .map(|(_, path)| path)
-}
-
-/// Read at most the newest `max_bytes` of a log file without loading its prefix.
-fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool), String> {
-    let mut file = std::fs::File::open(path).map_err(|error| format!("Open log: {error}"))?;
-    let length = file
-        .metadata()
-        .map_err(|error| format!("Log metadata: {error}"))?
-        .len();
-    let start = length.saturating_sub(u64::try_from(max_bytes).unwrap_or(u64::MAX));
-    // Inspect the preceding byte so an exact line boundary keeps its first
-    // complete line instead of dropping it as an assumed partial prefix.
-    let read_start = start.saturating_sub(1);
-    file.seek(SeekFrom::Start(read_start))
-        .map_err(|error| format!("Seek log: {error}"))?;
-    let mut bytes =
-        Vec::with_capacity(usize::try_from(length.saturating_sub(read_start)).unwrap_or(max_bytes));
-    std::io::copy(
-        &mut file.take(length.saturating_sub(read_start)),
-        &mut bytes,
-    )
-    .map_err(|error| format!("Read log: {error}"))?;
-    let truncated = start > 0;
-    let content = if truncated {
-        let prefix = bytes
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(1, |index| index + 1);
-        bytes.get(prefix..).unwrap_or_default()
-    } else {
-        bytes.as_slice()
-    };
-    Ok((String::from_utf8_lossy(content).into_owned(), truncated))
 }
 
 /// Render directly into a buffer for deterministic layout tests.
@@ -1756,30 +1722,6 @@ mod tests {
         assert!(
             text.contains("40 × 10"),
             "current dimensions should be visible"
-        );
-        Ok(())
-    }
-
-    #[test]
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "assertion failures are the intended failure mechanism for this test"
-    )]
-    fn log_tail_reads_only_the_configured_suffix() -> anyhow::Result<()> {
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("rustchan.log");
-        std::fs::write(&path, "discard-this-line\nkeep-one\nkeep-two\n")?;
-
-        let (tail, truncated) = read_log_tail(&path, 20).map_err(anyhow::Error::msg)?;
-
-        assert!(truncated, "a short byte limit should report truncation");
-        assert!(
-            !tail.contains("discard"),
-            "discarded prefix should not be loaded"
-        );
-        assert!(
-            tail.contains("keep-two"),
-            "newest complete line should remain"
         );
         Ok(())
     }
@@ -2018,24 +1960,6 @@ mod tests {
             latest_log_file(directory.path()),
             Some(current),
             "file timestamps must select the live log even when fallback sorts last"
-        );
-        Ok(())
-    }
-    #[test]
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "assertions verify exact-boundary tail reads"
-    )]
-    fn log_tail_keeps_a_complete_line_at_the_byte_limit() -> anyhow::Result<()> {
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("rustchan.log");
-        std::fs::write(&path, "old\n界-new\n")?;
-        let (tail, truncated) =
-            read_log_tail(&path, "界-new\n".len()).map_err(anyhow::Error::msg)?;
-        assert!(truncated, "prefix must be marked omitted");
-        assert_eq!(
-            tail, "界-new\n",
-            "a complete UTF-8 line at the read boundary must survive"
         );
         Ok(())
     }

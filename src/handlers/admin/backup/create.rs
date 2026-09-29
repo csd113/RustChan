@@ -248,8 +248,8 @@ pub(in crate::server) fn create_full_backup_to_server(
             path: "db/rustchan.sqlite3".to_owned(),
             size: db_snapshot_size,
             sha256: db_snapshot_sha,
-            integrity_check: snapshot_db_health_output(&conn, "integrity_check"),
-            foreign_key_check: snapshot_db_health_output(&conn, "foreign_key_check"),
+            integrity_check: Some(snapshot_db_health_output(&conn, "integrity_check")),
+            foreign_key_check: Some(snapshot_db_health_output(&conn, "foreign_key_check")),
         }),
         files,
         parts: Vec::new(),
@@ -363,8 +363,8 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
         );
     }
 
-    let pre_integrity = snapshot_db_health_output(&conn, "integrity_check").unwrap_or_default();
-    let pre_foreign_key = snapshot_db_health_output(&conn, "foreign_key_check").unwrap_or_default();
+    let pre_integrity = snapshot_db_health_output(&conn, "integrity_check");
+    let pre_foreign_key = snapshot_db_health_output(&conn, "foreign_key_check");
 
     let repair_request_path = maintenance_dir.join("repair-request.json");
     let repair_request = serde_json::json!({
@@ -644,17 +644,27 @@ fn copy_regular_file_to_backup(source: &Path, destination: &Path) -> Result<(u64
     storage::copy_file_and_hash(source, &mut output)
 }
 
-fn snapshot_db_health_output(conn: &rusqlite::Connection, pragma: &str) -> Option<String> {
-    let sql = format!("PRAGMA {pragma}");
-    let mut statement = conn.prepare(&sql).ok()?;
-    let rows = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .ok()?;
+/// Run a PRAGMA diagnostic for backup evidence.
+///
+/// A prepare or read failure is reported as diagnostic text instead of an empty
+/// value so pre-repair evidence cannot be mistaken for a clean check.
+fn snapshot_db_health_output(conn: &rusqlite::Connection, pragma: &str) -> String {
+    match read_pragma_string_column(conn, pragma) {
+        Ok(values) if !values.is_empty() => values.join(" | "),
+        Ok(_) => format!("{pragma} returned no rows"),
+        Err(error) => format!("{pragma} failed: {error}"),
+    }
+}
+
+/// Read the first string column of a PRAGMA result set.
+fn read_pragma_string_column(conn: &rusqlite::Connection, pragma: &str) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(&format!("PRAGMA {pragma}"))?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
     let mut values = Vec::new();
     for row in rows {
-        values.push(row.ok()?);
+        values.push(row?);
     }
-    (!values.is_empty()).then(|| values.join(" | "))
+    Ok(values)
 }
 
 #[derive(Deserialize)]

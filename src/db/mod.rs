@@ -11,8 +11,6 @@ pub mod admin;
 pub mod banners;
 /// Board configuration, statistics, and deletion operations.
 pub mod boards;
-/// Federated `ChanNet` reply persistence.
-pub mod chan_net;
 /// Durable filesystem-operation records.
 mod fs_ops;
 /// Database schema-version bookkeeping.
@@ -49,6 +47,32 @@ pub use setup::*;
 pub use themes::*;
 pub use threads::*;
 pub use user_thread_prefs::*;
+
+/// Commit a transaction opened with an explicit `BEGIN IMMEDIATE`.
+///
+/// A failed `COMMIT` can leave the transaction active on a pooled connection.
+/// Rolling back before returning the error keeps the next pool borrower from
+/// inheriting an open transaction or a stale write lock.
+pub(crate) fn commit_transaction(conn: &rusqlite::Connection, context: &'static str) -> Result<()> {
+    if let Err(error) = conn.execute_batch("COMMIT") {
+        drop(conn.execute_batch("ROLLBACK"));
+        return Err(error).context(context);
+    }
+    Ok(())
+}
+
+/// Cheap readiness probe for public health endpoints.
+///
+/// This deliberately avoids the full structural and integrity verification in
+/// [`verify_database_schema`]: that scan walks the whole database file and is
+/// reserved for startup, the detailed readiness response, and admin health.
+///
+/// # Errors
+/// Returns an error if the connection cannot answer a query or the recorded
+/// schema version is not the release baseline.
+pub fn database_ready_probe(conn: &rusqlite::Connection) -> Result<()> {
+    schema::verify_database_ready(conn)
+}
 
 /// Return the database schema version for the current release baseline.
 #[must_use]
@@ -198,4 +222,51 @@ pub fn paths_safe_to_delete(
     }
 
     Ok(safe)
+}
+
+#[cfg(test)]
+/// Transaction-helper regression tests.
+mod tests {
+    use super::commit_transaction;
+    use anyhow::{ensure, Context as _, Result};
+
+    #[test]
+    fn commit_transaction_rolls_back_after_a_failed_commit() -> Result<()> {
+        let pool = super::init_test_pool()?;
+        let conn = pool.get().context("get test database connection")?;
+        conn.execute_batch("PRAGMA defer_foreign_keys = ON; BEGIN IMMEDIATE")
+            .context("begin deferred transaction")?;
+        // Deferred foreign keys turn the commit into a failure while the
+        // transaction stays active, which is the state the helper must clean up.
+        conn.execute_batch(
+            "INSERT INTO polls (thread_id, question, expires_at) VALUES (999999, 'q', 0)",
+        )
+        .context("insert deferred-violation row")?;
+
+        ensure!(
+            commit_transaction(&conn, "test commit failure").is_err(),
+            "a deferred foreign-key violation must fail the commit"
+        );
+        // Starting a new transaction proves the failed one was rolled back.
+        conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK")
+            .context("connection must remain usable after a failed commit")?;
+        Ok(())
+    }
+
+    #[test]
+    fn readiness_probe_requires_the_release_schema_version() -> Result<()> {
+        let empty = rusqlite::Connection::open_in_memory().context("open schema-less database")?;
+        ensure!(
+            super::database_ready_probe(&empty).is_err(),
+            "a database without the release schema must not report ready"
+        );
+
+        let pool = super::init_test_pool()?;
+        let conn = pool.get().context("get test database connection")?;
+        ensure!(
+            super::database_ready_probe(&conn).is_ok(),
+            "a release-baseline database must report ready"
+        );
+        Ok(())
+    }
 }

@@ -1372,12 +1372,30 @@ pub(crate) fn enqueue_post_jobs(
         }
     }
 
-    // 2. Spam analysis
-    drop(job_queue.enqueue(&crate::workers::Job::SpamCheck {
+    // 2. Spam analysis. A dropped job degrades spam coverage but must not fail
+    // the already-committed post, so record why it was not scheduled.
+    match job_queue.enqueue(&crate::workers::Job::SpamCheck {
         post_id,
         ip_hash: ip_hash.to_owned(),
         body_len,
-    }));
+    }) {
+        Ok(crate::workers::EnqueueOutcome::Enqueued(_)) => {}
+        Ok(crate::workers::EnqueueOutcome::DroppedAtCapacity) => {
+            tracing::warn!(
+                target: "workers",
+                post_id,
+                "spam-check job rejected at capacity; post remains committed without spam analysis"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "workers",
+                post_id,
+                %error,
+                "spam-check job could not be enqueued; post remains committed without spam analysis"
+            );
+        }
+    }
     Ok(())
 }
 

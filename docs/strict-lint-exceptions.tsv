@@ -4,15 +4,6 @@ src/banner.rs	1148	expect	clippy::panic_in_result_fn	test assertions intentional
 src/banner.rs	1196	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn deleting_banner_asset_removes_webp_and_gif_siblings
 src/banner.rs	1235	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn animated_webp_banner_is_preserved_without_static_decode
 src/banner.rs	1264	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn rejects_oversized_banner_dimensions
-src/chan_net/mod.rs	360	expect	clippy::panic_in_result_fn	assertions intentionally report violations of ChanNet authentication	fn protected_chan_routes_reject_missing_and_wrong_key
-src/chan_net/mod.rs	407	expect	clippy::panic_in_result_fn	assertions intentionally report violations of ChanNet authentication	fn protected_chan_routes_accept_correct_key
-src/chan_net/mod.rs	586	expect	clippy::panic_in_result_fn	assertions intentionally report violations of stable message-ID semantics	fn command_uses_stable_message_ids_without_merging_identical_replies
-src/chan_net/mod.rs	659	expect	clippy::panic_in_result_fn	assertions intentionally report violations of decoded-Unicode length validation	fn command_accepts_json_escaped_unicode_at_legal_limit
-src/chan_net/mod.rs	733	expect	clippy::panic_in_result_fn	assertions intentionally report violations of database contention handling	fn command_write_contention_is_bounded_and_returns_retry_contract
-src/chan_net/mod.rs	804	expect	clippy::panic_in_result_fn	assertions intentionally report violations of connection-pool exhaustion handling	fn command_pool_exhaustion_is_bounded_and_returns_retry_contract
-src/chan_net/mod.rs	865	expect	clippy::panic_in_result_fn	assertions intentionally report violations of exact transport-limit semantics	fn command_and_import_bodies_at_exact_limit_reach_semantic_validation
-src/chan_net/selective_snapshot.rs	631	expect	clippy::panic_in_result_fn	assertions intentionally enforce the protected-board export boundary	fn protected_boards_are_excluded_from_every_gateway_export
-src/chan_net/selective_snapshot.rs	725	expect	clippy::panic_in_result_fn	assertions intentionally enforce the protected-board federation boundary	fn protected_boards_are_excluded_from_federation_export
 src/config/template.rs	5	expect	clippy::too_many_lines	the generated settings file stays contiguous so its documented ordering remains obvious	fn settings_template
 src/config.rs	556	expect	clippy::exit	invalid configuration must terminate with the standard EX_CONFIG status	fn settings_file_parse_error
 src/config.rs	777	expect	clippy::struct_excessive_bools	runtime configuration intentionally models independent operator-controlled feature switches	struct Config
@@ -50,10 +41,6 @@ src/db/boards.rs	1255	expect	clippy::panic_in_result_fn	test assertions intentio
 src/db/boards.rs	1295	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn create_board_with_media_flags_persists_audio_toggle
 src/db/boards.rs	1344	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn create_board_uses_standardized_defaults
 src/db/boards.rs	1404	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn delete_board_records_durable_board_directory_cleanup
-src/db/chan_net.rs	360	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn gateway_replies_escape_html_and_preserve_null_ip_hash
-src/db/chan_net.rs	402	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn replayed_gateway_reply_is_rejected_without_duplicate_insert
-src/db/chan_net.rs	440	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn stable_message_ids_distinguish_identical_replies_and_reject_id_reuse
-src/db/chan_net.rs	497	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn gateway_reply_rejects_non_exportable_board_before_any_write
 src/db/fs_ops.rs	181	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn rebuild_pending_fs_ops_for_restore_discards_restored_rows_and_allows_restore_swap_insert
 src/db/fs_ops.rs	251	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn rebuild_pending_fs_ops_for_restore_fails_closed_on_unexpected_schema_object_type
 src/db/migrations.rs	76	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn missing_schema_version_reads_as_unversioned

@@ -762,13 +762,9 @@ pub(super) fn submit_post(
                     return existing_submission_result(conn, board.short_name, existing);
                 }
                 Err(error) => {
-                    let stale_state_error = error.to_string();
                     uploads.rollback_new_files(conn, &upload_dir)?;
-                    if stale_state_error.contains("This thread is locked.") {
-                        return Err(AppError::Forbidden("This thread is locked.".into()));
-                    }
-                    if stale_state_error.contains("This thread is archived.") {
-                        return Err(AppError::Forbidden("This thread is archived.".into()));
+                    if let Some(closed) = error.downcast_ref::<db::threads::ThreadClosed>() {
+                        return Err(AppError::Forbidden(closed.message().to_owned()));
                     }
                     return Err(error.into());
                 }

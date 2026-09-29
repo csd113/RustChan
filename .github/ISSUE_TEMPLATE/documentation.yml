@@ -57,7 +57,6 @@ body:
         - Database, backup, or restore
         - TLS or reverse proxy
         - Tor or onion service
-        - ChanNet
         - Contributor or community policy
         - Other
     validations:

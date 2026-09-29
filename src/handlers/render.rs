@@ -1,7 +1,6 @@
 use crate::{
     db,
     error::{AppError, Result},
-    handlers::posting,
     models::{Board, Pagination, PollData, Thread, ThreadSummary},
     templates,
     utils::crypto::hash_ip,
@@ -55,20 +54,26 @@ fn update_sig_field(hasher: &mut Sha256, value: &str) {
     hasher.update([0]);
 }
 
+/// Mix an integer into the page signature without allocating a decimal string.
+fn update_sig_i64(hasher: &mut Sha256, value: i64) {
+    hasher.update(value.to_le_bytes());
+    hasher.update([0]);
+}
+
 fn update_thread_signature(hasher: &mut Sha256, thread: &Thread) {
-    update_sig_field(hasher, &thread.id.to_string());
-    update_sig_field(hasher, &thread.bumped_at.to_string());
+    update_sig_i64(hasher, thread.id);
+    update_sig_i64(hasher, thread.bumped_at);
     update_sig_field(hasher, if thread.locked { "1" } else { "0" });
     update_sig_field(hasher, if thread.sticky { "1" } else { "0" });
     update_sig_field(hasher, if thread.archived { "1" } else { "0" });
-    update_sig_field(hasher, &thread.reply_count.to_string());
+    update_sig_i64(hasher, thread.reply_count);
     update_sig_field(hasher, thread.op_file.as_deref().unwrap_or(""));
     update_sig_field(hasher, thread.op_thumb.as_deref().unwrap_or(""));
 }
 
 fn update_post_signature(hasher: &mut Sha256, post: &crate::models::Post) {
-    update_sig_field(hasher, &post.id.to_string());
-    update_sig_field(hasher, &post.edited_at.unwrap_or(0).to_string());
+    update_sig_i64(hasher, post.id);
+    update_sig_i64(hasher, post.edited_at.unwrap_or(0));
     update_sig_field(hasher, post.file_path.as_deref().unwrap_or(""));
     update_sig_field(hasher, post.thumb_path.as_deref().unwrap_or(""));
     update_sig_field(hasher, post.mime_type.as_deref().unwrap_or(""));
@@ -79,46 +84,43 @@ fn update_post_signature(hasher: &mut Sha256, post: &crate::models::Post) {
 }
 
 fn update_poll_signature(hasher: &mut Sha256, poll_data: &PollData) {
-    update_sig_field(hasher, &poll_data.poll.id.to_string());
-    update_sig_field(hasher, &poll_data.poll.thread_id.to_string());
+    update_sig_i64(hasher, poll_data.poll.id);
+    update_sig_i64(hasher, poll_data.poll.thread_id);
     update_sig_field(hasher, &poll_data.poll.question);
-    update_sig_field(hasher, &poll_data.poll.expires_at.to_string());
-    update_sig_field(hasher, &poll_data.poll.created_at.to_string());
-    update_sig_field(hasher, &poll_data.total_votes.to_string());
-    update_sig_field(
-        hasher,
-        &poll_data.user_voted_option.unwrap_or_default().to_string(),
-    );
+    update_sig_i64(hasher, poll_data.poll.expires_at);
+    update_sig_i64(hasher, poll_data.poll.created_at);
+    update_sig_i64(hasher, poll_data.total_votes);
+    update_sig_i64(hasher, poll_data.user_voted_option.unwrap_or_default());
     update_sig_field(hasher, if poll_data.is_expired { "1" } else { "0" });
     for option in &poll_data.options {
-        update_sig_field(hasher, &option.id.to_string());
-        update_sig_field(hasher, &option.poll_id.to_string());
+        update_sig_i64(hasher, option.id);
+        update_sig_i64(hasher, option.poll_id);
         update_sig_field(hasher, &option.text);
-        update_sig_field(hasher, &option.position.to_string());
-        update_sig_field(hasher, &option.vote_count.to_string());
+        update_sig_i64(hasher, option.position);
+        update_sig_i64(hasher, option.vote_count);
     }
 }
 
+/// Load the board page data using an already-resolved board and admin flag.
 pub(super) fn load_board_page_data(
     conn: &rusqlite::Connection,
-    board_short: &str,
+    board: Board,
     page: i64,
     threads_per_page: i64,
     preview_replies: i64,
-    admin_session_id: Option<&str>,
+    is_admin: bool,
 ) -> Result<BoardPageData> {
-    let is_admin = posting::is_admin_session(conn, admin_session_id);
-    let board = db::get_board_by_short(conn, board_short)?
-        .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
     let total = db::count_threads_for_board(conn, board.id)?;
     let pagination = Pagination::new(page, threads_per_page, total);
     let threads = db::get_threads_for_board(conn, board.id, threads_per_page, pagination.offset())?;
     let thread_ids = threads.iter().map(|thread| thread.id).collect::<Vec<_>>();
-    let previews = db::get_preview_posts_for_threads(conn, &thread_ids, preview_replies)?;
+    let mut previews = db::get_preview_posts_for_threads(conn, &thread_ids, preview_replies)?;
     let summaries = threads
         .into_iter()
         .map(|thread| {
-            let preview_posts = previews.get(&thread.id).cloned().unwrap_or_default();
+            // The preview map is consumed here, so move each list out instead
+            // of cloning every preview post.
+            let preview_posts = previews.remove(&thread.id).unwrap_or_default();
             let omitted =
                 (thread.reply_count - i64::try_from(preview_posts.len()).unwrap_or(0)).max(0);
             ThreadSummary {
@@ -174,20 +176,19 @@ pub(super) fn render_board_page(
     )
 }
 
+/// Load the thread page data using an already-resolved board and admin flag.
 pub(super) fn load_thread_page_data(
     conn: &rusqlite::Connection,
-    board_short: &str,
+    board: Board,
     thread_id: i64,
     client_ip: &str,
-    admin_session_id: Option<&str>,
     cookie_secret: &str,
+    is_admin: bool,
 ) -> Result<ThreadPageData> {
-    let is_admin = posting::is_admin_session(conn, admin_session_id);
-    let board = db::get_board_by_short(conn, board_short)?
-        .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
+    let board_id = board.id;
     let thread = db::get_thread(conn, thread_id)?
         .ok_or_else(|| AppError::NotFound(format!("Thread {thread_id} not found")))?;
-    if thread.board_id != board.id {
+    if thread.board_id != board_id {
         return Err(AppError::NotFound("Thread not found in this board.".into()));
     }
     let posts = db::get_posts_for_thread(conn, thread_id)?;

@@ -15,22 +15,11 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     };
     let mut board_cards = String::new();
     for (index, board) in view.boards.iter().enumerate() {
-        let board_assets = view
-            .appearance
-            .board_banners
-            .iter()
-            .filter(|asset| {
-                asset.scope == crate::models::BannerScope::Board && asset.board_id == Some(board.id)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
         board_cards.push_str(&render_board_settings_card(
             board,
             index,
             view.boards,
             view.csrf_token,
-            view.appearance.themes,
-            &board_assets,
             view.open_section,
         ));
     }

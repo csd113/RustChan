@@ -10,7 +10,7 @@
 // Respects the RUST_LOG environment variable if set.
 
 use std::fmt;
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, OnceLock};
@@ -132,7 +132,6 @@ const APP_LOG_TARGETS: &[&str] = &[
     "admin",
     "board",
     "chan",
-    "chan_net",
     "config",
     "console",
     "db",
@@ -165,6 +164,46 @@ pub fn is_main_log_file(path: &Path) -> bool {
     file_name == MAIN_LOG_FALLBACK_FILE_NAME
         || (file_name.starts_with("rustchan.")
             && path.extension().and_then(|ext| ext.to_str()) == Some("log"))
+}
+
+/// Read at most the newest `max_bytes` of a log file without loading its prefix.
+///
+/// Returns the tail and whether the file was truncated. When the read starts
+/// mid-line the partial first line is dropped; when it starts exactly on a line
+/// boundary the first complete line is kept.
+///
+/// # Errors
+/// Returns a message naming the failed filesystem step.
+pub fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool), String> {
+    let mut file = std::fs::File::open(path).map_err(|error| format!("Open log: {error}"))?;
+    let length = file
+        .metadata()
+        .map_err(|error| format!("Log metadata: {error}"))?
+        .len();
+    let start = length.saturating_sub(u64::try_from(max_bytes).unwrap_or(u64::MAX));
+    // Inspect the preceding byte so an exact line boundary keeps its first
+    // complete line instead of dropping it as an assumed partial prefix.
+    let read_start = start.saturating_sub(1);
+    file.seek(SeekFrom::Start(read_start))
+        .map_err(|error| format!("Seek log: {error}"))?;
+    let mut bytes =
+        Vec::with_capacity(usize::try_from(length.saturating_sub(read_start)).unwrap_or(max_bytes));
+    io::copy(
+        &mut file.take(length.saturating_sub(read_start)),
+        &mut bytes,
+    )
+    .map_err(|error| format!("Read log: {error}"))?;
+    let truncated = start > 0;
+    let content = if truncated {
+        let prefix = bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(1, |index| index + 1);
+        bytes.get(prefix..).unwrap_or_default()
+    } else {
+        bytes.as_slice()
+    };
+    Ok((String::from_utf8_lossy(content).into_owned(), truncated))
 }
 
 /// Returns whether a tracing target belongs to `RustChan` application code.
@@ -965,7 +1004,6 @@ fn default_env_filter() -> EnvFilter {
          startup=info,\
          sessions=info,\
          polls=info,\
-         chan_net=info,\
          console=info,\
          tls=info,\
          config=info",
@@ -1264,9 +1302,9 @@ mod tests {
         dependency_log_path, display_component, extract_component, humanize_field_name,
         is_dependency_log_target, is_external_source, is_ffmpeg_log_target, is_main_log_file,
         is_main_log_target, is_tor_descriptor_upload_timeout_event, normalize_duration,
-        normalize_field_value, normalize_message_text, parse_formatted_duration, rewrite_message,
-        FileFormatter, LogEventFields, TorDescriptorTimeoutDecision, TorDescriptorTimeoutLimiter,
-        DEPENDENCY_LOG_FILE_NAME,
+        normalize_field_value, normalize_message_text, parse_formatted_duration, read_log_tail,
+        rewrite_message, FileFormatter, LogEventFields, TorDescriptorTimeoutDecision,
+        TorDescriptorTimeoutLimiter, DEPENDENCY_LOG_FILE_NAME,
     };
     use std::io;
     use std::sync::{Arc, Mutex};
@@ -1407,7 +1445,7 @@ mod tests {
         assert!(is_dependency_log_target("rustls::server"));
         assert!(is_dependency_log_target("arti_client::builder"));
         assert!(is_dependency_log_target("tracing::span"));
-        assert!(is_dependency_log_target("reqwest::connect"));
+        assert!(is_dependency_log_target("url::parse"));
         assert!(is_dependency_log_target("rusqlite::inner"));
         assert!(is_dependency_log_target("r2d2::pool"));
         assert!(!is_dependency_log_target("admin"));
@@ -1707,5 +1745,50 @@ mod tests {
             TorDescriptorTimeoutDecision::Suppress
         );
         assert_eq!(limiter.suppressed, 1);
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertion failures are the intended failure mechanism for this test"
+    )]
+    /// Reads only the newest suffix of a log file.
+    fn log_tail_reads_only_the_configured_suffix() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("rustchan.log");
+        std::fs::write(&path, "discard-this-line\nkeep-one\nkeep-two\n")?;
+
+        let (tail, truncated) = read_log_tail(&path, 20).map_err(anyhow::Error::msg)?;
+
+        assert!(truncated, "a short byte limit should report truncation");
+        assert!(
+            !tail.contains("discard"),
+            "discarded prefix should not be loaded"
+        );
+        assert!(
+            tail.contains("keep-two"),
+            "newest complete line should remain"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assertions verify exact-boundary tail reads"
+    )]
+    /// Keeps a complete UTF-8 line that starts exactly at the read boundary.
+    fn log_tail_keeps_a_complete_line_at_the_byte_limit() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("rustchan.log");
+        std::fs::write(&path, "old\n界-new\n")?;
+        let (tail, truncated) =
+            read_log_tail(&path, "界-new\n".len()).map_err(anyhow::Error::msg)?;
+        assert!(truncated, "prefix must be marked omitted");
+        assert_eq!(
+            tail, "界-new\n",
+            "a complete UTF-8 line at the read boundary must survive"
+        );
+        Ok(())
     }
 }

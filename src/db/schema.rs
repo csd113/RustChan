@@ -233,6 +233,9 @@ const BASE_SCHEMA_SQL: &str = "
         updated_at  INTEGER NOT NULL DEFAULT (unixepoch())
     );
 
+    -- Retained historical tables. Existing databases and saved backups contain
+    -- them, and schema verification rejects unexpected objects, so the baseline
+    -- must keep declaring them. No current code reads or writes these rows.
     CREATE TABLE IF NOT EXISTS chan_net_posts (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
         remote_post_id  INTEGER NOT NULL,
@@ -319,6 +322,7 @@ const INDEX_SCHEMA_SQL: &str = "
         WHERE is_op = 1;
     CREATE INDEX IF NOT EXISTS idx_threads_archived
         ON threads(board_id, archived, bumped_at DESC);
+    -- Retained historical index paired with the retained tables above.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_chan_net_posts_remote
         ON chan_net_posts(remote_post_id, board_id);
     CREATE INDEX IF NOT EXISTS idx_user_thread_preferences_user_hidden
@@ -888,7 +892,8 @@ fn repair_known_legacy_baseline_drift(conn: &rusqlite::Connection) -> Result<()>
 
 /// Return whether a recorded version belongs to a recognized repairable baseline.
 fn is_known_legacy_schema_version(version: Option<&str>) -> bool {
-    if matches!(version, None | Some("1.3.0" | "1.4.0")) || version == Some(BASELINE_SCHEMA_VERSION)
+    if matches!(version, None | Some("1.3.0" | "1.4.0" | "1.4.1"))
+        || version == Some(BASELINE_SCHEMA_VERSION)
     {
         return true;
     }
@@ -1618,6 +1623,31 @@ fn schema_version_metadata_issues(conn: &rusqlite::Connection) -> Result<Vec<Str
         ));
     }
     Ok(issues)
+}
+
+/// Cheap readiness probe for public health endpoints.
+///
+/// This deliberately avoids the full structural and integrity verification in
+/// [`verify_database_schema`]: that scan walks the whole database file and is
+/// reserved for startup, the detailed readiness response, and admin health.
+///
+/// # Errors
+/// Returns an error if the connection cannot answer a query or the recorded
+/// schema version is not the release baseline.
+pub(super) fn verify_database_ready(conn: &rusqlite::Connection) -> Result<()> {
+    conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+        .context("Database did not answer a readiness query")?;
+    let version: String = conn
+        .query_row(
+            "SELECT CAST(version AS TEXT) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .context("Read schema version for readiness failed")?;
+    if version != BASELINE_SCHEMA_VERSION {
+        bail!("database schema version is {version}, expected {BASELINE_SCHEMA_VERSION}");
+    }
+    Ok(())
 }
 
 /// Build the canonical schema-version table shape in isolation.
@@ -2970,6 +3000,34 @@ mod tests {
             "INSERT INTO themes (slug, display_name) VALUES ('Unsafe Theme', 'Unsafe')",
             "themes row violates a persisted domain invariant",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn previous_release_baseline_upgrades_without_losing_data() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        install_or_migrate_schema(&conn)?;
+        conn.execute_batch(
+            "UPDATE schema_version SET version = '1.4.1';
+             INSERT INTO boards (id, short_name, name) VALUES (1, 'b', 'Random');
+             INSERT INTO chan_net_posts (remote_post_id, board_id, author, content, remote_ts)
+             VALUES (42, 1, 'legacy', 'retained', 0);",
+        )?;
+        install_or_migrate_schema(&conn)?;
+        verify_database_schema(&conn)?;
+        let retained: String = conn.query_row(
+            "SELECT content FROM chan_net_posts WHERE remote_post_id = 42",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            retained == "retained",
+            "historical data must survive the upgrade"
+        );
+        ensure!(
+            super::is_known_legacy_schema_version(Some("1.4.1")),
+            "the previous baseline must remain eligible for recognized repairs"
+        );
         Ok(())
     }
 

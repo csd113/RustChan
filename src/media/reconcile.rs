@@ -1058,8 +1058,7 @@ fn collect_reference_model(
     let result = collect_reference_model_in_transaction(conn, upload_root, row_limit);
     match result {
         Ok(model) => {
-            conn.execute_batch("COMMIT")
-                .context("commit managed-media reference snapshot")?;
+            crate::db::commit_transaction(conn, "commit managed-media reference snapshot")?;
             Ok(model)
         }
         Err(error) => {
@@ -3143,8 +3142,7 @@ fn immediate<T>(conn: &rusqlite::Connection, operation: impl FnOnce() -> Result<
         .context("begin media reconciliation repair transaction")?;
     match operation() {
         Ok(value) => {
-            conn.execute_batch("COMMIT")
-                .context("commit media reconciliation repair transaction")?;
+            crate::db::commit_transaction(conn, "commit media reconciliation repair transaction")?;
             Ok(value)
         }
         Err(error) => {

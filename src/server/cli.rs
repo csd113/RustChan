@@ -23,10 +23,6 @@ pub struct Cli {
     #[arg(long, short = 'p', global = true)]
     pub port: Option<u16>,
 
-    /// Enable the `ChanNet` / `RustWave` API on a second port (see `chan_net_bind` in config)
-    #[arg(long = "chan-net", global = true)]
-    pub chan_net: bool,
-
     #[command(subcommand)]
     /// Optional server or administration command.
     pub command: Option<Command>,

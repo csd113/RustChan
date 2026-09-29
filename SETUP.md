@@ -2,7 +2,7 @@
 
 Current setup and deployment guide for Linux, macOS, and Windows.
 
-Current development version: `1.4.1`.
+Current version: `1.5.0`.
 
 This guide reflects the current RustChan architecture:
 
@@ -238,7 +238,6 @@ Binary:
 
 ```bash
 ./target/release/rustchan-cli --port 9090
-./target/release/rustchan-cli serve --chan-net
 ./target/release/rustchan-cli --data-dir /absolute/path/to/rustchan-data
 ```
 
@@ -466,7 +465,6 @@ Detailed readiness and metrics include operational state such as database schema
 | 56 | Public metrics | observability | `false` | false | No | Yes | Keep off unless `/metrics` is behind a trusted scrape path. |
 | 60 | Include Tor hidden-service keys in automatic full backups | backup / Tor | `true` | true | Yes | Yes | Admin saves rewrite `settings.toml`; existing installs keep their current configured value until changed. |
 | 66 | Archive before prune | maintenance / archive | `true` | true | No | Yes | Global override: prune archives instead of hard-deletes. |
-| 72 | ChanNet API key set | ChanNet | `""` | false | No | Yes | Empty disables the protected ChanNet endpoints. |
 | 75 | New banner enabled flag | banner | `true` | true | Yes | No | Applies to newly uploaded global, board, and home banners. |
 | 76 | New global/board banner shows on board index | banner | `true` | true | Yes | No | Home banners do not use this placement flag. |
 | 77 | New global/board banner shows on catalog | banner | `true` | true | Yes | No | Home banners do not use this placement flag. |
@@ -640,12 +638,16 @@ Before major updates, back up:
 
 Or use the built-in backup tools from the admin panel.
 
-RustChan `1.4.1` resets the database baseline: fresh installs create the
-current `1.4.1` schema directly instead of replaying pre-release internal
-migrations. Existing in-development databases that structurally match that
-schema are marked as database schema version `1.4.1`; partial, unknown, or
-corrupt schemas are rejected without deleting data. Future released schema
-changes should add normal forward migrations tied to RustChan release versions.
+RustChan `1.5.0` retains the database structure introduced in `1.4.1`.
+Fresh installs create the current baseline directly. Existing structurally valid
+`1.4.1` databases are verified and stamped as schema version `1.5.0`; recognized
+older schema shapes use the existing compatibility repairs. Partial, unknown, or
+corrupt schemas are rejected without deleting data. Historical `chan_net_*`
+tables remain for database and backup compatibility, but ChanNet itself and the
+`--chan-net` option have been removed. Remove that option from service commands
+before upgrading. Obsolete ChanNet settings can remain in `settings.toml` and
+are ignored. Back up your data before upgrading. Future structural schema
+changes should add forward migrations tied to RustChan release versions.
 
 ## Troubleshooting
 

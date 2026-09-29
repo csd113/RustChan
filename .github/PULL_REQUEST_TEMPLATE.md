@@ -6,7 +6,7 @@
 
 <!--
 List affected surfaces: public UI, admin UI, storage/schema, media, moderation,
-backup/restore, TLS/proxy, Tor, ChanNet, deployment, or documentation.
+backup/restore, TLS/proxy, Tor, deployment, or documentation.
 State "None" where appropriate.
 -->
 

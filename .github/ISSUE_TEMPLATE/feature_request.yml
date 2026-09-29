@@ -55,7 +55,6 @@ body:
         - Moderation or abuse-resistance tooling
         - Backup or restore
         - Tor or onion-service operation
-        - ChanNet
         - TLS, reverse proxy, or deployment
         - None or not sure
     validations:

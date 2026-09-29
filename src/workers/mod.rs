@@ -290,7 +290,12 @@ impl JobQueue {
             .ok()
             .and_then(|conn| crate::db::pending_job_count(&conn).ok())
             .and_then(|count| u64::try_from(count).ok())
-            .unwrap_or(0);
+            .unwrap_or_else(|| {
+                warn!(
+                    "JobQueue: pending-job count unavailable at startup; capacity back-pressure may under-count until the first poll"
+                );
+                0
+            });
         Self {
             pool,
             notify: Arc::new(Notify::new()),
@@ -1157,15 +1162,15 @@ async fn handle_job(
             file_path,
             board_short,
         } => {
-            // Avoid scheduling the same source path twice.
-            if in_progress.contains_key(&file_path) {
+            // Avoid scheduling the same source path twice. The insert result
+            // makes the claim atomic against a concurrently dispatched job.
+            if in_progress.insert(file_path.clone(), true).is_some() {
                 warn!(
                     "VideoTranscode: skipping duplicate job for post {} ({}): already in flight",
                     post_id, file_path
                 );
                 return Ok(JobExecution::Stale);
             }
-            in_progress.insert(file_path.clone(), true);
             active_video_jobs.fetch_add(1, Ordering::Relaxed);
             let result = transcode_video(
                 job_id,
@@ -1189,15 +1194,15 @@ async fn handle_job(
             file_path,
             board_short,
         } => {
-            // Avoid scheduling the same source path twice.
-            if in_progress.contains_key(&file_path) {
+            // Avoid scheduling the same source path twice. The insert result
+            // makes the claim atomic against a concurrently dispatched job.
+            if in_progress.insert(file_path.clone(), true).is_some() {
                 warn!(
                     "AudioWaveform: skipping duplicate job for post {} ({}): already in flight",
                     post_id, file_path
                 );
                 return Ok(JobExecution::Stale);
             }
-            in_progress.insert(file_path.clone(), true);
             let result = generate_waveform(
                 job_id,
                 post_id,

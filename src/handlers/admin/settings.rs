@@ -64,7 +64,7 @@ fn format_banner_upload_error(error: &anyhow::Error) -> String {
         .unwrap_or_else(|| "Banner upload failed.".to_owned())
 }
 
-fn checkbox_is_on(value: Option<&str>) -> bool {
+pub(super) fn checkbox_is_on(value: Option<&str>) -> bool {
     value == Some("1")
         || value.is_some_and(|item| item.eq_ignore_ascii_case("on"))
         || value.is_some_and(|item| item.eq_ignore_ascii_case("true"))

@@ -47,7 +47,6 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::VecDeque;
-use std::io::{Seek as _, SeekFrom};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -1207,9 +1206,8 @@ fn safe_dir_size(root: &Path) -> Option<u64> {
 
 fn recent_warning_lines() -> Option<String> {
     let log_path = latest_log_file(&crate::config::logs_dir())?;
-    let buf = std::fs::read(log_path).ok()?;
-    let start = buf.len().saturating_sub(65_536);
-    let buf = String::from_utf8_lossy(buf.get(start..).unwrap_or_default()).into_owned();
+    // Read only the tail; a live log is arbitrarily large.
+    let (buf, _truncated) = read_log_tail(&log_path, 65_536).ok()?;
     let warnings: Vec<&str> = buf
         .lines()
         .rev()
@@ -2308,33 +2306,8 @@ fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
 
 /// Reads log tail.
 fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool)> {
-    let mut file = std::fs::File::open(path)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Open log: {e}")))?;
-    let len = file
-        .metadata()
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Log metadata: {e}")))?
-        .len();
-    let max_bytes = u64::try_from(max_bytes).unwrap_or(u64::MAX);
-    let start = len.saturating_sub(max_bytes);
-    file.seek(SeekFrom::Start(start))
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Seek log: {e}")))?;
-
-    let buf =
-        std::fs::read(path).map_err(|e| AppError::Internal(anyhow::anyhow!("Read log: {e}")))?;
-    let start = usize::try_from(start).unwrap_or(usize::MAX);
-    let text = String::from_utf8_lossy(buf.get(start..).unwrap_or_default()).into_owned();
-    let truncated = start > 0;
-    let content = if truncated {
-        match text.find('\n') {
-            Some(pos) if pos + 1 < text.len() => {
-                text.get(pos + 1..).map_or_else(String::new, str::to_owned)
-            }
-            _ => text,
-        }
-    } else {
-        text
-    };
-    Ok((content, truncated))
+    crate::logging::read_log_tail(path, max_bytes)
+        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))
 }
 
 fn admin_bootstrap_now_secs() -> u64 {
@@ -3241,6 +3214,29 @@ mod tests {
         let (content, truncated) = read_log_tail(&path, 8).context("read log tail")?;
         ensure!(truncated);
         ensure!(content.contains("line3"));
+        Ok(())
+    }
+
+    #[test]
+    fn reads_only_the_requested_log_tail_from_a_large_file() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir().context("create log directory")?;
+        let path = dir.path().join("rustchan.2026-04-03.log");
+        let mut large = "2026-01-01 INFO filler line\n".repeat(20_000);
+        large.push_str("tail-marker-one\n");
+        large.push_str("tail-marker-two\n");
+        std::fs::write(&path, large).context("write large log fixture")?;
+
+        let max_bytes = 64;
+        let (content, truncated) = read_log_tail(&path, max_bytes).context("read log tail")?;
+        ensure!(truncated, "a partial tail must report truncation");
+        ensure!(
+            content.len() <= max_bytes,
+            "tail read must stay within the requested byte budget"
+        );
+        ensure!(
+            content.ends_with("tail-marker-two\n"),
+            "tail read must end at the file's end"
+        );
         Ok(())
     }
 

@@ -21,8 +21,6 @@ pub mod banner;
 pub mod cache;
 /// CAPTCHA challenge generation and validation.
 pub mod captcha;
-/// `ChanNet` federation and gateway endpoints.
-pub mod chan_net;
 /// Runtime configuration and persistent settings.
 pub mod config;
 /// SQLite persistence operations and models.
@@ -224,7 +222,7 @@ fn main() -> anyhow::Result<()> {
         match cli.command {
             // Default (no subcommand) or explicit `serve`: start the server.
             None | Some(server::cli::Command::Serve) => {
-                let result = server::run_server(cli.port, cli.chan_net).await;
+                let result = server::run_server(cli.port).await;
                 // Restore terminal unconditionally after the server exits
                 // (graceful shutdown, SIGTERM, etc.).  cleanup() is idempotent.
                 server::cleanup();

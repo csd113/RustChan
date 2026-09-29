@@ -179,6 +179,10 @@ pub fn prune_to_limit(
 
 /// Load and validate all active original-media candidates.
 fn load_candidates(conn: &rusqlite::Connection, upload_root: &Path) -> Result<Vec<Candidate>> {
+    // Resolve the upload root once; every candidate path is checked against it.
+    let canonical_root = upload_root
+        .canonicalize()
+        .with_context(|| format!("Canonicalize upload root {}", upload_root.display()))?;
     let mut stmt = conn.prepare_cached(
         "SELECT p.id, p.created_at, p.file_path, p.file_size, b.short_name,
                 p.audio_file_path, p.audio_file_size
@@ -213,13 +217,19 @@ fn load_candidates(conn: &rusqlite::Connection, upload_root: &Path) -> Result<Ve
     let mut posts = Vec::new();
     for (post_id, created_at, path, db_size, board_short, audio_path, audio_size) in rows {
         let mut paths = Vec::new();
-        match candidate_path(upload_root, post_id, &path, db_size, &board_short) {
+        match candidate_path(&canonical_root, post_id, &path, db_size, &board_short) {
             CandidatePathLoad::Loaded(candidate_path) => paths.push(candidate_path),
             CandidatePathLoad::MissingSize => {}
             CandidatePathLoad::Unsafe => continue,
         }
         if let Some(audio_path) = audio_path {
-            match candidate_path(upload_root, post_id, &audio_path, audio_size, &board_short) {
+            match candidate_path(
+                &canonical_root,
+                post_id,
+                &audio_path,
+                audio_size,
+                &board_short,
+            ) {
                 CandidatePathLoad::Loaded(candidate_path) => paths.push(candidate_path),
                 CandidatePathLoad::MissingSize => {}
                 CandidatePathLoad::Unsafe => continue,
@@ -319,7 +329,7 @@ enum CandidatePathLoad {
 
 /// Validate one database media-path field into a pruning candidate.
 fn candidate_path(
-    upload_root: &Path,
+    canonical_root: &Path,
     post_id: i64,
     path: &str,
     db_size: Option<i64>,
@@ -334,7 +344,7 @@ fn candidate_path(
         );
         return CandidatePathLoad::Unsafe;
     };
-    match safe_file_size(upload_root, &relative_path) {
+    match safe_file_size(canonical_root, &relative_path) {
         Ok(Some(size)) => CandidatePathLoad::Loaded(CandidatePath {
             path: path.to_owned(),
             board_short: board_short.to_owned(),
@@ -395,12 +405,9 @@ fn validate_post_original_path(path: &str, board_short: &str) -> Option<PathBuf>
     Some(rel.to_path_buf())
 }
 
-/// Return the size of a safe regular file below `upload_root`.
-fn safe_file_size(upload_root: &Path, relative_path: &Path) -> Result<Option<u64>> {
-    let canonical_root = upload_root
-        .canonicalize()
-        .with_context(|| format!("Canonicalize upload root {}", upload_root.display()))?;
-    reject_symlink_components(&canonical_root, relative_path)?;
+/// Return the size of a safe regular file below an already-canonicalized root.
+fn safe_file_size(canonical_root: &Path, relative_path: &Path) -> Result<Option<u64>> {
+    reject_symlink_components(canonical_root, relative_path)?;
     let path = canonical_root.join(relative_path);
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -416,7 +423,7 @@ fn safe_file_size(upload_root: &Path, relative_path: &Path) -> Result<Option<u64
     let canonical_path = path
         .canonicalize()
         .with_context(|| format!("Canonicalize media path {}", path.display()))?;
-    if !canonical_path.starts_with(&canonical_root) {
+    if !canonical_path.starts_with(canonical_root) {
         anyhow::bail!("media path escapes upload root");
     }
     Ok(Some(metadata.len()))
@@ -614,6 +621,9 @@ fn finalize_original_prune_payload_in_tx(
 ) -> Result<OriginalPruneFinalizeReport> {
     let target_ids: HashSet<i64> = payload.post_ids.iter().copied().collect();
     validate_current_target_paths(conn, &target_ids, &payload.paths, false)?;
+    let canonical_root = Path::new(upload_dir)
+        .canonicalize()
+        .with_context(|| format!("Canonicalize upload root {upload_dir}"))?;
     let mut report = OriginalPruneFinalizeReport::default();
     for path in &payload.paths {
         let mut stmt = conn.prepare_cached(
@@ -647,7 +657,7 @@ fn finalize_original_prune_payload_in_tx(
             }
         }
 
-        if safe_file_size(Path::new(upload_dir), Path::new(&path.path))?.is_some() {
+        if safe_file_size(&canonical_root, Path::new(&path.path))?.is_some() {
             crate::utils::files::delete_file_checked(upload_dir, &path.path)?;
             report.removed_files = report.removed_files.saturating_add(1);
             report.removed_bytes = report.removed_bytes.saturating_add(path.size);

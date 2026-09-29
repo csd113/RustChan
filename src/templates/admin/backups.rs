@@ -157,14 +157,14 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
         let restore_tor_keys_option = if bf.contains_tor_hidden_service_keys
             && view.backups.tor_hidden_service_key_backup_available
         {
-            r#"<label class="admin-inline-checkbox backup-tor-option backup-tor-option-compact">
-        <input type="checkbox" name="restore_tor_hidden_service_keys" value="1">
-        <span>
-          <strong>Restore Tor keys</strong>
-          <span class="admin-quick-help">Replaces the current onion identity with the one from this backup.</span>
-        </span>
-      </label>
-      <p class="backup-extract-help backup-tor-warning">Anyone with these keys can impersonate this onion service.</p>"#.to_owned()
+            render_tor_key_option(
+                "restore_tor_hidden_service_keys",
+                "Restore Tor keys",
+                "Replaces the current onion identity with the one from this backup.",
+                "",
+                " backup-tor-option-compact",
+                true,
+            )
         } else {
             String::new()
         };
@@ -264,6 +264,31 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
     full_backup_rows
 }
 
+/// Renders one Tor hidden-service key checkbox option and its optional warning.
+fn render_tor_key_option(
+    name: &str,
+    headline: &str,
+    help: &str,
+    checked: &str,
+    label_class_suffix: &str,
+    warning: bool,
+) -> String {
+    let warning_html = if warning {
+        "\n<p class=\"backup-extract-help backup-tor-warning\">Anyone with these keys can impersonate this onion service.</p>"
+    } else {
+        ""
+    };
+    format!(
+        r#"<label class="admin-inline-checkbox backup-tor-option{label_class_suffix}">
+      <input type="checkbox" name="{name}" value="1"{checked}>
+      <span>
+        <strong>{headline}</strong>
+        <span class="admin-quick-help">{help}</span>
+      </span>
+    </label>{warning_html}"#
+    )
+}
+
 /// Renders the Tor-key option for scheduled full backups when supported.
 fn render_auto_full_backup_tor_option(view: &AdminPanelViewModel<'_>) -> String {
     if !view.backups.tor_hidden_service_key_backup_available {
@@ -279,14 +304,13 @@ fn render_auto_full_backup_tor_option(view: &AdminPanelViewModel<'_>) -> String 
         ""
     };
 
-    format!(
-        r#"<label class="admin-inline-checkbox backup-tor-option">
-      <input type="checkbox" name="auto_full_backup_include_tor_hidden_service_keys" value="1"{checked}>
-      <span>
-        <strong>Include Tor hidden service keys in automatic full backups</strong>
-        <span class="admin-quick-help">Preserves the same .onion address after restore. Anyone with these keys can impersonate this onion service.</span>
-      </span>
-    </label>"#
+    render_tor_key_option(
+        "auto_full_backup_include_tor_hidden_service_keys",
+        "Include Tor hidden service keys in automatic full backups",
+        "Preserves the same .onion address after restore. Anyone with these keys can impersonate this onion service.",
+        checked,
+        "",
+        false,
     )
 }
 
@@ -296,13 +320,14 @@ fn render_full_backup_create_tor_option(view: &AdminPanelViewModel<'_>) -> Strin
         return String::new();
     }
 
-    r#"<label class="admin-inline-checkbox backup-tor-option">
-      <input type="checkbox" name="include_tor_hidden_service_keys" value="1">
-      <span>
-        <strong>Include Tor hidden service keys</strong>
-        <span class="admin-quick-help">Preserves the same .onion address after restore. Anyone with these keys can impersonate this onion service.</span>
-      </span>
-    </label>"#.to_owned()
+    render_tor_key_option(
+        "include_tor_hidden_service_keys",
+        "Include Tor hidden service keys",
+        "Preserves the same .onion address after restore. Anyone with these keys can impersonate this onion service.",
+        "",
+        "",
+        false,
+    )
 }
 
 /// Renders the Tor-key restore option for uploaded full backups when supported.
@@ -311,14 +336,14 @@ fn render_full_backup_restore_upload_tor_option(view: &AdminPanelViewModel<'_>) 
         return String::new();
     }
 
-    r#"<label class="admin-inline-checkbox backup-tor-option">
-      <input type="checkbox" name="restore_tor_hidden_service_keys" value="1">
-      <span>
-        <strong>Restore Tor hidden service keys</strong>
-        <span class="admin-quick-help">Only applies when the uploaded backup includes Tor hidden service keys. Replaces the current onion identity with the one from the backup and restores the old .onion address.</span>
-      </span>
-    </label>
-    <p class="backup-extract-help backup-tor-warning">Anyone with these keys can impersonate this onion service.</p>"#.to_owned()
+    render_tor_key_option(
+        "restore_tor_hidden_service_keys",
+        "Restore Tor hidden service keys",
+        "Only applies when the uploaded backup includes Tor hidden service keys. Replaces the current onion identity with the one from the backup and restores the old .onion address.",
+        "",
+        "",
+        true,
+    )
 }
 
 /// Renders saved per-board backup rows and their available actions.

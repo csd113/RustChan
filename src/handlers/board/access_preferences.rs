@@ -4,11 +4,10 @@ use super::{
     board_unlock_default_return_to, board_unlock_rate_limit_message, board_unlock_retry_after_secs,
     check_csrf_jar, clear_board_unlock_failures, current_theme_from_jar, db,
     expected_board_access_cookie_value, header, load_board_access_context, new_csrf_token,
-    optional_connect_info_peer, record_board_unlock_failure, render_board_unlock_html,
-    safe_return_to, sha256_hex, should_set_public_secure_cookie, templates,
-    user_preferences_from_jar, verify_password, viewer_preference_key, AppError, AppState,
-    BoardAccessContext, Cookie, CookieJar, Duration, Form, HeaderMap, HeaderValue,
-    OptionalConnectInfoPeer, Path, Query, Redirect, Response, Result, SameSite,
+    record_board_unlock_failure, render_board_unlock_html, safe_return_to, sha256_hex,
+    should_set_public_secure_cookie, templates, user_preferences_from_jar, verify_password,
+    viewer_preference_key, AppError, AppState, BoardAccessContext, Cookie, CookieJar, Duration,
+    Form, HeaderMap, HeaderValue, Path, Query, Redirect, Response, Result, SameSite,
     SecureCookieContext, State, StatusCode, ADMIN_SESSION_COOKIE, BOARD_ACCESS_COOKIE_TTL_DAYS,
     CONFIG, NSFW_CONSENT_COOKIE, USER_ACTIVITY_BADGES_COOKIE, USER_HIDE_NSFW_COOKIE,
     USER_PREFERRED_VIEW_COOKIE, USER_THEME_COOKIE, USER_VIDEO_AUDIO_COOKIE, VISITOR_ID_COOKIE,
@@ -832,10 +831,10 @@ pub(in crate::server) async fn board_unlock_page(
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
-    peer: OptionalConnectInfoPeer,
+    peer: SecureCookieContext,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
@@ -905,12 +904,11 @@ pub(in crate::server) async fn unlock_board_access(
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
-    peer: OptionalConnectInfoPeer,
+    peer: SecureCookieContext,
     Form(form): Form<BoardUnlockForm>,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
     check_csrf_jar(&jar, form.csrf.as_deref())?;
-    let peer = optional_connect_info_peer(peer);
     let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)

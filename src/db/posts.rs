@@ -515,8 +515,7 @@ pub fn delete_post(
 
     match result {
         Ok(safe) => {
-            conn.execute_batch("COMMIT")
-                .context("Failed to commit delete_post transaction")?;
+            super::commit_transaction(conn, "Failed to commit delete_post transaction")?;
             Ok(safe)
         }
         Err(e) => {
@@ -732,8 +731,7 @@ pub fn self_delete_post(
 
     match result {
         Ok(outcome) => {
-            conn.execute_batch("COMMIT")
-                .context("Failed to commit self_delete_post transaction")?;
+            super::commit_transaction(conn, "Failed to commit self_delete_post transaction")?;
             Ok(outcome)
         }
         Err(error) => {
@@ -821,8 +819,7 @@ pub fn edit_post(
 
     match result {
         Ok(updated) => {
-            conn.execute_batch("COMMIT")
-                .context("Failed to commit edit_post transaction")?;
+            super::commit_transaction(conn, "Failed to commit edit_post transaction")?;
             Ok(updated)
         }
         Err(e) => {
@@ -1299,14 +1296,24 @@ pub fn persist_media_job(
         let mut matching_id = None;
         let mut pending_jobs_resolved = 0_usize;
         for (id, active_type, active_payload, status) in active {
-            let active_source = serde_json::from_str::<serde_json::Value>(&active_payload)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .pointer("/d/file_path")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                });
+            let parsed = serde_json::from_str::<serde_json::Value>(&active_payload);
+            let active_source = match parsed {
+                Ok(value) => value
+                    .pointer("/d/file_path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                Err(error) => {
+                    // Leave an unreadable job pending instead of resolving it as
+                    // a stale duplicate, so queued work is never discarded.
+                    tracing::warn!(
+                        target: "db",
+                        job_id = id,
+                        %error,
+                        "unreadable active media-job payload skipped during media scheduling"
+                    );
+                    continue;
+                }
+            };
             if matching_id.is_none()
                 && active_type == job_type
                 && active_source.as_deref() == Some(expected_source)
@@ -1442,8 +1449,7 @@ pub fn reject_media_job_at_capacity(
     })();
     match result {
         Ok(active) => {
-            conn.execute_batch("COMMIT")
-                .context("Failed to commit media capacity rejection")?;
+            super::commit_transaction(conn, "Failed to commit media capacity rejection")?;
             Ok(active)
         }
         Err(error) => {
@@ -2591,8 +2597,10 @@ pub fn replace_transcoded_media(
 
     match result {
         Ok(()) => {
-            conn.execute_batch("COMMIT")
-                .context("Failed to commit transcode media replacement transaction")?;
+            super::commit_transaction(
+                conn,
+                "Failed to commit transcode media replacement transaction",
+            )?;
             Ok(())
         }
         Err(error) => {

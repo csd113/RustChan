@@ -766,14 +766,6 @@ pub fn base_layout_with_preferences(
         format!(r#" data-theme="{}""#, escape_html(&active_theme))
     };
     let active_theme_value_attr = format!(r#" data-active-theme="{}""#, escape_html(&active_theme));
-    let theme_href = |theme: &str| {
-        format!(
-            "/theme/{}?return_to={}&_csrf={}",
-            escape_html(theme),
-            urlencoding_simple(current_path),
-            urlencoding_simple(csrf_token)
-        )
-    };
     let stylesheet_href = static_asset_url("/static/style.css");
     let admin_stylesheet_href = static_asset_url("/static/admin.css");
     let theme_init_src = static_asset_url("/static/theme-init.js");
@@ -803,11 +795,9 @@ pub fn base_layout_with_preferences(
     } else {
         String::new()
     };
-    let mut theme_picker_panel = String::new();
     let mut theme_select_options = String::new();
     let mut theme_noscript_buttons = String::new();
     for theme in enabled_themes.iter().filter(|theme| theme.enabled) {
-        let href = theme_href(&theme.slug);
         let selected_attr = if theme.slug == active_theme {
             " selected"
         } else {
@@ -830,17 +820,6 @@ pub fn base_layout_with_preferences(
                 "false"
             },
             label = escape_html(&theme.display_name),
-        );
-        let _ = write!(
-            theme_picker_panel,
-            r#"<a class="tp-option" data-action="set-theme" data-theme="{slug}" href="{href}" title="{description}">
-    <span class="tp-swatch" style="background:{swatch};"></span>{label}
-  </a>"#,
-            slug = escape_html(&theme.slug),
-            href = href,
-            description = escape_html(&theme.description),
-            swatch = escape_html(&theme.swatch_hex),
-            label = escape_html(&theme.display_name)
         );
     }
     let theme_select_disabled = if theme_select_options.is_empty() {
@@ -989,10 +968,6 @@ pub fn base_layout_with_preferences(
         </div>
       </noscript>
     </details>
-    <div id="theme-picker-panel" hidden inert aria-hidden="true">
-      <div class="tp-title">// SELECT THEME</div>
-      {theme_picker_panel}
-    </div>
   </div>
 </footer>
 
@@ -1023,7 +998,6 @@ pub fn base_layout_with_preferences(
         active_theme_attr = active_theme_attr,
         custom_theme_slugs = escape_html(&custom_theme_slugs),
         theme_select_options = theme_select_options,
-        theme_picker_panel = theme_picker_panel,
         theme_noscript_buttons = theme_noscript_buttons,
         current_path = escape_html(current_path),
         hide_nsfw_checked = hide_nsfw_checked,

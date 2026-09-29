@@ -85,10 +85,10 @@ async fn readyz_response(state: AppState, include_details: bool) -> Response {
             let pool = state.db.clone();
             move || {
                 pool.get().is_ok_and(|conn| {
-                    let ready = conn
-                        .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
-                        .is_ok_and(|value| value == 1);
-                    ready && crate::db::verify_database_schema(&conn).is_ok()
+                    // Public readiness stays bounded: the full integrity scan
+                    // runs in the detailed response, at startup, and in the
+                    // admin health view.
+                    crate::db::database_ready_probe(&conn).is_ok()
                 })
             }
         })

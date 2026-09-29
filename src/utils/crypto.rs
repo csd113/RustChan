@@ -233,7 +233,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
 /// # Errors
 /// Returns an error if the password does not meet the minimum requirements.
 pub fn validate_password(p: &str) -> Result<()> {
-    if p.len() < 8 {
+    if p.chars().count() < 8 {
         anyhow::bail!("Password must be at least 8 characters.");
     }
     Ok(())
@@ -259,6 +259,20 @@ mod tests {
         assert!(
             !verify_password("wrong-password", &hash)?,
             "a different password must not verify"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn password_validation_counts_characters_not_bytes() -> Result<()> {
+        // Three 3-byte characters are nine bytes but only three characters.
+        anyhow::ensure!(
+            validate_password("日本語").is_err(),
+            "multi-byte characters must still count as single characters"
+        );
+        anyhow::ensure!(
+            validate_password("日本語日本語日本").is_ok(),
+            "eight characters must satisfy the minimum"
         );
         Ok(())
     }

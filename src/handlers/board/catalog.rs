@@ -1,14 +1,13 @@
 use super::{
     activity_html_cache_control, admin_scoped_csrf_token, board_access_cookie_from_jar,
     board_access_denied_response, board_access_preflight, current_theme_from_jar, db,
-    ensure_csrf_for_request, header, latest_visible_thread_marker_tuple,
-    optional_connect_info_peer, remember_board_activity, remember_visible_thread_activity,
-    sha256_hex, split_catalog_threads, templates, thread_activity_markers_from_jar,
-    thread_unread_counts, user_preferences_from_jar, viewer_preference_key, AppError, AppState,
-    BoardAccessDecision, BoardAccessRequirement, CatalogRenderData, CookieJar, HashMap, HeaderMap,
-    HeaderValue, Html, OptionalConnectInfoPeer, Pagination, Path, Query, Response, Result,
-    SearchQuery, State, StatusCode, ADMIN_SESSION_COOKIE, SEARCH_QUERY_MAX_CHARS,
-    THREAD_ACTIVITY_MARKER_LIMIT,
+    ensure_csrf_for_request, header, latest_visible_thread_marker_tuple, remember_board_activity,
+    remember_visible_thread_activity, sha256_hex, split_catalog_threads, templates,
+    thread_activity_markers_from_jar, thread_unread_counts, user_preferences_from_jar,
+    viewer_preference_key, AppError, AppState, BoardAccessDecision, BoardAccessRequirement,
+    CatalogRenderData, CookieJar, HashMap, HeaderMap, HeaderValue, Html, Pagination, Path, Query,
+    Response, Result, SearchQuery, SecureCookieContext, State, StatusCode, ADMIN_SESSION_COOKIE,
+    SEARCH_QUERY_MAX_CHARS, THREAD_ACTIVITY_MARKER_LIMIT,
 };
 use axum::response::IntoResponse as _;
 use std::fmt::Write as _;
@@ -32,11 +31,11 @@ pub(in crate::server) async fn catalog(
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
-    peer: OptionalConnectInfoPeer,
+    peer: SecureCookieContext,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
     let user_preferences = user_preferences_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
     let viewer_key = viewer_preference_key(&client_ip, &jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
@@ -272,11 +271,11 @@ pub(in crate::server) async fn hidden_threads(
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
-    peer: OptionalConnectInfoPeer,
+    peer: SecureCookieContext,
 ) -> Result<Response> {
     let current_theme = current_theme_from_jar(&jar);
     let user_preferences = user_preferences_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
     let viewer_key = viewer_preference_key(&client_ip, &jar);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
@@ -351,12 +350,12 @@ pub(in crate::server) async fn board_archive(
     Query(params): Query<HashMap<String, String>>,
     jar: CookieJar,
     req_headers: HeaderMap,
-    peer: OptionalConnectInfoPeer,
+    peer: SecureCookieContext,
 ) -> Result<Response> {
     const ARCHIVE_PER_PAGE: i64 = 20;
     let current_theme = current_theme_from_jar(&jar);
     let user_preferences = user_preferences_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
@@ -440,12 +439,12 @@ pub(in crate::server) async fn search(
     Query(q): Query<SearchQuery>,
     jar: CookieJar,
     req_headers: HeaderMap,
-    peer: OptionalConnectInfoPeer,
+    peer: SecureCookieContext,
 ) -> Result<Response> {
     const SEARCH_PER_PAGE: i64 = 20;
     let current_theme = current_theme_from_jar(&jar);
     let user_preferences = user_preferences_from_jar(&jar);
-    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, optional_connect_info_peer(peer));
+    let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());

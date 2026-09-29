@@ -195,7 +195,7 @@ fn protect_tls_plaintext_backend(
 ///
 /// Returns an error when configuration validation, filesystem or database
 /// initialization, listener startup, or coordinated listener execution fails.
-pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::Result<()> {
+pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     // rustls 0.23 requires an explicit process-wide crypto provider.
     // install_default() is idempotent — a second call (e.g. in tests) returns
     // Err but never panics, so the let _ discard is intentional.
@@ -210,9 +210,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     // Validate critical configuration values immediately — fail fast with a
     // clear error rather than discovering misconfiguration at runtime (#8).
     CONFIG.validate()?;
-    if chan_net {
-        CONFIG.validate_chan_net_listener()?;
-    }
 
     let data_dir = super::parent_dir_or_current(std::path::Path::new(&CONFIG.database_path));
 
@@ -551,16 +548,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         ffmpeg_vp9_available,
     );
 
-    let chan_ledger = if chan_net {
-        let conn = pool.get()?;
-        let ledger = crate::db::chan_net::load_import_ledger(&conn)?
-            .into_iter()
-            .collect::<crate::chan_net::ledger::TxLedger>();
-        Some(Arc::new(parking_lot::Mutex::new(ledger)))
-    } else {
-        None
-    };
-
     let state = AppState {
         db: pool.clone(),
         ffmpeg_available,
@@ -583,9 +570,7 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
         ),
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
         media_upload_gate: crate::middleware::MediaUploadGate::new(),
-        chan_import_gate: crate::middleware::ChanImportGate::new(),
         db_maintenance_jobs: crate::middleware::DbMaintenanceJobs::new(),
-        chan_ledger,
         onion_address: Arc::new(tokio::sync::RwLock::new(None)),
     };
 
@@ -1469,23 +1454,6 @@ pub async fn run_server(port_override: Option<u16>, chan_net: bool) -> anyhow::R
     }
 
     let mut listener_tasks: tokio::task::JoinSet<ListenerTaskResult> = tokio::task::JoinSet::new();
-    if chan_net {
-        let chan_addr = CONFIG.chan_net_bind.clone();
-        let chan_app = crate::chan_net::chan_router(state.clone());
-        let chan_listener = tokio::net::TcpListener::bind(&chan_addr).await?;
-        let chan_cancel = worker_cancel.clone();
-        tracing::info!(target: "chan_net", addr = %chan_addr, "ChanNet API listening");
-        // Reuse the bounded HTTP server so this secondary listener gets the
-        // same protocol-level header cap and graceful shutdown as the forum.
-        listener_tasks.spawn(async move {
-            (
-                "ChanNet",
-                run_plain_http(chan_listener, chan_app, chan_cancel)
-                    .await
-                    .map_err(anyhow::Error::from),
-            )
-        });
-    }
 
     // TLS / HTTPS listener
     // Spawned as a background task so the HTTP listener below can start
@@ -2185,7 +2153,7 @@ mod tests {
         routing::any,
         Router,
     };
-    use std::{net::SocketAddr, sync::Arc, time::Duration};
+    use std::{net::SocketAddr, time::Duration};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tower::ServiceExt as _;
 
@@ -2414,48 +2382,6 @@ mod tests {
 
         let oversized = format!(
             "GET / HTTP/1.1\r\nHost: localhost\r\nX-Large: {}\r\nConnection: close\r\n\r\n",
-            "a".repeat(super::headers::HTTP_MAX_HEADER_BYTES)
-        );
-        let oversized = raw_http_request(address, oversized.as_bytes()).await?;
-        ensure_raw_status(&oversized, b"431")?;
-
-        cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(3), server).await???;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn channet_listener_rejects_ambiguous_framing_and_large_request_heads(
-    ) -> anyhow::Result<()> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?;
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let app = crate::chan_net::chan_router_with_auth(
-            crate::test_support::app_state(),
-            Arc::from("0123456789abcdef0123456789abcdef"),
-            512 * 1024,
-            10 * 1024 * 1024,
-        );
-        let server_cancel = cancel.clone();
-        let server =
-            tokio::spawn(async move { run_plain_http(listener, app, server_cancel).await });
-
-        let valid = raw_http_request(
-            address,
-            b"GET /chan/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-        )
-        .await?;
-        ensure_raw_status(&valid, b"200")?;
-
-        let ambiguous = raw_http_request(
-            address,
-            b"GET /chan/status HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\nConnection: close\r\n\r\n0\r\n\r\n",
-        )
-        .await?;
-        ensure_raw_status(&ambiguous, b"400")?;
-
-        let oversized = format!(
-            "GET /chan/status HTTP/1.1\r\nHost: localhost\r\nX-Large: {}\r\nConnection: close\r\n\r\n",
             "a".repeat(super::headers::HTTP_MAX_HEADER_BYTES)
         );
         let oversized = raw_http_request(address, oversized.as_bytes()).await?;

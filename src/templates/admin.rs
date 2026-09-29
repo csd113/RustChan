@@ -772,6 +772,11 @@ fn render_board_backup_actions(board: &Board, csrf_token: &str) -> String {
     )
 }
 
+/// Builds the settings form id shared by the board settings and appearance cards.
+fn board_settings_form_id(board_id: i64) -> String {
+    format!("board-settings-form-{board_id}")
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the board settings card preserves one cohesive form and its stable field hooks"
@@ -782,8 +787,6 @@ fn render_board_settings_card(
     index: usize,
     boards: &[Board],
     csrf_token: &str,
-    _themes: &[crate::models::Theme],
-    _board_banners: &[BannerAsset],
     open_section: Option<&str>,
 ) -> String {
     let checked = |value: bool| if value { " checked" } else { "" };
@@ -837,7 +840,7 @@ fn render_board_settings_card(
   <button type="submit"{move_down_disabled}>move down</button>
 </form>
 </div>
-<form method="POST" action="/admin/board/settings" class="board-settings-form" id="board-settings-form-{id}">
+<form method="POST" action="/admin/board/settings" class="board-settings-form" id="{form_id}">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="hidden" name="board_id" value="{id}">
 <div class="admin-subsection">
@@ -971,6 +974,7 @@ fn render_board_settings_card(
         display_order = board.display_order,
         csrf = escape_html(csrf_token),
         id = board.id,
+        form_id = board_settings_form_id(board.id),
         move_up_disabled = if prev_same_group { "" } else { " disabled" },
         move_down_disabled = if next_same_group { "" } else { " disabled" },
         name_raw = escape_html(&board.name),
@@ -1067,7 +1071,7 @@ fn render_board_appearance_card(
     } else {
         ""
     };
-    let form_id = format!("board-settings-form-{}", board.id);
+    let form_id = board_settings_form_id(board.id);
     format!(
         r#"<details class="board-settings-card" id="board-appearance-{short}"{open_attr}>
 <summary>/{short}/ — {name} {nsfw_tag}</summary>
@@ -2325,15 +2329,8 @@ mod tests {
     #[test]
     fn board_settings_card_separates_board_management_tasks() {
         let board = sample_board();
-        let html = render_board_settings_card(
-            &board,
-            0,
-            std::slice::from_ref(&board),
-            "csrf",
-            &[sample_theme()],
-            &[],
-            None,
-        );
+        let html =
+            render_board_settings_card(&board, 0, std::slice::from_ref(&board), "csrf", None);
 
         assert!(html.contains("// basic setup"));
         assert!(html.contains("// access &amp; anti-spam"));
@@ -2349,15 +2346,8 @@ mod tests {
     #[test]
     fn board_settings_card_masks_board_password_input() {
         let board = sample_board();
-        let html = render_board_settings_card(
-            &board,
-            0,
-            std::slice::from_ref(&board),
-            "csrf",
-            &[sample_theme()],
-            &[],
-            None,
-        );
+        let html =
+            render_board_settings_card(&board, 0, std::slice::from_ref(&board), "csrf", None);
 
         assert!(html.contains(
             r#"<input type="password" name="access_password" maxlength="256" autocomplete="off""#
@@ -2369,15 +2359,8 @@ mod tests {
         let mut board = sample_board();
         board.access_mode = BoardAccessMode::Public;
         board.access_password_hash = "hashed".into();
-        let html = render_board_settings_card(
-            &board,
-            0,
-            std::slice::from_ref(&board),
-            "csrf",
-            &[sample_theme()],
-            &[],
-            None,
-        );
+        let html =
+            render_board_settings_card(&board, 0, std::slice::from_ref(&board), "csrf", None);
 
         assert!(html.contains("A password is saved but unused while this board is public."));
     }
@@ -2420,15 +2403,8 @@ mod tests {
     #[test]
     fn board_settings_card_renders_self_edit_and_self_delete_checkboxes_without_token_input() {
         let board = sample_board();
-        let html = render_board_settings_card(
-            &board,
-            0,
-            std::slice::from_ref(&board),
-            "csrf",
-            &[sample_theme()],
-            &[],
-            None,
-        );
+        let html =
+            render_board_settings_card(&board, 0, std::slice::from_ref(&board), "csrf", None);
 
         assert!(html.contains(r#"name="allow_editing" value="1""#));
         assert!(
@@ -2450,15 +2426,8 @@ mod tests {
             max_pdf_size: 12 * 1024 * 1024,
             ..sample_board()
         };
-        let html = render_board_settings_card(
-            &board,
-            0,
-            std::slice::from_ref(&board),
-            "csrf",
-            &[sample_theme()],
-            &[],
-            None,
-        );
+        let html =
+            render_board_settings_card(&board, 0, std::slice::from_ref(&board), "csrf", None);
 
         assert!(html.contains(r#"name="max_image_size_mb""#));
         assert!(html.contains(r#"name="max_video_size_mb""#));

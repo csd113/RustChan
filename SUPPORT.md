@@ -18,7 +18,7 @@ When requesting project help, include the RustChan version or commit, operating
 system and architecture, installation method, enabled Cargo features, relevant
 deployment configuration, exact reproduction steps, and sanitized logs. State
 whether the database, media processing, backup/restore, reverse proxy, TLS, Tor,
-public/admin UI, moderation, or ChanNet is involved.
+public/admin UI, or moderation is involved.
 
 There is no guaranteed response time or individual support entitlement.
 

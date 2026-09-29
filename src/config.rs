@@ -557,17 +557,6 @@ struct SettingsFile {
     /// `SQLite` connection pool size. Default: 8.
     /// Increase on high-traffic deployments; each connection uses ~32 MiB page cache.
     db_pool_size: Option<u32>,
-    // ChanNet / RustWave gateway
-    /// Base URL of the connected `RustWave` instance.
-    /// Must begin with http:// or https://. Default: <http://localhost:7071>.
-    rustwave_url: Option<String>,
-    /// Address to bind the second `ChanNet` TCP listener.
-    /// Default: 127.0.0.1:7070 (loopback-only; not exposed to the internet).
-    chan_net_bind: Option<String>,
-    /// Pre-shared API key required for /chan/refresh and /chan/poll endpoints.
-    /// Must be at least 32 characters. Leave empty to disable the endpoints.
-    /// Set via `CHAN_NET_API_KEY` environment variable or `settings.toml`.
-    chan_net_api_key: Option<String>,
     /// TLS/HTTPS configuration. Omitting this section keeps TLS disabled.
     tls: Option<TlsConfig>,
 }
@@ -598,17 +587,6 @@ fn settings_file_parse_error(path: &Path) -> ! {
 /// Deserialize a settings file from TOML text.
 fn parse_settings_file_str(raw: &str) -> Result<SettingsFile, toml::de::Error> {
     toml::from_str(raw)
-}
-
-/// Return whether a listener address is a valid loopback endpoint.
-fn bind_addr_is_loopback(bind_addr: &str) -> bool {
-    if let Ok(addr) = bind_addr.parse::<std::net::SocketAddr>() {
-        return addr.ip().is_loopback();
-    }
-
-    bind_addr
-        .strip_prefix("localhost:")
-        .is_some_and(|port| port.parse::<u16>().is_ok())
 }
 
 /// Create settings.toml with defaults if it does not exist yet.
@@ -946,21 +924,6 @@ pub struct Config {
     pub blocking_threads: usize,
     /// `SQLite` `r2d2` connection pool size (default 8).
     pub db_pool_size: u32,
-    // ChanNet / RustWave gateway
-    /// Base URL of the connected `RustWave` instance (must begin with http:// or https://).
-    /// Validated at startup by `Config::validate()`.
-    pub rustwave_url: String,
-    /// Address to bind the second `ChanNet` TCP listener (default 127.0.0.1:7070).
-    /// Only used when the server is started with `--chan-net`.
-    pub chan_net_bind: String,
-    /// Maximum request body size for `/chan/import` (ZIP snapshots). Default: 10 MiB.
-    /// Maximum request body size for non-command `ChanNet` endpoints.
-    pub chan_net_max_body: usize,
-    /// Maximum request body size for `/chan/command` (raw JSON). Default: 512 KiB.
-    pub chan_net_command_max_body: usize,
-    /// Pre-shared key required on X-ChanNet-Key header for /chan/refresh and
-    /// /chan/poll. An empty string means those endpoints are disabled entirely.
-    pub chan_net_api_key: String,
     // TLS / HTTPS
     /// TLS configuration. Defaults to disabled so existing installs are unaffected.
     pub tls: TlsConfig,
@@ -1098,11 +1061,6 @@ impl std::fmt::Debug for Config {
             )
             .field("blocking_threads", &self.blocking_threads)
             .field("db_pool_size", &self.db_pool_size)
-            .field("rustwave_url", &"[REDACTED]")
-            .field("chan_net_bind", &self.chan_net_bind)
-            .field("chan_net_max_body", &self.chan_net_max_body)
-            .field("chan_net_command_max_body", &self.chan_net_command_max_body)
-            .field("chan_net_api_key", &"[REDACTED]")
             .field("tls", &self.tls)
             .finish()
     }
@@ -1222,29 +1180,6 @@ impl Config {
             );
             hex::encode(b)
         };
-        // ChanNet fields
-        let rustwave_url = env::var("CHAN_RUSTWAVE_URL").unwrap_or_else(|_| {
-            s.rustwave_url
-                .as_deref()
-                .unwrap_or("http://localhost:7071")
-                .to_owned()
-        });
-        let chan_net_bind = env::var("CHAN_NET_BIND").unwrap_or_else(|_| {
-            s.chan_net_bind
-                .as_deref()
-                .unwrap_or("127.0.0.1:7070")
-                .to_owned()
-        });
-        let chan_net_max_body: usize = env::var("CHAN_NET_MAX_BODY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(10 * 1024 * 1024); // 10 MiB default
-        let chan_net_command_max_body: usize = env::var("CHAN_NET_COMMAND_MAX_BODY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            // The legal 32,768-character reply envelope can approach 384 KiB
-            // when four-byte Unicode scalar values use JSON surrogate escapes.
-            .unwrap_or(512 * 1024);
         Self {
             forum_name,
             initial_site_subtitle,
@@ -1410,15 +1345,6 @@ impl Config {
                 }
             },
             db_pool_size: env_parse("CHAN_DB_POOL_SIZE", s.db_pool_size.unwrap_or(8)),
-            // ChanNet fields
-            rustwave_url,
-            chan_net_bind,
-            chan_net_max_body,
-            chan_net_command_max_body,
-            chan_net_api_key: env::var("CHAN_NET_API_KEY")
-                .ok()
-                .or(s.chan_net_api_key)
-                .unwrap_or_default(),
             // TLS — loaded from [tls] section in settings.toml; defaults to disabled.
             tls,
         }
@@ -1436,17 +1362,6 @@ impl Config {
         reason = "startup validation keeps the complete fail-closed configuration audit in one routine"
     )]
     pub fn validate(&self) -> anyhow::Result<()> {
-        fn url_host_is_loopback(url: &str) -> bool {
-            reqwest::Url::parse(url).is_ok_and(|parsed| {
-                parsed.host_str().is_some_and(|host| {
-                    host.eq_ignore_ascii_case("localhost")
-                        || host
-                            .parse::<std::net::IpAddr>()
-                            .is_ok_and(|ip| ip.is_loopback())
-                })
-            })
-        }
-
         const MIB: usize = 1024 * 1024;
         const MAX_IMAGE_MIB: usize = 100;
         const MAX_VIDEO_MIB: usize = 2048;
@@ -1566,19 +1481,6 @@ impl Config {
                 drop(std::fs::remove_file(probe));
             }
         }
-        // Validate rustwave_url at startup rather than at first federation call.
-        if !self.rustwave_url.starts_with("http://") && !self.rustwave_url.starts_with("https://") {
-            return Err(anyhow::anyhow!(
-                "CONFIG ERROR: rustwave_url must begin with http:// or https://, got: {}",
-                self.rustwave_url
-            ));
-        }
-        if !self.chan_net_api_key.is_empty() && self.chan_net_api_key.len() < 32 {
-            anyhow::bail!(
-                "CONFIG ERROR: chan_net_api_key must be empty to disable ChanNet auth-protected endpoints \
-                 or at least 32 characters long."
-            );
-        }
         if self.tor_only && !self.enable_tor_support {
             anyhow::bail!(
                 "CONFIG ERROR: tor_only=true requires enable_tor_support=true. \
@@ -1597,29 +1499,7 @@ impl Config {
                  ACME validation requires public HTTPS reachability, but tor_only binds RustChan to loopback."
             );
         }
-        if self.tor_only && !url_host_is_loopback(&self.rustwave_url) {
-            anyhow::bail!(
-                "CONFIG ERROR: tor_only=true requires rustwave_url to point at localhost/loopback. \
-                 Current rustwave_url '{}' would send federation traffic directly off-host.",
-                self.rustwave_url
-            );
-        }
         validate_ffmpeg_timeout_secs(self.ffmpeg_timeout_secs)?;
-        Ok(())
-    }
-
-    /// Validate `ChanNet` listener settings when the `ChanNet` service is enabled.
-    ///
-    /// # Errors
-    /// Returns an error if `ChanNet` would bind to a non-loopback address without
-    /// a configured pre-shared key.
-    pub fn validate_chan_net_listener(&self) -> anyhow::Result<()> {
-        if self.chan_net_api_key.is_empty() && !bind_addr_is_loopback(&self.chan_net_bind) {
-            anyhow::bail!(
-                "CONFIG ERROR: --chan-net with chan_net_bind '{}' requires chan_net_api_key when binding outside loopback.",
-                self.chan_net_bind
-            );
-        }
         Ok(())
     }
 
@@ -1819,7 +1699,7 @@ pub fn update_settings_file_auto_full_backup(
                 split_zip_part_size_gib.to_string(),
             ),
         ],
-        Some("# ── Federation / ChanNet gateway"),
+        Some("# TLS / HTTPS"),
     );
 }
 
@@ -2430,11 +2310,6 @@ mod tests {
             media_reconcile_repairs_per_pass: 32,
             blocking_threads: 4,
             db_pool_size: 8,
-            rustwave_url: "http://localhost:7071".to_owned(),
-            chan_net_bind: "127.0.0.1:7070".to_owned(),
-            chan_net_max_body: 10 * MIB,
-            chan_net_command_max_body: 512 * 1024,
-            chan_net_api_key: String::new(),
             tls: TlsConfig::default(),
         }
     }
@@ -2443,26 +2318,15 @@ mod tests {
     /// Redacts authentication secrets while retaining useful configuration context.
     fn config_debug_redacts_secrets() -> TestResult {
         const COOKIE_SECRET: &str = "cookie-secret-debug-sentinel";
-        const CHAN_NET_API_KEY: &str = "chan-net-key-debug-sentinel";
-        const RUSTWAVE_URL: &str = "http://debug-user:rw-secret-sentinel@localhost:7071";
-        const RUSTWAVE_CREDENTIAL: &str = "rw-secret-sentinel";
         let mut config = valid_config();
         config.cookie_secret = COOKIE_SECRET.to_owned();
-        config.chan_net_api_key = CHAN_NET_API_KEY.to_owned();
-        config.rustwave_url = RUSTWAVE_URL.to_owned();
         let rendered = format!("{config:?}");
         anyhow::ensure!(
             !rendered.contains(COOKIE_SECRET),
             "Config Debug output must not expose the cookie secret"
         );
         anyhow::ensure!(
-            !rendered.contains(CHAN_NET_API_KEY) && !rendered.contains(RUSTWAVE_CREDENTIAL),
-            "Config Debug output must not expose the ChanNet API key or RustWave URL credentials"
-        );
-        anyhow::ensure!(
-            rendered.contains("cookie_secret: \"[REDACTED]\"")
-                && rendered.contains("chan_net_api_key: \"[REDACTED]\"")
-                && rendered.contains("rustwave_url: \"[REDACTED]\""),
+            rendered.contains("cookie_secret: \"[REDACTED]\""),
             "Config Debug output should identify redacted fields"
         );
         anyhow::ensure!(
@@ -2551,7 +2415,7 @@ auto_full_backup_copies_to_keep = 1
         let input = r#"# RustChan settings.toml
 forum_name = "RustChan"
 
-# ── Federation / ChanNet gateway ─────────────────────────────────────────────
+# TLS / HTTPS
 [tls]
 enabled = false
 "#;
@@ -2568,7 +2432,7 @@ enabled = false
                 ("auto_full_backup_storage_mode", "\"directory\"".to_owned()),
                 ("auto_full_backup_split_zip_part_size_gib", "4".to_owned()),
             ],
-            Some("# ── Federation / ChanNet gateway"),
+            Some("# TLS / HTTPS"),
         );
 
         let positions = [
@@ -2577,7 +2441,7 @@ enabled = false
             output.find("auto_full_backup_include_tor_hidden_service_keys = true"),
             output.find("auto_full_backup_storage_mode = \"directory\""),
             output.find("auto_full_backup_split_zip_part_size_gib = 4"),
-            output.find("# ── Federation / ChanNet gateway"),
+            output.find("# TLS / HTTPS"),
             output.find("[tls]"),
         ];
 
@@ -2855,77 +2719,6 @@ port = 8080
             .context("distinct TLS and redirect ports should validate")
     }
 
-    #[test]
-    /// Rejects an enabled `ChanNet` API key below the minimum length.
-    fn validate_rejects_short_chan_net_api_key() {
-        let mut config = valid_config();
-        config.chan_net_api_key = "short-key".to_owned();
-
-        let error = validation_error(&config);
-
-        assert_eq!(
-            error.as_deref(),
-            Some(
-                "CONFIG ERROR: chan_net_api_key must be empty to disable ChanNet auth-protected endpoints or at least 32 characters long."
-            ),
-            "a short ChanNet API key should fail validation"
-        );
-    }
-
-    #[test]
-    /// Accepts either a disabled or sufficiently long `ChanNet` API key.
-    fn validate_accepts_empty_or_long_chan_net_api_key() -> TestResult {
-        let mut config = valid_config();
-        config.chan_net_api_key.clear();
-        config
-            .validate()
-            .context("an empty key should disable protected endpoints")?;
-
-        config.chan_net_api_key = "x".repeat(32);
-        config
-            .validate()
-            .context("a 32-character key should be accepted")
-    }
-
-    #[test]
-    /// Requires an API key only when `ChanNet` listens outside loopback.
-    fn validate_chan_net_listener_requires_key_for_non_loopback_bind() {
-        let mut config = valid_config();
-        config.chan_net_api_key.clear();
-        config.chan_net_bind = "0.0.0.0:7070".to_owned();
-
-        let error = config
-            .validate_chan_net_listener()
-            .err()
-            .map(|error| error.to_string());
-        assert_eq!(
-            error.as_deref(),
-            Some(
-                "CONFIG ERROR: --chan-net with chan_net_bind '0.0.0.0:7070' requires chan_net_api_key when binding outside loopback."
-            ),
-            "a non-loopback listener without a key should fail validation"
-        );
-
-        config.chan_net_bind = "127.0.0.1:7070".to_owned();
-        assert!(
-            config.validate_chan_net_listener().is_ok(),
-            "an IPv4 loopback listener may disable protected endpoints"
-        );
-
-        config.chan_net_bind = "localhost:7070".to_owned();
-        assert!(
-            config.validate_chan_net_listener().is_ok(),
-            "a localhost listener may disable protected endpoints"
-        );
-
-        config.chan_net_bind = "0.0.0.0:7070".to_owned();
-        config.chan_net_api_key = "x".repeat(32);
-        assert!(
-            config.validate_chan_net_listener().is_ok(),
-            "a non-loopback listener with a sufficiently long key should validate"
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     #[expect(
@@ -2994,6 +2787,24 @@ port = 8080
         anyhow::ensure!(
             !tls.require_https,
             "omitting tls.require_https must preserve the plaintext listener"
+        );
+        Ok(())
+    }
+
+    #[test]
+    /// Tolerates keys left behind by earlier releases so upgrades do not fail.
+    fn settings_file_ignores_obsolete_keys_from_older_releases() -> TestResult {
+        let parsed = super::parse_settings_file_str(
+            "forum_name = \"RustChan\"\n\
+             chan_net_bind = \"127.0.0.1:7070\"\n\
+             chan_net_api_key = \"obsolete-key\"\n\
+             rustwave_url = \"http://localhost:7071\"\n",
+        )
+        .context("settings files with obsolete keys must still parse")?;
+
+        anyhow::ensure!(
+            parsed.forum_name.as_deref() == Some("RustChan"),
+            "recognized keys must keep parsing alongside obsolete keys"
         );
         Ok(())
     }

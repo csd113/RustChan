@@ -13,9 +13,6 @@ pub mod banner;
 pub mod cache;
 /// CAPTCHA challenge generation and validation.
 pub mod captcha;
-#[cfg(test)]
-/// `ChanNet` federation and gateway endpoints used by crate-level tests.
-pub mod chan_net;
 /// Runtime configuration and persistent settings.
 pub mod config;
 /// SQLite persistence operations and models.
