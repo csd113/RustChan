@@ -32,6 +32,8 @@ docker compose ps
 docker compose logs -f rustchan
 ```
 
+To run a specific published SHA image before `latest` is available, set `RUSTCHAN_IMAGE=ghcr.io/csd113/rustchan:sha-<full-commit-SHA>` before `docker compose up -d`. The same override can pin later deployments to a tested revision.
+
 Create an administrator with `docker compose exec rustchan rustchan-cli --data-dir /data admin create-admin admin '<strong-password>'`. The image health check requests `/readyz`, which checks database readiness. `docker compose ps` shows its status.
 
 To upgrade the Compose deployment:

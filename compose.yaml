@@ -1,6 +1,6 @@
 services:
   rustchan:
-    image: ghcr.io/csd113/rustchan:latest
+    image: ${RUSTCHAN_IMAGE:-ghcr.io/csd113/rustchan:latest}
     restart: unless-stopped
     ports:
       - "8080:8080"
