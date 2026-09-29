@@ -56,7 +56,7 @@ Current version: `1.5.0`. Minimum supported Rust version: `1.91`.
 - Hashed client IPs, Argon2id admin passwords, CSRF protection, secure sessions, rate limiting, and security headers
 - Responsive pages with JavaScript enhancements and supported no-JavaScript fallbacks
 
-No Docker, Postgres, or Redis is required.
+No Postgres or Redis is required. Docker is optional; see [Container deployment](docs/containers.md).
 
 ## Quick start
 
@@ -79,6 +79,8 @@ Open `http://localhost:8080`. The admin panel is at `http://localhost:8080/admin
 On Windows, use `target/release/rustchan-cli.exe`. For a service installation, give RustChan an absolute data directory such as `--data-dir /var/lib/rustchan`.
 
 The full installation and deployment walkthrough is in [SETUP.md](SETUP.md). It covers Rust and `ffmpeg` installation, systemd, reverse proxies, TLS, Tor, updates, and troubleshooting.
+
+For Docker, pull `ghcr.io/csd113/rustchan:latest` and follow [the container guide](docs/containers.md). The image supports Linux AMD64 and ARM64 and stores all mutable state in a single `/data` volume.
 
 ## Configuration
 
