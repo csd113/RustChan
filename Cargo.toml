@@ -1,6 +1,6 @@
 [package]
 name = "rustchan"
-version = "1.4.1"
+version = "1.5.0"
 edition = "2021"
 # Keep the package MSRV and cargo-msrv metadata aligned with Arti's Rust 1.91
 # requirement.

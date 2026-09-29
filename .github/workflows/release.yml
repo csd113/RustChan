@@ -219,6 +219,30 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout release changelog
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Extract release notes
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          version = os.environ["RELEASE_TAG"].removeprefix("v")
+          sections = Path("CHANGELOG.md").read_text().split("\n## ")
+          matches = [section for section in sections[1:]
+                     if section.splitlines()[0].split(" — ")[0] == f"RustChan {version}"]
+          if len(matches) != 1:
+              raise SystemExit(f"expected one changelog entry for {version}")
+          notes = matches[0].split("\n", 1)[1].strip()
+          if not notes:
+              raise SystemExit("release notes must not be empty")
+          Path("RELEASE_NOTES.md").write_text(notes + "\n")
+          PY
+
       - name: Download build artifacts
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
@@ -259,4 +283,5 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
           files: release-assets/*

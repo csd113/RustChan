@@ -2,7 +2,21 @@
 
 All notable changes to RustChan will be documented in this file.
 
-## RustChan v1.5
+## RustChan 1.5.0 — 2026-09-28
+
+This release removes ChanNet and improves reliability, resource use, and administration.
+
+### Upgrade notes
+
+- ChanNet and the `--chan-net` CLI option have been removed. Remove the option from service commands before upgrading; obsolete ChanNet configuration keys are ignored.
+- Existing `1.4.1` database structures are retained, verified, and stamped as `1.5.0`. Historical `chan_net_*` tables remain for database and backup compatibility. Back up your data before upgrading.
+- `/readyz` now checks database connectivity and the release schema version. Deep integrity checks remain available at startup, in detailed readiness, and in admin health.
+- Rust 1.91 remains the minimum supported compiler.
+
+### Included since the last published release (1.4.0)
+
+- Includes the 1.4.1 terminal administration console refresh, schema normalization and domain validation, and thread reply-counter reconciliation described below.
+- Includes configurable backup storage directories, rejection of unsupported saved-backup storage modes, and the Arti 0.46 dependency refresh.
 
 ### Removed
 
@@ -12,7 +26,7 @@ All notable changes to RustChan will be documented in this file.
 
 - Fixed transaction handling so a failed `COMMIT` rolls back and returns the pooled SQLite connection cleanly instead of leaving an open transaction or stale write lock behind.
 - Locked and archived threads now reject replies through a typed error instead of matching English error text, so those responses keep their exact status.
-- Malformed background media-job payloads are logged and left pending instead of being resolved as stale duplicates.
+- Media scheduling logs JSON decoding failures and skips those records instead of resolving them as stale duplicates.
 - Spam-check jobs that cannot be enqueued are logged instead of silently dropped.
 - Fixed a duplicate-claim race so two workers cannot transcode or analyze the same source file at the same time.
 - Board deletion now aborts when the board lookup fails instead of skipping the pre-delete database health check.

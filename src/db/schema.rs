@@ -892,7 +892,8 @@ fn repair_known_legacy_baseline_drift(conn: &rusqlite::Connection) -> Result<()>
 
 /// Return whether a recorded version belongs to a recognized repairable baseline.
 fn is_known_legacy_schema_version(version: Option<&str>) -> bool {
-    if matches!(version, None | Some("1.3.0" | "1.4.0")) || version == Some(BASELINE_SCHEMA_VERSION)
+    if matches!(version, None | Some("1.3.0" | "1.4.0" | "1.4.1"))
+        || version == Some(BASELINE_SCHEMA_VERSION)
     {
         return true;
     }
@@ -2999,6 +3000,34 @@ mod tests {
             "INSERT INTO themes (slug, display_name) VALUES ('Unsafe Theme', 'Unsafe')",
             "themes row violates a persisted domain invariant",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn previous_release_baseline_upgrades_without_losing_data() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        install_or_migrate_schema(&conn)?;
+        conn.execute_batch(
+            "UPDATE schema_version SET version = '1.4.1';
+             INSERT INTO boards (id, short_name, name) VALUES (1, 'b', 'Random');
+             INSERT INTO chan_net_posts (remote_post_id, board_id, author, content, remote_ts)
+             VALUES (42, 1, 'legacy', 'retained', 0);",
+        )?;
+        install_or_migrate_schema(&conn)?;
+        verify_database_schema(&conn)?;
+        let retained: String = conn.query_row(
+            "SELECT content FROM chan_net_posts WHERE remote_post_id = 42",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            retained == "retained",
+            "historical data must survive the upgrade"
+        );
+        ensure!(
+            super::is_known_legacy_schema_version(Some("1.4.1")),
+            "the previous baseline must remain eligible for recognized repairs"
+        );
         Ok(())
     }
 
