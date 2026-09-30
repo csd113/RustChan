@@ -14,7 +14,11 @@ docker run -d --name rustchan --restart unless-stopped \
   ghcr.io/csd113/rustchan:latest
 ```
 
-Open <http://localhost:8080>. Create an administrator with `docker exec rustchan rustchan-cli --data-dir /data admin create-admin admin '<strong-password>'`; use a unique password. For a public site, put RustChan behind a TLS reverse proxy or configure its built-in TLS in `/data/settings.toml` and publish the TLS port as well. For a TLS-terminating proxy, set `CHAN_BEHIND_PROXY=true` and configure `trusted_proxy_cidrs` for the proxy's network. The Docker port mapping alone serves HTTP.
+Open <http://localhost:8080/setup> before allowing visitors. Choose a site name, create an administrator with a unique password, and name your first board. Select **review setup**, then **finish setup**. For a local trial, use **Local/testing → load defaults** before filling in your details. Your site is at <http://localhost:8080> and the admin panel is at <http://localhost:8080/admin>.
+
+For command-line setup instead, create an administrator with `docker exec rustchan rustchan-cli --data-dir /data admin create-admin admin '<strong-password>'`, then sign in to the admin panel to create a board. Creating an administrator this way disables the fresh-instance browser wizard.
+
+The port mapping above exposes HTTP on the host's network interfaces. For access only from your own computer, use `-p 127.0.0.1:8080:8080` instead. For a public site, put RustChan behind a TLS reverse proxy or configure its built-in TLS in `/data/settings.toml` and publish the TLS port as well. For a TLS-terminating proxy, set `CHAN_BEHIND_PROXY=true` and configure `trusted_proxy_cidrs` for the proxy's network. The Docker port mapping alone serves HTTP.
 
 The image starts `rustchan-cli --data-dir /data serve`. On first start RustChan creates `/data/settings.toml` with a random cookie secret and initializes `/data/chan.db`. The `/data` volume also contains `/data/boards` (uploads), `/data/backups`, `/data/logs`, and `/data/runtime` (including Tor identity and TLS material). Keep the **whole directory** across upgrades. SQLite journal files live beside `chan.db` and must stay on the same volume. If you override `CHAN_DB`, `CHAN_UPLOADS`, or `CHAN_BACKUP_DIRECTORY`, keep those paths under `/data` or mount them separately.
 
@@ -34,7 +38,7 @@ docker compose logs -f rustchan
 
 To run a specific published SHA image before `latest` is available, set `RUSTCHAN_IMAGE=ghcr.io/csd113/rustchan:sha-<full-commit-SHA>` before `docker compose up -d`. The same override can pin later deployments to a tested revision.
 
-Create an administrator with `docker compose exec rustchan rustchan-cli --data-dir /data admin create-admin admin '<strong-password>'`. The image health check requests `/readyz`, which checks database readiness. `docker compose ps` shows its status.
+Finish the browser setup at <http://localhost:8080/setup> as described above. For command-line setup instead, use `docker compose exec rustchan rustchan-cli --data-dir /data admin create-admin admin '<strong-password>'`, then create a board in the admin panel. The image health check requests `/readyz`, which checks database readiness. `docker compose ps` shows its status.
 
 To upgrade the Compose deployment:
 
