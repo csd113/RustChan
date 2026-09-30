@@ -2,6 +2,7 @@ import { test, expect, adminLogin } from './helpers';
 
 test('custom theme creation and editing retain native submit buttons outside the decorative preview', async ({ page, app, javaScriptEnabled }) => {
   await adminLogin(page, app);
+  await page.waitForLoadState('networkidle');
   await page.goto(`${app.baseURL}/admin/panel?open=theme-catalog#theme-catalog`);
   await page.locator('.theme-workbench-dropdown > summary').click();
   const form = page.locator('form[action="/admin/theme/create"]');
@@ -10,6 +11,9 @@ test('custom theme creation and editing retain native submit buttons outside the
   expect(await submit.evaluate((button: HTMLButtonElement) => button.form?.getAttribute('action'))).toBe('/admin/theme/create');
   await form.locator('input[name="display_name"]').fill('Browser created theme');
   await form.locator('input[name="slug"]').fill('browsercreated');
+  // This journey checks native submit buttons. Settle background health polls
+  // before navigation so WebKit does not report an aborted fetch as a page error.
+  await page.waitForLoadState('networkidle');
   await submit.click();
   const card = page.locator('#theme-browsercreated');
   await expect(card).toBeVisible();
@@ -19,9 +23,11 @@ test('custom theme creation and editing retain native submit buttons outside the
   const save = edit.getByRole('button', { name: 'save theme settings', exact: true });
   expect(await save.evaluate((button: HTMLButtonElement) => button.form?.getAttribute('action'))).toBe('/admin/theme/update');
   await edit.locator('input[name="display_name"]').fill('Browser edited theme');
+  await page.waitForLoadState('networkidle');
   await save.click();
   await expect(card.locator('summary').first()).toContainText('Browser edited theme');
   if (!(await card.evaluate((el: HTMLDetailsElement) => el.open))) await card.locator('summary').first().click();
+  await page.waitForLoadState('networkidle');
   await card.getByRole('button', { name: 'delete theme', exact: true }).click();
   if (javaScriptEnabled) await page.locator('#confirm-modal-continue').click();
   await expect(card).toHaveCount(0);

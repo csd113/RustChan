@@ -550,8 +550,11 @@ export const test = base.extend<{ app: RustChanServer; serverLogOnFailure: void 
       await use(app);
     } finally {
       // Cancel page reloads and background polling while the server is alive.
+      // Keep the context for Playwright teardown so late diagnostics failures
+      // can still retain their browser traces.
       try {
-        await context.close();
+        await Promise.all(context.pages().filter(page => !page.isClosed())
+          .map(page => page.goto('about:blank')));
       } finally {
         await app.dispose();
       }
