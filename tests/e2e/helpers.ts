@@ -267,21 +267,33 @@ export class RustChanServer {
   }
 
   runCli(args: string[]): void {
-    const result = spawnSync(this.binaryPath, args, {
-      cwd: this.binDir,
-      // CLI commands only need one connection; avoid eight concurrent WAL
-      // initializers competing within the one-second pool startup bound.
-      env: { ...this.env, CHAN_DB_POOL_SIZE: '1' },
-      encoding: 'utf8',
-      killSignal: 'SIGKILL',
-      timeout: 30_000,
-    });
-    fs.appendFileSync(this.logPath, [
-      `$ ${this.binaryPath} ${args.join(' ')}`,
-      result.stdout,
-      result.stderr,
-    ].join('\n'));
-    if (result.error || result.status !== 0) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const result = spawnSync(this.binaryPath, args, {
+        cwd: this.binDir,
+        // CLI commands only need one connection; avoid eight concurrent WAL
+        // initializers competing within the one-second pool startup bound.
+        env: { ...this.env, CHAN_DB_POOL_SIZE: '1' },
+        encoding: 'utf8',
+        killSignal: 'SIGKILL',
+        timeout: 30_000,
+      });
+      fs.appendFileSync(this.logPath, [
+        `$ ${this.binaryPath} ${args.join(' ')}`,
+        result.stdout,
+        result.stderr,
+      ].join('\n'));
+      if (!result.error && result.status === 0) {
+        return;
+      }
+      // run_admin initializes the pool before dispatching the command. Only
+      // retry that startup timeout: no admin mutation has executed yet, and
+      // retrying any later failure could duplicate a partially completed write.
+      if (!result.error && attempt < 2 && args[0] === 'admin'
+        && result.stderr.startsWith('Error: Failed to build database pool\n')
+        && result.stderr.includes('timed out waiting for connection')) {
+        fs.appendFileSync(this.logPath, `Retrying fixture database pool startup (${attempt + 1}/2)\n`);
+        continue;
+      }
       throw new Error(`rustchan-cli ${args.join(' ')} failed: ${result.error?.message || result.stderr || result.stdout}`);
     }
   }

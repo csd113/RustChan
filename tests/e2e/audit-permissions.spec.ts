@@ -1578,6 +1578,8 @@ test.describe('permissions, CSRF, and ownership', () => {
         expect(tableCount(app, 'posts', `thread_id = ${threadId}`)).toBe(postsBefore + 1);
       });
     } finally {
+      // Stop the default page's admin polling before disposing the standalone server.
+      await page.goto('about:blank');
       await context.close();
       await app.dispose();
     }

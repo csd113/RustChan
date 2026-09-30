@@ -43,11 +43,13 @@ test('audit: long public surfaces and expanded admin sections fit every release 
     }
   }
   await adminLogin(page, app);
-  for (const details of await page.locator('.admin-panel details:not([data-admin-diagnostics])').all()) {
-    if (await details.locator('summary').first().isVisible() && !(await details.evaluate((el: HTMLDetailsElement) => el.open))) {
-      await details.locator('summary').first().click();
+  // This is a layout audit; prepare all expanded cards together instead of
+  // scrolling through changing container bounds to click every nested summary.
+  await page.locator('.admin-panel details:not([data-admin-diagnostics])').evaluateAll(details => {
+    for (const element of details) {
+      if (element instanceof HTMLDetailsElement) element.open = true;
     }
-  }
+  });
   for (const width of widths) {
     await page.setViewportSize({ width, height: 844 });
     await expectNoHorizontalOverflow(page, `${width}px all admin sections expanded`, 1);

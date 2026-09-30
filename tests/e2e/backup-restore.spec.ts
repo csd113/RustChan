@@ -239,14 +239,19 @@ test.describe('live backup and restore coverage', () => {
       });
 
       const scheduledRef = await waitForNewBackupRef(app, new Set([sentinel.ref]), 90_000);
-      const scheduled = readBackupArtifact(app, scheduledRef);
-      assertFullBackupArtifact(scheduled, {
-        storageMode: 'split_zip',
-        splitSizeGib: 1,
-        includesTorKeys: false,
-        requiredBoards: ['pub', 'img', 'sec'],
-      });
-      assertChecksumsValid(scheduled.root);
+      // backup.json becomes visible before finalization writes and refreshes
+      // checksums. Wait for the finished artifact, including final metadata.
+      await expect(() => {
+        const scheduled = readBackupArtifact(app, scheduledRef);
+        expect(scheduled.metadata.total_size_bytes).toBeGreaterThan(0);
+        assertFullBackupArtifact(scheduled, {
+          storageMode: 'split_zip',
+          splitSizeGib: 1,
+          includesTorKeys: false,
+          requiredBoards: ['pub', 'img', 'sec'],
+        });
+        assertChecksumsValid(scheduled.root);
+      }).toPass({ timeout: 10_000, intervals: [100, 250, 500] });
     } finally {
       await stopApps(testInfo, apps);
     }
