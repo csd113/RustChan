@@ -117,19 +117,20 @@ pub(in crate::server) async fn update_full_backup_settings(
         move || -> Result<()> {
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
-            auto_backup_settings.update(
-                interval_hours,
-                copies_to_keep,
-                include_tor_hidden_service_keys,
-                storage_mode_value,
-                split_zip_part_size,
-            );
             crate::config::update_settings_file_auto_full_backup(
                 interval_hours,
                 copies_to_keep,
                 include_tor_hidden_service_keys,
                 storage_mode_value,
                 split_zip_part_size_gib,
+            )
+            .map_err(|error| AppError::BadRequest(format!("No settings saved: {error}")))?;
+            auto_backup_settings.update(
+                interval_hours,
+                copies_to_keep,
+                include_tor_hidden_service_keys,
+                storage_mode_value,
+                split_zip_part_size,
             );
             tracing::info!(
                 target: "admin",

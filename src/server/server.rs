@@ -305,8 +305,9 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
 
     // Check whether cookie_secret has changed since the last run (#19).
     // Must run after DB init so the site_settings table exists.
-    if let Ok(conn) = pool.get() {
-        check_cookie_secret_rotation(&conn);
+    {
+        let conn = pool.get()?;
+        check_cookie_secret_rotation(&conn)?;
     }
 
     // Initialise the live site name and subtitle from DB so they're available before any request.
@@ -331,6 +332,20 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                 CONFIG.forum_name.clone()
             });
             crate::templates::set_live_site_name(&name);
+            crate::templates::set_live_hide_nsfw_default(
+                crate::db::get_site_setting(&conn, "default_hide_nsfw_boards")?
+                    .is_some_and(|value| matches!(value.as_str(), "1" | "true")),
+            );
+            let saved_timeout = crate::db::get_site_setting(&conn, "ffmpeg_timeout_secs")?
+                .map(|value| value.parse::<u64>())
+                .transpose()
+                .map_err(anyhow::Error::from)?;
+            let effective_timeout = std::env::var("CHAN_FFMPEG_TIMEOUT_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .or(saved_timeout)
+                .unwrap_or(CONFIG.ffmpeg_timeout_secs);
+            crate::config::set_live_ffmpeg_timeout_secs(effective_timeout)?;
 
             // Seed subtitle from settings.toml if not yet configured in DB.
             // BUG FIX: get_site_subtitle() always returns a non-empty fallback

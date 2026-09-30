@@ -1012,7 +1012,12 @@ fn default_env_filter() -> EnvFilter {
 
 /// Parses `RUST_LOG`, falling back to `RustChan`'s default filter.
 fn env_filter() -> EnvFilter {
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| default_env_filter())
+    EnvFilter::try_from_default_env()
+        .ok()
+        .or_else(|| {
+            crate::config::saved_log_filter().and_then(|filter| EnvFilter::try_new(filter).ok())
+        })
+        .unwrap_or_else(default_env_filter)
 }
 
 // Terminal formatter

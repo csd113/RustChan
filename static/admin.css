@@ -4236,3 +4236,57 @@ html:not([data-theme]) .admin-login h1 {
     font-size: 16px;
   }
 }
+
+/* Runtime configuration forms use the current theme's existing color tokens. */
+.admin-settings-section { scroll-margin-top: calc(var(--header-offset, 58px) + 1rem); padding: 1.25rem; }
+.admin-settings-section h2 { margin-top: 0; scroll-margin-top: calc(var(--header-offset, 58px) + 1rem); }
+.admin-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.admin-setting { min-width: 0; padding: 1rem; border: 1px solid var(--border); background: var(--bg-panel); }
+.admin-setting > label { display: block; font-weight: bold; margin-bottom: .5rem; }
+.admin-setting input, .admin-setting textarea, .admin-setting select { width: 100%; max-width: 100%; box-sizing: border-box; min-height: 2.75rem; }
+.admin-setting input:focus-visible, .admin-setting textarea:focus-visible, .admin-setting select:focus-visible { outline: 2px solid var(--green-bright); outline-offset: 3px; }
+.admin-setting-help { color: var(--text-dim); font-size: .85rem; line-height: 1.55; }
+.admin-setting-state { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); gap: .35rem .5rem; font-size: .8rem; overflow-wrap: anywhere; }
+.admin-setting-state dt { color: var(--text-dim); }
+.admin-setting-state dd { margin: 0; }
+.admin-settings-save { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; margin-top: 1rem; }
+.admin-settings-save span { color: var(--text-dim); font-size: .85rem; }
+@media (max-width: 700px) {
+  .admin-settings-grid { grid-template-columns: minmax(0, 1fr); }
+  .admin-settings-section { padding: .75rem; }
+}
+.admin-settings-group { border: 0; padding: 0; margin: 1.5rem 0; min-width: 0; }
+.admin-settings-group legend { font-size: 1rem; font-weight: bold; padding: 0 0 .75rem; }
+.admin-settings-search { margin: 1rem 0; padding: 1rem; border: 1px solid var(--border); }
+.admin-settings-search label { display: block; font-weight: bold; margin-bottom: .5rem; }
+.admin-settings-search input { width: min(100%, 30rem); min-height: 2.75rem; box-sizing: border-box; }
+.admin-settings-search-results { padding-left: 1.25rem; }
+.admin-settings-search-results li { margin: .65rem 0; }
+
+/* Task navigation works through preserved URL anchors, including without JavaScript. */
+.admin-panel-workspace { display: grid; grid-template-columns: minmax(180px, 220px) minmax(0, 1fr); gap: 1.5rem; align-items: start; }
+.admin-panel-workspace .admin-section-index { position: sticky; top: calc(var(--header-offset, 72px) + 1rem); display: flex; flex-direction: column; align-items: stretch; gap: .2rem; padding: .75rem; margin: 0; max-height: calc(100vh - var(--header-offset, 72px) - 2rem); overflow-y: auto; }
+.admin-section-index a { padding: .5rem .65rem; border-radius: 4px; }
+.admin-section-index a:hover, .admin-section-index a:focus-visible { background: var(--surface-raised, var(--bg-alt)); outline: 2px solid currentColor; outline-offset: 2px; }
+.admin-task-content { min-width: 0; }
+.admin-task .admin-section:first-child { margin-top: 0; }
+@supports selector(:has(:target)) {
+  .admin-task-content .admin-task { display: none; }
+  .admin-task-content .admin-task-default { display: block; }
+  .admin-panel:has(.admin-task:target, .admin-task :target) .admin-task { display: none; }
+  .admin-panel:has(.admin-task:target, .admin-task :target) .admin-task:target,
+  .admin-panel:has(.admin-task:target, .admin-task :target) .admin-task:has(:target) { display: block; }
+}
+@media (max-width: 760px) {
+  .admin-panel-workspace { display: block; }
+  .admin-panel-workspace .admin-section-index { position: static; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: none; margin-bottom: 1rem; }
+  .admin-section-index > span { grid-column: 1 / -1; }
+}
+
+/* Dedicated credential forms retain readable spacing and touch targets. */
+#accounts form, #admin-secret-rotation { display: flex; flex-direction: column; gap: .65rem; align-items: stretch; }
+#accounts form h3 { display: block; margin: 0 0 .5rem; }
+#accounts form input, #accounts form select, #admin-secret-rotation input { width: 100%; box-sizing: border-box; min-height: 2.75rem; }
+#accounts form button, #admin-secret-rotation button { align-self: start; min-height: 2.75rem; margin-top: .5rem; }
+#accounts form input:focus-visible, #accounts form select:focus-visible, #admin-secret-rotation input:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+@media (max-width: 700px) { #accounts form input, #accounts form select, #admin-secret-rotation input { font-size: 16px; } }

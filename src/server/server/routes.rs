@@ -177,6 +177,26 @@ pub(super) fn public_routes() -> Router<AppState> {
 pub(super) fn admin_routes() -> Router<AppState> {
     Router::new()
         .merge(admin_auth_routes())
+        .route(
+            "/admin/network/settings",
+            post(crate::handlers::admin::update_network_settings),
+        )
+        .route(
+            "/admin/appearance/defaults",
+            post(crate::handlers::admin::update_visitor_defaults),
+        )
+        .route(
+            "/admin/secrets/rotate",
+            post(crate::handlers::admin::rotate_secret),
+        )
+        .route(
+            "/admin/accounts/{action}",
+            post(crate::handlers::admin::update_account),
+        )
+        .route(
+            "/admin/config/{section}",
+            post(crate::handlers::admin::update_runtime_settings),
+        )
         .merge(admin_board_routes())
         .merge(admin_backup_routes())
         .merge(admin_moderation_routes())

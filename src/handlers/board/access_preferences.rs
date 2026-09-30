@@ -1,16 +1,17 @@
 use super::{
-    board_access_cookie_from_jar, board_access_cookie_name, board_access_ok_response,
-    board_access_rate_limited_response, board_access_required_response, board_unlock_attempt_key,
-    board_unlock_default_return_to, board_unlock_rate_limit_message, board_unlock_retry_after_secs,
-    check_csrf_jar, clear_board_unlock_failures, current_theme_from_jar, db,
-    expected_board_access_cookie_value, header, load_board_access_context, new_csrf_token,
-    record_board_unlock_failure, render_board_unlock_html, safe_return_to, sha256_hex,
-    should_set_public_secure_cookie, templates, user_preferences_from_jar, verify_password,
-    viewer_preference_key, AppError, AppState, BoardAccessContext, Cookie, CookieJar, Duration,
-    Form, HeaderMap, HeaderValue, Path, Query, Redirect, Response, Result, SameSite,
-    SecureCookieContext, State, StatusCode, ADMIN_SESSION_COOKIE, BOARD_ACCESS_COOKIE_TTL_DAYS,
-    CONFIG, NSFW_CONSENT_COOKIE, USER_ACTIVITY_BADGES_COOKIE, USER_HIDE_NSFW_COOKIE,
-    USER_PREFERRED_VIEW_COOKIE, USER_THEME_COOKIE, USER_VIDEO_AUDIO_COOKIE, VISITOR_ID_COOKIE,
+    board_access_cookie_days, board_access_cookie_from_jar, board_access_cookie_name,
+    board_access_ok_response, board_access_rate_limited_response, board_access_required_response,
+    board_unlock_attempt_key, board_unlock_default_return_to, board_unlock_rate_limit_message,
+    board_unlock_retry_after_secs, check_csrf_jar, clear_board_unlock_failures,
+    current_theme_from_jar, db, expected_board_access_cookie_value, header,
+    load_board_access_context, new_csrf_token, record_board_unlock_failure,
+    render_board_unlock_html, safe_return_to, sha256_hex, should_set_public_secure_cookie,
+    templates, user_preferences_from_jar, verify_password, viewer_preference_key, AppError,
+    AppState, BoardAccessContext, Cookie, CookieJar, Duration, Form, HeaderMap, HeaderValue, Path,
+    Query, Redirect, Response, Result, SameSite, SecureCookieContext, State, StatusCode,
+    ADMIN_SESSION_COOKIE, CONFIG, NSFW_CONSENT_COOKIE, USER_ACTIVITY_BADGES_COOKIE,
+    USER_HIDE_NSFW_COOKIE, USER_PREFERRED_VIEW_COOKIE, USER_THEME_COOKIE, USER_VIDEO_AUDIO_COOKIE,
+    VISITOR_ID_COOKIE,
 };
 use axum::http::Uri;
 use axum::response::IntoResponse as _;
@@ -25,7 +26,9 @@ const OWNED_POSTS_COOKIE_MAX: usize = 16;
 /// Owned posts cookie max len used by this handler.
 const OWNED_POSTS_COOKIE_MAX_LEN: usize = 3_800;
 /// Self delete window secs used by this handler.
-pub(in crate::server::handlers) const SELF_DELETE_WINDOW_SECS: i64 = 60;
+pub(in crate::server::handlers) fn self_action_window_secs() -> i64 {
+    CONFIG.operator.self_action_window_secs
+}
 /// Board activity cookie used by this handler.
 const BOARD_ACTIVITY_COOKIE: &str = "rustchan_board_activity";
 /// Thread activity cookie used by this handler.
@@ -1060,7 +1063,7 @@ fn board_access_cookie(cookie_name: String, cookie_value: String, secure: bool) 
     cookie.set_same_site(SameSite::Lax);
     cookie.set_path("/");
     cookie.set_secure(secure);
-    cookie.set_max_age(Duration::days(BOARD_ACCESS_COOKIE_TTL_DAYS));
+    cookie.set_max_age(Duration::days(board_access_cookie_days()));
     cookie
 }
 
@@ -1150,9 +1153,9 @@ mod tests {
     use super::{
         board_activity_markers_from_jar, ensure_csrf_with_secure, owned_post_grants_from_jar,
         owned_posts_cookie, owned_posts_cookie_value, prune_board_activity_markers,
-        public_preference_cookie, remember_owned_post_until, set_user_preferences,
-        thread_activity_markers_from_jar, OwnedPostGrant, UserPreferencesForm,
-        BOARD_ACTIVITY_COOKIE, OWNED_POSTS_COOKIE_MAX_LEN, SELF_DELETE_WINDOW_SECS,
+        public_preference_cookie, remember_owned_post_until, self_action_window_secs,
+        set_user_preferences, thread_activity_markers_from_jar, OwnedPostGrant,
+        UserPreferencesForm, BOARD_ACTIVITY_COOKIE, OWNED_POSTS_COOKIE_MAX_LEN,
         THREAD_ACTIVITY_COOKIE, USER_HIDE_NSFW_COOKIE, VISITOR_ID_COOKIE,
     };
     use anyhow::{ensure, Context as _, Result as AnyResult};
@@ -1171,7 +1174,7 @@ mod tests {
                 thread_id: 7,
                 board_short: "test".to_owned(),
                 deletion_token: "token".to_owned(),
-                expires_at: chrono::Utc::now().timestamp() + SELF_DELETE_WINDOW_SECS,
+                expires_at: chrono::Utc::now().timestamp() + self_action_window_secs(),
             }],
             true,
         )
@@ -1251,7 +1254,7 @@ mod tests {
                 thread_id: 7,
                 board_short: "test".to_owned(),
                 deletion_token: "token".to_owned(),
-                expires_at: chrono::Utc::now().timestamp() + SELF_DELETE_WINDOW_SECS,
+                expires_at: chrono::Utc::now().timestamp() + self_action_window_secs(),
             }],
             false,
         )
@@ -1359,7 +1362,7 @@ mod tests {
             thread_id: 7,
             board_short: "test".to_owned(),
             deletion_token: "token".to_owned(),
-            expires_at: chrono::Utc::now().timestamp() + SELF_DELETE_WINDOW_SECS,
+            expires_at: chrono::Utc::now().timestamp() + self_action_window_secs(),
         }])
         .context("encode owned-posts cookie value")?;
 

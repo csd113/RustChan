@@ -166,10 +166,12 @@ function setAdminModalOpen(modal, open, displayValue) {
         var anchorId = link.getAttribute('data-open-admin-anchor') || sectionId;
         if (!sectionId || !document.getElementById(sectionId)) return;
         event.preventDefault();
-        openAdminSection(sectionId, anchorId);
+        // Native fragment navigation updates CSS :target; History API alone does not.
+        window.location.hash = anchorId;
         if (window.history && typeof window.history.replaceState === 'function') {
           window.history.replaceState(null, '', link.getAttribute('href'));
         }
+        openAdminSection(sectionId, anchorId);
       });
     });
   }

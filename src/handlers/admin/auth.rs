@@ -7,7 +7,7 @@
 //   3. POST /admin/logout → delete session from DB → clear cookie
 //
 // Brute-force protection:
-//   After LOGIN_FAIL_LIMIT failed attempts within LOGIN_FAIL_WINDOW seconds, the IP is
+//   After admin_login_fail_limit() failed attempts within admin_login_fail_window_secs() seconds, the IP is
 //   locked out for the remainder of that window.  On success the counter is cleared.
 //   Keys are SHA-256(IP) to avoid retaining raw addresses in memory.
 
@@ -34,16 +34,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
 // Admin login brute-force lockout
-// After LOGIN_FAIL_LIMIT failed attempts within LOGIN_FAIL_WINDOW seconds the
+// After admin_login_fail_limit() failed attempts within admin_login_fail_window_secs() seconds the
 // IP is locked out for the remainder of that window.  On success the counter
 // is cleared immediately so a genuine admin is never self-locked.
 //
 // Keys are SHA-256(IP) to avoid retaining raw addresses in memory.
 
 /// Login fail limit used by this handler.
-const LOGIN_FAIL_LIMIT: u32 = 5;
+fn admin_login_fail_limit() -> u32 {
+    CONFIG.operator.admin_login_fail_limit
+}
 /// Login fail window used by this handler.
-const LOGIN_FAIL_WINDOW: u64 = 900; // 15 minutes
+fn admin_login_fail_window_secs() -> u64 {
+    CONFIG.operator.admin_login_fail_window_secs
+}
 /// Admin login CSRF scope used by this handler.
 const ADMIN_LOGIN_CSRF_SCOPE: &str = "admin-login";
 
@@ -58,7 +62,7 @@ fn login_now_secs() -> u64 {
         .as_secs()
 }
 
-fn login_ip_key(ip: &str) -> String {
+pub(super) fn login_ip_key(ip: &str) -> String {
     use sha2::{Digest as _, Sha256};
     let mut h = Sha256::new();
     h.update(ip.as_bytes());
@@ -87,12 +91,12 @@ fn redact_login_username(username: &str) -> String {
 }
 
 /// Returns true if this IP is currently locked out.
-fn is_login_locked(ip_key: &str) -> bool {
+pub(super) fn is_login_locked(ip_key: &str) -> bool {
     let now = login_now_secs();
     if let Some(entry) = ADMIN_LOGIN_FAILS.get(ip_key) {
         let (count, window_start) = *entry;
-        if now.saturating_sub(window_start) <= LOGIN_FAIL_WINDOW {
-            return count >= LOGIN_FAIL_LIMIT;
+        if now.saturating_sub(window_start) <= admin_login_fail_window_secs() {
+            return count >= admin_login_fail_limit();
         }
     }
     false
@@ -103,13 +107,13 @@ fn is_login_locked(ip_key: &str) -> bool {
     clippy::significant_drop_tightening,
     reason = "the DashMap entry guard must remain held while its attempt count is updated"
 )]
-fn record_login_fail(ip_key: &str) -> u32 {
+pub(super) fn record_login_fail(ip_key: &str) -> u32 {
     let now = login_now_secs();
     let mut entry = ADMIN_LOGIN_FAILS
         .entry(ip_key.to_owned())
         .or_insert((0, now));
     let (count, window_start) = entry.value_mut();
-    if now.saturating_sub(*window_start) > LOGIN_FAIL_WINDOW {
+    if now.saturating_sub(*window_start) > admin_login_fail_window_secs() {
         *count = 1;
         *window_start = now;
     } else {
@@ -126,14 +130,15 @@ fn clear_login_fails(ip_key: &str) {
 /// Called periodically from the background task in `server/server.rs`.
 pub(in crate::server) fn prune_login_fails() {
     let now = login_now_secs();
-    // Throttle to at most once per LOGIN_FAIL_WINDOW seconds.
+    // Throttle to at most once per admin_login_fail_window_secs() seconds.
     let last = LOGIN_CLEANUP_SECS.load(Ordering::Relaxed);
-    if now.saturating_sub(last) < LOGIN_FAIL_WINDOW {
+    if now.saturating_sub(last) < admin_login_fail_window_secs() {
         return;
     }
     LOGIN_CLEANUP_SECS.store(now, Ordering::Relaxed);
-    ADMIN_LOGIN_FAILS
-        .retain(|_, (_, window_start)| now.saturating_sub(*window_start) <= LOGIN_FAIL_WINDOW);
+    ADMIN_LOGIN_FAILS.retain(|_, (_, window_start)| {
+        now.saturating_sub(*window_start) <= admin_login_fail_window_secs()
+    });
 }
 
 /// Ensures admin login CSRF.
@@ -319,12 +324,12 @@ pub(in crate::server) async fn admin_login(
     match result {
         None => {
             let fails = record_login_fail(&ip_key);
-            let locked_out = fails >= LOGIN_FAIL_LIMIT;
+            let locked_out = fails >= admin_login_fail_limit();
             warn!(
                 username = %username_log,
                 ip_prefix = %ip_key.get(..8).unwrap_or(&ip_key),
                 attempts = fails,
-                attempt_limit = LOGIN_FAIL_LIMIT,
+                attempt_limit = admin_login_fail_limit(),
                 locked_out,
                 "Failed admin login"
             );
@@ -540,7 +545,7 @@ mod tests {
         ADMIN_LOGIN_FAILS.remove(&key);
 
         let now = login_now_secs();
-        ADMIN_LOGIN_FAILS.insert(key.clone(), (LOGIN_FAIL_LIMIT, now));
+        ADMIN_LOGIN_FAILS.insert(key.clone(), (admin_login_fail_limit(), now));
         assert!(is_login_locked(&key));
 
         // Cleanup
@@ -553,7 +558,7 @@ mod tests {
         ADMIN_LOGIN_FAILS.remove(&key);
 
         let now = login_now_secs();
-        ADMIN_LOGIN_FAILS.insert(key.clone(), (LOGIN_FAIL_LIMIT - 1, now));
+        ADMIN_LOGIN_FAILS.insert(key.clone(), (admin_login_fail_limit() - 1, now));
         assert!(!is_login_locked(&key));
 
         ADMIN_LOGIN_FAILS.remove(&key);
@@ -564,9 +569,9 @@ mod tests {
         let key = login_ip_key("test-expired-window-55667788");
         ADMIN_LOGIN_FAILS.remove(&key);
 
-        // window_start far in the past, beyond LOGIN_FAIL_WINDOW
-        let old_ts = login_now_secs().saturating_sub(LOGIN_FAIL_WINDOW + 60);
-        ADMIN_LOGIN_FAILS.insert(key.clone(), (LOGIN_FAIL_LIMIT + 10, old_ts));
+        // window_start far in the past, beyond admin_login_fail_window_secs()
+        let old_ts = login_now_secs().saturating_sub(admin_login_fail_window_secs() + 60);
+        ADMIN_LOGIN_FAILS.insert(key.clone(), (admin_login_fail_limit() + 10, old_ts));
         assert!(!is_login_locked(&key));
 
         ADMIN_LOGIN_FAILS.remove(&key);
@@ -579,7 +584,7 @@ mod tests {
 
         let ip_key = login_ip_key("192.0.2.44");
         ADMIN_LOGIN_FAILS.remove(&ip_key);
-        ADMIN_LOGIN_FAILS.insert(ip_key.clone(), (LOGIN_FAIL_LIMIT, login_now_secs()));
+        ADMIN_LOGIN_FAILS.insert(ip_key.clone(), (admin_login_fail_limit(), login_now_secs()));
 
         let router = Router::new()
             .route("/admin/login", post(admin_login))

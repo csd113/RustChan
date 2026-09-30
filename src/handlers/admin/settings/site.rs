@@ -81,41 +81,43 @@ pub(in crate::server) async fn update_site_settings(
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
-            let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            let mut conn = pool.get()?;
+            let tx = conn.transaction().map_err(anyhow::Error::from)?;
+            let conn = &tx;
+            require_admin_session_sid(conn, session_id.as_deref())?;
             let homepage_new_thread_badges_enabled = resolved_checkbox_setting(
                 form.homepage_new_thread_badges_enabled.as_deref(),
-                db::get_homepage_new_thread_badges_enabled(&conn),
+                db::get_homepage_new_thread_badges_enabled(conn),
                 preserve_missing_badge_settings,
             );
             let thread_new_reply_badges_enabled = resolved_checkbox_setting(
                 form.thread_new_reply_badges_enabled.as_deref(),
-                db::get_thread_new_reply_badges_enabled(&conn),
+                db::get_thread_new_reply_badges_enabled(conn),
                 preserve_missing_badge_settings,
             );
             let homepage_new_reply_badges_enabled = resolved_checkbox_setting(
                 form.homepage_new_reply_badges_enabled.as_deref(),
-                db::get_homepage_new_reply_badges_enabled(&conn),
+                db::get_homepage_new_reply_badges_enabled(conn),
                 preserve_missing_badge_settings,
             );
 
             // Save the custom site name (trimmed, max 64 chars).
             let new_name = form.site_name.as_deref().map_or_else(
-                || db::get_site_name(&conn),
+                || db::get_site_name(conn),
                 |value| value.trim().chars().take(64).collect::<String>(),
             );
-            db::set_site_setting(&conn, "site_name", &new_name)?;
+            db::set_site_setting(conn, "site_name", &new_name)?;
             // Update the in-memory live name so all pages reflect it immediately.
-            crate::templates::set_live_site_name(&new_name);
+
             tracing::info!(target: "admin", "Site name updated");
 
             // Save the custom subtitle.
             let new_subtitle = form.site_subtitle.as_deref().map_or_else(
-                || db::get_site_subtitle(&conn),
+                || db::get_site_subtitle(conn),
                 |value| value.trim().chars().take(128).collect::<String>(),
             );
-            db::set_site_setting(&conn, "site_subtitle", &new_subtitle)?;
-            crate::templates::set_live_site_subtitle(&new_subtitle);
+            db::set_site_setting(conn, "site_subtitle", &new_subtitle)?;
+
             tracing::info!(target: "admin", "Site subtitle updated");
 
             // Save the default theme slug (validated against allowed values).
@@ -123,20 +125,20 @@ pub(in crate::server) async fn update_site_settings(
                 let candidate = db::sanitize_theme_slug(value);
                 if candidate.is_empty() {
                     crate::theme::HARD_DEFAULT_THEME.to_owned()
-                } else if db::get_theme(&conn, &candidate)?.is_some_and(|theme| theme.enabled) {
+                } else if db::get_theme(conn, &candidate)?.is_some_and(|theme| theme.enabled) {
                     candidate
                 } else {
                     crate::theme::HARD_DEFAULT_THEME.to_owned()
                 }
             } else {
-                db::get_default_user_theme(&conn)
+                db::get_default_user_theme(conn)
             };
-            db::set_site_setting(&conn, "default_theme", &new_theme)?;
-            db::sync_live_theme_state(&conn)?;
+            db::set_site_setting(conn, "default_theme", &new_theme)?;
+
             tracing::info!(target: "admin", "Default theme updated");
 
             db::set_site_setting(
-                &conn,
+                conn,
                 "homepage_new_thread_badges_enabled",
                 if homepage_new_thread_badges_enabled {
                     "1"
@@ -145,7 +147,7 @@ pub(in crate::server) async fn update_site_settings(
                 },
             )?;
             db::set_site_setting(
-                &conn,
+                conn,
                 "homepage_new_reply_badges_enabled",
                 if homepage_new_reply_badges_enabled {
                     "1"
@@ -154,7 +156,7 @@ pub(in crate::server) async fn update_site_settings(
                 },
             )?;
             db::set_site_setting(
-                &conn,
+                conn,
                 "thread_new_reply_badges_enabled",
                 if thread_new_reply_badges_enabled {
                     "1"
@@ -164,25 +166,13 @@ pub(in crate::server) async fn update_site_settings(
             )?;
             tracing::info!(target: "admin", "New-activity badge settings updated");
 
-            // Persist overlapping global settings back to settings.toml so
-            // they survive a restart without requiring a manual file edit.
-            crate::config::update_settings_file_site_settings(
-                &new_name,
-                &new_subtitle,
-                homepage_new_thread_badges_enabled,
-                homepage_new_reply_badges_enabled,
-                thread_new_reply_badges_enabled,
-                &new_theme,
-            );
-            tracing::info!(target: "admin", "settings.toml updated");
-
             db::set_site_setting(
-                &conn,
+                conn,
                 "banner_rotation_interval_minutes",
                 &banner_rotation_interval_minutes.to_string(),
             )?;
             db::set_site_setting(
-                &conn,
+                conn,
                 "banner_external_links_enabled",
                 if banner_external_links_enabled {
                     "1"
@@ -192,6 +182,12 @@ pub(in crate::server) async fn update_site_settings(
             )?;
             tracing::info!(target: "admin", "Banner settings updated");
 
+            let themes = db::load_themes(conn)?;
+            tx.commit().map_err(anyhow::Error::from)?;
+            crate::templates::set_live_site_name(&new_name);
+            crate::templates::set_live_site_subtitle(&new_subtitle);
+            crate::templates::set_live_default_theme(&new_theme);
+            crate::templates::set_live_themes(themes);
             Ok(())
         }
     })

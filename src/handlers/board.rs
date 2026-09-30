@@ -58,9 +58,13 @@ pub(super) fn should_set_public_secure_cookie(
 }
 
 /// Preview replies used by this handler.
-const PREVIEW_REPLIES: i64 = 3;
+fn index_reply_previews() -> i64 {
+    CONFIG.operator.index_reply_previews
+}
 /// Threads per page used by this handler.
-const THREADS_PER_PAGE: i64 = 10;
+fn index_threads_per_page() -> i64 {
+    CONFIG.operator.index_threads_per_page
+}
 /// User theme cookie used by this handler.
 const USER_THEME_COOKIE: &str = "rustchan_theme";
 /// User hide NSFW cookie used by this handler.
@@ -80,11 +84,17 @@ pub(in crate::server) const ADMIN_SESSION_COOKIE: &str = "chan_admin_session";
 /// Board access cookie prefix used by this handler.
 const BOARD_ACCESS_COOKIE_PREFIX: &str = "rustchan_board_access_";
 /// Board access cookie TTL days used by this handler.
-const BOARD_ACCESS_COOKIE_TTL_DAYS: i64 = 30;
+fn board_access_cookie_days() -> i64 {
+    CONFIG.operator.board_access_cookie_days
+}
 /// Board unlock fail limit used by this handler.
-const BOARD_UNLOCK_FAIL_LIMIT: u32 = 5;
+fn board_password_fail_limit() -> u32 {
+    CONFIG.operator.board_password_fail_limit
+}
 /// Board unlock fail window secs used by this handler.
-const BOARD_UNLOCK_FAIL_WINDOW_SECS: u64 = 900;
+fn board_password_fail_window_secs() -> u64 {
+    CONFIG.operator.board_password_fail_window_secs
+}
 /// HTML cache control used by this handler.
 const HTML_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_DYNAMIC_PUBLIC;
 /// X rustchan redirect header used by this handler.
@@ -287,7 +297,9 @@ pub(in crate::server) fn user_preferences_from_jar(jar: &CookieJar) -> templates
     templates::UserPreferences {
         hide_nsfw_boards: jar
             .get(USER_HIDE_NSFW_COOKIE)
-            .is_some_and(|cookie| cookie.value() == "1"),
+            .map_or(default_preferences.hide_nsfw_boards, |cookie| {
+                cookie.value() == "1"
+            }),
         video_audio_muted: jar
             .get(USER_VIDEO_AUDIO_COOKIE)
             .is_some_and(|cookie| cookie.value() == "mute"),
@@ -589,7 +601,7 @@ fn prune_board_unlock_failures(now_secs: u64) {
         return;
     }
     BOARD_UNLOCK_FAILS.retain(|_, (_, window_start)| {
-        now_secs.saturating_sub(*window_start) <= BOARD_UNLOCK_FAIL_WINDOW_SECS
+        now_secs.saturating_sub(*window_start) <= board_password_fail_window_secs()
     });
 }
 
@@ -598,14 +610,14 @@ fn board_unlock_retry_after_secs(attempt_key: &str) -> Option<u64> {
     prune_board_unlock_failures(now_secs);
     let (count, window_start) = *BOARD_UNLOCK_FAILS.get(attempt_key)?;
     let elapsed = now_secs.saturating_sub(window_start);
-    if elapsed > BOARD_UNLOCK_FAIL_WINDOW_SECS {
+    if elapsed > board_password_fail_window_secs() {
         BOARD_UNLOCK_FAILS.remove(attempt_key);
         return None;
     }
-    if count < BOARD_UNLOCK_FAIL_LIMIT {
+    if count < board_password_fail_limit() {
         return None;
     }
-    Some((BOARD_UNLOCK_FAIL_WINDOW_SECS.saturating_sub(elapsed)).max(1))
+    Some((board_password_fail_window_secs().saturating_sub(elapsed)).max(1))
 }
 
 fn record_board_unlock_failure(attempt_key: &str) {
@@ -615,7 +627,7 @@ fn record_board_unlock_failure(attempt_key: &str) {
         .entry(attempt_key.to_owned())
         .or_insert((0, now_secs));
     let (count, window_start) = entry.value_mut();
-    if now_secs.saturating_sub(*window_start) > BOARD_UNLOCK_FAIL_WINDOW_SECS {
+    if now_secs.saturating_sub(*window_start) > board_password_fail_window_secs() {
         *count = 1;
         *window_start = now_secs;
     } else {

@@ -806,42 +806,48 @@ pub(in crate::server) async fn setup_finish(
                 "setup_pdf_upload_limit_bytes",
                 &parsed.pdf_limit_bytes.to_string(),
             )?;
-            crate::config::update_settings_file_setup(&crate::config::SetupSettingsFileUpdate {
-                forum_name: &parsed.site_name,
-                site_subtitle: &parsed.site_subtitle,
-                homepage_new_thread_badges_enabled: parsed.homepage_new_thread_badges_enabled,
-                homepage_new_reply_badges_enabled: parsed.homepage_new_reply_badges_enabled,
-                thread_new_reply_badges_enabled: parsed.thread_new_reply_badges_enabled,
-                default_theme: &parsed.default_theme,
-                auto_full_backup_interval_hours: parsed.auto_backup_interval_hours,
-                auto_full_backup_copies_to_keep: parsed.backup_retention,
-                auto_full_backup_include_tor_hidden_service_keys: parsed
-                    .include_tor_keys_in_backups,
-                auto_full_backup_storage_mode: "directory",
-                auto_full_backup_split_zip_part_size_gib:
-                    crate::handlers::admin::backup::split_zip_part_size_gib(
-                        CONFIG.auto_full_backup_split_zip_part_size_bytes,
-                    ),
-                runtime: crate::config::SetupRuntimeSettingsUpdate {
-                    enable_tor_support: parsed.enable_tor,
-                    tor_only: parsed.tor_only,
-                    behind_proxy: parsed.behind_proxy,
-                    https_cookies: parsed.https_cookies,
-                    max_image_size_mb: u64::try_from(parsed.image_limit_bytes / MIB_I64)
-                        .unwrap_or(8),
-                    max_video_size_mb: u64::try_from(parsed.video_limit_bytes / MIB_I64)
-                        .unwrap_or(50),
-                    max_audio_size_mb: u64::try_from(parsed.audio_limit_bytes / MIB_I64)
-                        .unwrap_or(150),
-                },
-            })?;
             db::mark_setup_complete(&tx)?;
-            tx.commit()?;
+            let saved_themes = db::load_themes(&tx)?;
+            let saved_boards = db::get_all_boards(&tx)?;
+            crate::config::update_settings_file_setup_with_commit(
+                &crate::config::SetupSettingsFileUpdate {
+                    forum_name: &parsed.site_name,
+                    site_subtitle: &parsed.site_subtitle,
+                    homepage_new_thread_badges_enabled: parsed.homepage_new_thread_badges_enabled,
+                    homepage_new_reply_badges_enabled: parsed.homepage_new_reply_badges_enabled,
+                    thread_new_reply_badges_enabled: parsed.thread_new_reply_badges_enabled,
+                    default_theme: &parsed.default_theme,
+                    auto_full_backup_interval_hours: parsed.auto_backup_interval_hours,
+                    auto_full_backup_copies_to_keep: parsed.backup_retention,
+                    auto_full_backup_include_tor_hidden_service_keys: parsed
+                        .include_tor_keys_in_backups,
+                    auto_full_backup_storage_mode: "directory",
+                    auto_full_backup_split_zip_part_size_gib:
+                        crate::handlers::admin::backup::split_zip_part_size_gib(
+                            CONFIG.auto_full_backup_split_zip_part_size_bytes,
+                        ),
+                    runtime: crate::config::SetupRuntimeSettingsUpdate {
+                        enable_tor_support: parsed.enable_tor,
+                        tor_only: parsed.tor_only,
+                        behind_proxy: parsed.behind_proxy,
+                        https_cookies: parsed.https_cookies,
+                        max_image_size_mb: u64::try_from(parsed.image_limit_bytes / MIB_I64)
+                            .unwrap_or(8),
+                        max_video_size_mb: u64::try_from(parsed.video_limit_bytes / MIB_I64)
+                            .unwrap_or(50),
+                        max_audio_size_mb: u64::try_from(parsed.audio_limit_bytes / MIB_I64)
+                            .unwrap_or(150),
+                    },
+                },
+                || Ok(tx.commit()?),
+            )?;
 
             templates::set_live_site_name(&parsed.site_name);
             templates::set_live_site_subtitle(&parsed.site_subtitle);
-            db::sync_live_theme_state(&conn)?;
-            templates::set_live_boards(db::get_all_boards(&conn)?);
+            templates::set_live_hide_nsfw_default(parsed.hide_nsfw_default);
+            templates::set_live_default_theme(&parsed.default_theme);
+            templates::set_live_themes(saved_themes);
+            templates::set_live_boards(saved_boards);
             auto_backup_settings.update(
                 parsed.auto_backup_interval_hours,
                 parsed.backup_retention,
@@ -1078,12 +1084,12 @@ fn setup_form_page(
 <section class="setup-section" aria-labelledby="setup-step-4">
 <div class="setup-section-head"><span class="setup-step">Step 4</span><h2 id="setup-step-4">Network and Tor</h2><p>Describe how visitors reach this instance. Runtime binding changes take effect after restart.</p></div>
 <div class="setup-grid">
-<label><span>Public URL</span><input name="public_url" value="{public_url}" placeholder="https://example.com" inputmode="url"></label>
+<label><span>Public URL (setup note)</span><input name="public_url" value="{public_url}" placeholder="https://example.com" inputmode="url"></label>
 <label class="setup-check"><input type="checkbox" name="enable_tor" value="1"{enable_tor}> Enable Tor/onion service</label>
 <label class="setup-check"><input type="checkbox" name="tor_only" value="1"{tor_only}> Tor-only loopback binding after restart</label>
 <label class="setup-check"><input type="checkbox" name="https_cookies" value="1"{https_cookies}> Use Secure cookies when request transport is HTTPS</label>
 <label class="setup-check"><input type="checkbox" name="behind_proxy" value="1"{behind_proxy}> Instance is behind a trusted HTTPS proxy</label>
-</div></section>
+</div><p class="setup-field-help">The URL above is a setup note. Configure the authoritative public hostnames and trusted proxy networks in Admin → Network &amp; Security after setup. Backup storage is managed in Admin → Backups; PDF caps are per-board settings.</p></section>
 <section class="setup-section" aria-labelledby="setup-step-5">
 <div class="setup-section-head"><span class="setup-step">Step 5</span><h2 id="setup-step-5">Default board</h2><p>Create the first board and choose its initial access and posting rules.</p></div>
 <div class="setup-grid">

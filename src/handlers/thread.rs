@@ -486,7 +486,7 @@ pub(in crate::server) async fn post_reply(
         submit_result.thread_id,
         submit_result.post_id,
         &submit_result.deletion_token,
-        submit_result.created_at + crate::handlers::board::SELF_DELETE_WINDOW_SECS,
+        submit_result.created_at + crate::handlers::board::self_action_window_secs(),
         crate::handlers::board::should_set_public_secure_cookie(&req_headers, secure_context),
     );
 
@@ -659,7 +659,7 @@ pub(in crate::server) async fn edit_post_get(
         > context
             .post
             .created_at
-            .saturating_add(crate::handlers::board::SELF_DELETE_WINDOW_SECS)
+            .saturating_add(crate::handlers::board::self_action_window_secs())
     {
         return Err(AppError::Forbidden(
             "The 60-second edit window for this post has closed.".into(),
@@ -795,7 +795,7 @@ pub(in crate::server) async fn edit_post_post(
             }
 
             let now = chrono::Utc::now().timestamp();
-            if now.saturating_sub(post.created_at) > crate::handlers::board::SELF_DELETE_WINDOW_SECS
+            if now.saturating_sub(post.created_at) > crate::handlers::board::self_action_window_secs()
             {
                 return Err(AppError::Forbidden(
                     "The 60-second edit window for this post has closed.".into(),
@@ -821,7 +821,7 @@ pub(in crate::server) async fn edit_post_post(
                 &deletion_token,
                 &body_text,
                 &body_html,
-                crate::handlers::board::SELF_DELETE_WINDOW_SECS,
+                crate::handlers::board::self_action_window_secs(),
             )?;
 
             if !success {
@@ -939,7 +939,7 @@ pub(in crate::server) async fn delete_post_get(
         > context
             .post
             .created_at
-            .saturating_add(crate::handlers::board::SELF_DELETE_WINDOW_SECS)
+            .saturating_add(crate::handlers::board::self_action_window_secs())
     {
         return Err(AppError::Forbidden(
             "The 60-second self-delete window for this post has closed.".into(),
@@ -1058,7 +1058,7 @@ pub(in crate::server) async fn delete_own_post(
                 &conn,
                 post_id,
                 &deletion_token,
-                crate::handlers::board::SELF_DELETE_WINDOW_SECS,
+                crate::handlers::board::self_action_window_secs(),
             )?;
 
             if let Some(deleted) = deleted.as_ref() {
@@ -1824,7 +1824,7 @@ mod tests {
             thread_id,
             post_id,
             "edit-token",
-            chrono::Utc::now().timestamp() + crate::handlers::board::SELF_DELETE_WINDOW_SECS,
+            chrono::Utc::now().timestamp() + crate::handlers::board::self_action_window_secs(),
         );
         let cookie = jar
             .get("rustchan_owned_posts")
@@ -2411,7 +2411,7 @@ mod tests {
             &state,
             true,
             true,
-            crate::handlers::board::SELF_DELETE_WINDOW_SECS + 1,
+            crate::handlers::board::self_action_window_secs() + 1,
         )?;
         let router = Router::new()
             .route("/{board}/post/{id}/edit", get(super::edit_post_get))
@@ -2444,7 +2444,7 @@ mod tests {
             &state,
             true,
             true,
-            crate::handlers::board::SELF_DELETE_WINDOW_SECS + 1,
+            crate::handlers::board::self_action_window_secs() + 1,
         )?;
         let router = Router::new()
             .route("/{board}/post/{id}/edit", post(super::edit_post_post))
@@ -2798,7 +2798,7 @@ mod tests {
             &state,
             true,
             true,
-            crate::handlers::board::SELF_DELETE_WINDOW_SECS + 1,
+            crate::handlers::board::self_action_window_secs() + 1,
         )?;
         let router = Router::new()
             .route("/{board}/post/{id}/delete", post(super::delete_own_post))
@@ -2856,7 +2856,7 @@ mod tests {
             &state,
             true,
             true,
-            crate::handlers::board::SELF_DELETE_WINDOW_SECS + 1,
+            crate::handlers::board::self_action_window_secs() + 1,
         )?;
         let router = Router::new()
             .route("/{board}/post/{id}/delete", get(super::delete_post_get))

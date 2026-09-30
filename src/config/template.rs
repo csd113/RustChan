@@ -44,6 +44,18 @@ enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfi
 # ── Network / web server ─────────────────────────────────────────────────────
 # Main HTTP port. The server binds to 0.0.0.0:<port> unless Tor-only mode is enabled.
 port = 8080
+# Optional explicit listener IP:port; omit to compose CHAN_HOST + port.
+# bind_addr = "0.0.0.0:8080"
+# Reverse-proxy headers are accepted only from the CIDR allowlist below.
+behind_proxy = false
+# Omit https_cookies for automatic proxy/native-TLS policy.
+# https_cookies = true
+# Historical browsing budget: counts all methods outside existing route exemptions.
+rate_limit_gets = 60
+rate_limit_window = 60
+rate_limit_policy = "legacy" # alternatively "reads" for GET/HEAD only
+# Administrator sessions created after startup expire after this many seconds.
+session_duration = 28800
 
 # Trusted proxy CIDR allowlist for forwarded headers.
 # The defaults cover local reverse proxies on the same machine.
@@ -108,6 +120,15 @@ tor_service_nickname = "rustchan"
 
 
 # Media / external tools
+# Dimension of subsequently generated thumbnails; existing thumbnails remain unchanged.
+thumb_size = 250
+# Bounded managed-media audits and safe-repair permission.
+media_reconcile_repair_enabled = false
+media_reconcile_interval_hours = 24 # 0 disables periodic passes
+media_reconcile_files_per_pass = 512
+media_reconcile_database_rows_per_pass = 16384
+media_reconcile_hash_bytes_per_pass = 67108864 # 64 MiB
+media_reconcile_repairs_per_pass = 32
 # Set to true to hard-exit at startup when ffmpeg is not found.
 # When false, the server still starts and video thumbnails fall back to placeholders.
 require_ffmpeg = false

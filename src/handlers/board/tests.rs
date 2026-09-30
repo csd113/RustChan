@@ -549,7 +549,7 @@ async fn post_password_board_write_actions_require_unlock() -> anyhow::Result<()
                             post_id,
                             "edit-token",
                             chrono::Utc::now().timestamp()
-                                + crate::handlers::board::SELF_DELETE_WINDOW_SECS,
+                                + crate::handlers::board::self_action_window_secs(),
                         )
                         .get("rustchan_owned_posts")
                         .context("owned posts cookie")?
@@ -689,7 +689,7 @@ async fn self_delete_requires_owned_post_cookie() -> anyhow::Result<()> {
         thread_id,
         reply_id,
         "reply-token",
-        chrono::Utc::now().timestamp() + crate::handlers::board::SELF_DELETE_WINDOW_SECS,
+        chrono::Utc::now().timestamp() + crate::handlers::board::self_action_window_secs(),
     );
     let owned_cookie = owned_cookie_jar
         .get("rustchan_owned_posts")
@@ -4225,7 +4225,7 @@ async fn unlock_board_access_rate_limits_repeated_failures() -> anyhow::Result<(
         .route("/{board}/unlock", post(super::unlock_board_access))
         .with_state(state);
 
-    for _ in 0..(super::BOARD_UNLOCK_FAIL_LIMIT - 1) {
+    for _ in 0..(super::board_password_fail_limit() - 1) {
         let response = router
             .clone()
             .oneshot(

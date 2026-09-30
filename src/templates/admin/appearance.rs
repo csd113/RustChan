@@ -39,12 +39,12 @@ pub(super) fn render_site_settings(view: &AdminPanelViewModel<'_>) -> String {
         "No custom global favicon uploaded yet."
     };
     let public_url_help = if view.dashboard.public_url == "not configured" {
-        "No public URL is configured. Add at least one hostname to settings.toml public_hosts, then restart RustChan."
+        "No public URL is configured. Add public hostnames in Network & Security, then restart RustChan."
     } else {
-        "Runtime host trust uses settings.toml public_hosts. To change this URL, edit public_hosts and restart RustChan."
+        "Runtime host trust uses settings.toml public_hosts. Change public hostnames in Network & Security, then restart RustChan."
     };
 
-    render_admin_site_settings_section(
+    let section = render_admin_site_settings_section(
         view.csrf_token,
         view.appearance.site_name,
         view.appearance.site_subtitle,
@@ -58,6 +58,13 @@ pub(super) fn render_site_settings(view: &AdminPanelViewModel<'_>) -> String {
         global_favicon_label,
         global_favicon_button,
         global_favicon_status,
+    );
+    let hide = crate::templates::live_hide_nsfw_default();
+    format!(
+        r#"{section}<section class="admin-section" id="visitor-defaults"><h2>Visitor defaults</h2><p>Active and saved: hide NSFW boards <strong>{hide}</strong>. Source: database; applies live. Visitors with a saved preference keep their choice.</p><form method="POST" action="/admin/appearance/defaults"><input type="hidden" name="_csrf" value="{}"><label for="setting-default_hide_nsfw_boards">Hide NSFW boards by default</label><select name="default_hide_nsfw_boards" id="setting-default_hide_nsfw_boards"><option value="false"{}>Show</option><option value="true"{}>Hide</option></select><button type="submit">Save visitor default</button></form></section>"#,
+        escape_html(view.csrf_token),
+        if hide { "" } else { " selected" },
+        if hide { " selected" } else { "" }
     )
 }
 

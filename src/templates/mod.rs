@@ -57,7 +57,7 @@ pub struct UserPreferences {
 impl Default for UserPreferences {
     fn default() -> Self {
         Self {
-            hide_nsfw_boards: false,
+            hide_nsfw_boards: live_hide_nsfw_default(),
             video_audio_muted: false,
             preferred_board_view: PreferredBoardView::Catalog,
             show_activity_badges: true,
@@ -1210,6 +1210,19 @@ pub(crate) fn error_page_with_preferences(
         "/",
         preferences,
     )
+}
+
+/// Database-owned site default; visitor cookies always take precedence.
+static LIVE_HIDE_NSFW_DEFAULT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Update the live first-visit NSFW navigation preference after a database commit.
+pub fn set_live_hide_nsfw_default(hide: bool) {
+    LIVE_HIDE_NSFW_DEFAULT.store(hide, Ordering::Relaxed);
+}
+/// Current first-visit NSFW preference; false preserves historical defaults.
+#[must_use]
+pub fn live_hide_nsfw_default() -> bool {
+    LIVE_HIDE_NSFW_DEFAULT.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]

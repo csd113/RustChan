@@ -65,8 +65,10 @@ pub fn admin_login_page(
 }
 
 // Admin panel
+mod accounts;
 /// Appearance-section rendering.
 mod appearance;
+mod application;
 /// Backup-section rendering.
 mod backups;
 /// Board-section rendering.
@@ -77,10 +79,34 @@ mod control_center;
 mod layout;
 /// Maintenance-section rendering.
 mod maintenance;
+mod management;
 /// Moderation-section rendering.
 mod moderation;
+/// Network settings rendering.
+mod network;
+/// Server-rendered settings search.
+mod search;
 /// Site-health rendering.
 mod site_health;
+
+/// Render authenticated network configuration status and controls.
+#[must_use]
+pub fn render_network_settings(
+    fields: &Result<Vec<crate::config::admin::SettingField>, String>,
+    csrf: &str,
+) -> String {
+    network::render(fields, csrf)
+}
+
+/// Render a related restart-required process configuration section.
+#[must_use]
+pub fn render_runtime_settings(
+    section: crate::config::admin::runtime::RuntimeSection,
+    fields: &Result<Vec<crate::config::admin::SettingField>, String>,
+    csrf: &str,
+) -> String {
+    network::render_section(fields, csrf, section.key(), section.label(), &format!("/admin/config/{}", section.route_key()), "Process configuration. Existing board preferences and live maintenance tools remain available in their sections.")
+}
 
 /// Complete input model for the administrator control panel.
 #[derive(Debug)]
@@ -91,6 +117,12 @@ pub struct AdminPanelViewModel<'a> {
     pub boards: &'a [Board],
     /// Visitor-selected theme, when present.
     pub current_theme: Option<&'a str>,
+    /// Authenticated network configuration controls.
+    pub network_html: String,
+    /// Authenticated grouped runtime settings.
+    pub runtime_html: String,
+    /// Optional runtime settings search query.
+    pub settings_query: Option<&'a str>,
     /// Control-center dashboard data.
     pub dashboard: AdminPanelDashboardView<'a>,
     /// Moderation data.
@@ -1958,6 +1990,29 @@ pub fn admin_ip_history_page(
     )
 }
 
+/// Render administrator credential workflows without existing secret values.
+#[must_use]
+pub fn render_accounts(users: &[(i64, String, i64)], csrf: &str) -> String {
+    accounts::render(users, csrf)
+}
+
+/// Render dedicated path/secret management without current secret material.
+#[must_use]
+pub fn render_management(
+    state: &Result<crate::config::admin::management::ManagementState, String>,
+    csrf: &str,
+) -> String {
+    management::render(state, csrf)
+}
+
+/// Render active/saved/source information for the retained live controls.
+#[must_use]
+pub fn render_application_state(
+    fields: &Result<Vec<crate::config::admin::SettingField>, String>,
+) -> String {
+    application::render(fields)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2267,6 +2322,9 @@ mod tests {
         let full_backups = vec![full_backup];
         let board_backups = vec![sample_board_backup()];
         let view = AdminPanelViewModel {
+            network_html: String::new(),
+            runtime_html: String::new(),
+            settings_query: None,
             csrf_token: "csrf",
             boards,
             current_theme: None,
@@ -2524,7 +2582,7 @@ mod tests {
         reason = "the test intentionally checks a linear list of independent health-panel controls"
     )]
     #[test]
-    fn admin_panel_site_health_renders_after_site_settings_closed_by_default() {
+    fn admin_panel_site_health_is_grouped_in_overview_and_closed_by_default() {
         let board = sample_board();
         let themes = vec![sample_theme()];
         let html = render_admin_panel_for_test(std::slice::from_ref(&board), &[], &themes, None);
@@ -2542,7 +2600,9 @@ mod tests {
             "site health section should be present"
         );
         assert!(boards.is_some(), "boards section should be present");
-        assert!(site_settings < site_health);
+        assert!(site_health < site_settings);
+        assert!(html.contains(r#"data-admin-task="overview""#));
+        assert!(html.contains(r#"data-admin-task="appearance""#));
         assert!(site_health < boards);
         assert!(html.contains(r#"data-admin-dropdown-key="site-health""#));
         assert!(!html.contains(
@@ -2625,7 +2685,7 @@ mod tests {
         assert!(html.contains(r#"data-dashboard-state="ok""#));
         assert!(html.contains("system details, logs, and diagnostics"));
         assert!(html.contains(r#"id="public-url-settings""#));
-        assert!(html.contains("settings.toml public_hosts"));
+        assert!(html.contains("public hostnames in Network &amp; Security"));
     }
 
     #[test]
@@ -2816,10 +2876,11 @@ mod tests {
             maintenance.is_some(),
             "maintenance section should be present"
         );
-        assert!(overview < site_settings);
-        assert!(site_settings < boards);
+        assert!(overview < boards);
+        assert!(boards < site_settings);
         assert!(boards < moderation);
-        assert!(moderation < appearance);
+        assert!(moderation < site_settings);
+        assert!(site_settings < appearance);
         assert!(appearance < backups);
         assert!(backups < maintenance);
         assert!(html.contains("<h2>// site settings</h2>"));
@@ -3008,6 +3069,9 @@ mod tests {
         let board = sample_board();
         let themes = vec![sample_theme()];
         let html = admin_panel_page(&AdminPanelViewModel {
+            network_html: String::new(),
+            runtime_html: String::new(),
+            settings_query: None,
             csrf_token: "csrf",
             boards: std::slice::from_ref(&board),
             current_theme: Some("blue-sky"),
@@ -3102,6 +3166,9 @@ mod tests {
         crate::templates::set_live_themes(themes.clone());
 
         let html = admin_panel_page(&AdminPanelViewModel {
+            network_html: String::new(),
+            runtime_html: String::new(),
+            settings_query: None,
             csrf_token: "csrf",
             boards: std::slice::from_ref(&board),
             current_theme: Some("blue-sky"),
@@ -3184,6 +3251,9 @@ mod tests {
         crate::templates::set_live_themes(themes.clone());
 
         let html = admin_panel_page(&AdminPanelViewModel {
+            network_html: String::new(),
+            runtime_html: String::new(),
+            settings_query: None,
             csrf_token: "csrf",
             boards: std::slice::from_ref(&board),
             current_theme: Some("blue-sky"),

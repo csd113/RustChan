@@ -10,8 +10,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::sync::{LazyLock, OnceLock};
 
+/// Validated admin runtime configuration and atomic persistence.
+pub mod admin;
 /// Backup storage validation and settings persistence.
 mod backup_storage;
+/// Additional bounded operator policies.
+pub mod operator;
 /// Settings-file template rendering.
 mod template;
 pub use backup_storage::{prepare_backup_directory, update_settings_file_backup_directory};
@@ -22,6 +26,9 @@ pub static RUNTIME_LAYOUT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Explicit process-wide data-directory override.
 static DATA_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Launcher port selected before immutable configuration is initialized.
+static CLI_PORT_OVERRIDE: OnceLock<u16> = OnceLock::new();
 
 /// Absolute path to the directory the running binary lives in.
 fn binary_dir() -> PathBuf {
@@ -139,6 +146,20 @@ fn resolve_storage_dir(path: &Path, setting: &str) -> anyhow::Result<PathBuf> {
         anyhow::bail!("{setting} must not resolve to a filesystem root");
     }
     Ok(resolved)
+}
+
+/// Register the launcher port before configuration or logging initialization.
+///
+/// # Errors
+/// Rejects a zero port or a second override registration.
+pub fn configure_port_override(port: Option<u16>) -> anyhow::Result<()> {
+    let Some(port) = port else {
+        return Ok(());
+    };
+    anyhow::ensure!(port != 0, "--port must not be zero");
+    CLI_PORT_OVERRIDE
+        .set(port)
+        .map_err(|_| anyhow::anyhow!("launcher port was already configured"))
 }
 
 /// Configure an explicit runtime data directory before configuration is loaded.
@@ -557,8 +578,42 @@ struct SettingsFile {
     /// `SQLite` connection pool size. Default: 8.
     /// Increase on high-traffic deployments; each connection uses ~32 MiB page cache.
     db_pool_size: Option<u32>,
+    /// Persistent default for `bind_addr`; environment overrides still take precedence.
+    bind_addr: Option<String>,
+    /// Persistent default for `database_path`; environment overrides still take precedence.
+    database_path: Option<String>,
+    /// Persistent default for `upload_dir`; environment overrides still take precedence.
+    upload_dir: Option<String>,
+    /// Persistent default for `thumb_size`; environment overrides still take precedence.
+    thumb_size: Option<u32>,
+    /// Persistent default for `rate_limit_gets`; environment overrides still take precedence.
+    rate_limit_gets: Option<u32>,
+    /// Request categories counted by the browsing limiter.
+    rate_limit_policy: Option<RateLimitPolicy>,
+    /// Persistent default for `rate_limit_window`; environment overrides still take precedence.
+    rate_limit_window: Option<u64>,
+    /// Persistent default for `session_duration`; environment overrides still take precedence.
+    session_duration: Option<i64>,
+    /// Persistent default for `media_reconcile_repair_enabled`; environment overrides still take precedence.
+    media_reconcile_repair_enabled: Option<bool>,
+    /// Persistent default for `media_reconcile_interval_hours`; environment overrides still take precedence.
+    media_reconcile_interval_hours: Option<u64>,
+    /// Persistent default for `media_reconcile_files_per_pass`; environment overrides still take precedence.
+    media_reconcile_files_per_pass: Option<usize>,
+    /// Persistent default for `media_reconcile_database_rows_per_pass`; environment overrides still take precedence.
+    media_reconcile_database_rows_per_pass: Option<usize>,
+    /// Persistent default for `media_reconcile_hash_bytes_per_pass`; environment overrides still take precedence.
+    media_reconcile_hash_bytes_per_pass: Option<u64>,
+    /// Persistent default for `media_reconcile_repairs_per_pass`; environment overrides still take precedence.
+    media_reconcile_repairs_per_pass: Option<usize>,
     /// TLS/HTTPS configuration. Omitting this section keeps TLS disabled.
     tls: Option<TlsConfig>,
+    /// Additional saved authentication/display/deadline policies.
+    #[serde(flatten)]
+    operator: operator::SavedOperatorSettings,
+    /// Captured explicit TLS keys for immutable startup provenance.
+    #[serde(skip)]
+    tls_explicit_keys: std::collections::BTreeSet<String>,
 }
 
 /// Load the settings file or return defaults when it does not exist.
@@ -586,7 +641,14 @@ fn settings_file_parse_error(path: &Path) -> ! {
 
 /// Deserialize a settings file from TOML text.
 fn parse_settings_file_str(raw: &str) -> Result<SettingsFile, toml::de::Error> {
-    toml::from_str(raw)
+    let mut settings: SettingsFile = toml::from_str(raw)?;
+    let values: toml::Value = toml::from_str(raw)?;
+    settings.tls_explicit_keys = admin::certificates::SETTINGS
+        .iter()
+        .filter(|field| admin::file_value(&values, field.key).is_some())
+        .map(|field| field.key.to_owned())
+        .collect();
+    Ok(settings)
 }
 
 /// Create settings.toml with defaults if it does not exist yet.
@@ -731,6 +793,40 @@ fn default_acme_dir() -> String {
     "runtime/tls/acme".into()
 }
 
+/// Request-counting policy for the per-visitor browsing limiter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RateLimitPolicy {
+    /// Preserve the existing method-independent counting and route exemptions.
+    #[default]
+    Legacy,
+    /// Count GET/HEAD dynamic requests, keeping existing static-route exemptions.
+    Reads,
+}
+
+impl RateLimitPolicy {
+    /// Stable settings-file spelling for this policy.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Reads => "reads",
+        }
+    }
+}
+
+impl std::str::FromStr for RateLimitPolicy {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "legacy" => Ok(Self::Legacy),
+            "reads" => Ok(Self::Reads),
+            _ => Err("rate_limit_policy must be legacy or reads"),
+        }
+    }
+}
+
 /// Lazily loaded process-wide runtime configuration.
 pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::from_env);
 /// Runtime-adjustable `FFmpeg` timeout.
@@ -790,6 +886,8 @@ pub fn describe_timeout_secs(timeout_secs: u64) -> String {
 )]
 /// Fully resolved runtime configuration.
 pub struct Config {
+    /// Authentication, public paging and request-deadline policies.
+    pub operator: operator::OperatorSettings,
     // Loaded from settings.toml (env vars still override)
     /// Public forum name.
     pub forum_name: String,
@@ -857,6 +955,10 @@ pub struct Config {
     pub rate_limit_gets: u32,
     /// Rate-limit window duration in seconds.
     pub rate_limit_window: u64,
+    /// Request categories counted by the browsing limiter.
+    pub rate_limit_policy: RateLimitPolicy,
+    /// Startup provenance for network controls; contains key names, never secret values.
+    pub(crate) network_sources: std::collections::BTreeMap<&'static str, String>,
     /// Secret used for cookies, CSRF signatures, and privacy-preserving hashes.
     pub cookie_secret: String,
     /// Administrator session lifetime in seconds.
@@ -984,6 +1086,8 @@ impl std::fmt::Debug for Config {
             .field("thumb_size", &self.thumb_size)
             .field("rate_limit_gets", &self.rate_limit_gets)
             .field("rate_limit_window", &self.rate_limit_window)
+            .field("rate_limit_policy", &self.rate_limit_policy)
+            .field("network_sources", &self.network_sources)
             .field("cookie_secret", &"[REDACTED]")
             .field("session_duration", &self.session_duration)
             .field("behind_proxy", &self.behind_proxy)
@@ -1061,6 +1165,7 @@ impl std::fmt::Debug for Config {
             )
             .field("blocking_threads", &self.blocking_threads)
             .field("db_pool_size", &self.db_pool_size)
+            .field("operator", &self.operator)
             .field("tls", &self.tls)
             .finish()
     }
@@ -1069,50 +1174,73 @@ impl std::fmt::Debug for Config {
 impl Config {
     /// Load settings and environment overrides into one validated runtime shape.
     #[must_use]
+    pub fn from_env() -> Self {
+        Self::from_settings(load_settings_file(), &Environment::Process)
+    }
+
+    /// Resolve a settings snapshot with the launcher's actual precedence.
+    fn from_settings(s: SettingsFile, environment: &Environment<'_>) -> Self {
+        let cli_port = match environment {
+            Environment::Process => CLI_PORT_OVERRIDE.get().copied(),
+            Environment::Values(_) => None,
+        };
+        Self::from_settings_with_port(s, environment, cli_port)
+    }
+
+    /// Resolve a settings snapshot with an explicit environment source.
     #[expect(
         clippy::too_many_lines,
         reason = "configuration loading keeps precedence and defaults together for auditability"
     )]
-    pub fn from_env() -> Self {
-        let s = load_settings_file();
+    fn from_settings_with_port(
+        s: SettingsFile,
+        environment: &Environment<'_>,
+        cli_port: Option<u16>,
+    ) -> Self {
+        let operator = operator::OperatorSettings::load(&s.operator, environment);
+        let mut network_sources = admin::startup_network_sources(&s, environment, cli_port);
+        network_sources.extend(admin::management::startup_sources(&s, environment));
         let tls = s.tls.clone().unwrap_or_default();
         let data_dir = data_dir();
         let default_db = data_dir.join("chan.db").to_string_lossy().into_owned();
         let default_uploads = data_dir.join("boards").to_string_lossy().into_owned();
-        let forum_name = env_str(
+        let forum_name = environment.string(
             "CHAN_FORUM_NAME",
             s.forum_name.as_deref().unwrap_or("RustChan"),
         );
-        let initial_site_subtitle = env_str(
+        let initial_site_subtitle = environment.string(
             "CHAN_SITE_SUBTITLE",
             s.site_subtitle
                 .as_deref()
                 .unwrap_or("select board to proceed"),
         );
-        let legacy_new_activity_notifications_enabled = env::var("CHAN_NEW_ACTIVITY_NOTIFICATIONS")
+        let legacy_new_activity_notifications_enabled = environment
+            .var("CHAN_NEW_ACTIVITY_NOTIFICATIONS")
             .ok()
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .or(s.new_activity_notifications_enabled);
-        let initial_homepage_new_thread_badges_enabled =
-            env::var("CHAN_HOMEPAGE_NEW_THREAD_BADGES")
-                .ok()
-                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-                .or(s.homepage_new_thread_badges_enabled)
-                .or(legacy_new_activity_notifications_enabled)
-                .unwrap_or(true);
-        let initial_homepage_new_reply_badges_enabled = env::var("CHAN_HOMEPAGE_NEW_REPLY_BADGES")
+        let initial_homepage_new_thread_badges_enabled = environment
+            .var("CHAN_HOMEPAGE_NEW_THREAD_BADGES")
+            .ok()
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .or(s.homepage_new_thread_badges_enabled)
+            .or(legacy_new_activity_notifications_enabled)
+            .unwrap_or(true);
+        let initial_homepage_new_reply_badges_enabled = environment
+            .var("CHAN_HOMEPAGE_NEW_REPLY_BADGES")
             .ok()
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .or(s.homepage_new_reply_badges_enabled)
             .or(legacy_new_activity_notifications_enabled)
             .unwrap_or(true);
-        let initial_thread_new_reply_badges_enabled = env::var("CHAN_THREAD_NEW_REPLY_BADGES")
+        let initial_thread_new_reply_badges_enabled = environment
+            .var("CHAN_THREAD_NEW_REPLY_BADGES")
             .ok()
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .or(s.thread_new_reply_badges_enabled)
             .or(legacy_new_activity_notifications_enabled)
             .unwrap_or(true);
-        let initial_default_theme = env_str(
+        let initial_default_theme = environment.string(
             "CHAN_DEFAULT_THEME",
             s.default_theme
                 .as_deref()
@@ -1124,16 +1252,31 @@ impl Config {
                 .map(str::to_owned)
                 .collect()
         });
-        let port: u16 = env_parse("CHAN_PORT", s.port.unwrap_or(8080));
-        let max_image_mb: u32 = env_parse("CHAN_MAX_IMAGE_MB", s.max_image_size_mb.unwrap_or(8));
-        let max_video_mb: u32 = env_parse("CHAN_MAX_VIDEO_MB", s.max_video_size_mb.unwrap_or(50));
-        let max_audio_mb: u32 = env_parse("CHAN_MAX_AUDIO_MB", s.max_audio_size_mb.unwrap_or(150));
-        let bind_addr = env_str(
-            "CHAN_BIND",
-            &format!("{}:{}", env_str("CHAN_HOST", "0.0.0.0"), port),
+        let port: u16 =
+            cli_port.unwrap_or_else(|| environment.parse("CHAN_PORT", s.port.unwrap_or(8080)));
+        let max_image_mb: u32 =
+            environment.parse("CHAN_MAX_IMAGE_MB", s.max_image_size_mb.unwrap_or(8));
+        let max_video_mb: u32 =
+            environment.parse("CHAN_MAX_VIDEO_MB", s.max_video_size_mb.unwrap_or(50));
+        let max_audio_mb: u32 =
+            environment.parse("CHAN_MAX_AUDIO_MB", s.max_audio_size_mb.unwrap_or(150));
+        let file_bind = s
+            .bind_addr
+            .unwrap_or_else(|| format_bind_addr("0.0.0.0", port));
+        let default_bind = match environment.var("CHAN_HOST") {
+            Ok(host) => format_bind_addr(&host, port_from_bind_addr(&file_bind).unwrap_or(port)),
+            Err(_) => file_bind,
+        };
+        let bind_addr = environment.string("CHAN_BIND", &default_bind);
+        // The launcher has always replaced the final socket port, including
+        // CHAN_BIND's port. Resolve that before validation and state display.
+        let bind_addr = cli_port.map_or_else(
+            || bind_addr.clone(),
+            |port| format_bind_addr(bind_host_for_family(&bind_addr), port),
         );
-        let tor_only = env_bool("CHAN_TOR_ONLY", s.tor_only.unwrap_or(false));
-        let enable_tor_support = env_bool("CHAN_TOR_SUPPORT", s.enable_tor_support.unwrap_or(true));
+        let tor_only = environment.boolean("CHAN_TOR_ONLY", s.tor_only.unwrap_or(false));
+        let enable_tor_support =
+            environment.boolean("CHAN_TOR_SUPPORT", s.enable_tor_support.unwrap_or(true));
         // When tor_only=true, force the bind host to loopback while preserving
         // the configured address family and port. Validation later rejects a
         // tor-only request if Tor support itself is disabled.
@@ -1149,18 +1292,19 @@ impl Config {
         } else {
             bind_addr
         };
-        let behind_proxy = env_bool("CHAN_BEHIND_PROXY", s.behind_proxy.unwrap_or(false));
+        let behind_proxy =
+            environment.boolean("CHAN_BEHIND_PROXY", s.behind_proxy.unwrap_or(false));
         let https_cookies_default = behind_proxy || tls.enabled;
-        let trusted_proxy_cidrs = env_list(
+        let trusted_proxy_cidrs = environment.list(
             "CHAN_TRUSTED_PROXY_CIDRS",
             s.trusted_proxy_cidrs,
             &["127.0.0.1/32", "::1/128"],
         );
-        let public_hosts = env_list("CHAN_PUBLIC_HOSTS", s.public_hosts, &[]);
+        let public_hosts = environment.list("CHAN_PUBLIC_HOSTS", s.public_hosts, &[]);
         // Resolve cookie_secret from env > settings.toml.
         // generate_settings_file_if_missing() ensures settings.toml always has
         // a generated secret, so this fallback should only fire in abnormal cases.
-        let cookie_secret = if let Ok(v) = env::var("CHAN_COOKIE_SECRET") {
+        let cookie_secret = if let Ok(v) = environment.var("CHAN_COOKIE_SECRET") {
             v
         } else if let Some(v) = s.cookie_secret {
             v
@@ -1181,6 +1325,7 @@ impl Config {
             hex::encode(b)
         };
         Self {
+            network_sources,
             forum_name,
             initial_site_subtitle,
             initial_homepage_new_thread_badges_enabled,
@@ -1194,80 +1339,95 @@ impl Config {
             max_audio_size: mebibytes_to_bytes(max_audio_mb),
             enable_tor_support,
             tor_only,
-            tor_bootstrap_timeout_secs: env_parse(
+            tor_bootstrap_timeout_secs: environment.parse(
                 "CHAN_TOR_BOOTSTRAP_TIMEOUT",
                 s.tor_bootstrap_timeout_secs.unwrap_or(120),
             ),
-            tor_max_concurrent_streams: env_parse(
+            tor_max_concurrent_streams: environment.parse(
                 "CHAN_TOR_MAX_STREAMS",
                 s.tor_max_concurrent_streams.unwrap_or(512),
             ),
-            tor_service_nickname: env::var("CHAN_TOR_NICKNAME")
+            tor_service_nickname: environment
+                .var("CHAN_TOR_NICKNAME")
                 .ok()
                 .or(s.tor_service_nickname)
                 .unwrap_or_else(|| "rustchan".to_owned()),
-            require_ffmpeg: env_bool("CHAN_REQUIRE_FFMPEG", s.require_ffmpeg.unwrap_or(false)),
-            ffmpeg_path: env::var("CHAN_FFMPEG_PATH")
+            require_ffmpeg: environment
+                .boolean("CHAN_REQUIRE_FFMPEG", s.require_ffmpeg.unwrap_or(false)),
+            ffmpeg_path: environment
+                .var("CHAN_FFMPEG_PATH")
                 .ok()
                 .or(s.ffmpeg_path)
                 .unwrap_or_else(|| "ffmpeg".to_owned()),
-            ffprobe_path: env::var("CHAN_FFPROBE_PATH")
+            ffprobe_path: environment
+                .var("CHAN_FFPROBE_PATH")
                 .ok()
                 .or(s.ffprobe_path)
                 .unwrap_or_else(|| "ffprobe".to_owned()),
-            enable_any_file_uploads_feature: env_bool(
+            enable_any_file_uploads_feature: environment.boolean(
                 "CHAN_ENABLE_ANY_FILE_UPLOADS_FEATURE",
                 s.enable_any_file_uploads_feature.unwrap_or(false),
             ),
             bind_addr,
-            database_path: env_str("CHAN_DB", &default_db),
-            upload_dir: env_str("CHAN_UPLOADS", &default_uploads),
-            thumb_size: env_parse("CHAN_THUMB_SIZE", 250),
-            rate_limit_gets: env_parse("CHAN_RATE_GETS", 60),
-            rate_limit_window: env_parse("CHAN_RATE_WINDOW", 60),
+            database_path: environment
+                .string("CHAN_DB", s.database_path.as_deref().unwrap_or(&default_db)),
+            upload_dir: environment.string(
+                "CHAN_UPLOADS",
+                s.upload_dir.as_deref().unwrap_or(&default_uploads),
+            ),
+            thumb_size: environment.parse("CHAN_THUMB_SIZE", s.thumb_size.unwrap_or(250)),
+            rate_limit_gets: environment.parse("CHAN_RATE_GETS", s.rate_limit_gets.unwrap_or(60)),
+            rate_limit_policy: environment
+                .parse("CHAN_RATE_POLICY", s.rate_limit_policy.unwrap_or_default()),
+            rate_limit_window: environment
+                .parse("CHAN_RATE_WINDOW", s.rate_limit_window.unwrap_or(60)),
             cookie_secret,
-            session_duration: env_parse("CHAN_SESSION_SECS", 8 * 3600),
+            session_duration: environment
+                .parse("CHAN_SESSION_SECS", s.session_duration.unwrap_or(8 * 3600)),
             behind_proxy,
             trusted_proxy_cidrs,
-            https_cookies: env_bool(
+            https_cookies: environment.boolean(
                 "CHAN_HTTPS_COOKIES",
                 s.https_cookies.unwrap_or(https_cookies_default),
             ),
-            public_readiness_details: env_bool(
+            public_readiness_details: environment.boolean(
                 "CHAN_PUBLIC_READINESS_DETAILS",
                 s.public_readiness_details.unwrap_or(false),
             ),
-            public_metrics_enabled: env_bool(
+            public_metrics_enabled: environment.boolean(
                 "CHAN_PUBLIC_METRICS_ENABLED",
                 s.public_metrics_enabled.unwrap_or(false),
             ),
             public_hosts,
-            wal_checkpoint_interval: env_parse(
+            wal_checkpoint_interval: environment.parse(
                 "CHAN_WAL_CHECKPOINT_SECS",
                 s.wal_checkpoint_interval_secs.unwrap_or(3600),
             ),
-            auto_vacuum_interval_hours: env_parse(
+            auto_vacuum_interval_hours: environment.parse(
                 "CHAN_AUTO_VACUUM_HOURS",
                 s.auto_vacuum_interval_hours.unwrap_or(24),
             ),
-            backup_directory: env::var_os("CHAN_BACKUP_DIRECTORY")
+            backup_directory: environment
+                .var_os("CHAN_BACKUP_DIRECTORY")
                 .map(PathBuf::from)
                 .or(s.backup_directory),
-            auto_full_backup_interval_hours: env_parse(
+            auto_full_backup_interval_hours: environment.parse(
                 "CHAN_AUTO_FULL_BACKUP_HOURS",
                 s.auto_full_backup_interval_hours.unwrap_or(24),
             ),
-            auto_full_backup_copies_to_keep: env_parse::<u64>(
-                "CHAN_AUTO_FULL_BACKUP_COPIES",
-                s.auto_full_backup_copies_to_keep.unwrap_or(1),
-            )
-            .max(1),
-            auto_full_backup_include_tor_hidden_service_keys: env_bool(
+            auto_full_backup_copies_to_keep: environment
+                .parse::<u64>(
+                    "CHAN_AUTO_FULL_BACKUP_COPIES",
+                    s.auto_full_backup_copies_to_keep.unwrap_or(1),
+                )
+                .max(1),
+            auto_full_backup_include_tor_hidden_service_keys: environment.boolean(
                 "CHAN_AUTO_FULL_BACKUP_INCLUDE_TOR_KEYS",
                 s.auto_full_backup_include_tor_hidden_service_keys
                     .unwrap_or(false),
             ),
-            auto_full_backup_storage_mode: env::var("CHAN_AUTO_FULL_BACKUP_STORAGE_MODE")
+            auto_full_backup_storage_mode: environment
+                .var("CHAN_AUTO_FULL_BACKUP_STORAGE_MODE")
                 .ok()
                 .filter(|value| matches!(value.as_str(), "directory" | "split_zip"))
                 .or_else(|| {
@@ -1275,76 +1435,88 @@ impl Config {
                         .filter(|value| matches!(value.as_str(), "directory" | "split_zip"))
                 })
                 .unwrap_or_else(|| "directory".to_owned()),
-            auto_full_backup_split_zip_part_size_bytes: env_parse::<u64>(
-                "CHAN_AUTO_FULL_BACKUP_SPLIT_ZIP_PART_SIZE_GIB",
-                s.auto_full_backup_split_zip_part_size_gib.unwrap_or(4),
-            )
-            .clamp(1, 64)
-            .saturating_mul(1024 * 1024 * 1024),
-            poll_cleanup_interval_hours: env_parse(
+            auto_full_backup_split_zip_part_size_bytes: environment
+                .parse::<u64>(
+                    "CHAN_AUTO_FULL_BACKUP_SPLIT_ZIP_PART_SIZE_GIB",
+                    s.auto_full_backup_split_zip_part_size_gib.unwrap_or(4),
+                )
+                .clamp(1, 64)
+                .saturating_mul(1024 * 1024 * 1024),
+            poll_cleanup_interval_hours: environment.parse(
                 "CHAN_POLL_CLEANUP_HOURS",
                 s.poll_cleanup_interval_hours.unwrap_or(72),
             ),
             db_warn_threshold_bytes: {
-                let mb = env_parse::<u64>(
+                let mb = environment.parse::<u64>(
                     "CHAN_DB_WARN_THRESHOLD_MB",
                     s.db_warn_threshold_mb.unwrap_or(2048),
                 );
                 mb.saturating_mul(1024).saturating_mul(1024)
             },
-            job_queue_capacity: env_parse(
+            job_queue_capacity: environment.parse(
                 "CHAN_JOB_QUEUE_CAPACITY",
                 s.job_queue_capacity.unwrap_or(1000),
             ),
-            ffmpeg_timeout_secs: env_parse(
+            ffmpeg_timeout_secs: environment.parse(
                 "CHAN_FFMPEG_TIMEOUT_SECS",
                 s.ffmpeg_timeout_secs.unwrap_or(DEFAULT_FFMPEG_TIMEOUT_SECS),
             ),
-            initial_media_auto_prune_enabled: env_bool(
+            initial_media_auto_prune_enabled: environment.boolean(
                 "CHAN_MEDIA_AUTO_PRUNE_ENABLED",
                 s.media_auto_prune_enabled.unwrap_or(false),
             ),
-            initial_media_max_active_content_size_bytes: env_parse(
+            initial_media_max_active_content_size_bytes: environment.parse(
                 "CHAN_MEDIA_MAX_ACTIVE_CONTENT_SIZE_BYTES",
                 s.media_max_active_content_size_bytes.unwrap_or(0),
             ),
-            archive_before_prune: env_bool(
+            archive_before_prune: environment.boolean(
                 "CHAN_ARCHIVE_BEFORE_PRUNE",
                 s.archive_before_prune.unwrap_or(true),
             ),
             waveform_cache_max_bytes: {
-                let mb = env_parse::<u64>(
+                let mb = environment.parse::<u64>(
                     "CHAN_WAVEFORM_CACHE_MAX_MB",
                     s.waveform_cache_max_mb.unwrap_or(200),
                 );
                 mb.saturating_mul(1024).saturating_mul(1024)
             },
-            media_reconcile_repair_enabled: env_bool("CHAN_MEDIA_RECONCILE_REPAIR_ENABLED", false),
-            media_reconcile_interval_hours: env_parse("CHAN_MEDIA_RECONCILE_INTERVAL_HOURS", 24),
-            media_reconcile_files_per_pass: env_parse("CHAN_MEDIA_RECONCILE_FILES_PER_PASS", 512),
-            media_reconcile_database_rows_per_pass: env_parse(
+            media_reconcile_repair_enabled: environment.boolean(
+                "CHAN_MEDIA_RECONCILE_REPAIR_ENABLED",
+                s.media_reconcile_repair_enabled.unwrap_or(false),
+            ),
+            media_reconcile_interval_hours: environment.parse(
+                "CHAN_MEDIA_RECONCILE_INTERVAL_HOURS",
+                s.media_reconcile_interval_hours.unwrap_or(24),
+            ),
+            media_reconcile_files_per_pass: environment.parse(
+                "CHAN_MEDIA_RECONCILE_FILES_PER_PASS",
+                s.media_reconcile_files_per_pass.unwrap_or(512),
+            ),
+            media_reconcile_database_rows_per_pass: environment.parse(
                 "CHAN_MEDIA_RECONCILE_DATABASE_ROWS_PER_PASS",
-                16_384,
+                s.media_reconcile_database_rows_per_pass.unwrap_or(16_384),
             ),
-            media_reconcile_hash_bytes_per_pass: env_parse(
+            media_reconcile_hash_bytes_per_pass: environment.parse(
                 "CHAN_MEDIA_RECONCILE_HASH_BYTES_PER_PASS",
-                64 * 1024 * 1024,
+                s.media_reconcile_hash_bytes_per_pass
+                    .unwrap_or(64 * 1024 * 1024),
             ),
-            media_reconcile_repairs_per_pass: env_parse(
+            media_reconcile_repairs_per_pass: environment.parse(
                 "CHAN_MEDIA_RECONCILE_REPAIRS_PER_PASS",
-                32,
+                s.media_reconcile_repairs_per_pass.unwrap_or(32),
             ),
             blocking_threads: {
                 let cpus = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
                 let configured =
-                    env_parse("CHAN_BLOCKING_THREADS", s.blocking_threads.unwrap_or(0));
+                    environment.parse("CHAN_BLOCKING_THREADS", s.blocking_threads.unwrap_or(0));
                 if configured == 0 {
                     cpus.saturating_mul(4)
                 } else {
                     configured
                 }
             },
-            db_pool_size: env_parse("CHAN_DB_POOL_SIZE", s.db_pool_size.unwrap_or(8)),
+            db_pool_size: environment.parse("CHAN_DB_POOL_SIZE", s.db_pool_size.unwrap_or(8)),
+            operator,
             // TLS — loaded from [tls] section in settings.toml; defaults to disabled.
             tls,
         }
@@ -1366,6 +1538,7 @@ impl Config {
         const MAX_IMAGE_MIB: usize = 100;
         const MAX_VIDEO_MIB: usize = 2048;
         const MAX_AUDIO_MIB: usize = 512;
+        self.operator.validate()?;
         // cookie_secret is hex-encoded: 64 hex chars = 32 bytes of entropy.
         if self.cookie_secret.len() < 64 {
             anyhow::bail!(
@@ -1533,6 +1706,7 @@ fn toml_quote(s: &str) -> String {
 }
 
 /// Rewrite selected root settings while preserving unrelated text and comments.
+#[cfg(test)]
 fn rewrite_settings_file_lines(
     content: &str,
     updates: &[(&str, String)],
@@ -1600,33 +1774,29 @@ fn update_settings_file_entries_result(
     updates: &[(&str, String)],
     insert_missing_before: Option<&str>,
 ) -> anyhow::Result<()> {
-    // Escape backslash and double-quote, then wrap in double quotes.
-    let path = settings_file_path();
-    let content = match std::fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(error) => anyhow::bail!("could not read {}: {error}", path.display()),
-    };
-    // Replace the value portion of `key = ...` lines while preserving file
-    // order and unrelated comments.
-    let out = rewrite_settings_file_lines(&content, updates, insert_missing_before);
-    // Atomic write: write to a temp file in the same directory, then rename
-    // over the target. This prevents a partial write from corrupting settings.toml
-    // if the process is killed mid-write (rename(2) is atomic on POSIX).
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".settings_")
-        .suffix(".tmp")
-        .tempfile_in(dir)
-        .with_context(|| format!("could not create temp file for {}", path.display()))?;
-    tmp.write_all(out.as_bytes())
-        .and_then(|()| tmp.as_file().sync_all())
-        .with_context(|| format!("could not write temp settings file for {}", path.display()))?;
-    tmp.persist(&path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("could not atomically replace {}", path.display()))?;
-    restrict_private_file_permissions(&path)
-        .with_context(|| format!("could not repair permissions on {}", path.display()))?;
-    Ok(())
+    update_settings_file_entries_with_commit(updates, insert_missing_before, || Ok(()))
+}
+
+/// Persist a complete file update and compensate it if a prepared DB commit fails.
+fn update_settings_file_entries_with_commit(
+    updates: &[(&str, String)],
+    insert_missing_before: Option<&str>,
+    commit: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let _guard = admin::SETTINGS_WRITE_LOCK.lock();
+    let _ = insert_missing_before; // Legacy anchors remain API-compatible; root insertion is structural.
+    let parsed = updates
+        .iter()
+        .map(|(key, value)| {
+            let document: toml::Value = toml::from_str(&format!("value = {value}"))?;
+            let value = document
+                .get("value")
+                .cloned()
+                .context("missing settings value")?;
+            Ok(((*key).to_owned(), Some(value)))
+        })
+        .collect::<anyhow::Result<std::collections::BTreeMap<_, _>>>()?;
+    admin::save_root_and_commit_at(&settings_file_path(), &parsed, commit)
 }
 
 /// Persist selected root settings and log failures.
@@ -1672,14 +1842,17 @@ pub fn update_settings_file_site_settings(
 }
 
 /// Persist automatic full-backup scheduling and retention settings.
+///
+/// # Errors
+/// Returns validation/read/write failures before updating running workers.
 pub fn update_settings_file_auto_full_backup(
     interval_hours: u64,
     copies_to_keep: u64,
     include_tor_hidden_service_keys: bool,
     storage_mode: &str,
     split_zip_part_size_gib: u64,
-) {
-    update_settings_file_entries(
+) -> anyhow::Result<()> {
+    update_settings_file_entries_result(
         &[
             (
                 "auto_full_backup_interval_hours",
@@ -1700,7 +1873,7 @@ pub fn update_settings_file_auto_full_backup(
             ),
         ],
         Some("# TLS / HTTPS"),
-    );
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1764,7 +1937,18 @@ pub struct SetupSettingsFileUpdate<'a> {
 /// # Errors
 /// Returns an error if the settings file cannot be read or atomically replaced.
 pub fn update_settings_file_setup(update: &SetupSettingsFileUpdate<'_>) -> anyhow::Result<()> {
-    update_settings_file_entries_result(
+    update_settings_file_setup_with_commit(update, || Ok(()))
+}
+
+/// Persist setup settings, restoring them if the prepared database transaction fails.
+///
+/// # Errors
+/// Returns validation, persistence, database commit or rollback failures.
+pub fn update_settings_file_setup_with_commit(
+    update: &SetupSettingsFileUpdate<'_>,
+    commit: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    update_settings_file_entries_with_commit(
         &[
             ("forum_name", toml_quote(update.forum_name)),
             ("site_subtitle", toml_quote(update.site_subtitle)),
@@ -1824,6 +2008,7 @@ pub fn update_settings_file_setup(update: &SetupSettingsFileUpdate<'_>) -> anyho
             ),
         ],
         Some("# Optional explicit ffmpeg binary path."),
+        commit,
     )
 }
 
@@ -1856,7 +2041,12 @@ pub fn update_settings_file_media_pruning(enabled: bool, max_size_bytes: u64) {
 /// Called once at startup after the DB pool is ready.
 /// If the secret has rotated, all IP-based bans become invalid — warn loudly.
 /// On first run (no stored hash), silently stores the current hash and returns.
-pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
+/// Rotation revokes administrator sessions in the same database transaction.
+///
+/// # Errors
+/// Returns a database error; startup must not continue after an incomplete rotation.
+pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) -> anyhow::Result<()> {
+    use rusqlite::OptionalExtension as _;
     use sha2::{Digest as _, Sha256};
     const KEY: &str = "cookie_secret_hash";
     let current_hash = {
@@ -1870,11 +2060,13 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
             rusqlite::params![KEY],
             |r| r.get::<_, String>(0),
         )
-        .ok();
+        .optional()?;
+    let tx = conn.unchecked_transaction()?;
     if let Some(h) = &stored {
         if h == &current_hash {
-            return; // Secret unchanged — nothing to do.
+            return Ok(()); // Secret unchanged — nothing to do.
         }
+        tx.execute("DELETE FROM admin_sessions", [])?;
         tracing::warn!(
             "SECURITY WARNING: cookie_secret has changed since the last run. \
              All IP-based bans are now invalid because all IP hashes have changed. \
@@ -1884,38 +2076,67 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) {
         );
     }
     // First run (None) or rotated secret (Some) — store the current hash.
-    drop(conn.execute(
+    tx.execute(
         "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         rusqlite::params![KEY, current_hash],
-    ));
+    )?;
+    tx.commit()?;
+    Ok(())
 }
 
-/// Read a string environment override or clone its default.
-fn env_str(key: &str, default: &str) -> String {
-    env::var(key).unwrap_or_else(|_| default.to_owned())
+/// Environment source used by startup and mutation-free configuration previews.
+enum Environment<'a> {
+    /// Read the process environment, including non-Unicode path overrides.
+    Process,
+    /// Explicit overrides for isolated previews and tests.
+    Values(&'a std::collections::BTreeMap<String, String>),
 }
 
-/// Parse an environment override or retain its typed default.
-fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
-    env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
+impl Environment<'_> {
+    /// Look up a Unicode environment override.
+    fn var(&self, key: &str) -> Result<String, env::VarError> {
+        match self {
+            Self::Process => env::var(key),
+            Self::Values(values) => values.get(key).cloned().ok_or(env::VarError::NotPresent),
+        }
+    }
 
-/// Read a boolean environment override using the accepted truthy spellings.
-fn env_bool(key: &str, default: bool) -> bool {
-    env::var(key).map_or(default, |v| v == "1" || v.eq_ignore_ascii_case("true"))
-}
+    /// Look up a path override without losing platform encoding.
+    fn var_os(&self, key: &str) -> Option<std::ffi::OsString> {
+        match self {
+            Self::Process => env::var_os(key),
+            Self::Values(values) => values.get(key).map(std::ffi::OsString::from),
+        }
+    }
 
-/// Resolve a comma-separated list from environment, file, or defaults.
-fn env_list(key: &str, file_value: Option<Vec<String>>, default: &[&str]) -> Vec<String> {
-    env::var(key)
-        .ok()
-        .map(|value| split_list(&value))
-        .or(file_value)
-        .unwrap_or_else(|| default.iter().map(|value| (*value).to_owned()).collect())
+    /// Read a string override or clone its default.
+    fn string(&self, key: &str, default: &str) -> String {
+        self.var(key).unwrap_or_else(|_| default.to_owned())
+    }
+
+    /// Parse an override or retain its typed default.
+    fn parse<T: std::str::FromStr>(&self, key: &str, default: T) -> T {
+        self.var(key)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    }
+
+    /// Read a boolean override using the existing truthy spellings.
+    fn boolean(&self, key: &str, default: bool) -> bool {
+        self.var(key)
+            .map_or(default, |v| v == "1" || v.eq_ignore_ascii_case("true"))
+    }
+
+    /// Resolve a comma-separated list from environment, file, or defaults.
+    fn list(&self, key: &str, file_value: Option<Vec<String>>, default: &[&str]) -> Vec<String> {
+        self.var(key)
+            .ok()
+            .map(|value| split_list(&value))
+            .or(file_value)
+            .unwrap_or_else(|| default.iter().map(|value| (*value).to_owned()).collect())
+    }
 }
 
 /// Split a comma-separated setting, trimming and discarding empty values.
@@ -2008,9 +2229,16 @@ fn port_from_bind_addr(addr: &str) -> Option<u16> {
     port.parse().ok()
 }
 
+/// Read a saved filter before CONFIG initialization; logging does not recurse into CONFIG.
+#[must_use]
+pub fn saved_log_filter() -> Option<String> {
+    load_settings_file().operator.log_filter
+}
+
 #[cfg(test)]
 /// Configuration unit tests.
 mod tests {
+    use super::operator;
     use super::{
         describe_timeout_secs, ffmpeg_timeout_secs, resolve_data_dir_override,
         rewrite_settings_file_lines, runtime_tor_hidden_service_keys_dir,
@@ -2249,6 +2477,7 @@ mod tests {
         const MIB: usize = 1024 * 1024;
         const MIB_U64: u64 = 1024 * 1024;
         Config {
+            network_sources: std::collections::BTreeMap::new(),
             forum_name: "RustChan".to_owned(),
             initial_site_subtitle: "select board to proceed".to_owned(),
             initial_homepage_new_thread_badges_enabled: true,
@@ -2278,6 +2507,7 @@ mod tests {
             thumb_size: 250,
             rate_limit_gets: 60,
             rate_limit_window: 60,
+            rate_limit_policy: super::RateLimitPolicy::Legacy,
             cookie_secret: "a".repeat(64),
             session_duration: 8 * 3600,
             behind_proxy: false,
@@ -2310,6 +2540,10 @@ mod tests {
             media_reconcile_repairs_per_pass: 32,
             blocking_threads: 4,
             db_pool_size: 8,
+            operator: operator::OperatorSettings::load(
+                &operator::SavedOperatorSettings::default(),
+                &super::Environment::Values(&std::collections::BTreeMap::new()),
+            ),
             tls: TlsConfig::default(),
         }
     }
