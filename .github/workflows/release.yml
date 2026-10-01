@@ -307,7 +307,16 @@ jobs:
             fi
             gh release create "$GITHUB_REF_NAME" --draft --title "Release $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
           fi
-          release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq '.id')"
+          release_id="$(gh api graphql \
+            -f owner="$GITHUB_REPOSITORY_OWNER" \
+            -f name="${GITHUB_REPOSITORY#*/}" \
+            -f tag="$GITHUB_REF_NAME" \
+            -f query='query($owner: String!, $name: String!, $tag: String!) { repository(owner: $owner, name: $name) { release(tagName: $tag) { databaseId isDraft } } }' \
+            --jq '.data.repository.release | select(.isDraft) | .databaseId')"
+          if [[ ! "$release_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Expected a draft release with a positive numeric ID" >&2
+            exit 1
+          fi
           python3 tools/update_package.py sign --directory release-assets --key "$key_file" --release-id "$release_id" --version "$GITHUB_REF_NAME"
           rm release-assets/build-info-*.json
 
