@@ -220,3 +220,29 @@ preferences focus, signed public CSRF recovery and real native WAV playback.
 Evidence is retained at `output/playwright/v160-ui-audit/mac-browser-fixes/`.
 Offline packaging/signing remains 7/7; the optimized CLI identifies itself as
 `rustchan-cli 1.6.0`. The supplemental Linux container was stopped after testing.
+
+## Final session-revocation fixture correction
+
+On `0bf98e3`, every required native job and Dependency Audit passed. Full native
+Linux browser results were: Firefox 173 passed/148 conditional skips; WebKit 175
+passed/146 skips; Chromium no-JavaScript 164 passed/157 skips. Chromium had 282
+passes, 38 skips and one actual failure. Its three intentionally failing harness
+contract cases behaved as declared and are not additional unexpected failures.
+
+Chromium's account-reset behavior assertions passed, but the target admin tab
+polled Site Health after its session was intentionally revoked. The server
+correctly returned 403; strict diagnostics rejected this unrelated background
+request. The trace records reset POST 303 at 09:13:52.768Z and target health/jobs
+403 at 09:13:57.252Z. No application authorization defect was found.
+
+The fixture now navigates the target to a public page without logging out before
+reset. Added assertions prove the client retains its admin cookie and the server
+still has exactly one target session before mutation. Existing reauthentication,
+zero sessions after reset, protected-panel 403, recovery login and redaction
+assertions remain intact. No error exclusions, timeouts, retries or skips were
+added. Three independent repetitions across seven local profiles passed 21/21;
+actual Linux Chromium repetitions passed 3/3 with strict diagnostics. Evidence is
+in `output/playwright/v160-ui-audit/session-revocation-fix/` and
+`linux-session-revocation-fix/`; the original failure trace/screenshot remains in
+the downloaded Chromium artifact. Application code is unchanged by this fixture
+correction, and full native/browser CI must pass again on the new final head.
