@@ -31,7 +31,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /out/rustchan-cli /usr/local/bin/rustchan-cli
 
-ENV CHAN_HOST=0.0.0.0 \
+ENV RUSTCHAN_CONTAINER=1 \
+    CHAN_HOST=0.0.0.0 \
     CHAN_PORT=8080 \
     CHAN_TOR_SUPPORT=false
 

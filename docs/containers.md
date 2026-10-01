@@ -64,3 +64,7 @@ For Compose, use `docker compose stop` and `docker compose start` and replace `r
 ## Images and architectures
 
 GHCR image: `ghcr.io/csd113/rustchan`. The publishing workflow builds `linux/amd64` and `linux/arm64`. `latest` tracks the main branch and stable semantic-version tags. Every published commit receives an immutable `sha-<full-commit-SHA>` tag. A tag such as `v1.5.0` also produces `1.5.0` and `1.5` tags; the release tag must match the Cargo package version under the repository's release workflow. Pin a SHA tag for a repeatable deployment. Package visibility in GHCR is controlled in GitHub's package settings.
+
+### Software update checks
+
+Administrators can check stable RustChan releases in Software Updates. Container images remain deployment-managed; there is no Install control. Pull the chosen image and recreate the container while retaining the whole data volume. `/readyz` includes the running package `version`, without latest-release or update state. See [Software Updates](software-updates.md).

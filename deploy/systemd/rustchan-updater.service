@@ -1,0 +1,39 @@
+[Unit]
+Description=RustChan restricted signed-release updater
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rustchan-updater
+Group=rustchan-updater
+SupplementaryGroups=rustchan
+ExecStart=/usr/local/libexec/rustchan-updater
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=rustchan-updater
+RuntimeDirectoryMode=0750
+StateDirectory=rustchan-updater
+StateDirectoryMode=0700
+UMask=0077
+# RustChan enforces owner-only files. These capabilities permit reading snapshots
+# and restoring their original owner/mode, confined to the writable paths below.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER
+AmbientCapabilities=CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/rustchan /var/lib/rustchan-updater /var/lib/rustchan
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectClock=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

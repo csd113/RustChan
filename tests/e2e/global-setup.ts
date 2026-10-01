@@ -19,6 +19,11 @@ export default async function globalSetup() {
     });
     if (preflight.status !== 0) throw new Error('The opt-in media matrix requires the codecs reported by the toolchain preflight.');
   }
+  const fixture = spawnSync('cargo', ['test', '--locked', '--test', 'update_ui_fixtures'], {
+    cwd: repoRoot, stdio: 'inherit', env: process.env,
+  });
+  if (fixture.status !== 0) throw new Error('Native update renderer fixture generation failed.');
+
   if (process.env.RUSTCHAN_E2E_SKIP_BUILD === '1') {
     return;
   }

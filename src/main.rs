@@ -59,6 +59,8 @@ pub mod theme;
 pub mod theme_builder;
 /// TLS certificate loading and acceptor construction used by the server.
 pub mod tls;
+/// Signed release discovery and isolated native update transactions.
+pub mod updates;
 /// Cryptographic, filesystem, sanitization, and redirect helpers.
 pub mod utils;
 /// Background media and maintenance job processing.
@@ -142,12 +144,33 @@ fn relaunch_in_terminal_if_needed() -> anyhow::Result<bool> {
 // CHAN_BLOCKING_THREADS environment variable.
 
 fn main() -> anyhow::Result<()> {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--update-info")
+    {
+        writeln!(
+            io::stdout().lock(),
+            "{}",
+            serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"), "target": updates::platform_target(),
+                "schema": db::baseline_schema_version(), "minimum_schema": "1.5.0", "updater_protocol": 1
+            })
+        )?;
+        return Ok(());
+    }
     // Parse before terminal attachment, filesystem creation, logging, settings
     // generation, or CONFIG access. Clap handles --help and --version here and
     // exits successfully without mutating runtime state.
     let cli = server::cli::Cli::parse();
     config::configure_data_dir(cli.data_dir.as_deref())?;
     config::configure_port_override(cli.port)?;
+
+    if updates::managed() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(updates::await_startup())?;
+    }
 
     // Double-click / no-TTY guard
     // When launched from a file manager (Linux) or Explorer (Windows), stdout

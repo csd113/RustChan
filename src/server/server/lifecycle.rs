@@ -14,6 +14,16 @@ pub(super) async fn track_requests(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    if crate::updates::managed()
+        && !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+        )
+        && !crate::updates::mutations_allowed(Some(std::path::Path::new(crate::updates::SOCKET)))
+            .await
+    {
+        return recovery_unavailable();
+    }
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
     let _in_flight_guard = ScopedDecrement(&IN_FLIGHT);
@@ -88,5 +98,41 @@ pub(super) async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => tracing::info!(target: "server", signal = "SIGINT", "Shutdown signal received"),
         () = terminate => tracing::info!(target: "server", signal = "SIGTERM", "Shutdown signal received"),
+    }
+}
+
+/// Public write admission reports availability without exposing installation/recovery state.
+fn recovery_unavailable() -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        [("retry-after", "3")],
+        "Service temporarily unavailable. Retry shortly.",
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+/// Public admission privacy contract.
+mod tests {
+    use super::*;
+
+    /// Anonymous/API callers must not receive update phase, version or recovery details.
+    #[tokio::test]
+    async fn public_admission_error_keeps_updates_private() -> anyhow::Result<()> {
+        let response = recovery_unavailable();
+        anyhow::ensure!(
+            response.status() == axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "unsafe writes must fail closed"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let text = std::str::from_utf8(&body)?;
+        anyhow::ensure!(
+            !text.contains("update")
+                && !text.contains("recovery")
+                && !text.contains(crate::updates::VERSION),
+            "public availability errors must not expose update state"
+        );
+        Ok(())
     }
 }

@@ -4403,6 +4403,7 @@ html:not([data-theme]) .admin-login h1 {
   top: calc(var(--header-offset, 72px) + 1rem);
   display: flex;
   flex-direction: column;
+  flex-wrap: nowrap;
   align-items: stretch;
   gap: .2rem;
   padding: .75rem;
@@ -4857,6 +4858,7 @@ html.no-js .admin-panel:has(#boards:target, #boards :target) .admin-section-inde
 html.no-js .admin-panel:has(#moderation:target, #moderation :target) .admin-section-index a[href="#moderation"],
 html.no-js .admin-panel:has(#appearance:target, #appearance :target) .admin-section-index a[href="#appearance"],
 html.no-js .admin-panel:has(#backups:target, #backups :target) .admin-section-index a[href="#backups"],
+html.no-js .admin-panel:has(#software-updates:target, #software-updates :target) .admin-section-index a[href="#software-updates"],
 html.no-js .admin-panel:has(#maintenance:target, #maintenance :target) .admin-section-index a[href="#maintenance"] {
   color: var(--text); background: color-mix(in srgb, var(--green) 10%, var(--bg-panel)); border-inline-start-color: var(--green); font-weight: 600;
 }
@@ -5073,4 +5075,42 @@ html[data-theme] .admin-flash.flash-error {
     text-overflow: ellipsis;
     overflow: hidden;
   }
+}
+
+/* The update indicator stays inside the existing navigation cell at narrow widths. */
+.admin-section-index a[href="#software-updates"] {
+  flex-wrap: wrap;
+  gap: .35rem;
+}
+.admin-section-index a[href="#software-updates"] .admin-state-pill {
+  max-width: 100%;
+  white-space: normal;
+  text-transform: none;
+  letter-spacing: 0;
+}
+#admin-update-install {
+  display: flex;
+  flex-direction: column;
+  gap: .65rem;
+  align-items: stretch;
+}
+#admin-update-install input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 2.75rem;
+}
+#admin-update-install button { align-self: start; }
+
+/* Keep the restart confirmation beside its action instead of stretching Check. */
+#software-updates .admin-settings-grid:has(#admin-update-install) {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+}
+#admin-update-check {
+  align-self: start;
+  justify-self: start;
+}
+#admin-update-install {
+  width: 100%;
+  max-width: 38rem;
 }

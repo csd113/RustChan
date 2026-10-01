@@ -1,0 +1,10 @@
+# Root-owned 0644, /etc/rustchan/updater.toml. No web-configured paths.
+install_dir = "/opt/rustchan"
+state_dir = "/var/lib/rustchan-updater"
+data_dir = "/var/lib/rustchan"
+settings_path = "/var/lib/rustchan/settings.toml"
+health_port = 8080
+# Replace with: id -u rustchan
+web_uid = 10001
+public_key = "/etc/rustchan/update-public-key.hex"
+retention = 3

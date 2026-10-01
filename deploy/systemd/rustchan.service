@@ -1,0 +1,29 @@
+[Unit]
+Description=RustChan managed native imageboard
+After=network-online.target rustchan-updater.service
+Wants=network-online.target rustchan-updater.service
+
+[Service]
+Type=simple
+User=rustchan
+Group=rustchan
+WorkingDirectory=/var/lib/rustchan
+Environment=RUSTCHAN_MANAGED=1
+Environment=CHAN_DB=/var/lib/rustchan/chan.db
+Environment=CHAN_UPLOADS=/var/lib/rustchan/boards
+Environment=CHAN_HOST=127.0.0.1
+Environment=CHAN_PORT=8080
+ExecStart=/opt/rustchan/current/rustchan-cli --data-dir /var/lib/rustchan serve
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/rustchan
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

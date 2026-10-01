@@ -39,6 +39,11 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
         selected == "maintenance",
     );
 
+    let update_section = task(
+        "software-updates",
+        "<!-- software-updates -->",
+        selected == "software-updates",
+    );
     let body = format!(
         r#"<div class="admin-panel">
 {flash}
@@ -60,6 +65,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
 {overview_section}
 {network_section}
 {runtime_sections}
+{update_section}
 {boards_section}
 {moderation_section}
 {appearance_section}
@@ -140,6 +146,7 @@ fn render_admin_section_index(open_section: Option<&str>) -> String {
   <a href="#moderation">moderation</a>
   <a href="#appearance">appearance</a>
   <a href="#backups">backups</a>
+  <a href="#software-updates">Software Updates<!-- update-notification --></a>
   <a href="#maintenance">maintenance</a>
 </nav>"##;
     let anchor = open_section
@@ -207,6 +214,7 @@ fn default_task(open: Option<&str>) -> &'static str {
         Some(section) if section.starts_with("board-appearance-") => "appearance",
         Some(section) if section.starts_with("board-backup-") => "backups",
         Some(section) if section.starts_with("board-") => "boards",
+        Some("software-updates") => "software-updates",
         Some("boards") => "boards",
         Some("reports" | "moderation") => "moderation",
         Some(

@@ -196,6 +196,7 @@ fn protect_tls_plaintext_backend(
 /// Returns an error when configuration validation, filesystem or database
 /// initialization, listener startup, or coordinated listener execution fails.
 pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
+    crate::updates::await_startup().await?;
     // rustls 0.23 requires an explicit process-wide crypto provider.
     // install_default() is idempotent — a second call (e.g. in tests) returns
     // Err but never panics, so the let _ discard is intentional.

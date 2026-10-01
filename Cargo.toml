@@ -1,6 +1,6 @@
 [package]
 name = "rustchan"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2021"
 # Keep the package MSRV and cargo-msrv metadata aligned with Arti's Rust 1.91
 # requirement.
@@ -32,6 +32,10 @@ panic          = "abort"
 name = "rustchan-cli"
 path = "src/main.rs"
 
+[[bin]]
+name = "rustchan-updater"
+path = "src/bin/rustchan-updater.rs"
+
 [lib]
 name  = "chan"
 path  = "src/lib.rs"
@@ -60,6 +64,13 @@ toml  = "1.1.5"
 
 argon2  = "0.5.3"
 sha2    = "0.11.0"
+# Signed update verification reuses the TLS provider and existing compression/semver crates.
+ring = "0.17.14"
+semver = "1.0.28"
+flate2 = "1.1.9"
+tar = { version = "0.4.46", default-features = false }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "blocking"] }
+
 subtle  = "2.6.1"
 hex    = "0.4.3"
 # rand_core 0.10 updates RustChan's direct RNG trait dependency, but the
@@ -161,12 +172,6 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 # Safe in-process filesystem-capacity queries for upload disk-space preflights.
 rustix = { version = "1.1.4", features = ["fs"] }
 
-[dev-dependencies]
-# The CLI runtime integration test needs a TLS-capable HTTP client to drive the
-# built binary over HTTPS. Production targets no longer link an HTTP client.
-# default-features = false prevents the native-tls backend from being compiled
-# in; rustls-no-provider keeps the test build on the pure-Rust TLS stack.
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider"] }
 
 [features]
 default         = ["tls-self-signed"]

@@ -1959,3 +1959,64 @@ function setAdminModalOpen(modal, open, displayValue) {
     }
   });
 })();
+
+// Installation is persisted in the updater, so an outage never depends on a POST response.
+document.addEventListener('DOMContentLoaded', function () {
+  var section = document.getElementById('software-updates');
+  if (!section) return;
+  var message = document.getElementById('admin-update-message');
+  var stopped = false;
+  var timer;
+  var controller;
+  window.addEventListener('pagehide', function () {
+    stopped = true;
+    clearTimeout(timer);
+    if (controller) controller.abort();
+  });
+  function reconnect() {
+    if (stopped) return;
+    controller = new AbortController();
+    var timeout = setTimeout(function () { controller.abort(); }, 5000);
+    fetch('/admin/updates/status', { credentials: 'same-origin', cache: 'no-store', signal: controller.signal })
+      .then(function (response) {
+        if (response.status === 403 || response.status === 401) {
+          stopped = true;
+          message.textContent = 'Sign in again, then open Software Updates to see the persisted result.';
+          return null;
+        }
+        if (!response.ok) throw new Error('Updater temporarily unavailable');
+        return response.json();
+      }).then(function (status) {
+        if (!status || stopped) return;
+        message.textContent = status.message || 'Waiting for the updater…';
+        if (['idle', 'succeeded', 'rolled_back', 'failed', 'failed_manual_intervention'].includes(status.phase)) {
+          stopped = true;
+          window.location.replace('/admin/panel?open=software-updates#software-updates');
+        }
+      }).catch(function () {
+        if (!stopped) message.textContent = 'RustChan is restarting. Reconnecting to check the persisted result…';
+      }).finally(function () {
+        clearTimeout(timeout);
+        if (!stopped) timer = setTimeout(reconnect, 2000);
+      });
+  }
+  var form = document.getElementById('admin-update-install');
+  if (form) form.addEventListener('submit', function (event) {
+    if (!form.checkValidity()) return;
+    event.preventDefault();
+    message.textContent = 'Requesting installation. Waiting for the updater…';
+    form.querySelector('button[type="submit"]').disabled = true;
+    fetch(form.action, { method: 'POST', credentials: 'same-origin', redirect: 'follow', body: new URLSearchParams(new FormData(form)) })
+      .then(function (response) {
+        if (!response.ok) {
+          stopped = true;
+          message.textContent = 'Installation request was rejected. Reload Software Updates to review the current state.';
+          form.querySelector('button[type="submit"]').disabled = false;
+          return;
+        }
+        reconnect();
+      }).catch(function () { reconnect(); });
+    form.querySelector('[name="current_password"]').value = '';
+  });
+  if (section.dataset.updateActive === 'true') reconnect();
+});

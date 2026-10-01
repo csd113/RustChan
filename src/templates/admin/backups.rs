@@ -42,7 +42,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
         ));
     }
 
-    render_admin_backups_section(
+    let section = render_admin_backups_section(
         view.csrf_token,
         &backup_warning_html,
         view.backups.backup_status_line,
@@ -58,7 +58,8 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
         &board_backup_cards,
         &render_full_backup_rows(view),
         &render_board_backup_rows(view),
-    )
+    );
+    format!("{section}<!-- update-backups -->")
 }
 
 #[expect(

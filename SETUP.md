@@ -701,3 +701,7 @@ rustchan-data/runtime/tor/state/
 ```
 
 Back that directory up if the onion address matters.
+
+### Optional administrator-controlled software updates
+
+For immutable native Linux version directories, a separate restricted updater service, signing trust setup and automatic backup/rollback, follow [Software Updates](docs/software-updates.md). The existing single-binary service remains deployment-managed until explicitly converted.
