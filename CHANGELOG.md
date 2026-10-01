@@ -22,6 +22,7 @@ All notable changes to RustChan will be documented in this file.
 ### Testing and maintenance
 
 - Restored version-controlled Playwright tests, configurations, npm manifest and lockfile, helper scripts, and browser CI. Browser downloads, profiles, runtime databases, caches, reports, screenshots, traces, videos, and disposable audit evidence remain ignored.
+- Coordinated CLI integration-test subprocess spawning to prevent Linux fork/exec descriptor inheritance from making freshly copied executables fail with `ETXTBSY`, while keeping test execution parallel. Kept configuration documentation compatible with Rust 1.91's strict Clippy checks.
 - Added deterministic polling lifecycle, Firefox launch and no-JavaScript, fixture disposal, and narrow-table accessibility regressions. Completed validation passed 2,430 Rust tests and the seven-project browser matrix (1,077 passed, 883 explicit skips, zero unexpected failures or retries); WebKit stress testing passed 120/120 with two workers.
 
 ## RustChan 1.5.0 — 2026-09-28

@@ -14,11 +14,11 @@ pub struct ManagementState {
     pub database_source: String,
     /// Immutable startup source for the media root.
     pub uploads_source: String,
-    /// Effective running SQLite file.
+    /// Effective running `SQLite` file.
     pub database: String,
-    /// File-selected SQLite path for next startup without overrides.
+    /// File-selected `SQLite` path for next startup without overrides.
     pub saved_database: String,
-    /// Environment-effective next-start SQLite path.
+    /// Environment-effective next-start `SQLite` path.
     pub next_database: String,
     /// Effective running board-media root.
     pub uploads: String,
