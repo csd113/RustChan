@@ -338,11 +338,22 @@ fn render_inline(text: &str) -> String {
     result
 }
 
-/// Sanitize a file name: keep only safe characters.
+/// Keeps safe filename characters and a bounded extension when truncating.
 #[must_use]
 pub fn sanitize_filename(name: &str) -> String {
+    const MAX_FILE_NAME_CHARS: usize = 100;
     let name = name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'], "_");
-    name.chars().take(100).collect()
+    if let Some((stem, extension)) = name.rsplit_once('.') {
+        let suffix_chars = extension.chars().count() + 1;
+        if !stem.is_empty() && !extension.is_empty() && suffix_chars < MAX_FILE_NAME_CHARS {
+            let prefix: String = stem
+                .chars()
+                .take(MAX_FILE_NAME_CHARS - suffix_chars)
+                .collect();
+            return format!("{prefix}.{extension}");
+        }
+    }
+    name.chars().take(MAX_FILE_NAME_CHARS).collect()
 }
 
 /// Validate and truncate post body.
@@ -599,6 +610,45 @@ mod tests {
         let long_name = format!("{cjk}.jpg");
         let result = sanitize_filename(&long_name);
         assert!(result.chars().count() <= 100);
+    }
+
+    #[test]
+    fn long_filenames_keep_extension_within_unicode_character_bound() {
+        let long_name = format!("日本語-{}.png", "long-filename-".repeat(10));
+        let result = sanitize_filename(&long_name);
+        assert_eq!(result.chars().count(), 100);
+        assert!(result.starts_with("日本語-"));
+        assert_eq!(
+            std::path::Path::new(&result)
+                .extension()
+                .and_then(std::ffi::OsStr::to_str),
+            Some("png")
+        );
+        let multi_dot = sanitize_filename(&format!("{}.archive.tar.gz", "日".repeat(110)));
+        assert_eq!(multi_dot.chars().count(), 100);
+        assert_eq!(
+            std::path::Path::new(&multi_dot)
+                .extension()
+                .and_then(std::ffi::OsStr::to_str),
+            Some("gz")
+        );
+    }
+
+    #[test]
+    fn filename_extension_preservation_keeps_sanitization_and_bounds() {
+        assert_eq!(
+            sanitize_filename("../unsafe\\path:<name>?.png"),
+            ".._unsafe_path__name__.png"
+        );
+        assert_eq!(sanitize_filename(".gitignore"), ".gitignore");
+        assert_eq!(sanitize_filename("plain.txt"), "plain.txt");
+        for name in [
+            "日".repeat(150),
+            format!("stem.{}", "日".repeat(150)),
+            format!("{}.", "日".repeat(150)),
+        ] {
+            assert_eq!(sanitize_filename(&name).chars().count(), 100);
+        }
     }
 
     #[test]

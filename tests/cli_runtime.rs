@@ -657,7 +657,8 @@ async fn headless_server_without_admin_never_starts_console_input() -> Result<()
     )?;
     assert!(
         initialized.status.success(),
-        "initialize headless test data"
+        "initialize headless test data: {}",
+        String::from_utf8_lossy(&initialized.stderr)
     );
     drop((https_reservation, redirect_reservation));
     let log_path = root.path().join("headless.log");

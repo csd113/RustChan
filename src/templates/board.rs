@@ -537,7 +537,7 @@ fn render_catalog_card(
     };
 
     format!(
-        r#"<div class="catalog-item{sticky}{pinned_class}" data-replies="{replies}" data-created="{created}" data-bumped="{bumped}" data-sticky="{is_sticky}" data-pinned="{is_pinned}">
+        r#"<div class="catalog-item{sticky}{pinned_class}" data-replies="{replies}" data-created="{created}" data-bumped="{bumped}" data-last-reply="{last_reply}" data-sticky="{is_sticky}" data-pinned="{is_pinned}">
 <a class="catalog-card-link" href="/{board}/thread/{thread_id}">
   {thumb}
 </a>
@@ -558,6 +558,7 @@ fn render_catalog_card(
         replies = thread.reply_count,
         created = thread.created_at,
         bumped = thread.bumped_at,
+        last_reply = thread.last_post_at,
         is_sticky = if thread.sticky { "1" } else { "0" },
         is_pinned = if is_pinned { "1" } else { "0" },
         board = escape_html(&board.short_name),
@@ -1510,7 +1511,7 @@ pub fn search_page(
             escape_html(&result_label)
         );
         for post in posts {
-            body.push_str(&super::thread::render_post(
+            body.push_str(&super::thread::render_search_post(
                 post,
                 &board.short_name,
                 csrf_token,
@@ -1528,7 +1529,6 @@ pub fn search_page(
                     thread_op_id: None,
                     video_audio_muted: user_preferences.video_audio_muted,
                 },
-                0,
             ));
         }
         body.push_str(&render_pagination(
@@ -1650,6 +1650,7 @@ mod tests {
             subject: Some("Thread subject".into()),
             created_at: 1_700_000_000,
             bumped_at: 1_700_000_100,
+            last_post_at: 1_700_000_100,
             locked: true,
             sticky: true,
             archived: false,

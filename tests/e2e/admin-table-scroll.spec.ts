@@ -1,7 +1,7 @@
 import { test, expect, adminLogin, sqliteExec } from './helpers';
 import { BUILTIN_THEMES } from './phase4-helpers';
 
-const sections = ['control-center', 'site-settings', 'site-health', 'network-security', 'https', 'tor', 'access', 'timeouts', 'display', 'media', 'schedules', 'accounts', 'storage', 'logging', 'system', 'configuration-state', 'boards', 'moderation', 'appearance', 'backups', 'maintenance'];
+const sections = ['control-center', 'site-settings', 'site-health', 'network-security', 'https', 'tor', 'access', 'timeouts', 'display', 'media', 'schedules', 'accounts', 'storage', 'logging', 'system', 'configuration-state', 'boards', 'moderation', 'appearance', 'backups', 'software-updates', 'maintenance'];
 
 for (const [theme] of BUILTIN_THEMES) {
 test(`${theme}: 320px admin sections preserve native tables and keyboard-accessible local scrolling`, async ({ page, app }, testInfo) => {

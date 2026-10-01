@@ -273,6 +273,7 @@ mod tests {
             subject: Some("subject".into()),
             created_at: 100,
             bumped_at: 200,
+            last_post_at: 200,
             locked: false,
             sticky: false,
             archived: false,

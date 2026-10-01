@@ -57,6 +57,8 @@ pub mod theme_builder;
 #[cfg(test)]
 /// TLS certificate handling used by crate-level tests.
 pub mod tls;
+/// Signed release discovery and isolated native update transactions.
+pub mod updates;
 /// Cryptographic, filesystem, sanitization, and redirect helpers.
 pub mod utils;
 #[cfg(test)]

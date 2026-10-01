@@ -56,6 +56,7 @@ pub(super) fn render(query: Option<&str>) -> String {
             }
         }
         for (section, label, synonyms) in [
+            ("software-updates", "Software Updates", "software update upgrade release version rollback"),
             ("accounts", "Administrator accounts and passwords", "accounts administrator create reset change password"),
             ("storage", "Storage relocation and secret rotation", "storage paths database uploads data directory relocate migrate cookie secret rotate CSRF"),
             ("visitor-defaults", "Default NSFW visibility", "default hide NSFW boards visibility visitor preference"),

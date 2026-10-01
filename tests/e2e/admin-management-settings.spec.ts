@@ -107,6 +107,12 @@ test('account creation and password resets require reauthentication and revoke t
     await target.getByLabel('Password').fill('OperatorPass123!');
     await target.getByRole('button',{name:'authenticate'}).click();
     await expect(target.locator('.admin-panel')).toBeVisible();
+    // Keep the authenticated session, but stop unrelated health/update polling
+    // before deliberately revoking it. The explicit protected-page request
+    // below still proves that the old session fails closed.
+    await target.goto(app.baseURL, {waitUntil:'domcontentloaded'});
+    expect((await targetContext.cookies(app.baseURL)).some(cookie => cookie.name === 'chan_admin_session')).toBe(true);
+    expect(sqliteQuery(app,"SELECT COUNT(*) FROM admin_sessions WHERE admin_id=(SELECT id FROM admin_users WHERE username='operator');")).toBe('1');
     const reset=page.locator('#admin-account-password');
     await reset.locator('[name=username]').selectOption('operator');
     await reset.locator('[name=current_password]').fill('AdminPass123!');

@@ -74,6 +74,9 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features
 
+      - name: Test native update packaging and signing
+        run: python3 -m unittest discover -s tools -p "test_update_package.py"
+
       - name: Run tests
         run: cargo test --locked --workspace --all-features
 
@@ -203,11 +206,19 @@ jobs:
             )
           fi
 
+      - name: Package signed-update inputs for native Linux
+        if: runner.os == 'Linux' && !contains(github.ref_name, '-')
+        shell: bash
+        run: python3 tools/update_package.py package --binary target/${{ matrix.target }}/release/rustchan-cli --target ${{ matrix.target }} --version "$GITHUB_REF_NAME" --output dist
+
       - name: Upload artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: rustchan-cli-${{ matrix.asset_suffix }}
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/rustchan-update-*.tar.gz
+            dist/build-info-*.json
           if-no-files-found: error
           retention-days: 7
 
@@ -276,11 +287,38 @@ jobs:
           cd release-assets
           sha256sum --check --strict SHA256SUMS.txt
 
+      - name: Create draft and sign native update artifacts
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUSTCHAN_UPDATE_SIGNING_KEY: ${{ secrets.RUSTCHAN_UPDATE_SIGNING_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$RUSTCHAN_UPDATE_SIGNING_KEY"
+          key_file="${RUNNER_TEMP}/rustchan-update-key.pem"
+          umask 077
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s\n' "$RUSTCHAN_UPDATE_SIGNING_KEY" > "$key_file"
+          if ! gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true; then
+            if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              echo "Refusing to alter an already published release" >&2
+              exit 1
+            fi
+            gh release create "$GITHUB_REF_NAME" --draft --title "Release $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
+          fi
+          release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq '.id')"
+          python3 tools/update_package.py sign --directory release-assets --key "$key_file" --release-id "$release_id" --version "$GITHUB_REF_NAME"
+          rm release-assets/build-info-*.json
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           body_path: RELEASE_NOTES.md

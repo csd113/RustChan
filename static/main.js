@@ -23,6 +23,11 @@ function isTouchLikeDevice() {
   );
 }
 
+function userScrollBehavior() {
+  return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches ?
+    'auto' : 'smooth';
+}
+
 function setElementInert(element, inert) {
   if (!element) return;
   if (inert) {
@@ -144,7 +149,7 @@ function setPostFormOpen(open, opts) {
     if (first && !isMobileViewport()) first.focus();
     if (isMobileViewport() || (opts && opts.scrollIntoView)) {
       setTimeout(function () {
-        wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        wrap.scrollIntoView({ behavior: userScrollBehavior(), block: 'start' });
       }, 40);
     }
   }
@@ -373,6 +378,7 @@ document.addEventListener('DOMContentLoaded', function () {
   initSelfActionCountdowns(document);
   enablePosterHighlightControls(document);
   wireAudioMiniPlayers(document);
+  wireMediaPlaybackErrors(document);
   wireMediaThumbFallbacks(document);
   syncMobileHeaderOffset();
   initMobileBoardMenus();
@@ -462,6 +468,7 @@ window.addEventListener('resize', function () {
     initSelfActionCountdowns(container);
     enablePosterHighlightControls(container);
     wireAudioMiniPlayers(container);
+    wireMediaPlaybackErrors(container);
     wireMediaThumbFallbacks(container);
     if (_origLocalize) _origLocalize(container);
   };
@@ -1094,7 +1101,7 @@ function showPostFormFeedback(form, message) {
     banner.focus();
   }
   if (typeof banner.scrollIntoView === 'function') {
-    banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    banner.scrollIntoView({ behavior: userScrollBehavior(), block: 'nearest' });
   }
 }
 
@@ -1145,16 +1152,18 @@ function submitPostFormWithProgress(form) {
         'Uploading ' + formatBytes(event.loaded) + ' / ' + formatBytes(event.total) + ' (' + Math.round(percent) + '%)'
       );
     } else {
-      submitHelper.setProgress(100, 'Uploading…');
+      submitHelper.setProgress(0, 'Uploading…');
     }
+  });
+
+  xhr.upload.addEventListener('load', function () {
+    setSubmitButtonsWaitingForServer(form);
+    submitHelper.setProgress(100, 'Upload sent. Waiting for server…');
   });
 
   xhr.addEventListener('load', function () {
     var payload = submitHelper.parsePayload(xhr);
     var explicitRedirect = submitHelper.extractRedirect(xhr, payload);
-
-    submitHelper.setBusy(false);
-    submitHelper.setProgress(100, 'Finishing…');
 
     // XHR follows redirects internally, and some browsers expose the final
     // response URL without the original #p123 fragment. The explicit redirect
@@ -1165,21 +1174,15 @@ function submitPostFormWithProgress(form) {
       return;
     }
 
-    var finalUrl = absoluteUrl(xhr.responseURL || form.action);
-    var currentUrl = absoluteUrl(window.location.href);
-
-    if (xhr.status >= 200 && xhr.status < 400 && finalUrl && finalUrl !== currentUrl) {
-      navigatePostSubmitTarget(form, finalUrl);
-      return;
-    }
-
     if (payload && payload.error) {
-      resetPostSubmitFailureState(form, payload.error);
+      var nextAction = /captcha/i.test(payload.error) ? ' Choose new challenge, then enter its text and submit again.' : '';
+      resetPostSubmitFailureState(form, payload.error + nextAction);
       return;
     }
 
     if (xhr.status >= 200 && xhr.status < 400) {
-      window.location.reload();
+      resetPostSubmitFailureState(form,
+        'The server response did not confirm your post. It may still have succeeded. Check the thread or board in another tab before retrying; your input is kept here.');
       return;
     }
 
@@ -1192,31 +1195,67 @@ function submitPostFormWithProgress(form) {
   xhr.addEventListener('error', function () {
     resetPostSubmitFailureState(
       form,
-      'Connection dropped before the server response arrived. Your post may still have succeeded. Refresh the thread or board before trying again.'
+      'Connection dropped before the server response arrived. Your post may still have succeeded. Check the thread or board in another tab before retrying; your input is kept here.'
     );
   });
 
   xhr.addEventListener('timeout', function () {
     resetPostSubmitFailureState(
       form,
-      'Request timed out before the server response arrived. Request may still have succeeded. Refresh before retrying.'
+      'Request timed out before the server response arrived. Your post may still have succeeded. Check the thread or board in another tab before retrying; your input is kept here.'
     );
   });
 
   xhr.addEventListener('abort', function () {
-    stopSubmitButtonAnimation(form);
-    setSubmittingState(form, false);
-    resetUploadProgress(form);
-    dispatchPostFormEvent(form, 'rustchan:post-submit-reset');
+    resetPostSubmitFailureState(form,
+      'Submission interrupted. Your post may still have succeeded. Check the thread or board in another tab before retrying; your input is kept here.');
   });
 
-  xhr.send(new FormData(form));
+  try {
+    xhr.send(new FormData(form));
+  } catch (_error) {
+    resetPostSubmitFailureState(form, 'Could not send the upload. Your input is kept here. Check your connection and try again.');
+  }
   return true;
 }
 
 function captchaNonceMissing(form) {
   var answerField = form && form.querySelector('input[name="captcha_answer"]');
   return !!(answerField && !answerField.value.trim());
+}
+
+function refreshPostCaptcha(link) {
+  var form = link.closest('form.post-form');
+  if (!form || !window.DOMParser) return false;
+  if (form.dataset.captchaRefreshing === '1' || form.dataset.uploadSubmitting === '1') return true;
+  form.dataset.captchaRefreshing = '1';
+  link.setAttribute('aria-disabled', 'true');
+  fetchWithTimeout(link.href, { credentials: 'same-origin', cache: 'no-store' }, 30000)
+    .then(function (response) {
+      if (!response.ok) throw new Error('CAPTCHA refresh failed');
+      return response.text();
+    }).then(function (html) {
+      var doc = new DOMParser().parseFromString(html, 'text/html');
+      var freshForm = Array.prototype.find.call(doc.querySelectorAll('form.post-form'), function (candidate) {
+        return candidate.getAttribute('action') === form.getAttribute('action');
+      });
+      var freshId = freshForm && freshForm.querySelector('input[name="captcha_id"]');
+      var freshImage = freshForm && freshForm.querySelector('.captcha-image');
+      var freshLink = freshForm && freshForm.querySelector('.captcha-refresh-link');
+      if (!freshId || !freshImage || !freshLink) throw new Error('CAPTCHA unavailable');
+      form.querySelector('input[name="captcha_id"]').value = freshId.value;
+      form.querySelector('.captcha-image').src = freshImage.getAttribute('src');
+      link.href = freshLink.getAttribute('href');
+      var answer = form.querySelector('input[name="captcha_answer"]');
+      answer.value = '';
+      answer.focus();
+    }).catch(function () {
+      showPostFormFeedback(form, 'Could not refresh the CAPTCHA. Your input and attachments are kept. Check your connection and choose new challenge again.');
+    }).then(function () {
+      form.dataset.captchaRefreshing = '';
+      link.removeAttribute('aria-disabled');
+    });
+  return true;
 }
 
 // NSFW disclaimer overlay
@@ -1386,6 +1425,62 @@ function wireAudioMiniPlayers(root) {
     audio.addEventListener('play', function () {
       updateAudioMiniPlayer(audio);
     });
+  });
+}
+
+function wireMediaPlaybackErrors(root) {
+  (root || document).querySelectorAll('audio.audio-player, video.media-expanded-video').forEach(function (media) {
+    if (media.dataset.playbackErrorWired === '1') return;
+    media.dataset.playbackErrorWired = '1';
+    var notice = null;
+    function clearError() {
+      if (notice) notice.hidden = true;
+    }
+    function showError() {
+      if (!notice) {
+        notice = document.createElement('p');
+        notice.className = 'media-playback-error form-field-help';
+        notice.setAttribute('role', 'status');
+        media.insertAdjacentElement('afterend', notice);
+      }
+      var kind = media.tagName === 'AUDIO' ? 'Audio' : 'Video';
+      notice.textContent = kind + ' could not be played. ';
+      var source = media.querySelector('source');
+      var rawSrc = source ? source.getAttribute('src') : media.getAttribute('src');
+      var original = null;
+      try {
+        if (rawSrc) original = new URL(rawSrc, window.location.href);
+      } catch (e) {
+        original = null;
+      }
+      if (original && original.origin === window.location.origin && original.pathname.indexOf('/boards/') === 0) {
+        var link = document.createElement('a');
+        link.href = original.pathname;
+        link.setAttribute('download', '');
+        link.textContent = 'Download the original file';
+        notice.appendChild(link);
+        notice.appendChild(document.createTextNode(' to try another player.'));
+      } else {
+        notice.appendChild(document.createTextNode('Try reloading this page.'));
+      }
+      notice.hidden = false;
+    }
+    media.addEventListener('error', function () {
+      // An intentional playback abort is not a failed or unsupported file.
+      if (media.error && media.error.code !== 1) showError();
+    });
+    media.querySelectorAll('source').forEach(function (source) {
+      source.addEventListener('error', function () {
+        // A child source failure can leave media.error null. Wait for the
+        // browser's source selection before reporting that no source works.
+        window.setTimeout(function () {
+          if (media.networkState === HTMLMediaElement.NETWORK_NO_SOURCE) showError();
+        }, 0);
+      });
+    });
+    media.addEventListener('loadstart', clearError);
+    media.addEventListener('loadeddata', clearError);
+    if ((media.error && media.error.code !== 1) || media.networkState === HTMLMediaElement.NETWORK_NO_SOURCE) showError();
   });
 }
 
@@ -2434,8 +2529,6 @@ function repositionOpenThreadMenus() {
 
 function clampPopupToViewport(anchor, popup) {
   var rect = anchor.getBoundingClientRect();
-  var pw = popup.offsetWidth || 420;
-  var ph = popup.offsetHeight || 200;
   var visualViewport = window.visualViewport || null;
   var vw = visualViewport && visualViewport.width ? visualViewport.width : window.innerWidth;
   var vh = visualViewport && visualViewport.height ? visualViewport.height : window.innerHeight;
@@ -2444,6 +2537,15 @@ function clampPopupToViewport(anchor, popup) {
   var viewportLeft = scrollX + (visualViewport && visualViewport.offsetLeft ? visualViewport.offsetLeft : 0);
   var viewportTop = scrollY + (visualViewport && visualViewport.offsetTop ? visualViewport.offsetTop : 0);
   var gutter = 8;
+  var viewportOffsetTop = viewportTop - scrollY;
+  var availableAbove = rect.top - viewportOffsetTop - gutter * 2;
+  var availableBelow = viewportOffsetTop + vh - rect.bottom - gutter * 2;
+  // A dense preview must fit beside its trigger. Otherwise clamping an
+  // oversized popup back into view can cover the link before it is clicked.
+  popup.style.maxHeight = Math.max(1, Math.min(vh * 0.7, Math.max(availableAbove, availableBelow))) + 'px';
+  popup.style.overflowY = 'auto';
+  var pw = popup.offsetWidth || 420;
+  var ph = popup.offsetHeight || 200;
   var left = rect.left + scrollX;
   var minLeft = viewportLeft + gutter;
   var maxLeft = viewportLeft + Math.max(gutter, vw - pw - gutter);
@@ -2452,7 +2554,7 @@ function clampPopupToViewport(anchor, popup) {
   if (left > maxLeft) left = maxLeft;
   if (left < minLeft) left = minLeft;
 
-  if (rect.bottom + ph + gutter < vh) {
+  if (ph <= availableBelow) {
     top = rect.bottom + scrollY + gutter;
   } else {
     top = rect.top + scrollY - ph - gutter;
@@ -2680,6 +2782,7 @@ function clampPopupToViewport(anchor, popup) {
   }
 
   function syncUserPreferencesBackgroundScrollLock() {
+    document.querySelectorAll('.user-preferences-panel').forEach(syncUserPreferencesPanelState);
     if (
       isMobileUserPreferencesViewport() &&
       document.querySelector('.user-preferences-panel[open]')
@@ -2702,6 +2805,22 @@ function clampPopupToViewport(anchor, popup) {
     if (form) {
       setElementAriaHidden(form, !open);
       setElementInert(form, !open);
+      var modal = open && isMobileUserPreferencesViewport();
+      var wasModal = form.getAttribute('aria-modal') === 'true';
+      if (modal) {
+        form.setAttribute('role', 'dialog');
+        form.setAttribute('aria-modal', 'true');
+        form.setAttribute('aria-label', 'User preferences');
+        if (!wasModal) {
+          var close = form.querySelector('.user-preferences-mobile-close');
+          if (close) close.focus();
+        }
+      } else {
+        form.removeAttribute('role');
+        form.removeAttribute('aria-modal');
+        form.removeAttribute('aria-label');
+        if (open && wasModal && summary) restoreUserPreferencesSummaryFocus(panel);
+      }
     }
   }
 
@@ -2712,9 +2831,22 @@ function clampPopupToViewport(anchor, popup) {
     panel.open = false;
     syncUserPreferencesPanelState(panel);
     syncUserPreferencesBackgroundScrollLock();
-    if (opts.restoreFocus && summary && typeof summary.focus === 'function') {
-      summary.focus();
-    }
+    if (opts.restoreFocus && summary) restoreUserPreferencesSummaryFocus(panel);
+  }
+
+  function restoreUserPreferencesSummaryFocus(panel) {
+    var summary = panel.querySelector('.user-preferences-summary');
+    if (!summary || typeof summary.focus !== 'function') return;
+    summary.focus();
+    // WebKit can retain the hidden mobile summary through the first frame
+    // after closing or resizing. Restore once its visible layout is painted.
+    window.requestAnimationFrame(function () {
+      window.requestAnimationFrame(function () {
+        if (summary.isConnected && (!panel.open || !isMobileUserPreferencesViewport())) {
+          summary.focus();
+        }
+      });
+    });
   }
 
   if (userPreferencesMobileQuery) {
@@ -2935,7 +3067,7 @@ function clampPopupToViewport(anchor, popup) {
   }
 
   pill.addEventListener('click', function () {
-    window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+    window.scrollTo({ top: document.body.scrollHeight, behavior: userScrollBehavior() });
     hidePill();
   });
 
@@ -3332,7 +3464,7 @@ function clampPopupToViewport(anchor, popup) {
     }
   }
 
-  function highlightPostFromHash(scrollBehavior) {
+  function highlightPostFromHash() {
     var match = window.location.hash.match(/^#p(\d+)$/);
     if (!match) {
       clearMissingHashNotice();
@@ -3346,9 +3478,6 @@ function clampPopupToViewport(anchor, popup) {
     }
     clearMissingHashNotice();
     highlightPost(match[1]);
-    if (scrollBehavior && typeof target.scrollIntoView === 'function') {
-      target.scrollIntoView({ behavior: scrollBehavior, block: 'start' });
-    }
   }
 
   function syncQuotedPostState(root) {
@@ -3383,11 +3512,9 @@ function clampPopupToViewport(anchor, popup) {
       clearHighlight();
       return;
     }
-    var behavior = 'smooth';
-    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      behavior = 'auto';
-    }
-    highlightPostFromHash(behavior);
+    // Native fragment navigation owns scrolling and history restoration. The
+    // post's CSS scroll margin already keeps it below the fixed header.
+    highlightPostFromHash();
   });
 
   var popup = document.createElement('div');
@@ -3451,6 +3578,7 @@ function clampPopupToViewport(anchor, popup) {
       link.addEventListener('mouseenter', function () { clearTimeout(_hideTimer); showPopup(link, pid); });
       link.addEventListener('mouseleave', function () { _hideTimer = setTimeout(hidePopup, 120); });
       link.addEventListener('click', function (e) {
+        if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
         var target = document.getElementById('p' + pid);
         if (!target) {
           e.preventDefault();
@@ -3458,9 +3586,6 @@ function clampPopupToViewport(anchor, popup) {
           showMissingPostPopup(link, pid);
           return;
         }
-        e.preventDefault();
-        var offset = target.getBoundingClientRect().top + window.pageYOffset - 60;
-        window.scrollTo({ top: offset, behavior: 'smooth' });
         highlightPost(pid);
         hidePopup();
       });
@@ -3479,6 +3604,7 @@ function clampPopupToViewport(anchor, popup) {
       link.addEventListener('mouseenter', function () { clearTimeout(_hideTimer); showPopup(link, pid); });
       link.addEventListener('mouseleave', function () { _hideTimer = setTimeout(hidePopup, 120); });
       link.addEventListener('click', function (e) {
+        if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
         var target = document.getElementById('p' + pid);
         if (!target) {
           e.preventDefault();
@@ -3486,9 +3612,6 @@ function clampPopupToViewport(anchor, popup) {
           showMissingPostPopup(link, pid);
           return;
         }
-        e.preventDefault();
-        var offset = target.getBoundingClientRect().top + window.pageYOffset - 60;
-        window.scrollTo({ top: offset, behavior: 'smooth' });
         highlightPost(pid);
         hidePopup();
       });
@@ -3619,6 +3742,7 @@ function clampPopupToViewport(anchor, popup) {
         _cbHideTimer = setTimeout(function () { if (popup) popup.style.display = 'none'; }, 120);
       });
       link.addEventListener('click', function (e) {
+        if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
         e.preventDefault();
         var key = board + ':' + pid;
         function navigate(threadId) {
@@ -3840,7 +3964,7 @@ function sortCatalog(mode) {
     }
     if (mode === 'replies') return parseInt(b.dataset.replies) - parseInt(a.dataset.replies);
     if (mode === 'created') return parseInt(b.dataset.created) - parseInt(a.dataset.created);
-    if (mode === 'last_reply') return parseInt(b.dataset.bumped) - parseInt(a.dataset.bumped);
+    if (mode === 'last_reply') return parseInt(b.dataset.lastReply) - parseInt(a.dataset.lastReply);
     return 0;
   });
   var frag = document.createDocumentFragment();
@@ -3903,6 +4027,12 @@ function togglePosterHighlights(threadId, posterId) {
 
 // Centralised event delegation
 document.addEventListener('click', function (e) {
+  var captchaRefresh = e.target.closest && e.target.closest('.captcha-refresh-link');
+  if (captchaRefresh && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey &&
+    refreshPostCaptcha(captchaRefresh)) {
+    e.preventDefault();
+    return;
+  }
   if (
     e.target === document.getElementById('ban-delete-modal') ||
     e.target.id === 'ban-delete-cancel'
@@ -4069,6 +4199,10 @@ document.addEventListener('submit', function (e) {
     return;
   }
   if (form.matches && form.matches('form.post-form')) {
+    if (form.dataset.uploadSubmitting === '1' || form.dataset.captchaRefreshing === '1') {
+      e.preventDefault();
+      return;
+    }
     if (captchaNonceMissing(form)) {
       e.preventDefault();
       showPostFormFeedback(
@@ -4301,7 +4435,9 @@ if (window.visualViewport) {
   try {
     var saved = localStorage.getItem(DRAFT_KEY);
     var savedMode = localStorage.getItem(DRAFT_META_KEY);
-    if (saved) {
+    // A validation response carries the latest submitted text; shared autosave
+    // may be stale or have been written by another tab during navigation.
+    if (saved && !ta.value) {
       ta.value = saved;
       ta.dataset.draftRestored = '1';
       ta.dataset.lastPersistedDraft = saved;

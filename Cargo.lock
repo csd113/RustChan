@@ -1440,7 +1440,7 @@ dependencies = [
  "quote",
  "sha3 0.12.0",
  "strum",
- "syn 3.0.6",
+ "syn 2.0.119",
  "unicode-ident",
  "void",
 ]
@@ -4188,7 +4188,9 @@ checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
  "base64 0.23.1",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -4324,7 +4326,7 @@ dependencies = [
 
 [[package]]
 name = "rustchan"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4338,6 +4340,7 @@ dependencies = [
  "crossterm",
  "dashmap",
  "data-encoding",
+ "flate2",
  "futures",
  "getrandom 0.4.3",
  "hex",
@@ -4355,17 +4358,20 @@ dependencies = [
  "rcgen 0.14.10",
  "regex",
  "reqwest",
+ "ring",
  "rusqlite",
  "rustix",
  "rustls",
  "rustls-acme",
  "rustls-pki-types",
  "rustls-webpki",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "sha3 0.12.0",
  "subtle",
+ "tar",
  "tempfile",
  "thiserror 2.0.20",
  "time",
@@ -5217,6 +5223,16 @@ name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+]
 
 [[package]]
 name = "tempfile"
@@ -7574,9 +7590,9 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",

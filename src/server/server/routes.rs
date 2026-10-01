@@ -176,6 +176,18 @@ pub(super) fn public_routes() -> Router<AppState> {
 /// Compose all authenticated administration route groups.
 pub(super) fn admin_routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/admin/updates/status",
+            get(crate::handlers::admin::updates::status),
+        )
+        .route(
+            "/admin/updates/check",
+            post(crate::handlers::admin::updates::check),
+        )
+        .route(
+            "/admin/updates/install",
+            post(crate::handlers::admin::updates::install),
+        )
         .merge(admin_auth_routes())
         .route(
             "/admin/network/settings",

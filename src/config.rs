@@ -6,6 +6,34 @@ use std::io::{stderr, stdout, Write as _};
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
+/// Validate the persisted settings syntax and known field types before update backup.
+///
+/// # Errors
+/// Returns an error for malformed TOML or invalid `RustChan` settings field types.
+pub(crate) fn validate_update_settings(text: &str, data: &Path) -> anyhow::Result<()> {
+    let settings = parse_settings_file_str(text)
+        .map_err(|_error| anyhow::anyhow!("configuration backup is not valid RustChan settings"))?;
+    if let Some(tls) = settings.tls {
+        if tls.acme.enabled {
+            let cache = Path::new(&tls.acme.cache_dir);
+            let cache = if cache.is_absolute() {
+                cache.to_path_buf()
+            } else {
+                data.join(cache)
+            };
+            anyhow::ensure!(
+                cache.starts_with(data.join("runtime"))
+                    && cache
+                        .components()
+                        .all(|part| !matches!(part, Component::ParentDir)),
+                "managed updates require ACME state inside the protected runtime directory"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 use std::sync::Mutex;
 use std::sync::{LazyLock, OnceLock};

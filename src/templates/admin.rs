@@ -88,6 +88,8 @@ mod network;
 mod search;
 /// Site-health rendering.
 mod site_health;
+/// Software update and pre-upgrade backup views.
+mod updates;
 
 /// Render authenticated network configuration status and controls.
 #[must_use]
@@ -2010,6 +2012,23 @@ pub fn render_application_state(
     fields: &Result<Vec<crate::config::admin::SettingField>, String>,
 ) -> String {
     application::render(fields)
+}
+
+/// Render administrator-only software status inside the existing admin workspace.
+#[must_use]
+pub fn render_software_updates(
+    status: &crate::updates::Status,
+    csrf: &str,
+    managed: bool,
+    container: bool,
+) -> String {
+    updates::render(status, csrf, managed, container)
+}
+
+/// Render pre-upgrade snapshot history inside the existing Backups workspace.
+#[must_use]
+pub fn render_update_backups(status: &crate::updates::Status) -> String {
+    updates::backups(status)
 }
 
 #[cfg(test)]

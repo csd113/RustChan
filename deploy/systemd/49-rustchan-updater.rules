@@ -1,0 +1,10 @@
+// Root-owned /etc/polkit-1/rules.d/49-rustchan-updater.rules.
+// No shell, arbitrary unit, reload, enable, restart or environment authority.
+polkit.addRule(function(action, subject) {
+    if (subject.user === "rustchan-updater" &&
+        action.id === "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") === "rustchan.service" &&
+        (action.lookup("verb") === "start" || action.lookup("verb") === "stop")) {
+        return polkit.Result.YES;
+    }
+});

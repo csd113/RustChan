@@ -31,6 +31,8 @@ struct HealthPayload {
 )]
 /// Detailed readiness response.
 struct ReadyPayload {
+    /// Running application package version.
+    version: &'static str,
     /// Aggregate readiness label.
     status: &'static str,
     /// Whether the database accepts queries and has the expected schema.
@@ -60,6 +62,8 @@ struct ReadyPayload {
 #[derive(Serialize)]
 /// Public readiness response without operational internals.
 struct PublicReadyPayload {
+    /// Running application package version; no release-discovery metadata.
+    version: &'static str,
     /// Aggregate readiness label.
     status: &'static str,
 }
@@ -104,6 +108,7 @@ async fn readyz_response(state: AppState, include_details: bool) -> Response {
         return (
             status,
             Json(PublicReadyPayload {
+                version: env!("CARGO_PKG_VERSION"),
                 status: status_label,
             }),
         )
@@ -172,6 +177,7 @@ async fn readyz_response(state: AppState, include_details: bool) -> Response {
         StatusCode::SERVICE_UNAVAILABLE
     };
     let payload = ReadyPayload {
+        version: env!("CARGO_PKG_VERSION"),
         status: status_label,
         database_ready,
         database_schema_version: crate::db::baseline_schema_version(),
@@ -392,7 +398,19 @@ mod tests {
             Some("ready"),
             "public readiness should include the aggregate status"
         );
+        assert_eq!(
+            body.get("version").and_then(serde_json::Value::as_str),
+            Some(env!("CARGO_PKG_VERSION")),
+            "readiness must report only the running package version"
+        );
         for field in [
+            "latest_release",
+            "update_available",
+            "discovery",
+            "updater",
+            "backups",
+            "approval",
+            "phase",
             "database_schema_version",
             "database_schema_valid",
             "worker_queue_pending",

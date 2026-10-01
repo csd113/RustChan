@@ -2,28 +2,55 @@
 
 All notable changes to RustChan will be documented in this file.
 
-## Unreleased
+## RustChan 1.6.0 — 2026-10-01
+
+This release includes every integrated change since the published v1.5.0 release:
+the container deployment workflow, correctness fixes, terminal and web administration
+upgrades, public posting and reading improvements, and verified native software updates.
+
+### Upgrade notes
+
+- Back up the complete data directory before upgrading. Existing database structures are verified and stamped for the running 1.6.0 package; Rust 1.91 remains the minimum supported compiler.
+- Native self-updates require one-time operator setup on Linux GNU x86_64 or ARM64: separate service identities, the supplied systemd/polkit configuration, a protected updater executable and independently provisioned trusted public key. The updater is operator-managed and is not replaced by application updates. See [Software Updates](docs/software-updates.md).
+- Containers, macOS, Windows and custom installations use their deployment tools to install releases. Their admin panel can check releases but does not offer native installation. Keep container data volumes when recreating an instance.
+- `/readyz` additionally reports the running package version. It does not expose release availability, updater transactions or retained backup metadata.
+
+### Added
+
+- Added the administrator-only Software Updates task, stable-release availability notice and persisted progress/results, integrated into the existing admin workspace and all nine themes. Installation requires the current administrator password, CSRF/same-origin validation, an expiring one-use approval and explicit restart confirmation.
+- Added a separate native updater with bounded, fixed-operation local IPC and official-repository release discovery. Ed25519-signed manifests bind release identity, target, compatibility, sizes and hashes; strict archive and ELF checks reject unsafe or mismatched payloads before activation.
+- Added mandatory verified pre-upgrade snapshots of the database, configuration, media and private runtime state. Failed activation, migration or readiness restores the previous executable and persistent state together; durable recovery gates startup after interruptions and retains evidence when operator intervention is required. Snapshot metadata appears in the existing Backups task.
+- Added deterministic Linux update packaging, signed manifests/public-key assets and signing tests to the release workflow while retaining the four existing platform ZIPs and checksums. Stable publication requires the repository signing secret and verifies both native targets before publishing.
+- Added a production container image, persistent-volume Compose setup and GHCR publishing for Linux amd64/arm64. Main and stable tags publish `latest`, version tags and immutable commit tags; Compose supports pinning a chosen image.
 
 ### Improved
 
-- Expanded the terminal administration console with task-oriented browsing, contextual forms and dialogs, logs, history, telemetry, and responsive operator views.
-- Reorganized the web admin panel into 21 task-focused sections with searchable configuration controls, account management, and separate active, saved, overridden, and next-restart settings states.
-- Standardized admin spacing, typography, controls, tables, status treatments, and expandable details across all nine existing themes, including loading, error, empty, and disabled states.
-- Improved responsive admin forms and moderation layouts down to 320px. Dense wide tables retain horizontal scrolling within named, keyboard-focusable containers, with accessible keyboard navigation and reachable actions.
-- Improved current-section navigation, visible focus indicators, contrast, status announcements, and backup progress semantics. Backup dialogs now contain keyboard focus and restore focus when closed, while retaining no-JavaScript fallbacks and reduced-motion support.
+- Expanded the terminal administration console with task-oriented browsing, contextual forms and dialogs, logs, history, telemetry, help and responsive operator views.
+- Reorganized web administration into 22 task sections with searchable configuration controls and account management. Settings distinguish active, saved, environment-overridden and next-restart values; validated persistence retains operator comments and applies live settings only after successful saves.
+- Standardized admin spacing, typography, controls, tables, state treatments and expandable details across all nine themes. Responsive forms work down to 320px; dense tables scroll within named keyboard-focusable regions, with reachable actions and visible focus.
+- Improved current-section navigation, contrast, status announcements and backup progress semantics, while preserving native forms, no-JavaScript fallbacks and reduced-motion support.
+- Refreshed the README, setup and container guides, demonstration screenshots, and operator documentation for the terminal/admin workflows and native update boundary.
 
 ### Fixed
 
-- Rejected network and runtime configuration forms now retain the administrator's selected theme and submitted values.
-- Admin health polling no longer starts requests from an unloading page: polling schedules after completion, cancels and aborts on navigation, ignores late updates, and resumes after back/forward-cache restoration. This fixes intermittent WebKit access-control diagnostics without increasing timeouts or enabling retries.
-- Firefox launches automatically through the normal browser harness on macOS 27 despite Playwright's upstream shared-application-identity defect ([Playwright #42768](https://github.com/microsoft/playwright/issues/42768)). The isolated identity uses the installed browser binary, requires no manual shell setup, and is protected by launch regressions and a version guard.
-- Browser fixture teardown now closes pages before stopping their server, preventing background polling from racing shutdown. Navigation assertions wait for the actual submission response and audits inspect the selected task's visible controls.
+- Completed native updates clear the availability notice; stale discovery records cannot offer installation of the running or an older version. Rollbacks retain notice of a newer release.
+
+- Banned identities can no longer submit reports or poll votes; those mutations share the existing posting ban gate and enforce CSRF before authorization results are disclosed. Long ban reasons wrap on narrow screens.
+- NSFW consent and mobile preferences dialogs move and contain keyboard focus, support dismissal/reopening and restore focus to their triggers. Mobile preferences also restore visible trigger focus after returning to desktop.
+- Rejected public posts retain submitted drafts and poll settings, explain attachment reselection and provide copyable recovery after parsed errors and bounded oversized uploads. Enhanced CAPTCHA refresh preserves the composer and files.
+- Interrupted uploads and unconfirmed responses retain input and explain check-before-retry recovery. Pending uploads cannot fall through into duplicate native submissions, and server-rendered recovery text takes precedence over stale autosave.
+- Local quotes and backlinks preserve browser history; dense previews keep their triggers reachable. Search links open complete thread context and retain modified-click behavior; poll result anchors resolve correctly.
+- Filename sanitization preserves bounded extensions and Unicode stems. Failed audio/video playback provides readable recovery advice and an original-file download action; explicit scrolling honors reduced motion.
+- Catalog “last reply” sorting includes sage replies independently of bump order, preserving normal bump sorting and saved preferences.
+- Rejected network and runtime configuration forms retain the administrator's selected theme and submitted values without partially changing saved settings.
+- Admin health polling aborts on navigation, ignores late responses, schedules after completion and resumes after back/forward-cache restoration, preventing unloading-page WebKit diagnostics.
 
 ### Testing and maintenance
 
-- Restored version-controlled Playwright tests, configurations, npm manifest and lockfile, helper scripts, and browser CI. Browser downloads, profiles, runtime databases, caches, reports, screenshots, traces, videos, and disposable audit evidence remain ignored.
-- Coordinated CLI integration-test subprocess spawning to prevent Linux fork/exec descriptor inheritance from making freshly copied executables fail with `ETXTBSY`, while keeping test execution parallel. Kept configuration documentation compatible with Rust 1.91's strict Clippy checks.
-- Added deterministic polling lifecycle, Firefox launch and no-JavaScript, fixture disposal, and narrow-table accessibility regressions. Completed validation passed 2,430 Rust tests and the seven-project browser matrix (1,077 passed, 883 explicit skips, zero unexpected failures or retries); WebKit stress testing passed 120/120 with two workers.
+- Restored version-controlled Playwright infrastructure and browser CI, with normal regression and weekly/manual deep modes. Runtime data, browser profiles, screenshots, reports, traces and disposable audit evidence remain ignored.
+- Added administrator authorization, updater signing/archive/snapshot/rollback/recovery, readiness privacy, all-theme/narrow-screen, keyboard focus and no-JavaScript regressions. Release candidates receive strict Rust lint, locked dependency policy, packaging and browser validation.
+- Stabilized fixture teardown, backup completion and completed-redirect submission assertions and session-revocation fixtures that retain and verify the old session without unrelated polling, preserving test budgets and all-theme coverage. Linux browser CI provides a virtual audio output for genuine native playback checks. Firefox uses an isolated application identity for the macOS 27 upstream Playwright launch defect, with launch regressions and a version guard.
+- Coordinated CLI test subprocess spawning to prevent Linux fork/exec descriptor inheritance from causing `ETXTBSY`, while preserving parallel test execution. Guarded native updater helpers with Unix configuration so check-only Windows builds remain warning-free. Kept configuration documentation compatible with Rust 1.91 strict lint and refreshed the yanked `yoke-derive` lockfile entry.
 
 ## RustChan 1.5.0 — 2026-09-28
 

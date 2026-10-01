@@ -83,6 +83,15 @@ jobs:
           npm ci
           npx playwright install --with-deps ${{ matrix.browser }}
 
+      - name: Configure headless audio output
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pulseaudio pulseaudio-utils
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=rustchan_ci rate=48000
+          pactl set-default-sink rustchan_ci
+          pactl list short sinks
+
       - name: Build RustChan
         run: cargo build --locked --bin rustchan-cli
 
@@ -163,6 +172,15 @@ jobs:
         run: |
           npm ci
           npx playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Configure headless audio output
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pulseaudio pulseaudio-utils
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=rustchan_ci rate=48000
+          pactl set-default-sink rustchan_ci
+          pactl list short sinks
 
       - name: Build RustChan
         run: cargo build --locked --bin rustchan-cli
