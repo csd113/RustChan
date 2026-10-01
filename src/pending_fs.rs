@@ -2127,7 +2127,7 @@ mod tests {
             |row| row.get(0),
         )?;
         assert!(thumb_path.is_none());
-        assert!(hash_thumb.is_empty());
+        assert_eq!(hash_thumb, "");
         assert!(crate::db::list_pending_fs_ops(&conn)?.is_empty());
         assert!(upload_dir.join("tech/original.png").is_file());
         assert!(upload_dir.join("tech/later.png").is_file());

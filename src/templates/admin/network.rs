@@ -103,7 +103,6 @@ fn render_control_groups(fields: &[SettingField], section: &str) -> String {
                 &[
                     "require_ffmpeg",
                     "ffmpeg_path",
-                    "ffprobe_path",
                     "thumb_size",
                     "job_queue_capacity",
                     "waveform_cache_max_mb",

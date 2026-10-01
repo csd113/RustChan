@@ -1054,11 +1054,6 @@ fn setup_form_page(
     } else {
         "missing"
     };
-    let ffprobe = if app_state.ffprobe_available {
-        "detected"
-    } else {
-        "missing"
-    };
     let body = format!(
         r#"<main class="setup-wizard">
 <div class="setup-head">
@@ -1105,7 +1100,7 @@ fn setup_form_page(
 </div><p class="setup-field-help" id="setup-board-slug-help">The slug becomes the board URL and must contain 1–8 lowercase letters or digits.</p></section>
 <section class="setup-section setup-section-wide" aria-labelledby="setup-step-6">
 <div class="setup-section-head"><span class="setup-step">Step 6</span><h2 id="setup-step-6">Uploads and media</h2><p>Enable only the formats this instance should accept and set whole-MiB limits.</p></div>
-<p class="setup-runtime-note">Runtime detection: ffmpeg <strong>{ffmpeg}</strong>; ffprobe <strong>{ffprobe}</strong>.</p>
+<p class="setup-runtime-note">Runtime detection: ffmpeg <strong>{ffmpeg}</strong>; image/audio inspection <strong>built in</strong>.</p>
 <div class="setup-grid">
 <label class="setup-check"><input type="checkbox" name="allow_uploads" value="1"{allow_uploads}> Allow image uploads</label>
 <label class="setup-check"><input type="checkbox" name="allow_video" value="1"{allow_video}> Allow video uploads</label>
@@ -1169,7 +1164,6 @@ fn setup_form_page(
         allow_self_delete = checked(form.allow_self_delete.as_deref()),
         allow_archive = checked(form.allow_archive.as_deref()),
         ffmpeg = ffmpeg,
-        ffprobe = ffprobe,
         allow_uploads = checked(form.allow_uploads.as_deref()),
         allow_video = checked(form.allow_video.as_deref()),
         allow_audio = checked(form.allow_audio.as_deref()),

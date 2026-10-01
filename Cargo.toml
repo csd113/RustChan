@@ -2,8 +2,7 @@
 name = "rustchan"
 version = "1.6.0"
 edition = "2021"
-# Keep the package MSRV and cargo-msrv metadata aligned with Arti's Rust 1.91
-# requirement.
+# Rust 1.99 is the supported minimum for the package and build tooling.
 rust-version.workspace = true
 license = "MIT"
 description = "Self-contained imageboard — single binary, zero runtime dependencies"
@@ -13,13 +12,13 @@ categories = ["web-programming", "multimedia::images"]
 
 # Keep `cargo-msrv` metadata aligned with `rust-version`.
 [package.metadata]
-msrv = "1.91"
+msrv = "1.99"
 
 [workspace]
 resolver = "2"
 
 [workspace.package]
-rust-version = "1.91"
+rust-version = "1.99"
 
 [profile.release]
 opt-level      = 3
@@ -81,6 +80,17 @@ rand_core = "0.10.1"
 getrandom = { version = "0.4.3", features = ["sys_rng"] }
 
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "ico"] }
+# Already used by image; inspect GIF repeat/disposal metadata without retaining frames.
+gif = { version = "0.14.2", default-features = false, features = ["std", "color_quant"] }
+# Container inspection only for video; no video decoders are enabled.
+symphonia = { version = "0.6.1", default-features = false, features = ["aac", "adpcm", "alac", "flac", "mp1", "mp2", "mp3", "pcm", "vorbis", "isomp4", "mkv", "ogg", "wav", "exp-video-codecs"] }
+# Symphonia supplies Opus packets; this decoder avoids native libopus.
+opus-decoder = { version = "0.1.1", default-features = false }
+# HEVC intra still pictures only; no native library or video framework.
+heic-rs = { version = "0.1.1", default-features = false, features = ["std"] }
+
+# Pure-Rust first-page PDF previews, with embedded standard fonts.
+hayro = { version = "0.7.1", default-features = false, features = ["embed-fonts"] }
 
 # Apply JPEG Orientation tags before thumbnailing so phone photos display upright.
 kamadak-exif = "0.6.1"

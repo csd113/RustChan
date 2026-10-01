@@ -93,10 +93,10 @@ pub(super) struct ScopedDecrement<'a>(pub(super) &'a AtomicU64);
 
 impl Drop for ScopedDecrement<'_> {
     fn drop(&mut self) {
-        // Saturating decrement: fetch_update retries on spurious failure.
+        // Saturating decrement: try_update retries on spurious failure.
         let _previous_value = self
             .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(1))
             });
     }
@@ -472,12 +472,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
             CONFIG.ffmpeg_path
         );
     }
-    // ffprobe is used lazily for WebM codec inspection, so probe it at startup
-    // to make explicit configured paths authoritative and catch bogus paths early.
-    let ffprobe_available = crate::detect::detect_ffprobe();
-    // libwebp encoder: needed for image→WebP conversion.  Checked independently
-    // so that a stock ffmpeg build (missing libwebp) still enables video/audio
-    // features while image conversion degrades gracefully.
+    // libwebp is required only by the retained video-frame thumbnail command.
     let ffmpeg_webp_available = crate::detect::detect_webp_encoder(ffmpeg_available);
     // libvpx-vp9 + libopus encoders: needed for MP4→WebM transcoding and
     // WebM/AV1→VP9 re-encoding.  Checked independently so that a build missing
@@ -557,17 +552,12 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         );
     }
     let worker_queue = Arc::new(crate::workers::JobQueue::new(pool.clone()));
-    let worker_handles = crate::workers::start_worker_pool(
-        &worker_queue,
-        ffmpeg_available,
-        ffprobe_available,
-        ffmpeg_vp9_available,
-    );
+    let worker_handles =
+        crate::workers::start_worker_pool(&worker_queue, ffmpeg_available, ffmpeg_vp9_available);
 
     let state = AppState {
         db: pool.clone(),
         ffmpeg_available,
-        ffprobe_available,
         ffmpeg_webp_available,
         ffmpeg_vp9_available,
         ffmpeg_vp9_encoder_available: ffmpeg_webm_status.vp9,

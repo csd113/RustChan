@@ -1274,7 +1274,6 @@ pub(crate) fn process_primary_upload(
     max_audio_size: usize,
     max_pdf_size: usize,
     ffmpeg_available: bool,
-    ffprobe_available: bool,
     ffmpeg_webp_available: bool,
 ) -> Result<(Option<crate::utils::files::UploadedFile>, Option<String>)> {
     let Some((upload, fname)) = file_data else {
@@ -1285,7 +1284,6 @@ pub(crate) fn process_primary_upload(
     let detected_mime = crate::utils::files::classify_upload_mime(
         upload.temp_file.path(),
         &upload.sniff_bytes,
-        ffprobe_available,
         allow_any_files,
     )
     .map_err(|error| classify_upload_error(&error))?;
@@ -1343,7 +1341,6 @@ pub(crate) fn process_primary_upload(
         max_audio_size,
         max_pdf_size,
         ffmpeg_available,
-        ffprobe_available,
         ffmpeg_webp_available,
         allow_any_files,
     };
@@ -1426,15 +1423,10 @@ fn upload_path_belongs_to_board(path: &str, board_short: &str) -> bool {
     path.split('/').next() == Some(board_short)
 }
 
-fn temp_upload_mime(
-    upload: &TempUpload,
-    ffprobe_available: bool,
-    allow_any_files: bool,
-) -> Result<String> {
+fn temp_upload_mime(upload: &TempUpload, allow_any_files: bool) -> Result<String> {
     crate::utils::files::classify_upload_mime(
         upload.temp_file.path(),
         &upload.sniff_bytes,
-        ffprobe_available,
         allow_any_files,
     )
     .map_err(|error| classify_upload_error(&error))
@@ -1451,7 +1443,6 @@ pub(crate) fn process_audio_combo(
     board: &Board,
     upload_dir: &str,
     max_audio_size: usize,
-    ffprobe_available: bool,
 ) -> Result<Option<crate::utils::files::UploadedFile>> {
     let Some((audio_upload, aud_fname)) = audio_file_data else {
         return Ok(None);
@@ -1480,7 +1471,6 @@ pub(crate) fn process_audio_combo(
         upload_dir,
         &board.short_name,
         max_audio_size,
-        ffprobe_available,
     )
     .map_err(|e| classify_upload_error(&e))?;
 
@@ -1509,7 +1499,6 @@ pub(crate) fn process_audio_first_uploads(
     max_audio_size: usize,
     max_pdf_size: usize,
     ffmpeg_available: bool,
-    ffprobe_available: bool,
     ffmpeg_webp_available: bool,
 ) -> Result<(
     Option<crate::utils::files::UploadedFile>,
@@ -1532,7 +1521,6 @@ pub(crate) fn process_audio_first_uploads(
             max_audio_size,
             max_pdf_size,
             ffmpeg_available,
-            ffprobe_available,
             ffmpeg_webp_available,
         )
     };
@@ -1553,14 +1541,13 @@ pub(crate) fn process_audio_first_uploads(
             board,
             save_root_str,
             max_audio_size,
-            ffprobe_available,
         )?;
 
         return Ok((primary, audio, primary_hash));
     }
 
     if let Some((audio_upload, audio_name)) = audio_file_data {
-        let audio_mime = temp_upload_mime(&audio_upload, ffprobe_available, allow_any_files)?;
+        let audio_mime = temp_upload_mime(&audio_upload, allow_any_files)?;
         if crate::models::MediaType::from_mime(&audio_mime) != crate::models::MediaType::Audio {
             return Err(AppError::BadRequest(
                 "The audio slot only accepts audio files.".into(),
@@ -2521,7 +2508,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             false,
             false,
-            false,
         );
 
         let Err(error) = result else {
@@ -2583,7 +2569,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
-            false,
             false,
             false,
         );
@@ -2652,7 +2637,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             false,
             false,
-            false,
         )
         .context("accept PDF upload")?;
         let uploaded = uploaded.context("PDF upload result was empty")?;
@@ -2692,7 +2676,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
-            false,
             false,
             false,
         );
@@ -2738,7 +2721,6 @@ trailer << /Root 1 0 R >>
             board.max_pdf_size_bytes(),
             false,
             false,
-            false,
         );
 
         let Err(error) = result else {
@@ -2776,7 +2758,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
-            false,
             false,
             false,
         );
@@ -2820,7 +2801,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
-            false,
             false,
             false,
         )

@@ -1324,7 +1324,7 @@ mod tests {
             chrono::Utc::now().timestamp() - 1,
         );
 
-        assert!(owned_post_grants_from_jar(&jar).is_empty());
+        assert_eq!(owned_post_grants_from_jar(&jar).len(), 0);
     }
 
     #[test]
@@ -1387,7 +1387,7 @@ mod tests {
                 value,
             ));
 
-            assert!(owned_post_grants_from_jar(&jar).is_empty());
+            assert_eq!(owned_post_grants_from_jar(&jar).len(), 0);
         }
     }
 

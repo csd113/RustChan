@@ -28,7 +28,7 @@ Choose the option that suits you:
 |---|---|---|
 | [Docker](#start-with-docker) | Running the ready-made app with its media tools included | Docker running on your computer or server |
 | [Download the app](#download-the-app) | Running RustChan directly, without Docker or compiling code | A supported Linux, macOS, or Windows computer |
-| [Build from source](#build-from-source) | Developers who want to build the app themselves | Git and Rust 1.91 or newer |
+| [Build from source](#build-from-source) | Developers who want to build the app themselves | Git and Rust 1.99 or newer |
 
 ### Start with Docker
 
@@ -62,7 +62,7 @@ docker stop rustchan     # Stop the site
 docker start rustchan    # Start it again
 ```
 
-The image includes `ffmpeg` and `ffprobe` for video thumbnails, audio waveforms, and supported media conversion. Tor is off by default in Docker.
+Images, animated GIF/WebP conversion, HEIC/HEIF, container inspection, common audio waveforms, and supported PDF previews run in Rust. The image includes `ffmpeg` for video thumbnails, WebM transcoding, and audio codecs the Rust decoders do not cover. Tor is off by default in Docker.
 
 For **Docker Compose, updates, backups, or a public website**, follow the [container guide](docs/containers.md). Public sites need HTTPS and suitable network settings; complete setup before allowing visitors. The guide also explains how to pin an image to a specific revision instead of following `latest`.
 
@@ -89,11 +89,11 @@ chmod +x rustchan-cli
 
 On Windows, run `rustchan-cli.exe` (or `./rustchan-cli.exe` in PowerShell). Follow the terminal's first-run prompts to create your administrator and, optionally, your first board. You can also create boards in [the admin panel](http://localhost:8080/admin). Keep the app running while you use the site.
 
-RustChan creates a `rustchan-data` folder next to the app. Keep that folder when updating. Installing `ffmpeg` and `ffprobe` adds the enhanced media features; see [SETUP.md](SETUP.md) for installation and deployment details.
+RustChan creates a `rustchan-data` folder next to the app. Keep that folder when updating. Installing `ffmpeg` enables video processing and the audio compatibility fallback; see [SETUP.md](SETUP.md) for installation and deployment details.
 
 ### Build from source
 
-With Git and Rust **1.91 or newer** installed:
+With Git and Rust **1.99 or newer** installed:
 
 ```bash
 git clone https://github.com/csd113/RustChan.git

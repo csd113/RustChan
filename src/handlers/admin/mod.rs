@@ -614,7 +614,6 @@ struct AdminPanelSnapshot {
     media_auto_prune_enabled: bool,
     media_max_active_content_size_bytes: u64,
     ffmpeg_available: bool,
-    ffprobe_available: bool,
     ffmpeg_webp_available: bool,
     ffmpeg_vp9_available: bool,
     ffmpeg_vp9_encoder_available: bool,
@@ -814,7 +813,6 @@ struct MaintenanceDomainData {
     media_auto_prune_enabled: bool,
     media_max_active_content_size_bytes: u64,
     ffmpeg_available: bool,
-    ffprobe_available: bool,
     ffmpeg_webp_available: bool,
     ffmpeg_vp9_available: bool,
     ffmpeg_vp9_encoder_available: bool,
@@ -1306,7 +1304,6 @@ fn load_maintenance_domain_data(
         media_auto_prune_enabled: db::get_media_auto_prune_enabled(conn),
         media_max_active_content_size_bytes: db::get_media_max_active_content_size_bytes(conn),
         ffmpeg_available: state.ffmpeg_available,
-        ffprobe_available: state.ffprobe_available,
         ffmpeg_webp_available: state.ffmpeg_webp_available,
         ffmpeg_vp9_available: state.ffmpeg_vp9_available,
         ffmpeg_vp9_encoder_available: state.ffmpeg_vp9_encoder_available,
@@ -1386,7 +1383,6 @@ fn load_admin_panel_snapshot(
             media_max_active_content_size_bytes: maintenance_domain
                 .media_max_active_content_size_bytes,
             ffmpeg_available: maintenance_domain.ffmpeg_available,
-            ffprobe_available: maintenance_domain.ffprobe_available,
             ffmpeg_webp_available: maintenance_domain.ffmpeg_webp_available,
             ffmpeg_vp9_available: maintenance_domain.ffmpeg_vp9_available,
             ffmpeg_vp9_encoder_available: maintenance_domain.ffmpeg_vp9_encoder_available,
@@ -1664,15 +1660,14 @@ fn dashboard_dependency_status(
     ffmpeg_required: bool,
 ) -> (String, String, crate::templates::AdminDashboardState) {
     let ffmpeg = detection_word(maintenance.ffmpeg_available);
-    let ffprobe = detection_word(maintenance.ffprobe_available);
-    let state = if maintenance.ffmpeg_available && maintenance.ffprobe_available {
+    let state = if maintenance.ffmpeg_available {
         crate::templates::AdminDashboardState::Ok
     } else if ffmpeg_required {
         crate::templates::AdminDashboardState::ActionNeeded
     } else {
         crate::templates::AdminDashboardState::Informational
     };
-    let status = if maintenance.ffmpeg_available && maintenance.ffprobe_available {
+    let status = if maintenance.ffmpeg_available {
         "ready"
     } else if ffmpeg_required {
         "required tool missing"
@@ -1682,7 +1677,7 @@ fn dashboard_dependency_status(
     (
         status.to_owned(),
         format!(
-            "ffmpeg {ffmpeg}; ffprobe {ffprobe}; WebP {}; VP9 {}; Opus {}.",
+            "ffmpeg {ffmpeg}; WebP {}; VP9 {}; Opus {}.",
             detection_word(maintenance.ffmpeg_webp_available),
             detection_word(maintenance.ffmpeg_vp9_encoder_available),
             detection_word(maintenance.ffmpeg_opus_available)
@@ -1916,11 +1911,6 @@ fn render_admin_panel_from_snapshot(
                 } else {
                     crate::templates::AdminDetectionStatus::Missing
                 },
-                ffprobe: if snapshot.ffprobe_available {
-                    crate::templates::AdminDetectionStatus::Detected
-                } else {
-                    crate::templates::AdminDetectionStatus::Missing
-                },
                 webp_encoder: if snapshot.ffmpeg_webp_available {
                     crate::templates::AdminDetectionStatus::Detected
                 } else {
@@ -2003,7 +1993,6 @@ fn build_site_health_view<'a>(
         tor_detail: &snapshot.dashboard.tor_detail,
         dependency_summary: crate::templates::AdminSiteHealthDependencySummary {
             ffmpeg: detection_status(snapshot.ffmpeg_available),
-            ffprobe: detection_status(snapshot.ffprobe_available),
             webp: detection_status(snapshot.ffmpeg_webp_available),
             vp9: detection_status(snapshot.ffmpeg_vp9_encoder_available),
             opus: detection_status(snapshot.ffmpeg_opus_available),
@@ -2049,7 +2038,6 @@ fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&st
          OS: {os}-{arch}\n\
          SQLite: {sqlite}\n\
          ffmpeg: {ffmpeg}\n\
-         ffprobe: {ffprobe}\n\
          Tor enabled: {tor_enabled} ({tor_detail})\n\
          TLS enabled: {tls_enabled}\n\
          Reverse proxy: {reverse_proxy}\n\
@@ -2063,7 +2051,6 @@ fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&st
         arch = std::env::consts::ARCH,
         sqlite = rusqlite::version(),
         ffmpeg = detection_word(snapshot.ffmpeg_available),
-        ffprobe = detection_word(snapshot.ffprobe_available),
         warnings = indent_diagnostics_block(&snapshot.site_health.recent_warnings),
     )
 }
@@ -2755,7 +2742,7 @@ mod tests {
         assert_eq!(state, crate::templates::AdminDashboardState::Failure);
     }
 
-    fn maintenance_with_media_tools(ffmpeg: bool, ffprobe: bool) -> MaintenanceDomainData {
+    fn maintenance_with_media_tools(ffmpeg: bool) -> MaintenanceDomainData {
         MaintenanceDomainData {
             db_size_bytes: 0,
             db_size_warning: false,
@@ -2763,7 +2750,6 @@ mod tests {
             media_auto_prune_enabled: false,
             media_max_active_content_size_bytes: 0,
             ffmpeg_available: ffmpeg,
-            ffprobe_available: ffprobe,
             ffmpeg_webp_available: false,
             ffmpeg_vp9_available: false,
             ffmpeg_vp9_encoder_available: false,
@@ -2774,7 +2760,7 @@ mod tests {
 
     #[test]
     fn dashboard_optional_media_tools_are_informational_not_warning() {
-        let maintenance = maintenance_with_media_tools(false, false);
+        let maintenance = maintenance_with_media_tools(false);
 
         assert_eq!(
             dashboard_dependency_status(&maintenance, false).2,

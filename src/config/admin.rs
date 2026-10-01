@@ -189,7 +189,6 @@ pub(super) fn startup_network_sources(
                 }
                 "require_ffmpeg" => settings.require_ffmpeg.is_some(),
                 "ffmpeg_path" => settings.ffmpeg_path.is_some(),
-                "ffprobe_path" => settings.ffprobe_path.is_some(),
                 "thumb_size" => settings.thumb_size.is_some(),
                 "job_queue_capacity" => settings.job_queue_capacity.is_some(),
                 "waveform_cache_max_mb" => settings.waveform_cache_max_mb.is_some(),

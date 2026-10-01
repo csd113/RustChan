@@ -2,12 +2,13 @@
 
 Current setup and deployment guide for Linux, macOS, and Windows.
 
-Current version: `1.5.0`.
+Current candidate version: `1.6.0`.
 
 This guide reflects the current RustChan architecture:
 
 - Tor onion hosting is built in via Arti. You do not install or manage a separate `tor` service.
-- `ffmpeg` is optional, but strongly recommended if you want WebP thumbnails, WebM transcoding, video thumbnails, and audio waveforms.
+- Images, GIF/WebP animation, HEIC/HEIF, container metadata, common audio waveforms, and supported PDF previews run internally in Rust. Unsupported PDF previews use the built-in SVG placeholder.
+- `ffmpeg` is optional, but recommended for video thumbnails, WebM transcoding, and uncovered audio codecs. Standalone `ffprobe` and external PDF renderers are not required.
 - The post edit form and self-delete flow share a 60-second self-action window after posting.
 
 ## Contents
@@ -33,9 +34,9 @@ This guide reflects the current RustChan architecture:
 
 RustChan is a single Rust binary. A basic install only needs:
 
-- Rust toolchain to build it
+- Rust 1.99 or newer to build it
 - a writable runtime data directory (next to the binary by default, or selected with `--data-dir`)
-- `ffmpeg` if you want the enhanced media pipeline
+- `ffmpeg` for video processing and uncovered audio codecs
 
 RustChan does not require:
 
@@ -96,11 +97,10 @@ cargo --version
 When `ffmpeg` is available, RustChan can:
 
 - extract video thumbnails
-- generate audio waveform thumbnails
-- convert supported image thumbnails to WebP
+- generate waveform thumbnails for uncovered audio codecs (for example AC-3 or Speex)
 - transcode MP4 uploads to WebM when VP9 and Opus are available
 
-Without `ffmpeg`, RustChan still runs, but video and audio handling degrades gracefully.
+Without `ffmpeg`, images, animation, metadata inspection, supported PDF previews, and common audio waveforms still work. Video processing and uncovered-codec waveform previews use their existing placeholders.
 
 ### Debian / Ubuntu / Raspberry Pi OS
 
@@ -135,7 +135,6 @@ Then make sure the FFmpeg `bin` directory is on `PATH`.
 
 ```bash
 ffmpeg -version
-ffprobe -version
 ```
 
 If you want RustChan to refuse startup when `ffmpeg` is missing, set:
@@ -329,7 +328,6 @@ enable_tor_support = true
 
 require_ffmpeg = false
 # ffmpeg_path = "/usr/local/bin/ffmpeg"
-# ffprobe_path = "/usr/local/bin/ffprobe"
 ffmpeg_timeout_secs = 600
 
 [tls]
@@ -705,3 +703,17 @@ Back that directory up if the onion address matters.
 ### Optional administrator-controlled software updates
 
 For immutable native Linux version directories, a separate restricted updater service, signing trust setup and automatic backup/rollback, follow [Software Updates](docs/software-updates.md). The existing single-binary service remains deployment-managed until explicitly converted.
+
+### Internal media processing
+
+RustChan handles JPEG/PNG/BMP/TIFF, static and animated WebP, GIF conversion,
+HEIC/HEIF still pictures, container metadata, and common audio waveforms in Rust.
+PDF previews cover a small bounded vector/text subset; compressed streams,
+embedded images/fonts and other unbudgeted features use the existing SVG preview
+while the original PDF remains available.
+
+FFmpeg remains the video backend. It also preserves waveform support for audio
+variants the internal decoders do not cover, including AC-3, Speex, unsupported
+AAC profiles and Opus multistream/surround. See the
+[media migration report](docs/non-video-media-migration.md) for format coverage,
+resource limits and verification.

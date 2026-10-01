@@ -396,7 +396,6 @@ pub(in crate::server) async fn post_reply(
         let pool = state.db.clone();
         let job_queue = std::sync::Arc::clone(&state.job_queue);
         let ffmpeg_available = state.ffmpeg_available;
-        let ffprobe_available = state.ffprobe_available;
         let ffmpeg_webp_available = state.ffmpeg_webp_available;
         move || -> Result<posting::SubmitPostResult> {
             // `spawn_blocking` work is not cancelled when its join handle is
@@ -426,7 +425,6 @@ pub(in crate::server) async fn post_reply(
                     upload_dir: CONFIG.upload_dir.clone(),
                     thumb_size: CONFIG.thumb_size,
                     ffmpeg_available,
-                    ffprobe_available,
                     ffmpeg_webp_available,
                 },
             )
@@ -1577,10 +1575,8 @@ mod tests {
     }
 
     fn flac_fixture(size: usize) -> Vec<u8> {
-        let mut bytes = vec![0_u8; size.max(4)];
-        if let Some(prefix) = bytes.get_mut(..4) {
-            prefix.copy_from_slice(b"fLaC");
-        }
+        let mut bytes = include_bytes!("../../tests/fixtures/media/tone.flac").to_vec();
+        bytes.resize(size.max(bytes.len()), 0);
         bytes
     }
 
@@ -1602,7 +1598,7 @@ mod tests {
     #[tokio::test]
     async fn create_thread_and_reply_accept_audio_within_board_limit() -> Result<()> {
         let state = crate::test_support::app_state();
-        seed_audio_board(&state, 5_000)?;
+        seed_audio_board(&state, 20_000)?;
 
         let router = Router::new()
             .route("/{board}", post(crate::handlers::board::create_thread))
@@ -1673,13 +1669,13 @@ mod tests {
     #[tokio::test]
     async fn create_thread_rejects_audio_over_board_limit_with_413() -> Result<()> {
         let state = crate::test_support::app_state();
-        seed_audio_board(&state, 5_000)?;
+        seed_audio_board(&state, 20_000)?;
 
         let router = Router::new()
             .route("/{board}", post(crate::handlers::board::create_thread))
             .with_state(state);
 
-        let audio = flac_fixture(5_001);
+        let audio = flac_fixture(20_001);
         let (boundary, body) = crate::test_support::multipart_body(
             &[("_csrf", "csrf123"), ("body", "")],
             Some(("audio_file", "too-large.flac", &audio, "audio/flac")),

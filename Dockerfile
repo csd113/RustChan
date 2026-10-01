@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM rust:1.91.0-bookworm AS builder
+FROM rust:1.99.0-bookworm AS builder
 WORKDIR /build
 
 # BuildKit retains compiled dependencies between builds without carrying Cargo
@@ -19,10 +19,12 @@ LABEL org.opencontainers.image.title="RustChan" \
       org.opencontainers.image.source="https://github.com/csd113/RustChan" \
       org.opencontainers.image.licenses="MIT"
 
-# FFmpeg and ffprobe enable RustChan's complete media pipeline. curl provides
+# FFmpeg handles video and uncovered audio codecs. Rust handles other media.
+# The standalone ffprobe executable is unnecessary. curl provides
 # a bounded readiness probe; ca-certificates support outbound TLS and Arti.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl ffmpeg && \
+    rm -f /usr/bin/ffprobe && \
     rm -rf /var/lib/apt/lists/* && \
     groupadd --system --gid 10001 rustchan && \
     useradd --system --uid 10001 --gid rustchan --home-dir /data \

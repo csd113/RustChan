@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import type { Page, TestInfo } from '@playwright/test';
 import { expectNoHorizontalOverflow } from './phase4-helpers';
 import {
@@ -91,11 +90,7 @@ test.describe('real media toolchain', () => {
     const pdfThumbResponse = await page.request.get(`${app.baseURL}${pdfThumb}`);
     expect(pdfThumbResponse.status()).toBe(200);
     const pdfThumbContentType = pdfThumbResponse.headers()['content-type'];
-    if (pdfRendererAvailable()) {
-      expect(['image/webp', 'image/svg+xml']).toContain(pdfThumbContentType?.split(';')[0]);
-    } else {
-      expect(pdfThumbContentType).toContain('image/svg+xml');
-    }
+    expect(pdfThumbContentType).toContain('image/webp');
     const pdfHref = await page.locator('.file-info a').first().getAttribute('href');
     const pdfResponse = await page.request.get(`${app.baseURL}${pdfHref}`);
     expect(pdfResponse.status()).toBe(200);
@@ -116,11 +111,4 @@ async function inspectMediaLayout(page: Page, testInfo: TestInfo, kind: string):
       await page.screenshot({ path: testInfo.outputPath(`${kind}-${width}.png`) });
     }
   }
-}
-
-function pdfRendererAvailable(): boolean {
-  return ['pdftoppm', 'mutool', 'qlmanage'].some((tool) => {
-    const result = spawnSync(tool, ['-h'], { stdio: 'ignore' });
-    return !result.error;
-  });
 }

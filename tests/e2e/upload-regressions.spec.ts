@@ -1,4 +1,4 @@
-import { test as base, expect, type Locator, type Page, type TestInfo, type WorkerInfo } from './diagnostics';
+import { test as base, expect, expectHttpError, expectConsoleError, javaScriptEnabledFor, type Locator, type Page, type TestInfo, type WorkerInfo } from './diagnostics';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -68,7 +68,6 @@ const test = base.extend<{ runtime: Runtime }>({
       env: {
         CHAN_ENABLE_ANY_FILE_UPLOADS_FEATURE: '1',
         CHAN_FFMPEG_PATH: process.env.RUSTCHAN_E2E_FFMPEG_PATH ?? 'ffmpeg',
-        CHAN_FFPROBE_PATH: process.env.RUSTCHAN_E2E_FFPROBE_PATH ?? 'ffprobe',
         CHAN_PUBLIC_HOSTS: 'localhost,127.0.0.1,::1',
       },
     });
@@ -94,7 +93,6 @@ test.describe('upload regressions (ignored by default)', () => {
 
   test('posting UI accepts audio/MKV variants and keeps textarea resize disabled', async ({ page, runtime }, testInfo) => {
     test.skip(!toolAvailable(process.env.RUSTCHAN_E2E_FFMPEG_PATH ?? 'ffmpeg'), 'ffmpeg is required');
-    test.skip(!toolAvailable(process.env.RUSTCHAN_E2E_FFPROBE_PATH ?? 'ffprobe'), 'ffprobe is required');
     test.setTimeout(180_000);
 
     const fixtures = await createFixtures(runtime.fixtureDir);
@@ -162,10 +160,10 @@ test.describe('upload regressions (ignored by default)', () => {
       });
     }
 
-    await expectUiUploadError(page, runtime, mediaBoard, fixtures.fakeMkv, /matroska|ffprobe|validate|streams/i);
+    await expectUiUploadError(page, runtime, mediaBoard, fixtures.fakeMkv, /matroska|validate|streams/i);
     await expectUiUploadError(page, runtime, noAudioBoard, fixtures.flac, /audio uploads are disabled/i);
     await expectUiUploadError(page, runtime, noVideoBoard, fixtures.mkv, /video uploads are disabled/i);
-    await expectRequestUploadError(page, runtime, mediaBoard, fixtures.overLimitOgg, /too large|maximum audio upload size/i);
+    await expectRequestUploadError(page, runtime, mediaBoard, fixtures.overLimitAudio, /too large|maximum audio upload size/i);
     await expectRequestUploadError(page, runtime, mediaBoard, fixtures.overLimitMkv, /too large|maximum video upload size/i);
   });
 });
@@ -195,6 +193,10 @@ async function expectUiUploadError(page: Page, runtime: Runtime, board: string, 
   await form.locator('input[name="subject"]').fill(`reject ${Date.now()}`);
   await form.locator('textarea[name="body"]').fill(`reject ${file.name}`);
   await setFile(form.locator('input[type="file"]').first(), file);
+  expectHttpError({ method: 'POST', path: `/${board}`, status: 422, reason: `intentional rejection of ${file.name}` });
+  if (javaScriptEnabledFor(test.info())) {
+    expectConsoleError({ pattern: /^Failed to load resource: the server responded with a status of 422 \(Unprocessable Entity\)$/, reason: `browser reports the intentional upload rejection for ${file.name}` });
+  }
   const [response] = await Promise.all([
     page.waitForResponse((candidate) => candidate.request().method() === 'POST' && new URL(candidate.url()).pathname === `/${board}`),
     form.getByRole('button', { name: /post thread/i }).click(),
@@ -232,6 +234,8 @@ async function assertTextareaNotResizable(page: Page, runtime: Runtime, board: s
   await revealPostForm(page);
   const textarea = page.locator(`form[action="/${board}"] textarea[name="body"]`).first();
   await expect(textarea).toHaveCSS('resize', 'none');
+  // Chromium's disabled-script mouse drag can stall; the native CSS contract still applies.
+  if (!javaScriptEnabledFor(test.info())) return;
   const before = await textarea.boundingBox();
   if (!before) throw new Error('textarea box not available');
   await page.mouse.move(before.x + before.width - 2, before.y + before.height - 2);
@@ -399,19 +403,24 @@ async function createFixtures(dir: string): Promise<Record<string, UploadFixture
 
   await add('png', 'control.png', 'image/png', 'image', ffmpegBytes(dir, 'control.png', ['-f', 'lavfi', '-i', 'color=c=red:s=2x2:d=0.01', '-frames:v', '1']));
   await add('flac', 'tiny.flac', 'audio/x-flac', 'audio', ffmpegBytes(dir, 'tiny.flac', ['-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.05', '-c:a', 'flac']));
-  await add('mp3', 'tiny.mp3', 'audio/mp3', 'audio', ffmpegBytes(dir, 'tiny.mp3', ['-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.05', '-c:a', 'libmp3lame', '-b:a', '64k']));
+  await add('mp3', 'tiny.mp3', 'audio/mp3', 'audio', bundledMedia('tone.mp3'));
   await add('wav', 'tiny.wav', 'audio/x-wav', 'audio', ffmpegBytes(dir, 'tiny.wav', ['-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.05', '-c:a', 'pcm_s16le']));
-  await add('ogg', 'tiny.ogg', 'application/ogg', 'audio', ffmpegBytes(dir, 'tiny.ogg', ['-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.05', '-c:a', 'libvorbis']));
-  await add('oga', 'tiny.oga', 'audio/oga', 'audio', ffmpegBytes(dir, 'tiny.oga', ['-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.05', '-c:a', 'libvorbis']));
+  await add('ogg', 'tiny.ogg', 'application/ogg', 'audio', bundledMedia('tone.ogg'));
+  await add('oga', 'tiny.oga', 'audio/oga', 'audio', bundledMedia('tone.ogg'));
   await add('m4a', 'tiny.m4a', 'audio/x-m4a', 'audio', ffmpegBytes(dir, 'tiny.m4a', ['-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.05', '-c:a', 'aac', '-b:a', '64k']));
   await add('aac', 'tiny.aac', 'audio/x-aac', 'audio', ffmpegBytes(dir, 'tiny.aac', ['-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.05', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts']));
   await add('opus', 'tiny.opus', 'audio/opus', 'audio', ffmpegBytes(dir, 'tiny.opus', ['-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.05', '-c:a', 'libopus', '-b:a', '32k']));
   await add('webmAudio', 'tiny-audio.webm', 'audio/webm', 'audio', ffmpegBytes(dir, 'tiny-audio.webm', ['-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.05', '-c:a', 'libopus', '-b:a', '32k', '-f', 'webm']));
   await add('mkv', 'tiny.mkv', 'video/x-matroska', 'video', ffmpegBytes(dir, 'tiny.mkv', ['-f', 'lavfi', '-i', 'color=c=black:s=16x16:d=0.1', '-an', '-c:v', 'mpeg4', '-f', 'matroska']));
   await add('fakeMkv', 'fake.mkv', 'video/x-matroska', 'video', Buffer.from('\x1a\x45\xdf\xa3\xa3\x42\x86\x81\x01\x42\xf7\x81\x01\x42\xf2\x81\x04\x42\xf3\x81\x08\x42\x82\x88matroska\x42\x87\x81\x04not real media', 'binary'));
-  await add('overLimitOgg', 'over-limit.ogg', 'audio/ogg', 'audio', Buffer.concat([Buffer.from('OggS'), Buffer.alloc(MIB + 1)]));
+  await add('overLimitAudio', 'over-limit.wav', 'audio/wav', 'audio', ffmpegBytes(dir, 'over-limit.wav', ['-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=16', '-c:a', 'pcm_s16le']));
   await add('overLimitMkv', 'over-limit.mkv', 'video/x-matroska', 'video', Buffer.concat([files.mkv.buffer, Buffer.alloc(MIB + 1)]));
   return files;
+}
+
+// Reuse sanitized fixtures without requiring optional MP3/Vorbis encoders.
+function bundledMedia(name: string): Buffer {
+  return fs.readFileSync(path.resolve(__dirname, '../fixtures/media', name));
 }
 
 function ffmpegBytes(dir: string, name: string, args: string[]): Buffer {

@@ -535,12 +535,10 @@ struct SettingsFile {
     /// multiple instances that share the same storage to avoid key collisions.
     /// Default: "rustchan".
     tor_service_nickname: Option<String>,
-    /// Whether startup fails when `FFmpeg` or `FFprobe` is unavailable.
+    /// Whether startup fails when `FFmpeg` is unavailable.
     require_ffmpeg: Option<bool>,
     /// Configured `FFmpeg` executable path.
     ffmpeg_path: Option<String>,
-    /// Configured `FFprobe` executable path.
-    ffprobe_path: Option<String>,
     /// Whether boards may enable arbitrary-file uploads.
     enable_any_file_uploads_feature: Option<bool>,
     /// How often to run PRAGMA `wal_checkpoint(TRUNCATE)`, in seconds.
@@ -965,8 +963,6 @@ pub struct Config {
     pub require_ffmpeg: bool,
     /// Explicit ffmpeg binary path, or plain "ffmpeg" for PATH lookup.
     pub ffmpeg_path: String,
-    /// Explicit ffprobe binary path, or plain "ffprobe" for PATH lookup.
-    pub ffprobe_path: String,
     /// Global feature gate for arbitrary uploads. Boards can only enable the
     /// per-board toggle when this is true.
     pub enable_any_file_uploads_feature: bool,
@@ -1103,7 +1099,6 @@ impl std::fmt::Debug for Config {
             .field("tor_service_nickname", &self.tor_service_nickname)
             .field("require_ffmpeg", &self.require_ffmpeg)
             .field("ffmpeg_path", &self.ffmpeg_path)
-            .field("ffprobe_path", &self.ffprobe_path)
             .field(
                 "enable_any_file_uploads_feature",
                 &self.enable_any_file_uploads_feature,
@@ -1387,11 +1382,6 @@ impl Config {
                 .ok()
                 .or(s.ffmpeg_path)
                 .unwrap_or_else(|| "ffmpeg".to_owned()),
-            ffprobe_path: environment
-                .var("CHAN_FFPROBE_PATH")
-                .ok()
-                .or(s.ffprobe_path)
-                .unwrap_or_else(|| "ffprobe".to_owned()),
             enable_any_file_uploads_feature: environment.boolean(
                 "CHAN_ENABLE_ANY_FILE_UPLOADS_FEATURE",
                 s.enable_any_file_uploads_feature.unwrap_or(false),
@@ -2527,7 +2517,6 @@ mod tests {
             tor_service_nickname: "rustchan".to_owned(),
             require_ffmpeg: false,
             ffmpeg_path: "ffmpeg".to_owned(),
-            ffprobe_path: "ffprobe".to_owned(),
             enable_any_file_uploads_feature: false,
             bind_addr: "0.0.0.0:8080".to_owned(),
             database_path: "chan.db".to_owned(),

@@ -15,20 +15,6 @@ fn ffmpeg_command() -> Command {
     Command::new(&crate::config::CONFIG.ffmpeg_path)
 }
 
-/// Construct a command for the configured `FFprobe` executable.
-fn ffprobe_command() -> Command {
-    Command::new(&crate::config::CONFIG.ffprobe_path)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Broad media stream category reported by `FFprobe`.
-pub enum StreamKind {
-    /// The file contains audio but no video stream.
-    AudioOnly,
-    /// The file contains at least one video stream.
-    Video,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// Host-tuned settings for VP9 background transcoding.
 pub struct Vp9EncodingProfile {
@@ -100,80 +86,40 @@ pub fn run_ffmpeg(args: &[&str]) -> Result<()> {
     }
 }
 
-/// Convert an image file to WebP using ffmpeg.
+/// Inspect an uncovered audio container using bounded, zero-frame stream maps.
 ///
-/// Uses quality 85 and strips all metadata (`-map_metadata -1`).
-/// Input can be any format ffmpeg understands (JPEG, PNG, BMP, TIFF, GIF, …).
-///
-/// The `-loop 0` flag causes multi-frame inputs (GIF) to produce an animated
-/// WebP that loops forever, matching the default GIF behaviour.  For
-/// single-frame inputs ffmpeg silently ignores the flag.
-///
+/// This compatibility path is used only when the Rust parser reports an
+/// unsupported format, never after malformed-input or resource-limit errors.
 /// # Errors
-/// Returns an error if ffmpeg exits non-zero or cannot be spawned.
-pub fn ffmpeg_image_to_webp(input: &Path, output: &Path) -> Result<()> {
-    let in_str = path_to_str(input)?;
-    let out_str = path_to_str(output)?;
-
-    run_ffmpeg(&[
-        "-loglevel",
-        "error",
-        "-i",
-        in_str,
-        "-c:v",
-        "libwebp",
-        "-quality",
-        "85",
-        "-loop",
-        "0",
-        "-map_metadata",
-        "-1",
-        "-y",
-        out_str,
-    ])
-    .with_context(|| format!("image→webp conversion failed for {in_str}"))
+/// Returns an error if the tool cannot establish an audio-only stream layout.
+pub(crate) fn probe_uncovered_audio(path: &Path) -> Result<super::probe::StreamKind> {
+    let path = path_to_str(path)?;
+    let has_audio = mapped_stream_exists(path, "a:0", "-frames:a")?;
+    let has_video = mapped_stream_exists(path, "v:0", "-frames:v")?;
+    if has_video {
+        return Ok(super::probe::StreamKind::Video);
+    }
+    if has_audio {
+        return Ok(super::probe::StreamKind::AudioOnly);
+    }
+    anyhow::bail!("uncovered audio container has no audio/video streams")
 }
 
-/// Convert an animated image file to WebP while scaling to fit within the
-/// supplied banner bounds.
-/// Convert an input image to animated WebP while scaling to fit a max box.
-///
-/// # Errors
-/// Returns an error if ffmpeg is unavailable or the conversion fails.
-pub fn ffmpeg_image_to_webp_scaled(
-    input: &Path,
-    output: &Path,
-    max_width: u32,
-    max_height: u32,
-) -> Result<()> {
-    let in_str = path_to_str(input)?;
-    let out_str = path_to_str(output)?;
-    let scale = format!(
-        "scale='if(gt(iw,ih),min(iw,{max_width}),-2)':'if(gt(iw,ih),-2,min(ih,{max_height}))'"
-    );
-
-    run_ffmpeg(&[
-        "-loglevel",
-        "error",
-        "-i",
-        in_str,
-        "-vf",
-        &scale,
-        "-c:v",
-        "libwebp",
-        "-quality",
-        "85",
-        "-loop",
-        "0",
-        "-map_metadata",
-        "-1",
-        "-y",
-        out_str,
-    ])
-    .with_context(|| format!("image→webp conversion failed for {in_str}"))
+/// Ask `FFmpeg` to map one stream without decoding any frames.
+fn mapped_stream_exists(path: &str, selector: &str, frames: &str) -> Result<bool> {
+    let mut command = ffmpeg_command();
+    command.args([
+        "-v", "error", "-i", path, "-map", selector, frames, "0", "-f", "null", "-",
+    ]);
+    let output = run_command_with_timeout(
+        &mut command,
+        &crate::config::CONFIG.ffmpeg_path,
+        "audio container compatibility probe",
+    )?;
+    Ok(output.status.success())
 }
 
-/// Generate a WebP thumbnail from an image or video by extracting the first
+/// Generate a WebP thumbnail from a video by extracting the first
 /// frame and scaling to fit within `max_dim × max_dim`.
 ///
 /// The `-2` height modifier ensures the scaled height is rounded to an even
@@ -206,157 +152,6 @@ pub fn ffmpeg_thumbnail(input: &Path, output: &Path, max_dim: u32) -> Result<()>
         out_str,
     ])
     .with_context(|| format!("thumbnail generation failed for {in_str}"))
-}
-
-/// Probe whether a media container is audio-only or contains video streams.
-///
-/// # Errors
-/// Returns an error if `ffprobe` cannot be spawned, times out, exits non-zero,
-/// or reports no audio/video streams.
-pub fn probe_stream_kind(path: &Path) -> Result<StreamKind> {
-    let path_str = path_to_str(path)?;
-    let output = run_command_with_timeout(
-        ffprobe_command().args([
-            "-v",
-            "quiet",
-            "-show_entries",
-            "stream=codec_type",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            path_str,
-        ]),
-        &crate::config::CONFIG.ffprobe_path,
-        "ffprobe",
-    )?;
-
-    if !output.status.success() {
-        return Err(anyhow::anyhow!(
-            "ffprobe exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-
-    let mut saw_audio = false;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        match line.trim() {
-            "video" => return Ok(StreamKind::Video),
-            "audio" => saw_audio = true,
-            _ => {}
-        }
-    }
-
-    if saw_audio {
-        Ok(StreamKind::AudioOnly)
-    } else {
-        Err(anyhow::anyhow!(
-            "ffprobe returned no audio or video streams for: {path_str}"
-        ))
-    }
-}
-
-/// Uses the configured `FFmpeg` binary as a bounded stream-inspection fallback.
-///
-/// This is used only for an otherwise ambiguous `WebM` container when `FFprobe`
-/// is missing or fails. Explicit stream maps let `FFmpeg` validate whether a
-/// video or audio stream exists without decoding the upload.
-///
-/// # Errors
-/// Returns an error if `FFmpeg` cannot be run or neither stream kind is found.
-pub fn probe_stream_kind_with_ffmpeg(path: &Path) -> Result<StreamKind> {
-    let path_str = path_to_str(path)?;
-    if ffmpeg_has_stream(path_str, "0:v:0", "v")? {
-        return Ok(StreamKind::Video);
-    }
-    if ffmpeg_has_stream(path_str, "0:a:0", "a")? {
-        return Ok(StreamKind::AudioOnly);
-    }
-    anyhow::bail!("ffmpeg returned no audio or video streams for: {path_str}")
-}
-
-/// Tests one explicit stream mapping without decoding media frames.
-fn ffmpeg_has_stream(path: &str, selector: &str, stream_specifier: &str) -> Result<bool> {
-    let mut command = ffmpeg_command();
-    command.args([
-        "-v",
-        "error",
-        "-i",
-        path,
-        "-map",
-        selector,
-        &format!("-frames:{stream_specifier}"),
-        "0",
-        "-f",
-        "null",
-        "-",
-    ]);
-    let output =
-        run_command_with_timeout(&mut command, &crate::config::CONFIG.ffmpeg_path, "ffmpeg")?;
-    Ok(output.status.success())
-}
-
-/// Probe the primary video codec of a media file using `ffprobe`.
-///
-/// Returns the lowercase codec name (e.g. `"vp9"`, `"av1"`, `"h264"`) on
-/// success.  `ffprobe` must be on the same PATH as `ffmpeg`.
-///
-/// # Errors
-/// Returns an error if `ffprobe` cannot be spawned, exits non-zero, or its
-/// output contains no recognisable codec name.
-pub fn probe_video_codec(path: &str) -> Result<String> {
-    probe_codec(path, "v:0", "video")
-}
-
-/// Probe the primary audio codec of a media file using `ffprobe`.
-///
-/// Returns the lowercase codec name (e.g. `"flac"`, `"mp3"`, `"opus"`) on
-/// success.
-///
-/// # Errors
-/// Returns an error if `ffprobe` cannot be spawned, exits non-zero, or its
-/// output contains no recognisable codec name.
-pub fn probe_audio_codec(path: &Path) -> Result<String> {
-    let path_str = path_to_str(path)?;
-    probe_codec(path_str, "a:0", "audio")
-}
-
-/// Probe a selected stream and return its normalized codec name.
-fn probe_codec(path: &str, stream_selector: &str, stream_label: &str) -> Result<String> {
-    let output = run_command_with_timeout(
-        ffprobe_command().args([
-            "-v",
-            "quiet",
-            "-select_streams",
-            stream_selector,
-            "-show_entries",
-            "stream=codec_name",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            path,
-        ]),
-        &crate::config::CONFIG.ffprobe_path,
-        "ffprobe",
-    )?;
-
-    if !output.status.success() {
-        return Err(anyhow::anyhow!(
-            "ffprobe exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-
-    let codec = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_ascii_lowercase();
-
-    if codec.is_empty() {
-        return Err(anyhow::anyhow!(
-            "ffprobe returned no {stream_label} codec name for: {path}"
-        ));
-    }
-
-    Ok(codec)
 }
 
 #[must_use]

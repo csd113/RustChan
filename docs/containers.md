@@ -1,6 +1,6 @@
 # Container deployment
 
-RustChan's container listens on HTTP port **8080**. The image includes `ffmpeg`, `ffprobe`, and CA certificates. It runs as the unprivileged `rustchan` user (UID/GID 10001). Templates and static assets are embedded in the server binary.
+RustChan's container listens on HTTP port **8080**. The image includes `ffmpeg` and CA certificates. It runs as the unprivileged `rustchan` user (UID/GID 10001). Templates and static assets are embedded in the server binary.
 
 ## Pull and run
 

@@ -397,8 +397,6 @@ pub struct AppState {
     pub db: crate::db::DbPool,
     /// Whether the `FFmpeg` executable is available.
     pub ffmpeg_available: bool,
-    /// Whether the `FFprobe` executable is available.
-    pub ffprobe_available: bool,
     /// Whether `FFmpeg` supports `WebP` output.
     pub ffmpeg_webp_available: bool,
     /// Whether `FFmpeg` supports `VP9` output.

@@ -49,7 +49,6 @@ pub(super) struct SubmitPostCommand {
     pub upload_dir: String,
     pub thumb_size: u32,
     pub ffmpeg_available: bool,
-    pub ffprobe_available: bool,
     pub ffmpeg_webp_available: bool,
 }
 
@@ -94,7 +93,6 @@ struct UploadConfig<'a> {
     pub max_audio_size: usize,
     pub max_pdf_size: usize,
     pub ffmpeg_available: bool,
-    pub ffprobe_available: bool,
     pub ffmpeg_webp_available: bool,
 }
 
@@ -422,7 +420,6 @@ fn process_uploads(
         config.max_audio_size,
         config.max_pdf_size,
         config.ffmpeg_available,
-        config.ffprobe_available,
         config.ffmpeg_webp_available,
     );
 
@@ -533,7 +530,6 @@ pub(super) fn submit_post(
         upload_dir,
         thumb_size,
         ffmpeg_available,
-        ffprobe_available,
         ffmpeg_webp_available,
     } = command;
 
@@ -619,7 +615,6 @@ pub(super) fn submit_post(
             max_audio_size: effective_max_audio_size,
             max_pdf_size: effective_max_pdf_size,
             ffmpeg_available,
-            ffprobe_available,
             ffmpeg_webp_available,
         },
     )?;
@@ -922,7 +917,6 @@ mod tests {
             upload_dir: upload_dir.to_owned(),
             thumb_size: 250,
             ffmpeg_available: false,
-            ffprobe_available: false,
             ffmpeg_webp_available: false,
         }
     }
@@ -960,7 +954,6 @@ mod tests {
             upload_dir: upload_dir.to_owned(),
             thumb_size: 250,
             ffmpeg_available: false,
-            ffprobe_available: false,
             ffmpeg_webp_available: false,
         }
     }
@@ -994,7 +987,6 @@ mod tests {
             upload_dir: upload_dir.to_owned(),
             thumb_size: 250,
             ffmpeg_available: false,
-            ffprobe_available: false,
             ffmpeg_webp_available: false,
         }
     }
@@ -1027,7 +1019,7 @@ mod tests {
     }
 
     fn flac_header_bytes() -> Vec<u8> {
-        b"fLaC\x00\x00\x00\x22tiny test flac bytes".to_vec()
+        include_bytes!("../../tests/fixtures/media/tone.flac").to_vec()
     }
 
     fn malformed_aac_bytes() -> Result<Vec<u8>> {
@@ -1043,7 +1035,7 @@ mod tests {
     }
 
     fn mp4_header_bytes() -> Vec<u8> {
-        b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2mp41".to_vec()
+        include_bytes!("../../tests/fixtures/media/video.mp4").to_vec()
     }
 
     fn pending_upload_stage_count(upload_dir: &std::path::Path) -> Result<usize> {
@@ -1512,7 +1504,6 @@ mod tests {
                 max_audio_size: 1024 * 1024,
                 max_pdf_size: 1024 * 1024,
                 ffmpeg_available: false,
-                ffprobe_available: false,
                 ffmpeg_webp_available: false,
             },
         );
@@ -1640,7 +1631,10 @@ mod tests {
 
         match error {
             AppError::BadRequest(message) => {
-                assert!(message.contains("ADTS stream is malformed"));
+                assert!(
+                    message.contains("ADTS stream is malformed")
+                        || message.contains("could not validate")
+                );
             }
             other => bail!("expected BadRequest, got {other:?}"),
         }
@@ -1923,7 +1917,6 @@ mod tests {
                 max_audio_size: 1024 * 1024,
                 max_pdf_size: 1024 * 1024,
                 ffmpeg_available: false,
-                ffprobe_available: false,
                 ffmpeg_webp_available: false,
             },
         )
@@ -2010,7 +2003,6 @@ mod tests {
                     max_audio_size: 1024 * 1024,
                     max_pdf_size: 1024 * 1024,
                     ffmpeg_available: false,
-                    ffprobe_available: false,
                     ffmpeg_webp_available: false,
                 },
             )?;

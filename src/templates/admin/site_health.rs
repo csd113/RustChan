@@ -211,7 +211,6 @@ fn render_dependency_summary(view: &AdminPanelViewModel<'_>) -> String {
     let mut rows = String::new();
     for (label, status) in [
         ("ffmpeg", dependencies.ffmpeg),
-        ("ffprobe", dependencies.ffprobe),
         ("WebP support", dependencies.webp),
         ("VP9 support", dependencies.vp9),
         ("Opus support", dependencies.opus),

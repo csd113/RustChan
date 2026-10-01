@@ -266,7 +266,6 @@ fn spawn_tls_process(
             .env("CHAN_TOR_ONLY", "0")
             .env("CHAN_REQUIRE_FFMPEG", "0")
             .env("CHAN_FFMPEG_PATH", "__rustchan_tls_test_no_ffmpeg__")
-            .env("CHAN_FFPROBE_PATH", "__rustchan_tls_test_no_ffprobe__")
             // Direct HTTPS must mark cookies Secure even when the proxy/tunnel
             // compatibility toggle is disabled.
             .env("CHAN_HTTPS_COOKIES", "0")

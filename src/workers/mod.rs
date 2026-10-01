@@ -173,7 +173,7 @@ pub enum Job {
         /// Short name of the board containing the post.
         board_short: String,
     },
-    /// Generate a waveform PNG thumbnail for an audio upload via ffmpeg.
+    /// Generate a waveform PNG thumbnail with streaming Rust audio decoders.
     AudioWaveform {
         /// Database identifier of the post owning the upload.
         post_id: i64,
@@ -509,7 +509,7 @@ impl JobQueue {
     fn decrement_pending_by(&self, count: usize) {
         let count = u64::try_from(count).unwrap_or(u64::MAX);
         self.pending_jobs
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
                 Some(pending.saturating_sub(count))
             })
             .ok();
@@ -541,7 +541,6 @@ impl JobQueue {
 pub fn start_worker_pool(
     queue: &Arc<JobQueue>,
     ffmpeg_available: bool,
-    ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let n = std::thread::available_parallelism()
@@ -554,14 +553,7 @@ pub fn start_worker_pool(
         .map(|idx| {
             let q = Arc::clone(queue);
             tokio::spawn(async move {
-                worker_loop(
-                    idx,
-                    q,
-                    ffmpeg_available,
-                    ffprobe_available,
-                    ffmpeg_vp9_available,
-                )
-                .await;
+                worker_loop(idx, q, ffmpeg_available, ffmpeg_vp9_available).await;
             })
         })
         .collect()
@@ -979,7 +971,6 @@ async fn worker_loop(
     id: usize,
     queue: Arc<JobQueue>,
     ffmpeg_available: bool,
-    ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
 ) {
     debug!("Worker {id} started");
@@ -1040,7 +1031,6 @@ async fn worker_loop(
                     job_id,
                     job,
                     ffmpeg_available,
-                    ffprobe_available,
                     ffmpeg_vp9_available,
                     queue.pool.clone(),
                     Arc::clone(&queue.in_progress),
@@ -1147,7 +1137,6 @@ async fn handle_job(
     job_id: i64,
     job: Job,
     ffmpeg_available: bool,
-    ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
     pool: DbPool,
     in_progress: Arc<DashMap<String, bool>>,
@@ -1178,7 +1167,6 @@ async fn handle_job(
                 file_path.clone(),
                 board_short,
                 ffmpeg_available,
-                ffprobe_available,
                 ffmpeg_vp9_available,
                 pool,
                 cancel,
@@ -1279,7 +1267,6 @@ fn media_job_identity(job: &Job) -> Option<MediaJobIdentity> {
 ///
 /// A hard timeout of the live `ffmpeg_timeout_secs` setting is applied.
 #[expect(
-    clippy::cognitive_complexity,
     clippy::too_many_arguments,
     reason = "transcode process control and fail-closed cleanup share one lifecycle"
 )]
@@ -1289,21 +1276,12 @@ async fn transcode_video(
     file_path: String,
     board_short: String,
     ffmpeg_available: bool,
-    ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
     pool: DbPool,
     cancel: CancellationToken,
 ) -> Result<JobExecution> {
     if !ffmpeg_available {
         debug!("VideoTranscode skipped for post {post_id}: ffmpeg not available");
-        return Ok(JobExecution::NeedsCompletion);
-    }
-
-    if !ffprobe_available {
-        warn!(
-            "VideoTranscode skipped for post {post_id}: ffprobe not available. \
-             Install ffprobe alongside ffmpeg to enable safe video transcoding."
-        );
         return Ok(JobExecution::NeedsCompletion);
     }
 
@@ -1427,7 +1405,7 @@ fn transcode_video_prepare(
         let src_str = src
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8: {}", src.display()))?;
-        match crate::media::ffmpeg::probe_video_codec(src_str) {
+        match crate::media::probe::probe_video_codec(src_str) {
             Ok(codec) if codec == "av1" => {
                 tracing::info!(target: "workers", post_id = post_id, codec = "av1", "VideoTranscode: re-encoding WebM/AV1 to VP9");
             }
@@ -1779,8 +1757,8 @@ fn validate_transcoded_webm_output(
         });
     }
 
-    if crate::media::ffmpeg::probe_stream_kind(output_path)?
-        != crate::media::ffmpeg::StreamKind::Video
+    if crate::media::probe::probe_stream_kind(output_path)?
+        != crate::media::probe::StreamKind::Video
     {
         return Ok(TranscodeOutputDecision::Skip {
             reason: "transcoded output has no video stream",
@@ -1789,7 +1767,7 @@ fn validate_transcoded_webm_output(
     let output_str = output_path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Transcoded output path is non-UTF-8"))?;
-    let codec = crate::media::ffmpeg::probe_video_codec(output_str)?;
+    let codec = crate::media::probe::probe_video_codec(output_str)?;
     if codec != "vp9" {
         return Ok(TranscodeOutputDecision::Skip {
             reason: "transcoded output is not VP9",
@@ -1800,23 +1778,10 @@ fn validate_transcoded_webm_output(
 }
 
 // AudioWaveform
-/// Generate a waveform PNG thumbnail for an audio upload via ffmpeg.
-///
-/// Same `kill_on_drop` fix as `transcode_video`. Uses
-/// `tokio::process::Command` so the OS process is actually killed when the
-/// timeout fires, rather than continuing to run in an abandoned blocking thread.
-/// Parts produced by [`waveform_prepare`] that are consumed by the ffmpeg
-/// phase and [`waveform_finalise`].
-type WaveformPrepareParts = (
-    Vec<String>,
-    PathBuf,
-    String,
-    PathBuf,
-    String,
-    tempfile::NamedTempFile,
-);
+/// Parts prepared for atomic waveform persistence after in-process decoding.
+type WaveformPrepareParts = (PathBuf, String, PathBuf, String, tempfile::NamedTempFile);
 
-/// Generates and persists an audio waveform thumbnail with bounded process time.
+/// Generate a Rust waveform, retaining the authorized uncovered-codec fallback.
 async fn generate_waveform(
     job_id: i64,
     post_id: i64,
@@ -1826,60 +1791,19 @@ async fn generate_waveform(
     pool: DbPool,
     cancel: CancellationToken,
 ) -> Result<JobExecution> {
-    if !ffmpeg_available {
+    let (png_abs, png_rel, src_path, expected_file_path, tmp_png) =
+        tokio::task::spawn_blocking(move || waveform_prepare(&file_path, &board_short))
+            .await
+            .map_err(|error| anyhow::anyhow!("waveform preparation failed: {error}"))??;
+    if !render_waveform_with_compatibility(&src_path, tmp_png.path(), ffmpeg_available, &cancel)
+        .await?
+    {
         return Ok(JobExecution::NeedsCompletion);
     }
-
-    let timeout_secs = crate::config::ffmpeg_timeout_secs();
-    let ffmpeg_timeout = Duration::from_secs(timeout_secs);
-
-    // File I/O and temporary-file creation are blocking.
-    let (args, png_abs, png_rel, src_path, expected_file_path, tmp_png) = {
-        let file_path2 = file_path.clone();
-        let board_short2 = board_short.clone();
-        tokio::task::spawn_blocking(move || waveform_prepare(&file_path2, &board_short2))
-            .await
-            .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in waveform prepare: {e}"))??
-    };
-
-    // `kill_on_drop` terminates ffmpeg when its timeout future is dropped.
-    let mut command = ffmpeg_command();
-    command
-        .args(&args)
-        .stderr(Stdio::piped())
-        .stdout(Stdio::null())
-        .kill_on_drop(true);
-    let child = command.spawn().map_err(|e| {
-        anyhow::anyhow!(
-            "failed to spawn ffmpeg '{}' for waveform: {e}",
-            CONFIG.ffmpeg_path
-        )
-    })?;
-    drop(command);
-
-    match wait_for_ffmpeg_output(child, ffmpeg_timeout, cancel).await? {
-        AsyncWaitOutcome::Exited(output) => {
-            if !output.status.success() {
-                return Err(anyhow::anyhow!(
-                    "ffmpeg waveform exited with {}: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ));
-            }
-        }
-        AsyncWaitOutcome::TimedOut => {
-            warn!("AudioWaveform: job for post {post_id} timed out after {timeout_secs}s — ffmpeg process killed");
-            return Err(anyhow::anyhow!(
-                "ffmpeg waveform timed out after {timeout_secs}s"
-            ));
-        }
-        AsyncWaitOutcome::Cancelled => {
-            return Err(anyhow::anyhow!("ffmpeg waveform cancelled during shutdown"));
-        }
+    if cancel.is_cancelled() {
+        anyhow::bail!("audio waveform cancelled before persistence");
     }
-
-    // File persistence and the database update are blocking.
-    let finalise_result = tokio::task::spawn_blocking(move || {
+    let finalised = tokio::task::spawn_blocking(move || {
         waveform_finalise(
             job_id,
             post_id,
@@ -1893,8 +1817,82 @@ async fn generate_waveform(
         )
     })
     .await
-    .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in waveform finalise: {e}"))?;
-    finalise_result
+    .map_err(|error| anyhow::anyhow!("waveform persistence failed: {error}"))?;
+    finalised
+}
+
+/// Render common codecs internally; only unavailable codecs may invoke `FFmpeg`.
+/// Both paths share the existing deadline, shutdown handling and temp output.
+async fn render_waveform_with_compatibility(
+    src_path: &std::path::Path,
+    output_path: &std::path::Path,
+    ffmpeg_available: bool,
+    cancel: &CancellationToken,
+) -> Result<bool> {
+    let started = std::time::Instant::now();
+    let source = src_path.to_path_buf();
+    let output = output_path.to_path_buf();
+    let decoder_cancel = cancel.clone();
+    let rendered = tokio::task::spawn_blocking(move || {
+        crate::media::audio::render_waveform(
+            &source,
+            &output,
+            CONFIG.thumb_size,
+            (CONFIG.thumb_size / 2).max(1),
+            &decoder_cancel,
+        )
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("waveform decoder failed: {error}"))?;
+    if let Err(error) = rendered {
+        if !crate::media::audio::is_unsupported(&error) {
+            return Err(error);
+        }
+        if !ffmpeg_available {
+            return Ok(false);
+        }
+        if cancel.is_cancelled() {
+            anyhow::bail!("audio decoding cancelled before compatibility fallback");
+        }
+        let remaining = Duration::from_secs(crate::config::ffmpeg_timeout_secs())
+            .checked_sub(started.elapsed())
+            .ok_or_else(|| anyhow::anyhow!("waveform deadline exceeded"))?;
+        let mut command = ffmpeg_command();
+        let filter = format!(
+            "showwavespic=s={}x{}:colors=0x888888",
+            CONFIG.thumb_size,
+            CONFIG.thumb_size / 2
+        );
+        command
+            .args(["-loglevel", "error", "-i"])
+            .arg(src_path)
+            .args(["-filter_complex", &filter, "-frames:v", "1", "-y"])
+            .arg(output_path)
+            .stderr(Stdio::piped())
+            .stdout(Stdio::null())
+            .kill_on_drop(true);
+        let child = command.spawn().map_err(|spawn_error| {
+            anyhow::anyhow!(
+                "uncovered audio codec requires FFmpeg '{}': {spawn_error}",
+                CONFIG.ffmpeg_path
+            )
+        })?;
+        drop(command);
+        match wait_for_ffmpeg_output(child, remaining, cancel.clone()).await? {
+            AsyncWaitOutcome::Exited(output) if output.status.success() => {}
+            AsyncWaitOutcome::Exited(output) => anyhow::bail!(
+                "FFmpeg audio compatibility decoder failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            AsyncWaitOutcome::TimedOut => {
+                anyhow::bail!("FFmpeg audio compatibility decoder timed out")
+            }
+            AsyncWaitOutcome::Cancelled => {
+                anyhow::bail!("audio compatibility decoding cancelled during shutdown")
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Formats the actionable warning emitted when video re-encoding times out.
@@ -1906,24 +1904,19 @@ fn video_reencode_timeout_warning(post_id: i64, timeout_secs: u64) -> String {
 }
 
 /// Blocking prepare phase for [`generate_waveform`]: validate the source,
-/// create a temp output file, and build the ffmpeg arg list.
+/// and create a temp output file.
 fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepareParts> {
     use anyhow::Context as _;
     let upload_dir = &CONFIG.upload_dir;
-    let src = PathBuf::from(upload_dir).join(file_path);
-    if !src.exists() {
-        return Err(anyhow::anyhow!(
-            "Audio source not found for waveform: {}",
-            src.display()
-        ));
-    }
+    let upload_root = std::path::Path::new(upload_dir);
+    let board_dir = validated_board_media_dir(upload_root, board_short)?;
+    let src = validated_board_media_file(upload_root, file_path, board_short)?;
     let stem = src
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("Malformed audio filename: {}", src.display()))?
         .to_owned();
-    let thumb_size = CONFIG.thumb_size;
-    let thumbs_dir = PathBuf::from(upload_dir).join(board_short).join("thumbs");
+    let thumbs_dir = board_dir.join("thumbs");
     std::fs::create_dir_all(&thumbs_dir)?;
     let png_name = format!("{stem}.png");
     let png_abs = thumbs_dir.join(&png_name);
@@ -1933,35 +1926,7 @@ fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepar
         .suffix(".png")
         .tempfile_in(&thumbs_dir)
         .context("Failed to create temp file for waveform PNG")?;
-    let src_str = src
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8"))?
-        .to_owned();
-    let tmp_str = tmp_png
-        .path()
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Temp path is non-UTF-8"))?
-        .to_owned();
-    let filter = format!(
-        "showwavespic=s={thumb_size}x{}:colors=0x888888",
-        thumb_size / 2
-    );
-    let args: Vec<String> = [
-        "-loglevel",
-        "error",
-        "-i",
-        &src_str,
-        "-filter_complex",
-        &filter,
-        "-frames:v",
-        "1",
-        "-y",
-        &tmp_str,
-    ]
-    .iter()
-    .map(|s| (*s).to_owned())
-    .collect();
-    Ok((args, png_abs, png_rel, src, file_path.to_owned(), tmp_png))
+    Ok((png_abs, png_rel, src, file_path.to_owned(), tmp_png))
 }
 
 /// Blocking finalise phase for [`generate_waveform`]: atomically persist the
@@ -3190,6 +3155,72 @@ mod tests {
             rusqlite::params![board_id],
             |row| row.get(0),
         )?)
+    }
+
+    #[tokio::test]
+    async fn waveform_common_codecs_work_without_tools_and_uncovered_codecs_use_fallback(
+    ) -> anyhow::Result<()> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
+        let dir = tempfile::tempdir()?;
+        let output = dir.path().join("wave.png");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        anyhow::ensure!(
+            super::render_waveform_with_compatibility(
+                &root.join("tone.opus"),
+                &output,
+                false,
+                &cancel
+            )
+            .await?,
+            "common audio requires a tool"
+        );
+        anyhow::ensure!(
+            image::open(&output)?.width() == crate::config::CONFIG.thumb_size,
+            "waveform width changed"
+        );
+        std::fs::remove_file(&output)?;
+        for file in ["ac3.m4a", "surround.opus", "he-aac.m4a", "tone.spx"] {
+            anyhow::ensure!(
+                !super::render_waveform_with_compatibility(
+                    &root.join(file),
+                    &output,
+                    false,
+                    &cancel
+                )
+                .await?,
+                "uncovered variant {file} was decoded without its fallback"
+            );
+            anyhow::ensure!(
+                !output.exists(),
+                "uncovered variant published invalid output"
+            );
+            if crate::media::ffmpeg::detect_ffmpeg() {
+                anyhow::ensure!(
+                    super::render_waveform_with_compatibility(
+                        &root.join(file),
+                        &output,
+                        true,
+                        &cancel
+                    )
+                    .await?,
+                    "compatibility fallback did not render {file}"
+                );
+                anyhow::ensure!(
+                    image::open(&output)?.width() == crate::config::CONFIG.thumb_size,
+                    "fallback dimensions changed"
+                );
+                std::fs::remove_file(&output)?;
+            }
+        }
+        let malformed = dir.path().join("bad.wav");
+        std::fs::write(&malformed, b"RIFF\xff\xff\xff\xffWAVE")?;
+        anyhow::ensure!(
+            super::render_waveform_with_compatibility(&malformed, &output, true, &cancel)
+                .await
+                .is_err(),
+            "malformed audio invoked a permissive fallback"
+        );
+        Ok(())
     }
 
     #[test]

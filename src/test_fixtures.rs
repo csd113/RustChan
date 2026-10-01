@@ -79,7 +79,6 @@ pub(crate) fn app_state() -> crate::middleware::AppState {
     crate::middleware::AppState {
         db: pool,
         ffmpeg_available: false,
-        ffprobe_available: false,
         ffmpeg_webp_available: false,
         ffmpeg_vp9_available: false,
         ffmpeg_vp9_encoder_available: false,

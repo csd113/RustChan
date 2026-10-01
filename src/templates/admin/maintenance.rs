@@ -170,17 +170,12 @@ fn render_media_detection_cards(view: &AdminPanelViewModel<'_>) -> String {
         (
             "ffmpeg",
             view.maintenance.media_detection.ffmpeg.is_detected(),
-            "video thumbnails, waveform jobs, and transcoding entrypoint",
-        ),
-        (
-            "ffprobe",
-            view.maintenance.media_detection.ffprobe.is_detected(),
-            "WebM codec inspection for uploads that need it",
+            "video thumbnails and transcoding entrypoint",
         ),
         (
             "WebP encoder",
             view.maintenance.media_detection.webp_encoder.is_detected(),
-            "image to WebP conversion",
+            "video frame thumbnails",
         ),
         (
             "VP9/WebM pipeline",

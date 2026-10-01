@@ -134,25 +134,10 @@ pub fn save_section(
     let after = super::rewrite_root_settings(&before, &updates)?;
     let saved = super::resolve_file(&after, &Environment::Values(&empty))?;
     validate_section(section, &saved)?;
-    if section == RuntimeSection::Media {
-        for (tool, old, new, required) in [
-            (
-                "ffmpeg",
-                &previous.ffmpeg_path,
-                &saved.ffmpeg_path,
-                saved.require_ffmpeg,
-            ),
-            (
-                "ffprobe",
-                &previous.ffprobe_path,
-                &saved.ffprobe_path,
-                false,
-            ),
-        ] {
-            if old != new || required {
-                probe_tool(tool, new)?;
-            }
-        }
+    if section == RuntimeSection::Media
+        && (previous.ffmpeg_path != saved.ffmpeg_path || saved.require_ffmpeg)
+    {
+        probe_tool("ffmpeg", &saved.ffmpeg_path)?;
     }
     super::save_root_at(&path, &updates, &Environment::Process, |candidate| {
         validate_section(section, candidate)
@@ -240,9 +225,8 @@ static MEDIA_SETTINGS: &[SettingDefinition] = &[
     SettingDefinition { key: "max_video_size_mb", label: "New-board video upload default (MiB)", environment: "CHAN_MAX_VIDEO_MB", kind: InputKind::Number(1, 2048), value: |c| (c.max_video_size / (1024 * 1024)).to_string(), help: "Upload limit for newly created boards; edit existing per-board caps under Boards." },
     SettingDefinition { key: "max_audio_size_mb", label: "New-board audio upload default (MiB)", environment: "CHAN_MAX_AUDIO_MB", kind: InputKind::Number(1, 512), value: |c| (c.max_audio_size / (1024 * 1024)).to_string(), help: "Upload limit for newly created boards; existing boards retain their stored caps." },
     SettingDefinition { key: "enable_any_file_uploads_feature", label: "Master arbitrary-file upload gate", environment: "CHAN_ENABLE_ANY_FILE_UPLOADS_FEATURE", kind: InputKind::Boolean, value: |c| c.enable_any_file_uploads_feature.to_string(), help: "Both this global gate and the per-board arbitrary-file checkbox must be enabled. This does not change individual board preferences." },
-    SettingDefinition { key: "require_ffmpeg", label: "Require FFmpeg at startup", environment: "CHAN_REQUIRE_FFMPEG", kind: InputKind::Boolean, value: |c| c.require_ffmpeg.to_string(), help: "Missing FFmpeg becomes a startup error. FFprobe is detected separately; this flag does not make missing FFprobe fatal." },
+    SettingDefinition { key: "require_ffmpeg", label: "Require FFmpeg at startup", environment: "CHAN_REQUIRE_FFMPEG", kind: InputKind::Boolean, value: |c| c.require_ffmpeg.to_string(), help: "Missing FFmpeg becomes a startup error. Internal Rust image, metadata, PDF and common-audio processing does not need FFmpeg." },
     SettingDefinition { key: "ffmpeg_path", label: "FFmpeg executable", environment: "CHAN_FFMPEG_PATH", kind: InputKind::Text, value: |c| c.ffmpeg_path.clone(), help: "Use ffmpeg for PATH lookup, or an absolute executable path. New tool paths are checked with a bounded version probe before saving." },
-    SettingDefinition { key: "ffprobe_path", label: "FFprobe executable", environment: "CHAN_FFPROBE_PATH", kind: InputKind::Text, value: |c| c.ffprobe_path.clone(), help: "Use ffprobe for PATH lookup, or an absolute executable path. Missing FFprobe reduces media metadata support." },
     SettingDefinition { key: "thumb_size", label: "Generated thumbnail dimension (pixels)", environment: "CHAN_THUMB_SIZE", kind: InputKind::Number(16, 4096), value: |c| c.thumb_size.to_string(), help: "Applies to thumbnails generated after restart. Existing thumbnails are not regenerated." },
     SettingDefinition { key: "job_queue_capacity", label: "Background queue capacity (pending jobs)", environment: "CHAN_JOB_QUEUE_CAPACITY", kind: InputKind::Number(0, 1_000_000), value: |c| c.job_queue_capacity.to_string(), help: "0 is unlimited. Once full, the queue drops new media jobs with a warning. Current queue pressure is shown in Site Health." },
     SettingDefinition { key: "waveform_cache_max_mb", label: "Thumbnail/waveform cache budget (MiB)", environment: "CHAN_WAVEFORM_CACHE_MAX_MB", kind: InputKind::Number(0, 1_048_576), value: |c| (c.waveform_cache_max_bytes / (1024 * 1024)).to_string(), help: "Oldest cache files are evicted by a background task when the budget is exceeded. 0 disables eviction." },
@@ -313,8 +297,8 @@ mod tests {
             );
         }
         ensure!(
-            keys.len() == 63,
-            "registry must cover 39 inventoried root controls, 12 TLS leaves and 12 new operator choices"
+            keys.len() == 62,
+            "registry must cover 38 inventoried root controls, 12 TLS leaves and 12 new operator choices"
         );
         let config = resolve_file("", &Environment::Values(&BTreeMap::new()))?;
         ensure!(
@@ -467,7 +451,6 @@ mod tests {
             );
         }
         validate_tool_path("ffmpeg", "ffmpeg")?;
-        validate_tool_path("ffprobe", "ffprobe")?;
         Ok(())
     }
 
