@@ -10,6 +10,9 @@ Desktop.ini
 *.orig
 *.rej
 
+# Local tests.
+tests/
+
 # Build output, dependency caches, coverage, and profiling output.
 target/
 node_modules/
