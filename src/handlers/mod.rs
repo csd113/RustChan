@@ -24,7 +24,7 @@ use axum::{
     body::Body,
     extract::{Multipart, Request},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse as _, Response},
 };
 use futures::StreamExt as _;
 use std::collections::HashSet;
@@ -459,8 +459,22 @@ fn error_chain_contains(error: &(dyn std::error::Error + 'static), needle: &str)
 
 #[derive(Default)]
 struct PublicMultipartBudget {
+    /// Count shared by normal parsing and rejected-upload recovery.
     fields_seen: usize,
+    /// Aggregate field-data bytes observed across the request.
     bytes_seen: usize,
+    /// Additional allowance activated only after a board upload limit rejects a file.
+    rejected_upload: Option<RejectedUploadRecovery>,
+}
+
+/// One shared allowance for rejected field data and trailing draft controls.
+struct RejectedUploadRecovery {
+    /// Rejected excess and trailing controls consumed within the shared allowance.
+    bytes_seen: usize,
+    /// Single deadline for the rejected field and every trailing control.
+    deadline: tokio::time::Instant,
+    /// Whether the rejected field ended before the allowance was exhausted.
+    field_complete: bool,
 }
 
 impl PublicMultipartBudget {
@@ -480,6 +494,16 @@ impl PublicMultipartBudget {
             return Err(AppError::UploadTooLarge(
                 "Multipart upload is too large.".into(),
             ));
+        }
+        if let Some(recovery) = &mut self.rejected_upload {
+            recovery.bytes_seen = recovery.bytes_seen.saturating_add(len);
+            if recovery.bytes_seen > REJECTED_UPLOAD_DISCARD_MAX_BYTES
+                || tokio::time::Instant::now() >= recovery.deadline
+            {
+                return Err(AppError::UploadTooLarge(
+                    "Rejected upload recovery limit reached.".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -562,12 +586,58 @@ async fn discard_unknown_public_multipart_field(
 
 // Streaming multipart size limit
 //
-// Upload fields stream directly to disk and abort with HTTP 413 as soon as the
-// running total exceeds the configured board limit.
+// Upload fields stream directly to disk and stop staging at the configured
+// board limit. A small, time-bounded discard can then deliver the original 413
+// without retaining or processing excess bytes.
 //
 // Text fields (CSRF token, post body, …) use the same chunked parser with a
 // small fixed cap, so disabling Axum's route-level body limit for upload routes
 // does not leave text fields unbounded.
+
+/// Maximum additional upload bytes discarded after a board-size rejection.
+const REJECTED_UPLOAD_DISCARD_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum time spent discarding a rejected upload before closing its request.
+const REJECTED_UPLOAD_DISCARD_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Discards a small finite rejected field so browsers can receive its original error.
+/// Excess bytes never reach disk, and every read retains the aggregate upload budget.
+async fn discard_rejected_upload_field(
+    field: &mut axum::extract::multipart::Field<'_>,
+    budget: &mut PublicMultipartBudget,
+    initial_excess_bytes: usize,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + REJECTED_UPLOAD_DISCARD_TIMEOUT;
+    budget.rejected_upload = Some(RejectedUploadRecovery {
+        bytes_seen: initial_excess_bytes,
+        deadline,
+        field_complete: false,
+    });
+    if initial_excess_bytes > REJECTED_UPLOAD_DISCARD_MAX_BYTES {
+        return false;
+    }
+    let discard = async {
+        loop {
+            // Check ready streams too; the outer timer also bounds stalled reads.
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            let Ok(chunk) = field.chunk().await else {
+                return false;
+            };
+            let Some(chunk) = chunk else {
+                return true;
+            };
+            if budget.note_chunk(chunk.len()).is_err() {
+                return false;
+            }
+        }
+    };
+    let complete = matches!(tokio::time::timeout_at(deadline, discard).await, Ok(true));
+    if let Some(recovery) = &mut budget.rejected_upload {
+        recovery.field_complete = complete;
+    }
+    complete
+}
 
 async fn stream_field_to_temp_file(
     mut field: axum::extract::multipart::Field<'_>,
@@ -612,6 +682,13 @@ async fn stream_field_to_temp_file(
                 limit_bytes = max_bytes,
                 "multipart upload field exceeded board limit"
             );
+            // Keep the media permit until this bounded discard completes; reject
+            // regardless of the outcome and never stage or inspect excess bytes.
+            let excess = size_bytes
+                .saturating_add(chunk.len())
+                .saturating_sub(max_bytes);
+            let _discard_completed =
+                discard_rejected_upload_field(&mut field, budget, excess).await;
             return Err(AppError::UploadTooLarge(format!(
                 "File too large. Maximum upload size is {}.",
                 format_upload_limit(max_bytes)
@@ -722,6 +799,168 @@ pub(crate) struct PostFormData {
     pub captcha_answer: String,
 }
 
+/// Keeps native posting failures actionable without changing their status or security checks.
+pub(crate) fn native_post_error_response(
+    error: AppError,
+    prefill: Option<&crate::templates::forms::PostFormState>,
+) -> Response {
+    let mut response = error.into_response();
+    let Some(crate::error::ErrorPage::Message(message)) =
+        response.extensions().get::<crate::error::ErrorPage>()
+    else {
+        // Ban pages retain their dedicated explanation and appeal form.
+        return response;
+    };
+    let body = crate::templates::forms::post_error_recovery_body(message, prefill);
+    let html = crate::templates::base_layout(
+        "Posting error",
+        None,
+        &body,
+        "",
+        &crate::templates::live_boards(),
+        None,
+        None,
+        false,
+        "/",
+    );
+    response
+        .extensions_mut()
+        .insert(crate::error::ErrorPage::Content {
+            title: "Posting error".into(),
+            body,
+        });
+    *response.body_mut() = Body::from(html);
+    response
+}
+
+/// Request resources and a bounded draft retained even when parsing fails.
+pub(crate) struct PostMultipartContext<'a> {
+    /// Existing concurrency gate held while upload bytes are staged or discarded.
+    pub media_upload_gate: &'a crate::middleware::MediaUploadGate,
+    /// Escaped at rendering; records only bounded recoverable user controls.
+    pub draft: &'a mut crate::templates::forms::PostFormState,
+}
+
+/// Records only known bounded user controls; never tokens, CAPTCHA answers or uploads.
+fn capture_post_draft(
+    name: &str,
+    value: &str,
+    draft: &mut crate::templates::forms::PostFormState,
+) -> Result<()> {
+    match name {
+        "name" => value.clone_into(&mut draft.name),
+        "subject" => value.clone_into(&mut draft.subject),
+        "body" => value.clone_into(&mut draft.body),
+        "sage" => {
+            draft.sage = value == "1"
+                || value.eq_ignore_ascii_case("on")
+                || value.eq_ignore_ascii_case("true");
+        }
+        "poll_question" if value.chars().count() <= 500 => {
+            value.clone_into(&mut draft.poll.get_or_insert_default().question);
+        }
+        "poll_option" => {
+            let value = value.trim();
+            if !value.is_empty() {
+                let poll = draft.poll.get_or_insert_default();
+                if poll.options.len() >= 20 || value.chars().count() > 200 {
+                    return Err(AppError::BadRequest(
+                        "Poll recovery control exceeds its limit.".into(),
+                    ));
+                }
+                poll.options.push(value.to_owned());
+            }
+        }
+        "poll_duration_value" => {
+            value.clone_into(&mut draft.poll.get_or_insert_default().duration_value);
+        }
+        "poll_duration_unit" => {
+            value.clone_into(&mut draft.poll.get_or_insert_default().duration_unit);
+        }
+        "poll_question" => {
+            return Err(AppError::BadRequest(
+                "Poll recovery question exceeds its limit.".into(),
+            ))
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Reads trailing controls only after a finite rejected field; shares its cap and deadline.
+async fn recover_rejected_post_tail(
+    multipart: &mut Multipart,
+    budget: &mut PublicMultipartBudget,
+    draft: &mut crate::templates::forms::PostFormState,
+) {
+    let Some(recovery) = budget
+        .rejected_upload
+        .as_ref()
+        .filter(|state| state.field_complete)
+    else {
+        return;
+    };
+    let deadline = recovery.deadline;
+    let recover = async {
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(AppError::BadRequest("Draft recovery timed out.".into()));
+            }
+            let next_field = multipart
+                .next_field()
+                .await
+                .map_err(|error| multipart_read_error("draft recovery", &error))?;
+            let Some(mut field) = next_field else {
+                return Ok(());
+            };
+            budget.note_field()?;
+            let name = field.name().unwrap_or_default().to_owned();
+            match name.as_str() {
+                "name"
+                | "subject"
+                | "body"
+                | "sage"
+                | "poll_question"
+                | "poll_option"
+                | "poll_duration_value"
+                | "poll_duration_unit" => {
+                    let value = read_text_field(field, budget).await?;
+                    capture_post_draft(&name, &value, draft)?;
+                }
+                "file" | "audio_file" | "image_file" => {
+                    draft.had_attachments |= field.file_name().is_some_and(|name| !name.is_empty());
+                    loop {
+                        let next_chunk = field.chunk().await.map_err(|error| {
+                            multipart_read_error("rejected upload tail", &error)
+                        })?;
+                        let Some(chunk) = next_chunk else {
+                            break;
+                        };
+                        budget.note_chunk(chunk.len())?;
+                    }
+                }
+                _ => discard_unknown_public_multipart_field(field, budget).await?,
+            }
+        }
+    };
+    if matches!(tokio::time::timeout_at(deadline, recover).await, Ok(Ok(()))) {
+        draft.incomplete = false;
+    }
+}
+
+/// Retains the original upload error after bounded best-effort draft recovery.
+async fn recover_upload_parse_error<T>(
+    result: Result<T>,
+    multipart: &mut Multipart,
+    budget: &mut PublicMultipartBudget,
+    draft: &mut crate::templates::forms::PostFormState,
+) -> Result<T> {
+    if result.is_err() {
+        recover_rejected_post_tail(multipart, budget, draft).await;
+    }
+    result
+}
+
 /// Drain all fields from a multipart form into [`PostFormData`].
 /// `csrf_cookie` is the value from the browser cookie for CSRF verification.
 #[expect(
@@ -739,8 +978,17 @@ pub(crate) async fn parse_post_multipart(
     max_video_size: usize,
     max_audio_size: usize,
     max_pdf_size: usize,
-    media_upload_gate: &crate::middleware::MediaUploadGate,
+    context: PostMultipartContext<'_>,
 ) -> Result<PostFormData> {
+    let PostMultipartContext {
+        media_upload_gate,
+        draft,
+    } = context;
+    draft.incomplete = true;
+    draft.poll = Some(crate::templates::forms::PollFormState {
+        duration_unit: "hours".into(),
+        ..Default::default()
+    });
     tracing::info!(target: LOG_TARGET,
         max_image_bytes = max_image_size,
         max_video_bytes = max_video_size,
@@ -760,7 +1008,7 @@ pub(crate) async fn parse_post_multipart(
     let mut image_file: Option<(TempUpload, String)> = None;
     let mut poll_question = String::new();
     let mut poll_options: Vec<String> = Vec::new();
-    let mut poll_duration_value: Option<i64> = None;
+    let mut poll_duration_value = String::new();
     let mut poll_duration_unit = String::from("hours");
     let mut sage = false;
     let mut captcha_id = String::new();
@@ -788,13 +1036,23 @@ pub(crate) async fn parse_post_multipart(
             Some("submission_token") => {
                 submission_token = read_text_field(field, &mut budget).await?;
             }
-            Some("name") => name = read_text_field(field, &mut budget).await?,
-            Some("subject") => subject = read_text_field(field, &mut budget).await?,
-            Some("body") => body = read_text_field(field, &mut budget).await?,
+            Some("name") => {
+                name = read_text_field(field, &mut budget).await?;
+                capture_post_draft("name", &name, draft)?;
+            }
+            Some("subject") => {
+                subject = read_text_field(field, &mut budget).await?;
+                capture_post_draft("subject", &subject, draft)?;
+            }
+            Some("body") => {
+                body = read_text_field(field, &mut budget).await?;
+                capture_post_draft("body", &body, draft)?;
+            }
             Some("deletion_token") => deletion_token = read_text_field(field, &mut budget).await?,
             Some("sage") => {
                 let v = read_text_field(field, &mut budget).await?;
                 sage = v == "1" || v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("true");
+                capture_post_draft("sage", &v, draft)?;
             }
             Some("captcha_id") => captcha_id = read_text_field(field, &mut budget).await?,
             Some("captcha_answer") => {
@@ -807,6 +1065,7 @@ pub(crate) async fn parse_post_multipart(
                         "Poll question must be 500 characters or fewer.".into(),
                     ));
                 }
+                capture_post_draft("poll_question", &v, draft)?;
                 poll_question = v;
             }
             Some("poll_option") => {
@@ -823,15 +1082,17 @@ pub(crate) async fn parse_post_multipart(
                             "Each poll option must be 200 characters or fewer.".into(),
                         ));
                     }
+                    capture_post_draft("poll_option", &trimmed, draft)?;
                     poll_options.push(trimmed);
                 }
             }
             Some("poll_duration_value") => {
-                let v = read_text_field(field, &mut budget).await?;
-                poll_duration_value = v.trim().parse::<i64>().ok();
+                poll_duration_value = read_text_field(field, &mut budget).await?;
+                capture_post_draft("poll_duration_value", &poll_duration_value, draft)?;
             }
             Some("poll_duration_unit") => {
                 poll_duration_unit = read_text_field(field, &mut budget).await?;
+                capture_post_draft("poll_duration_unit", &poll_duration_unit, draft)?;
             }
             Some("file") => {
                 if !seen_upload_slots.insert("file") {
@@ -839,7 +1100,8 @@ pub(crate) async fn parse_post_multipart(
                         "Duplicate upload field 'file'.".into(),
                     ));
                 }
-                file = read_upload_field(
+                draft.had_attachments |= field.file_name().is_some_and(|name| !name.is_empty());
+                let upload_result = read_upload_field(
                     field,
                     max_image_size
                         .max(max_video_size)
@@ -851,7 +1113,11 @@ pub(crate) async fn parse_post_multipart(
                     media_upload_gate,
                     &mut media_upload_guard,
                 )
-                .await?;
+                .await;
+                draft.had_attachments |= upload_result.as_ref().is_ok_and(Option::is_some);
+                file =
+                    recover_upload_parse_error(upload_result, &mut multipart, &mut budget, draft)
+                        .await?;
             }
             Some("audio_file") => {
                 if !seen_upload_slots.insert("audio_file") {
@@ -859,7 +1125,8 @@ pub(crate) async fn parse_post_multipart(
                         "Duplicate upload field 'audio_file'.".into(),
                     ));
                 }
-                audio_file = read_upload_field(
+                draft.had_attachments |= field.file_name().is_some_and(|name| !name.is_empty());
+                let upload_result = read_upload_field(
                     field,
                     max_audio_size,
                     "audio",
@@ -868,7 +1135,11 @@ pub(crate) async fn parse_post_multipart(
                     media_upload_gate,
                     &mut media_upload_guard,
                 )
-                .await?;
+                .await;
+                draft.had_attachments |= upload_result.as_ref().is_ok_and(Option::is_some);
+                audio_file =
+                    recover_upload_parse_error(upload_result, &mut multipart, &mut budget, draft)
+                        .await?;
             }
             Some("image_file") => {
                 if !seen_upload_slots.insert("image_file") {
@@ -876,7 +1147,8 @@ pub(crate) async fn parse_post_multipart(
                         "Duplicate upload field 'image_file'.".into(),
                     ));
                 }
-                image_file = read_upload_field(
+                draft.had_attachments |= field.file_name().is_some_and(|name| !name.is_empty());
+                let upload_result = read_upload_field(
                     field,
                     max_image_size,
                     "image",
@@ -885,7 +1157,11 @@ pub(crate) async fn parse_post_multipart(
                     media_upload_gate,
                     &mut media_upload_guard,
                 )
-                .await?;
+                .await;
+                draft.had_attachments |= upload_result.as_ref().is_ok_and(Option::is_some);
+                image_file =
+                    recover_upload_parse_error(upload_result, &mut multipart, &mut budget, draft)
+                        .await?;
             }
             _ => {
                 discard_unknown_public_multipart_field(field, &mut budget).await?;
@@ -893,13 +1169,15 @@ pub(crate) async fn parse_post_multipart(
         }
     }
 
+    draft.incomplete = false;
+
     // Convert duration value + unit → seconds (saturating to prevent overflow).
     // The unit is validated against an explicit allow-list (case-insensitive) so
     // that a tampered form field does not silently multiply by an arbitrary factor.
     let poll_duration_secs = if poll_question.trim().is_empty() {
         None
     } else {
-        match poll_duration_value {
+        match poll_duration_value.trim().parse::<i64>().ok() {
             None => None,
             Some(v) => {
                 let unit = poll_duration_unit.trim().to_ascii_lowercase();
@@ -1458,7 +1736,7 @@ trailer << /Root 1 0 R >>
         boundary: &str,
         body: Vec<u8>,
     ) -> anyhow::Result<axum::extract::Multipart> {
-        let request = Request::builder()
+        let mut request = Request::builder()
             .method("POST")
             .uri("/parse")
             .header(
@@ -1467,9 +1745,258 @@ trailer << /Root 1 0 R >>
             )
             .body(Body::from(body))
             .context("build multipart extraction request")?;
+        // Match public posting routes: the parser enforces its own board and aggregate caps.
+        axum::extract::DefaultBodyLimit::disable().apply(&mut request);
         axum::extract::Multipart::from_request(request, &())
             .await
             .map_err(|rejection| anyhow::anyhow!(rejection.to_string()))
+    }
+
+    #[tokio::test]
+    async fn rejected_upload_discard_finishes_without_staging_bytes() -> anyhow::Result<()> {
+        let (boundary, body) =
+            multipart_body_with_files(&[], &[("file", "oversized.png", &[1; 2048], "image/png")]);
+        let mut multipart = multipart_from_bytes(&boundary, body).await?;
+        let mut field = multipart
+            .next_field()
+            .await?
+            .context("missing upload field")?;
+        let mut budget = super::PublicMultipartBudget::default();
+        ensure!(super::discard_rejected_upload_field(&mut field, &mut budget, 0).await);
+        ensure!(budget.bytes_seen == 2048);
+        ensure!(field.chunk().await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_upload_discard_stops_at_excess_and_aggregate_limits() -> anyhow::Result<()> {
+        let (boundary, body) =
+            multipart_body_with_files(&[], &[("file", "oversized.png", &[1; 2048], "image/png")]);
+        let mut multipart = multipart_from_bytes(&boundary, body).await?;
+        let mut field = multipart
+            .next_field()
+            .await?
+            .context("missing upload field")?;
+        let mut budget = super::PublicMultipartBudget::default();
+        ensure!(
+            !super::discard_rejected_upload_field(
+                &mut field,
+                &mut budget,
+                super::REJECTED_UPLOAD_DISCARD_MAX_BYTES
+            )
+            .await
+        );
+        ensure!(budget.bytes_seen == 2048);
+
+        let (boundary, body) =
+            multipart_body_with_files(&[], &[("file", "oversized.png", &[1; 2048], "image/png")]);
+        let mut multipart = multipart_from_bytes(&boundary, body).await?;
+        let mut field = multipart
+            .next_field()
+            .await?
+            .context("missing upload field")?;
+        let mut budget = super::PublicMultipartBudget {
+            fields_seen: 0,
+            bytes_seen: super::PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES,
+            ..super::PublicMultipartBudget::default()
+        };
+        ensure!(!super::discard_rejected_upload_field(&mut field, &mut budget, 0).await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_upload_discard_times_out_on_a_stalled_field() -> anyhow::Result<()> {
+        use futures::StreamExt as _;
+        let prefix = axum::body::Bytes::from_static(b"--stalled\r\nContent-Disposition: form-data; name=\"file\"; filename=\"stalled.png\"\r\n\r\npartial bytes");
+        let stream = futures::stream::once(async { Ok::<_, std::io::Error>(prefix) })
+            .chain(futures::stream::pending());
+        let request = Request::builder()
+            .header(
+                header::CONTENT_TYPE,
+                "multipart/form-data; boundary=stalled",
+            )
+            .body(Body::from_stream(stream))?;
+        let mut multipart = axum::extract::Multipart::from_request(request, &()).await?;
+        let mut field = multipart
+            .next_field()
+            .await?
+            .context("missing stalled upload field")?;
+        let mut budget = super::PublicMultipartBudget::default();
+        let completed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            super::discard_rejected_upload_field(&mut field, &mut budget, 0),
+        )
+        .await?;
+        ensure!(!completed);
+        Ok(())
+    }
+
+    /// Constructs the native form order: user text, rejected upload, then poll controls.
+    fn rejected_upload_with_tail(
+        tail: &[(&str, &str)],
+        later_upload_bytes: &[u8],
+    ) -> (String, Vec<u8>) {
+        let (boundary, mut body) = multipart_body_with_files(
+            &[
+                ("name", "匿名"),
+                ("subject", "Subject <saved>"),
+                ("body", "Draft 日本語"),
+            ],
+            &[("file", "oversized.png", &[1; 2048], "image/png")],
+        );
+        let closing = format!("--{boundary}--\r\n");
+        body.truncate(body.len().saturating_sub(closing.len()));
+        let files = if later_upload_bytes.is_empty() {
+            Vec::new()
+        } else {
+            vec![("image_file", "later.png", later_upload_bytes, "image/png")]
+        };
+        let (_, trailing) = multipart_body_with_files(tail, &files);
+        body.extend_from_slice(&trailing);
+        (boundary, body)
+    }
+
+    #[tokio::test]
+    async fn rejected_upload_preserves_received_text_and_trailing_poll() -> anyhow::Result<()> {
+        let (boundary, body) = rejected_upload_with_tail(
+            &[
+                ("sage", "1"),
+                ("poll_question", "Question 日本語?"),
+                ("poll_option", "One"),
+                ("poll_option", "Two"),
+                ("poll_option", "Three"),
+                ("poll_duration_value", "3"),
+                ("poll_duration_unit", "days"),
+                ("captcha_answer", "never retained"),
+                ("_csrf", "never retained"),
+            ],
+            b"later upload is discarded",
+        );
+        let gate = crate::middleware::MediaUploadGate::new();
+        let mut draft = crate::templates::forms::PostFormState::default();
+        let result = parse_post_multipart(
+            multipart_from_bytes(&boundary, body).await?,
+            None,
+            1024,
+            1024,
+            1024,
+            1024,
+            super::PostMultipartContext {
+                media_upload_gate: &gate,
+                draft: &mut draft,
+            },
+        )
+        .await;
+        ensure!(
+            matches!(&result, Err(crate::error::AppError::UploadTooLarge(message)) if message.starts_with("File too large."))
+        );
+        ensure!(
+            draft.body == "Draft 日本語"
+                && draft.subject == "Subject <saved>"
+                && draft.name == "匿名"
+        );
+        ensure!(draft.sage && draft.had_attachments && !draft.incomplete);
+        let poll = draft.poll.context("trailing poll not retained")?;
+        ensure!(poll.question == "Question 日本語?" && poll.options == ["One", "Two", "Three"]);
+        ensure!(poll.duration_value == "3" && poll.duration_unit == "days");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_upload_tail_shares_excess_budget_and_reports_partial_capture(
+    ) -> anyhow::Result<()> {
+        let bytes = vec![1; super::REJECTED_UPLOAD_DISCARD_MAX_BYTES];
+        let (boundary, body) =
+            rejected_upload_with_tail(&[("poll_question", "Already captured?")], &bytes);
+        let gate = crate::middleware::MediaUploadGate::new();
+        let mut draft = crate::templates::forms::PostFormState::default();
+        let result = parse_post_multipart(
+            multipart_from_bytes(&boundary, body).await?,
+            None,
+            1024,
+            1024,
+            1024,
+            1024,
+            super::PostMultipartContext {
+                media_upload_gate: &gate,
+                draft: &mut draft,
+            },
+        )
+        .await;
+        ensure!(
+            matches!(&result, Err(crate::error::AppError::UploadTooLarge(message)) if message.starts_with("File too large.")),
+            "expected original board-limit rejection, received {:?}",
+            result.as_ref().err().map(ToString::to_string)
+        );
+        drop(result);
+        ensure!(draft.body == "Draft 日本語" && draft.incomplete);
+        ensure!(
+            draft.poll.context("bounded earlier poll missing")?.question == "Already captured?"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_upload_tail_keeps_text_poll_and_field_limits() -> anyhow::Result<()> {
+        let long_text = "x".repeat(super::TEXT_MULTIPART_FIELD_MAX_BYTES + 1);
+        let long_question = "q".repeat(501);
+        let long_option = "o".repeat(201);
+        for tail in [
+            vec![("poll_question", "q"); super::PUBLIC_MULTIPART_MAX_FIELDS],
+            vec![("poll_option", "option"); 21],
+            vec![("body", long_text.as_str())],
+            vec![("poll_question", long_question.as_str())],
+            vec![("poll_option", long_option.as_str())],
+        ] {
+            let (boundary, body) = rejected_upload_with_tail(&tail, &[]);
+            let gate = crate::middleware::MediaUploadGate::new();
+            let mut draft = crate::templates::forms::PostFormState::default();
+            let result = parse_post_multipart(
+                multipart_from_bytes(&boundary, body).await?,
+                None,
+                1024,
+                1024,
+                1024,
+                1024,
+                super::PostMultipartContext {
+                    media_upload_gate: &gate,
+                    draft: &mut draft,
+                },
+            )
+            .await;
+            ensure!(
+                matches!(&result, Err(crate::error::AppError::UploadTooLarge(message)) if message.starts_with("File too large."))
+            );
+            drop(result);
+            ensure!(draft.incomplete);
+            ensure!(draft
+                .poll
+                .as_ref()
+                .is_none_or(|poll| poll.options.len() <= 20));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_upload_tail_does_not_receive_a_second_timeout() -> anyhow::Result<()> {
+        let (boundary, body) = multipart_body_with_files(&[("body", "unread")], &[]);
+        let mut multipart = multipart_from_bytes(&boundary, body).await?;
+        let mut draft = crate::templates::forms::PostFormState {
+            body: "saved".into(),
+            incomplete: true,
+            ..Default::default()
+        };
+        let mut budget = super::PublicMultipartBudget {
+            rejected_upload: Some(super::RejectedUploadRecovery {
+                bytes_seen: 1,
+                deadline: tokio::time::Instant::now(),
+                field_complete: true,
+            }),
+            ..Default::default()
+        };
+        super::recover_rejected_post_tail(&mut multipart, &mut budget, &mut draft).await;
+        ensure!(draft.body == "saved" && draft.incomplete && budget.bytes_seen == 0);
+        Ok(())
     }
 
     #[test]
@@ -1555,7 +2082,10 @@ trailer << /Root 1 0 R >>
             1_024,
             5_000,
             1_024,
-            &gate,
+            super::PostMultipartContext {
+                media_upload_gate: &gate,
+                draft: &mut crate::templates::forms::PostFormState::default(),
+            },
         )
         .await?;
         let (upload, _) = form.audio_file.as_ref().ok_or_else(|| {
@@ -1582,7 +2112,10 @@ trailer << /Root 1 0 R >>
             1_024,
             5_000,
             1_024,
-            &gate,
+            super::PostMultipartContext {
+                media_upload_gate: &gate,
+                draft: &mut crate::templates::forms::PostFormState::default(),
+            },
         )
         .await?;
         Ok("ok")
@@ -1671,7 +2204,10 @@ trailer << /Root 1 0 R >>
             1_024,
             1_024,
             1_024,
-            &gate,
+            super::PostMultipartContext {
+                media_upload_gate: &gate,
+                draft: &mut crate::templates::forms::PostFormState::default(),
+            },
         )
         .await?;
         Ok("ok")
@@ -1688,7 +2224,10 @@ trailer << /Root 1 0 R >>
             1_024,
             1_024,
             2_048,
-            &gate,
+            super::PostMultipartContext {
+                media_upload_gate: &gate,
+                draft: &mut crate::templates::forms::PostFormState::default(),
+            },
         )
         .await?;
         let (upload, _) = form.file.as_ref().ok_or_else(|| {
@@ -1752,7 +2291,10 @@ trailer << /Root 1 0 R >>
             1_024,
             1_024,
             1_024,
-            &gate,
+            super::PostMultipartContext {
+                media_upload_gate: &gate,
+                draft: &mut crate::templates::forms::PostFormState::default(),
+            },
         )
         .await?;
 
@@ -1783,7 +2325,10 @@ trailer << /Root 1 0 R >>
             1_024,
             1_024,
             1_024,
-            &gate,
+            super::PostMultipartContext {
+                media_upload_gate: &gate,
+                draft: &mut crate::templates::forms::PostFormState::default(),
+            },
         )
         .await?;
 

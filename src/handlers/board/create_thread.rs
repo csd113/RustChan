@@ -3,7 +3,7 @@ use super::{
     handled_post_error_status, identity_key, index_reply_previews, index_threads_per_page,
     is_xml_http_request, make_scoped_csrf_form_token, parse_post_multipart, posting,
     remember_owned_post_until_with_secure, render, self_action_window_secs,
-    should_set_public_secure_cookie, templates, unlock_redirect_url, user_preferences_from_jar,
+    should_set_public_secure_cookie, unlock_redirect_url, user_preferences_from_jar,
     xhr_error_response, xhr_post_error_response, xhr_redirect_response, AppError, AppState,
     BoardAccessDecision, BoardAccessRequirement, CookieJar, HashMap, HeaderMap, Html, Multipart,
     Path, PostFormData, Redirect, Response, Result, SecureCookieContext, State,
@@ -54,7 +54,8 @@ pub(in crate::server) async fn create_thread(
     };
 
     let csrf_cookie = jar.get("csrf_token").map(|c| c.value().to_owned());
-    let form = tokio::time::timeout(
+    let mut parse_draft = crate::templates::forms::PostFormState::default();
+    let parsed_form = tokio::time::timeout(
         crate::handlers::PUBLIC_UPLOAD_TIMEOUT,
         parse_post_multipart(
             multipart,
@@ -63,22 +64,40 @@ pub(in crate::server) async fn create_thread(
             access_context.board.max_video_size_bytes(),
             access_context.board.max_audio_size_bytes(),
             access_context.board.max_pdf_size_bytes(),
-            &state.media_upload_gate,
+            crate::handlers::PostMultipartContext {
+                media_upload_gate: &state.media_upload_gate,
+                draft: &mut parse_draft,
+            },
         ),
     )
     .await
-    .map_err(|_error| AppError::BadRequest("Upload timed out. Please try again.".into()))??;
+    .map_err(|_error| AppError::BadRequest("Upload timed out. Please try again.".into()))
+    .and_then(std::convert::identity);
+    let form = match parsed_form {
+        Ok(form) => form,
+        Err(error) => {
+            if xhr_request {
+                return xhr_post_error_response(error);
+            }
+            return Ok(crate::handlers::native_post_error_response(
+                error,
+                Some(&parse_draft),
+            ));
+        }
+    };
+
+    let post_form_state = parse_draft;
 
     if !form.csrf_verified {
-        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+        let error = AppError::Forbidden("CSRF token mismatch. Reload the posting page for a fresh form after copying your draft.".into());
+        if xhr_request {
+            return xhr_post_error_response(error);
+        }
+        return Ok(crate::handlers::native_post_error_response(
+            error,
+            Some(&post_form_state),
+        ));
     }
-
-    let post_form_state = templates::forms::PostFormState {
-        name: form.name.clone(),
-        subject: form.subject.clone(),
-        body: form.body.clone(),
-        sage: form.sage,
-    };
 
     // Also extract csrf_token before spawn_blocking so the ban page appeal form works.
     let ban_csrf_token = csrf_cookie.clone().unwrap_or_default();
@@ -167,7 +186,10 @@ pub(in crate::server) async fn create_thread(
                     if xhr_request {
                         return xhr_post_error_response(error);
                     }
-                    return Err(error);
+                    return Ok(crate::handlers::native_post_error_response(
+                        error,
+                        Some(&post_form_state),
+                    ));
                 }
             };
             if xhr_request {

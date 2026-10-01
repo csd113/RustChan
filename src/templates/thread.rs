@@ -587,7 +587,7 @@ fn render_poll(
     let show_results = pd.is_expired || pd.user_voted_option.is_some();
 
     let mut html = format!(
-        r#"<div class="poll-container">
+        r#"<div class="poll-container" id="poll">
 <div class="poll-header">
   <span class="poll-icon">📊</span>
   <span class="poll-question">{q}</span>
@@ -871,9 +871,52 @@ fn effective_media_type(post: &Post) -> crate::models::MediaType {
     post.media_type.unwrap_or(crate::models::MediaType::Other)
 }
 
-/// Render a single post as HTML.
-/// `pub` because board.rs uses this for thread-summary preview posts and
-/// search results; all other call-sites are within this module.
+#[derive(Clone, Copy)]
+/// Selects whether post links act within this page or open their thread.
+enum PostLinkContext {
+    /// Keeps fragment links and the inline reply action.
+    Inline,
+    /// Opens a complete thread from a partial set of search results.
+    Thread,
+}
+
+/// Renders a post with inline quote and reply controls.
+#[must_use]
+pub fn render_post(
+    post: &Post,
+    board_short: &str,
+    csrf_token: &str,
+    opts: RenderPostOpts,
+    edit_window_secs: i64,
+) -> String {
+    render_post_with_context(
+        post,
+        board_short,
+        csrf_token,
+        opts,
+        edit_window_secs,
+        PostLinkContext::Inline,
+    )
+}
+
+/// Renders a search result with links back to the complete thread context.
+pub(super) fn render_search_post(
+    post: &Post,
+    board_short: &str,
+    csrf_token: &str,
+    opts: RenderPostOpts,
+) -> String {
+    render_post_with_context(
+        post,
+        board_short,
+        csrf_token,
+        opts,
+        0,
+        PostLinkContext::Thread,
+    )
+}
+
+/// Renders a single post as HTML in its current navigation context.
 ///
 /// # Trust boundary
 /// `post.body_html` is inserted **raw** (unescaped) because it is pre-rendered,
@@ -889,12 +932,13 @@ fn effective_media_type(post: &Post) -> crate::models::MediaType {
     clippy::too_many_lines,
     reason = "post rendering keeps all media variants and security-sensitive escaping together"
 )]
-pub fn render_post(
+fn render_post_with_context(
     post: &Post,
     board_short: &str,
     csrf_token: &str,
     opts: RenderPostOpts,
     _edit_window_secs: i64,
+    link_context: PostLinkContext,
 ) -> String {
     let RenderPostOpts {
         show_delete,
@@ -973,14 +1017,26 @@ pub fn render_post(
         .map(|state| format!(r#" data-media-processing-state="{}""#, escape_html(state)))
         .unwrap_or_default();
 
+    let post_link = match link_context {
+        PostLinkContext::Inline => format!(
+            r##"href="#p{}" data-action="append-reply" data-id="{}""##,
+            post.id, post.id
+        ),
+        PostLinkContext::Thread => format!(
+            r#"href="/{}/thread/{}#p{}""#,
+            escape_html(board_short),
+            post.thread_id,
+            post.id
+        ),
+    };
     let mut html = format!(
-        r##"<div class="post{op_class}" id="p{id}" data-thread-id="{thread_id}"{poster_attr}{media_processing_state_attr}>
+        r#"<div class="post{op_class}" id="p{id}" data-thread-id="{thread_id}"{poster_attr}{media_processing_state_attr}>
 <div class="post-meta">
 {subject_html}<strong class="name">{name}</strong>{tripcode}{poster_id_html}
 <span class="post-time" data-utc="{ts}">{time}</span>
-<a class="post-num" href="#p{id}" data-action="append-reply" data-id="{id}">No.{id}</a>{post_state_badges}{media_processing_badge}
+<a class="post-num" {post_link}>No.{id}</a>{post_state_badges}{media_processing_badge}
 <span class="backrefs" id="backrefs-{id}"></span>
-</div>"##,
+</div>"#,
         op_class = op_class,
         id = post.id,
         thread_id = post.thread_id,
@@ -1292,6 +1348,23 @@ pub fn render_post(
     let body_html =
         crate::utils::sanitize::normalize_greentext_blocks(&post.body_html, collapse_greentext);
     let body_html = annotate_op_quotelinks(&body_html, thread_op_id);
+    let body_html = match link_context {
+        PostLinkContext::Inline => body_html,
+        // Only the sanitizer generates these fragment links. Search results
+        // may omit the target, so resolve it through the board's post route.
+        PostLinkContext::Thread => body_html
+            .replace(
+                "href=\"#p",
+                &format!("href=\"/{}/post/", escape_html(board_short)),
+            )
+            .replace(
+                "class=\"quotelink\"",
+                &format!(
+                    "class=\"quotelink crosslink\" data-crossboard=\"{}\"",
+                    escape_html(board_short)
+                ),
+            ),
+    };
     let _ = write!(html, r#"<div class="post-body">{body_html}</div>"#);
 
     // Edit link + report button (only on thread pages where show_delete=true)
@@ -1482,8 +1555,8 @@ fn render_edit_overlay(
 #[cfg(test)]
 mod tests {
     use super::{
-        delete_post_page, display_file_name, edit_post_page, render_post, thread_page,
-        EditOverlayState, OwnedPostControls, RenderPostOpts,
+        delete_post_page, display_file_name, edit_post_page, render_post, render_search_post,
+        thread_page, EditOverlayState, OwnedPostControls, RenderPostOpts,
     };
     use crate::models::{BoardAccessMode, MediaType, Post, Thread};
 
@@ -1524,6 +1597,7 @@ mod tests {
             subject: Some("Thread subject".into()),
             created_at: 1_700_000_000,
             bumped_at: 1_700_000_100,
+            last_post_at: 1_700_000_100,
             locked: false,
             sticky: false,
             archived: false,
@@ -1651,6 +1725,43 @@ mod tests {
         assert!(html.contains(r#"name="_csrf" value="admin-csrf""#));
         assert!(html.contains(r#"name="_csrf"   value="admin-csrf""#));
         assert!(html.contains(r#"data-csrf="public-csrf""#));
+    }
+
+    #[test]
+    fn search_results_link_to_thread_and_resolve_quoted_posts() {
+        let mut post = sample_post();
+        post.body_html = crate::utils::sanitize::render_post_body(
+            &crate::utils::sanitize::escape_html(&format!(
+                ">>42 >>>/other/7 https://example.test/#p8 <{}>bad</{}>",
+                "script", "script"
+            )),
+            true,
+        );
+        let html = render_search_post(
+            &post,
+            "test",
+            "csrf",
+            RenderPostOpts {
+                show_delete: false,
+                is_admin: false,
+                admin_csrf_token: None,
+                show_media: true,
+                allow_editing: false,
+                allow_self_delete: false,
+                owned_post_controls: None,
+                show_poster_ids: false,
+                collapse_greentext: true,
+                thread_state: None,
+                thread_op_id: None,
+                video_audio_muted: false,
+            },
+        );
+        assert!(html.contains(r#"class="post-num" href="/test/thread/1#p1""#));
+        assert!(!html.contains(r#"data-action="append-reply""#));
+        assert!(html.contains(r#"href="/test/post/42" class="quotelink crosslink" data-crossboard="test" data-pid="42""#));
+        assert!(html.contains(r#"href="/other/post/7""#));
+        assert!(html.contains("https://example.test/#p8"));
+        assert!(!html.contains("<script>"));
     }
 
     #[test]

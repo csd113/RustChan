@@ -5707,6 +5707,7 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
 /* Poll styles */
 
 .poll-container {
+  scroll-margin-top: calc(var(--header-offset, 58px) + 10px);
   margin: 10px 0 14px 0;
   border: 1px solid var(--green-dim);
   background: linear-gradient(135deg, rgba(0,200,64,0.04), rgba(0,0,0,0));
@@ -5946,6 +5947,10 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   color: var(--text-dim);
   font-size: 0.72rem;
   line-height: 1.4;
+}
+
+.media-playback-error {
+  color: var(--text);
 }
 
 .auto-compress-status {

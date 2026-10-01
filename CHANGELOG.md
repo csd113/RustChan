@@ -6,6 +6,7 @@ All notable changes to RustChan will be documented in this file.
 
 ### Improved
 
+- Improved public posting recovery, quote and search navigation, long-filename presentation, and mobile keyboard focus while preserving the compact imageboard layout and existing themes.
 - Expanded the terminal administration console with task-oriented browsing, contextual forms and dialogs, logs, history, telemetry, and responsive operator views.
 - Reorganized the web admin panel into 21 task-focused sections with searchable configuration controls, account management, and separate active, saved, overridden, and next-restart settings states.
 - Standardized admin spacing, typography, controls, tables, status treatments, and expandable details across all nine existing themes, including loading, error, empty, and disabled states.
@@ -14,6 +15,9 @@ All notable changes to RustChan will be documented in this file.
 
 ### Fixed
 
+- Rejected public posts retain poll settings and submitted drafts, explain attachment reselection, and keep enhanced CAPTCHA refresh in place. Upload interruptions and unconfirmed responses retain input with check-before-retry guidance; pending uploads cannot fall through to duplicate native submissions.
+- Local quotes and backlinks preserve browser history, dense previews keep their triggers reachable, search links open complete thread context, poll result anchors work, and bounded filename sanitization retains extensions. Mobile preferences use dialog focus containment and restoration, and explicit scrolling honors reduced motion.
+- Catalog “last reply” sorting includes sage replies independently of bump order. Failed audio/video playback offers readable recovery advice and an original-file download action.
 - Rejected network and runtime configuration forms now retain the administrator's selected theme and submitted values.
 - Admin health polling no longer starts requests from an unloading page: polling schedules after completion, cancels and aborts on navigation, ignores late updates, and resumes after back/forward-cache restoration. This fixes intermittent WebKit access-control diagnostics without increasing timeouts or enabling retries.
 - Firefox launches automatically through the normal browser harness on macOS 27 despite Playwright's upstream shared-application-identity defect ([Playwright #42768](https://github.com/microsoft/playwright/issues/42768)). The isolated identity uses the installed browser binary, requires no manual shell setup, and is protected by launch regressions and a version guard.

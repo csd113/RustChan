@@ -485,6 +485,8 @@ pub struct Thread {
     pub created_at: i64,
     /// Last bump time as a Unix timestamp.
     pub bumped_at: i64,
+    /// Latest post time, including replies that do not bump the thread.
+    pub last_post_at: i64,
     /// Whether new replies are prohibited.
     pub locked: bool,
     /// Whether the thread remains ahead of non-sticky threads.

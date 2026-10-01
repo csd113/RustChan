@@ -49,6 +49,7 @@ pub struct PollInsert<'a> {
 ///   1  `t.board_id`     5  t.locked       9  `op.file_path`  13 op.id (`op_id`)
 ///   2  t.subject      6  t.sticky       10 `op.thumb_path` 14 t.archived
 ///   3  `t.created_at`   7  `t.reply_count`  11 op.name       15 `image_count`
+///   16 `last_post_at`
 fn map_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
     Ok(Thread {
         id: row.get(0)?,
@@ -56,6 +57,7 @@ fn map_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
         subject: row.get(2)?,
         created_at: row.get(3)?,
         bumped_at: row.get(4)?,
+        last_post_at: row.get(16)?,
         locked: row.get::<_, i32>(5)? != 0,
         sticky: row.get::<_, i32>(6)? != 0,
         reply_count: row.get(7)?,
@@ -130,10 +132,11 @@ const THREAD_SELECT: &str = "
            t.locked, t.sticky, t.reply_count,
            op.body, op.file_path, op.thumb_path, op.name, op.tripcode, op.id,
            t.archived,
-           COUNT(DISTINCT fp.id) AS image_count
+           COUNT(DISTINCT CASE WHEN fp.file_path IS NOT NULL THEN fp.id END) AS image_count,
+           COALESCE(MAX(fp.created_at), t.created_at) AS last_post_at
     FROM threads t
     JOIN posts op ON op.thread_id = t.id AND op.is_op = 1
-    LEFT JOIN posts fp ON fp.thread_id = t.id AND fp.file_path IS NOT NULL";
+    LEFT JOIN posts fp ON fp.thread_id = t.id";
 
 /// Get paginated threads for a board with OP preview data.
 /// Sticky threads float to the top, then sorted by most recent bump.
@@ -1039,6 +1042,75 @@ mod tests {
             deletion_token: "token".to_owned(),
             is_op: false,
         }
+    }
+
+    #[test]
+    fn listing_last_post_includes_non_bumping_text_and_audio_without_counting_them_as_images(
+    ) -> Result<()> {
+        let conn = test_conn()?;
+        let board_id = create_board(&conn, "read", "Reading", "", false)?;
+        let thread_id = create_plain_thread(&conn, board_id, "opening post only")?;
+        conn.execute(
+            "UPDATE threads SET created_at = 100, bumped_at = 100 WHERE id = ?1",
+            params![thread_id],
+        )?;
+        conn.execute(
+            "UPDATE posts SET created_at = 100 WHERE thread_id = ?1",
+            params![thread_id],
+        )?;
+        let thread = super::get_thread(&conn, thread_id)?.context("opening thread should exist")?;
+        anyhow::ensure!(
+            thread.last_post_at == 100 && thread.image_count == 0,
+            "a thread without replies uses the opening-post time and has no images"
+        );
+
+        let mut image = plain_reply(board_id, thread_id);
+        image.file_path = Some("read/image.png".to_owned());
+        let image_id = create_reply_with_thread_update(&conn, &image, "", false, None)?;
+        let mut audio = plain_reply(board_id, thread_id);
+        audio.audio_file_path = Some("read/audio.wav".to_owned());
+        let audio_id = create_reply_with_thread_update(&conn, &audio, "", false, None)?;
+        let text_id = create_reply_with_thread_update(
+            &conn,
+            &plain_reply(board_id, thread_id),
+            "",
+            false,
+            None,
+        )?;
+        for (post_id, timestamp) in [(image_id, 200), (audio_id, 300), (text_id, 400)] {
+            conn.execute(
+                "UPDATE posts SET created_at = ?1 WHERE id = ?2",
+                params![timestamp, post_id],
+            )?;
+        }
+        let thread =
+            super::get_thread(&conn, thread_id)?.context("thread should exist after replies")?;
+        anyhow::ensure!(
+            thread.last_post_at == 400 && thread.bumped_at == 100 && thread.image_count == 1,
+            "sage text replies update last-post time while bump time and image counts remain correct"
+        );
+        let active = super::get_threads_for_board(&conn, board_id, 20, 0)?;
+        anyhow::ensure!(active.len() == 1, "the active listing contains one thread");
+        let active = active.first().context("active thread should exist")?;
+        anyhow::ensure!(
+            active.last_post_at == 400 && active.image_count == 1,
+            "catalog/index listing must retain the same post and image aggregates"
+        );
+        conn.execute(
+            "UPDATE threads SET archived = 1 WHERE id = ?1",
+            params![thread_id],
+        )?;
+        let archived = super::get_archived_threads_for_board(&conn, board_id, 20, 0)?;
+        anyhow::ensure!(
+            archived.len() == 1,
+            "the archive listing contains one thread"
+        );
+        let archived = archived.first().context("archived thread should exist")?;
+        anyhow::ensure!(
+            archived.last_post_at == 400 && archived.image_count == 1,
+            "archive listing must retain the same post and image aggregates"
+        );
+        Ok(())
     }
 
     fn pending_upload_op(id: &str) -> crate::pending_fs::PendingFsOpInsert {
