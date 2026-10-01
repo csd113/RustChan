@@ -1,8 +1,8 @@
 # RustChan Playwright E2E Suite
 
-The maintained Playwright harness belongs in version control: `playwright.config.ts`,
-`package.json` / `package-lock.json`, `tests/e2e/**`, and
-`.github/workflows/e2e.yml`. Generated run evidence stays ignored: browser
+The maintained local Playwright harness belongs in version control: `playwright.config.ts`,
+`package.json` / `package-lock.json`, and `tests/e2e/**`.
+Browser tests do not run in GitHub Actions. Generated run evidence stays ignored: browser
 reports, `test-results/`, the `output/playwright/` runtime tree (including
 preserved debug roots and audit output), traces, videos, screenshots, storage
 state, and the rebranded-Firefox workaround bundle. Never force-add generated
@@ -45,8 +45,7 @@ Two supported modes share one configuration; retries stay at **zero** in both.
 
 ### Normal regression mode
 
-Routine CI runs the maintained suite per engine, one project per job, with a
-failure cap. Locally the closest equivalent is:
+Run the maintained local suite per engine with a failure cap:
 
 ```sh
 RUSTCHAN_E2E_SKIP_BUILD=1 npx playwright test --project=chromium --workers=2 --max-failures=5
@@ -56,8 +55,8 @@ RUSTCHAN_E2E_SKIP_BUILD=1 npx playwright test --project=chromium-nojs --workers=
 ```
 
 `npm run test:e2e:ci` is the bounded Chromium shorthand (`--max-failures=5`).
-The tracked workflow `.github/workflows/e2e.yml` runs these four projects on
-pull requests, pushes, and merge groups; evidence is uploaded only on failure.
+These commands run locally; pull requests, pushes, and merge groups do not
+trigger browser checks.
 
 ### Deep audit mode
 
@@ -75,10 +74,8 @@ npm run test:e2e:deep
 
 `npm run test:e2e:deep` is the all-projects matrix (`chromium`,
 `chromium-nojs`, `webkit`, `mobile-webkit`, `firefox`, `mobile-firefox`,
-`firefox-nojs`). The workflow exposes it as `workflow_dispatch` input
-`mode=deep` and as the weekly scheduled pass. Deep diagnostics are expensive;
-they are deliberately not part of the routine pull-request pass. A single
-project can be run deeply with an explicit `--project`.
+`firefox-nojs`). Deep diagnostics are expensive and run only when requested
+locally. A single project can be run deeply with an explicit `--project`.
 
 ## Firefox on macOS 27 (Playwright issue #42768)
 
@@ -119,7 +116,7 @@ Firefox/mobile/no-JS launch probes pass.
 ## Maintained source, fixtures and disposable evidence
 
 Track the TypeScript specs/helpers/configs, helper `.mjs` scripts, npm manifest
-and lockfile, and browser workflow. Required small sanitized regression fixtures
+and lockfile. Required small sanitized regression fixtures
 belong in `tests/e2e/fixtures/`; most current fixtures are generated deterministically
 inside each isolated runtime by `helpers.ts`. Never copy runtime databases,
 authentication state or downloaded browser bundles into source fixtures.
@@ -377,9 +374,8 @@ The retained local npm shorthand runs a bounded Chromium pass with two workers a
 npm run test:e2e:ci
 ```
 
-The tracked browser workflow is `.github/workflows/e2e.yml` (normal regression
-projects on PR/push, deep audit on `workflow_dispatch mode=deep` and the weekly
-schedule). Failure diagnostics retain traces, screenshots, videos, server logs,
+The browser suite runs locally; there is no GitHub Actions browser workflow or weekly
+schedule. Failure diagnostics retain traces, screenshots, videos, server logs,
 and browser errors; retries are disabled.
 
 ## Full Local Matrix

@@ -219,7 +219,7 @@ cargo clippy --locked --workspace --all-targets --all-features
 cargo test --locked --workspace --all-features
 ```
 
-Browser-test infrastructure and its npm files are local-only and are not included in a fresh clone. Keep browser reports and temporary screenshots out of commits; the demonstration screenshots in `docs/screenshots/` are published documentation. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance.
+Browser tests run locally; their harness and npm files are tracked, but GitHub Actions does not run browser checks. Keep browser reports and temporary screenshots out of commits; the demonstration screenshots in `docs/screenshots/` are published documentation. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance.
 
 ## Documentation
 
