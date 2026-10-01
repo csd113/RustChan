@@ -117,6 +117,7 @@ test('mobile preferences initial focus and keyboard containment', async ({ app, 
   await expect(form).not.toHaveAttribute('aria-modal', 'true');
   await expect(summary).toBeFocused();
   await expect(page.locator('body')).not.toHaveClass(/user-preferences-mobile-open/);
+  await capture(page, 'preferences-desktop-restored');
   await page.keyboard.press('Escape');
 });
 

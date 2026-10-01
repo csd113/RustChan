@@ -21,13 +21,13 @@ async function savedStatus(app: {dataDir:string}, changes: Record<string, unknow
 }
 const available = {available:{id:42, version:candidateVersion, published_at:'2026-09-30T00:00:00Z', notes:'Release fixture', manifest:null, size:100, verification:'Release failed verification: signature mismatch.', compatible:false}};
 
-test('software updates fit current admin themes, mobile and no-JS task navigation', async ({page,browser}, info) => {
-  const app = await createStandaloneApp({admin:true, env:{RUSTCHAN_CONTAINER:'1'}});
-  try {
-    await adminLogin(page,app);
-    const storageState = await page.context().storageState();
-    for (const [theme] of BUILTIN_THEMES) {
-      for (const width of [1280,390,320]) {
+for (const width of [1280,390,320]) {
+  test(`software updates fit current admin themes at ${width}px and no-JS task navigation`, async ({page,browser}, info) => {
+    const app = await createStandaloneApp({admin:true, env:{RUSTCHAN_CONTAINER:'1'}});
+    try {
+      await adminLogin(page,app);
+      const storageState = await page.context().storageState();
+      for (const [theme] of BUILTIN_THEMES) {
         const context = await newAuditedContext(browser,{storageState, viewport:{width,height:900}, javaScriptEnabled:!isNoJsProject(info)});
         try {
 
@@ -52,9 +52,9 @@ test('software updates fit current admin themes, mobile and no-JS task navigatio
           await ui.screenshot({path:info.outputPath(`updates-${theme}-${width}.png`), fullPage:true});
         } finally {await context.close();}
       }
-    }
-  } finally {await app.dispose();}
-});
+    } finally {await app.dispose();}
+  });
+}
 
 test('update data is administrator-only and public readiness exposes only running version', async ({page,browser},info)=>{
   const app=await createStandaloneApp({admin:true,boards:[{short:'pub',name:'Public'}]});

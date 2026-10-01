@@ -36,7 +36,7 @@ upgrades, public posting and reading improvements, and verified native software 
 - Completed native updates clear the availability notice; stale discovery records cannot offer installation of the running or an older version. Rollbacks retain notice of a newer release.
 
 - Banned identities can no longer submit reports or poll votes; those mutations share the existing posting ban gate and enforce CSRF before authorization results are disclosed. Long ban reasons wrap on narrow screens.
-- NSFW consent and mobile preferences dialogs move and contain keyboard focus, support dismissal/reopening and restore focus to their triggers.
+- NSFW consent and mobile preferences dialogs move and contain keyboard focus, support dismissal/reopening and restore focus to their triggers. Mobile preferences also restore visible trigger focus after returning to desktop.
 - Rejected public posts retain submitted drafts and poll settings, explain attachment reselection and provide copyable recovery after parsed errors and bounded oversized uploads. Enhanced CAPTCHA refresh preserves the composer and files.
 - Interrupted uploads and unconfirmed responses retain input and explain check-before-retry recovery. Pending uploads cannot fall through into duplicate native submissions, and server-rendered recovery text takes precedence over stale autosave.
 - Local quotes and backlinks preserve browser history; dense previews keep their triggers reachable. Search links open complete thread context and retain modified-click behavior; poll result anchors resolve correctly.
@@ -49,7 +49,7 @@ upgrades, public posting and reading improvements, and verified native software 
 
 - Restored version-controlled Playwright infrastructure and browser CI, with normal regression and weekly/manual deep modes. Runtime data, browser profiles, screenshots, reports, traces and disposable audit evidence remain ignored.
 - Added administrator authorization, updater signing/archive/snapshot/rollback/recovery, readiness privacy, all-theme/narrow-screen, keyboard focus and no-JavaScript regressions. Release candidates receive strict Rust lint, locked dependency policy, packaging and browser validation.
-- Stabilized fixture teardown, backup completion and submission navigation assertions. Firefox uses an isolated application identity for the macOS 27 upstream Playwright launch defect, with launch regressions and a version guard.
+- Stabilized fixture teardown, backup completion and completed-redirect submission assertions, preserving test budgets and all-theme coverage. Linux browser CI provides a virtual audio output for genuine native playback checks. Firefox uses an isolated application identity for the macOS 27 upstream Playwright launch defect, with launch regressions and a version guard.
 - Coordinated CLI test subprocess spawning to prevent Linux fork/exec descriptor inheritance from causing `ETXTBSY`, while preserving parallel test execution. Guarded native updater helpers with Unix configuration so check-only Windows builds remain warning-free. Kept configuration documentation compatible with Rust 1.91 strict lint and refreshed the yanked `yoke-derive` lockfile entry.
 
 ## RustChan 1.5.0 — 2026-09-28

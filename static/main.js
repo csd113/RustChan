@@ -2819,7 +2819,7 @@ function clampPopupToViewport(anchor, popup) {
         form.removeAttribute('role');
         form.removeAttribute('aria-modal');
         form.removeAttribute('aria-label');
-        if (open && wasModal && summary) summary.focus();
+        if (open && wasModal && summary) restoreUserPreferencesSummaryFocus(panel);
       }
     }
   }
@@ -2831,16 +2831,22 @@ function clampPopupToViewport(anchor, popup) {
     panel.open = false;
     syncUserPreferencesPanelState(panel);
     syncUserPreferencesBackgroundScrollLock();
-    if (opts.restoreFocus && summary && typeof summary.focus === 'function') {
-      summary.focus();
-      // Native details can retain the hidden-summary style through the first
-      // frame. Restore after the closed panel has actually been painted.
+    if (opts.restoreFocus && summary) restoreUserPreferencesSummaryFocus(panel);
+  }
+
+  function restoreUserPreferencesSummaryFocus(panel) {
+    var summary = panel.querySelector('.user-preferences-summary');
+    if (!summary || typeof summary.focus !== 'function') return;
+    summary.focus();
+    // WebKit can retain the hidden mobile summary through the first frame
+    // after closing or resizing. Restore once its visible layout is painted.
+    window.requestAnimationFrame(function () {
       window.requestAnimationFrame(function () {
-        window.requestAnimationFrame(function () {
-          if (!panel.open && summary.isConnected) summary.focus();
-        });
+        if (summary.isConnected && (!panel.open || !isMobileUserPreferencesViewport())) {
+          summary.focus();
+        }
       });
-    }
+    });
   }
 
   if (userPreferencesMobileQuery) {

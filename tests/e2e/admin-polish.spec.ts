@@ -239,7 +239,7 @@ async function submitReport(page: Page, board: string, threadId: number, postId:
     await reportButton.click();
     await page.locator('#report-reason').fill(reason);
     await Promise.all([
-      page.waitForURL(new RegExp(`/${board}/thread/${threadId}`)),
+      page.waitForURL(url => url.pathname === `/${board}/thread/${threadId}` && url.searchParams.get('reported') === '1', { waitUntil: 'domcontentloaded' }),
       page.locator('#report-submit-btn').click(),
     ]);
     return;
@@ -250,7 +250,7 @@ async function submitReport(page: Page, board: string, threadId: number, postId:
   await openDetailsIfClosed(fallback.locator('.report-fallback-details').first());
   await fallback.locator('.report-fallback-reason').fill(reason);
   await Promise.all([
-    page.waitForURL(new RegExp(`/${board}/thread/${threadId}`)),
+    page.waitForURL(url => url.pathname === `/${board}/thread/${threadId}` && url.searchParams.get('reported') === '1', { waitUntil: 'domcontentloaded' }),
     fallback.locator('.report-fallback-submit').click(),
   ]);
 }

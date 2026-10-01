@@ -166,3 +166,57 @@ the native trusted public key is independently authenticated. The exact setup is
 in `docs/software-updates.md` under Release signing. No real signing key was
 generated, read, uploaded or configured by this audit. Ephemeral synthetic signing
 keys belong only to the existing offline packaging tests.
+
+## Browser CI findings and focused corrections
+
+The first complete native CI run on `d975b906c09ce5ef3114ee18b47ea2611393ead3`
+passed Quality, Tests (2,509 cases), all three platform smoke jobs and Dependency
+Audit. Chromium and Chromium no-JavaScript browser jobs passed. Firefox and WebKit
+browser jobs failed and therefore that head was not integrated or released.
+
+Firefox's sole failure was a real native-audio test: intact PCM WAV data reached
+the browser, but `OnMediaSinkAudioError` stopped playback without an output device.
+An isolated official Playwright 1.63 Linux container reproduced the media-sink
+failure and then passed real playback with a PulseAudio virtual sink. Both normal
+and deep browser CI now configure that ephemeral output. Audio is not mocked or
+muted; the playback and error-recovery assertions remain intact.
+
+WebKit exposed one application focus regression: resizing open mobile preferences
+back to desktop focused a summary before WebKit had painted its visible layout.
+The existing painted-layout focus restoration now covers that transition and
+retains guards against focusing a reopened mobile modal. The original keyboard
+regression passed on Linux WebKit; its reviewed after screenshot is
+`output/playwright/public-polish/v160-focus-after-webkit-preferences-desktop-restored.png`.
+The original GitHub failure screenshot/trace remains in the downloaded WebKit
+artifact. This is a focused shared-script correction with no redesign.
+
+Two harness races were corrected: report submission now waits for the distinct
+`reported=1` redirect instead of an already-matching thread URL, and accepted CSRF
+submission waits for its thread redirect before returning to the board. The report
+row, status, persistence, token renewal and tamper-rejection assertions remain.
+The updater theme matrix is split by viewport into three bounded tests, preserving
+all nine themes at 1280/390/320px, screenshots, focus and overflow assertions,
+90-second budgets and zero retries. Linux WebKit passed all four originally failed
+areas, including all three viewport/theme cases.
+
+Supplemental Linux engines connect through Playwright's loopback proxy to the
+isolated local app. Full remote test results are not substituted for native CI:
+`Download.path()` is unavailable through that connection, and an intentional
+outage can report a SOCKS error instead of direct connection refusal. Those adapter
+limitations remain explicit failures in the supplemental run; native GitHub jobs
+must pass without weakening their assertions or changing their exclusions.
+
+Supplemental Linux results: 54 passed, two existing no-JavaScript skips and four
+explicit remote-adapter failures (three local download-path calls and one outage
+error classification). Separate Linux WebKit focus evidence passed 1/1. Strict
+host lint, JavaScript syntax, all workflow YAML, whitespace and the optimized
+both-binary rebuild passed after the focused corrections. The complete protected
+GitHub native/browser jobs still gate the final PR head.
+
+The final focused macOS run after these browser corrections passed 101 cases with
+four existing no-JavaScript enhancement skips and no failures (105 executions
+across all seven profiles). It covers all eleven updater cases plus moderation,
+preferences focus, signed public CSRF recovery and real native WAV playback.
+Evidence is retained at `output/playwright/v160-ui-audit/mac-browser-fixes/`.
+Offline packaging/signing remains 7/7; the optimized CLI identifies itself as
+`rustchan-cli 1.6.0`. The supplemental Linux container was stopped after testing.

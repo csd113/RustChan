@@ -139,6 +139,7 @@ test('release: signed public CSRF survives cookie loss but tampered forms fail c
   ]);
   // Public tokens are deliberately signed and cookie-independent (unlike admin CSRF).
   expect(response.status()).toBe(303);
+  await page.waitForURL(/\/pub\/thread\/\d+/, { waitUntil: 'domcontentloaded' });
   expect(sqliteQuery(app, 'SELECT COUNT(*) FROM posts;')).toBe('1');
   await page.goto(`${app.baseURL}/pub`);
   expect(await page.locator('form[action="/pub"] input[name="_csrf"]').inputValue()).not.toBe(token);
