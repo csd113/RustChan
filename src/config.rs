@@ -6,6 +6,7 @@ use std::io::{stderr, stdout, Write as _};
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
 /// Validate the persisted settings syntax and known field types before update backup.
 ///
 /// # Errors

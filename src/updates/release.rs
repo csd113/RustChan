@@ -2,6 +2,7 @@ use anyhow::Context as _;
 use ring::signature::{UnparsedPublicKey, ED25519};
 use semver::Version;
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use sha2::{Digest as _, Sha256};
 use std::io::Read as _;
 use std::time::{Duration, Instant};
@@ -154,6 +155,7 @@ fn agent() -> anyhow::Result<reqwest::blocking::Client> {
 
 // GitHub redirects release downloads to its HTTPS release asset CDN. Follow
 // each hop ourselves so the HTTP client can never contact an arbitrary redirect target.
+#[cfg(unix)]
 /// Fetch bounded artifact bytes only from allowlisted HTTPS release sources.
 pub(super) fn fetch(url: &str, limit: u64) -> anyhow::Result<Vec<u8>> {
     fetch_before(url, limit, Instant::now() + Duration::from_secs(30))
@@ -223,6 +225,7 @@ pub(super) fn validate_source(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 /// Compute the lowercase SHA-256 digest of exact bytes.
 pub(super) fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))

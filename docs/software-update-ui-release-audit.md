@@ -128,6 +128,13 @@ The final CLI change only adds initialization stderr to a failure assertion. Thi
 local full Docker run is not a pass or proof of native CI behavior. Required native
 GitHub checks must validate the final candidate before protected integration.
 
+The first PR head's required Windows smoke exposed three native-only helpers
+compiled without Unix guards; strict dead-code enforcement rejected the build.
+The correction gates those helpers and their hash import with `cfg(unix)` without
+relaxing lint or changing native behavior. Host strict lint passed, as did 46 updater/template tests and the exact native
+renderer integration test. Every required native/browser check must run on the
+new final PR head. Earlier-head passes do not satisfy that integration gate.
+
 The implementation task's earlier broad matrix was 1,290 passed, 913 explicit
 skips and two initial failures; both passed its focused final recheck. Its original
 full headless run is not described as an entirely green run. One unchanged
