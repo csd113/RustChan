@@ -375,6 +375,23 @@ test('search post numbers and quotes open their thread context', async ({ page, 
   await page.goBack();
   await expect(page.locator('#board-search-input')).toHaveValue('unique-search-needle');
   if (['chromium', 'webkit', 'firefox'].includes(testInfo.project.name)) {
+    // Check each modifier independently so the foreground gesture's Shift
+    // cannot hide a broken Control/Command passthrough guard.
+    const intercepted = await page.locator(`#p${reply} a.quotelink`).evaluate(link => {
+      return ['ctrlKey', 'metaKey'].map(modifier => {
+        let preventedByApp: boolean | undefined;
+        document.addEventListener('click', event => {
+          preventedByApp = event.defaultPrevented;
+          // Inspect application handling, then cancel synthetic navigation.
+          event.preventDefault();
+        }, { once: true });
+        link.dispatchEvent(new MouseEvent('click', {
+          bubbles: true, cancelable: true, [modifier]: true,
+        }));
+        return preventedByApp;
+      });
+    });
+    expect(intercepted).toEqual([false, false]);
     await page.evaluate(() => {
       document.addEventListener('click', event => {
         if (!(event.target instanceof Element) || !event.target.closest('a.quotelink')) return;
@@ -386,7 +403,9 @@ test('search post numbers and quotes open their thread context', async ({ page, 
     });
     const [opened] = await Promise.all([
       page.context().waitForEvent('page'),
-      page.locator(`#p${reply} a.quotelink`).click({ modifiers: ['ControlOrMeta'] }),
+      // Open the tab in the foreground: Chromium can leave a traced background
+      // tab uninitialized even after its document response has arrived.
+      page.locator(`#p${reply} a.quotelink`).click({ modifiers: ['ControlOrMeta', 'Shift'] }),
     ]).finally(async () => {
       noteEvent('modified-quote-click', JSON.stringify(await page.evaluate(() => (window as Window & { auditQuoteClick?: unknown }).auditQuoteClick)));
     });
