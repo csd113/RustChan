@@ -54,13 +54,10 @@ __pycache__/
 /core.[0-9]*
 /rustchan-cli*.dmp
 
-# Playwright tests and generated browser/play-test evidence.
-# All browser-test infrastructure is local-only, including its npm metadata.
-/playwright*.config.*
-/package.json
-/package-lock.json
-/.github/workflows/e2e.yml
-/tests/e2e/
+# Browser infrastructure (tests/e2e, config, npm lockfile, CI) is source.
+# Small intentional fixtures belong in tests/e2e/fixtures, never output/.
+# Disposable audit notes and generated browser evidence remain local.
+/tests/e2e/AUDIT-*.md
 /output/
 playwright-report/
 test-results/
@@ -70,6 +67,10 @@ browser-artifacts/
 .playwright/
 .playwright-cli/
 .playwright-mcp/
+# Downloaded browser bundles and Playwright-generated temporary profiles.
+ms-playwright/
+playwright-browsers/
+playwright_*_profile-*/
 .auth/
 /browser-results.json
 /browser-summary.json

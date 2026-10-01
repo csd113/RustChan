@@ -2,6 +2,28 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## Unreleased
+
+### Improved
+
+- Expanded the terminal administration console with task-oriented browsing, contextual forms and dialogs, logs, history, telemetry, and responsive operator views.
+- Reorganized the web admin panel into 21 task-focused sections with searchable configuration controls, account management, and separate active, saved, overridden, and next-restart settings states.
+- Standardized admin spacing, typography, controls, tables, status treatments, and expandable details across all nine existing themes, including loading, error, empty, and disabled states.
+- Improved responsive admin forms and moderation layouts down to 320px. Dense wide tables retain horizontal scrolling within named, keyboard-focusable containers, with accessible keyboard navigation and reachable actions.
+- Improved current-section navigation, visible focus indicators, contrast, status announcements, and backup progress semantics. Backup dialogs now contain keyboard focus and restore focus when closed, while retaining no-JavaScript fallbacks and reduced-motion support.
+
+### Fixed
+
+- Rejected network and runtime configuration forms now retain the administrator's selected theme and submitted values.
+- Admin health polling no longer starts requests from an unloading page: polling schedules after completion, cancels and aborts on navigation, ignores late updates, and resumes after back/forward-cache restoration. This fixes intermittent WebKit access-control diagnostics without increasing timeouts or enabling retries.
+- Firefox launches automatically through the normal browser harness on macOS 27 despite Playwright's upstream shared-application-identity defect ([Playwright #42768](https://github.com/microsoft/playwright/issues/42768)). The isolated identity uses the installed browser binary, requires no manual shell setup, and is protected by launch regressions and a version guard.
+- Browser fixture teardown now closes pages before stopping their server, preventing background polling from racing shutdown. Navigation assertions wait for the actual submission response and audits inspect the selected task's visible controls.
+
+### Testing and maintenance
+
+- Restored version-controlled Playwright tests, configurations, npm manifest and lockfile, helper scripts, and browser CI. Browser downloads, profiles, runtime databases, caches, reports, screenshots, traces, videos, and disposable audit evidence remain ignored.
+- Added deterministic polling lifecycle, Firefox launch and no-JavaScript, fixture disposal, and narrow-table accessibility regressions. Completed validation passed 2,430 Rust tests and the seven-project browser matrix (1,077 passed, 883 explicit skips, zero unexpected failures or retries); WebKit stress testing passed 120/120 with two workers.
+
 ## RustChan 1.5.0 — 2026-09-28
 
 This release removes ChanNet and improves reliability, resource use, and administration.

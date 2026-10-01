@@ -1214,7 +1214,7 @@ pub fn mod_log_page(
 ) -> String {
     let mut rows = String::new();
     if entries.is_empty() {
-        rows.push_str(r#"<tr><td colspan="6" style="color:var(--text-dim);text-align:center">no entries yet</td></tr>"#);
+        rows.push_str(r#"<tr><td colspan="6" class="admin-table-empty">no entries yet</td></tr>"#);
     }
     for e in entries {
         let target = e.target_id.map_or_else(
@@ -1230,12 +1230,11 @@ pub fn mod_log_page(
             rows,
             r#"<tr>
 <td style="white-space:nowrap;font-size:0.78rem">{time}</td>
-<td><strong>{admin}</strong></td>
+<td class="admin-log-user">{admin}</td>
 <td><code>{action}</code></td>
 <td style="font-size:0.82rem">{target}</td>
 <td>{board}</td>
-<td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.8rem"
-    title="{detail}">{detail}</td>
+<td><details class="admin-log-detail"><summary>View detail</summary><p>{detail}</p></details></td>
 </tr>"#,
             time = escape_html(&fmt_ts(e.created_at)),
             admin = escape_html(&e.admin_name),
@@ -1249,14 +1248,14 @@ pub fn mod_log_page(
     let pagination_html = render_pagination(pagination, "/admin/mod-log");
 
     let body = format!(
-        r#"<div class="page-box">
+        r#"<div class="page-box admin-detail-page">
 <div class="board-header">
   <a href="/admin/panel">[ back to panel ]</a>
   <h2 style="margin:0.5rem 0 0.25rem">// moderation log</h2>
   <p style="color:var(--text-dim);font-size:0.82rem">{total} total entries</p>
 </div>
-<div class="admin-table-wrap">
-<table class="admin-table" style="width:100%;font-size:0.85rem">
+<div class="admin-table-wrap" tabindex="0" role="region" aria-label="Moderation log">
+<table class="admin-table admin-log-table">
 <thead><tr>
   <th>time</th><th>admin</th><th>action</th><th>target</th><th>board</th><th>detail</th>
 </tr></thead>
@@ -1945,7 +1944,7 @@ pub fn admin_ip_history_page(
 </p>
 <p style="color:var(--text-dim);font-size:0.82rem">{identity_summary}</p>
 <p style="margin:0.35rem 0 1rem 0">{return_buttons}</p>
-<div class="admin-table-wrap">
+<div class="admin-table-wrap" tabindex="0" role="region" aria-label="IP history">
 <table class="admin-table" style="width:100%">
 <thead><tr>
   <th style="text-align:left">time</th>

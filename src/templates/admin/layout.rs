@@ -10,7 +10,7 @@ use super::{AdminPanelFlash, AdminPanelViewModel};
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
     let selected = default_task(view.open_section);
     let flash_html = render_flash(view.flash);
-    let section_index = render_admin_section_index();
+    let section_index = render_admin_section_index(view.open_section);
     let settings_search = super::search::render(view.settings_query);
     let overview_section = render_admin_overview_section(view);
     let site_settings_section = appearance::render_site_settings(view);
@@ -67,12 +67,12 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
 {maintenance_section}
 </div></div>
 
-<div id="backup-modal" class="compress-modal admin-modal-hidden" role="dialog" aria-modal="true" aria-labelledby="backup-modal-title" aria-hidden="true" hidden inert>
+<div id="backup-modal" class="compress-modal admin-modal-hidden" role="dialog" aria-modal="true" aria-labelledby="backup-modal-title" tabindex="-1" aria-hidden="true" hidden inert>
   <div class="compress-modal-box">
     <div class="compress-modal-title" id="backup-modal-title">&#128190; Creating Backup…</div>
     <div class="compress-progress admin-progress-spaced" id="backup-progress-wrap">
-      <div class="compress-progress-track"><div class="compress-progress-bar" id="backup-progress-bar"></div></div>
-      <div class="compress-progress-text" id="backup-progress-text">Starting…</div>
+      <div class="compress-progress-track" role="progressbar" aria-label="Backup progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="compress-progress-bar" id="backup-progress-bar"></div></div>
+      <div class="compress-progress-text" id="backup-progress-text" role="status">Starting…</div>
     </div>
     <div class="compress-done-actions admin-modal-hidden" id="backup-done-actions" hidden>
       <button class="compress-cancel-btn" data-action="close-backup-modal">&#10003; Done — reload</button>
@@ -108,16 +108,17 @@ fn render_flash(flash: Option<AdminPanelFlash<'_>>) -> String {
             "flash-ok"
         };
         format!(
-            r#"<div class="admin-flash {cls}">{msg}</div>"#,
+            r#"<div class="admin-flash {cls}" role="{role}">{msg}</div>"#,
             cls = cls,
+            role = if flash.is_error { "alert" } else { "status" },
             msg = escape_html(flash.message),
         )
     })
 }
 
 /// Renders links to each major admin-panel section.
-const fn render_admin_section_index() -> &'static str {
-    r##"<nav class="admin-section-index" aria-label="Admin panel sections">
+fn render_admin_section_index(open_section: Option<&str>) -> String {
+    let index = r##"<nav class="admin-section-index" aria-label="Admin panel sections">
   <span>Administration</span>
   <a href="#control-center">Overview</a>
   <a href="#site-settings">Site settings</a>
@@ -140,7 +141,21 @@ const fn render_admin_section_index() -> &'static str {
   <a href="#appearance">appearance</a>
   <a href="#backups">backups</a>
   <a href="#maintenance">maintenance</a>
-</nav>"##
+</nav>"##;
+    let anchor = open_section
+        .filter(|section| index.contains(&format!("href=\"#{section}\"")))
+        .unwrap_or_else(|| match default_task(open_section) {
+            "appearance" => "appearance",
+            "backups" => "backups",
+            "maintenance" => "maintenance",
+            "boards" => "boards",
+            "moderation" => "moderation",
+            _ => "control-center",
+        });
+    index.replace(
+        &format!("href=\"#{anchor}\""),
+        &format!("href=\"#{anchor}\" aria-current=\"location\""),
+    )
 }
 
 /// Renders the dashboard and live-log overview.

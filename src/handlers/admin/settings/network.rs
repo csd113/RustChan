@@ -21,6 +21,7 @@ pub(in crate::server) async fn update_network_settings(
         Some(peer),
         form.get("_csrf").map(String::as_str),
     )?;
+    let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
@@ -39,7 +40,7 @@ pub(in crate::server) async fn update_network_settings(
                 }
                 let csrf = form.get("_csrf").map_or("", String::as_str);
                 let body = format!("<div class=\"admin-panel\"><p role=\"alert\" class=\"admin-flash flash-error\">No changes saved: {}</p><p><a href=\"/admin/panel#network-security\">Return to admin panel</a></p>{}</div>", crate::utils::sanitize::escape_html(&error.to_string()), crate::templates::admin::render_network_settings(&fields, csrf));
-                let html = crate::templates::base_layout("Network settings validation", None, &body, csrf, &[], None, None, false, "/admin/panel");
+                let html = crate::templates::base_layout("Network settings validation", None, &body, csrf, &[], current_theme.as_deref(), None, false, "/admin/panel");
                 Ok((axum::http::StatusCode::UNPROCESSABLE_ENTITY, axum::response::Html(html)).into_response())
             }
         }

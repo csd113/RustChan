@@ -1,5 +1,48 @@
 'use strict';
 
+// Keep horizontal table panning available to keyboard users in Safari, whose
+// native arrow handling does not reliably scroll a focused overflow region.
+document.addEventListener('DOMContentLoaded', function () {
+  document.querySelectorAll('.admin-table-wrap[tabindex="0"]').forEach(function (region) {
+    region.addEventListener('keydown', function (event) {
+      if (event.target !== region || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      if (region.scrollWidth <= region.clientWidth) return;
+      event.preventDefault();
+      region.scrollLeft += (event.key === 'ArrowRight' ? 1 : -1) * Math.max(40, region.clientWidth / 5);
+    });
+  });
+});
+
+// Resolve deep links through their existing task/section ancestry.
+function syncAdminCurrentLocation() {
+  var links = Array.from(document.querySelectorAll('.admin-section-index a'));
+  if (!links.length) return;
+  var id;
+  try { id = decodeURIComponent(window.location.hash.slice(1)); } catch (error) { return; }
+  var target = id ? document.getElementById(id) : document.querySelector('.admin-task-default');
+  var active = null;
+  var current = target;
+  while (current && !active) {
+    active = links.find(function (link) { return link.getAttribute('href') === '#' + current.id; });
+    current = current.parentElement;
+  }
+  if (!active && target) {
+    var task = target.closest('.admin-task') || target;
+    active = links.find(function (link) {
+      var section = document.getElementById(link.getAttribute('href').slice(1));
+      return section && task.contains(section);
+    });
+  }
+  if (!active) return;
+  links.forEach(function (link) {
+    if (link === active) link.setAttribute('aria-current', 'location');
+    else link.removeAttribute('aria-current');
+  });
+}
+document.addEventListener('DOMContentLoaded', syncAdminCurrentLocation);
+window.addEventListener('hashchange', syncAdminCurrentLocation);
+
 function setAdminElementInert(element, inert) {
   if (!element) return;
   if (inert) {
@@ -1016,7 +1059,7 @@ function setAdminModalOpen(modal, open, displayValue) {
 })();
 
 (function () {
-  function fetchJsonWithTimeout(url, timeoutMs) {
+  function fetchJsonWithTimeout(url, timeoutMs, cancellation) {
     if (!window.AbortController && window.XMLHttpRequest) {
       return new Promise(function (resolve, reject) {
         var xhr = new XMLHttpRequest();
@@ -1043,6 +1086,12 @@ function setAdminModalOpen(modal, open, displayValue) {
         xhr.addEventListener('error', function () {
           reject(new Error('poll request failed'));
         });
+        if (cancellation) cancellation.cancel = function () { xhr.abort(); };
+        xhr.addEventListener('abort', function () {
+          var error = new Error('poll request cancelled');
+          error.name = 'AbortError';
+          reject(error);
+        });
         xhr.send();
       });
     }
@@ -1058,6 +1107,7 @@ function setAdminModalOpen(modal, open, displayValue) {
     if (window.AbortController) {
       controller = new AbortController();
       options.signal = controller.signal;
+      if (cancellation) cancellation.cancel = function () { controller.abort(); };
       timer = window.setTimeout(function () {
         controller.abort();
       }, timeoutMs);
@@ -1102,6 +1152,8 @@ function setAdminModalOpen(modal, open, displayValue) {
       failed: container.querySelector('[data-admin-health-job-list="failed"]'),
       completed: container.querySelector('[data-admin-health-job-list="completed"]')
     };
+    var pollStatus = container.querySelector('[data-admin-health-poll-status]');
+    if (pollStatus) pollStatus.hidden = false;
     var failedDismissButton = container.querySelector('[data-admin-health-failed-dismiss]');
     var activeJobToggle = null;
 
@@ -1178,7 +1230,14 @@ function setAdminModalOpen(modal, open, displayValue) {
         card.className = 'admin-health-job-card';
         var title = document.createElement('h4');
         title.textContent = job.name || job.type || 'Background job';
-        card.appendChild(title);
+        var heading = document.createElement('div');
+        heading.className = 'admin-health-job-heading';
+        heading.appendChild(title);
+        var status = document.createElement('span');
+        status.className = 'admin-state-pill admin-state-pill-' + (name === 'failed' ? 'failure' : 'ok');
+        status.textContent = name === 'failed' ? 'Failed' : 'Completed';
+        heading.appendChild(status);
+        card.appendChild(heading);
         var meta = document.createElement('div');
         meta.className = 'admin-health-job-meta';
         appendJobMeta(meta, 'id', job.id);
@@ -1252,14 +1311,25 @@ function setAdminModalOpen(modal, open, displayValue) {
       }
     });
 
-    function poll() {
-      fetchJsonWithTimeout(url, 8000).then(applyJobs, function () {
-        // Keep the last known values visible; the next poll will retry.
-      });
-    }
-
-    poll();
-    window.setInterval(poll, 5000);
+    var healthPoller = createAdminJsonPoller({
+      url: url,
+      baseDelayMs: 5000,
+      maxDelayMs: 5000,
+      timeoutMs: 8000,
+      onData: function (data) {
+        applyJobs(data);
+        if (pollStatus && pollStatus.textContent !== 'Job counts are up to date. Updates every 5 seconds.') {
+          pollStatus.textContent = 'Job counts are up to date. Updates every 5 seconds.';
+        }
+      },
+      onStatus: function () {
+        // Preserve the last snapshot and announce a stale connection once.
+        if (pollStatus && pollStatus.textContent !== 'Could not refresh job counts. Showing the last snapshot; retrying automatically.') {
+          pollStatus.textContent = 'Could not refresh job counts. Showing the last snapshot; retrying automatically.';
+        }
+      }
+    });
+    healthPoller.start();
   }
 
   document.addEventListener('DOMContentLoaded', initSiteHealthJobPolling);
@@ -1354,6 +1424,8 @@ function setAdminModalOpen(modal, open, displayValue) {
     var inFlight = false;
     var timer = null;
     var failures = 0;
+    var cancellation = { cancel: null };
+    var resumeAfterNavigation = false;
     var baseDelay = options.baseDelayMs || 750;
     var timeoutMs = options.timeoutMs || 20000;
     var maxDelay = options.maxDelayMs || 12000;
@@ -1371,8 +1443,9 @@ function setAdminModalOpen(modal, open, displayValue) {
     function poll() {
       if (stopped || inFlight) return;
       inFlight = true;
-      fetchJsonWithTimeout(options.url, timeoutMs)
+      fetchJsonWithTimeout(options.url, timeoutMs, cancellation)
         .then(function (data) {
+          if (stopped) return;
           failures = 0;
           if (options.onData && options.onData(data) === false) {
             stopped = true;
@@ -1381,6 +1454,7 @@ function setAdminModalOpen(modal, open, displayValue) {
           schedule(nextDelay(false));
         })
         .catch(function (error) {
+          if (stopped) return;
           failures += 1;
           var delay = nextDelay(true);
           if (options.onStatus) {
@@ -1399,20 +1473,38 @@ function setAdminModalOpen(modal, open, displayValue) {
         });
     }
 
-    return {
-      start: function () {
-        stopped = false;
-        if (timer) window.clearTimeout(timer);
-        poll();
-      },
-      stop: function () {
-        stopped = true;
-        if (timer) {
-          window.clearTimeout(timer);
-          timer = null;
-        }
+    function start() {
+      stopped = false;
+      if (timer) window.clearTimeout(timer);
+      poll();
+    }
+
+    function stop() {
+      stopped = true;
+      if (timer) {
+        window.clearTimeout(timer);
+        timer = null;
       }
-    };
+      if (cancellation.cancel) cancellation.cancel();
+    }
+
+    // WebKit can reject fetch synchronously while a form navigation is pending.
+    // beforeunload runs at navigation start; pagehide alone is too late. Also
+    // cancel an active request and avoid applying its result to an old document.
+    function suspendForNavigation() {
+      resumeAfterNavigation = resumeAfterNavigation || !stopped;
+      stop();
+    }
+    window.addEventListener('beforeunload', suspendForNavigation);
+    window.addEventListener('pagehide', suspendForNavigation);
+    window.addEventListener('pageshow', function (event) {
+      if (event.persisted && resumeAfterNavigation) {
+        resumeAfterNavigation = false;
+        start();
+      }
+    });
+
+    return { start: start, stop: stop };
   }
 
   window.createAdminJsonPoller = createAdminJsonPoller;
@@ -1473,6 +1565,7 @@ function setAdminModalOpen(modal, open, displayValue) {
 (function () {
   var _poller = null;
   var _downloadMode = false;
+  var _backupTrigger = null;
 
   var PHASE_LABELS = [
     'Idle',
@@ -1494,12 +1587,16 @@ function setAdminModalOpen(modal, open, displayValue) {
       done.style.display = 'none';
     }
     _setBkProgress(0, 'Starting\u2026');
+    _backupTrigger = document.activeElement;
     setAdminModalOpen(modal, true);
+    modal.focus();
   }
 
   function hideBackupModal() {
     var modal = document.getElementById('backup-modal');
     setAdminModalOpen(modal, false);
+    if (_backupTrigger && _backupTrigger.isConnected) _backupTrigger.focus();
+    _backupTrigger = null;
   }
 
   function showDoneButton() {
@@ -1507,13 +1604,19 @@ function setAdminModalOpen(modal, open, displayValue) {
     if (done) {
       done.hidden = false;
       done.style.display = 'flex';
+      var button = done.querySelector('button');
+      if (button) button.focus();
     }
   }
 
   function _setBkProgress(pct, text) {
     var bar = document.getElementById('backup-progress-bar');
     var txt = document.getElementById('backup-progress-text');
-    if (bar) bar.style.width = Math.min(100, Math.max(0, pct)) + '%';
+    if (bar) {
+      var value = Math.min(100, Math.max(0, pct));
+      bar.style.width = value + '%';
+      bar.parentElement.setAttribute('aria-valuenow', String(value));
+    }
     if (txt) txt.textContent = text;
   }
 
@@ -1829,6 +1932,24 @@ function setAdminModalOpen(modal, open, displayValue) {
         _submitRestoreUploadForm(form, '\u21BB Uploading ' + label + '\u2026');
       });
     });
+  });
+
+  document.addEventListener('keydown', function (event) {
+    var modal = document.getElementById('backup-modal');
+    if (event.key !== 'Tab' || !modal || modal.hidden) return;
+    var controls = Array.from(modal.querySelectorAll('button:not(:disabled), a[href], [tabindex="0"]'))
+      .filter(function (control) { return control.getClientRects().length > 0; });
+    var first = controls[0];
+    var last = controls[controls.length - 1];
+    if (!first) {
+      event.preventDefault();
+      modal.focus();
+    } else if (!modal.contains(document.activeElement) || document.activeElement === modal
+      || (event.shiftKey && document.activeElement === first)
+      || (!event.shiftKey && document.activeElement === last)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    }
   });
 
   document.addEventListener('click', function (e) {

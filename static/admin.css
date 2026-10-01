@@ -1,5 +1,18 @@
 /* admin.css — RustChan admin-page-only styles */
 
+/* Administrative rhythm inherits each theme's palette and shape. */
+.admin-panel,
+.admin-login,
+.admin-detail-page {
+  --admin-space-xs: 0.35rem;
+  --admin-space-sm: 0.65rem;
+  --admin-space-md: 1rem;
+  --admin-space-lg: 1.5rem;
+  --admin-control-height: 2.65rem;
+  --admin-rule: color-mix(in srgb, var(--border) 80%, var(--text-dim) 20%);
+  font-size: 0.95rem;
+}
+
 .admin-access-address {
   color: var(--text-dim);
   font-size: 0.82rem;
@@ -110,13 +123,14 @@
 
 .admin-panel h1 {
   color: var(--green-bright);
-  font-size: 1.1rem;
-  letter-spacing: 0.1em;
-  margin-bottom: 12px;
+  font-size: 1.5rem;
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+  margin: 0 0 var(--admin-space-xs);
 }
 
 html:not([data-theme]) .admin-panel h1 {
-  text-shadow: 0 0 10px rgba(0,255,65,0.4);
+  text-shadow: none;
 }
 
 .admin-section {
@@ -137,23 +151,23 @@ html:not([data-theme]) .admin-panel h1 {
 }
 
 .admin-section h2 {
-  font-size: 0.92rem;
-  color: var(--green);
-  letter-spacing: 0.08em;
+  font-size: 1.1rem;
+  color: var(--text);
+  letter-spacing: 0.02em;
   margin-bottom: 10px;
   padding-bottom: 6px;
   border-bottom: 1px solid var(--border);
 }
 
 .admin-section h3 {
-  font-size: 0.84rem;
-  color: var(--text-dim);
+  font-size: 0.95rem;
+  color: var(--text);
   margin: 12px 0 7px;
 }
 
 .admin-section h4 {
-  font-size: 0.78rem;
-  color: var(--green-dim);
+  font-size: 0.88rem;
+  color: var(--text);
   margin: 0.85rem 0 0.4rem;
   letter-spacing: 0.04em;
 }
@@ -204,8 +218,8 @@ html:not([data-theme]) .admin-panel h1 {
   display: grid;
   gap: 0.55rem;
   padding: 0.75rem;
-  border: 1px solid color-mix(in srgb, var(--red-bright, #b42f2f) 58%, var(--border));
-  background: color-mix(in srgb, var(--red-bright, #b42f2f) 5%, var(--bg-panel));
+  border: 1px solid var(--admin-rule);
+  background: color-mix(in srgb, var(--bg-input) 45%, var(--bg-panel));
   border-radius: var(--radius-md, 6px);
 }
 
@@ -314,9 +328,9 @@ html:not([data-theme]) .admin-panel h1 {
 }
 
 .admin-control-common-actions {
-  padding: 0.55rem;
-  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
-  background: color-mix(in srgb, var(--bg-input) 42%, transparent);
+  padding: 0;
+  border: 0;
+  background: transparent;
   border-radius: var(--radius-md, 6px);
 }
 
@@ -333,8 +347,8 @@ html:not([data-theme]) .admin-panel h1 {
 
 .admin-control-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
-  gap: 0.65rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+  gap: var(--admin-space-md);
   align-items: stretch;
 }
 
@@ -343,8 +357,8 @@ html:not([data-theme]) .admin-panel h1 {
   flex-direction: column;
   gap: 0.6rem;
   min-width: 0;
-  padding: 0.8rem;
-  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  padding: var(--admin-space-md);
+  border: 1px solid var(--admin-rule);
   background: color-mix(in srgb, var(--bg-input) 36%, transparent);
   border-radius: var(--radius-md, 6px);
 }
@@ -439,8 +453,8 @@ html:not([data-theme]) .admin-panel h1 {
 .admin-control-facts dt,
 .admin-control-detail-list dt {
   color: var(--text-dim);
-  font-size: 0.68rem;
-  letter-spacing: 0.035em;
+  font-size: 0.76rem;
+  letter-spacing: 0.025em;
   text-transform: uppercase;
 }
 
@@ -448,8 +462,9 @@ html:not([data-theme]) .admin-panel h1 {
 .admin-control-detail-list dd {
   margin: 0.14rem 0 0;
   color: var(--text);
-  font-size: 0.76rem;
-  line-height: 1.4;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
   overflow-wrap: anywhere;
 }
 
@@ -469,8 +484,8 @@ html:not([data-theme]) .admin-panel h1 {
   color: var(--text);
   background: var(--bg-panel);
   font-size: 0.72rem;
-  font-weight: 700;
-  line-height: 1.15;
+  font-weight: 600;
+  line-height: 1.3;
   letter-spacing: 0.02em;
   white-space: nowrap;
 }
@@ -551,6 +566,9 @@ html:not([data-theme]) .admin-panel h1 {
   min-height: 2.15rem;
 }
 
+.admin-section input:not([type]),
+.admin-section input[type="email"],
+.admin-section input[type="url"],
 .admin-section input[type="text"],
 .admin-section input[type="password"],
 .admin-section input[type="number"],
@@ -558,7 +576,7 @@ html:not([data-theme]) .admin-panel h1 {
 .admin-section textarea {
   background: var(--bg-input);
   border: 1px solid var(--border);
-  color: var(--green-pale);
+  color: var(--text);
   padding: 0.5rem 0.65rem;
   font-family: var(--font);
   font-size: 0.82rem;
@@ -620,21 +638,22 @@ html:not([data-theme]) .admin-panel h1 {
 .admin-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.8rem;
-  margin-bottom: 10px;
+  font-size: 0.88rem;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: var(--admin-space-md, 1rem);
 }
 
 .admin-table th {
-  color: var(--green-dim);
+  color: var(--text-dim);
   text-align: left;
-  padding: 7px 9px;
+  padding: 0.65rem 0.75rem;
   border-bottom: 1px solid var(--border);
   font-weight: normal;
   letter-spacing: 0.05em;
 }
 
 .admin-table td {
-  padding: 7px 9px;
+  padding: 0.6rem 0.75rem;
   border-bottom: 1px solid var(--border);
   color: var(--text);
   vertical-align: middle;
@@ -643,6 +662,7 @@ html:not([data-theme]) .admin-panel h1 {
 .admin-table .admin-table-empty {
   color: var(--text-dim);
   text-align: center;
+  padding: var(--admin-space-lg, 1.5rem) var(--admin-space-md, 1rem);
 }
 
 .admin-table tr:hover td {
@@ -2659,7 +2679,7 @@ html.no-js .admin-toolbar-btn[data-action="open-report"] {
 
 @media (min-width: 960px) {
   .admin-moderation-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 52rem), 1fr));
   }
 
   .admin-moderation-card-log {
@@ -2763,20 +2783,7 @@ html.no-js .admin-toolbar-btn[data-action="open-report"] {
     box-sizing: border-box;
   }
 
-  .admin-table {
-    display: block;
-    max-width: 100%;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-  }
 
-  .admin-table thead,
-  .admin-table tbody,
-  .admin-table tfoot {
-    display: table;
-    width: 100%;
-    min-width: 40rem;
-  }
 }
 
 @media (min-width: 901px) and (max-width: 1180px) {
@@ -4237,56 +4244,833 @@ html:not([data-theme]) .admin-login h1 {
   }
 }
 
-/* Runtime configuration forms use the current theme's existing color tokens. */
-.admin-settings-section { scroll-margin-top: calc(var(--header-offset, 58px) + 1rem); padding: 1.25rem; }
-.admin-settings-section h2 { margin-top: 0; scroll-margin-top: calc(var(--header-offset, 58px) + 1rem); }
-.admin-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
-.admin-setting { min-width: 0; padding: 1rem; border: 1px solid var(--border); background: var(--bg-panel); }
-.admin-setting > label { display: block; font-weight: bold; margin-bottom: .5rem; }
-.admin-setting input, .admin-setting textarea, .admin-setting select { width: 100%; max-width: 100%; box-sizing: border-box; min-height: 2.75rem; }
-.admin-setting input:focus-visible, .admin-setting textarea:focus-visible, .admin-setting select:focus-visible { outline: 2px solid var(--green-bright); outline-offset: 3px; }
-.admin-setting-help { color: var(--text-dim); font-size: .85rem; line-height: 1.55; }
-.admin-setting-state { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); gap: .35rem .5rem; font-size: .8rem; overflow-wrap: anywhere; }
-.admin-setting-state dt { color: var(--text-dim); }
-.admin-setting-state dd { margin: 0; }
-.admin-settings-save { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; margin-top: 1rem; }
-.admin-settings-save span { color: var(--text-dim); font-size: .85rem; }
-@media (max-width: 700px) {
-  .admin-settings-grid { grid-template-columns: minmax(0, 1fr); }
-  .admin-settings-section { padding: .75rem; }
+/* Runtime configuration shares the same fields, surfaces, and spacing. */
+.admin-settings-section {
+  scroll-margin-top: calc(var(--header-offset, 58px) + 1rem);
 }
-.admin-settings-group { border: 0; padding: 0; margin: 1.5rem 0; min-width: 0; }
-.admin-settings-group legend { font-size: 1rem; font-weight: bold; padding: 0 0 .75rem; }
-.admin-settings-search { margin: 1rem 0; padding: 1rem; border: 1px solid var(--border); }
-.admin-settings-search label { display: block; font-weight: bold; margin-bottom: .5rem; }
-.admin-settings-search input { width: min(100%, 30rem); min-height: 2.75rem; box-sizing: border-box; }
-.admin-settings-search-results { padding-left: 1.25rem; }
-.admin-settings-search-results li { margin: .65rem 0; }
+.admin-settings-section h2 {
+  margin-top: 0;
+}
+.admin-settings-section > form {
+  display: grid;
+  gap: var(--admin-space-lg);
+  width: 100%;
+  align-items: start;
+}
+.admin-settings-grid {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--admin-space-md);
+}
+.admin-setting {
+  min-width: 0;
+  padding: var(--admin-space-md);
+  border: 1px solid var(--admin-rule);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-input) 40%, var(--bg-panel));
+}
+.admin-setting > label {
+  display: block;
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin-bottom: var(--admin-space-sm);
+}
+.admin-setting input, .admin-setting textarea, .admin-setting select {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  min-height: var(--admin-control-height);
+}
+.admin-setting-help {
+  color: var(--text-dim);
+  margin: var(--admin-space-sm) 0;
+  font-size: .88rem;
+  line-height: 1.55;
+}
+.admin-setting-state {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr);
+  gap: .35rem .65rem;
+  padding-top: var(--admin-space-sm);
+  border-top: 1px solid var(--admin-rule);
+  font-size: .82rem;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.admin-setting-state dt {
+  color: var(--text-dim);
+}
+.admin-setting-state dd {
+  margin: 0;
+}
+.admin-setting-state dd:empty::before {
+  content: "—";
+  color: var(--text-dim);
+}
+.admin-settings-save {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--admin-space-md);
+  padding-top: var(--admin-space-md);
+  border-top: 1px solid var(--admin-rule);
+}
+.admin-settings-save span {
+  color: var(--text-dim);
+  font-size: .85rem;
+}
+.admin-settings-group {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.admin-settings-group legend {
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 600;
+  padding: 0 0 var(--admin-space-sm);
+}
+.admin-settings-search {
+  margin: var(--admin-space-md) 0 var(--admin-space-lg);
+  padding: var(--admin-space-md);
+  border: 1px solid var(--admin-rule);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+.admin-settings-search form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--admin-space-sm);
+}
+.admin-settings-search label {
+  flex-basis: 100%;
+  font-size: .9rem;
+  font-weight: 600;
+}
+.admin-settings-search input {
+  flex: 1 1 18rem;
+  width: min(100%, 36rem);
+  max-width: 36rem;
+  min-width: 0;
+  min-height: var(--admin-control-height);
+  padding: .5rem .65rem;
+  border: 1px solid var(--admin-rule);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text);
+  font: inherit;
+  font-size: .9rem;
+}
+.admin-settings-search [role="status"] {
+  margin-top: var(--admin-space-md);
+  color: var(--text-dim);
+  font-size: .88rem;
+}
+.admin-settings-search-results {
+  padding-left: var(--admin-space-lg);
+  font-size: .9rem;
+}
+.admin-settings-search-results li {
+  margin: var(--admin-space-sm) 0;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 1000px) {
+  .admin-settings-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 700px) {
+  .admin-settings-section {
+    padding: var(--admin-space-md);
+  }
+  .admin-settings-search input {
+    font-size: 16px;
+  }
+}
 
 /* Task navigation works through preserved URL anchors, including without JavaScript. */
-.admin-panel-workspace { display: grid; grid-template-columns: minmax(180px, 220px) minmax(0, 1fr); gap: 1.5rem; align-items: start; }
-.admin-panel-workspace .admin-section-index { position: sticky; top: calc(var(--header-offset, 72px) + 1rem); display: flex; flex-direction: column; align-items: stretch; gap: .2rem; padding: .75rem; margin: 0; max-height: calc(100vh - var(--header-offset, 72px) - 2rem); overflow-y: auto; }
-.admin-section-index a { padding: .5rem .65rem; border-radius: 4px; }
-.admin-section-index a:hover, .admin-section-index a:focus-visible { background: var(--surface-raised, var(--bg-alt)); outline: 2px solid currentColor; outline-offset: 2px; }
-.admin-task-content { min-width: 0; }
-.admin-task .admin-section:first-child { margin-top: 0; }
+.admin-panel-workspace {
+  display: grid;
+  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+  gap: 1.5rem;
+  align-items: start;
+}
+.admin-panel-workspace .admin-section-index {
+  position: sticky;
+  top: calc(var(--header-offset, 72px) + 1rem);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: .2rem;
+  padding: .75rem;
+  margin: 0;
+  max-height: calc(100vh - var(--header-offset, 72px) - 2rem);
+  overflow-y: auto;
+}
+.admin-section-index a {
+  padding: .5rem .65rem;
+  border-radius: 4px;
+}
+.admin-section-index a:hover, .admin-section-index a:focus-visible {
+  background: var(--surface-raised, var(--bg-alt));
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+.admin-task-content {
+  min-width: 0;
+}
+.admin-task .admin-section:first-child {
+  margin-top: 0;
+}
 @supports selector(:has(:target)) {
-  .admin-task-content .admin-task { display: none; }
-  .admin-task-content .admin-task-default { display: block; }
-  .admin-panel:has(.admin-task:target, .admin-task :target) .admin-task { display: none; }
+  .admin-task-content .admin-task {
+    display: none;
+  }
+  .admin-task-content .admin-task-default {
+    display: block;
+  }
+  .admin-panel:has(.admin-task:target, .admin-task :target) .admin-task {
+    display: none;
+  }
   .admin-panel:has(.admin-task:target, .admin-task :target) .admin-task:target,
-  .admin-panel:has(.admin-task:target, .admin-task :target) .admin-task:has(:target) { display: block; }
+  .admin-panel:has(.admin-task:target, .admin-task :target) .admin-task:has(:target) {
+    display: block;
+  }
 }
 @media (max-width: 760px) {
-  .admin-panel-workspace { display: block; }
-  .admin-panel-workspace .admin-section-index { position: static; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: none; margin-bottom: 1rem; }
-  .admin-section-index > span { grid-column: 1 / -1; }
+  .admin-panel-workspace {
+    display: block;
+  }
+  .admin-panel-workspace .admin-section-index {
+    position: static;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-height: none;
+    margin-bottom: 1rem;
+  }
+  .admin-section-index > span {
+    grid-column: 1 / -1;
+  }
 }
 
 /* Dedicated credential forms retain readable spacing and touch targets. */
-#accounts form, #admin-secret-rotation { display: flex; flex-direction: column; gap: .65rem; align-items: stretch; }
-#accounts form h3 { display: block; margin: 0 0 .5rem; }
-#accounts form input, #accounts form select, #admin-secret-rotation input { width: 100%; box-sizing: border-box; min-height: 2.75rem; }
-#accounts form button, #admin-secret-rotation button { align-self: start; min-height: 2.75rem; margin-top: .5rem; }
-#accounts form input:focus-visible, #accounts form select:focus-visible, #admin-secret-rotation input:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+#accounts form, #admin-secret-rotation {
+  display: flex;
+  flex-direction: column;
+  gap: .65rem;
+  align-items: stretch;
+}
+#accounts form h3 {
+  display: block;
+  margin: 0 0 .5rem;
+}
+#accounts form input, #accounts form select, #admin-secret-rotation input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 2.75rem;
+}
+#accounts form button, #admin-secret-rotation button {
+  align-self: start;
+  min-height: 2.75rem;
+  margin-top: .5rem;
+}
+#accounts form input:focus-visible, #accounts form select:focus-visible, #admin-secret-rotation input:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}
 @media (max-width: 700px) { #accounts form input, #accounts form select, #admin-secret-rotation input { font-size: 16px; } }
+
+/* Shared interaction and content treatments; scoped to administrative surfaces. */
+.admin-panel :is(button, input[type="submit"], .admin-button-link, .admin-link-button, .admin-control-action),
+.admin-detail-page :is(button, .admin-button-link),
+.admin-login button {
+  min-height: var(--admin-control-height);
+  padding: .5rem .8rem;
+  font-size: .88rem;
+  line-height: 1.3;
+  letter-spacing: .01em;
+  box-shadow: none;
+  border-radius: var(--radius-sm);
+}
+.admin-panel :is(button, .admin-button-link, .admin-link-button):hover:not(:disabled),
+.admin-login button:hover {
+  background: color-mix(in srgb, var(--green) 8%, var(--bg-panel));
+  box-shadow: none;
+}
+.admin-panel button:active:not(:disabled) {
+  background: color-mix(in srgb, var(--green) 14%, var(--bg-panel));
+}
+.admin-panel button:disabled {
+  opacity: 1;
+  color: var(--text-dim);
+  border-color: var(--admin-rule);
+  background: var(--bg-panel);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+.admin-panel :is(.btn-danger, .backup-restore-upload-form button, .backup-primary-actions button[data-confirm], .backup-extract-actions button[data-confirm]):not(.btn-success) {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 60%, var(--border));
+}
+.admin-panel :is(.btn-danger, .backup-restore-upload-form button, .backup-primary-actions button[data-confirm], .backup-extract-actions button[data-confirm]):hover:not(:disabled) {
+  background: color-mix(in srgb, var(--red) 8%, var(--bg-panel));
+}
+.admin-panel :is(input, select, textarea, button, a, summary):focus-visible,
+.admin-detail-page :is(button, a, summary):focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 3px;
+}
+.admin-panel :is(input[type="checkbox"], input[type="radio"]) {
+  accent-color: var(--green);
+  flex-shrink: 0;
+}
+.admin-panel input::placeholder {
+  color: var(--text-dim);
+  opacity: 1;
+}
+.admin-panel input::file-selector-button {
+  min-height: var(--admin-control-height);
+  padding: .5rem .8rem;
+  margin-right: var(--admin-space-sm);
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--admin-rule);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.admin-panel input::file-selector-button:hover {
+  border-color: var(--green);
+}
+.admin-panel textarea {
+  resize: vertical;
+}
+.admin-panel .admin-section > p,
+.admin-panel .admin-section > ol {
+  margin-bottom: var(--admin-space-md);
+  line-height: 1.6;
+}
+.admin-panel .admin-section > ol {
+  padding-left: var(--admin-space-lg);
+}
+.admin-panel .admin-section > ol li + li {
+  margin-top: var(--admin-space-sm);
+}
+.admin-panel .admin-section > h3 {
+  margin-top: var(--admin-space-lg);
+}
+.admin-panel code {
+  font-size: .88em;
+  overflow-wrap: anywhere;
+}
+.admin-panel .admin-section-index a {
+  color: var(--text-dim);
+  font-size: .88rem;
+  line-height: 1.35;
+  letter-spacing: 0;
+  white-space: normal;
+  min-height: 2.4rem;
+  border-inline-start: 3px solid transparent;
+}
+.admin-panel .admin-section-index a:hover {
+  color: var(--text);
+  background: var(--bg-input);
+  outline: none;
+}
+.admin-panel .admin-section-index a[aria-current="location"] {
+  color: var(--text);
+  background: color-mix(in srgb, var(--green) 10%, var(--bg-panel));
+  border-inline-start-color: var(--green);
+  font-weight: 600;
+}
+.admin-panel .admin-section-index > span {
+  padding: .25rem .65rem .5rem;
+  font-size: .74rem;
+}
+.admin-panel .admin-dropdown > summary {
+  font-size: 1rem;
+  letter-spacing: .02em;
+}
+.admin-panel .admin-control-group > header h3 {
+  font-size: 1rem;
+}
+.admin-panel .admin-control-group > header p {
+  font-size: .85rem;
+  line-height: 1.5;
+}
+.admin-panel .admin-control-status-item {
+  background: transparent;
+  padding: .4rem .65rem;
+}
+.admin-panel .admin-control-status-copy strong {
+  font-size: .95rem;
+  font-weight: 600;
+}
+.admin-panel .admin-control-status-copy > span {
+  font-size: .76rem;
+}
+.admin-panel .admin-control-attention-copy p {
+  font-size: .85rem;
+  line-height: 1.5;
+}
+.admin-panel .admin-control-facts {
+  gap: var(--admin-space-sm) var(--admin-space-md);
+}
+.admin-panel .admin-health-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
+}
+.admin-panel .admin-health-row {
+  gap: var(--admin-space-sm);
+  align-items: start;
+  font-size: .88rem;
+}
+.admin-panel .admin-health-row > span {
+  flex: 1 1 45%;
+}
+.admin-panel .admin-health-row > strong {
+  flex: 1 1 55%;
+  font-variant-numeric: tabular-nums;
+}
+.admin-panel .admin-health-inspect-button {
+  min-height: var(--admin-control-height);
+  padding: .35rem 0;
+  text-align: left;
+}
+.admin-panel .admin-health-job-card {
+  gap: var(--admin-space-sm);
+  padding: var(--admin-space-md);
+  border-radius: var(--radius-sm);
+}
+.admin-health-job-heading {
+  display: flex;
+  gap: var(--admin-space-sm);
+  justify-content: space-between;
+  align-items: start;
+}
+.admin-health-job-heading h4 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.admin-panel .admin-health-job-error {
+  font-size: .88rem;
+  padding-inline-start: var(--admin-space-sm);
+  border-inline-start: 2px solid var(--red);
+  color: var(--text);
+}
+.admin-panel .admin-health-job-meta {
+  font-size: .82rem;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.admin-panel .board-settings-form .admin-subsection {
+  padding: var(--admin-space-md) 0;
+  margin: 0;
+  border: 0;
+  border-bottom: 1px solid var(--admin-rule);
+  border-radius: 0;
+  background: transparent;
+}
+.admin-panel .board-settings-grid label {
+  align-items: stretch;
+  font-size: .88rem;
+  letter-spacing: 0;
+  gap: var(--admin-space-xs);
+}
+.admin-panel .board-settings-checks label {
+  font-size: .85rem;
+  letter-spacing: 0;
+}
+.admin-panel .admin-card-header {
+  border: 0;
+  margin-bottom: var(--admin-space-sm);
+}
+.admin-panel .admin-card-header h3 {
+  font-size: .95rem;
+}
+.admin-panel .admin-card-header p {
+  font-size: .85rem;
+  line-height: 1.5;
+}
+.admin-panel .backup-restore-upload-form .admin-file-field {
+  flex: 0 1 auto;
+}
+.admin-panel #accounts .admin-settings-grid {
+  margin-top: var(--admin-space-lg);
+  align-items: start;
+}
+.admin-panel #accounts form {
+  padding-top: var(--admin-space-md);
+  border-top: 1px solid var(--admin-rule);
+}
+.admin-panel #accounts form p {
+  color: var(--text-dim);
+  font-size: .85rem;
+}
+.admin-panel #admin-secret-rotation {
+  max-width: 42rem;
+  padding: var(--admin-space-md);
+  border-inline-start: 3px solid var(--red);
+  background: var(--bg-input);
+}
+.admin-table tbody th {
+  color: var(--text);
+  font-weight: 500;
+  vertical-align: top;
+  letter-spacing: 0;
+}
+.admin-table :is(td, th) {
+  overflow-wrap: anywhere;
+}
+.admin-table tbody tr:focus-within {
+  background: color-mix(in srgb, var(--green) 6%, transparent);
+}
+.admin-table-wrap {
+  border-radius: var(--radius-sm);
+}
+.admin-table-wrap:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 3px;
+}
+.admin-panel .admin-state-table {
+  table-layout: fixed;
+  min-width: 58rem;
+}
+.admin-state-table th:first-child {
+  width: 16%;
+}
+.admin-state-table :is(td, th) {
+  vertical-align: top;
+}
+.admin-panel #accounts .admin-table {
+  table-layout: fixed;
+  min-width: 0;
+}
+#accounts .admin-table th:first-child {
+  width: 12%;
+}
+#accounts .admin-table th:last-child {
+  width: 35%;
+}
+.admin-detail-page {
+  max-width: 1220px;
+  margin-inline: auto;
+}
+.admin-detail-page .board-header {
+  margin-bottom: var(--admin-space-lg);
+}
+/* Diagnostics remain a non-modal disclosure; confirmations keep their existing focus trap. */
+.admin-panel .admin-diagnostics-panel {
+  border-radius: var(--radius-md);
+}
+.admin-panel .admin-diagnostics-text {
+  line-height: 1.6;
+}
+body:has(.admin-panel) .compress-modal-box {
+  border-color: var(--admin-rule, var(--border));
+  background: var(--bg-panel);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-panel);
+  padding: 1.5rem;
+  max-height: calc(100dvh - 2rem);
+  overflow-y: auto;
+}
+body:has(.admin-panel) .compress-modal-title {
+  color: var(--text);
+  font-size: 1.1rem;
+  letter-spacing: 0;
+}
+body:has(.admin-panel) .compress-progress-track {
+  height: .45rem;
+}
+@media (max-width: 760px) {
+  .admin-panel .admin-section-index a {
+    min-height: 44px;
+    text-align: left;
+  }
+  .admin-panel .admin-control-action {
+    min-height: 42px;
+  }
+  .admin-panel .admin-health-row {
+    flex-direction: column;
+  }
+  .admin-panel .admin-health-row > strong {
+    text-align: left;
+  }
+}
+@media (max-width: 640px) {
+  .admin-panel :is(button, input[type="submit"], .admin-button-link, .admin-link-button, .admin-control-action), .admin-login button {
+    min-height: 42px;
+  }
+  .admin-panel .admin-section input:not([type]),
+  .admin-panel .admin-section input[type="email"],
+  .admin-panel .admin-section input[type="url"] {
+    font-size: 16px;
+    min-height: 42px;
+  }
+  .admin-panel .board-settings-grid label {
+    font-size: .9rem;
+  }
+  .admin-panel .admin-settings-search form {
+    align-items: stretch;
+  }
+  .admin-panel .admin-settings-search input {
+    max-width: 100%;
+  }
+  .admin-panel .admin-settings-search button {
+    width: 100%;
+  }
+  .admin-panel .admin-setting-state {
+    grid-template-columns: 6rem minmax(0, 1fr);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .admin-panel *, .admin-login *, body:has(.admin-panel) .compress-modal * {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+html.no-js .admin-panel:has(.admin-task:target, .admin-task :target) .admin-section-index a[aria-current] {
+  color: var(--text-dim); background: transparent; border-inline-start-color: transparent; font-weight: normal;
+}
+html.no-js .admin-panel:has(#control-center:target, #control-center :target) .admin-section-index a[href="#control-center"],
+html.no-js .admin-panel:has(#site-settings:target, #site-settings :target) .admin-section-index a[href="#site-settings"],
+html.no-js .admin-panel:has(#site-health:target, #site-health :target) .admin-section-index a[href="#site-health"],
+html.no-js .admin-panel:has(#network-security:target, #network-security :target) .admin-section-index a[href="#network-security"],
+html.no-js .admin-panel:has(#https:target, #https :target) .admin-section-index a[href="#https"],
+html.no-js .admin-panel:has(#tor:target, #tor :target) .admin-section-index a[href="#tor"],
+html.no-js .admin-panel:has(#access:target, #access :target) .admin-section-index a[href="#access"],
+html.no-js .admin-panel:has(#timeouts:target, #timeouts :target) .admin-section-index a[href="#timeouts"],
+html.no-js .admin-panel:has(#display:target, #display :target) .admin-section-index a[href="#display"],
+html.no-js .admin-panel:has(#media:target, #media :target) .admin-section-index a[href="#media"],
+html.no-js .admin-panel:has(#schedules:target, #schedules :target) .admin-section-index a[href="#schedules"],
+html.no-js .admin-panel:has(#accounts:target, #accounts :target) .admin-section-index a[href="#accounts"],
+html.no-js .admin-panel:has(#storage:target, #storage :target) .admin-section-index a[href="#storage"],
+html.no-js .admin-panel:has(#logging:target, #logging :target) .admin-section-index a[href="#logging"],
+html.no-js .admin-panel:has(#system:target, #system :target) .admin-section-index a[href="#system"],
+html.no-js .admin-panel:has(#configuration-state:target, #configuration-state :target) .admin-section-index a[href="#configuration-state"],
+html.no-js .admin-panel:has(#boards:target, #boards :target) .admin-section-index a[href="#boards"],
+html.no-js .admin-panel:has(#moderation:target, #moderation :target) .admin-section-index a[href="#moderation"],
+html.no-js .admin-panel:has(#appearance:target, #appearance :target) .admin-section-index a[href="#appearance"],
+html.no-js .admin-panel:has(#backups:target, #backups :target) .admin-section-index a[href="#backups"],
+html.no-js .admin-panel:has(#maintenance:target, #maintenance :target) .admin-section-index a[href="#maintenance"] {
+  color: var(--text); background: color-mix(in srgb, var(--green) 10%, var(--bg-panel)); border-inline-start-color: var(--green); font-weight: 600;
+}
+
+.admin-panel :is(.admin-settings-save > button, .board-settings-actions button[type="submit"]:not(.btn-danger), #accounts form > button) {
+  background: color-mix(in srgb, var(--green) 12%, var(--bg-panel));
+  color: var(--text);
+  border-color: var(--green);
+  font-weight: 600;
+}
+.admin-panel :is(.btn-danger, .backup-restore-upload-form button, .backup-primary-actions button[data-confirm], .backup-extract-actions button[data-confirm]):not(.btn-success) {
+  color: color-mix(in srgb, var(--red) 40%, var(--text) 60%);
+}
+.admin-panel #configuration-state .admin-state-table th:first-child {
+  width: 20%;
+}
+.admin-panel #configuration-state .admin-state-table th:nth-child(n+2):nth-child(-n+4) {
+  width: 14%;
+}
+.admin-panel #configuration-state .admin-state-table th:nth-child(5) {
+  width: 18%;
+}
+.admin-panel .admin-state-table td:empty::before {
+  content: "—";
+  color: var(--text-dim);
+}
+.admin-application-help {
+  margin-top: var(--admin-space-sm);
+}
+.admin-panel .admin-application-help > summary {
+  min-height: 2rem;
+  font-size: .82rem;
+  cursor: pointer;
+  color: var(--green);
+}
+.admin-application-help p {
+  margin-top: var(--admin-space-sm);
+  color: var(--text-dim);
+}
+.admin-job-poll-status {
+  min-height: 1.55em;
+}
+
+/* Keep new comparison tables in one accessible, horizontally scrollable table. */
+@media (max-width: 420px) {
+  .admin-panel .admin-table-wrap:has(.admin-state-table),
+  #accounts .admin-table-wrap {
+    overflow-x: auto;
+  }
+  .admin-panel .admin-section > .admin-table-wrap > .admin-state-table,
+  #accounts .admin-table {
+    display: table;
+    min-width: 58rem !important;
+  }
+  #accounts .admin-table {
+    min-width: 22rem !important;
+  }
+  .admin-panel .admin-section > .admin-table-wrap > .admin-state-table thead,
+  #accounts .admin-table thead {
+    display: table-header-group;
+  }
+  .admin-panel .admin-section > .admin-table-wrap > .admin-state-table tbody,
+  #accounts .admin-table tbody {
+    display: table-row-group;
+    min-width: 0;
+  }
+  .admin-panel .admin-section > .admin-table-wrap > .admin-state-table tr,
+  #accounts .admin-table tr {
+    display: table-row;
+    margin: 0;
+    border: 0;
+    background: transparent;
+  }
+  .admin-panel .admin-section > .admin-table-wrap > .admin-state-table td,
+  #accounts .admin-table td {
+    display: table-cell;
+    width: auto;
+    border-bottom: 1px solid var(--border);
+  }
+}
+.admin-log-table {
+  table-layout: fixed;
+  min-width: 60rem !important;
+}
+.admin-log-table th:nth-child(1) {
+  width: 18%;
+}
+.admin-log-table th:nth-child(2) {
+  width: 22%;
+}
+.admin-log-table th:nth-child(3) {
+  width: 14%;
+}
+.admin-log-table th:nth-child(4) {
+  width: 12%;
+}
+.admin-log-table th:nth-child(5) {
+  width: 8%;
+}
+.admin-log-user {
+  overflow-wrap: anywhere;
+}
+.admin-log-detail summary {
+  color: var(--green);
+  cursor: pointer;
+  min-height: 2rem;
+}
+.admin-log-detail p {
+  margin-top: .5rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Give long reports and archive actions real column space before adding a second panel. */
+.admin-panel .admin-moderation-card-review .admin-table {
+  table-layout: fixed;
+}
+@media (min-width: 421px) {
+  .admin-panel .admin-moderation-card .admin-report-table {
+    min-width: 52rem;
+  }
+  .admin-report-table th:nth-child(1) { width: 6rem; }
+  .admin-report-table th:nth-child(2) { width: 9rem; }
+  .admin-report-table th:nth-child(3) { width: 20%; }
+  .admin-report-table th:nth-child(5) { width: 9rem; }
+  .admin-report-table th:nth-child(6) { width: 8rem; }
+  .admin-panel .backup-table th:nth-child(1) { width: 25%; }
+  .admin-panel .backup-table th:nth-child(2) { width: 8%; }
+  .admin-panel .backup-table th:nth-child(3) { width: 14%; }
+  .admin-panel .backup-table th:nth-child(4) { width: 8%; }
+  .admin-panel .backup-table th:nth-child(5) { width: 14%; }
+  .admin-panel .backup-table th:nth-child(6) { width: 31%; }
+}
+@media (max-width: 640px) {
+  .admin-panel .admin-quick-form > .admin-quick-field {
+    flex: 0 1 auto;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+  }
+}
+/* The light classic surface needs darker secondary text for sustained reading. */
+[data-theme="chanclassic"] .admin-panel,
+[data-theme="chanclassic"] .admin-detail-page {
+  --text-dim: #585858;
+}
+.admin-panel .board-settings-checks label {
+  color: var(--text);
+}
+body:has(.admin-panel) .compress-cancel-btn {
+  color: var(--text);
+  background: var(--bg-input);
+  border-color: var(--border);
+}
+
+@media (max-width: 420px) {
+  .admin-panel .admin-moderation-card .admin-table-wrap { overflow-x: auto; }
+  .admin-panel .admin-moderation-card .admin-table {
+    display: table;
+    min-width: 36rem !important;
+  }
+  .admin-panel .admin-moderation-card .admin-report-table {
+    min-width: 52rem !important;
+  }
+  .admin-panel .admin-moderation-card .admin-table thead { display: table-header-group; }
+  .admin-panel .admin-moderation-card .admin-table tbody { display: table-row-group; }
+  .admin-panel .admin-moderation-card .admin-table tr {
+    display: table-row;
+    margin: 0;
+    border: 0;
+    background: transparent;
+  }
+  .admin-panel .admin-moderation-card .admin-table td {
+    display: table-cell;
+    width: auto;
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+.admin-panel .admin-moderation-card-review .admin-table td { vertical-align: top; }
+.admin-report-summary, .admin-report-detail p { line-height: 1.5; }
+.admin-panel .admin-report-detail > summary {
+  min-height: 2rem;
+  margin-top: var(--admin-space-xs);
+  font-size: .82rem;
+  color: var(--green);
+  cursor: pointer;
+}
+.admin-report-detail p { margin-top: var(--admin-space-sm); }
+.admin-panel #full-backup-restore .admin-site-settings-form > label {
+  display: grid;
+  gap: var(--admin-space-xs);
+  width: 100%;
+}
+.admin-panel #full-backup-restore input[name="backup_directory"] { width: 100%; }
+
+/* Keep state text readable; borders and concise labels carry the state color. */
+.admin-panel :is(.admin-detection-pill, .backup-verification-ok, .backup-verification-error) {
+  color: var(--text);
+}
+[data-theme="dorfic"] .admin-panel {
+  --text-dim: color-mix(in srgb, #b69a6b 85%, var(--text));
+}
+html[data-theme] .admin-flash.flash-error {
+  color: var(--text);
+  background: color-mix(in srgb, var(--red) 8%, var(--bg-panel));
+  border-inline-start: 3px solid var(--red);
+}
+
+/* Preserve the compact content preview when report tables scroll on small screens. */
+@media (max-width: 420px) {
+  .admin-report-table td:nth-child(3) {
+    white-space: nowrap !important;
+    text-overflow: ellipsis;
+    overflow: hidden;
+  }
+}
