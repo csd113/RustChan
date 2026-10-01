@@ -154,14 +154,17 @@ pub(in crate::server) async fn update_media_settings(
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
-            let conn = pool.get()?;
+            let mut conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref())?;
+            let tx = conn.transaction().map_err(anyhow::Error::from)?;
+            db::set_media_prune_settings(&tx, prune_enabled, prune_max_bytes)?;
+            db::set_site_setting(&tx, "ffmpeg_timeout_secs", &timeout_secs.to_string())?;
+            tx.commit().map_err(anyhow::Error::from)?;
             crate::config::set_live_ffmpeg_timeout_secs(timeout_secs)?;
-            db::set_media_prune_settings(&conn, prune_enabled, prune_max_bytes)?;
-            crate::config::update_settings_file_ffmpeg_timeout(timeout_secs);
-            crate::config::update_settings_file_media_pruning(prune_enabled, prune_max_bytes);
-            let prune_report =
-                crate::media::prune::run_configured_prune(&conn, &CONFIG.upload_dir)?;
+            let prune_report = match crate::media::prune::run_configured_prune(&conn, &CONFIG.upload_dir) {
+                Ok(report) => report,
+                Err(error) => { tracing::warn!(target: "admin", error = %error, "Media settings saved; immediate pruning failed"); return Err(AppError::BadRequest("Media settings saved, but immediate pruning failed; review the log before retrying maintenance.".into())); }
+            };
             tracing::info!(
                 target: "admin",
                 ffmpeg_timeout_secs = timeout_secs,
@@ -887,7 +890,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn media_settings_save_updates_live_timeout_and_settings_file() -> anyhow::Result<()> {
+    async fn media_settings_save_commits_database_then_applies_live_timeout() -> anyhow::Result<()>
+    {
         let _guard = MEDIA_SETTINGS_TEST_LOCK.lock().await;
         let state = crate::test_support::app_state();
         install_admin_session(&state)?;
@@ -943,16 +947,31 @@ mod tests {
 
         ensure!(crate::config::ffmpeg_timeout_secs() == 1_800);
         let updated_settings = std::fs::read_to_string(&settings_path).context("read settings")?;
-        ensure!(updated_settings.contains("ffmpeg_timeout_secs = 1800\n"));
-        ensure!(updated_settings.contains("media_auto_prune_enabled = true\n"));
-        ensure!(updated_settings.contains("media_max_active_content_size_bytes = 2097152\n"));
+        let seeds = format!(
+            r#"forum_name = "RustChan"
+ffmpeg_timeout_secs = {previous_timeout}
+media_auto_prune_enabled = false
+media_max_active_content_size_bytes = 0
+"#
+        );
+
+        ensure!(
+            updated_settings == seeds,
+            "DB-owned settings must not partially mirror to startup seeds"
+        );
         let conn = state.db.get().context("get settings database connection")?;
         ensure!(crate::db::get_media_auto_prune_enabled(&conn));
         ensure!(crate::db::get_media_max_active_content_size_bytes(&conn) == 2_097_152);
+        ensure!(
+            crate::db::get_site_setting(&conn, "ffmpeg_timeout_secs")?.as_deref() == Some("1800")
+        );
         let reloaded = crate::config::Config::from_env();
-        ensure!(reloaded.ffmpeg_timeout_secs == 1_800);
-        ensure!(reloaded.initial_media_auto_prune_enabled);
-        ensure!(reloaded.initial_media_max_active_content_size_bytes == 2_097_152);
+        ensure!(
+            reloaded.ffmpeg_timeout_secs == previous_timeout,
+            "immutable startup seed remains a seed"
+        );
+        ensure!(!reloaded.initial_media_auto_prune_enabled);
+        ensure!(reloaded.initial_media_max_active_content_size_bytes == 0);
         drop(conn);
 
         crate::config::set_live_ffmpeg_timeout_secs(previous_timeout).context("restore timeout")?;

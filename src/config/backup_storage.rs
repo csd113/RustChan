@@ -57,7 +57,20 @@ fn absolute_resolved_path(path: &Path) -> anyhow::Result<PathBuf> {
 /// and directory creation, permission, write, sync, or probe removal failures.
 pub fn prepare_backup_directory(path: &Path, config: &Config) -> anyhow::Result<PathBuf> {
     let root = resolve_backup_directory(path, config)?;
-    // Check all existing child paths before creating or changing permissions.
+    validate_backup_children(&root)?;
+    for dir in [&root, &root.join("full"), &root.join("boards")] {
+        prepare_private_storage(dir).with_context(|| {
+            format!(
+                "backup_directory '{}' is unusable; check the mount and grant the RustChan service user directory access, permission to set private modes, and read/write/delete access",
+                dir.display()
+            )
+        })?;
+    }
+    Ok(root)
+}
+
+/// Inspect all legacy children before creating or changing any directory.
+fn validate_backup_children(root: &Path) -> anyhow::Result<()> {
     for child in [root.join("full"), root.join("boards")] {
         match std::fs::symlink_metadata(&child) {
             Ok(metadata) => anyhow::ensure!(
@@ -69,15 +82,7 @@ pub fn prepare_backup_directory(path: &Path, config: &Config) -> anyhow::Result<
             Err(error) => return Err(error).context("inspect backup_directory child"),
         }
     }
-    for dir in [&root, &root.join("full"), &root.join("boards")] {
-        prepare_private_storage(dir).with_context(|| {
-            format!(
-                "backup_directory '{}' is unusable; check the mount and grant the RustChan service user directory access, permission to set private modes, and read/write/delete access",
-                dir.display()
-            )
-        })?;
-    }
-    Ok(root)
+    Ok(())
 }
 
 /// Exercise private directory access with a unique, automatically cleaned probe.
@@ -99,18 +104,101 @@ fn prepare_private_storage(path: &Path) -> anyhow::Result<()> {
 /// Returns validation or settings-file persistence failures without changing the
 /// running process's backup root. Passing the default path explicitly resets it.
 pub fn update_settings_file_backup_directory(path: &Path) -> anyhow::Result<()> {
-    let root = prepare_backup_directory(path, &super::CONFIG)?;
-    let value = root.to_str().context("backup_directory must be UTF-8")?;
-    super::update_settings_file_entries_result(
-        &[("backup_directory", super::toml_quote(value))],
-        None,
-    )
+    prepare_and_persist(path, &super::CONFIG, |root| {
+        let value = root.to_str().context("backup_directory must be UTF-8")?;
+        super::update_settings_file_entries_result(
+            &[("backup_directory", super::toml_quote(value))],
+            None,
+        )
+    })
+}
+
+/// Remove only newly prepared, still-empty directories if preparation or saving fails.
+fn prepare_and_persist(
+    path: &Path,
+    config: &Config,
+    persist: impl FnOnce(&Path) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let root = resolve_backup_directory(path, config)?;
+    validate_backup_children(&root)?;
+    let mut created = Vec::new();
+    for target in [root.clone(), root.join("full"), root.join("boards")] {
+        let mut next = Some(target.as_path());
+        while let Some(directory) = next {
+            match std::fs::symlink_metadata(directory) {
+                Ok(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if !created.iter().any(|entry| entry == directory) {
+                        created.push(directory.to_path_buf());
+                    }
+                    next = directory.parent();
+                }
+                Err(error) => return Err(error).context("inspect backup preparation path"),
+            }
+        }
+    }
+    // Record actual successful creates rather than assuming a path still belongs
+    // to us after the preflight; another operator may create it concurrently.
+    created.sort_by_key(|directory| directory.components().count());
+    let mut prepared = Vec::new();
+    let result = created
+        .iter()
+        .try_for_each(|directory| match std::fs::create_dir(directory) {
+            Ok(()) => {
+                prepared.push(directory.clone());
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error).context("create backup preparation directory"),
+        })
+        .and_then(|()| prepare_backup_directory(&root, config))
+        .and_then(|root| persist(&root));
+    if let Err(error) = result {
+        prepared.sort_by_key(|directory| std::cmp::Reverse(directory.components().count()));
+        for directory in prepared {
+            match std::fs::remove_dir(&directory) {
+                Ok(()) => {},
+                Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => {},
+                Err(cleanup) => return Err(cleanup).with_context(|| format!("Backup directory save failed ({error}); cannot remove newly prepared directory {}; inspect it before retrying", directory.display())),
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use anyhow::ensure;
+
+    #[test]
+    fn failed_directory_save_removes_only_new_empty_preparation() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("new/nested/backups");
+        let config = crate::config::tests::valid_config();
+        let result = prepare_and_persist(&root, &config, |_| {
+            anyhow::bail!("injected persistence failure")
+        });
+        ensure!(result.is_err());
+        ensure!(
+            !temp.path().join("new").exists(),
+            "failed save must not leave newly prepared paths"
+        );
+        let existing = temp.path().join("existing");
+        std::fs::create_dir(&existing)?;
+        std::fs::write(existing.join("operator-file"), "keep")?;
+        let result = prepare_and_persist(&existing, &config, |_| {
+            anyhow::bail!("injected persistence failure")
+        });
+        ensure!(result.is_err());
+        ensure!(std::fs::read_to_string(existing.join("operator-file"))? == "keep");
+        ensure!(
+            std::fs::read_dir(&existing)?.count() == 1,
+            "only new empty child directories may be removed"
+        );
+        Ok(())
+    }
 
     #[test]
     fn backup_directory_creates_private_nested_storage_without_probe_files() -> anyhow::Result<()> {

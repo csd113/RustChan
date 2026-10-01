@@ -147,6 +147,7 @@ fn main() -> anyhow::Result<()> {
     // exits successfully without mutating runtime state.
     let cli = server::cli::Cli::parse();
     config::configure_data_dir(cli.data_dir.as_deref())?;
+    config::configure_port_override(cli.port)?;
 
     // Double-click / no-TTY guard
     // When launched from a file manager (Linux) or Explorer (Windows), stdout

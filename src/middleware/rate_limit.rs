@@ -1,6 +1,7 @@
-use crate::config::CONFIG;
+use crate::config::{RateLimitPolicy, CONFIG};
 use axum::{
     extract::Request,
+    http::Method,
     middleware::Next,
     response::{IntoResponse as _, Response},
 };
@@ -24,15 +25,34 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Applies the configured GET request limit to dynamic routes.
-pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
-    let path = req.uri().path();
-    if path.starts_with("/static/")
+/// Decide which requests consume the browsing budget without weakening
+/// independent posting cooldowns or password-attempt protections.
+fn counts_request(method: &Method, path: &str, policy: RateLimitPolicy) -> bool {
+    let exempt = path.starts_with("/static/")
         || path.starts_with("/theme-css/")
         || path.starts_with("/boards/")
         || path == "/admin/log/live"
-        || path == "/admin/backup/progress"
-    {
+        || path == "/admin/backup/progress";
+    !exempt
+        && (policy == RateLimitPolicy::Legacy || method == Method::GET || method == Method::HEAD)
+}
+
+/// Advance one visitor's counter using the historical whole-second boundary.
+const fn consume_budget(counter: &mut (u32, u64), now: u64, window: u64, limit: u32) -> bool {
+    let (count, window_start) = counter;
+    if now.saturating_sub(*window_start) > window {
+        *count = 1;
+        *window_start = now;
+        false
+    } else {
+        *count = count.saturating_add(1);
+        *count > limit
+    }
+}
+
+/// Apply the configured per-visitor browsing request limit.
+pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
+    if !counts_request(req.method(), req.uri().path(), CONFIG.rate_limit_policy) {
         return next.run(req).await;
     }
 
@@ -51,15 +71,7 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
 
     let blocked = {
         let mut binding = RATE_TABLE.entry(ip_key).or_insert((0, now));
-        let (count, window_start) = binding.value_mut();
-        let blocked = if now.saturating_sub(*window_start) > window {
-            *count = 1;
-            *window_start = now;
-            false
-        } else {
-            *count += 1;
-            *count > limit
-        };
+        let blocked = consume_budget(binding.value_mut(), now, window, limit);
         drop(binding);
         blocked
     };
@@ -89,8 +101,101 @@ pub async fn rate_limit_middleware(req: Request, next: Next) -> Response {
             .compare_exchange(last_cleanup, now, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
     {
-        RATE_TABLE.retain(|_, (_, window_start)| now.saturating_sub(*window_start) <= window * 2);
+        RATE_TABLE.retain(|_, (_, window_start)| {
+            now.saturating_sub(*window_start) <= window.saturating_mul(2)
+        });
     }
 
     next.run(req).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{consume_budget, counts_request, Method, RateLimitPolicy};
+
+    #[test]
+    fn legacy_counts_writes_polling_and_nonexempt_assets() {
+        for method in [Method::GET, Method::HEAD, Method::POST, Method::DELETE] {
+            for path in [
+                "/",
+                "/test",
+                "/api/thread/1",
+                "/favicon.ico",
+                "/banner/assets/1",
+            ] {
+                assert!(
+                    counts_request(&method, path, RateLimitPolicy::Legacy),
+                    "legacy must count {method} {path}"
+                );
+            }
+            for path in [
+                "/static/main.js",
+                "/theme-css/forest",
+                "/boards/test/file.png",
+                "/admin/log/live",
+                "/admin/backup/progress",
+            ] {
+                assert!(
+                    !counts_request(&method, path, RateLimitPolicy::Legacy),
+                    "existing exemption changed: {path}"
+                );
+                assert!(
+                    !counts_request(&method, path, RateLimitPolicy::Reads),
+                    "reads exemption changed: {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reads_policy_counts_get_and_head_only() {
+        for method in [Method::GET, Method::HEAD] {
+            assert!(
+                counts_request(&method, "/api/thread/1", RateLimitPolicy::Reads),
+                "reads must count polling"
+            );
+        }
+        for method in [Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS] {
+            assert!(
+                !counts_request(&method, "/test", RateLimitPolicy::Reads),
+                "reads must not count {method}"
+            );
+        }
+    }
+
+    #[test]
+    fn budget_boundary_and_independent_visitors_preserve_defaults() {
+        let mut visitor_a = (0, 100);
+        let mut visitor_b = (0, 100);
+        assert!(
+            !consume_budget(&mut visitor_a, 100, 60, 2),
+            "first request allowed"
+        );
+        assert!(
+            !consume_budget(&mut visitor_a, 100, 60, 2),
+            "second request allowed"
+        );
+        assert!(
+            consume_budget(&mut visitor_a, 160, 60, 2),
+            "equal boundary retains historical limit"
+        );
+        assert!(
+            !consume_budget(&mut visitor_b, 160, 60, 2),
+            "other visitor remains independent"
+        );
+        assert!(
+            !consume_budget(&mut visitor_a, 161, 60, 2),
+            "greater boundary resets"
+        );
+        assert_eq!(visitor_a, (1, 161), "rollover consumes one request");
+    }
+
+    #[test]
+    fn counter_cannot_wrap_to_bypass_limit() {
+        let mut visitor = (u32::MAX, 100);
+        assert!(
+            consume_budget(&mut visitor, 101, 60, 60),
+            "saturated counter remains blocked"
+        );
+    }
 }

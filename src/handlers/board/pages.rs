@@ -2,12 +2,12 @@ use super::{
     activity_html_cache_control, admin_scoped_csrf_token, board_access_cookie_from_jar,
     board_access_denied_response, board_access_preflight, board_activity_markers_from_jar,
     can_view_board, current_theme_from_jar, db, ensure_csrf_for_request, has_nsfw_consent, header,
-    latest_visible_thread_marker_tuple, prune_board_activity_markers, remember_board_activity,
-    remember_visible_thread_activity, render, sha256_hex, templates,
-    thread_activity_markers_from_jar, user_preferences_from_jar, AppError, AppState,
-    BoardAccessContext, BoardAccessDecision, BoardAccessRequirement, CookieJar, HashMap, HashSet,
-    HeaderMap, HeaderValue, Html, Path, Query, Redirect, Response, Result, SecureCookieContext,
-    State, StatusCode, ADMIN_SESSION_COOKIE, CONFIG, PREVIEW_REPLIES, THREADS_PER_PAGE,
+    index_reply_previews, index_threads_per_page, latest_visible_thread_marker_tuple,
+    prune_board_activity_markers, remember_board_activity, remember_visible_thread_activity,
+    render, sha256_hex, templates, thread_activity_markers_from_jar, user_preferences_from_jar,
+    AppError, AppState, BoardAccessContext, BoardAccessDecision, BoardAccessRequirement, CookieJar,
+    HashMap, HashSet, HeaderMap, HeaderValue, Html, Path, Query, Redirect, Response, Result,
+    SecureCookieContext, State, StatusCode, ADMIN_SESSION_COOKIE, CONFIG,
 };
 use axum::response::IntoResponse as _;
 
@@ -287,8 +287,8 @@ pub(in crate::server) async fn board_index(
                 &conn,
                 board,
                 page,
-                THREADS_PER_PAGE,
-                PREVIEW_REPLIES,
+                index_threads_per_page(),
+                index_reply_previews(),
                 is_admin,
             )?;
             let banner_selection = crate::banner::resolve_board_banner(

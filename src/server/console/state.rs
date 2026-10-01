@@ -1,13 +1,15 @@
 //! Typed state and keyboard transitions for the full-screen console.
 
+use super::browse::ViewFilter;
+use super::forms::{handle_form_key, FormAction};
+pub use super::forms::{FieldValue, FormField, FormFieldId, FormKind, FormState};
 use super::input::KeyEvent;
+use super::telemetry::{timestamp, TaskRow};
 use std::fmt;
 use std::time::{Duration, Instant};
 
 /// Duration for transient success and information notices.
 const NOTICE_TTL: Duration = Duration::from_secs(8);
-/// Maximum character count accepted by a password field.
-const MAX_PASSWORD_CHARS: usize = 256;
 
 /// Whether the terminal can display the console and its dialogs.
 #[must_use]
@@ -21,8 +23,14 @@ pub enum Screen {
     /// Live operational overview.
     #[default]
     Dashboard,
+    /// Durable and runtime background work.
+    Tasks,
     /// Per-board content table.
     Boards,
+    /// Runtime diagnostics and account/moderation summaries.
+    System,
+    /// Explicit nonsecret runtime and restart configuration.
+    Configuration,
     /// Application log viewer.
     Logs,
     /// Contextual keyboard reference.
@@ -34,9 +42,11 @@ impl Screen {
     const fn from_number(number: char) -> Option<Self> {
         match number {
             '1' => Some(Self::Dashboard),
-            '2' => Some(Self::Boards),
-            '3' => Some(Self::Logs),
-            '4' => Some(Self::Help),
+            '2' => Some(Self::Tasks),
+            '3' => Some(Self::Boards),
+            '4' => Some(Self::Logs),
+            '5' => Some(Self::System),
+            '6' => Some(Self::Configuration),
             _ => None,
         }
     }
@@ -174,514 +184,18 @@ impl Default for LogViewState {
     }
 }
 
-/// Administration form purpose.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FormKind {
-    /// Create a board and choose media policy defaults.
-    CreateBoard,
-    /// Create an administrator account.
-    CreateAdmin,
-    /// Select a thread for permanent deletion.
-    DeleteThread,
-}
-
-impl FormKind {
-    /// Return the concise form title.
-    #[must_use]
-    pub const fn title(self) -> &'static str {
-        match self {
-            Self::CreateBoard => "Create board",
-            Self::CreateAdmin => "Create administrator",
-            Self::DeleteThread => "Delete thread",
-        }
-    }
-
-    /// Return the form's operator-facing description.
-    #[must_use]
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::CreateBoard => "Set the board identity and initial media policy.",
-            Self::CreateAdmin => "Credentials are masked and never written to the console log.",
-            Self::DeleteThread => "Enter a thread ID. A separate confirmation follows.",
-        }
-    }
-}
-
-/// Stable identifier for a form field.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FormFieldId {
-    /// Board URL segment.
-    BoardShort,
-    /// Board display name.
-    BoardName,
-    /// Board description.
-    BoardDescription,
-    /// Adult-content designation.
-    BoardNsfw,
-    /// Image-upload policy.
-    BoardImages,
-    /// Video-upload policy.
-    BoardVideo,
-    /// Audio-upload policy.
-    BoardAudio,
-    /// Administrator username.
-    AdminUsername,
-    /// Administrator password.
-    AdminPassword,
-    /// Repeated administrator password.
-    AdminPasswordConfirm,
-    /// Thread database identifier.
-    ThreadId,
-}
-
-/// Editable form value.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FieldValue {
-    /// Single-line text.
-    Text(String),
-    /// Boolean toggle.
-    Toggle(bool),
-}
-
-/// One reusable form field.
-#[derive(Clone, PartialEq, Eq)]
-pub struct FormField {
-    /// Stable field identifier.
-    pub id: FormFieldId,
-    /// Visible label.
-    pub label: &'static str,
-    /// Context shown below the focused field.
-    pub help: &'static str,
-    /// Mutable value.
-    pub value: FieldValue,
-    /// Whether text must be masked.
-    pub secret: bool,
-    /// Maximum accepted character count for text values.
-    max_chars: usize,
-}
-
-impl fmt::Debug for FormField {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = match (&self.value, self.secret) {
-            (FieldValue::Text(_), true) => "<redacted>".to_owned(),
-            (FieldValue::Text(value), false) => value.clone(),
-            (FieldValue::Toggle(value), _) => value.to_string(),
-        };
-        formatter
-            .debug_struct("FormField")
-            .field("id", &self.id)
-            .field("label", &self.label)
-            .field("value", &value)
-            .field("secret", &self.secret)
-            .finish_non_exhaustive()
-    }
-}
-
-impl FormField {
-    /// Construct a plain text field.
-    const fn text(
-        id: FormFieldId,
-        label: &'static str,
-        help: &'static str,
-        max_chars: usize,
-    ) -> Self {
-        Self {
-            id,
-            label,
-            help,
-            value: FieldValue::Text(String::new()),
-            secret: false,
-            max_chars,
-        }
-    }
-
-    /// Construct a masked text field.
-    const fn secret(id: FormFieldId, label: &'static str, help: &'static str) -> Self {
-        Self {
-            id,
-            label,
-            help,
-            value: FieldValue::Text(String::new()),
-            secret: true,
-            max_chars: MAX_PASSWORD_CHARS,
-        }
-    }
-
-    /// Construct a boolean field.
-    const fn toggle(
-        id: FormFieldId,
-        label: &'static str,
-        help: &'static str,
-        enabled: bool,
-    ) -> Self {
-        Self {
-            id,
-            label,
-            help,
-            value: FieldValue::Toggle(enabled),
-            secret: false,
-            max_chars: 0,
-        }
-    }
-
-    /// Return the text value when this is a text field.
-    #[must_use]
-    pub fn text_value(&self) -> Option<&str> {
-        match &self.value {
-            FieldValue::Text(value) => Some(value),
-            FieldValue::Toggle(_) => None,
-        }
-    }
-
-    /// Return the toggle value when this is a toggle field.
-    const fn toggle_value(&self) -> Option<bool> {
-        match &self.value {
-            FieldValue::Toggle(value) => Some(*value),
-            FieldValue::Text(_) => None,
-        }
-    }
-}
-
-/// Interactive modal form.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FormState {
-    /// Administrative operation being collected.
-    pub kind: FormKind,
-    /// Ordered form fields.
-    pub fields: Vec<FormField>,
-    /// Focused field index.
-    pub focused: usize,
-    /// Cursor position in Unicode scalar values for the focused text field.
-    pub cursor: usize,
-    /// Inline validation error.
-    pub error: Option<String>,
-}
-
-impl FormState {
-    /// Construct a form with safe operator defaults.
-    #[must_use]
-    pub fn new(kind: FormKind) -> Self {
-        let fields = match kind {
-            FormKind::CreateBoard => vec![
-                FormField::text(
-                    FormFieldId::BoardShort,
-                    "Short name",
-                    "1-8 ASCII letters or numbers; used in /board/ URLs.",
-                    8,
-                ),
-                FormField::text(
-                    FormFieldId::BoardName,
-                    "Display name",
-                    "Human-readable board name.",
-                    80,
-                ),
-                FormField::text(
-                    FormFieldId::BoardDescription,
-                    "Description",
-                    "Optional concise purpose shown to visitors.",
-                    240,
-                ),
-                FormField::toggle(
-                    FormFieldId::BoardNsfw,
-                    "NSFW board",
-                    "Marks the board as adult content.",
-                    false,
-                ),
-                FormField::toggle(
-                    FormFieldId::BoardImages,
-                    "Image uploads",
-                    "Allow image attachments.",
-                    true,
-                ),
-                FormField::toggle(
-                    FormFieldId::BoardVideo,
-                    "Video uploads",
-                    "Allow video attachments.",
-                    true,
-                ),
-                FormField::toggle(
-                    FormFieldId::BoardAudio,
-                    "Audio uploads",
-                    "Allow audio attachments.",
-                    false,
-                ),
-            ],
-            FormKind::CreateAdmin => vec![
-                FormField::text(
-                    FormFieldId::AdminUsername,
-                    "Username",
-                    "3-32 ASCII letters, numbers, underscores, or dashes.",
-                    32,
-                ),
-                FormField::secret(
-                    FormFieldId::AdminPassword,
-                    "Password",
-                    "At least 8 characters; input is masked.",
-                ),
-                FormField::secret(
-                    FormFieldId::AdminPasswordConfirm,
-                    "Confirm password",
-                    "Repeat the password exactly.",
-                ),
-            ],
-            FormKind::DeleteThread => vec![FormField::text(
-                FormFieldId::ThreadId,
-                "Thread ID",
-                "Positive numeric database ID; deletion cannot be undone.",
-                20,
-            )],
-        };
-        Self {
-            kind,
-            fields,
-            focused: 0,
-            cursor: 0,
-            error: None,
-        }
-    }
-
-    /// Return the focused field.
-    #[must_use]
-    pub fn focused_field(&self) -> Option<&FormField> {
-        self.fields.get(self.focused)
-    }
-
-    /// Return a field by stable identifier.
-    fn field(&self, id: FormFieldId) -> Option<&FormField> {
-        self.fields.iter().find(|field| field.id == id)
-    }
-
-    /// Return a required text field or an internal form error.
-    fn text(&self, id: FormFieldId) -> Result<&str, String> {
-        self.field(id)
-            .and_then(FormField::text_value)
-            .ok_or_else(|| "The form could not read a required field.".to_owned())
-    }
-
-    /// Return a required toggle field or an internal form error.
-    fn toggle(&self, id: FormFieldId) -> Result<bool, String> {
-        self.field(id)
-            .and_then(FormField::toggle_value)
-            .ok_or_else(|| "The form could not read a required setting.".to_owned())
-    }
-
-    /// Move focus by one field, wrapping at either end.
-    fn move_focus(&mut self, backwards: bool) {
-        let count = self.fields.len();
-        if count == 0 {
-            return;
-        }
-        self.focused = if backwards {
-            self.focused
-                .checked_sub(1)
-                .unwrap_or_else(|| count.saturating_sub(1))
-        } else {
-            self.focused.saturating_add(1) % count
-        };
-        self.cursor = self
-            .focused_field()
-            .and_then(FormField::text_value)
-            .map_or(0, |value| value.chars().count());
-        self.error = None;
-    }
-
-    /// Insert one character into the focused text field.
-    fn insert_char(&mut self, character: char) {
-        if character.is_control() {
-            return;
-        }
-        let cursor = self.cursor;
-        let Some(field) = self.fields.get_mut(self.focused) else {
-            return;
-        };
-        let FieldValue::Text(value) = &mut field.value else {
-            return;
-        };
-        if value.chars().count() >= field.max_chars {
-            self.error = Some(format!(
-                "{} accepts at most {} characters.",
-                field.label, field.max_chars
-            ));
-            return;
-        }
-        let byte_index = value
-            .char_indices()
-            .nth(cursor)
-            .map_or(value.len(), |(index, _)| index);
-        value.insert(byte_index, character);
-        self.cursor = cursor.saturating_add(1);
-        self.error = None;
-    }
-
-    /// Insert sanitized pasted content into the focused text field.
-    fn insert_paste(&mut self, content: &str) {
-        let Some(field) = self.focused_field() else {
-            return;
-        };
-        let Some(value) = field.text_value() else {
-            return;
-        };
-        let remaining = field.max_chars.saturating_sub(value.chars().count());
-        // One excess character supplies the existing length error without
-        // repeatedly allocating it for the rest of a large clipboard.
-        for character in content
-            .chars()
-            .filter(|character| !character.is_control())
-            .take(remaining + 1)
-        {
-            self.insert_char(character);
-        }
-    }
-
-    /// Remove the character immediately before the cursor.
-    fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let target = self.cursor.saturating_sub(1);
-        let Some(field) = self.fields.get_mut(self.focused) else {
-            return;
-        };
-        let FieldValue::Text(value) = &mut field.value else {
-            return;
-        };
-        let Some((byte_index, _)) = value.char_indices().nth(target) else {
-            return;
-        };
-        value.remove(byte_index);
-        self.cursor = target;
-        self.error = None;
-    }
-
-    /// Remove the character at the cursor.
-    fn delete(&mut self) {
-        let Some(field) = self.fields.get_mut(self.focused) else {
-            return;
-        };
-        let FieldValue::Text(value) = &mut field.value else {
-            return;
-        };
-        let Some((byte_index, _)) = value.char_indices().nth(self.cursor) else {
-            return;
-        };
-        value.remove(byte_index);
-        self.error = None;
-    }
-
-    /// Move the cursor inside the focused text field.
-    fn move_cursor(&mut self, right: bool) {
-        let length = self
-            .focused_field()
-            .and_then(FormField::text_value)
-            .map_or(0, |value| value.chars().count());
-        self.cursor = if right {
-            self.cursor.saturating_add(1).min(length)
-        } else {
-            self.cursor.saturating_sub(1)
-        };
-    }
-
-    /// Move the cursor to the start or end of the focused text field.
-    fn move_cursor_to_edge(&mut self, end: bool) {
-        self.cursor = if end {
-            self.focused_field()
-                .and_then(FormField::text_value)
-                .map_or(0, |value| value.chars().count())
-        } else {
-            0
-        };
-    }
-
-    /// Clear the focused text field.
-    fn clear_text(&mut self) {
-        let Some(field) = self.fields.get_mut(self.focused) else {
-            return;
-        };
-        if let FieldValue::Text(value) = &mut field.value {
-            value.clear();
-            self.cursor = 0;
-            self.error = None;
-        }
-    }
-
-    /// Flip the focused boolean field.
-    fn toggle_focused(&mut self) {
-        let Some(field) = self.fields.get_mut(self.focused) else {
-            return;
-        };
-        if let FieldValue::Toggle(value) = &mut field.value {
-            *value = !*value;
-            self.error = None;
-        }
-    }
-
-    /// Validate and convert this form into an operation request.
-    fn request(&self) -> Result<OperationRequest, String> {
-        match self.kind {
-            FormKind::CreateBoard => {
-                let short = self
-                    .text(FormFieldId::BoardShort)?
-                    .trim()
-                    .to_ascii_lowercase();
-                if short.is_empty()
-                    || short.len() > 8
-                    || !short
-                        .chars()
-                        .all(|character| character.is_ascii_alphanumeric())
-                {
-                    return Err("Short name must be 1-8 ASCII letters or numbers.".to_owned());
-                }
-                let name = self.text(FormFieldId::BoardName)?.trim().to_owned();
-                if name.is_empty() {
-                    return Err("Display name is required.".to_owned());
-                }
-                Ok(OperationRequest::CreateBoard {
-                    short,
-                    name,
-                    description: self.text(FormFieldId::BoardDescription)?.trim().to_owned(),
-                    nsfw: self.toggle(FormFieldId::BoardNsfw)?,
-                    allow_images: self.toggle(FormFieldId::BoardImages)?,
-                    allow_video: self.toggle(FormFieldId::BoardVideo)?,
-                    allow_audio: self.toggle(FormFieldId::BoardAudio)?,
-                })
-            }
-            FormKind::CreateAdmin => {
-                let username = self.text(FormFieldId::AdminUsername)?.trim().to_owned();
-                if !(3..=32).contains(&username.len())
-                    || !username.chars().all(|character| {
-                        character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
-                    })
-                {
-                    return Err(
-                        "Username must be 3-32 ASCII letters, numbers, underscores, or dashes."
-                            .to_owned(),
-                    );
-                }
-                let password = self.text(FormFieldId::AdminPassword)?.to_owned();
-                crate::utils::crypto::validate_password(&password)
-                    .map_err(|error| error.to_string())?;
-                if password != self.text(FormFieldId::AdminPasswordConfirm)? {
-                    return Err("Passwords do not match.".to_owned());
-                }
-                Ok(OperationRequest::CreateAdmin { username, password })
-            }
-            FormKind::DeleteThread => {
-                let raw = self.text(FormFieldId::ThreadId)?.trim();
-                let thread_id = raw
-                    .parse::<i64>()
-                    .map_err(|_| "Thread ID must be a positive whole number.".to_owned())?;
-                if thread_id <= 0 {
-                    return Err("Thread ID must be a positive whole number.".to_owned());
-                }
-                Ok(OperationRequest::DeleteThread { thread_id })
-            }
-        }
-    }
-}
-
 /// Modal content layered over the active screen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Dialog {
+    /// Read-only contextual details, never raw payloads.
+    Inspect {
+        /// Human-readable title.
+        title: String,
+        /// Safe, labeled detail lines.
+        lines: Vec<String>,
+        /// Scroll position within the detail.
+        scroll: u16,
+    },
     /// Graceful server-shutdown confirmation.
     ConfirmQuit,
     /// Administrative data-entry form.
@@ -709,6 +223,22 @@ pub struct ConsoleState {
     pub notice: Option<Notice>,
     /// Board-table selection.
     pub boards: BoardListState,
+    /// Durable task selection, retaining identity across refreshes.
+    pub tasks: BoardListState,
+    /// Selected safe task detail from the latest snapshot.
+    pub selected_task: Option<TaskRow>,
+    /// Content search and sort.
+    pub board_filter: ViewFilter,
+    /// Task search and lifecycle filter.
+    pub task_filter: ViewFilter,
+    /// Log search and severity filter.
+    pub log_filter: ViewFilter,
+    /// Last visible log record for read-only inspection.
+    pub selected_log: Option<String>,
+    /// Origin screen restored when contextual help closes.
+    pub help_return: Option<Screen>,
+    /// Scroll position for System and Configuration.
+    pub system_scroll: u16,
     /// Log scrolling and follow mode.
     pub logs: LogViewState,
     /// Vertical viewport for overview panels on short terminals.
@@ -718,6 +248,93 @@ pub struct ConsoleState {
 }
 
 impl ConsoleState {
+    /// Reconcile filtered selections with the latest authoritative snapshot.
+    pub fn reconcile_data(&mut self, stats: &super::ChanStats) {
+        let boards = self.board_filter.boards(&stats.board_rows);
+        self.board_filter.row_count = boards.len();
+        self.boards.reconcile_rows(&boards);
+        let tasks: Vec<_> = stats
+            .operator
+            .tasks
+            .iter()
+            .filter(|task| self.task_filter.task_matches(task))
+            .collect();
+        if let Some(id) = &self.tasks.selected_short {
+            if let Some(index) = tasks.iter().position(|task| &task.id == id) {
+                self.tasks.selected = Some(index);
+            }
+        }
+        self.tasks.reconcile(tasks.len());
+        self.task_filter.row_count = tasks.len();
+        self.selected_task = self
+            .tasks
+            .selected
+            .and_then(|index| tasks.get(index))
+            .map(|task| (*task).clone());
+        self.tasks.selected_short = self.selected_task.as_ref().map(|task| task.id.clone());
+    }
+
+    /// Return the search state for the current destination.
+    pub const fn active_filter(&mut self) -> Option<&mut ViewFilter> {
+        match self.screen {
+            Screen::Boards => Some(&mut self.board_filter),
+            Screen::Tasks => Some(&mut self.task_filter),
+            Screen::Logs => Some(&mut self.log_filter),
+            _ => None,
+        }
+    }
+
+    /// Open contextual task or content details without launching side effects.
+    fn inspect_selection(&mut self) {
+        let detail = match self.screen {
+            Screen::Tasks => self.selected_task.as_ref().map(|task| (task.kind.clone(), vec![
+                format!("Identity: {}", task.id), format!("State: {}", task.state.label()),
+                format!("Item: {}", task.item),
+                format!("Attempts: {}", task.attempts.map_or_else(|| "Not published".to_owned(), |value| value.to_string())),
+                format!("Created: {}", task.created_at.map_or_else(|| "Not published".to_owned(), timestamp)),
+                format!("State changed: {}", task.changed_at.map_or_else(|| "Not published".to_owned(), timestamp)),
+                task.detail.clone(), "Per-job cancellation/retry and worker identity are not published by this console.".to_owned(),
+            ])),
+            Screen::Logs => self.selected_log.as_ref().map(|line| ("Log entry · last visible record".to_owned(), vec![line.clone()])),
+            Screen::Boards => self.boards.selected_short.as_ref().map(|short| (format!("Board /{short}/"), vec![
+                format!("Route: /{short}/"), "Manage board policies and moderation in the authenticated /admin interface.".to_owned(),
+                "C creates a board; D selects a thread for confirmed deletion.".to_owned(),
+            ])),
+            _ => None,
+        };
+        if let Some((title, lines)) = detail {
+            self.dialog = Some(Dialog::Inspect {
+                title,
+                lines,
+                scroll: 0,
+            });
+        }
+    }
+
+    /// Cycle the suite's primary destinations without entering the help overlay.
+    fn cycle_screen(&mut self, backward: bool) {
+        let screens = [
+            Screen::Dashboard,
+            Screen::Tasks,
+            Screen::Boards,
+            Screen::Logs,
+            Screen::System,
+            Screen::Configuration,
+        ];
+        let index = screens
+            .iter()
+            .position(|screen| *screen == self.screen)
+            .unwrap_or(0);
+        let next = if backward {
+            (index + screens.len() - 1) % screens.len()
+        } else {
+            (index + 1) % screens.len()
+        };
+        if let Some(screen) = screens.get(next) {
+            self.screen = *screen;
+        }
+    }
+
     /// Remove a transient notice after its display period.
     pub fn expire_notice(&mut self, now: Instant) {
         if self
@@ -769,6 +386,32 @@ impl ConsoleState {
             return self.handle_dialog(dialog, key);
         }
 
+        if self.screen == Screen::Help
+            && matches!(key, KeyEvent::Escape | KeyEvent::Character('?' | 'q' | 'h'))
+        {
+            self.screen = self.help_return.take().unwrap_or_default();
+            return ConsoleAction::None;
+        }
+        if let Some(filter) = self.active_filter() {
+            if filter.editing {
+                filter.edit(key);
+                self.selected_log = None;
+                return ConsoleAction::None;
+            }
+            if matches!(key, KeyEvent::Character('/')) {
+                filter.editing = true;
+                return ConsoleAction::None;
+            }
+            if matches!(key, KeyEvent::Character('s' | 'S')) {
+                filter.mode = filter.mode.wrapping_add(1);
+                self.selected_log = None;
+                return ConsoleAction::None;
+            }
+            if matches!(key, KeyEvent::Escape) && !filter.query.is_empty() {
+                filter.query.clear();
+                return ConsoleAction::None;
+            }
+        }
         if let KeyEvent::Character(character) = key {
             if let Some(screen) = Screen::from_number(*character) {
                 self.screen = screen;
@@ -779,7 +422,15 @@ impl ConsoleState {
 
         match key {
             KeyEvent::Character('q' | 'Q') => self.dialog = Some(Dialog::ConfirmQuit),
-            KeyEvent::Character('?' | 'h' | 'H') => self.screen = Screen::Help,
+            KeyEvent::Character('?' | 'h' | 'H') => {
+                self.help_return = Some(self.screen);
+                self.screen = Screen::Help;
+                self.help_scroll = 0;
+            }
+            KeyEvent::Character('t' | 'T') => self.screen = Screen::Tasks,
+            KeyEvent::Tab => self.cycle_screen(false),
+            KeyEvent::BackTab => self.cycle_screen(true),
+            KeyEvent::Enter => self.inspect_selection(),
             KeyEvent::Character('g' | 'G') => self.screen = Screen::Dashboard,
             KeyEvent::Character('b' | 'B') => self.screen = Screen::Boards,
             KeyEvent::Character('l' | 'L') => self.screen = Screen::Logs,
@@ -814,6 +465,18 @@ impl ConsoleState {
     /// Handle an input event while a modal is active.
     fn handle_dialog(&mut self, mut dialog: Dialog, key: &KeyEvent) -> ConsoleAction {
         match &mut dialog {
+            Dialog::Inspect { scroll, .. } => {
+                match key {
+                    KeyEvent::Escape | KeyEvent::Character('q') => return ConsoleAction::None,
+                    KeyEvent::Up | KeyEvent::Character('k') => *scroll = scroll.saturating_sub(1),
+                    KeyEvent::Down | KeyEvent::Character('j') => *scroll = scroll.saturating_add(1),
+                    KeyEvent::PageUp => *scroll = scroll.saturating_sub(5),
+                    KeyEvent::PageDown => *scroll = scroll.saturating_add(5),
+                    KeyEvent::Home => *scroll = 0,
+                    _ => {}
+                }
+                self.dialog = Some(dialog);
+            }
             Dialog::ConfirmQuit => match key {
                 KeyEvent::Enter | KeyEvent::Character('y' | 'Y') => {
                     return ConsoleAction::Shutdown { forced: false };
@@ -861,9 +524,30 @@ impl ConsoleState {
         ConsoleAction::None
     }
 
+    /// Move through the bounded task table without wrapping or losing identity.
+    fn handle_tasks_key(&mut self, key: &KeyEvent) {
+        let count = self.task_filter.row_count;
+        match key {
+            KeyEvent::Up | KeyEvent::Character('k' | 'K') => self.tasks.move_by(-1, count),
+            KeyEvent::Down | KeyEvent::Character('j' | 'J') => self.tasks.move_by(1, count),
+            KeyEvent::PageUp => self.tasks.page_by(-1, count),
+            KeyEvent::PageDown => self.tasks.page_by(1, count),
+            KeyEvent::Home => {
+                self.tasks.selected_short = None;
+                self.tasks.selected = (count > 0).then_some(0);
+            }
+            KeyEvent::End => {
+                self.tasks.selected_short = None;
+                self.tasks.selected = (count > 0).then_some(count.saturating_sub(1));
+            }
+            _ => {}
+        }
+    }
+
     /// Handle navigation local to the active primary screen.
     fn handle_screen_key(&mut self, key: &KeyEvent, board_count: usize) {
         match self.screen {
+            Screen::Tasks => self.handle_tasks_key(key),
             Screen::Boards => match key {
                 KeyEvent::Up | KeyEvent::Character('k' | 'K') => {
                     self.boards.move_by(-1, board_count);
@@ -917,15 +601,18 @@ impl ConsoleState {
                     self.logs.horizontal_offset = self.logs.horizontal_offset.saturating_add(4);
                 }
                 KeyEvent::Home => self.logs.horizontal_offset = 0,
+                KeyEvent::Character('p' | 'P') => self.logs.follow = !self.logs.follow,
                 KeyEvent::End | KeyEvent::Character('f' | 'F') => {
                     self.logs.rows_from_bottom = 0;
                     self.logs.follow = true;
                 }
                 _ => {}
             },
-            Screen::Dashboard | Screen::Help => {
+            Screen::Dashboard | Screen::Help | Screen::System | Screen::Configuration => {
                 let offset = if self.screen == Screen::Help {
                     &mut self.help_scroll
+                } else if matches!(self.screen, Screen::System | Screen::Configuration) {
+                    &mut self.system_scroll
                 } else {
                     &mut self.overview_scroll
                 };
@@ -1024,7 +711,10 @@ impl OperationRequest {
     /// Return whether completion changes statistics shown in the console.
     #[must_use]
     pub const fn refreshes_stats(&self) -> bool {
-        matches!(self, Self::CreateBoard { .. } | Self::DeleteThread { .. })
+        matches!(
+            self,
+            Self::CreateBoard { .. } | Self::DeleteThread { .. } | Self::CreateAdmin { .. }
+        )
     }
 }
 
@@ -1062,361 +752,6 @@ impl fmt::Debug for OperationRequest {
     }
 }
 
-/// Intermediate outcome of a key press inside a form.
-enum FormAction {
-    /// Preserve the edited form.
-    KeepOpen,
-    /// Proceed with a validated operation.
-    Submit(OperationRequest),
-}
-
-/// Apply one editing or focus event to a form.
-fn handle_form_key(form: &mut FormState, key: &KeyEvent) -> Option<FormAction> {
-    match key {
-        KeyEvent::Tab | KeyEvent::Down => form.move_focus(false),
-        KeyEvent::BackTab | KeyEvent::Up => form.move_focus(true),
-        KeyEvent::Left => form.move_cursor(false),
-        KeyEvent::Right => form.move_cursor(true),
-        KeyEvent::Home => form.move_cursor_to_edge(false),
-        KeyEvent::End => form.move_cursor_to_edge(true),
-        KeyEvent::Backspace => form.backspace(),
-        KeyEvent::Delete => form.delete(),
-        KeyEvent::ClearLine => form.clear_text(),
-        KeyEvent::Character(' ')
-            if form
-                .focused_field()
-                .is_some_and(|field| matches!(field.value, FieldValue::Toggle(_))) =>
-        {
-            form.toggle_focused();
-        }
-        KeyEvent::Character(character) | KeyEvent::RepeatCharacter(character) => {
-            form.insert_char(*character);
-        }
-        KeyEvent::Paste(content) => form.insert_paste(content),
-        KeyEvent::Enter => {
-            let final_field = form.focused.saturating_add(1) >= form.fields.len();
-            if final_field {
-                match form.request() {
-                    Ok(request) => return Some(FormAction::Submit(request)),
-                    Err(error) => form.error = Some(error),
-                }
-            } else {
-                form.move_focus(false);
-            }
-        }
-        KeyEvent::Submit => match form.request() {
-            Ok(request) => return Some(FormAction::Submit(request)),
-            Err(error) => form.error = Some(error),
-        },
-        KeyEvent::Escape
-        | KeyEvent::PageUp
-        | KeyEvent::PageDown
-        | KeyEvent::ForceQuit
-        | KeyEvent::Resize => return None,
-    }
-    Some(FormAction::KeepOpen)
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Type text into the currently focused form field.
-    fn type_text(form: &mut FormState, value: &str) {
-        for character in value.chars() {
-            form.insert_char(character);
-        }
-    }
-
-    #[test]
-    fn escape_returns_to_dashboard_without_opening_quit_confirmation() {
-        let mut state = ConsoleState {
-            screen: Screen::Logs,
-            ..ConsoleState::default()
-        };
-
-        let action = state.handle_key(&KeyEvent::Escape, 0, (80, 24));
-
-        assert_eq!(
-            action,
-            ConsoleAction::None,
-            "escape should not stop the server"
-        );
-        assert_eq!(
-            state.screen,
-            Screen::Dashboard,
-            "escape should navigate back"
-        );
-        assert!(state.dialog.is_none(), "escape should not open a dialog");
-    }
-
-    #[test]
-    fn board_selection_stays_valid_when_rows_change() {
-        let mut selection = BoardListState {
-            selected: Some(8),
-            ..BoardListState::default()
-        };
-
-        selection.reconcile(3);
-        assert_eq!(
-            selection.selected,
-            Some(2),
-            "selection should clamp to the final row"
-        );
-
-        selection.reconcile(0);
-        assert_eq!(selection.selected, None, "an empty table has no selection");
-    }
-
-    #[test]
-    fn log_scrolling_disables_follow_and_end_restores_it() {
-        let mut state = ConsoleState {
-            screen: Screen::Logs,
-            ..ConsoleState::default()
-        };
-
-        state.handle_key(&KeyEvent::PageUp, 0, (80, 24));
-        assert!(
-            !state.logs.follow,
-            "manual scrolling should pause follow mode"
-        );
-        assert_eq!(
-            state.logs.rows_from_bottom, 10,
-            "page-up should move ten rows"
-        );
-
-        state.handle_key(&KeyEvent::End, 0, (80, 24));
-        assert!(state.logs.follow, "end should resume follow mode");
-        assert_eq!(
-            state.logs.rows_from_bottom, 0,
-            "end should jump to the newest line"
-        );
-    }
-
-    #[test]
-    fn passwords_are_redacted_from_debug_output() {
-        let request = OperationRequest::CreateAdmin {
-            username: "operator".to_owned(),
-            password: "correct-horse-battery-staple".to_owned(),
-        };
-
-        let debug = format!("{request:?}");
-
-        assert!(
-            debug.contains("<redacted>"),
-            "debug output should mark redaction"
-        );
-        assert!(
-            !debug.contains("correct-horse-battery-staple"),
-            "debug output must not contain plaintext passwords"
-        );
-    }
-
-    #[test]
-    fn delete_thread_uses_a_separate_destructive_confirmation() {
-        let mut state = ConsoleState::default();
-        state.handle_key(&KeyEvent::Character('d'), 0, (80, 24));
-        let form_dialog = state.dialog.take();
-        assert!(
-            matches!(&form_dialog, Some(Dialog::Form(_))),
-            "delete shortcut should open a form"
-        );
-        let Some(Dialog::Form(mut form)) = form_dialog else {
-            return;
-        };
-        type_text(&mut form, "42");
-        state.dialog = Some(Dialog::Form(form));
-
-        let action = state.handle_key(&KeyEvent::Submit, 0, (80, 24));
-
-        assert_eq!(
-            action,
-            ConsoleAction::None,
-            "confirmation should precede deletion"
-        );
-        assert_eq!(
-            state.dialog,
-            Some(Dialog::ConfirmDelete { thread_id: 42 }),
-            "validated deletion should open the destructive confirmation"
-        );
-    }
-
-    #[test]
-    fn create_admin_rejects_mismatched_passwords() {
-        let mut form = FormState::new(FormKind::CreateAdmin);
-        type_text(&mut form, "operator");
-        form.move_focus(false);
-        type_text(&mut form, "password-one");
-        form.move_focus(false);
-        type_text(&mut form, "password-two");
-
-        let result = form.request();
-
-        assert_eq!(result, Err("Passwords do not match.".to_owned()));
-    }
-    #[test]
-    fn hidden_dialogs_reject_input_but_allow_ctrl_c() {
-        let mut state = ConsoleState {
-            dialog: Some(Dialog::ConfirmDelete { thread_id: 42 }),
-            ..ConsoleState::default()
-        };
-        for size in [(40, 10), (120, 2), (1, 100)] {
-            assert_eq!(
-                state.handle_key(&KeyEvent::Character('y'), 0, size),
-                ConsoleAction::None,
-                "a hidden confirmation must not delete"
-            );
-            assert_eq!(
-                state.dialog,
-                Some(Dialog::ConfirmDelete { thread_id: 42 }),
-                "resize must preserve the pending identity"
-            );
-        }
-        assert_eq!(
-            state.handle_key(&KeyEvent::ForceQuit, 0, (0, 0)),
-            ConsoleAction::Shutdown { forced: true },
-            "Ctrl-C must work at every size"
-        );
-    }
-
-    #[test]
-    fn repeated_enter_cannot_accept_destructive_confirmation() {
-        let mut state = ConsoleState::default();
-        for key in [
-            KeyEvent::Character('d'),
-            KeyEvent::Paste("42".to_owned()),
-            KeyEvent::Enter,
-            KeyEvent::Enter,
-            KeyEvent::RepeatCharacter('y'),
-        ] {
-            assert_eq!(
-                state.handle_key(&key, 0, (80, 24)),
-                ConsoleAction::None,
-                "submission must wait for an explicit confirmation key"
-            );
-        }
-        let request = OperationRequest::DeleteThread { thread_id: 42 };
-        assert_eq!(
-            state.handle_key(&KeyEvent::Character('y'), 0, (80, 24)),
-            ConsoleAction::Submit(request),
-            "only the confirmed thread should be submitted"
-        );
-        for key in [
-            KeyEvent::Enter,
-            KeyEvent::Character('y'),
-            KeyEvent::Character('d'),
-            KeyEvent::Escape,
-        ] {
-            assert_eq!(
-                state.handle_key(&key, 0, (80, 24)),
-                ConsoleAction::None,
-                "progress must prevent duplicate operations"
-            );
-            assert!(
-                matches!(state.dialog, Some(Dialog::Progress { .. })),
-                "in-flight operation must retain its progress state"
-            );
-        }
-    }
-
-    #[test]
-    fn board_selection_tracks_identity_and_page_height() {
-        let mut boards = BoardListState {
-            selected: Some(1),
-            visible_rows: 3,
-            ..BoardListState::default()
-        };
-        boards.reconcile_rows(&[("b".to_owned(), 0, 0), ("c".to_owned(), 0, 0)]);
-        boards.reconcile_rows(&[
-            ("a".to_owned(), 0, 0),
-            ("b".to_owned(), 0, 0),
-            ("c".to_owned(), 0, 0),
-        ]);
-        assert_eq!(
-            boards.selected,
-            Some(2),
-            "inserting a board must not change the selected board"
-        );
-        boards.page_by(-1, 3);
-        assert_eq!(
-            boards.selected,
-            Some(0),
-            "page navigation must use the visible height"
-        );
-        boards.reconcile_rows(&[]);
-        assert!(
-            boards.selected.is_none() && boards.selected_short.is_none(),
-            "empty snapshots must clear selection identity"
-        );
-    }
-
-    #[test]
-    fn form_editing_preserves_unicode_and_limits_large_paste() {
-        let mut form = FormState::new(FormKind::CreateBoard);
-        form.move_focus(false);
-        form.insert_paste("a界e\u{301}🦀");
-        form.move_cursor(false);
-        form.backspace();
-        form.delete();
-        assert_eq!(
-            form.text(FormFieldId::BoardName),
-            Ok("a界e"),
-            "editing must remove complete Unicode scalar values"
-        );
-        form.move_cursor_to_edge(false);
-        form.insert_paste("Z\r\n");
-        assert_eq!(
-            form.text(FormFieldId::BoardName),
-            Ok("Za界e"),
-            "paste must not inject terminal controls"
-        );
-        form.clear_text();
-        form.insert_paste(&"界".repeat(100_000));
-        assert_eq!(
-            form.text(FormFieldId::BoardName)
-                .map(|value| value.chars().count()),
-            Ok(80),
-            "large paste must respect the field limit"
-        );
-        assert!(
-            form.error.is_some(),
-            "overflow must report the length limit"
-        );
-    }
-
-    #[test]
-    fn form_focus_and_repeat_keys_do_not_trigger_global_actions() {
-        let mut state = ConsoleState::default();
-        state.handle_key(&KeyEvent::RepeatCharacter('a'), 0, (80, 24));
-        assert!(
-            state.dialog.is_none(),
-            "a held action key must not reopen forms"
-        );
-        state.handle_key(&KeyEvent::Character('a'), 0, (80, 24));
-        for key in [
-            KeyEvent::BackTab,
-            KeyEvent::RepeatCharacter('q'),
-            KeyEvent::Character('1'),
-        ] {
-            state.handle_key(&key, 0, (80, 24));
-        }
-        assert!(
-            matches!(state.dialog, Some(Dialog::Form(_))),
-            "form must retain focus"
-        );
-        let Some(Dialog::Form(form)) = &state.dialog else {
-            return;
-        };
-        assert_eq!(form.focused, 2, "back-tab must wrap to the final field");
-        assert_eq!(
-            form.text(FormFieldId::AdminPasswordConfirm),
-            Ok("q1"),
-            "global shortcuts and repeated text belong to the focused field"
-        );
-        state.handle_key(&KeyEvent::Escape, 0, (80, 24));
-        assert!(
-            state.dialog.is_none(),
-            "escape must cancel without submission"
-        );
-    }
-}
+#[path = "state_tests.rs"]
+mod tests;

@@ -12,8 +12,33 @@ use anyhow::{Context, Result};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 #[cfg(all(feature = "tls-self-signed", unix))]
-use std::process::{Child, ExitStatus};
-use std::process::{Command, Output};
+use std::process::ExitStatus;
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::Mutex;
+
+/// Coordinates fork/exec so another child cannot retain a freshly copied
+/// executable's writable descriptor until its own exec (Rust issue #114554).
+/// Only spawning is serialized; child execution and tests remain parallel.
+static COMMAND_SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+/// Spawns a subprocess after any earlier fork has completed its exec handshake.
+fn spawn_command(command: &mut Command) -> Result<Child> {
+    let _guard = COMMAND_SPAWN_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("CLI test subprocess spawn lock was poisoned"))?;
+    command.spawn().context("spawn CLI test subprocess")
+}
+
+/// Captures subprocess output without holding the spawn lock while it runs.
+fn command_output(command: &mut Command) -> Result<Output> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    spawn_command(command)?
+        .wait_with_output()
+        .context("capture CLI test subprocess output")
+}
 
 /// Builds a CLI command rooted in the supplied working directory.
 fn cli_command(binary: &Path, args: &[&str], current_dir: &Path) -> Command {
@@ -24,9 +49,7 @@ fn cli_command(binary: &Path, args: &[&str], current_dir: &Path) -> Command {
 
 /// Runs one non-server CLI command with Tor support disabled.
 fn run_cli(binary: &Path, args: &[&str], current_dir: &Path) -> Result<Output> {
-    cli_command(binary, args, current_dir)
-        .env("CHAN_TOR_SUPPORT", "0")
-        .output()
+    command_output(cli_command(binary, args, current_dir).env("CHAN_TOR_SUPPORT", "0"))
         .context("run rustchan-cli")
 }
 
@@ -68,9 +91,8 @@ impl TlsProcessGuard {
     /// Requests normal Unix termination and waits for the server to exit.
     async fn terminate_gracefully(&mut self, log_path: &Path) -> Result<ExitStatus> {
         let pid = self.child_mut()?.id().to_string();
-        let signal_status = Command::new("kill")
-            .args(["-TERM", &pid])
-            .status()
+        let signal_status = spawn_command(Command::new("kill").args(["-TERM", &pid]))?
+            .wait()
             .context("run the Unix kill utility")?;
         if !signal_status.success() {
             bail!("failed to send SIGTERM to TLS child {pid}: {signal_status}");
@@ -234,29 +256,30 @@ fn spawn_tls_process(
         .open(log_path)
         .context("open TLS server log")?;
     let stderr = stdout.try_clone().context("clone TLS server log")?;
-    let child = cli_command(binary, &["--data-dir", data_dir_text, "serve"], root)
-        .env("RUSTCHAN_SPAWNED", "1")
-        .env("CHAN_HOST", "127.0.0.1")
-        .env("CHAN_PORT", main_port.to_string())
-        .env("CHAN_BIND", format!("127.0.0.1:{main_port}"))
-        .env("CHAN_TOR_SUPPORT", "0")
-        .env("CHAN_TOR_ONLY", "0")
-        .env("CHAN_REQUIRE_FFMPEG", "0")
-        .env("CHAN_FFMPEG_PATH", "__rustchan_tls_test_no_ffmpeg__")
-        .env("CHAN_FFPROBE_PATH", "__rustchan_tls_test_no_ffprobe__")
-        // Direct HTTPS must mark cookies Secure even when the proxy/tunnel
-        // compatibility toggle is disabled.
-        .env("CHAN_HTTPS_COOKIES", "0")
-        .env("CHAN_PUBLIC_HOSTS", "localhost,127.0.0.1,::1")
-        .env("CHAN_AUTO_FULL_BACKUP_HOURS", "0")
-        .env("CHAN_AUTO_VACUUM_HOURS", "0")
-        .env("CHAN_WAL_CHECKPOINT_SECS", "0")
-        .env("CHAN_POLL_CLEANUP_HOURS", "0")
-        .env("CHAN_WAVEFORM_CACHE_MAX_MB", "0")
-        .stdout(std::process::Stdio::from(stdout))
-        .stderr(std::process::Stdio::from(stderr))
-        .spawn()
-        .context("start TLS server")?;
+    let child = spawn_command(
+        cli_command(binary, &["--data-dir", data_dir_text, "serve"], root)
+            .env("RUSTCHAN_SPAWNED", "1")
+            .env("CHAN_HOST", "127.0.0.1")
+            .env("CHAN_PORT", main_port.to_string())
+            .env("CHAN_BIND", format!("127.0.0.1:{main_port}"))
+            .env("CHAN_TOR_SUPPORT", "0")
+            .env("CHAN_TOR_ONLY", "0")
+            .env("CHAN_REQUIRE_FFMPEG", "0")
+            .env("CHAN_FFMPEG_PATH", "__rustchan_tls_test_no_ffmpeg__")
+            .env("CHAN_FFPROBE_PATH", "__rustchan_tls_test_no_ffprobe__")
+            // Direct HTTPS must mark cookies Secure even when the proxy/tunnel
+            // compatibility toggle is disabled.
+            .env("CHAN_HTTPS_COOKIES", "0")
+            .env("CHAN_PUBLIC_HOSTS", "localhost,127.0.0.1,::1")
+            .env("CHAN_AUTO_FULL_BACKUP_HOURS", "0")
+            .env("CHAN_AUTO_VACUUM_HOURS", "0")
+            .env("CHAN_WAL_CHECKPOINT_SECS", "0")
+            .env("CHAN_POLL_CLEANUP_HOURS", "0")
+            .env("CHAN_WAVEFORM_CACHE_MAX_MB", "0")
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr)),
+    )
+    .context("start TLS server")?;
     Ok(TlsProcessGuard::new(child))
 }
 
@@ -273,8 +296,7 @@ fn help_and_version_do_not_create_runtime_state() -> Result<()> {
         .context("copied CLI path has no parent")?
         .join("rustchan-data");
 
-    let help = cli_command(&copied_cli, &["--help"], root.path())
-        .output()
+    let help = command_output(&mut cli_command(&copied_cli, &["--help"], root.path()))
         .context("run rustchan-cli --help")?;
     assert!(help.status.success(), "help failed: {help:?}");
     assert!(
@@ -286,8 +308,7 @@ fn help_and_version_do_not_create_runtime_state() -> Result<()> {
         "--help must not create adjacent runtime state"
     );
 
-    let version = cli_command(&copied_cli, &["--version"], root.path())
-        .output()
+    let version = command_output(&mut cli_command(&copied_cli, &["--version"], root.path()))
         .context("run rustchan-cli --version")?;
     assert!(version.status.success(), "version failed: {version:?}");
     assert!(

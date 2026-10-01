@@ -103,6 +103,15 @@ fn render_report_rows(view: &AdminPanelViewModel<'_>) -> String {
     for rc in view.moderation.reports {
         let preview = escape_html(rc.post_preview.trim());
         let reason = escape_html(&rc.report.reason);
+        let reason = if rc.report.reason.chars().nth(160).is_some() {
+            let summary: String = rc.report.reason.chars().take(80).collect();
+            format!(
+                r#"<div class="admin-report-summary">{summary}…</div><details class="admin-report-detail"><summary>Full report</summary><p>{reason}</p></details>"#,
+                summary = escape_html(&summary),
+            )
+        } else {
+            reason
+        };
         let age = fmt_ts(rc.report.created_at);
         let user_info = rc.post_ip_hash.as_deref().map_or_else(
             || String::from(r#"<span style="color:var(--text-dim)">n/a</span>"#),
@@ -234,8 +243,8 @@ fn render_admin_moderation_section(
     </div>
     <div class="admin-subsection admin-subsection-tight">
       <h4>// report inbox{report_badge}</h4>
-      <div class="admin-table-wrap">
-      <table class="admin-table">
+      <div class="admin-table-wrap" tabindex="0" role="region" aria-label="Report inbox">
+      <table class="admin-table admin-report-table">
         <thead><tr><th>post</th><th>user</th><th>content preview</th><th>reason</th><th>filed</th><th>action</th></tr></thead>
         <tbody>{report_rows}</tbody>
       </table>
@@ -244,7 +253,7 @@ fn render_admin_moderation_section(
 
     <div class="admin-subsection admin-subsection-tight">
       <h4 id="appeals">// ban appeals{appeal_badge}</h4>
-      <div class="admin-table-wrap">
+      <div class="admin-table-wrap" tabindex="0" role="region" aria-label="Ban appeals">
       <table class="admin-table">
         <thead><tr><th>ip (partial)</th><th>appeal message</th><th>filed</th><th>action</th></tr></thead>
         <tbody>{appeal_rows}</tbody>
@@ -261,7 +270,7 @@ fn render_admin_moderation_section(
 
     <div class="admin-subsection admin-subsection-tight" id="active-bans">
       <h4>// active bans{ban_badge}</h4>
-      <div class="admin-table-wrap">
+      <div class="admin-table-wrap" tabindex="0" role="region" aria-label="Active bans">
       <table class="admin-table">
         <thead><tr><th>ip hash (partial)</th><th>reason</th><th>expires</th><th>action</th></tr></thead>
         <tbody>{ban_rows}</tbody>
@@ -285,7 +294,7 @@ fn render_admin_moderation_section(
 
     <div class="admin-subsection admin-subsection-tight" id="word-filters">
       <h4>// word filters{filter_badge}</h4>
-      <div class="admin-table-wrap">
+      <div class="admin-table-wrap" tabindex="0" role="region" aria-label="Word filters">
       <table class="admin-table">
         <thead><tr><th>pattern</th><th>replacement</th><th>action</th></tr></thead>
         <tbody>{filter_rows}</tbody>

@@ -2073,7 +2073,7 @@ mod tests {
         .context("failed to make first submission")?;
 
         let original_created_at =
-            chrono::Utc::now().timestamp() - crate::handlers::board::SELF_DELETE_WINDOW_SECS - 1;
+            chrono::Utc::now().timestamp() - crate::handlers::board::self_action_window_secs() - 1;
         conn.execute(
             "UPDATE posts SET created_at = ?1",
             rusqlite::params![original_created_at],
@@ -2118,7 +2118,7 @@ mod tests {
         );
         assert_eq!(duplicate.created_at, original_created_at);
         assert!(
-            duplicate.created_at + crate::handlers::board::SELF_DELETE_WINDOW_SECS
+            duplicate.created_at + crate::handlers::board::self_action_window_secs()
                 <= chrono::Utc::now().timestamp(),
             "duplicate self-action expiry should stay tied to the original post"
         );

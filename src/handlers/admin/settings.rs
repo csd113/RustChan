@@ -11,6 +11,7 @@ use crate::{
     models::{BannerScope, BannerTargetType, BoardAccessMode, BoardBannerMode},
     utils::crypto::hash_password,
 };
+use axum::response::IntoResponse as _;
 use axum::{
     extract::{Form, Multipart, Query, State},
     http::{header, HeaderMap, HeaderValue},
@@ -30,6 +31,8 @@ mod backup_settings;
 mod banners;
 mod board;
 mod maintenance;
+mod network;
+mod runtime;
 mod site;
 mod themes;
 
@@ -38,6 +41,8 @@ pub(in crate::server) use backup_settings::*;
 pub(in crate::server) use banners::*;
 pub(in crate::server) use board::*;
 pub(in crate::server) use maintenance::*;
+pub(in crate::server) use network::*;
+pub(in crate::server) use runtime::*;
 pub(in crate::server) use site::*;
 pub(in crate::server) use themes::*;
 
@@ -106,3 +111,43 @@ async fn read_limited_upload_bytes(
 }
 
 // POST /admin/board/settings
+
+/// Save the site NSFW default; existing visitor preferences retain priority.
+pub(in crate::server) async fn update_visitor_defaults(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Form(form): Form<std::collections::BTreeMap<String, String>>,
+) -> Result<Response> {
+    require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        Some(peer),
+        form.get("_csrf").map(String::as_str),
+    )?;
+    let hide = match form.get("default_hide_nsfw_boards").map(String::as_str) {
+        Some("true") => true,
+        Some("false") => false,
+        _ => return Err(AppError::BadRequest("Choose an NSFW default.".into())),
+    };
+    let session = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let conn = state.db.get()?;
+        require_admin_session_sid(&conn, session.as_deref())?;
+        db::set_site_setting(
+            &conn,
+            "default_hide_nsfw_boards",
+            if hide { "1" } else { "0" },
+        )?;
+        crate::templates::set_live_hide_nsfw_default(hide);
+        Ok(())
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
+    Ok(admin_panel_redirect_anchor(
+        "Visitor default saved and applied live. Existing visitor preferences keep priority.",
+        "site-settings",
+    )
+    .into_response())
+}

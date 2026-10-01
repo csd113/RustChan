@@ -1,0 +1,192 @@
+name: Browser E2E
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+  merge_group:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Browser suite mode
+        type: choice
+        options:
+          - normal
+          - deep
+        default: normal
+  schedule:
+    # Weekly deep audit pass (all projects, expensive diagnostics).
+    - cron: "41 7 * * 6"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Normal regression mode: maintained suite on the primary engines. One job per
+  # project so wall time stays bounded; retries stay at the repository default
+  # of zero and any strict-diagnostics finding fails its project.
+  # ---------------------------------------------------------------------------
+  regression:
+    name: Regression (${{ matrix.project }})
+    if: ${{ github.event_name != 'schedule' && !(github.event_name == 'workflow_dispatch' && inputs.mode == 'deep') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: chromium
+            browser: chromium
+          - project: webkit
+            browser: webkit
+          - project: firefox
+            browser: firefox
+          - project: chromium-nojs
+            browser: chromium
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.91.0
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: e2e-regression
+          key: ${{ matrix.project }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install browser dependencies
+        run: |
+          npm ci
+          npx playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Build RustChan
+        run: cargo build --locked --bin rustchan-cli
+
+      - name: Run maintained browser suite
+        env:
+          CI: true
+          RUSTCHAN_E2E_SKIP_BUILD: 1
+        run: >-
+          npx playwright test
+          --project=${{ matrix.project }}
+          --workers=2
+          --max-failures=5
+
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-${{ matrix.project }}-failure
+          path: |
+            playwright-report/
+            test-results/e2e/
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Deep audit mode: every project, including the emulated mobile and Firefox
+  # no-JavaScript configurations, with bounded tracing/screenshot diagnostics.
+  # Run manually (mode=deep) or by the weekly schedule. This is deliberately not
+  # part of the routine pull-request pass.
+  # ---------------------------------------------------------------------------
+  deep-audit:
+    name: Deep audit (${{ matrix.project }})
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'deep') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: chromium
+            browser: chromium
+          - project: chromium-nojs
+            browser: chromium
+          - project: webkit
+            browser: webkit
+          - project: mobile-webkit
+            browser: webkit
+          - project: firefox
+            browser: firefox
+          - project: mobile-firefox
+            browser: firefox
+          - project: firefox-nojs
+            browser: firefox
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.91.0
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: e2e-deep
+          key: ${{ matrix.project }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install browser dependencies
+        run: |
+          npm ci
+          npx playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Build RustChan
+        run: cargo build --locked --bin rustchan-cli
+
+      - name: Run deep browser audit
+        env:
+          CI: true
+          RUSTCHAN_E2E_SKIP_BUILD: 1
+          RUSTCHAN_E2E_DEEP_DIAGNOSTICS: 1
+          RUSTCHAN_AUDIT_OUTPUT: output/playwright/deep-audit/${{ matrix.project }}
+        run: >-
+          npx playwright test
+          --project=${{ matrix.project }}
+          --workers=2
+
+      - name: Upload deep audit evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: deep-audit-${{ matrix.project }}
+          # The deep run writes everything under RUSTCHAN_AUDIT_OUTPUT; the
+          # report and result JSON are bounded, and failure traces are bounded
+          # by the deep artifact budget.
+          path: |
+            output/playwright/deep-audit/${{ matrix.project }}/
+          if-no-files-found: warn
+          retention-days: 14

@@ -5,6 +5,8 @@ use rusqlite::params;
 use rusqlite::OptionalExtension as _;
 use std::collections::HashSet;
 
+/// Transactional administrator credential workflows.
+pub mod accounts;
 /// Administrative users, sessions, moderation, and database health queries.
 pub mod admin;
 /// Banner asset persistence and ordering.
@@ -38,6 +40,7 @@ pub use types::{CachedFile, DbPool, NewPost};
 #[cfg(test)]
 pub use pool::init_test_pool;
 
+pub use accounts::*;
 pub use admin::*;
 pub use banners::*;
 pub use boards::*;

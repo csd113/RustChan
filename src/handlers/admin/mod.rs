@@ -13,7 +13,9 @@
 // spawn_blocking to avoid blocking the Tokio event loop. Direct DB calls from
 // async context were stalling worker threads under concurrent load.
 
+mod accounts;
 pub(in crate::server) mod auth;
+pub(in crate::server) use accounts::*;
 pub(in crate::server) use auth::*;
 
 pub(in crate::server) mod backup;
@@ -547,6 +549,9 @@ pub(super) fn admin_panel_error_redirect_anchor_open(
 /// All fields are optional — missing = no flash message.
 #[derive(Deserialize, Default)]
 pub(in crate::server) struct AdminPanelQuery {
+    /// Runtime settings search; works without JavaScript.
+    #[serde(rename = "q")]
+    pub settings_query: Option<String>,
     pub flash: Option<String>,
     pub flash_error: Option<String>,
     pub open: Option<String>,
@@ -574,6 +579,8 @@ pub(in crate::server) struct LiveLogQuery {
 )]
 /// Point-in-time data for admin panel.
 struct AdminPanelSnapshot {
+    accounts: Vec<(i64, String, i64)>,
+    saved_ffmpeg_timeout: Option<String>,
     boards: Vec<crate::models::Board>,
     bans: Vec<crate::models::Ban>,
     filters: Vec<crate::models::WordFilter>,
@@ -1340,6 +1347,8 @@ fn load_admin_panel_snapshot(
     });
     Ok((
         AdminPanelSnapshot {
+            accounts: db::list_admins(conn)?,
+            saved_ffmpeg_timeout: db::get_site_setting(conn, "ffmpeg_timeout_secs")?,
             boards: boards_domain.boards,
             bans: moderation_domain.bans,
             filters: moderation_domain.filters,
@@ -1810,6 +1819,27 @@ fn media_summary_label(activity: &DashboardActivitySnapshot) -> String {
     }
 }
 
+/// Render the additional runtime, account and management tasks after authorization.
+fn render_runtime_workspaces(snapshot: &AdminPanelSnapshot, csrf_token: &str) -> String {
+    let runtime_html: String = crate::config::admin::runtime::SECTIONS
+        .iter()
+        .map(|section| {
+            let fields = crate::config::admin::runtime::section_snapshot(*section)
+                .map_err(|_| "unavailable".to_owned());
+            crate::templates::admin::render_runtime_settings(*section, &fields, csrf_token)
+        })
+        .collect();
+    let application_html = build_application_state(snapshot);
+    format!(
+        "{runtime_html}{}{}{application_html}",
+        crate::templates::admin::render_accounts(&snapshot.accounts, csrf_token),
+        crate::templates::admin::render_management(
+            &crate::config::admin::management::snapshot().map_err(|_| "unavailable".to_owned()),
+            csrf_token
+        )
+    )
+}
+
 fn render_admin_panel_from_snapshot(
     snapshot: &AdminPanelSnapshot,
     csrf_token: &str,
@@ -1817,13 +1847,19 @@ fn render_admin_panel_from_snapshot(
     flash: Option<&(bool, String)>,
     open_section: Option<&str>,
     current_theme: Option<&str>,
+    settings_query: Option<&str>,
 ) -> String {
     let diagnostics_text = build_diagnostics_text(snapshot, tor_address);
     let flash_ref = flash.map(|(is_error, message)| crate::templates::AdminPanelFlash {
         is_error: *is_error,
         message,
     });
+    let network_fields =
+        crate::config::admin::network_snapshot().map_err(|_| "unavailable".to_owned());
     let view = crate::templates::AdminPanelViewModel {
+        network_html: crate::templates::admin::render_network_settings(&network_fields, csrf_token),
+        runtime_html: render_runtime_workspaces(snapshot, csrf_token),
+        settings_query,
         csrf_token,
         boards: &snapshot.boards,
         current_theme,
@@ -2119,6 +2155,7 @@ pub(in crate::server) async fn admin_panel(
                 flash.as_ref(),
                 open_section.as_deref(),
                 current_theme.as_deref(),
+                params.settings_query.as_deref(),
             ))
         }
     })
@@ -2331,6 +2368,86 @@ pub(super) fn consume_admin_session_bootstrap(token: &str) -> Option<String> {
 
     let (session_id, expires_at) = ADMIN_SESSION_BOOTSTRAPS.remove(token)?.1;
     (expires_at > now).then_some(session_id)
+}
+
+/// Build live state from the same authenticated database/worker snapshot as the controls.
+fn build_application_state(snapshot: &AdminPanelSnapshot) -> String {
+    let live = std::collections::BTreeMap::from([
+        ("forum_name", snapshot.site_name.clone()),
+        ("site_subtitle", snapshot.site_subtitle.clone()),
+        (
+            "homepage_new_thread_badges_enabled",
+            snapshot.homepage_new_thread_badges_enabled.to_string(),
+        ),
+        (
+            "homepage_new_reply_badges_enabled",
+            snapshot.homepage_new_reply_badges_enabled.to_string(),
+        ),
+        (
+            "thread_new_reply_badges_enabled",
+            snapshot.thread_new_reply_badges_enabled.to_string(),
+        ),
+        ("default_theme", snapshot.default_theme.clone()),
+        (
+            "enabled_builtin_themes",
+            snapshot
+                .themes
+                .iter()
+                .filter(|t| t.enabled && t.is_builtin)
+                .map(|t| t.slug.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+        (
+            "ffmpeg_timeout_secs",
+            snapshot.ffmpeg_timeout_secs.to_string(),
+        ),
+        (
+            "media_auto_prune_enabled",
+            snapshot.media_auto_prune_enabled.to_string(),
+        ),
+        (
+            "media_max_active_content_size_bytes",
+            snapshot.media_max_active_content_size_bytes.to_string(),
+        ),
+        (
+            "backup_directory",
+            crate::config::backups_dir().display().to_string(),
+        ),
+        (
+            "auto_full_backup_interval_hours",
+            snapshot.auto_full_backup_interval_hours.to_string(),
+        ),
+        (
+            "auto_full_backup_copies_to_keep",
+            snapshot.auto_full_backup_copies_to_keep.to_string(),
+        ),
+        (
+            "auto_full_backup_include_tor_hidden_service_keys",
+            snapshot
+                .auto_full_backup_include_tor_hidden_service_keys
+                .to_string(),
+        ),
+        (
+            "auto_full_backup_storage_mode",
+            snapshot.auto_full_backup_storage_mode.clone(),
+        ),
+        (
+            "auto_full_backup_split_zip_part_size_gib",
+            (snapshot.auto_full_backup_split_zip_part_size_bytes / (1024 * 1024 * 1024))
+                .to_string(),
+        ),
+    ])
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value))
+    .collect();
+    crate::templates::admin::render_application_state(
+        &crate::config::admin::application::snapshot(
+            &live,
+            snapshot.saved_ffmpeg_timeout.as_deref(),
+        )
+        .map_err(|_| "unavailable".to_owned()),
+    )
 }
 
 #[cfg(test)]

@@ -22,6 +22,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
 <summary><span>// site health</span></summary>
 <div class="admin-dropdown-content admin-site-health" data-admin-health-jobs-url="/admin/site-health/jobs">
   <div class="admin-health-grid">{rows}</div>
+  <p class="admin-meta-note admin-job-poll-status" data-admin-health-poll-status role="status" hidden>Updating job counts…</p>
   <noscript><p class="admin-copy">Live job details require JavaScript. Refresh this page to update the counts.</p></noscript>
   {recent_jobs}
   <div class="admin-subsection admin-subsection-tight admin-health-tor" id="tor-status">

@@ -305,8 +305,9 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
 
     // Check whether cookie_secret has changed since the last run (#19).
     // Must run after DB init so the site_settings table exists.
-    if let Ok(conn) = pool.get() {
-        check_cookie_secret_rotation(&conn);
+    {
+        let conn = pool.get()?;
+        check_cookie_secret_rotation(&conn)?;
     }
 
     // Initialise the live site name and subtitle from DB so they're available before any request.
@@ -331,6 +332,20 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                 CONFIG.forum_name.clone()
             });
             crate::templates::set_live_site_name(&name);
+            crate::templates::set_live_hide_nsfw_default(
+                crate::db::get_site_setting(&conn, "default_hide_nsfw_boards")?
+                    .is_some_and(|value| matches!(value.as_str(), "1" | "true")),
+            );
+            let saved_timeout = crate::db::get_site_setting(&conn, "ffmpeg_timeout_secs")?
+                .map(|value| value.parse::<u64>())
+                .transpose()
+                .map_err(anyhow::Error::from)?;
+            let effective_timeout = std::env::var("CHAN_FFMPEG_TIMEOUT_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .or(saved_timeout)
+                .unwrap_or(CONFIG.ffmpeg_timeout_secs);
+            crate::config::set_live_ffmpeg_timeout_secs(effective_timeout)?;
 
             // Seed subtitle from settings.toml if not yet configured in DB.
             // BUG FIX: get_site_subtitle() always returns a non-empty fallback
@@ -1309,21 +1324,17 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         let force_reload_notify = Arc::new(tokio::sync::Notify::new());
 
         // Stats refresh task — polls DB every 3 s (or immediately on [R]).
-        // block_in_place keeps &mut delta locals on the same stack frame so
-        // req/s and other deltas are correctly accumulated across calls.
+        // The sampler owns monotonic request baselines, bounded history and a
+        // thirty-second storage cache; collection never blocks input/rendering.
         {
-            let pool_stats = pool.clone();
-            let worker_queue_stats = Arc::clone(&state.job_queue);
+            let runtime_stats = state.clone();
             let stats_w = Arc::clone(&shared_stats);
             let cancel_stats = worker_cancel.clone();
             let onion_addr = Arc::clone(&state.onion_address);
             let force_reload = Arc::clone(&force_reload_notify);
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(3));
-                let mut prev_req = REQUEST_COUNT.load(Ordering::Relaxed);
-                let mut prev_tick = Instant::now();
-                let mut prev_threads: i64 = 0;
-                let mut prev_posts: i64 = 0;
+                let mut sampler = super::console::stats::Sampler::new(start_time);
                 loop {
                     tokio::select! {
                         _ = interval.tick() => {}
@@ -1337,17 +1348,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                     }
                     let onion = onion_addr.read().await.clone();
                     let snap = tokio::task::block_in_place(|| {
-                        super::console::collect_stats(
-                            &pool_stats,
-                            &worker_queue_stats,
-                            start_time,
-                            &mut prev_req,
-                            &mut prev_tick,
-                            &mut prev_threads,
-                            &mut prev_posts,
-                            onion,
-                            http_port,
-                        )
+                        sampler.collect(&runtime_stats, onion, http_port)
                     });
                     *stats_w.write().await = snap;
                 }
@@ -1400,15 +1401,17 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                     return;
                 }
                 let size = crossterm::terminal::size().unwrap_or((0, 0));
-                let board_rows = metrics.read().await.board_rows.clone();
+                let snapshot = metrics.read().await;
                 let action = {
                     let mut app = console.write().await;
                     if !super::console::is_active() || cancel_d.is_cancelled() {
                         return;
                     }
-                    app.boards.reconcile_rows(&board_rows);
-                    app.handle_key(&key, board_rows.len(), size)
+                    app.reconcile_data(&snapshot);
+                    let count = app.board_filter.row_count;
+                    app.handle_key(&key, count, size)
                 };
+                drop(snapshot);
                 redraw.notify_one();
 
                 match action {

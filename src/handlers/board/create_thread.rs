@@ -1,12 +1,13 @@
 use super::{
     board_access_cookie_from_jar, board_access_preflight, current_theme_from_jar, db,
-    handled_post_error_status, identity_key, is_xml_http_request, make_scoped_csrf_form_token,
-    parse_post_multipart, posting, remember_owned_post_until_with_secure, render,
+    handled_post_error_status, identity_key, index_reply_previews, index_threads_per_page,
+    is_xml_http_request, make_scoped_csrf_form_token, parse_post_multipart, posting,
+    remember_owned_post_until_with_secure, render, self_action_window_secs,
     should_set_public_secure_cookie, templates, unlock_redirect_url, user_preferences_from_jar,
     xhr_error_response, xhr_post_error_response, xhr_redirect_response, AppError, AppState,
     BoardAccessDecision, BoardAccessRequirement, CookieJar, HashMap, HeaderMap, Html, Multipart,
     Path, PostFormData, Redirect, Response, Result, SecureCookieContext, State,
-    ADMIN_SESSION_COOKIE, CONFIG, PREVIEW_REPLIES, SELF_DELETE_WINDOW_SECS, THREADS_PER_PAGE,
+    ADMIN_SESSION_COOKIE, CONFIG,
 };
 use axum::response::IntoResponse as _;
 
@@ -187,8 +188,8 @@ pub(in crate::server) async fn create_thread(
                     &conn,
                     board,
                     1,
-                    THREADS_PER_PAGE,
-                    PREVIEW_REPLIES,
+                    index_threads_per_page(),
+                    index_reply_previews(),
                     is_admin,
                 )?;
                 let banner_selection = crate::banner::resolve_board_banner(
@@ -242,7 +243,7 @@ pub(in crate::server) async fn create_thread(
         submit_result.thread_id,
         submit_result.post_id,
         &submit_result.deletion_token,
-        submit_result.created_at + SELF_DELETE_WINDOW_SECS,
+        submit_result.created_at + self_action_window_secs(),
         should_set_public_secure_cookie(&req_headers, secure_context),
     );
 
