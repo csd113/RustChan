@@ -50,6 +50,11 @@ fn absolute_resolved_path(path: &Path) -> anyhow::Result<PathBuf> {
     super::resolve_storage_dir(&absolute, "protected storage path")
 }
 
+/// Check saved backup paths without creating directories or changing permissions.
+pub(super) fn validate_backup_directory(path: &Path, config: &Config) -> anyhow::Result<()> {
+    validate_backup_children(&resolve_backup_directory(path, config)?)
+}
+
 /// Validate and prepare an absolute private backup root and legacy subdirectories.
 ///
 /// # Errors

@@ -15,6 +15,8 @@
 
 mod accounts;
 pub(in crate::server) mod auth;
+/// Explicit administrator settings restarts.
+pub(in crate::server) mod restart;
 /// Administrator-only software update handlers.
 pub(in crate::server) mod updates;
 pub(in crate::server) use accounts::*;
@@ -2121,6 +2123,7 @@ pub(in crate::server) async fn admin_panel(
     };
     updates::authorize(&state, &jar).await?;
     let update_status = updates::snapshot().await;
+    let restart_view = restart::snapshot(Some(&update_status)).await;
     let auto_full_backup_settings = state.auto_full_backup_settings.snapshot();
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -2153,7 +2156,8 @@ pub(in crate::server) async fn admin_panel(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    let html = html.replace("<!-- software-updates -->", &crate::templates::admin::render_software_updates(&update_status, &csrf, crate::updates::managed(), crate::updates::container_managed()))
+    let html = html.replace("<!-- settings-restart -->", &crate::templates::admin::render_restart(&restart_view, &csrf))
+        .replace("<!-- software-updates -->", &crate::templates::admin::render_software_updates(&update_status, &csrf, crate::updates::managed(), crate::updates::container_managed()))
         .replace("<!-- update-backups -->", &crate::templates::admin::render_update_backups(&update_status))
         .replace("<!-- update-notification -->", if update_status.available_release().is_some() { r#" <span class="admin-state-pill admin-state-pill-informational">Update available</span>"# } else { "" });
     Ok((jar, Html(html)))

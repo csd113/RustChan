@@ -91,7 +91,7 @@ pub fn canonical_parent_for_new_child(root: &Path, path: &Path) -> Result<PathBu
 }
 
 /// Reject any existing symlink component in a path without following it.
-fn reject_symlink_components(path: &Path) -> Result<()> {
+pub(crate) fn reject_symlink_components(path: &Path) -> Result<()> {
     let mut cursor = PathBuf::new();
     for component in path.components() {
         cursor.push(component.as_os_str());

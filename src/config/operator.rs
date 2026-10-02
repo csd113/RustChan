@@ -185,17 +185,18 @@ impl SavedOperatorSettings {
 
 /// Additional access settings.
 pub static ACCESS_SETTINGS: &[SettingDefinition] = &[
-    SettingDefinition { key: "admin_login_fail_limit", label: "Administrator failed-login allowance", help: "Failed login attempts per visitor before lockout; account reauthentication uses the same protection.", environment: "CHAN_ADMIN_LOGIN_FAIL_LIMIT", kind: InputKind::Number(1, 100), value: |c| c.operator.admin_login_fail_limit.to_string() },
-    SettingDefinition { key: "admin_login_fail_window_secs", label: "Administrator failed-login window (seconds)", help: "Separate from browsing limits. Counter resets after this interval.", environment: "CHAN_ADMIN_LOGIN_FAIL_WINDOW_SECS", kind: InputKind::Number(30, 86400), value: |c| c.operator.admin_login_fail_window_secs.to_string() },
-    SettingDefinition { key: "board_password_fail_limit", label: "Board-password failed-attempt allowance", help: "Per visitor and board; leaves browsing and administrator protections separate.", environment: "CHAN_BOARD_PASSWORD_FAIL_LIMIT", kind: InputKind::Number(1, 100), value: |c| c.operator.board_password_fail_limit.to_string() },
-    SettingDefinition { key: "board_password_fail_window_secs", label: "Board-password failed-attempt window (seconds)", help: "Board unlock counters expire after this interval.", environment: "CHAN_BOARD_PASSWORD_FAIL_WINDOW_SECS", kind: InputKind::Number(30, 86400), value: |c| c.operator.board_password_fail_window_secs.to_string() },
-    SettingDefinition { key: "board_access_cookie_days", label: "Board-password access lifetime (days)", help: "Browser cookie lifetime for new password grants. Existing browser cookies retain their issued expiry; password or secret changes revoke grants.", environment: "CHAN_BOARD_ACCESS_COOKIE_DAYS", kind: InputKind::Number(1, 365), value: |c| c.operator.board_access_cookie_days.to_string() },
-    SettingDefinition { key: "self_action_window_secs", label: "Self-edit and self-delete window (seconds)", help: "Signed ownership grants and server authorization use this window. Board permissions still apply; legacy edit_window_secs remains inactive.", environment: "CHAN_SELF_ACTION_WINDOW_SECS", kind: InputKind::Number(1, 3600), value: |c| c.operator.self_action_window_secs.to_string() },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "admin_login_fail_limit", label: "Administrator failed-login allowance", help: "Failed login attempts per visitor before lockout; account reauthentication uses the same protection.", environment: "CHAN_ADMIN_LOGIN_FAIL_LIMIT", kind: InputKind::Number(1, 100), value: |c| c.operator.admin_login_fail_limit.to_string() },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "admin_login_fail_window_secs", label: "Administrator failed-login window (seconds)", help: "Separate from browsing limits. Counter resets after this interval.", environment: "CHAN_ADMIN_LOGIN_FAIL_WINDOW_SECS", kind: InputKind::Number(30, 86400), value: |c| c.operator.admin_login_fail_window_secs.to_string() },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "board_password_fail_limit", label: "Board-password failed-attempt allowance", help: "Per visitor and board; leaves browsing and administrator protections separate.", environment: "CHAN_BOARD_PASSWORD_FAIL_LIMIT", kind: InputKind::Number(1, 100), value: |c| c.operator.board_password_fail_limit.to_string() },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "board_password_fail_window_secs", label: "Board-password failed-attempt window (seconds)", help: "Board unlock counters expire after this interval.", environment: "CHAN_BOARD_PASSWORD_FAIL_WINDOW_SECS", kind: InputKind::Number(30, 86400), value: |c| c.operator.board_password_fail_window_secs.to_string() },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "board_access_cookie_days", label: "Board-password access lifetime (days)", help: "Browser cookie lifetime for new password grants. Existing browser cookies retain their issued expiry; password or secret changes revoke grants.", environment: "CHAN_BOARD_ACCESS_COOKIE_DAYS", kind: InputKind::Number(1, 365), value: |c| c.operator.board_access_cookie_days.to_string() },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "self_action_window_secs", label: "Self-edit and self-delete window (seconds)", help: "Signed ownership grants and server authorization use this window. Board permissions still apply; legacy edit_window_secs remains inactive.", environment: "CHAN_SELF_ACTION_WINDOW_SECS", kind: InputKind::Number(1, 3600), value: |c| c.operator.self_action_window_secs.to_string() },
 ];
 
 /// Public index display preferences.
 pub static DISPLAY_SETTINGS: &[SettingDefinition] = &[
     SettingDefinition {
+        application: crate::config::admin::ApplicationMode::Restart,
         key: "index_threads_per_page",
         label: "Board index threads per page",
         help: "Index pagination only. Catalog behavior is unchanged.",
@@ -204,6 +205,7 @@ pub static DISPLAY_SETTINGS: &[SettingDefinition] = &[
         value: |c| c.operator.index_threads_per_page.to_string(),
     },
     SettingDefinition {
+        application: crate::config::admin::ApplicationMode::Restart,
         key: "index_reply_previews",
         label: "Board index reply previews",
         help: "Latest reply previews per thread; 0 hides previews.",
@@ -216,6 +218,7 @@ pub static DISPLAY_SETTINGS: &[SettingDefinition] = &[
 /// Normal request deadline preferences.
 pub static TIMEOUT_SETTINGS: &[SettingDefinition] = &[
     SettingDefinition {
+        application: crate::config::admin::ApplicationMode::Restart,
         key: "read_timeout_secs",
         label: "Normal GET/HEAD timeout (seconds)",
         help: "Uploads, backup, restore and maintenance retain their existing timeout exemptions.",
@@ -224,6 +227,7 @@ pub static TIMEOUT_SETTINGS: &[SettingDefinition] = &[
         value: |c| c.operator.read_timeout_secs.to_string(),
     },
     SettingDefinition {
+        application: crate::config::admin::ApplicationMode::Restart,
         key: "write_timeout_secs",
         label: "Normal write timeout (seconds)",
         help: "Other methods use this timeout; existing operation exemptions remain available.",
@@ -235,5 +239,5 @@ pub static TIMEOUT_SETTINGS: &[SettingDefinition] = &[
 
 /// Startup tracing filter.
 pub static LOG_SETTINGS: &[SettingDefinition] = &[
-    SettingDefinition { key: "log_filter", label: "Log filter / verbosity", help: "Tracing directives such as info,rustchan=debug. Blank keeps the built-in INFO application/dependency filter. RUST_LOG takes precedence. Restart required; excessive detail can increase log volume.", environment: "RUST_LOG", kind: InputKind::OptionalText, value: |c| c.operator.log_filter.clone().unwrap_or_else(|| "Built-in INFO filter".to_owned()) },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "log_filter", label: "Log filter / verbosity", help: "Tracing directives such as info,rustchan=debug. Blank keeps the built-in INFO application/dependency filter. RUST_LOG takes precedence. Restart required; excessive detail can increase log volume.", environment: "RUST_LOG", kind: InputKind::OptionalText, value: |c| c.operator.log_filter.clone().unwrap_or_else(|| "Built-in INFO filter".to_owned()) },
 ];

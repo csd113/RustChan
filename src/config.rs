@@ -2104,7 +2104,7 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) -> anyhow::Resu
 }
 
 /// Environment source used by startup and mutation-free configuration previews.
-enum Environment<'a> {
+pub(crate) enum Environment<'a> {
     /// Read the process environment, including non-Unicode path overrides.
     Process,
     /// Explicit overrides for isolated previews and tests.

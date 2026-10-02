@@ -30,7 +30,7 @@ pub(in crate::server) async fn update_network_settings(
         require_admin_session_sid(&conn, session_id.as_deref())?;
         let save_result = crate::config::admin::save_network(&form);
         match save_result {
-            Ok(()) => Ok(admin_panel_redirect_anchor("Network settings saved. Restart required; environment and launcher overrides still take precedence.", "network-security").into_response()),
+            Ok(()) => Ok(admin_panel_redirect_anchor(if crate::config::admin::restart_pending().unwrap_or(true) { "Settings saved. Restart required: use Restart RustChan to apply these changes." } else { "Settings saved. No restart is required for the effective configuration." }, "network-security").into_response()),
             Err(error) => {
                 let mut fields = crate::config::admin::network_snapshot().map_err(|_| "unavailable".to_owned());
                 if let Ok(fields) = &mut fields {

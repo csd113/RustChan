@@ -32,7 +32,7 @@ pub(in crate::server) async fn update_runtime_settings(
         require_admin_session_sid(&conn, session_id.as_deref())?;
         let save_result = crate::config::admin::runtime::save_section(section, &form);
         match save_result {
-            Ok(()) => Ok(admin_panel_redirect_anchor("Configuration saved. Restart required; environment and launcher overrides still take precedence.", section.key()).into_response()),
+            Ok(()) => Ok(admin_panel_redirect_anchor(if crate::config::admin::restart_pending().unwrap_or(true) { "Settings saved. Restart required: use Restart RustChan to apply these changes." } else { "Settings saved. No restart is required for the effective configuration." }, section.key()).into_response()),
             Err(error) => {
                 let mut fields = crate::config::admin::runtime::section_snapshot(section).map_err(|_| "unavailable".to_owned());
                 if let Ok(fields) = &mut fields {

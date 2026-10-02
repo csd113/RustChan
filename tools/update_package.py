@@ -53,7 +53,7 @@ def package(binary, target, version, output):
     (output / name).write_bytes(artifact)
     info = dict(version=version, target=target, filename=name, size=len(artifact), sha256=digest(artifact),
                 executable_size=len(data), executable_sha256=digest(data), schema=version,
-                minimum_schema='1.5.0', minimum_updater='1.5.0', format=1)
+                minimum_schema='1.5.0', minimum_updater='1.6.0', format=1)
     (output / f'build-info-{target}.json').write_text(json.dumps(info, sort_keys=True))
     return info
 

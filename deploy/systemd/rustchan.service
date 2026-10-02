@@ -17,6 +17,8 @@ ExecStart=/opt/rustchan/current/rustchan-cli --data-dir /var/lib/rustchan serve
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=90
+# Configuration recovery must never replace files underneath an unresponsive process.
+SendSIGKILL=no
 UMask=0077
 NoNewPrivileges=true
 ProtectSystem=strict

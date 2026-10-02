@@ -84,6 +84,8 @@ mod management;
 mod moderation;
 /// Network settings rendering.
 mod network;
+/// Settings restart banner and explicit form.
+mod restart;
 /// Server-rendered settings search.
 mod search;
 /// Site-health rendering.
@@ -2025,6 +2027,12 @@ pub fn render_software_updates(
 #[must_use]
 pub fn render_update_backups(status: &crate::updates::Status) -> String {
     updates::backups(status)
+}
+
+/// Render durable configuration restart state and its POST-only action.
+#[must_use]
+pub fn render_restart(view: &crate::restart::View, csrf: &str) -> String {
+    restart::render(view, csrf)
 }
 
 #[cfg(test)]

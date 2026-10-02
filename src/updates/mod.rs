@@ -6,12 +6,15 @@ mod daemon;
 /// Official stable release discovery and cryptographic verification.
 mod release;
 #[cfg(unix)]
+/// Configuration transactions sharing the update control boundary.
+mod restart;
+#[cfg(unix)]
 mod snapshot;
 mod transaction;
 
 pub use daemon::run;
 pub use release::{discover, platform_target, Discovery, Release};
-pub use transaction::{BackupInfo, Phase, Status};
+pub use transaction::{BackupInfo, Operation, Phase, Status};
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -34,6 +37,20 @@ pub enum Request {
         /// One-use approval from the last compatible release check.
         approval: String,
         /// Authenticated full administrator requesting installation.
+        administrator: i64,
+    },
+    /// Record a fully initialized process bound to its exact loaded settings.
+    Started {
+        /// Fresh process identity; replay cannot overwrite a restart's generation.
+        instance: uuid::Uuid,
+        /// Private SHA-256 binding of startup settings, not exposed in readiness.
+        configuration: String,
+    },
+    /// Request only the fixed `RustChan` settings restart, once per running instance.
+    Restart {
+        /// Last ready process identity, issued by the application, never browser-selected.
+        instance: uuid::Uuid,
+        /// Authenticated full administrator.
         administrator: i64,
     },
     /// Authorize startup only after updater recovery and current-version validation.
@@ -175,6 +192,13 @@ mod tests {
                 .is_err(),
             "arbitrary commands must be rejected"
         );
+        for extra in ["command", "arguments", "service", "executable", "path"] {
+            let value = serde_json::json!({"operation":"restart", "instance": uuid::Uuid::new_v4(), "administrator":1, extra: "anything"});
+            anyhow::ensure!(
+                serde_json::from_value::<Request>(value).is_err(),
+                "restart must reject arbitrary {extra}"
+            );
+        }
         let dir = tempfile::tempdir()?;
         anyhow::ensure!(
             !mutations_allowed(Some(&dir.path().join("missing.sock"))).await,

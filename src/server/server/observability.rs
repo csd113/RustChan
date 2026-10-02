@@ -75,7 +75,11 @@ pub(super) async fn healthz() -> impl IntoResponse {
 
 /// Return configured public or detailed readiness.
 pub(super) async fn readyz(State(state): State<AppState>) -> Response {
-    readyz_response(state, CONFIG.public_readiness_details).await
+    let mut response = readyz_response(state, CONFIG.public_readiness_details).await;
+    if let Ok(value) = axum::http::HeaderValue::from_str(&crate::restart::INSTANCE.to_string()) {
+        response.headers_mut().insert("x-rustchan-instance", value);
+    }
+    response
 }
 
 /// Build a readiness response with optional operational details.
@@ -99,6 +103,7 @@ async fn readyz_response(state: AppState, include_details: bool) -> Response {
         .await
         .unwrap_or(false);
 
+        let database_ready = database_ready && !state.job_queue.cancel.is_cancelled();
         let status_label = if database_ready { "ready" } else { "degraded" };
         let status = if database_ready {
             StatusCode::OK
@@ -170,6 +175,7 @@ async fn readyz_response(state: AppState, include_details: bool) -> Response {
     } else {
         false
     };
+    let database_ready = database_ready && !state.job_queue.cancel.is_cancelled();
     let status_label = if database_ready { "ready" } else { "degraded" };
     let status = if database_ready {
         StatusCode::OK

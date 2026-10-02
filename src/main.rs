@@ -53,6 +53,8 @@ pub mod test_fixtures;
 #[cfg(test)]
 /// Shared state and request builders for crate-local tests.
 pub(crate) use test_fixtures as test_support;
+/// Settings restart coordination and supervisor recovery.
+pub mod restart;
 /// Built-in theme metadata.
 pub mod theme;
 /// Custom theme configuration and CSS generation.
@@ -204,6 +206,9 @@ fn main() -> anyhow::Result<()> {
     }
     generate_settings_file_if_missing();
 
+    if matches!(&cli.command, None | Some(server::cli::Command::Serve)) {
+        restart::prepare_startup()?;
+    }
     logging::init_logging(&log_dir);
 
     // Install a panic hook that restores the terminal before printing the
@@ -238,7 +243,7 @@ fn main() -> anyhow::Result<()> {
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build Tokio runtime: {e}"))?;
 
-    rt.block_on(async move {
+    let result = rt.block_on(async move {
         // Install the ring crypto provider once before anything else accesses
         // rustls. ok() = harmless if already installed (tests, re-runs).
         drop(rustls::crypto::ring::default_provider().install_default());
@@ -258,5 +263,8 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
         }
-    })
+    });
+    rt.shutdown_timeout(std::time::Duration::from_secs(10));
+    logging::shutdown();
+    result
 }

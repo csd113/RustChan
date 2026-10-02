@@ -583,3 +583,164 @@ fn private_or_hardlinked_current_binary_is_rejected() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// Configuration-only supervisor mock, with no actual service execution.
+struct RestartService<'a> {
+    /// Disposable deployment under test.
+    engine: &'a Engine,
+    /// Number of replacement starts; the second is rollback recovery.
+    starts: Cell<u32>,
+    /// Inject a failure in the first startup rather than launching host processes.
+    fail_start: bool,
+    /// Fail the trial health check, preserving all database writes.
+    fail_health: bool,
+    /// Simulate the old process falsely answering health after service control.
+    old_instance: Option<Uuid>,
+}
+impl Service for RestartService<'_> {
+    fn stop(&self) -> anyhow::Result<()> { Ok(()) }
+    fn start(&self) -> anyhow::Result<()> {
+        self.starts.set(self.starts.get() + 1);
+        if self.starts.get() == 1 && self.fail_start { anyhow::bail!("injected settings startup failure"); }
+        if self.starts.get() == 1 && self.old_instance.is_some() { return Ok(()); }
+        let bytes = crate::restart::Store::read(&self.engine.config.settings_path, 4 * 1024 * 1024)?;
+        self.engine.started(Uuid::new_v4(), &crate::restart::configuration_digest(&bytes))?;
+        Ok(())
+    }
+    fn health(&self, _version: &str, _schema: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(!(self.starts.get() == 1 && self.fail_health), "injected readiness timeout");
+        Ok(())
+    }
+    fn health_instance(&self, version: &str, previous: Uuid) -> anyhow::Result<()> {
+        self.health(version, "")?;
+        anyhow::ensure!(self.engine.restart_store().running()?.instance != previous, "old process cannot satisfy readiness");
+        Ok(())
+    }
+}
+
+/// Record a healthy initial process and a validated pending startup policy change.
+fn pending_restart(engine: &Engine) -> anyhow::Result<Uuid> {
+    let instance = Uuid::new_v4();
+    let good = format!("enable_tor_support = false\ncookie_secret = '{}'\n", "ab".repeat(32)).into_bytes();
+    fs::write(&engine.config.settings_path, &good)?;
+    engine.started(instance, &crate::restart::configuration_digest(&good))?;
+    let candidate = format!("{}\nrate_limit_gets = 12345\n", std::str::from_utf8(&good)?);
+    crate::config::admin::atomic_replace(&engine.config.settings_path, &candidate)?;
+    Ok(instance)
+}
+
+/// Pending settings survive until replacement readiness; both OS leases exclude all races.
+#[test]
+fn settings_restart_health_commit_and_update_mutual_exclusion() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let engine = &fixture.engine;
+    let previous = pending_restart(engine)?;
+    let service = RestartService { engine, starts: Cell::new(0), fail_start: false, fail_health: false, old_instance: None };
+    let (mut status, update, settings) = engine.approve_restart(previous, 1, &service)?;
+    anyhow::ensure!(status.phase.blocks_writes() && status.phase.active(), "restart must close write admission");
+    anyhow::ensure!(engine.lock().is_err(), "software installation must be serialized with restart");
+    anyhow::ensure!(engine.approve_restart(previous, 2, &service).is_err(), "duplicate/concurrent restart must reject");
+    anyhow::ensure!(crate::config::admin::settings_lease(&engine.config.settings_path).is_err(), "saves must not race a restart");
+    anyhow::ensure!(engine.restart_store().running()?.instance == previous, "pending cannot clear merely on request acceptance");
+    engine.restart_settings(&mut status, &service)?;
+    anyhow::ensure!(status.phase == Phase::Succeeded, "healthy replacement must commit");
+    anyhow::ensure!(engine.restart_store().running()?.instance != previous, "successful restart must observe a replacement");
+    drop(settings); drop(update);
+    anyhow::ensure!(engine.approve_restart(previous, 1, &service).is_err(), "replayed process approval must remain consumed");
+    Ok(())
+}
+
+/// Startup, health timeout and stale process readiness all restore config without reverting data.
+#[test]
+fn settings_restart_failures_recover_configuration_only() -> anyhow::Result<()> {
+    for (fail_start, fail_health, old_process) in [(true, false, false), (false, true, false), (false, false, true)] {
+        let fixture = fixture()?;
+        let engine = &fixture.engine;
+        let previous = pending_restart(engine)?;
+        let original = crate::restart::Store::read(&engine.restart_store().directory.join("known-good.toml"), 4 * 1024 * 1024)?;
+        fs::write(engine.config.data_dir.join("boards/pub/media.bin"), b"new content must survive")?;
+        let service = RestartService { engine, starts: Cell::new(0), fail_start, fail_health, old_instance: old_process.then_some(previous) };
+        let (mut status, _update, _settings) = engine.approve_restart(previous, 1, &service)?;
+        engine.restart_settings(&mut status, &service)?;
+        anyhow::ensure!(status.phase == Phase::RolledBack && service.starts.get() == 2, "failed trial must verify previous config recovery");
+        anyhow::ensure!(fs::read(&engine.config.settings_path)? == original, "known-good settings must be restored");
+        anyhow::ensure!(fs::read(engine.config.data_dir.join("boards/pub/media.bin"))? == b"new content must survive", "configuration rollback must not revert media/database");
+    }
+    Ok(())
+}
+
+/// An interrupted transaction enters the existing daemon recovery before startup admission.
+#[test]
+fn interrupted_settings_restart_reuses_updater_recovery() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let engine = &fixture.engine;
+    let previous = pending_restart(engine)?;
+    let service = RestartService { engine, starts: Cell::new(1), fail_start: false, fail_health: false, old_instance: None };
+    let (mut status, update, settings) = engine.approve_restart(previous, 1, &service)?;
+    engine.save(&mut status, Phase::HealthChecking, "interrupted settings startup")?;
+    drop(settings); drop(update);
+    engine.recover(&service)?;
+    anyhow::ensure!(engine.status()?.phase == Phase::RolledBack, "existing recovery must handle configuration-only transactions");
+    Ok(())
+}
+
+/// Invalid candidate data never gets durable restart approval or touches a service.
+#[test]
+fn invalid_settings_cannot_start_restart_transaction() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let engine = &fixture.engine;
+    let previous = pending_restart(engine)?;
+    let service = RestartService { engine, starts: Cell::new(0), fail_start: false, fail_health: false, old_instance: None };
+    fs::write(&engine.config.settings_path, "port = 0\n")?;
+    anyhow::ensure!(engine.approve_restart(previous, 1, &service).is_err(), "invalid configuration must reject before service work");
+    anyhow::ensure!(service.starts.get() == 0 && !engine.status()?.phase.active(), "invalid config must not start a restart");
+    Ok(())
+}
+
+/// A timed-out stop must close admission without restoring beneath an unconfirmed process.
+#[test]
+fn failed_settings_shutdown_cannot_restore_under_an_unconfirmed_process() -> anyhow::Result<()> {
+    struct UnresponsiveService { stops: Cell<u32>, starts: Cell<u32> }
+    impl Service for UnresponsiveService {
+        fn stop(&self) -> anyhow::Result<()> { self.stops.set(self.stops.get() + 1); anyhow::bail!("shutdown timed out") }
+        fn start(&self) -> anyhow::Result<()> { self.starts.set(self.starts.get() + 1); anyhow::bail!("must not start after unconfirmed stop") }
+        fn health(&self, _version: &str, _schema: &str) -> anyhow::Result<()> { anyhow::bail!("must not check health after unconfirmed stop") }
+    }
+    let fixture = fixture()?;
+    let engine = &fixture.engine;
+    let previous = pending_restart(engine)?;
+    let candidate = fs::read(&engine.config.settings_path)?;
+    let service = UnresponsiveService { stops: Cell::new(0), starts: Cell::new(0) };
+    let (mut status, _update, _settings) = engine.approve_restart(previous, 1, &service)?;
+    engine.restart_settings(&mut status, &service)?;
+    anyhow::ensure!(service.stops.get() == 1 && service.starts.get() == 0, "an unconfirmed stop must not trigger further service control");
+    anyhow::ensure!(status.phase == Phase::FailedManualIntervention && fs::read(&engine.config.settings_path)? == candidate, "unconfirmed stop must retain configuration and close admission");
+    anyhow::ensure!(engine.restart_store().running()?.instance == previous, "failed shutdown cannot verify a replacement");
+    Ok(())
+}
+
+/// Two administrator requests compete for the same OS-owned transaction lease.
+#[test]
+fn concurrent_settings_restarts_accept_exactly_one_request() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let engine = &fixture.engine;
+    let previous = pending_restart(engine)?;
+    let barrier = std::sync::Barrier::new(2);
+    let outcomes = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            let service = RestartService { engine, starts: Cell::new(0), fail_start: false, fail_health: false, old_instance: None };
+            let result = engine.approve_restart(previous, 1, &service);
+            barrier.wait();
+            result.is_ok()
+        });
+        let second = scope.spawn(|| {
+            let service = RestartService { engine, starts: Cell::new(0), fail_start: false, fail_health: false, old_instance: None };
+            let result = engine.approve_restart(previous, 2, &service);
+            barrier.wait();
+            result.is_ok()
+        });
+        Ok::<_, anyhow::Error>((first.join().map_err(|_| anyhow::anyhow!("first restart worker failed"))?, second.join().map_err(|_| anyhow::anyhow!("second restart worker failed"))?))
+    })?;
+    anyhow::ensure!(outcomes.0 != outcomes.1 && engine.status()?.phase == Phase::Stopping, "exactly one concurrent restart may be durable");
+    Ok(())
+}

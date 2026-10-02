@@ -8,9 +8,10 @@ services:
       CHAN_HOST: 0.0.0.0
       CHAN_PORT: "8080"
       CHAN_TOR_SUPPORT: "false"
+      RUSTCHAN_RESTART_ON_EXIT: "1"
     volumes:
       - rustchan-data:/data
-    stop_grace_period: 30s
+    stop_grace_period: 90s
 
 volumes:
   rustchan-data:

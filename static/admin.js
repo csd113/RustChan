@@ -2020,3 +2020,63 @@ document.addEventListener('DOMContentLoaded', function () {
   });
   if (section.dataset.updateActive === 'true') reconnect();
 });
+
+// A restart has one bounded reconnect window; all status remains administrator-only.
+(() => {
+  const section = document.getElementById('settings-restart');
+  if (!section) return;
+  const form = document.getElementById('admin-restart-form');
+  const status = document.getElementById('admin-restart-status');
+  let deadline = 0;
+  let previousInstance = section.dataset.restartInstance;
+  let timer;
+  const poll = async () => {
+    if (Date.now() >= deadline) {
+      status.textContent = 'Restart verification timed out. Refresh restart status to review recovery or retry after the service returns.';
+      return;
+    }
+    try {
+      const response = await fetch('/admin/restart/status', { cache: 'no-store', signal: AbortSignal.timeout(5000) });
+      if (response.status === 403 || response.status === 401) {
+        status.textContent = 'RustChan reconnected. Sign in again to review restart status.';
+        return;
+      }
+      if (response.ok) {
+        const result = await response.json();
+        status.textContent = result.message;
+        if (!result.in_progress && result.instance !== previousInstance) {
+          location.reload();
+          return;
+        }
+        if (!result.in_progress && !result.pending) return;
+      }
+    } catch (_) { status.textContent = 'RustChan is reconnecting. Waiting for verified readiness…'; }
+    timer = setTimeout(poll, 1500);
+  };
+  if (section.dataset.restartInProgress === 'true') {
+    deadline = Date.now() + 240000;
+    poll();
+  }
+  if (form) form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = form.querySelector('button');
+    if (button.disabled) return;
+    button.disabled = true;
+    previousInstance = section.dataset.restartInstance;
+    status.textContent = 'Requesting a graceful restart…';
+    try {
+      const response = await fetch(form.action, { method: 'POST', headers: { Accept: 'application/json' },
+        body: new URLSearchParams(new FormData(form)), signal: AbortSignal.timeout(10000) });
+      const result = await response.json().catch(() => null);
+      if (!response.ok) {
+        status.textContent = result?.message || 'Restart request rejected. Refresh restart status and review configuration before retrying.';
+        button.disabled = false;
+        return;
+      }
+      status.textContent = result?.message || 'Restart accepted. Waiting for verified readiness…';
+    } catch (_) { status.textContent = 'Restart acknowledgment was interrupted. Checking durable status…'; }
+    clearTimeout(timer);
+    deadline = Date.now() + 240000;
+    poll();
+  });
+})();

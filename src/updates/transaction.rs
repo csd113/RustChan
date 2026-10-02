@@ -98,6 +98,28 @@ impl Phase {
     }
 }
 
+/// Operation sharing the updater's lock, journal and recovery admission.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Operation {
+    /// Signed software installation with complete persistent-state rollback.
+    #[default]
+    Update,
+    /// Configuration-only restart; database/media must never be rolled back.
+    SettingsRestart,
+}
+
+impl Operation {
+    /// Retain wire compatibility with earlier update-only status schemas.
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "Serde skip_serializing_if callbacks require a shared reference"
+    )]
+    const fn is_update(&self) -> bool {
+        matches!(self, Self::Update)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 /// Verified updater-owned pre-upgrade snapshot metadata exposed to administrators.
@@ -133,6 +155,12 @@ pub struct BackupInfo {
 #[serde(deny_unknown_fields)]
 /// Durable administrator-only discovery, transaction and retained snapshot state.
 pub struct Status {
+    /// Kind of transaction; old update journals default to software installation.
+    #[serde(default, skip_serializing_if = "Operation::is_update")]
+    pub operation: Operation,
+    /// Process identity whose single settings restart was accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_instance: Option<uuid::Uuid>,
     /// Durable installation or recovery phase.
     pub phase: Phase,
     /// Currently selected immutable version.
@@ -250,6 +278,11 @@ pub(super) mod native {
         fn start(&self) -> anyhow::Result<()>;
         /// Bound readiness and require the expected running application version.
         fn health(&self, version: &str, schema: &str) -> anyhow::Result<()>;
+        /// Verify replacement identity in addition to database/listener readiness.
+        fn health_instance(&self, version: &str, previous: Uuid) -> anyhow::Result<()> {
+            let _ = previous;
+            self.health(version, crate::db::baseline_schema_version())
+        }
     }
 
     /// Publish exact bytes via same-filesystem rename after file and directory fsync.
@@ -553,6 +586,8 @@ pub(super) mod native {
             );
             status.previous_version = Some(current);
             status.target_version = Some(manifest.version.clone());
+            status.operation = super::Operation::Update;
+            status.restart_instance = None;
             status.administrator = Some(administrator);
             status.job = Some(Uuid::new_v4().to_string());
             status.approval = None;
@@ -581,10 +616,14 @@ pub(super) mod native {
             service: &impl Service,
             source: &impl ArtifactSource,
         ) -> anyhow::Result<()> {
+            let settings = crate::config::admin::settings_lease(&self.config.settings_path);
             let coordination = self.coordination_lock();
-            let outcome = match &coordination {
-                Ok(_) => self.install_inner(status, manifest, service, source),
-                Err(error) => Err(anyhow::anyhow!("backup coordination failed: {error}")),
+            let outcome = match (&settings, &coordination) {
+                (Ok(_), Ok(_)) => self.install_inner(status, manifest, service, source),
+                (Err(error), _) => Err(anyhow::anyhow!(
+                    "configuration coordination failed: {error}"
+                )),
+                (_, Err(error)) => Err(anyhow::anyhow!("backup coordination failed: {error}")),
             };
             if let Err(error) = outcome {
                 tracing::error!(error = %error, "update failed");
@@ -717,6 +756,11 @@ pub(super) mod native {
                 Phase::Succeeded,
                 "RustChan updated successfully after health verification.",
             )?;
+            let store = self.restart_store();
+            if store.directory.join("running.json").try_exists()? {
+                let running = store.running()?;
+                store.observe(running.instance, &running.digest, true)?;
+            }
             self.retain_terminal(status);
             Ok(())
         }
@@ -1007,6 +1051,10 @@ pub(super) mod native {
         pub(in crate::updates) fn recover(&self, service: &impl Service) -> anyhow::Result<()> {
             let _lock = self.lock()?;
             let mut status = self.status()?;
+            if status.operation == super::Operation::SettingsRestart && status.phase.active() {
+                let _settings = crate::config::admin::settings_lease(&self.config.settings_path)?;
+                return self.recover_settings_restart(&mut status, service);
+            }
             self.reconcile_backups(&mut status)?;
             if !status.phase.active() {
                 self.retain_terminal(&mut status);

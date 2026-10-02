@@ -10,7 +10,7 @@ test('Tor, media, schedules and system controls save supported settings with pen
     await adminLogin(page, app);
     const cases = [
       { section: 'tor', field: 'tor_bootstrap_timeout_secs', value: '300', entries: 5 },
-      { section: 'media', field: 'thumb_size', value: '512', entries: 17 },
+      { section: 'media', field: 'thumb_size', value: '512', entries: 16 },
       { section: 'schedules', field: 'db_warn_threshold_mb', value: '3000', entries: 4 },
       { section: 'system', field: 'db_pool_size', value: '12', entries: 2 },
     ];

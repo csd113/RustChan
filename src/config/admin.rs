@@ -38,9 +38,20 @@ pub enum InputKind {
     OptionalText,
 }
 
+/// How a validated administrator setting takes effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationMode {
+    /// Database or shared live state is updated by the existing save handler.
+    Live,
+    /// The process must reinitialize the affected resource or immutable policy.
+    Restart,
+}
+
 /// Definition shared by rendering, input validation and coverage checks.
 #[derive(Debug)]
 pub struct SettingDefinition {
+    /// Whether this control uses live state or immutable process initialization.
+    pub application: ApplicationMode,
     /// Authoritative settings-file key.
     pub key: &'static str,
     /// Human-readable label and units.
@@ -57,18 +68,18 @@ pub struct SettingDefinition {
 
 /// Network settings; default request policy preserves the historical behavior.
 pub static NETWORK_SETTINGS: &[SettingDefinition] = &[
-    SettingDefinition { key: "behind_proxy", label: "Trust reverse-proxy headers", help: "For Serveo or another reverse proxy. Forwarded visitor identity and HTTPS are accepted only from trusted peers. Configure the proxy to replace client-supplied forwarding headers.", environment: "CHAN_BEHIND_PROXY", kind: InputKind::Boolean, value: |c| c.behind_proxy.to_string() },
-    SettingDefinition { key: "trusted_proxy_cidrs", label: "Trusted proxy networks (CIDRs)", help: "One CIDR per line or separated by commas. Trust only your proxy peers; a broad allowlist lets those peers supply visitor identity for bans and request counters.", environment: "CHAN_TRUSTED_PROXY_CIDRS", kind: InputKind::List, value: |c| c.trusted_proxy_cidrs.join(", ") },
-    SettingDefinition { key: "public_hosts", label: "Public hostnames", help: "Bare hostnames or IP literals, without scheme, port or path. The first hostname is the displayed public entry point. Used by host checks and HTTPS redirects.", environment: "CHAN_PUBLIC_HOSTS", kind: InputKind::List, value: |c| c.public_hosts.join(", ") },
-    SettingDefinition { key: "https_cookies", label: "Secure authentication cookies", help: "Automatic enables the policy for proxy mode or native HTTPS. Secure cookies are issued for native HTTPS or trusted forwarded HTTPS, preserving plain HTTP access behavior.", environment: "CHAN_HTTPS_COOKIES", kind: InputKind::Boolean, value: |c| c.https_cookies.to_string() },
-    SettingDefinition { key: "port", label: "Primary HTTP port", help: "CHAN_PORT overrides this default. An explicit listen address supplies its own port. A launcher --port/-p overrides the final listener port, including CHAN_BIND.", environment: "CHAN_PORT", kind: InputKind::Number(1, 65535), value: |c| c.port.to_string() },
-    SettingDefinition { key: "bind_addr", label: "Listen address (IP:port)", help: "Leave blank for 0.0.0.0 with the primary HTTP port. Use [::]:8080 for IPv6. CHAN_BIND overrides this field; CHAN_HOST overrides the saved or automatic interface. A launcher --port/-p overrides this address’s port. Tor-only forces loopback. Listener changes require a service restart.", environment: "CHAN_BIND", kind: InputKind::Address, value: |c| c.bind_addr.clone() },
-    SettingDefinition { key: "rate_limit_gets", label: "Browsing request allowance (per visitor/window)", help: "Raise this if visitors frequently see ‘slow down’. Counters use the trusted forwarded identity or the direct peer. Posting cooldowns and password-attempt protection remain separate.", environment: "CHAN_RATE_GETS", kind: InputKind::Number(1, 1_000_000), value: |c| c.rate_limit_gets.to_string() },
-    SettingDefinition { key: "rate_limit_window", label: "Browsing window (seconds)", help: "The historical counter rolls over when elapsed whole seconds are greater than this window. Changing it takes effect on restart.", environment: "CHAN_RATE_WINDOW", kind: InputKind::Number(1, 86400), value: |c| c.rate_limit_window.to_string() },
-    SettingDefinition { key: "rate_limit_policy", label: "Requests counted by the browsing limiter", help: "Legacy counts all methods, including writes, API polling, favicons and banners. Reads counts GET/HEAD only; write-specific protections still apply. Both exempt /static/, /theme-css/, /boards/, admin live logs and backup progress.", environment: "CHAN_RATE_POLICY", kind: InputKind::Policy, value: |c| c.rate_limit_policy.as_str().to_owned() },
-    SettingDefinition { key: "session_duration", label: "Administrator session lifetime (seconds)", help: "Applies to sessions created after restart. Existing sessions keep their stored expiry. Default: 28800 seconds (8 hours).", environment: "CHAN_SESSION_SECS", kind: InputKind::Number(60, 2_592_000), value: |c| c.session_duration.to_string() },
-    SettingDefinition { key: "public_readiness_details", label: "Public detailed readiness", help: "Expose operational details at /readyz. /healthz remains minimal and public.", environment: "CHAN_PUBLIC_READINESS_DETAILS", kind: InputKind::Boolean, value: |c| c.public_readiness_details.to_string() },
-    SettingDefinition { key: "public_metrics_enabled", label: "Public Prometheus metrics", help: "Expose unauthenticated /metrics. Use a trusted scrape path if enabled.", environment: "CHAN_PUBLIC_METRICS_ENABLED", kind: InputKind::Boolean, value: |c| c.public_metrics_enabled.to_string() },
+    SettingDefinition { application: ApplicationMode::Restart, key: "behind_proxy", label: "Trust reverse-proxy headers", help: "For Serveo or another reverse proxy. Forwarded visitor identity and HTTPS are accepted only from trusted peers. Configure the proxy to replace client-supplied forwarding headers.", environment: "CHAN_BEHIND_PROXY", kind: InputKind::Boolean, value: |c| c.behind_proxy.to_string() },
+    SettingDefinition { application: ApplicationMode::Restart, key: "trusted_proxy_cidrs", label: "Trusted proxy networks (CIDRs)", help: "One CIDR per line or separated by commas. Trust only your proxy peers; a broad allowlist lets those peers supply visitor identity for bans and request counters.", environment: "CHAN_TRUSTED_PROXY_CIDRS", kind: InputKind::List, value: |c| c.trusted_proxy_cidrs.join(", ") },
+    SettingDefinition { application: ApplicationMode::Restart, key: "public_hosts", label: "Public hostnames", help: "Bare hostnames or IP literals, without scheme, port or path. The first hostname is the displayed public entry point. Used by host checks and HTTPS redirects.", environment: "CHAN_PUBLIC_HOSTS", kind: InputKind::List, value: |c| c.public_hosts.join(", ") },
+    SettingDefinition { application: ApplicationMode::Restart, key: "https_cookies", label: "Secure authentication cookies", help: "Automatic enables the policy for proxy mode or native HTTPS. Secure cookies are issued for native HTTPS or trusted forwarded HTTPS, preserving plain HTTP access behavior.", environment: "CHAN_HTTPS_COOKIES", kind: InputKind::Boolean, value: |c| c.https_cookies.to_string() },
+    SettingDefinition { application: ApplicationMode::Restart, key: "port", label: "Primary HTTP port", help: "CHAN_PORT overrides this default. An explicit listen address supplies its own port. A launcher --port/-p overrides the final listener port, including CHAN_BIND.", environment: "CHAN_PORT", kind: InputKind::Number(1, 65535), value: |c| c.port.to_string() },
+    SettingDefinition { application: ApplicationMode::Restart, key: "bind_addr", label: "Listen address (IP:port)", help: "Leave blank for 0.0.0.0 with the primary HTTP port. Use [::]:8080 for IPv6. CHAN_BIND overrides this field; CHAN_HOST overrides the saved or automatic interface. A launcher --port/-p overrides this address’s port. Tor-only forces loopback. Listener changes require a service restart.", environment: "CHAN_BIND", kind: InputKind::Address, value: |c| c.bind_addr.clone() },
+    SettingDefinition { application: ApplicationMode::Restart, key: "rate_limit_gets", label: "Browsing request allowance (per visitor/window)", help: "Raise this if visitors frequently see ‘slow down’. Counters use the trusted forwarded identity or the direct peer. Posting cooldowns and password-attempt protection remain separate.", environment: "CHAN_RATE_GETS", kind: InputKind::Number(1, 1_000_000), value: |c| c.rate_limit_gets.to_string() },
+    SettingDefinition { application: ApplicationMode::Restart, key: "rate_limit_window", label: "Browsing window (seconds)", help: "The historical counter rolls over when elapsed whole seconds are greater than this window. Changing it takes effect on restart.", environment: "CHAN_RATE_WINDOW", kind: InputKind::Number(1, 86400), value: |c| c.rate_limit_window.to_string() },
+    SettingDefinition { application: ApplicationMode::Restart, key: "rate_limit_policy", label: "Requests counted by the browsing limiter", help: "Legacy counts all methods, including writes, API polling, favicons and banners. Reads counts GET/HEAD only; write-specific protections still apply. Both exempt /static/, /theme-css/, /boards/, admin live logs and backup progress.", environment: "CHAN_RATE_POLICY", kind: InputKind::Policy, value: |c| c.rate_limit_policy.as_str().to_owned() },
+    SettingDefinition { application: ApplicationMode::Restart, key: "session_duration", label: "Administrator session lifetime (seconds)", help: "Applies to sessions created after restart. Existing sessions keep their stored expiry. Default: 28800 seconds (8 hours).", environment: "CHAN_SESSION_SECS", kind: InputKind::Number(60, 2_592_000), value: |c| c.session_duration.to_string() },
+    SettingDefinition { application: ApplicationMode::Restart, key: "public_readiness_details", label: "Public detailed readiness", help: "Expose operational details at /readyz. /healthz remains minimal and public.", environment: "CHAN_PUBLIC_READINESS_DETAILS", kind: InputKind::Boolean, value: |c| c.public_readiness_details.to_string() },
+    SettingDefinition { application: ApplicationMode::Restart, key: "public_metrics_enabled", label: "Public Prometheus metrics", help: "Expose unauthenticated /metrics. Use a trusted scrape path if enabled.", environment: "CHAN_PUBLIC_METRICS_ENABLED", kind: InputKind::Boolean, value: |c| c.public_metrics_enabled.to_string() },
 ];
 
 /// One control with saved, effective and active state; never includes secrets.
@@ -142,7 +153,8 @@ fn snapshot_from(
             SettingField {
                 definition,
                 input,
-                pending: active_value != next_start,
+                pending: definition.application == ApplicationMode::Restart
+                    && active_value != next_start,
                 overridden: saved_value != next_start,
                 next_start,
                 active: active_value,
@@ -321,7 +333,7 @@ fn setting_source(definition: &SettingDefinition, active: &Config) -> String {
 }
 
 /// Resolve file configuration without filesystem validation or secret exposure.
-fn resolve_file(content: &str, environment: &Environment<'_>) -> anyhow::Result<Config> {
+pub(crate) fn resolve_file(content: &str, environment: &Environment<'_>) -> anyhow::Result<Config> {
     let mut settings: SettingsFile = super::parse_settings_file_str(content)
         .map_err(|_| anyhow::anyhow!("settings.toml is invalid; repair it before saving"))?;
     // A preview does not use secrets. Avoid generating a fallback secret for a
@@ -525,6 +537,17 @@ pub(super) fn save_root_at(
     environment: &Environment<'_>,
     validate: impl Fn(&Config) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    let _lease = settings_lease(path)?;
+    save_root_locked(path, updates, environment, validate)
+}
+
+/// Validate and publish while holding the cross-process settings lease.
+fn save_root_locked(
+    path: &Path,
+    updates: &BTreeMap<String, Option<toml::Value>>,
+    environment: &Environment<'_>,
+    validate: impl Fn(&Config) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     ensure!(
         !std::fs::symlink_metadata(path)?.file_type().is_symlink(),
         "settings.toml must not be a symlink"
@@ -536,6 +559,13 @@ pub(super) fn save_root_at(
         &Environment::Values(&BTreeMap::new()),
     )?)?;
     validate(&resolve_file(&after, environment)?)?;
+    validate_restart_candidate(&after, environment)?;
+    if crate::restart::container_restart_enabled() {
+        ensure!(
+            !crate::restart::container_status()?.phase.active(),
+            "A restart is in progress; settings cannot be changed"
+        );
+    }
     atomic_replace(path, &after)
 }
 
@@ -546,8 +576,9 @@ pub(super) fn save_root_and_commit_at(
     updates: &BTreeMap<String, Option<toml::Value>>,
     commit: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    let _lease = settings_lease(path)?;
     let before = std::fs::read_to_string(path).context("read setup settings before commit")?;
-    save_root_at(path, updates, &Environment::Process, |config| {
+    save_root_locked(path, updates, &Environment::Process, |config| {
         validate_network(config)?;
         config.operator.validate()
     })?;
@@ -637,7 +668,7 @@ pub(super) fn rewrite_root_settings(
 }
 
 /// Persist private, synced bytes before replacing the original settings file.
-fn atomic_replace(path: &Path, content: &str) -> anyhow::Result<()> {
+pub(crate) fn atomic_replace(path: &Path, content: &str) -> anyhow::Result<()> {
     let parent = path.parent().context("settings path needs a parent")?;
     let mut temporary = tempfile::Builder::new()
         .prefix(".settings_")
@@ -652,10 +683,34 @@ fn atomic_replace(path: &Path, content: &str) -> anyhow::Result<()> {
         .as_file()
         .sync_all()
         .context("sync temporary settings file")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                ensure!(
+                    metadata.is_file() && metadata.nlink() == 1,
+                    "configuration destination must be a regular file without hardlinks"
+                );
+                let staged = temporary.as_file().metadata()?;
+                if (staged.uid(), staged.gid()) != (metadata.uid(), metadata.gid()) {
+                    rustix::fs::fchown(
+                        temporary.as_file(),
+                        Some(rustix::fs::Uid::from_raw(metadata.uid())),
+                        Some(rustix::fs::Gid::from_raw(metadata.gid())),
+                    )?;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     temporary
         .persist(path)
         .map_err(|e| e.error)
         .context("atomically replace settings.toml")?;
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -1086,6 +1141,242 @@ mod tests {
                 .is_some_and(|s| s.contains("CHAN_HOST")),
             "derived host override needs provenance"
         );
+        Ok(())
+    }
+}
+
+/// Lock the fixed configuration resource across web saves and supervisor transactions.
+///
+/// # Errors
+/// Rejects unsafe lock paths and concurrent saves, restarts or configuration recovery.
+pub(crate) fn settings_lease(path: &Path) -> anyhow::Result<std::fs::File> {
+    let parent = path
+        .parent()
+        .context("settings path needs a parent")?
+        .canonicalize()?;
+    crate::utils::fs_security::reject_symlink_components(&parent)?;
+    let lock_path = parent.join(".settings.lock");
+    if lock_path.exists() {
+        crate::utils::fs_security::assert_regular_file_no_symlink(&lock_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            ensure!(
+                std::fs::metadata(&lock_path)?.nlink() == 1,
+                "settings lock must not be hardlinked"
+            );
+        }
+    }
+    let mut options = std::fs::File::options();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options
+            .mode(0o600)
+            .custom_flags(i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits())?);
+    }
+    let file = options.open(lock_path)?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "settings lease must be a regular file"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = file.metadata()?;
+        ensure!(
+            metadata.nlink() == 1,
+            "settings lease must not be hardlinked"
+        );
+        // The updater may establish this inode during an upgrade from a pre-restart build.
+        // Keep the fixed lock accessible to the web-owned data directory after handoff.
+        let owner = std::fs::metadata(&parent)?;
+        if (metadata.uid(), metadata.gid()) != (owner.uid(), owner.gid()) {
+            rustix::fs::fchown(
+                &file,
+                Some(rustix::fs::Uid::from_raw(owner.uid())),
+                Some(rustix::fs::Gid::from_raw(owner.gid())),
+            )?;
+        }
+    }
+    file.try_lock().context(
+        "Another configuration save, update or restart is in progress. Retry after it completes.",
+    )?;
+    Ok(file)
+}
+
+/// Compare effective startup controls against the running process, excluding live controls.
+///
+/// # Errors
+/// Rejects an unreadable or invalid settings file.
+pub fn restart_pending() -> anyhow::Result<bool> {
+    let bytes = crate::restart::Store::read(&super::settings_file_path(), 4 * 1024 * 1024)?;
+    pending_from(std::str::from_utf8(&bytes)?, &CONFIG, &Environment::Process)
+}
+
+/// Pure comparison seam for effective configuration and no-op save tests.
+fn pending_from(
+    content: &str,
+    active: &Config,
+    environment: &Environment<'_>,
+) -> anyhow::Result<bool> {
+    let next = resolve_file(content, environment)?;
+    Ok(NETWORK_SETTINGS
+        .iter()
+        .chain(runtime::all_definitions())
+        .chain(application::SETTINGS)
+        .any(|field| {
+            field.application == ApplicationMode::Restart
+                && (field.value)(active) != (field.value)(&next)
+        })
+        || active.cookie_secret != next.cookie_secret
+        || active.database_path != next.database_path
+        || active.upload_dir != next.upload_dir)
+}
+
+/// Compare two saved files using the centralized immutable-setting registry.
+///
+/// # Errors
+/// Rejects invalid saved or previously initialized configuration.
+pub(crate) fn restart_files_differ(previous: &str, candidate: &str) -> anyhow::Result<bool> {
+    let active = resolve_file(previous, &Environment::Process)?;
+    pending_from(candidate, &active, &Environment::Process)
+}
+
+/// Validate the entire saved and effective configuration without creating startup resources.
+///
+/// # Errors
+/// Rejects malformed configuration, invalid bounds, listener conflicts and unusable TLS material.
+pub(crate) fn validate_restart_candidate(
+    content: &str,
+    environment: &Environment<'_>,
+) -> anyhow::Result<()> {
+    for env in [&Environment::Values(&BTreeMap::new()), environment] {
+        let config = resolve_file(content, env)?;
+        for section in runtime::SECTIONS {
+            runtime::validate_section(*section, &config)?;
+        }
+        for definition in application::SETTINGS {
+            if let InputKind::Number(min, max) = definition.kind {
+                let value: u64 = (definition.value)(&config).parse()?;
+                ensure!(
+                    (min..=max).contains(&value),
+                    "{} is outside its allowed range",
+                    definition.label
+                );
+            }
+        }
+        if let Some(path) = &config.backup_directory {
+            super::backup_storage::validate_backup_directory(path, &config)?;
+        }
+        certificates::validate(&config)?;
+        ensure!(
+            config.cookie_secret.len() >= 64,
+            "Cookie secret must have at least 64 characters"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+/// Classification and cross-process write serialization tests.
+mod restart_tests {
+    use super::*;
+
+    /// Complete validation rejects unsafe related configuration before any save can publish it.
+    #[test]
+    fn complete_candidate_validation_rejects_invalid_related_paths_and_live_bounds(
+    ) -> anyhow::Result<()> {
+        let env = Environment::Values(&BTreeMap::new());
+        for content in [
+            "backup_directory = 'relative/backups'\n",
+            "ffmpeg_path = '../untrusted-executable'\n",
+            "auto_full_backup_interval_hours = 10000\n",
+        ] {
+            ensure!(
+                validate_restart_candidate(content, &env).is_err(),
+                "invalid related configuration must reject"
+            );
+        }
+        validate_restart_candidate("ffmpeg_path = 'optional-unavailable-ffmpeg'\n", &env)?;
+        Ok(())
+    }
+
+    /// Live edits and equivalent effective values never create a restart warning.
+    #[test]
+    fn pending_state_uses_restart_metadata_and_actual_effective_changes() -> anyhow::Result<()> {
+        let empty = BTreeMap::new();
+        let env = Environment::Values(&empty);
+        let active = resolve_file("enable_tor_support = false\n", &env)?;
+        ensure!(!pending_from("enable_tor_support = false\nforum_name = 'Live title'\nauto_full_backup_interval_hours = 48\n", &active, &env)?, "live settings must not request restart");
+        ensure!(
+            !pending_from(
+                "enable_tor_support = false\nrate_limit_gets = 60\n",
+                &active,
+                &env
+            )?,
+            "unchanged startup values must not request restart"
+        );
+        ensure!(
+            pending_from(
+                "enable_tor_support = false\nrate_limit_gets = 61\n",
+                &active,
+                &env
+            )?,
+            "changed immutable policy must remain pending"
+        );
+        let overrides = BTreeMap::from([("CHAN_RATE_GETS".to_owned(), "60".to_owned())]);
+        ensure!(
+            !pending_from(
+                "enable_tor_support = false\nrate_limit_gets = 61\n",
+                &active,
+                &Environment::Values(&overrides)
+            )?,
+            "operator override must prevent ineffective restart warning"
+        );
+        ensure!(
+            application::SETTINGS.iter().all(|f| f.application
+                == if f.key == "backup_directory" {
+                    ApplicationMode::Restart
+                } else {
+                    ApplicationMode::Live
+                }),
+            "application controls must declare their actual ownership"
+        );
+        Ok(())
+    }
+    /// A supervisor's lease rejects all configuration writers until it releases the resource.
+    #[test]
+    fn supervisor_lease_rejects_config_save_without_partial_mutation() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("settings.toml");
+        let before = "enable_tor_support = false\n";
+        std::fs::write(&path, before)?;
+        let lease = settings_lease(&path)?;
+        let updates =
+            BTreeMap::from([("rate_limit_gets".to_owned(), Some(toml::Value::Integer(61)))]);
+        ensure!(
+            save_root_at(
+                &path,
+                &updates,
+                &Environment::Values(&BTreeMap::new()),
+                |_| Ok(())
+            )
+            .is_err(),
+            "settings save must reject during restart"
+        );
+        ensure!(
+            std::fs::read_to_string(&path)? == before,
+            "rejected save must preserve original bytes"
+        );
+        drop(lease);
+        save_root_at(
+            &path,
+            &updates,
+            &Environment::Values(&BTreeMap::new()),
+            |_| Ok(()),
+        )?;
         Ok(())
     }
 }

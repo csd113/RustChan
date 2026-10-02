@@ -11,9 +11,15 @@ const REQUEST_ID_HEADER: &str = "x-request-id";
 
 /// Track request counts, active clients, uploads, tracing, and request IDs.
 pub(super) async fn track_requests(
+    axum::extract::State(state): axum::extract::State<crate::middleware::AppState>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    if state.job_queue.cancel.is_cancelled()
+        || (!state.runtime_ready.load(Ordering::Acquire) && req.uri().path() != "/readyz")
+    {
+        return recovery_unavailable();
+    }
     if crate::updates::managed()
         && !matches!(
             *req.method(),
@@ -132,6 +138,46 @@ mod tests {
                 && !text.contains("recovery")
                 && !text.contains(crate::updates::VERSION),
             "public availability errors must not expose update state"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+/// Shutdown request admission using the production middleware and cancellation token.
+mod shutdown_tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        middleware::from_fn_with_state,
+        routing::get,
+        Router,
+    };
+    use tower::ServiceExt as _;
+
+    /// Stop new work while allowing already accepted work to complete through listener drain.
+    #[tokio::test]
+    async fn cancelled_runtime_rejects_new_http_work() -> anyhow::Result<()> {
+        let state = crate::test_support::app_state();
+        let app = Router::new()
+            .route("/", get(|| async { StatusCode::NO_CONTENT }))
+            .layer(from_fn_with_state(state.clone(), track_requests));
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty())?)
+            .await?;
+        anyhow::ensure!(
+            response.status() == StatusCode::NO_CONTENT,
+            "running instance should admit HTTP work"
+        );
+        state.job_queue.cancel.cancel();
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty())?)
+            .await?;
+        anyhow::ensure!(
+            response.status() == StatusCode::SERVICE_UNAVAILABLE,
+            "shutdown must stop new work"
         );
         Ok(())
     }

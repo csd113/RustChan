@@ -77,6 +77,7 @@ pub(crate) fn app_state() -> crate::middleware::AppState {
     }
     let job_queue = std::sync::Arc::new(crate::workers::JobQueue::new(pool.clone()));
     crate::middleware::AppState {
+        runtime_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         db: pool,
         ffmpeg_available: false,
         ffmpeg_webp_available: false,

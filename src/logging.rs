@@ -13,7 +13,7 @@ use std::fmt;
 use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, OnceLock};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use tracing::field::{Field, Visit};
@@ -48,10 +48,12 @@ static CONSOLE_MUTEX: LazyLock<parking_lot::Mutex<()>> =
 // requiring callers to thread it through their own state, and without changing
 // the public `init_logging(&Path)` signature.
 /// Keeps the main log writer's background worker alive for the process lifetime.
-static MAIN_FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+static MAIN_FILE_GUARD: parking_lot::Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> =
+    parking_lot::Mutex::new(None);
 /// Keeps the dependency log writer's background worker alive for the process lifetime.
-static DEPENDENCY_FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> =
-    OnceLock::new();
+static DEPENDENCY_FILE_GUARD: parking_lot::Mutex<
+    Option<tracing_appender::non_blocking::WorkerGuard>,
+> = parking_lot::Mutex::new(None);
 
 /// Fallback main-log filename used when daily rotation cannot be initialized.
 pub const MAIN_LOG_FALLBACK_FILE_NAME: &str = "rustchan.log";
@@ -1244,7 +1246,7 @@ pub fn init_logging(log_dir: &Path) {
     // The WorkerGuard is stored in MAIN_FILE_GUARD so it lives for the entire
     // process — see the comment on that static for why this matters.
     let (main_file_writer, main_guard) = tracing_appender::non_blocking(rolling);
-    drop(MAIN_FILE_GUARD.set(main_guard));
+    *MAIN_FILE_GUARD.lock() = Some(main_guard);
 
     let file_layer = tracing_subscriber::fmt::layer()
         .event_format(FileFormatter)
@@ -1254,7 +1256,7 @@ pub fn init_logging(log_dir: &Path) {
 
     let dependency_log = tracing_appender::rolling::never(log_dir, DEPENDENCY_LOG_FILE_NAME);
     let (dependency_file_writer, dependency_guard) = tracing_appender::non_blocking(dependency_log);
-    drop(DEPENDENCY_FILE_GUARD.set(dependency_guard));
+    *DEPENDENCY_FILE_GUARD.lock() = Some(dependency_guard);
 
     let dependency_file_layer = tracing_subscriber::fmt::layer()
         .event_format(FileFormatter)
@@ -1299,6 +1301,12 @@ pub fn console_prompt(msg: &str) {
     drop(write!(io::stdout(), "{msg}"));
     drop(io::stdout().flush());
     // _guard dropped here — stdin read happens outside the lock
+}
+
+/// Drain queued file logging at the end of the executable lifecycle.
+pub fn shutdown() {
+    drop(MAIN_FILE_GUARD.lock().take());
+    drop(DEPENDENCY_FILE_GUARD.lock().take());
 }
 
 #[cfg(test)]

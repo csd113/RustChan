@@ -35,7 +35,10 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
         .layer(axum_middleware::from_fn(
             crate::middleware::rate_limit_middleware,
         ))
-        .layer(axum_middleware::from_fn(track_requests))
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            track_requests,
+        ))
         .layer(axum_middleware::from_fn(
             super::headers::theme_error_response,
         ))

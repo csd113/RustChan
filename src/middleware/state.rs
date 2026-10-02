@@ -393,6 +393,8 @@ impl Drop for MaintenanceGuard {
 )]
 /// Shared runtime services and capability state used by request handlers.
 pub struct AppState {
+    /// Admit normal HTTP work only after initialization and supervisor observation.
+    pub runtime_ready: Arc<AtomicBool>,
     /// Database connection pool.
     pub db: crate::db::DbPool,
     /// Whether the `FFmpeg` executable is available.

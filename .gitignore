@@ -21,6 +21,7 @@ tests/fixtures/*
 !tests/e2e/
 tests/e2e/*
 !tests/e2e/non-video-media.spec.ts
+!tests/e2e/settings-restart.spec.ts
 
 # Build output, dependency caches, coverage, and profiling output.
 target/

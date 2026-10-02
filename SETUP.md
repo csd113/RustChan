@@ -717,3 +717,7 @@ variants the internal decoders do not cover, including AC-3, Speex, unsupported
 AAC profiles and Opus multistream/surround. See the
 [media migration report](docs/non-video-media-migration.md) for format coverage,
 resource limits and verification.
+
+## Applying administrator configuration
+
+Live controls keep applying immediately. Other controls show their active, saved and next-start values. Saving never restarts RustChan; managed Linux and opted-in supervised containers expose **Restart RustChan** for pending settings. See [settings restarts](docs/settings-restarts.md) for the complete classification, supervisor setup, graceful shutdown and failure recovery.

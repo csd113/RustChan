@@ -98,7 +98,7 @@ pub(in crate::server) async fn update_full_backup_settings(
         .await
         .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
         return Ok(admin_panel_redirect_anchor(
-            "Backup directory saved. Restart RustChan to apply it. Existing backups have not been moved. CHAN_BACKUP_DIRECTORY, if set, takes precedence.",
+            if crate::config::admin::restart_pending().unwrap_or(true) { "Backup directory saved. Restart RustChan to apply it. Existing backups have not been moved; environment overrides take precedence." } else { "Backup directory saved. The effective configuration does not require a restart." },
             "full-backup-restore",
         ).into_response());
     }

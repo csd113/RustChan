@@ -181,6 +181,30 @@ fn protect_tls_plaintext_backend(
     ))
 }
 
+/// Initialize and run the configured HTTP, HTTPS, Tor, and background services.
+///
+/// # Errors
+///
+/// Returns an error when configuration validation, filesystem or database
+/// initialization, listener startup, or coordinated listener execution fails.
+pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
+    let (ready, started) = tokio::sync::oneshot::channel();
+    if !crate::updates::managed() && !crate::restart::container_restart_enabled() {
+        let result = run_server_lifecycle(port_override, ready).await;
+        drop(started);
+        return result;
+    }
+    let server = run_server_lifecycle(port_override, ready);
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result,
+        initialized = tokio::time::timeout(crate::restart::STARTUP_TIMEOUT, started) => {
+            initialized.context("RustChan initialization timed out")?.context("RustChan initialization stopped before readiness")?;
+            server.await
+        }
+    }
+}
+
 #[expect(
     clippy::cognitive_complexity,
     reason = "startup, listener selection, and coordinated shutdown form one server lifecycle"
@@ -189,13 +213,11 @@ fn protect_tls_plaintext_backend(
     clippy::too_many_lines,
     reason = "startup ordering and shutdown ownership are one cohesive server lifecycle"
 )]
-/// Initialize and run the configured HTTP, HTTPS, Tor, and background services.
-///
-/// # Errors
-///
-/// Returns an error when configuration validation, filesystem or database
-/// initialization, listener startup, or coordinated listener execution fails.
-pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
+/// Initialize resources, report readiness once, then own their bounded shutdown.
+async fn run_server_lifecycle(
+    port_override: Option<u16>,
+    ready: tokio::sync::oneshot::Sender<()>,
+) -> anyhow::Result<()> {
     crate::updates::await_startup().await?;
     // rustls 0.23 requires an explicit process-wide crypto provider.
     // install_default() is idempotent — a second call (e.g. in tests) returns
@@ -207,6 +229,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     migrate_runtime_layout_if_needed()?;
 
     generate_settings_file_if_missing();
+    let startup_digest = crate::restart::startup_digest()?;
 
     // Validate critical configuration values immediately — fail fast with a
     // clear error rather than discovering misconfiguration at runtime (#8).
@@ -556,6 +579,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         crate::workers::start_worker_pool(&worker_queue, ffmpeg_available, ffmpeg_vp9_available);
 
     let state = AppState {
+        runtime_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         db: pool.clone(),
         ffmpeg_available,
         ffmpeg_webp_available,
@@ -584,7 +608,9 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     // and the Tor task. Declared here so it is available to background tasks
     // spawned below. detect_tor is called later, after the first-run wizard.
     let worker_cancel = state.job_queue.cancel.clone();
+    let _cancel_on_exit = worker_cancel.clone().drop_guard();
     let start_time = Instant::now();
+    let mut background_tasks = tokio::task::JoinSet::new();
 
     // Media reconciliation is deliberately paged and periodic: workers poll
     // durable pending rows independently, while this pass repairs only bounded
@@ -593,7 +619,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         let reconcile_pool = pool.clone();
         let reconcile_queue = Arc::clone(&state.job_queue);
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        background_tasks.spawn(async move {
             let mut job_cursor = startup_media_reconciliation.next_job_id;
             let mut post_cursor = startup_media_reconciliation.next_post_id;
             let mut interval = tokio::time::interval(Duration::from_mins(1));
@@ -652,7 +678,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         let reconcile_pool = pool.clone();
         let cancel_clone = worker_cancel.clone();
         let interval_hours = CONFIG.media_reconcile_interval_hours;
-        tokio::spawn(async move {
+        background_tasks.spawn(async move {
             let mut cursor = startup_managed_media_cursor;
             let mut interval = tokio::time::interval(Duration::from_hours(interval_hours));
             interval.tick().await;
@@ -704,7 +730,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         let reconcile_pool = pool.clone();
         let reconcile_queue = Arc::clone(&state.job_queue);
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        background_tasks.spawn(async move {
             let mut cursor = startup_prune_reconciliation.next_board_id;
             let mut interval = tokio::time::interval(Duration::from_mins(1));
             interval.tick().await;
@@ -759,7 +785,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     {
         let bg = pool.clone();
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        background_tasks.spawn(async move {
             let mut iv = tokio::time::interval(Duration::from_hours(1));
             loop {
                 tokio::select! {
@@ -793,7 +819,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         let maintenance_state = state.clone();
         let interval_secs = CONFIG.wal_checkpoint_interval;
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        background_tasks.spawn(async move {
             // Stagger the first run by half the interval so it doesn't fire
             // immediately at startup alongside the session purge.
             tokio::select! {
@@ -840,7 +866,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     // Background: prune stale IPs from ACTIVE_IPS every 5 min
     {
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        background_tasks.spawn(async move {
             let mut iv = tokio::time::interval(Duration::from_mins(5));
             loop {
                 tokio::select! {
@@ -865,7 +891,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     // opportunistic prune path inside clear_login_fails).
     {
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        background_tasks.spawn(async move {
             let mut iv = tokio::time::interval(Duration::from_mins(5));
             loop {
                 tokio::select! {
@@ -888,7 +914,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         let maintenance_state = state.clone();
         let interval_secs = CONFIG.auto_vacuum_interval_hours * 3600;
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        background_tasks.spawn(async move {
             // Stagger the first run by half the interval to avoid hammering the
             // DB immediately at startup alongside WAL checkpoint and session purge.
             tokio::select! {
@@ -958,7 +984,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         let bg = pool.clone();
         let maintenance_state = state.clone();
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        background_tasks.spawn(async move {
             let scheduler_started_at = SystemTime::now();
             let mut failure_streak = 0u32;
             let mut retry_not_before: Option<SystemTime> = None;
@@ -1081,7 +1107,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         let bg = pool.clone();
         let interval_secs = CONFIG.poll_cleanup_interval_hours * 3600;
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        background_tasks.spawn(async move {
             tokio::select! {
                 () = tokio::time::sleep(Duration::from_mins(10)) => {} // initial delay
                 () = cancel_clone.cancelled() => { return; }
@@ -1127,7 +1153,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     {
         let bg = pool.clone();
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        background_tasks.spawn(async move {
             tokio::select! {
                 () = tokio::time::sleep(Duration::from_mins(5)) => {}
                 () = cancel_clone.cancelled() => { return; }
@@ -1175,7 +1201,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         let max_bytes = CONFIG.waveform_cache_max_bytes;
         let cancel_clone = worker_cancel.clone();
         let bg = pool.clone();
-        tokio::spawn(async move {
+        background_tasks.spawn(async move {
             tokio::select! {
                 () = tokio::time::sleep(Duration::from_mins(30)) => {} // initial stagger
                 () = cancel_clone.cancelled() => { return; }
@@ -1264,9 +1290,11 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
 
     // Install shutdown handling before raw first-run input can begin.
     let signal_cancel = worker_cancel.clone();
-    tokio::spawn(async move {
-        shutdown_signal().await;
-        signal_cancel.cancel();
+    background_tasks.spawn(async move {
+        tokio::select! {
+            () = shutdown_signal() => signal_cancel.cancel(),
+            () = signal_cancel.cancelled() => {},
+        }
         super::console::cleanup();
     });
 
@@ -1323,7 +1351,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
             let cancel_stats = worker_cancel.clone();
             let onion_addr = Arc::clone(&state.onion_address);
             let force_reload = Arc::clone(&force_reload_notify);
-            tokio::spawn(async move {
+            background_tasks.spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(3));
                 let mut sampler = super::console::stats::Sampler::new(start_time);
                 loop {
@@ -1374,7 +1402,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         let cancel_d = worker_cancel.clone();
         let shutdown_tx = worker_cancel.clone();
         let operation_pool = pool.clone();
-        tokio::spawn(async move {
+        background_tasks.spawn(async move {
             loop {
                 let next_key = tokio::select! {
                     biased;
@@ -1583,27 +1611,56 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         });
     }
 
+    {
+        let conn = pool.get()?;
+        crate::db::database_ready_probe(&conn)?;
+    }
+    crate::restart::started(startup_digest).await?;
+    state.runtime_ready.store(true, Ordering::Release);
+    ready
+        .send(())
+        .map_err(|()| anyhow::anyhow!("startup readiness receiver dropped"))?;
+
     let runtime_result = tokio::select! {
         () = wait_shutdown.cancelled() => Ok(()),
         result = next_listener_exit(&mut listener_tasks, &worker_cancel) => result,
     };
+    let deadline = tokio::time::Instant::now() + crate::restart::SHUTDOWN_TIMEOUT;
     worker_cancel.cancel();
     let listener_shutdown_result = finish_listener_tasks(&mut listener_tasks).await;
-
-    // Each worker gets `ffmpeg_timeout + 10s` to finish its in-flight job.
-    tracing::info!(target: "server", "Signalling background workers to shut down…");
-    worker_cancel.cancel();
-    let shutdown_timeout = Duration::from_secs(crate::config::ffmpeg_timeout_secs() + 10);
-    for handle in worker_handles {
-        drop(tokio::time::timeout(shutdown_timeout, handle).await);
+    tracing::info!(target: "server", "Draining background workers and persistent operations");
+    for mut handle in worker_handles {
+        if tokio::time::timeout_at(deadline, &mut handle)
+            .await
+            .is_err()
+        {
+            handle.abort();
+        }
     }
-    // The cancellation token interrupts Tor's retry backoff. This 15-second
-    // safety-net timeout
-    // below is only a last resort for the in-flight copy_bidirectional on any
-    // active stream — Arti sends RELAY_END cells synchronously on drop, which
-    // completes well within this window under normal conditions.
-    if let Some(h) = tor_handle {
-        drop(tokio::time::timeout(Duration::from_secs(15), h).await);
+    if let Some(mut handle) = tor_handle {
+        if tokio::time::timeout_at(deadline, &mut handle)
+            .await
+            .is_err()
+        {
+            handle.abort();
+        }
+    }
+    let drain = async { while background_tasks.join_next().await.is_some() {} };
+    if tokio::time::timeout_at(deadline, drain).await.is_err() {
+        background_tasks.shutdown().await;
+    }
+    let checkpoint_pool = pool.clone();
+    let checkpoint = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let conn = checkpoint_pool.get()?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        Ok(())
+    });
+    match tokio::time::timeout_at(deadline, checkpoint).await {
+        Ok(Ok(Ok(()))) => {}
+        result => tracing::warn!(
+            ?result,
+            "Final SQLite checkpoint did not complete; SQLite WAL recovery remains available"
+        ),
     }
 
     runtime_result?;
@@ -1711,7 +1768,9 @@ async fn finish_listener_tasks(
         first_error.map_or(Ok(()), Err)
     };
 
-    if let Ok(result) = tokio::time::timeout(Duration::from_secs(3), drain).await {
+    if let Ok(result) =
+        tokio::time::timeout(crate::restart::HTTP_DRAIN + Duration::from_secs(2), drain).await
+    {
         return result;
     }
     tracing::warn!(
@@ -1732,7 +1791,7 @@ async fn run_plain_http(
     let shutdown_handle = handle.clone();
     tokio::spawn(async move {
         cancel.cancelled().await;
-        shutdown_handle.graceful_shutdown(Some(Duration::from_secs(1)));
+        shutdown_handle.graceful_shutdown(Some(crate::restart::HTTP_DRAIN));
     });
 
     let std_listener = listener.into_std()?;
@@ -1773,7 +1832,7 @@ pub async fn run_https_static(
     // background workers and the HTTP listener.
     tokio::spawn(async move {
         cancel.cancelled().await;
-        handle_clone.graceful_shutdown(Some(Duration::from_secs(1)));
+        handle_clone.graceful_shutdown(Some(crate::restart::HTTP_DRAIN));
     });
 
     // Convert tokio TcpListener → std TcpListener for axum_server::from_tcp_rustls.
@@ -1907,7 +1966,7 @@ pub async fn run_https_acme(
             }
         }
     };
-    if tokio::time::timeout(Duration::from_secs(1), drain_connections)
+    if tokio::time::timeout(crate::restart::HTTP_DRAIN, drain_connections)
         .await
         .is_err()
     {
@@ -2497,5 +2556,55 @@ mod tests {
             scheduled_full_backup_failure_retry_delay(interval, 10),
             interval
         );
+    }
+}
+
+#[cfg(test)]
+/// Actual HTTP listener tests for the bounded graceful drain.
+mod shutdown_tests {
+    use super::*;
+    use axum::{routing::get, Router};
+
+    /// An accepted request can finish after cancellation while new connections stop.
+    #[tokio::test]
+    async fn graceful_shutdown_drains_an_in_flight_http_response() -> anyhow::Result<()> {
+        drop(rustls::crypto::ring::default_provider().install_default());
+        let accepted = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let handler_accepted = Arc::clone(&accepted);
+        let handler_release = Arc::clone(&release);
+        let app = Router::new().route(
+            "/",
+            get(move || {
+                let accepted = Arc::clone(&handler_accepted);
+                let release = Arc::clone(&handler_release);
+                async move {
+                    accepted.notify_one();
+                    release.notified().await;
+                    "completed"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let server_cancel = cancel.clone();
+        let server =
+            tokio::spawn(async move { run_plain_http(listener, app, server_cancel).await });
+        let request = tokio::spawn(async move {
+            reqwest::get(format!("http://{address}/"))
+                .await?
+                .text()
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), accepted.notified()).await?;
+        cancel.cancel();
+        release.notify_one();
+        anyhow::ensure!(
+            tokio::time::timeout(Duration::from_secs(3), request).await??? == "completed",
+            "accepted response must finish during graceful drain"
+        );
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
+        Ok(())
     }
 }
