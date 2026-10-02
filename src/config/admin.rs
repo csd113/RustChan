@@ -1239,6 +1239,7 @@ fn pending_from(
 ///
 /// # Errors
 /// Rejects invalid saved or previously initialized configuration.
+#[cfg(unix)]
 pub(crate) fn restart_files_differ(previous: &str, candidate: &str) -> anyhow::Result<bool> {
     let active = resolve_file(previous, &Environment::Process)?;
     pending_from(candidate, &active, &Environment::Process)

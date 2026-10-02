@@ -1858,8 +1858,23 @@ async fn render_waveform_with_compatibility(
             .checked_sub(started.elapsed())
             .ok_or_else(|| anyhow::anyhow!("waveform deadline exceeded"))?;
         let mut command = ffmpeg_command();
+        // Debian FFmpeg's Speex decoder leaves frame layouts unspecified. Its
+        // validated header permits only mono/stereo; negotiate either without
+        // downmixing or changing the channel count before showwavespic.
+        let layout = if error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<symphonia::core::errors::Error>(),
+                Some(symphonia::core::errors::Error::Unsupported(
+                    "Speex requires the compatibility decoder"
+                ))
+            )
+        }) {
+            "aformat=channel_layouts=mono|stereo,"
+        } else {
+            ""
+        };
         let filter = format!(
-            "showwavespic=s={}x{}:colors=0x888888",
+            "{layout}showwavespic=s={}x{}:colors=0x888888",
             CONFIG.thumb_size,
             CONFIG.thumb_size / 2
         );
@@ -3192,6 +3207,7 @@ mod tests {
             "he-aac.m4a",
             "he-aac-inband.aac",
             "tone.spx",
+            "speex-stereo.spx",
             "speex-chained.spx",
             "speex-multiplexed.spx",
             "speex-chained-multiplexed.spx",

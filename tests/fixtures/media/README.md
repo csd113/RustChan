@@ -27,3 +27,5 @@ The `opus-surround-distinct.opus` fixture contains six generated sine waves at 2
 `inline-image.pdf` is an original 100 × 80 page with one red RGB pixel displayed as a 60 × 60 inline image. It verifies that valid input outside the bounded renderer subset keeps its original download and receives the deterministic SVG preview.
 
 `speex-chained-multiplexed.spx` joins two complete multiplexed groups with four distinct serials and recomputed CRCs. Completed logical streams must not block the next chain’s grouped BOS pages.
+
+`speex-stereo.spx` is Debian FFmpeg 5.1.9/libspeex encoding of the synthetic stereo `tone.m4a`, resampled to 32 kHz (`-ar 32000 -ac 2 -c:a libspeex`). Together with mono `tone.spx`, it protects count-preserving mono/stereo layout negotiation before the legacy Debian waveform filter.
