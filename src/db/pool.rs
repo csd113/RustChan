@@ -21,6 +21,21 @@ pub(super) const CONNECTION_PRAGMAS: &str = "
 /// Maximum time callers wait for a pooled connection.
 const POOL_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Require one initialized connection before startup; fill spare capacity asynchronously.
+fn build_pool(manager: SqliteConnectionManager, pool_size: u32) -> Result<DbPool> {
+    // r2d2's build() waits for max_size connections by default. That couples
+    // first-run startup to every spare initializer's scheduling even when a
+    // usable connection is ready. Keep eager refill and the one-second request
+    // deadline, but validate readiness through a real checkout instead.
+    let pool = Pool::builder()
+        .max_size(pool_size)
+        .event_handler(Box::new(super::diagnostics::PoolEvents::new()))
+        .connection_timeout(POOL_CONNECTION_TIMEOUT)
+        .build_unchecked(manager);
+    drop(pool.get().context("Failed to initialize database pool")?);
+    Ok(pool)
+}
+
 /// Initialise the `SQLite` connection pool and ensure the schema exists.
 ///
 /// # Errors
@@ -37,12 +52,7 @@ pub fn init_pool() -> Result<DbPool> {
         .with_init(|conn| conn.execute_batch(CONNECTION_PRAGMAS));
 
     let pool_size = CONFIG.db_pool_size;
-    let pool = Pool::builder()
-        .max_size(pool_size)
-        .event_handler(Box::new(super::diagnostics::PoolEvents::new()))
-        .connection_timeout(POOL_CONNECTION_TIMEOUT)
-        .build(manager)
-        .context("Failed to build database pool")?;
+    let pool = build_pool(manager, pool_size)?;
 
     let conn = pool.get().context("Failed to get DB connection")?;
     install_or_migrate_schema(&conn)?;
@@ -119,6 +129,68 @@ pub fn has_no_admin(pool: &DbPool) -> bool {
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
+
+    /// Holds spare connection initializers until the test releases them.
+    #[derive(Debug, Default)]
+    struct InitializationGate {
+        /// Whether spare initializers can finish.
+        released: parking_lot::Mutex<bool>,
+        /// Wakes blocked initializers when the test has observed startup.
+        wake: parking_lot::Condvar,
+    }
+
+    /// Releases blocked initializers even when the startup regression fails.
+    #[derive(Debug)]
+    struct ReleaseInitializers(std::sync::Arc<InitializationGate>);
+
+    impl Drop for ReleaseInitializers {
+        fn drop(&mut self) {
+            *self.0.released.lock() = true;
+            self.0.wake.notify_all();
+        }
+    }
+
+    #[test]
+    fn startup_uses_a_ready_connection_while_spare_initializers_are_blocked() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let gate = std::sync::Arc::new(InitializationGate::default());
+        let release = ReleaseInitializers(std::sync::Arc::clone(&gate));
+        let openings = std::sync::atomic::AtomicUsize::new(0);
+        let manager =
+            r2d2_sqlite::SqliteConnectionManager::file(directory.path().join("startup.db"))
+                .with_init(move |conn| {
+                    if openings.fetch_add(1, std::sync::atomic::Ordering::Relaxed) != 0 {
+                        let mut released = gate.released.lock();
+                        while !*released {
+                            gate.wake.wait(&mut released);
+                        }
+                    }
+                    conn.execute_batch(super::CONNECTION_PRAGMAS)
+                });
+        let result = super::build_pool(manager, 4);
+        drop(release);
+        let pool = result?;
+        anyhow::ensure!(pool.max_size() == 4, "startup changed pool capacity");
+        anyhow::ensure!(
+            pool.connection_timeout() == super::POOL_CONNECTION_TIMEOUT,
+            "startup changed request checkout timeout"
+        );
+        let conn = pool.get()?;
+        super::install_or_migrate_schema(&conn)?;
+        crate::db::verify_database_schema(&conn)?;
+        Ok(())
+    }
+
+    #[test]
+    fn startup_rejects_a_pool_with_no_usable_connection() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(directory.path());
+        anyhow::ensure!(
+            super::build_pool(manager, 4).is_err(),
+            "startup accepted an unusable database"
+        );
+        Ok(())
+    }
 
     #[test]
     fn every_pool_connection_enforces_wal_full_and_foreign_keys() -> Result<()> {

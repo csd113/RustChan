@@ -438,3 +438,29 @@ local evidence. Operators should watch pool wait/hold warnings, debug lock/SQL
 labels, job queues and WAL growth under their actual workload. Existing deep
 health/repair and exclusive restore work can be expensive by design. Nothing in
 these measurements justifies a database migration today.
+
+## 14. CLI startup readiness follow-up
+
+The published working revision `39675da` had three Linux CLI integration failures
+at database-pool construction in CI run `37048226995`. Both Rust test binaries
+passed, but separate CLI processes reported a one-second pool timeout. Unchanged
+local CLI tests and 60 fresh Linux-container startups did not reproduce that
+host-specific scheduling failure; those container runs used the previously built
+validation image, not this source revision.
+
+A deterministic regression exposed an unnecessarily strict startup requirement:
+r2d2's checked builder waits for the whole configured pool by default, even when
+one fully initialized connection is usable. Holding spare initializers behind a
+gate made the former builder fail with the same timeout. Production startup now
+keeps eager background filling and checks out one initialized connection before
+installing and verifying the schema. Pool capacity, one-second request checkout,
+WAL, FULL synchronization, foreign keys and busy timeout are unchanged. An
+additional regression rejects a database path that cannot yield any usable
+connection. No startup timeout was increased.
+
+With Rust 1.99, the repaired tree passed all-target/all-feature checking, strict
+Clippy (all, pedantic, nursery and cargo), all five CLI integration tests, 2,671
+workspace test executions with four test threads, dependency policy and the
+all-feature workspace release build. Four opt-in tests remain ignored in each
+Rust test binary. The exact scheduling cause of the earlier hosted failure is
+still unproven; exact-head hosted CI remains the final platform verification.
