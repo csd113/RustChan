@@ -85,7 +85,7 @@ pub fn convert_file(
     let action = conversion_action(mime);
 
     match action {
-        ConversionAction::ToWebp => convert_to_webp(input_path, output_dir, file_stem),
+        ConversionAction::ToWebp => convert_to_webp(input_path, mime, output_dir, file_stem),
         ConversionAction::ToWebpIfSmaller => {
             convert_png_if_smaller(input_path, output_dir, file_stem)
         }
@@ -98,7 +98,12 @@ pub fn convert_file(
 ///
 /// On codec failure, logs a warning and falls back to copying the original
 /// file unchanged (so the post still succeeds).
-fn convert_to_webp(input: &Path, output_dir: &Path, file_stem: &str) -> Result<ConversionResult> {
+fn convert_to_webp(
+    input: &Path,
+    mime: &str,
+    output_dir: &Path,
+    file_stem: &str,
+) -> Result<ConversionResult> {
     let output = output_dir.join(format!("{file_stem}.webp"));
     let tmp_out = temp_sibling(&output);
 
@@ -132,8 +137,8 @@ fn convert_to_webp(input: &Path, output_dir: &Path, file_stem: &str) -> Result<C
         Err(e) => {
             drop(std::fs::remove_file(&tmp_out));
             tracing::warn!("image→webp failed ({:#}); storing original", e);
-            // Fall back: copy input to its original extension destination
-            copy_as_is_with_ext(input, output_dir, file_stem, ext_for_original_mime(input))
+            // Preserve the validated MIME even for suffixless or misnamed temporary files.
+            copy_as_is(input, mime, output_dir, file_stem)
         }
     }
 }
@@ -166,13 +171,13 @@ fn convert_png_if_smaller(
                 // PNG is already optimal
                 drop(std::fs::remove_file(&tmp_webp));
                 tracing::debug!("PNG→WebP skipped: webp ({webp_size}B) ≥ png ({original_size}B)");
-                copy_as_is_with_ext(input, output_dir, file_stem, "png")
+                copy_as_is(input, "image/png", output_dir, file_stem)
             }
         }
         Err(e) => {
             drop(std::fs::remove_file(&tmp_webp));
             tracing::warn!("png→webp failed ({:#}); storing original PNG", e);
-            copy_as_is_with_ext(input, output_dir, file_stem, "png")
+            copy_as_is(input, "image/png", output_dir, file_stem)
         }
     }
 }
@@ -192,16 +197,6 @@ fn copy_as_is(
         ext,
         upload_mime_to_static(mime),
     )
-}
-
-/// Copy `input` to `output_dir/{file_stem}.{ext}`, returning a `ConversionResult`.
-fn copy_as_is_with_ext(
-    input: &Path,
-    output_dir: &Path,
-    file_stem: &str,
-    ext: &str,
-) -> Result<ConversionResult> {
-    copy_as_is_with_mime(input, output_dir, file_stem, ext, ext_to_static_mime(ext))
 }
 
 /// Copy input bytes using an explicit canonical MIME type and extension.
@@ -279,54 +274,6 @@ fn file_size(path: &Path) -> Result<u64> {
     std::fs::metadata(path)
         .map(|m| m.len())
         .with_context(|| format!("failed to stat {}", path.display()))
-}
-
-/// Best-guess extension for a file whose extension we preserved but whose
-/// original MIME is no longer in scope.  Used only in fallback paths.
-fn ext_for_original_mime(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("jpg" | "jpeg") => "jpg",
-        Some("png") => "png",
-        Some("gif") => "gif",
-        Some("heic") => "heic",
-        Some("heif") => "heif",
-        Some("bmp") => "bmp",
-        Some("tiff" | "tif") => "tiff",
-        Some("webp") => "webp",
-        Some("webm") => "webm",
-        Some("mkv") => "mkv",
-        Some("svg") => "svg",
-        Some("pdf") => "pdf",
-        Some("opus") => "opus",
-        _ => "bin",
-    }
-}
-
-/// Map a file extension back to a `'static` MIME string for `ConversionResult`.
-fn ext_to_static_mime(ext: &str) -> &'static str {
-    match ext {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "gif" => "image/gif",
-        "heic" => "image/heic",
-        "heif" => "image/heif",
-        "bmp" => "image/bmp",
-        "tiff" | "tif" => "image/tiff",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "pdf" => "application/pdf",
-        "webm" => "video/webm",
-        "mkv" => "video/x-matroska",
-        "mp4" => "video/mp4",
-        "mp3" => "audio/mpeg",
-        "ogg" => "audio/ogg",
-        "opus" => "audio/opus",
-        "flac" => "audio/flac",
-        "wav" => "audio/wav",
-        "m4a" => "audio/mp4",
-        "aac" => "audio/aac",
-        _ => "application/octet-stream",
-    }
 }
 
 #[cfg(test)]

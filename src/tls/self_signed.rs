@@ -30,7 +30,7 @@ const CERT_SANS: &[&str] = &["localhost", "127.0.0.1", "::1"];
 ///
 /// # Errors
 ///
-/// Returns [`AppError::Tls`] (wrapped in [`crate::Result`]) if directory
+/// Returns [`AppError::Tls`] (wrapped in [`crate::error::Result`]) if directory
 /// creation fails, certificate/key generation fails, the private files cannot
 /// be written, or the PEM files cannot be loaded into a `TlsAcceptor`.
 pub(super) fn generate_or_load(data_dir: &Path) -> Result<(Arc<TlsAcceptor>, Arc<ServerConfig>)> {
@@ -140,7 +140,7 @@ fn build_cert_params() -> Result<rcgen::CertificateParams> {
     Ok(params)
 }
 
-/// Decide the correct [`SanType`] for a raw string: IPv4/6 literals become
+/// Decide the correct [`rcgen::SanType`] for a raw string: IPv4/6 literals become
 /// `IpAddress`, everything else becomes `DnsName`.
 fn san_for(s: &str) -> Result<rcgen::SanType> {
     if let Ok(address) = s.parse::<std::net::IpAddr>() {

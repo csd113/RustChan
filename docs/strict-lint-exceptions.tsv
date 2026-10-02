@@ -189,8 +189,8 @@ src/media/prune.rs	524	expect	clippy::panic_in_result_fn	test assertions intenti
 src/media/prune.rs	595	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn pruning_removes_secondary_audio_original_with_combo_post
 src/media/prune.rs	657	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn pruning_refuses_symlink_media_paths
 src/media/prune.rs	711	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn pruning_refuses_symlink_parent_components
-src/media/thumbnail.rs	496	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn write_pdf_placeholder_outputs_svg
-src/media/thumbnail.rs	511	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn unsupported_image_thumbnail_falls_back_to_svg_placeholder_without_ffmpeg
+src/media/thumbnail.rs	497	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn write_pdf_placeholder_outputs_svg
+src/media/thumbnail.rs	512	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn unsupported_image_thumbnail_falls_back_to_svg_placeholder_without_ffmpeg
 src/middleware/state.rs	342	expect	clippy::struct_excessive_bools	independent runtime capability flags are shared across handlers and workers	struct AppState
 src/middleware/state.rs	435	expect	clippy::panic_in_result_fn	assertions provide precise regression failures after fallible test-database setup	fn db_maintenance_jobs_assign_monotonic_job_ids_and_preserve_them_in_terminal_states
 src/middleware/state.rs	527	expect	clippy::panic_in_result_fn	assertions provide precise regression failures after fallible test-database setup	fn db_maintenance_jobs_finished_updates_only_matching_running_job
@@ -370,10 +370,10 @@ tests/cli_runtime.rs	304	expect	clippy::panic_in_result_fn	assertions intentiona
 tests/cli_runtime.rs	356	expect	clippy::panic_in_result_fn	assertions intentionally report violated CLI filesystem invariants	fn relative_data_dir_is_rejected_before_filesystem_mutation
 tests/cli_runtime.rs	396	expect	clippy::too_many_lines	one subprocess lifecycle verifies the complete direct-HTTPS topology and cookie contract	fn direct_https_process_exposes_only_https_and_redirect_with_secure_login_cookies
 tests/cli_runtime.rs	400	expect	clippy::panic_in_result_fn	assertions intentionally report violated TLS topology and cookie invariants	fn direct_https_process_exposes_only_https_and_redirect_with_secure_login_cookies
-src/media/audio.rs	440	expect	clippy::cast_possible_truncation,clippy::cast_sign_loss,clippy::as_conversions	clamped normalized amplitudes map to a bounded pixel radius	fn render_peaks
+src/media/audio.rs	521	expect	clippy::cast_possible_truncation,clippy::cast_sign_loss,clippy::as_conversions	clamped normalized amplitudes map to a bounded pixel radius	fn render_peaks
 src/media/heif.rs	12	expect	clippy::redundant_pub_crate	keep codec helpers internal while allowing upload and banner callers	fn decode
 src/media/images.rs	21	expect	clippy::redundant_pub_crate	keep codec helpers internal while allowing upload and banner callers	fn validate_dimensions
 src/media/images.rs	35	expect	clippy::redundant_pub_crate	keep codec helpers internal while allowing upload and banner callers	fn decode_still
 src/media/images.rs	74	expect	clippy::redundant_pub_crate	keep codec helpers internal while allowing upload and banner callers	fn image_to_webp
-src/media/pdf.rs	30	expect	clippy::redundant_pub_crate	PDF rendering is an internal media helper	fn render
-src/media/pdf.rs	34	expect	clippy::cast_possible_truncation,clippy::cast_sign_loss,clippy::as_conversions	finite positive viewport dimensions are clamped to a checked u16 bound before rounding	fn render
+src/media/pdf.rs	31	expect	clippy::redundant_pub_crate	PDF rendering is an internal media helper	fn render
+src/media/pdf.rs	35	expect	clippy::cast_possible_truncation,clippy::cast_sign_loss,clippy::as_conversions	finite positive viewport dimensions are clamped to a checked u16 bound before rounding	fn render

@@ -16,6 +16,7 @@ msrv = "1.99"
 
 [workspace]
 resolver = "2"
+exclude = ["vendor/symphonia-codec-aac"]
 
 [workspace.package]
 rust-version = "1.99"
@@ -85,7 +86,7 @@ gif = { version = "0.14.2", default-features = false, features = ["std", "color_
 # Container inspection only for video; no video decoders are enabled.
 symphonia = { version = "0.6.1", default-features = false, features = ["aac", "adpcm", "alac", "flac", "mp1", "mp2", "mp3", "pcm", "vorbis", "isomp4", "mkv", "ogg", "wav", "exp-video-codecs"] }
 # Symphonia supplies Opus packets; this decoder avoids native libopus.
-opus-decoder = { version = "0.1.1", default-features = false }
+opus-pure = "0.2.2"
 # HEVC intra still pictures only; no native library or video framework.
 heic-rs = { version = "0.1.1", default-features = false, features = ["std"] }
 
@@ -275,3 +276,7 @@ missing_assert_message = "deny"
 large_include_file = "deny"
 verbose_file_reads = "deny"
 wildcard_dependencies = "deny"
+
+# Reject detected in-band SBR instead of publishing AAC-LC-only HE-AAC audio.
+[patch.crates-io]
+symphonia-codec-aac = { path = "vendor/symphonia-codec-aac" }

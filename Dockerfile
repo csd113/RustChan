@@ -2,10 +2,13 @@
 
 FROM rust:1.99.0-bookworm AS builder
 WORKDIR /build
+ARG CARGO_BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 
 # BuildKit retains compiled dependencies between builds without carrying Cargo
 # caches or the source tree into the final image.
 COPY Cargo.toml Cargo.lock ./
+COPY vendor ./vendor
 COPY src ./src
 COPY static ./static
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \

@@ -2,7 +2,10 @@
 
 use anyhow::{ensure, Context as _, Result};
 use image::{Rgba, RgbaImage};
-use opus_decoder::OpusDecoder;
+#[path = "audio_mp4.rs"]
+mod mp4;
+#[path = "audio_opus.rs"]
+mod opus;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
@@ -16,16 +19,18 @@ use tokio_util::sync::CancellationToken;
 pub(crate) fn is_unsupported(error: &anyhow::Error) -> bool {
     // Symphonia also calls missing MP4 atoms and excessive MKV geometry
     // Unsupported. Only audited codec limitations may select compatibility.
-    // Opus InternalError includes transform failures, so it must fail closed.
+    // Opus reconstruction and packet errors fail closed.
     error.chain().any(|cause| {
         matches!(
             cause.downcast_ref::<symphonia::core::errors::Error>(),
             Some(symphonia::core::errors::Error::Unsupported(
-                "Opus multistream requires the compatibility decoder"
+                "Opus mapping family requires the compatibility decoder"
                     | "AAC profile needs the compatibility decoder"
                     | "audio codec needs the compatibility decoder"
                     | "Speex requires the compatibility decoder"
                     | "aac: aac too complex"
+                    | "aac: spectral band replication is unsupported"
+                    | "audio edit list requires the compatibility decoder"
             ))
         )
     })
@@ -38,8 +43,8 @@ const MAX_PACKET_SAMPLES: usize = 4 * 1024 * 1024;
 enum PacketDecoder {
     /// Mature general-purpose pure-Rust audio decoders.
     Symphonia(Box<dyn AudioDecoder>),
-    /// Single Opus stream, mono or stereo.
-    Opus(Box<OpusDecoder>),
+    /// Bounded mono/stereo/multistream Opus with explicit channel mappings.
+    Opus(Box<opus::Decoder>),
 }
 
 impl PacketDecoder {
@@ -62,43 +67,17 @@ impl PacketDecoder {
             .extra_data
             .as_deref()
             .context("Opus header missing")?;
-        ensure!(header.get(..8) == Some(b"OpusHead"), "invalid Opus header");
-        ensure!(
-            header.get(9).copied().map(usize::from) == Some(channels),
-            "Opus channels disagree with container"
-        );
-        let mapping = *header.get(18).context("truncated Opus mapping")?;
-        if mapping == 0 {
-            ensure!(channels <= 2, "invalid single-stream Opus channel count");
-            Ok(Self::Opus(Box::new(OpusDecoder::new(48_000, channels)?)))
-        } else {
-            let streams = usize::from(*header.get(19).context("truncated Opus stream count")?);
-            let coupled = usize::from(*header.get(20).context("truncated Opus coupled count")?);
-            let channel_map = header
-                .get(21..21 + channels)
-                .context("truncated Opus channel map")?;
-            ensure!(
-                streams > 0 && coupled <= streams && streams + coupled <= 255,
-                "invalid Opus stream mapping"
-            );
-            ensure!(
-                channel_map
-                    .iter()
-                    .all(|slot| *slot == 255 || usize::from(*slot) < streams + coupled),
-                "invalid Opus channel mapping"
-            );
-            // The current focused decoder's multistream packet splitter is not
-            // RFC 6716 Appendix B compatible (a valid libopus 5.1 fixture fails).
-            // Preserve this variant through the authorized compatibility path.
-            Err(symphonia::core::errors::Error::Unsupported(
-                "Opus multistream requires the compatibility decoder",
-            )
-            .into())
-        }
+        Ok(Self::Opus(Box::new(opus::Decoder::new(header, channels)?)))
     }
 
     /// Decode one packet into a reused bounded float buffer.
-    fn decode(&mut self, packet: &Packet, channels: usize, samples: &mut Vec<f32>) -> Result<()> {
+    fn decode(
+        &mut self,
+        packet: &Packet,
+        channels: usize,
+        samples: &mut Vec<f32>,
+        budget: &AudioBudget<'_>,
+    ) -> Result<()> {
         match self {
             Self::Symphonia(decoder) => {
                 let pcm = decoder.decode(packet).context("decode audio packet")?;
@@ -115,19 +94,7 @@ impl PacketDecoder {
                 pcm.copy_to_slice_interleaved(samples.as_mut_slice());
             }
             Self::Opus(decoder) => {
-                ensure!(!packet.data.is_empty(), "empty Opus packet");
-                samples.resize(
-                    OpusDecoder::MAX_FRAME_SIZE_48K
-                        .checked_mul(channels)
-                        .context("Opus buffer overflow")?,
-                    0.0,
-                );
-                let frames = decoder.decode_float(&packet.data, samples, false)?;
-                samples.truncate(
-                    frames
-                        .checked_mul(channels)
-                        .context("Opus frame overflow")?,
-                );
+                decoder.decode(&packet.data, samples, || budget.check())?;
             }
         }
         ensure!(
@@ -136,6 +103,72 @@ impl PacketDecoder {
         );
         Ok(())
     }
+}
+
+/// Validate a discrete Opus identification header without decoding PCM.
+pub(crate) fn validate_discrete_opus_header(
+    header: &[u8],
+    head: &opus_pure::OpusHead,
+) -> Result<()> {
+    let channels = usize::from(head.channel_count);
+    opus::Decoder::validate(header, channels)?;
+    ensure!(
+        header.get(18) == Some(&head.mapping_family)
+            && header.get(19) == Some(&head.stream_count)
+            && header.get(20) == Some(&head.coupled_count)
+            && header.get(21..21 + channels) == Some(head.channel_mapping.as_slice())
+            && header.get(10..12) == Some(head.pre_skip.to_le_bytes().as_slice())
+            && header.get(16..18) == Some(head.output_gain_q8.to_le_bytes().as_slice()),
+        "Opus headers changed during validation"
+    );
+    Ok(())
+}
+
+/// Stream discrete Ogg layouts through the same bounded, explicitly mapped decoder.
+fn visit_discrete_opus(
+    input: &Path,
+    header: &[u8],
+    budget: &AudioBudget<'_>,
+    mut visit: impl FnMut(f32) -> Result<()>,
+) -> Result<u64> {
+    use opus_pure::{OggOpusReader, OggPacket, Trim};
+    let (source, reads) = super::probe::open_discrete_opus_source(
+        input,
+        budget.started,
+        budget.timeout,
+        budget.cancel,
+    )?;
+    let mut reader = OggOpusReader::new(source)?;
+    validate_discrete_opus_header(header, reader.head())?;
+    let channels = usize::from(reader.head().channel_count);
+    let mut decoder = opus::Decoder::new(header, channels)?;
+    let mut trim = Trim::new(reader.head(), 48_000, channels)?;
+    let gain = 10.0_f32.powf(f32::from(reader.head().output_gain_q8) / (256.0 * 20.0));
+    let mut packet = OggPacket::default();
+    let mut samples = Vec::new();
+    let mut frames = 0_u64;
+    loop {
+        budget.check()?;
+        reads.start_packet();
+        if !reader.read_packet_into(&mut packet)? {
+            break;
+        }
+        decoder.decode(&packet.data, &mut samples, || budget.check())?;
+        ensure!(
+            samples.iter().all(|sample| sample.is_finite()),
+            "non-finite Opus PCM"
+        );
+        for frame in trim.keep(&packet, &samples).chunks_exact(channels) {
+            let amplitude = frame_amplitude(frame, gain)?;
+            visit(amplitude)?;
+            frames = frames
+                .checked_add(1)
+                .context("Opus sample count overflow")?;
+        }
+    }
+    budget.check()?;
+    ensure!(frames > 0, "Opus contains no decodable samples");
+    Ok(frames)
 }
 
 /// Opus presentation metadata is independent of the PCM decoder state.
@@ -292,30 +325,8 @@ impl AudioBudget<'_> {
     }
 }
 
-/// Walk decoded channel frames without retaining the clip in memory.
-fn visit_samples(
-    input: &Path,
-    budget: &AudioBudget<'_>,
-    mut visit: impl FnMut(f32) -> Result<()>,
-) -> Result<u64> {
-    budget.check()?;
-    if super::probe::is_speex(input, budget.started, budget.timeout, Some(budget.cancel))? {
-        return Err(symphonia::core::errors::Error::Unsupported(
-            "Speex requires the compatibility decoder",
-        )
-        .into());
-    }
-    let (mut format, read_budget) =
-        super::probe::open_audio_format(input, budget.started, budget.timeout, budget.cancel)?;
-    let track = format
-        .first_track(TrackType::Audio)
-        .context("media has no audio track")?;
-    let track_id = track.id;
-    let params = track
-        .codec_params
-        .as_ref()
-        .and_then(symphonia::core::codecs::CodecParameters::audio)
-        .context("audio codec parameters missing")?;
+/// Reject audited unavailable codecs while distinguishing malformed configurations.
+fn validate_audio_codec(params: &AudioCodecParameters) -> Result<bool> {
     if params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_AAC
         && params.extra_data.as_deref().map_or_else(
             || Ok(params.profile.is_some_and(|profile| {
@@ -340,6 +351,65 @@ fn visit_samples(
         )
         .into());
     }
+    Ok(is_opus)
+}
+
+/// Mean absolute channel amplitude avoids cancellation of out-of-phase stereo.
+fn frame_amplitude(frame: &[f32], gain: f32) -> Result<f32> {
+    let channels = u16::try_from(frame.len())?;
+    ensure!(channels > 0, "empty audio channel frame");
+    Ok(frame
+        .iter()
+        .map(|sample| (sample * gain).abs().min(1.0))
+        .sum::<f32>()
+        / f32::from(channels))
+}
+
+/// Walk decoded channel frames without retaining the clip in memory.
+fn visit_samples(
+    input: &Path,
+    budget: &AudioBudget<'_>,
+    mut visit: impl FnMut(f32) -> Result<()>,
+) -> Result<u64> {
+    budget.check()?;
+    if super::probe::is_speex(input, budget.started, budget.timeout, Some(budget.cancel))? {
+        return Err(symphonia::core::errors::Error::Unsupported(
+            "Speex requires the compatibility decoder",
+        )
+        .into());
+    }
+    if let Some(header) = super::probe::discrete_opus_header(
+        input,
+        budget.started,
+        budget.timeout,
+        Some(budget.cancel),
+    )? {
+        return visit_discrete_opus(input, &header, budget, visit);
+    }
+    let (mut format, read_budget) =
+        super::probe::open_audio_format(input, budget.started, budget.timeout, budget.cancel)?;
+    let track = format
+        .first_track(TrackType::Audio)
+        .context("media has no audio track")?;
+    let track_id = track.id;
+    let params = track
+        .codec_params
+        .as_ref()
+        .and_then(symphonia::core::codecs::CodecParameters::audio)
+        .context("audio codec parameters missing")?;
+    let mut movie_presentation = if format.format_info().short_name == "isomp4" {
+        mp4::read(
+            input,
+            track_id,
+            params
+                .sample_rate
+                .context("MP4 audio sample rate missing")?,
+            || budget.check(),
+        )?
+    } else {
+        None
+    };
+    let is_opus = validate_audio_codec(params)?;
     let mut opus = if is_opus {
         Some(OpusPresentation::new(params, track.time_base)?)
     } else {
@@ -356,6 +426,12 @@ fn visit_samples(
         "audio channels exceed safety limit"
     );
     let mut decoder = PacketDecoder::new(params, channels)?;
+    if is_opus && movie_presentation.is_some() {
+        return Err(symphonia::core::errors::Error::Unsupported(
+            "audio edit list requires the compatibility decoder",
+        )
+        .into());
+    }
     let mut samples = Vec::new();
     let mut frames = 0_u64;
     loop {
@@ -367,7 +443,7 @@ fn visit_samples(
         if packet.track_id != track_id {
             continue;
         }
-        decoder.decode(&packet, channels, &mut samples)?;
+        decoder.decode(&packet, channels, &mut samples, budget)?;
         let presentation = if let Some(opus) = &mut opus {
             opus.samples(&packet, &samples, channels)?
         } else {
@@ -375,17 +451,22 @@ fn visit_samples(
         };
         // Mean absolute channel amplitude avoids cancelling out-of-phase stereo.
         for frame in presentation.chunks_exact(channels) {
-            let divisor = f32::from(u16::try_from(channels)?);
-            let amplitude = frame
-                .iter()
-                .map(|sample| (sample * gain).abs().min(1.0))
-                .sum::<f32>()
-                / divisor;
-            visit(amplitude)?;
+            let amplitude = frame_amplitude(frame, gain)?;
+            let emitted = if let Some(presentation) = &mut movie_presentation {
+                presentation.frame(amplitude, &mut visit, || budget.check())?
+            } else {
+                visit(amplitude)?;
+                1
+            };
             frames = frames
-                .checked_add(1)
+                .checked_add(emitted)
                 .context("audio sample count overflow")?;
         }
+    }
+    if let Some(presentation) = &mut movie_presentation {
+        frames = frames
+            .checked_add(presentation.finish(&mut visit, || budget.check())?)
+            .context("audio sample count overflow")?;
     }
     ensure!(frames > 0, "audio contains no decodable samples");
     budget.check()?;
@@ -471,9 +552,9 @@ mod tests {
             .into()
         ));
         for error in [
-            anyhow::Error::from(opus_decoder::OpusError::InternalError),
-            anyhow::Error::from(opus_decoder::OpusError::InvalidPacket),
-            anyhow::Error::from(opus_decoder::OpusError::BufferTooSmall),
+            anyhow::Error::from(opus_pure::Error::Internal("transform failure")),
+            anyhow::Error::from(opus_pure::Error::InvalidPacket("invalid framing")),
+            anyhow::Error::from(opus_pure::Error::InvalidArgument("output buffer budget")),
             anyhow::Error::from(symphonia::core::errors::Error::DecodeError(
                 "invalid header",
             )),
@@ -520,6 +601,7 @@ mod tests {
             "tone.ogg",
             "tone.opus",
             "speech-mode.opus",
+            "surround.opus",
             "tone.aac",
             "tone.m4a",
             "tone-alac.m4a",
@@ -698,6 +780,101 @@ mod tests {
         Ok(())
     }
 
+    /// libopus reference samples verify exact duration, mapping, padding and gain.
+    #[test]
+    fn mapped_opus_matches_independent_pcm_without_external_tools() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
+        let cancel = CancellationToken::new();
+        for name in ["opus-surround-distinct", "opus-surround-padded-gain"] {
+            let expected = std::fs::read(root.join(format!("{name}-native.f32")))?;
+            ensure!(
+                expected.len().is_multiple_of(24),
+                "invalid six-channel reference"
+            );
+            let expected = expected
+                .as_chunks::<24>()
+                .0
+                .iter()
+                .map(|frame| {
+                    frame
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|sample| f32::from_le_bytes(*sample).abs().min(1.0))
+                        .sum::<f32>()
+                        / 6.0
+                })
+                .collect::<Vec<_>>();
+            let mut actual = Vec::new();
+            let budget = AudioBudget {
+                started: Instant::now(),
+                timeout: Duration::from_secs(10),
+                cancel: &cancel,
+            };
+            let frames = visit_samples(&root.join(format!("{name}.opus")), &budget, |amplitude| {
+                actual.push(amplitude);
+                Ok(())
+            })
+            .with_context(|| format!("decode {name}"))?;
+            ensure!(
+                frames == 11_520 && actual.len() == expected.len(),
+                "Opus presentation duration changed for {name}"
+            );
+            ensure!(
+                actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(a, b)| (a - b).abs() <= 0.000_04),
+                "Opus amplitude differs from libopus for {name}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The native reference applies the movie edit list, including encoder delay.
+    #[test]
+    fn aac_lc_movie_edits_preserve_presentation_duration_and_waveform() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
+        let bytes = std::fs::read(root.join("aac-lc-native.f32"))?;
+        let expected = bytes
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|frame| {
+                frame
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|sample| f32::from_le_bytes(*sample).abs())
+                    .sum::<f32>()
+                    / 2.0
+            })
+            .collect::<Vec<_>>();
+        let cancel = CancellationToken::new();
+        let budget = AudioBudget {
+            started: Instant::now(),
+            timeout: Duration::from_secs(10),
+            cancel: &cancel,
+        };
+        let mut actual = Vec::new();
+        let frames = visit_samples(&root.join("tone.m4a"), &budget, |amplitude| {
+            actual.push(amplitude);
+            Ok(())
+        })?;
+        ensure!(
+            frames == 5_760 && actual.len() == expected.len(),
+            "AAC encoder padding changed movie presentation"
+        );
+        ensure!(
+            actual
+                .iter()
+                .zip(&expected)
+                .all(|(a, b)| (a - b).abs() <= 0.002),
+            "AAC movie waveform differs from independent decoder"
+        );
+        Ok(())
+    }
+
     #[test]
     fn implicit_he_aac_is_unsupported_and_truncated_extensions_are_invalid() -> Result<()> {
         ensure!(
@@ -719,6 +896,68 @@ mod tests {
             ensure!(
                 !is_unsupported(&error),
                 "invalid AAC config selected fallback"
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn in_band_sbr_never_publishes_core_only_waveforms() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
+        let input = root.join("he-aac-inband.aac");
+        let dir = tempfile::tempdir()?;
+        let output = dir.path().join("wave.png");
+        let cancel = CancellationToken::new();
+        let error = render_waveform(&input, &output, 100, 50, &cancel)
+            .err()
+            .context("in-band HE-AAC was decoded as core-only AAC-LC")?;
+        ensure!(
+            is_unsupported(&error),
+            "SBR did not select explicit compatibility: {error:#}"
+        );
+        ensure!(!output.exists(), "incomplete SBR waveform was published");
+        let (mut format, _) = super::super::probe::open_audio_format(
+            &input,
+            Instant::now(),
+            Duration::from_secs(5),
+            &cancel,
+        )?;
+        let track = format
+            .first_track(TrackType::Audio)
+            .context("no AAC track")?;
+        let params = track
+            .codec_params
+            .as_ref()
+            .and_then(symphonia::core::codecs::CodecParameters::audio)
+            .context("no AAC parameters")?
+            .clone();
+        let channels = params.channels.as_ref().context("no AAC channels")?.count();
+        let packet = format.next_packet()?.context("no AAC packet")?;
+        let budget = AudioBudget {
+            started: Instant::now(),
+            timeout: Duration::from_secs(5),
+            cancel: &cancel,
+        };
+        for removed in 1..=3 {
+            let mut truncated = packet.clone();
+            truncated.data = packet
+                .data
+                .get(
+                    ..packet
+                        .data
+                        .len()
+                        .checked_sub(removed)
+                        .context("AAC packet too short")?,
+                )
+                .context("AAC fixture truncation outside packet")?
+                .to_vec()
+                .into_boxed_slice();
+            let error = PacketDecoder::new(&params, channels)?
+                .decode(&truncated, channels, &mut Vec::new(), &budget)
+                .err()
+                .context("truncated AAC raw-data block was accepted")?;
+            ensure!(
+                !is_unsupported(&error),
+                "truncated SBR payload selected compatibility: {error:#}"
             );
         }
         Ok(())

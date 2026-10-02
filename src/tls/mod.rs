@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// A TLS acceptor that is either a static [`TlsAcceptor`] (manual cert or
-/// self-signed) or an [`AcmeAcceptor`] (Let's Encrypt / rustls-acme).
+/// self-signed) or an [`rustls_acme::AcmeAcceptor`] (Let's Encrypt / rustls-acme).
 ///
 /// The ACME variant cannot be represented as a plain [`TlsAcceptor`] because
 /// the underlying certificate is rotated dynamically by the background renewal
@@ -60,7 +60,7 @@ impl fmt::Debug for Acceptor {
 ///
 /// # Errors
 ///
-/// Returns [`crate::AppError::Tls`] if:
+/// Returns [`crate::error::AppError::Tls`] if:
 /// - A manual certificate path cannot be read or parsed.
 /// - The ACME config is invalid (empty domain list, IP address as domain, etc.).
 /// - The ACME cache directory cannot be created.

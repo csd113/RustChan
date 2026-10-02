@@ -1,5 +1,7 @@
 # Non-video media backend migration
 
+> Historical report for the initial migration at `16f4b91`. The current [capability matrix and follow-up evidence](media-capabilities.md) supersede the uncommitted status, Opus compatibility limitations and unavailable Docker-base conclusions below. Remaining compatibility calls and PDF limitations are still explicit.
+
 Implemented backend migration, with the explicitly authorized FFmpeg compatibility fallback for uncovered audio codecs/variants. All changes remain uncommitted. Rust 1.99 is now the minimum in Cargo, CI, release builds, Docker and setup documentation. Actual video frame decoding and VP9/Opus WebM transcoding remain on FFmpeg.
 
 **Final verification conclusion:** suitable for review, but production readiness is not established. The final pass below records passing validation, local fixes, remaining AAC/Speex compatibility limits, and the failed Docker base-image resolution. Do not treat the initial migration results as release approval.

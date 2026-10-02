@@ -5,7 +5,7 @@ import { createThread, expect, expectSafePage, test } from './helpers';
 test('common audio waveforms finish in the worker without FFmpeg', async ({ page, app }) => {
   test.setTimeout(180_000);
   const media = path.resolve(__dirname, '../fixtures/media');
-  for (const file of ['tone.mp3', 'tone.flac', 'tone.wav', 'tone.ogg', 'tone.aac', 'tone.m4a', 'tone-alac.m4a', 'tone.opus', 'speech-mode.opus', 'audio.webm']) {
+  for (const file of ['tone.mp3', 'tone.flac', 'tone.wav', 'tone.ogg', 'tone.aac', 'tone.m4a', 'tone-alac.m4a', 'tone.opus', 'speech-mode.opus', 'surround.opus', 'opus-surround-distinct.opus', 'opus-surround-padded-gain.opus', 'opus-surround-discrete.opus', 'audio.webm']) {
     await createThread(page, app, 'aud', {
       subject: `Rust waveform ${file}`,
       body: 'common audio decoder and atomic waveform job',

@@ -37,7 +37,11 @@ fn gif_webp_preserves_partial_updates_disposal_delays_and_loops() -> Result<()> 
     let dir = tempfile::tempdir()?;
     let input = dir.path().join("fixture.gif");
     let output = dir.path().join("animation.webp");
-    for (repeat, expected_loops) in [(gif::Repeat::Infinite, 0), (gif::Repeat::Finite(3), 4)] {
+    for (repeat, expected_loops) in [
+        (gif::Repeat::Infinite, 0),
+        (gif::Repeat::Finite(3), 4),
+        (gif::Repeat::Finite(u16::MAX - 1), u32::from(u16::MAX)),
+    ] {
         gif_fixture(&input, repeat)?;
         let expected = GifDecoder::new(BufReader::new(File::open(&input)?))?
             .into_frames()
@@ -77,6 +81,60 @@ fn gif_webp_preserves_partial_updates_disposal_delays_and_loops() -> Result<()> 
         ensure!(
             fourth.get_pixel(0, 0).0 == [0, 0, 0, 0],
             "background disposal failed"
+        );
+    }
+    Ok(())
+}
+
+/// GIF counts repeats after the first play; WebP's u16 counts total plays.
+#[test]
+fn unrepresentable_gif_repeat_count_does_not_publish_a_changed_animation() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("max-repeat.gif");
+    let output = dir.path().join("animation.webp");
+    gif_fixture(&input, gif::Repeat::Finite(u16::MAX))?;
+    let error = image_to_webp(&input, &output, None)
+        .err()
+        .context("65536 total GIF plays were silently changed to 65535")?;
+    ensure!(
+        error.to_string().contains("loop"),
+        "missing loop diagnostic"
+    );
+    ensure!(!output.exists(), "unrepresentable animation was published");
+    Ok(())
+}
+
+/// Conversion failures must preserve validated MIME, independent of temporary names.
+#[test]
+fn valid_gif_conversion_fallback_preserves_mime_frames_and_original_bytes() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    for (index, name) in ["upload", "misleading.jpg", "input.GIF"].iter().enumerate() {
+        let input = dir.path().join(name);
+        gif_fixture(&input, gif::Repeat::Finite(u16::MAX))?;
+        let original = std::fs::read(&input)?;
+        let stem = format!("preserved-{index}");
+        let result = crate::media::convert::convert_file(&input, "image/gif", dir.path(), &stem)?;
+        ensure!(!result.was_converted, "unrepresentable GIF was changed");
+        ensure!(result.final_mime == "image/gif", "validated MIME was lost");
+        ensure!(
+            result
+                .final_path
+                .extension()
+                .is_some_and(|ext| ext == "gif"),
+            "wrong fallback extension"
+        );
+        ensure!(
+            std::fs::read(&result.final_path)? == original,
+            "fallback changed GIF bytes"
+        );
+        let decoder = GifDecoder::new(BufReader::new(File::open(&result.final_path)?))?;
+        ensure!(
+            decoder.into_frames().collect_frames()?.len() == 4,
+            "fallback lost animation frames"
+        );
+        ensure!(
+            !dir.path().join(format!("{stem}.webp")).exists(),
+            "fallback left partial WebP"
         );
     }
     Ok(())

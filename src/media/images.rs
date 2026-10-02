@@ -190,7 +190,9 @@ fn gif_loops(input: &Path, budget: &AnimationBudget) -> Result<u16> {
     match decoder.repeat() {
         gif::Repeat::Infinite => Ok(0),
         // GIF counts repeats after the first play; WebP counts total plays.
-        gif::Repeat::Finite(repeats) => Ok(repeats.saturating_add(1)),
+        gif::Repeat::Finite(repeats) => repeats
+            .checked_add(1)
+            .context("GIF loop count cannot be represented by WebP"),
     }
 }
 

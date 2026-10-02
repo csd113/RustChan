@@ -10,7 +10,7 @@ use serde::Deserialize;
 pub(in crate::server) struct SiteSettingsForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
-    /// Custom site name (replaces [ `RustChan` ] on home page and footer).
+    /// Custom site name (replaces `RustChan` on home page and footer).
     pub site_name: Option<String>,
     /// Custom home page subtitle line below the site name.
     pub site_subtitle: Option<String>,

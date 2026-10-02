@@ -422,7 +422,7 @@ mod tests {
     fn valid_unsupported_pdf_retains_upload_and_uses_svg_preview() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let source =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/compressed.pdf");
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/inline-image.pdf");
         let before = std::fs::read(&source)?;
         let output = dir.path().join("page.webp");
         let result = generate_thumbnail(&source, "application/pdf", &output, 100, false, false)?;

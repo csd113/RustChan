@@ -364,7 +364,7 @@ fn count_files_in_dir(dir: &Path) -> u64 {
 ///
 /// MEM-FIX: Uses `std::io::copy` with the zip writer directly, streaming each
 /// file through a kernel buffer (~8 KiB) instead of reading the whole file
-/// into a Vec<u8> first.  Peak RAM per file = `io::copy`'s 8 KiB stack buffer.
+/// into a `Vec<u8>` first.  Peak RAM per file = `io::copy`'s 8 KiB stack buffer.
 ///
 /// Progress tracking: increments `progress.files_done` and `progress.bytes_done`
 /// after each file is written to the zip.

@@ -1,12 +1,13 @@
 //! Pure-Rust first-page PDF previews with a conservative resource safety gate.
 //!
 //! Hayro does not expose an allocation/work budget for arbitrary PDF programs.
-//! Until it does, compressed streams and recursive rendering resources use the
-//! existing placeholder. Small vector/text documents can be rendered safely.
+//! Direct Flate streams are expanded under an aggregate cap and inspected before
+//! rendering. Recursive resources and inline images still use the placeholder.
 
 use anyhow::{ensure, Context as _, Result};
 use hayro::hayro_interpret::InterpreterSettings;
-use hayro::hayro_syntax::object::{Array, Dict, MaybeRef, Name, ObjectIdentifier};
+use hayro::hayro_syntax::content::Operator;
+use hayro::hayro_syntax::object::{Array, Dict, MaybeRef, Name, Object, ObjectIdentifier};
 use hayro::hayro_syntax::reader::{Reader, ReaderExt as _};
 use hayro::hayro_syntax::Pdf;
 use hayro::{RenderCache, RenderSettings};
@@ -47,8 +48,7 @@ pub(crate) fn render(input: &Path, output: &Path, max_dim: u32) -> Result<()> {
     );
     let mut bytes = Vec::new();
     source.take(MAX_PREVIEW_BYTES + 1).read_to_end(&mut bytes)?;
-    preflight(&bytes)?;
-    let source_length = u64::try_from(bytes.len())?;
+    let source_length = preflight(&bytes)?;
     let pdf = Pdf::new(bytes).map_err(|error| anyhow::anyhow!("PDF parse failed: {error:?}"))?;
     ensure!(
         pdf.len() <= MAX_PREVIEW_OBJECTS,
@@ -116,7 +116,13 @@ pub(crate) fn render(input: &Path, output: &Path, max_dim: u32) -> Result<()> {
 ///
 /// This gate is deliberately conservative: unsupported previews never reject an
 /// upload. Name escapes are refused so escaped resource keys cannot bypass it.
-fn preflight(bytes: &[u8]) -> Result<()> {
+fn preflight(bytes: &[u8]) -> Result<u64> {
+    preflight_syntax(bytes)?;
+    preflight_page_tree(bytes)
+}
+
+/// Bound syntax before allocating parsed objects or interpreting content.
+fn preflight_syntax(bytes: &[u8]) -> Result<()> {
     ensure!(
         u64::try_from(bytes.len())? <= MAX_PREVIEW_BYTES,
         "PDF preview exceeds source budget"
@@ -129,8 +135,8 @@ fn preflight(bytes: &[u8]) -> Result<()> {
         ensure!(
             !matches!(
                 name,
-                b"Filter"
-                    | b"F"
+                b"F" | b"DecodeParms"
+                    | b"DP"
                     | b"Encrypt"
                     | b"XObject"
                     | b"Pattern"
@@ -179,7 +185,7 @@ fn preflight(bytes: &[u8]) -> Result<()> {
             }
         }
     }
-    preflight_page_tree(bytes)
+    Ok(())
 }
 
 /// Admit only flat page trees made from bounded, direct dictionary objects.
@@ -188,7 +194,8 @@ fn preflight(bytes: &[u8]) -> Result<()> {
 /// depth/cycle budget. Inspect dictionaries without resolving references first.
 /// Nested trees, aliases, duplicate revisions and indirect stream lengths use
 /// the placeholder rather than entering that unbudgeted traversal.
-fn preflight_page_tree(bytes: &[u8]) -> Result<()> {
+fn preflight_page_tree(bytes: &[u8]) -> Result<u64> {
+    let mut expanded_bytes = u64::try_from(bytes.len())?;
     let mut reader = Reader::new(bytes);
     let mut objects = BTreeMap::new();
     loop {
@@ -227,6 +234,7 @@ fn preflight_page_tree(bytes: &[u8]) -> Result<()> {
                     .context("PDF preview requires direct stream lengths")?,
             )?;
             let stream = reader.read_bytes(length).context("truncated PDF stream")?;
+            preflight_stream(&dict, stream, &mut expanded_bytes)?;
             ensure!(
                 !stream
                     .split(|byte| byte.is_ascii_whitespace() || b"/[]<>(){}".contains(byte))
@@ -238,6 +246,11 @@ fn preflight_page_tree(bytes: &[u8]) -> Result<()> {
                 .forward_tag(b"endstream")
                 .context("PDF stream length mismatch")?;
             reader.skip_white_spaces_and_comments();
+        } else {
+            ensure!(
+                !dict.contains_key(b"Filter"),
+                "PDF filter is outside a content stream"
+            );
         }
         reader
             .forward_tag(b"endobj")
@@ -273,6 +286,76 @@ fn preflight_page_tree(bytes: &[u8]) -> Result<()> {
             );
         }
     }
+    Ok(expanded_bytes)
+}
+
+/// Expand only simple content streams, within one shared source/work ceiling.
+fn preflight_stream(dict: &Dict<'_>, stream: &[u8], expanded_bytes: &mut u64) -> Result<()> {
+    let decoded;
+    let program = if dict.contains_key(b"Filter") {
+        ensure!(
+            dict.len() == 2
+                && matches!(dict.get_raw::<Name<'_>>(b"Filter"),
+                    Some(MaybeRef::NotRef(name)) if name.as_ref() == b"FlateDecode"),
+            "PDF preview requires a single direct Flate content filter"
+        );
+        let limit = MAX_PREVIEW_BYTES
+            .checked_sub(*expanded_bytes)
+            .context("PDF expanded content exceeds source budget")?;
+        let mut inflater = flate2::bufread::ZlibDecoder::new(stream);
+        let mut buffer = Vec::new();
+        (&mut inflater).take(limit + 1).read_to_end(&mut buffer)?;
+        ensure!(
+            u64::try_from(buffer.len())? <= limit,
+            "PDF expanded content exceeds source budget"
+        );
+        ensure!(
+            inflater.total_in() == u64::try_from(stream.len())?,
+            "PDF compressed stream has trailing data"
+        );
+        decoded = buffer;
+        decoded.as_slice()
+    } else {
+        stream
+    };
+    *expanded_bytes = expanded_bytes
+        .checked_add(u64::try_from(program.len())?)
+        .context("PDF expanded content size overflow")?;
+    ensure!(
+        *expanded_bytes <= MAX_PREVIEW_BYTES,
+        "PDF expanded content exceeds source budget"
+    );
+    preflight_content(program)?;
+    Ok(())
+}
+
+/// Inspect actual operators, so `BI` inside a text string is harmless but inline
+/// images cannot enter Hayro's unbudgeted image allocation/decode path.
+fn preflight_content(program: &[u8]) -> Result<()> {
+    preflight_syntax(program)?;
+    let mut reader = Reader::new(program);
+    while !reader.at_end() {
+        reader.skip_white_spaces_and_comments();
+        if reader.at_end() {
+            break;
+        }
+        if matches!(
+            reader.peek_byte(),
+            Some(b'/' | b'.' | b'+' | b'-' | b'0'..=b'9' | b'[' | b'<' | b'(')
+        ) {
+            reader
+                .read_without_context::<Object<'_>>()
+                .context("invalid PDF content operand")?;
+        } else {
+            let operator = reader
+                .read_without_context::<Operator<'_>>()
+                .context("invalid PDF content operator")?;
+            ensure!(
+                &*operator != b"BI",
+                "inline PDF images require placeholder preview"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -285,14 +368,16 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
         let dir = tempfile::tempdir()?;
         let output = dir.path().join("page.webp");
-        render(&root.join("simple.pdf"), &output, 100)?;
-        let image = image::open(output)?.into_rgba8();
-        ensure!(image.dimensions() == (100, 80), "PDF aspect ratio changed");
-        let pixel = image.get_pixel(20, 20);
-        ensure!(
-            pixel.0.get(..3) == Some(&[255, 0, 0]),
-            "first-page red rectangle was not rendered"
-        );
+        for input in ["simple.pdf", "compressed.pdf"] {
+            render(&root.join(input), &output, 100)?;
+            let image = image::open(&output)?.into_rgba8();
+            ensure!(image.dimensions() == (100, 80), "PDF aspect ratio changed");
+            let pixel = image.get_pixel(20, 20);
+            ensure!(
+                pixel.0.get(..3) == Some(&[255, 0, 0]),
+                "first-page red rectangle was not rendered"
+            );
+        }
         Ok(())
     }
 
@@ -353,6 +438,50 @@ mod tests {
         }
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
         preflight(&std::fs::read(root.join("simple.pdf"))?)?;
+        Ok(())
+    }
+    #[test]
+    fn compressed_bombs_truncation_and_inline_images_fail_before_rendering() -> Result<()> {
+        use std::io::Write as _;
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&vec![b' '; usize::try_from(MAX_PREVIEW_BYTES)? + 1])?;
+        let compressed = encoder.finish()?;
+        let mut pdf = format!(
+            "%PDF-1.4\n1 0 obj << /Length {} /Filter /FlateDecode >> stream\n",
+            compressed.len()
+        )
+        .into_bytes();
+        pdf.extend_from_slice(&compressed);
+        pdf.extend_from_slice(b"\nendstream endobj\nxref");
+        ensure!(
+            preflight(&pdf).is_err(),
+            "PDF decompression bomb was admitted"
+        );
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
+        let valid = std::fs::read(root.join("compressed.pdf"))?;
+        let mut truncated = valid;
+        let offset = truncated
+            .windows(7)
+            .position(|bytes| bytes == b"stream\n")
+            .context("fixture content stream missing")?
+            + 7;
+        *truncated
+            .get_mut(offset + 27)
+            .context("fixture zlib checksum missing")? ^= 0xff;
+        ensure!(
+            preflight(&truncated).is_err(),
+            "invalid zlib checksum was admitted"
+        );
+        ensure!(
+            preflight_content(b"BI /W 999999 /H 999999 /BPC 8 ID x EI").is_err(),
+            "inline image entered unbudgeted renderer"
+        );
+        preflight_content(b"BT (BI is text) Tj ET")?;
+        ensure!(
+            preflight_content(b"9999999999 0 m").is_err(),
+            "decoded numeric budget was bypassed"
+        );
         Ok(())
     }
 }

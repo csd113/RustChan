@@ -163,6 +163,43 @@ impl symphonia::core::io::MediaSource for ContainerSource {
     }
 }
 
+/// Supply bounded Opus header/packet reads to the standalone Ogg decoder.
+pub(crate) fn open_discrete_opus_source(
+    path: &Path,
+    started: Instant,
+    timeout: Duration,
+    cancel: &CancellationToken,
+) -> Result<(impl std::io::Read + use<>, Arc<ContainerReadBudget>)> {
+    let file = File::open(path)?;
+    let metadata = file.metadata()?;
+    ensure!(metadata.is_file(), "Opus source is not a regular file");
+    let window = Arc::new(ContainerReadBudget::new());
+    // Bound OpusTags strings/counts before packet-mode's separate ceiling.
+    window.limit.store(1024 * 1024, Ordering::Relaxed);
+    Ok((
+        ContainerSource {
+            length: metadata.len(),
+            file,
+            started,
+            timeout,
+            read_bytes: 0,
+            window: Arc::clone(&window),
+            cancel: Some(cancel.clone()),
+        },
+        window,
+    ))
+}
+
+/// Inspect every page of a discrete Opus stream that Symphonia cannot recognize.
+pub(crate) fn discrete_opus_header(
+    path: &Path,
+    started: Instant,
+    timeout: Duration,
+    cancel: Option<&CancellationToken>,
+) -> Result<Option<Vec<u8>>> {
+    speex::discrete_opus_header(path, started, timeout, cancel)
+}
+
 /// Open a format reader using content signatures, never a client extension.
 pub(crate) fn open_format(path: &Path) -> Result<Box<dyn FormatReader>> {
     open_bounded_format(
@@ -237,6 +274,28 @@ pub fn inspect(path: &Path) -> Result<MediaInfo> {
             audio_codec: Some("speex"),
         });
     }
+    if let Some(header) = discrete_opus_header(
+        path,
+        Instant::now(),
+        Duration::from_secs(crate::config::ffmpeg_timeout_secs()),
+        None,
+    )? {
+        // The same bounded Rust reader validates OpusHead/OpusTags without PCM decoding.
+        let cancel = CancellationToken::new();
+        let (source, _) = open_discrete_opus_source(
+            path,
+            Instant::now(),
+            Duration::from_secs(crate::config::ffmpeg_timeout_secs()),
+            &cancel,
+        )?;
+        let reader = opus_pure::OggOpusReader::new(source)?;
+        super::audio::validate_discrete_opus_header(&header, reader.head())?;
+        return Ok(MediaInfo {
+            kind: StreamKind::AudioOnly,
+            video_codec: None,
+            audio_codec: Some("opus"),
+        });
+    }
     let format = open_format(path)?;
     let mut video_codec = None;
     let mut audio_codec = None;
@@ -267,7 +326,7 @@ pub fn inspect(path: &Path) -> Result<MediaInfo> {
     })
 }
 
-/// Validate single-stream Ogg Speex before selecting its unavailable decoder.
+/// Validate every logical Speex stream before selecting its unavailable decoder.
 pub(crate) fn is_speex(
     path: &Path,
     started: Instant,
@@ -444,6 +503,66 @@ mod tests {
     }
 
     #[test]
+    fn every_speex_logical_stream_must_end_and_pass_crc() -> Result<()> {
+        let original = include_bytes!("../../tests/fixtures/media/speex-chained.spx");
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("bad.spx");
+        let mut corrupted = original.to_vec();
+        *corrupted.last_mut().context("empty chained fixture")? ^= 1;
+        for bytes in [
+            corrupted.as_slice(),
+            original
+                .get(..original.len() - 1)
+                .context("empty fixture")?,
+        ] {
+            std::fs::write(&path, bytes)?;
+            let error = inspect(&path)
+                .err()
+                .context("invalid second stream was accepted")?;
+            ensure!(
+                !super::super::audio::is_unsupported(&error),
+                "invalid second stream selected fallback"
+            );
+        }
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        ensure!(
+            is_speex(&path, Instant::now(), Duration::from_secs(1), Some(&cancel)).is_err(),
+            "cancelled validation continued"
+        );
+        ensure!(
+            is_speex(&path, Instant::now(), Duration::ZERO, None).is_err(),
+            "expired validation continued"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn discrete_opus_crc_and_truncation_fail_closed() -> Result<()> {
+        let original = include_bytes!("../../tests/fixtures/media/opus-surround-discrete.opus");
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("misleading.jpg");
+        let mut corrupt = original.to_vec();
+        *corrupt.last_mut().context("empty Opus fixture")? ^= 1;
+        for bytes in [
+            corrupt.as_slice(),
+            original
+                .get(..original.len() - 1)
+                .context("empty Opus fixture")?,
+        ] {
+            std::fs::write(&path, bytes)?;
+            let error = inspect(&path)
+                .err()
+                .context("invalid discrete Opus accepted")?;
+            ensure!(
+                !super::super::audio::is_unsupported(&error),
+                "invalid Opus selected compatibility"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn fixture_metadata_preserves_verified_stream_types_and_codecs() -> Result<()> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
         for (file, kind, codec) in [
@@ -455,7 +574,15 @@ mod tests {
             ("he-aac.m4a", StreamKind::AudioOnly, "aac"),
             ("ac3.m4a", StreamKind::AudioOnly, "ac3"),
             ("surround.opus", StreamKind::AudioOnly, "opus"),
+            ("opus-surround-discrete.opus", StreamKind::AudioOnly, "opus"),
             ("tone.spx", StreamKind::AudioOnly, "speex"),
+            ("speex-chained.spx", StreamKind::AudioOnly, "speex"),
+            ("speex-multiplexed.spx", StreamKind::AudioOnly, "speex"),
+            (
+                "speex-chained-multiplexed.spx",
+                StreamKind::AudioOnly,
+                "speex",
+            ),
             ("audio.mkv", StreamKind::AudioOnly, "flac"),
             ("multiple-streams.mp4", StreamKind::Video, "h264"),
             ("audio.webm", StreamKind::AudioOnly, "opus"),

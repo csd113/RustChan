@@ -3164,22 +3164,38 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let output = dir.path().join("wave.png");
         let cancel = tokio_util::sync::CancellationToken::new();
-        anyhow::ensure!(
-            super::render_waveform_with_compatibility(
-                &root.join("tone.opus"),
-                &output,
-                false,
-                &cancel
-            )
-            .await?,
-            "common audio requires a tool"
-        );
-        anyhow::ensure!(
-            image::open(&output)?.width() == crate::config::CONFIG.thumb_size,
-            "waveform width changed"
-        );
-        std::fs::remove_file(&output)?;
-        for file in ["ac3.m4a", "surround.opus", "he-aac.m4a", "tone.spx"] {
+        for file in [
+            "tone.opus",
+            "surround.opus",
+            "opus-surround-distinct.opus",
+            "opus-surround-padded-gain.opus",
+            "opus-surround-discrete.opus",
+        ] {
+            anyhow::ensure!(
+                super::render_waveform_with_compatibility(
+                    &root.join(file),
+                    &output,
+                    false,
+                    &cancel
+                )
+                .await?,
+                "common audio {file} requires a tool"
+            );
+            anyhow::ensure!(
+                image::open(&output)?.width() == crate::config::CONFIG.thumb_size,
+                "waveform width changed"
+            );
+            std::fs::remove_file(&output)?;
+        }
+        for file in [
+            "ac3.m4a",
+            "he-aac.m4a",
+            "he-aac-inband.aac",
+            "tone.spx",
+            "speex-chained.spx",
+            "speex-multiplexed.spx",
+            "speex-chained-multiplexed.spx",
+        ] {
             anyhow::ensure!(
                 !super::render_waveform_with_compatibility(
                     &root.join(file),
