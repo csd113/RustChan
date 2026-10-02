@@ -724,17 +724,10 @@ pub(in crate::server) async fn admin_ip_report(
 mod tests {
     use super::super::{admin_panel_redirect_anchor_open, SESSION_COOKIE};
     use super::*;
+    use crate::test_support::admin_signed_csrf;
     use anyhow::{ensure, Context as _};
     use axum::extract::State;
     use axum_extra::extract::cookie::{Cookie, CookieJar};
-
-    fn admin_signed_csrf() -> String {
-        crate::utils::crypto::make_scoped_csrf_form_token(
-            "csrf123",
-            &crate::config::CONFIG.cookie_secret,
-            "session123",
-        )
-    }
 
     fn build_admin_jar() -> CookieJar {
         CookieJar::new()

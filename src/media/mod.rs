@@ -284,8 +284,8 @@ impl MediaProcessor {
     /// Writes a WebP file (or SVG placeholder) to `thumb_dir / {file_stem}.{ext}`.
     ///
     /// # Errors
-    /// Returns an error only if preview generation and placeholder writing fail
-    /// AND writing the placeholder also fails.
+    /// Returns an error if decoding or encoding fails without an available fallback,
+    /// or if writing the fallback placeholder fails.
     pub fn generate_thumbnail(
         self,
         input_path: &Path,

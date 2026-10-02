@@ -10,6 +10,7 @@ use crate::{
     config::CONFIG,
     db,
     error::{AppError, Result},
+    handlers::is_xml_http_request,
     middleware::AppState,
     models::{BackupInfo, BoardAccessMode},
     utils::crypto::{new_session_id, verify_password},
@@ -105,10 +106,10 @@ use downloads::{prune_stale_temp_board_downloads, write_temp_board_download_toke
 #[cfg(test)]
 use http::admin_xhr_error_response;
 use http::{
-    is_xml_http_request, log_restore_upload_started, redirect_page_response,
-    restore_auth_preflight, restore_error_redirect_target, restore_failure_response,
-    restore_start_response, restore_success_redirect_target, restore_upload_parse_response,
-    sanitize_board_short_value, stream_restore_upload_to_tempfile, validate_backup_zip_filename,
+    log_restore_upload_started, redirect_page_response, restore_auth_preflight,
+    restore_error_redirect_target, restore_failure_response, restore_start_response,
+    restore_success_redirect_target, restore_upload_parse_response, sanitize_board_short_value,
+    stream_restore_upload_to_tempfile, validate_backup_zip_filename,
     validate_saved_backup_reference, validate_streamed_restore_upload, RestoreKind,
 };
 pub(in crate::server) use listing::latest_verified_full_backup_modified_time;
@@ -625,6 +626,7 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::models::BackupBoardSummary;
+    use crate::test_support::admin_signed_csrf;
     use anyhow::{bail, ensure, Context as _, Result as TestResult};
     use axum::{
         body::{to_bytes, Body},
@@ -946,14 +948,6 @@ mod tests {
         )
         .context("create test admin session")?;
         Ok(())
-    }
-
-    fn admin_signed_csrf() -> String {
-        crate::utils::crypto::make_scoped_csrf_form_token(
-            "csrf123",
-            &crate::config::CONFIG.cookie_secret,
-            "session123",
-        )
     }
 
     fn admin_cookie_jar() -> CookieJar {

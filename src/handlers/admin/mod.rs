@@ -2469,6 +2469,7 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::middleware::SecureCookieContext;
+    use crate::test_support::admin_signed_csrf;
     use anyhow::{bail, ensure, Context as _};
     use axum::{
         body::to_bytes,
@@ -3385,14 +3386,6 @@ mod tests {
         )
         .context("create admin session")?;
         Ok(())
-    }
-
-    fn admin_signed_csrf() -> String {
-        crate::utils::crypto::make_scoped_csrf_form_token(
-            "csrf123",
-            &crate::config::CONFIG.cookie_secret,
-            "session123",
-        )
     }
 
     #[tokio::test]

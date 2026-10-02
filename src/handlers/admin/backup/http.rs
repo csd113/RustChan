@@ -41,13 +41,6 @@ pub(in crate::server) async fn backup_request_logging_middleware(
     response
 }
 
-pub(super) fn is_xml_http_request(headers: &HeaderMap) -> bool {
-    headers
-        .get("x-requested-with")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case("XMLHttpRequest"))
-}
-
 pub(super) fn admin_xhr_error_response(error: &AppError) -> Response {
     let handled = match error {
         AppError::NotFound(message) => Some((StatusCode::NOT_FOUND, message.clone())),

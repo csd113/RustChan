@@ -15,7 +15,7 @@ use crate::{
             admin_scoped_csrf_token, check_csrf_jar, ensure_csrf_for_request,
             ensure_csrf_with_secure, BoardAccessContext,
         },
-        parse_post_multipart, posting, render, PostFormData,
+        is_xml_http_request, parse_post_multipart, posting, render, PostFormData,
     },
     middleware::AppState,
     utils::crypto::hash_ip,
@@ -37,13 +37,6 @@ type ThreadViewLoadResult = (
     bool,
     Option<(i64, i64)>,
 );
-
-fn is_xml_http_request(headers: &HeaderMap) -> bool {
-    headers
-        .get("x-requested-with")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case("XMLHttpRequest"))
-}
 
 // GET /:board/thread/:id
 #[expect(

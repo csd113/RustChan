@@ -51,7 +51,7 @@ has already been coordinated under [SECURITY.md](SECURITY.md).
 
 ## Rust and feature policy
 
-The workspace currently declares Rust `1.91` as its minimum supported Rust
+The workspace currently declares Rust `1.99` as its minimum supported Rust
 version (MSRV). Keep `rust-version` and the `cargo-msrv` metadata aligned; do not
 raise the MSRV incidentally.
 
@@ -79,13 +79,13 @@ cargo test --locked --workspace --all-features
 Use the Playwright harness under `tests/e2e/` for public UI, admin UI, media,
 backup and restore, moderation, Tor/proxy, and no-JavaScript changes. The
 maintained harness source is tracked: `playwright.config.ts`, `package.json`,
-`package-lock.json`, `tests/e2e/**`, and `.github/workflows/e2e.yml`. Generated
-evidence is not: keep reports, traces, screenshots, videos, storage state,
+`package-lock.json`, and `tests/e2e/**`. Browser validation runs locally.
+Generated evidence is not: keep reports, traces, screenshots, videos, storage state,
 runtime databases, preserved fixture roots, audit output, and other browser
 artifacts under the matching `.gitignore` rules and out of commits. See
 `tests/e2e/README.md` for the normal regression and deep audit commands.
 Run focused scenarios first and the available browser matrix for broad changes.
-Some media tests require `ffmpeg`, `ffprobe`, and specific codecs; do not replace
+Some media tests require `ffmpeg` and specific codecs; do not replace
 deterministic fixtures with private uploads from a live site. Permanent Rust
 unit and integration tests remain normal repository source.
 

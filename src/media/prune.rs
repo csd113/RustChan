@@ -213,7 +213,6 @@ fn prune_candidates<C: std::ops::Deref<Target = rusqlite::Connection>>(
     Ok(report)
 }
 
-/// Load and validate all active original-media candidates.
 /// Database-only candidate columns, collected before filesystem validation.
 type CandidateRow = (
     i64,

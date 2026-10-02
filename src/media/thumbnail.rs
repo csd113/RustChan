@@ -132,7 +132,8 @@ pub fn override_pdf_renderer_mode(mode: TestPdfRendererMode) -> PdfRendererTestG
 /// Failed video extraction writes a `.svg` sibling placeholder.
 ///
 /// # Errors
-/// Returns an error if thumbnail generation and placeholder writing both fail.
+/// Returns an error if decoding or encoding fails without an available fallback,
+/// or if writing the fallback placeholder fails.
 pub fn generate_thumbnail(
     input_path: &Path,
     mime: &str,

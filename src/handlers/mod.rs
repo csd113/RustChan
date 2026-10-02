@@ -31,6 +31,15 @@ use std::collections::HashSet;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt as _;
 
+/// Classify enhanced requests; authentication and CSRF checks remain independent.
+#[must_use]
+pub(crate) fn is_xml_http_request(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-requested-with")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("XMLHttpRequest"))
+}
+
 /// MIME sniff bytes used by this handler.
 const MIME_SNIFF_BYTES: usize = 512;
 /// Text multipart field max bytes used by this handler.
@@ -1668,6 +1677,7 @@ mod tests {
         parse_post_multipart, process_audio_first_uploads, MultipartEnvelopeScanner, TempUpload,
         PUBLIC_MULTIPART_ENVELOPE_LIMIT_MARKER, PUBLIC_MULTIPART_ENVELOPE_MAX_BYTES,
     };
+    use crate::test_support::valid_pdf;
     use anyhow::{bail, ensure, Context as _};
     use axum::{
         body::Body,
@@ -1702,19 +1712,6 @@ mod tests {
             },
             name.to_owned(),
         ))
-    }
-
-    fn valid_pdf() -> &'static [u8] {
-        b"%PDF-1.4
-1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
-2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
-3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents 4 0 R >> endobj
-4 0 obj << /Length 0 >> stream
-
-endstream endobj
-trailer << /Root 1 0 R >>
-%%EOF
-"
     }
 
     async fn multipart_from_bytes(

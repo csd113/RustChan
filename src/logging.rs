@@ -1276,12 +1276,6 @@ pub fn init_logging(log_dir: &Path) {
 // correctly with the tracing terminal layer. Use these instead of
 // `println!`/`print!` in `console.rs` and `detect.rs`.
 
-/// Print `msg` followed by a newline to stdout, under the console lock.
-pub fn console_println(msg: &str) {
-    let _guard = CONSOLE_MUTEX.lock();
-    drop(writeln!(io::stdout(), "{msg}"));
-}
-
 /// Write a raw pre-formatted block exactly as provided (no trailing newline added).
 ///
 /// Used for banners, install-hint blocks, and stats sections that are already

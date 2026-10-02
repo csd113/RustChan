@@ -702,6 +702,7 @@ mod tests {
         admin_db_repair, admin_db_repair_status, admin_vacuum, parse_ffmpeg_timeout_secs_input,
         parse_media_prune_size_input, update_media_settings, PRE_REPAIR_BACKUP_FAILURE,
     };
+    use crate::test_support::admin_signed_csrf;
     use anyhow::{bail, ensure, Context as _};
     use axum::{
         body::{to_bytes, Body},
@@ -729,14 +730,6 @@ mod tests {
         )
         .context("create admin session")?;
         Ok(())
-    }
-
-    fn admin_signed_csrf() -> String {
-        crate::utils::crypto::make_scoped_csrf_form_token(
-            "csrf123",
-            &crate::config::CONFIG.cookie_secret,
-            "session123",
-        )
     }
 
     fn posts_ai_trigger_sql(state: &crate::middleware::AppState) -> anyhow::Result<String> {

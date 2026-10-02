@@ -13,7 +13,7 @@ use crate::{
     config::CONFIG,
     db::{self},
     error::{AppError, Result},
-    handlers::{parse_post_multipart, posting, render, PostFormData},
+    handlers::{is_xml_http_request, parse_post_multipart, posting, render, PostFormData},
     middleware::{validate_csrf, validate_signed_csrf, AppState, SecureCookieContext},
     models::{Board, Pagination, SearchQuery, SEARCH_QUERY_MAX_CHARS},
     templates,
@@ -157,13 +157,6 @@ fn thread_unread_counts(
             (unread > 0).then_some((thread.id, unread))
         })
         .collect()
-}
-
-fn is_xml_http_request(headers: &HeaderMap) -> bool {
-    headers
-        .get("x-requested-with")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case("XMLHttpRequest"))
 }
 
 #[derive(Serialize)]

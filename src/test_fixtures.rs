@@ -139,3 +139,28 @@ pub(crate) fn multipart_body(
     body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
     (boundary, body)
 }
+
+/// Signs the shared administrator fixture's CSRF value for its session.
+#[must_use]
+pub(crate) fn admin_signed_csrf() -> String {
+    crate::utils::crypto::make_scoped_csrf_form_token(
+        "csrf123",
+        &crate::config::CONFIG.cookie_secret,
+        "session123",
+    )
+}
+
+/// Returns a minimal structurally valid PDF fixture.
+#[must_use]
+pub(crate) fn valid_pdf() -> &'static [u8] {
+    b"%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents 4 0 R >> endobj
+4 0 obj << /Length 0 >> stream
+
+endstream endobj
+trailer << /Root 1 0 R >>
+%%EOF
+"
+}
