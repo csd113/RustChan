@@ -675,13 +675,24 @@ test.describe('no-JavaScript server-rendered parity', () => {
     await form.locator('textarea[name="body"]').fill(marker('nojs-upload-body'));
     await form.locator('input[type="file"]').first().setInputFiles(app.fixtures().tinyPng);
     await form.getByRole('button', { name: /post thread/i }).click();
-    await waitForThreadRedirect(page, 'img');
+    const threadId = await waitForThreadRedirect(page, 'img');
     await expect(page.locator('.post.op .file-info')).toContainText('tiny.png');
     const mediaHref = await page.locator('.post.op .file-info a').first().getAttribute('href');
     expect(mediaHref).toMatch(/^\/boards\/img\//);
     const media = await page.request.get(`${app.baseURL}${mediaHref}`);
     expect(media.status()).toBe(200);
-    expect(media.headers()['content-type']).toMatch(/^image\/png/);
+    // Production may retain PNG or publish its smaller lossless WebP output.
+    // Check the persisted format and actual bytes, rather than the upload name.
+    const storedMime = sqliteQuery(app, `SELECT mime_type FROM posts WHERE thread_id = ${threadId} AND is_op = 1;`);
+    expect(media.headers()['content-type']).toBe(storedMime);
+    const payload = await media.body();
+    if (storedMime === 'image/webp') {
+      expect(payload.subarray(0, 4).toString('ascii')).toBe('RIFF');
+      expect(payload.subarray(8, 12).toString('ascii')).toBe('WEBP');
+    } else {
+      expect(storedMime).toBe('image/png');
+      expect(payload.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    }
     expect(media.headers()['x-content-type-options']).toBe('nosniff');
 
     await page.goto(`${app.baseURL}/img`);

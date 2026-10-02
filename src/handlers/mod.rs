@@ -1265,7 +1265,7 @@ use crate::models::Board;
 pub(crate) fn process_primary_upload(
     file_data: Option<(TempUpload, String)>,
     board: &Board,
-    conn: &rusqlite::Connection,
+    mut lookup: impl FnMut(&str) -> Result<Option<crate::db::CachedFile>>,
     upload_dir: &str,
     save_root: &str,
     thumb_size: u32,
@@ -1363,7 +1363,7 @@ pub(crate) fn process_primary_upload(
     // record_file_hash uses INSERT OR REPLACE, so the cache entry is
     // automatically refreshed to point at the newly saved files.
     let hash = sha256_file_hex(upload.temp_file.path())?;
-    if let Some(cached) = crate::db::find_file_by_hash(conn, &hash)? {
+    if let Some(cached) = lookup(&hash)? {
         let same_board_cache = cached_paths_belong_to_board(&cached, &board.short_name);
         let file_ok = std::path::Path::new(upload_dir)
             .join(&cached.file_path)
@@ -1488,7 +1488,7 @@ pub(crate) fn process_audio_first_uploads(
     image_file_data: Option<(TempUpload, String)>,
     fallback_file_data: Option<(TempUpload, String)>,
     board: &Board,
-    conn: &rusqlite::Connection,
+    mut lookup: impl FnMut(&str) -> Result<Option<crate::db::CachedFile>>,
     upload_dir: &str,
     save_root_str: &str,
     thumb_size: u32,
@@ -1505,11 +1505,11 @@ pub(crate) fn process_audio_first_uploads(
     let allow_any_files =
         crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
     let has_audio_or_image_upload = audio_file_data.is_some() || image_file_data.is_some();
-    let save_primary = |file_data| {
+    let mut save_primary = |file_data| {
         process_primary_upload(
             file_data,
             board,
-            conn,
+            &mut lookup,
             upload_dir,
             save_root_str,
             thumb_size,
@@ -1583,7 +1583,7 @@ fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
 /// post.  Shared by `create_thread` and `post_reply`.
 pub(crate) fn enqueue_post_jobs(
     job_queue: &JobQueue,
-    conn: &rusqlite::Connection,
+    pool: &crate::db::DbPool,
     post_id: i64,
     ip_hash: &str,
     body_len: usize,
@@ -1609,7 +1609,9 @@ pub(crate) fn enqueue_post_jobs(
                 | crate::models::MediaType::Other => None,
             };
             if let Some(j) = job {
-                match job_queue.enqueue_media(conn, &j) {
+                let conn = pool.get()?;
+                let enqueued = job_queue.enqueue_media(&conn, &j);
+                match enqueued {
                     Ok(crate::workers::EnqueueOutcome::Enqueued(job_id)) => tracing::debug!(
                         target: "workers",
                         post_id,
@@ -2488,7 +2490,7 @@ trailer << /Root 1 0 R >>
             None,
             Some(other),
             &board,
-            &conn,
+            |hash| Ok(crate::db::find_file_by_hash(&conn, hash)?),
             boards_dir
                 .path()
                 .to_str()
@@ -2550,7 +2552,7 @@ trailer << /Root 1 0 R >>
         let result = super::process_primary_upload(
             Some(upload),
             &board,
-            &conn,
+            |hash| Ok(crate::db::find_file_by_hash(&conn, hash)?),
             uploads_dir
                 .path()
                 .to_str()
@@ -2615,7 +2617,7 @@ trailer << /Root 1 0 R >>
         let (uploaded, primary_hash) = super::process_primary_upload(
             Some(temp_upload("doc.pdf", pdf)?),
             &board,
-            &conn,
+            |hash| Ok(crate::db::find_file_by_hash(&conn, hash)?),
             uploads_dir
                 .path()
                 .to_str()
@@ -2655,7 +2657,7 @@ trailer << /Root 1 0 R >>
         let result = super::process_primary_upload(
             Some(temp_upload("doc.pdf", valid_pdf())?),
             &board,
-            &conn,
+            |hash| Ok(crate::db::find_file_by_hash(&conn, hash)?),
             uploads_dir
                 .path()
                 .to_str()
@@ -2697,7 +2699,7 @@ trailer << /Root 1 0 R >>
         let result = super::process_primary_upload(
             Some(temp_upload("doc.pdf", valid_pdf())?),
             &board,
-            &conn,
+            |hash| Ok(crate::db::find_file_by_hash(&conn, hash)?),
             uploads_dir
                 .path()
                 .to_str()
@@ -2735,7 +2737,7 @@ trailer << /Root 1 0 R >>
         let result = super::process_primary_upload(
             Some(temp_upload("not-really.pdf", b"plain text")?),
             &board,
-            &conn,
+            |hash| Ok(crate::db::find_file_by_hash(&conn, hash)?),
             uploads_dir
                 .path()
                 .to_str()
@@ -2777,7 +2779,7 @@ trailer << /Root 1 0 R >>
         let (uploaded, _) = super::process_primary_upload(
             Some(temp_upload("doc.pdf", valid_pdf())?),
             &board,
-            &conn,
+            |hash| Ok(crate::db::find_file_by_hash(&conn, hash)?),
             uploads_dir
                 .path()
                 .to_str()

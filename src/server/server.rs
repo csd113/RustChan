@@ -792,16 +792,16 @@ async fn run_server_lifecycle(
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
-                        let connection = bg.get();
-                        if let Ok(conn) = connection {
-                            let purge_result = crate::db::purge_expired_sessions(&conn);
-                            match purge_result {
-                                Ok(n) if n > 0 => {
-                                    tracing::info!(target: "sessions", purged = n, "Expired sessions purged");
-                                }
-                                Err(e) => tracing::error!("Session purge error: {e}"),
-                                Ok(_) => {}
-                            }
+                        let purge_pool = bg.clone();
+                        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+                            let conn = purge_pool.get()?;
+                            crate::db::purge_expired_sessions(&conn)
+                        }).await;
+                        match result {
+                            Ok(Ok(n)) if n > 0 => tracing::info!(target: "sessions", purged = n, "Expired sessions purged"),
+                            Ok(Ok(_)) => {},
+                            Ok(Err(error)) => tracing::error!(error = %error, "Session purge error"),
+                            Err(error) => tracing::error!(error = %error, "Session purge blocking task failed"),
                         }
                     }
                     () = cancel_clone.cancelled() => {
@@ -842,18 +842,22 @@ async fn run_server_lifecycle(
                             );
                             continue;
                         }
-                        let connection = bg.get();
-                        if let Ok(conn) = connection {
-                            match crate::db::run_wal_checkpoint(&conn) {
-                                Ok((pages, moved, backfill)) => {
-                                    tracing::debug!("WAL checkpoint: {pages} pages total, {moved} moved, {backfill} backfilled");
-                                }
-                                Err(e) => tracing::warn!("WAL checkpoint failed: {e}"),
-                            }
-                            // Fix #7: reuse `conn` instead of calling bg.get() again.
-                            // A second acquire while the first is still alive deadlocks
-                            // with a pool size of 1.
-                            drop(conn.execute_batch("PRAGMA optimize;"));
+                        let checkpoint_pool = bg.clone();
+                        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                            let conn = checkpoint_pool.get()?;
+                            let (log_pages, checkpointed_pages, busy) = crate::db::run_wal_checkpoint(&conn)?;
+                            tracing::debug!(target: "db", log_pages, checkpointed_pages, busy,
+                                "WAL checkpoint completed");
+                            // Reuse the connection so a one-connection pool cannot
+                            // deadlock on a nested checkout. Both operations can
+                            // wait for SQLite and must stay off async workers.
+                            conn.execute_batch("PRAGMA optimize;")?;
+                            Ok(())
+                        }).await;
+                        match result {
+                            Ok(Ok(())) => {},
+                            Ok(Err(error)) => tracing::warn!(target: "db", error = %error, "WAL checkpoint or planner maintenance failed"),
+                            Err(error) => tracing::warn!(target: "db", error = %error, "WAL maintenance blocking task failed"),
                         }
                     }
                     () = cancel_clone.cancelled() => {

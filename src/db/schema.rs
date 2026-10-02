@@ -278,6 +278,10 @@ const INDEX_SCHEMA_SQL: &str = "
         ON threads(board_id, sticky DESC, bumped_at DESC);
     CREATE INDEX IF NOT EXISTS idx_posts_thread
         ON posts(thread_id, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_posts_thread_live
+        ON posts(thread_id, id);
+    CREATE INDEX IF NOT EXISTS idx_posts_board_ip_created
+        ON posts(board_id, ip_hash, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_posts_board
         ON posts(board_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_bans_ip
@@ -336,7 +340,9 @@ const INDEX_SCHEMA_SQL: &str = "
 /// Obsolete theme index accepted only during the known legacy repair path.
 const LEGACY_THEME_SORT_INDEX: &str = "idx_themes_enabled_sort";
 /// Additive indexes introduced after the first package-version baseline.
-const ADDITIVE_BASELINE_INDEXES: [&str; 9] = [
+const ADDITIVE_BASELINE_INDEXES: [&str; 11] = [
+    "idx_posts_thread_live",
+    "idx_posts_board_ip_created",
     "idx_posts_file_path",
     "idx_posts_thumb_path",
     "idx_posts_audio_file_path",

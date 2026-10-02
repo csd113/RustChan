@@ -8,9 +8,9 @@ use super::schema::install_or_migrate_schema;
 use super::types::DbPool;
 
 /// Pragmas applied to every pooled `SQLite` connection.
-const CONNECTION_PRAGMAS: &str = "
+pub(super) const CONNECTION_PRAGMAS: &str = "
     PRAGMA journal_mode = WAL;
-    PRAGMA synchronous = NORMAL;
+    PRAGMA synchronous = FULL;
     PRAGMA foreign_keys = ON;
     PRAGMA cache_size = -32000;
     PRAGMA temp_store = MEMORY;
@@ -39,6 +39,7 @@ pub fn init_pool() -> Result<DbPool> {
     let pool_size = CONFIG.db_pool_size;
     let pool = Pool::builder()
         .max_size(pool_size)
+        .event_handler(Box::new(super::diagnostics::PoolEvents::new()))
         .connection_timeout(POOL_CONNECTION_TIMEOUT)
         .build(manager)
         .context("Failed to build database pool")?;
@@ -47,7 +48,9 @@ pub fn init_pool() -> Result<DbPool> {
     install_or_migrate_schema(&conn)?;
     super::upsert_builtin_themes(&conn)?;
 
-    tracing::info!(target: "db", path = db_path, "Database initialised");
+    tracing::info!(target: "db", path = db_path, pool_size,
+        checkout_timeout_ms = %POOL_CONNECTION_TIMEOUT.as_millis(),
+        "Database initialised");
     Ok(pool)
 }
 
@@ -118,6 +121,24 @@ mod tests {
     use anyhow::Result;
 
     #[test]
+    fn every_pool_connection_enforces_wal_full_and_foreign_keys() -> Result<()> {
+        let pool = super::init_test_pool()?;
+        let connections = (0..4)
+            .map(|_| pool.get())
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for conn in connections {
+            let mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+            let synchronous: i64 = conn.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
+            let foreign_keys: bool = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+            anyhow::ensure!(
+                mode == "wal" && synchronous == 2 && foreign_keys,
+                "pooled connection weakened durability or relationship enforcement"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     #[expect(
         clippy::panic_in_result_fn,
         reason = "test assertions intentionally panic on failure"
@@ -136,6 +157,114 @@ mod tests {
             std::time::Duration::from_secs(1),
             "pool checkout timeout should remain one second"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn exhausted_pool_returns_a_bounded_retryable_error() -> Result<()> {
+        let pool = super::init_test_pool()?;
+        let held = (0..4)
+            .map(|_| pool.get())
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let started = std::time::Instant::now();
+        let error = pool
+            .get()
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("exhausted pool supplied a connection"))?;
+        anyhow::ensure!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "pool timeout exceeded its bound"
+        );
+        anyhow::ensure!(
+            matches!(
+                crate::error::AppError::from(error),
+                crate::error::AppError::DbBusy
+            ),
+            "pool exhaustion must be retryable"
+        );
+        drop(held);
+        anyhow::ensure!(
+            pool.get()?.is_autocommit(),
+            "returned connection inherited a transaction"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wal_readers_remain_usable_and_writer_contention_is_bounded() -> Result<()> {
+        let pool = super::init_test_pool()?;
+        let writer = pool.get()?;
+        writer.execute_batch("BEGIN IMMEDIATE")?;
+        writer.execute(
+            "INSERT INTO site_settings(key,value) VALUES('uncommitted','value')",
+            [],
+        )?;
+        let reader = pool.get()?;
+        let visible: i64 = reader.query_row(
+            "SELECT COUNT(*) FROM site_settings WHERE key='uncommitted'",
+            [],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(visible == 0, "reader observed an uncommitted write");
+        let started = std::time::Instant::now();
+        let error = reader
+            .execute(
+                "INSERT INTO site_settings(key,value) VALUES('contended','value')",
+                [],
+            )
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("competing write unexpectedly succeeded"))?;
+        anyhow::ensure!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "busy wait exceeded its bound"
+        );
+        anyhow::ensure!(
+            matches!(
+                crate::error::AppError::from(error),
+                crate::error::AppError::DbBusy
+            ),
+            "busy writer must be retryable"
+        );
+        writer.execute_batch("ROLLBACK")?;
+        anyhow::ensure!(
+            reader.is_autocommit(),
+            "busy failure left a transaction active"
+        );
+        reader.execute(
+            "INSERT INTO site_settings(key,value) VALUES('recovered','value')",
+            [],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn active_read_snapshot_bounds_checkpoint_and_wal_backup_stays_complete() -> Result<()> {
+        let pool = super::init_test_pool()?;
+        let writer = pool.get()?;
+        crate::db::create_board(&writer, "wal", "WAL", "", false)?;
+        let reader = pool.get()?;
+        reader.execute_batch("BEGIN; SELECT COUNT(*) FROM boards;")?;
+        crate::db::create_board(&writer, "next", "Next", "", false)?;
+        let (log, checkpointed, busy) = crate::db::run_wal_checkpoint(&writer)?;
+        anyhow::ensure!(
+            busy == 1 && checkpointed < log,
+            "active reader must prevent a complete truncate checkpoint"
+        );
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("backup.sqlite3");
+        writer.execute(
+            "VACUUM INTO ?1",
+            [path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("backup path"))?],
+        )?;
+        let snapshot = rusqlite::Connection::open(&path)?;
+        let boards: i64 = snapshot.query_row("SELECT COUNT(*) FROM boards", [], |r| r.get(0))?;
+        anyhow::ensure!(boards == 2, "WAL snapshot missed a committed board");
+        crate::db::verify_database_schema(&snapshot)?;
+        reader.execute_batch("ROLLBACK")?;
+        let (_, _, busy) = crate::db::run_wal_checkpoint(&writer)?;
+        anyhow::ensure!(busy == 0, "checkpoint did not recover after reader release");
         Ok(())
     }
 }

@@ -40,7 +40,7 @@ pub(in crate::server) async fn create_thread(
         &state,
         &board_short,
         admin_session_id.clone(),
-        access_cookie,
+        access_cookie.clone(),
         BoardAccessRequirement::Post,
         format!("/{board_short}"),
     )
@@ -135,9 +135,8 @@ pub(in crate::server) async fn create_thread(
             // dropped. Keep the permit inside this closure so a disconnected
             // request cannot release the media gate while parsing continues.
             let _media_upload_guard = media_upload_guard;
-            let conn = pool.get()?;
             posting::submit_post(
-                &conn,
+                &pool,
                 &job_queue,
                 posting::SubmitPostCommand {
                     mode: posting::SubmitPostMode::NewThread {
@@ -150,6 +149,7 @@ pub(in crate::server) async fn create_thread(
                     identity_key,
                     cookie_secret: CONFIG.cookie_secret.clone(),
                     admin_session_id,
+                    access_cookie,
                     ban_csrf_token,
                     submission_token,
                     name,

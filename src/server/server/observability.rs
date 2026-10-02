@@ -275,6 +275,18 @@ async fn metrics_response(state: AppState) -> Response {
     .await
     .unwrap_or((0, 0, false, 0, false, -1));
 
+    let pool_state = state.db.state();
+    let database_bytes = tokio::fs::metadata(&CONFIG.database_path)
+        .await
+        .map_or(-1, |metadata| {
+            i64::try_from(metadata.len()).unwrap_or(i64::MAX)
+        });
+    let wal_bytes = tokio::fs::metadata(format!("{}-wal", CONFIG.database_path))
+        .await
+        .map_or(-1, |metadata| {
+            i64::try_from(metadata.len()).unwrap_or(i64::MAX)
+        });
+
     let body = format!(
         concat!(
             "# TYPE rustchan_requests_total counter\n",
@@ -311,6 +323,14 @@ async fn metrics_response(state: AppState) -> Response {
             "rustchan_media_reconcile_scan_incomplete_total {}\n",
             "# TYPE rustchan_database_schema_valid gauge\n",
             "rustchan_database_schema_valid{{version=\"{}\"}} {}\n",
+            "# TYPE rustchan_database_pool_connections gauge\n",
+            "rustchan_database_pool_connections {}\n",
+            "# TYPE rustchan_database_pool_idle gauge\n",
+            "rustchan_database_pool_idle {}\n",
+            "# TYPE rustchan_database_file_bytes gauge\n",
+            "rustchan_database_file_bytes {}\n",
+            "# TYPE rustchan_database_wal_file_bytes gauge\n",
+            "rustchan_database_wal_file_bytes {}\n",
             "# TYPE rustchan_full_backups_saved gauge\n",
             "rustchan_full_backups_saved {}\n",
             "# TYPE rustchan_latest_full_backup_verified gauge\n",
@@ -352,6 +372,10 @@ async fn metrics_response(state: AppState) -> Response {
         media_reconcile.incomplete_scans_total,
         crate::db::baseline_schema_version(),
         u8::from(database_schema_valid),
+        pool_state.connections,
+        pool_state.idle_connections,
+        database_bytes,
+        wal_bytes,
         full_backup_count,
         u8::from(latest_full_backup_verified),
         latest_full_backup_age_seconds,
@@ -501,6 +525,10 @@ mod tests {
         );
 
         for metric in [
+            "rustchan_database_pool_connections",
+            "rustchan_database_pool_idle",
+            "rustchan_database_file_bytes",
+            "rustchan_database_wal_file_bytes",
             "rustchan_requests_total",
             "rustchan_job_queue_pending",
             "rustchan_media_reconcile_files_scanned_total",

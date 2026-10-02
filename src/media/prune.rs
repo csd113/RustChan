@@ -107,7 +107,40 @@ pub fn prune_to_limit(
     max_bytes: u64,
 ) -> Result<PruneReport> {
     let upload_root = Path::new(upload_dir);
-    let mut candidates = load_candidates(conn, upload_root)?;
+    let candidates = load_candidates(conn, upload_root)?;
+    prune_candidates(candidates, upload_dir, max_bytes, || Ok(conn))
+}
+
+/// Run configured pruning with no pooled connection during candidate filesystem scans.
+///
+/// # Errors
+/// Returns an error if settings, candidate queries or checkout fail.
+pub fn run_configured_prune_with_pool(
+    pool: &crate::db::DbPool,
+    upload_dir: &str,
+) -> Result<PruneReport> {
+    let (max_bytes, rows) = {
+        let conn = pool.get()?;
+        if !crate::db::get_media_auto_prune_enabled(&conn) {
+            return Ok(PruneReport::default());
+        }
+        let max_bytes = crate::db::get_media_max_active_content_size_bytes(&conn);
+        if max_bytes == 0 {
+            return Ok(PruneReport::default());
+        }
+        (max_bytes, load_candidate_rows(&conn)?)
+    };
+    let candidates = validate_candidate_rows(rows, Path::new(upload_dir))?;
+    prune_candidates(candidates, upload_dir, max_bytes, || Ok(pool.get()?))
+}
+
+/// Process candidates, checking out only for the race-safe mutation boundary.
+fn prune_candidates<C: std::ops::Deref<Target = rusqlite::Connection>>(
+    mut candidates: Vec<Candidate>,
+    upload_dir: &str,
+    max_bytes: u64,
+    mut connection: impl FnMut() -> Result<C>,
+) -> Result<PruneReport> {
     candidates.sort_by_key(|candidate| {
         (
             candidate.created_at,
@@ -131,7 +164,8 @@ pub fn prune_to_limit(
         if remaining <= max_bytes {
             break;
         }
-        let intent = match persist_prune_intent(conn, &candidate) {
+        let conn = connection()?;
+        let intent = match persist_prune_intent(&conn, &candidate) {
             Ok(intent) => intent,
             Err(error) => {
                 report.skipped_files = report.skipped_files.saturating_add(1);
@@ -145,7 +179,9 @@ pub fn prune_to_limit(
             }
         };
 
-        match finalize_original_prune_payload(conn, upload_dir, &intent.id, &intent.payload) {
+        let finalized =
+            finalize_original_prune_payload(&conn, upload_dir, &intent.id, &intent.payload);
+        match finalized {
             Ok(finalized) => {
                 remaining = remaining.saturating_sub(candidate.size);
                 report.removed_files = report.removed_files.saturating_add(finalized.removed_files);
@@ -178,11 +214,24 @@ pub fn prune_to_limit(
 }
 
 /// Load and validate all active original-media candidates.
+/// Database-only candidate columns, collected before filesystem validation.
+type CandidateRow = (
+    i64,
+    i64,
+    String,
+    Option<i64>,
+    String,
+    Option<String>,
+    Option<i64>,
+);
+
+/// Collect and validate candidates for callers already owning a connection.
 fn load_candidates(conn: &rusqlite::Connection, upload_root: &Path) -> Result<Vec<Candidate>> {
-    // Resolve the upload root once; every candidate path is checked against it.
-    let canonical_root = upload_root
-        .canonicalize()
-        .with_context(|| format!("Canonicalize upload root {}", upload_root.display()))?;
+    validate_candidate_rows(load_candidate_rows(conn)?, upload_root)
+}
+
+/// Collect candidate rows without performing filesystem access.
+fn load_candidate_rows(conn: &rusqlite::Connection) -> Result<Vec<CandidateRow>> {
     let mut stmt = conn.prepare_cached(
         "SELECT p.id, p.created_at, p.file_path, p.file_size, b.short_name,
                 p.audio_file_path, p.audio_file_size
@@ -214,6 +263,14 @@ fn load_candidates(conn: &rusqlite::Connection, upload_root: &Path) -> Result<Ve
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
+    Ok(rows)
+}
+
+/// Inspect untrusted paths and group references after releasing the pool borrow.
+fn validate_candidate_rows(rows: Vec<CandidateRow>, upload_root: &Path) -> Result<Vec<Candidate>> {
+    let canonical_root = upload_root
+        .canonicalize()
+        .with_context(|| format!("Canonicalize upload root {}", upload_root.display()))?;
     let mut posts = Vec::new();
     for (post_id, created_at, path, db_size, board_short, audio_path, audio_size) in rows {
         let mut paths = Vec::new();

@@ -35,6 +35,7 @@ pub(in crate::server) fn create_full_backup_to_server(
     if let Some(session_id) = session_id {
         require_admin_session_sid(&conn, Some(session_id))?;
     }
+    drop(conn);
     let uploads_base = Path::new(&CONFIG.upload_dir);
     let global_favicon_dir = crate::favicon::global_backup_source_dir();
     let mut tor_hidden_service_keys_dir = if include_tor_hidden_service_keys {
@@ -107,9 +108,20 @@ pub(in crate::server) fn create_full_backup_to_server(
         .to_str()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Backup DB path non-UTF-8")))?
         .replace('\'', "''");
+    let conn = pool.get()?;
+    if let Some(session_id) = session_id {
+        require_admin_session_sid(&conn, Some(session_id))?;
+    }
     conn.execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
         .map_err(|error| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {error}")))?;
+    drop(conn);
     restrict_backup_file(&db_snapshot_path)?;
+    // Export metadata from the same committed snapshot shipped in the backup;
+    // file copying and hashing no longer occupy a live pooled connection.
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_snapshot_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
     let db_snapshot_size = std::fs::metadata(&db_snapshot_path)
         .map(|metadata| metadata.len())
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {error}")))?;
@@ -311,7 +323,6 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
     job_id: u64,
     reason: &str,
 ) -> Result<String> {
-    let conn = pool.get()?;
     let backup_id = storage::build_backup_id(storage::BackupScope::PreMaintenance, "pre-repair-db");
     let root_dir = storage::create_backup_root(&backup_id)?;
     let db_dir = root_dir.join("db");
@@ -329,9 +340,15 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
         .to_str()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Backup DB path non-UTF-8")))?
         .replace('\'', "''");
+    let conn = pool.get()?;
     conn.execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
         .map_err(|error| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {error}")))?;
+    drop(conn);
     restrict_backup_file(&db_snapshot_path)?;
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_snapshot_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
     let db_snapshot_size = std::fs::metadata(&db_snapshot_path)
         .map(|metadata| metadata.len())
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Stat DB snapshot: {error}")))?;

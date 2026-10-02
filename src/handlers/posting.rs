@@ -36,6 +36,7 @@ pub(super) struct SubmitPostCommand {
     pub identity_key: String,
     pub cookie_secret: String,
     pub admin_session_id: Option<String>,
+    pub access_cookie: Option<String>,
     pub ban_csrf_token: String,
     pub submission_token: String,
     pub name: String,
@@ -107,11 +108,7 @@ struct ProcessedUploads {
 }
 
 impl ProcessedUploads {
-    pub(crate) fn rollback_new_files(
-        &self,
-        conn: &rusqlite::Connection,
-        upload_dir: &str,
-    ) -> Result<()> {
+    pub(crate) fn rollback_new_files(&self, pool: &db::DbPool, upload_dir: &str) -> Result<()> {
         if let Some(pending) = self.pending_finalize.as_ref() {
             let stage_dir = std::path::Path::new(&pending.payload.stage_dir);
             if stage_dir.exists() {
@@ -137,7 +134,9 @@ impl ProcessedUploads {
             }
             match crate::utils::files::delete_file_checked(upload_dir, &primary.file_path) {
                 Ok(()) => {
-                    if let Err(error) = db::delete_file_hash_by_path(conn, &primary.file_path) {
+                    if let Err(error) =
+                        db::delete_file_hash_by_path(&*pool.get()?, &primary.file_path)
+                    {
                         return Err(AppError::Internal(error));
                     }
                 }
@@ -310,17 +309,13 @@ fn build_pending_upload_op(
     }))
 }
 
-fn finalize_pending_uploads(
-    conn: &rusqlite::Connection,
-    upload_dir: &str,
-    uploads: &ProcessedUploads,
-) {
+fn finalize_pending_uploads(pool: &db::DbPool, upload_dir: &str, uploads: &ProcessedUploads) {
     let Some(pending) = uploads.pending_finalize.as_ref() else {
         return;
     };
 
-    match crate::pending_fs::finalize_upload_payload_for_op(
-        conn,
+    match crate::pending_fs::finalize_upload_payload_with_pool(
+        pool,
         upload_dir,
         Some(&pending.op_id),
         &pending.payload,
@@ -334,6 +329,97 @@ fn finalize_pending_uploads(
             );
         }
     }
+}
+
+/// Clean uncommitted staged files if the final pool checkout fails.
+fn checkout_post_connection(
+    pool: &db::DbPool,
+    uploads: &ProcessedUploads,
+    upload_dir: &str,
+) -> Result<r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>> {
+    match pool.get() {
+        Ok(conn) => Ok(conn),
+        Err(error) => {
+            uploads.rollback_new_files(pool, upload_dir)?;
+            Err(error.into())
+        }
+    }
+}
+
+/// Preserve a transaction's typed public rejection.
+fn post_creation_error(error: anyhow::Error) -> AppError {
+    match error.downcast::<AppError>() {
+        Ok(error) => error,
+        Err(error) => error.into(),
+    }
+}
+
+/// Check mutable request policy while the post transaction owns the write lock.
+fn revalidate_posting_policy(
+    conn: &rusqlite::Connection,
+    prepared: &Board,
+    prepared_filters: &[(String, String)],
+    admin_session_id: Option<&str>,
+    access_cookie: Option<&str>,
+    ip_hash: &str,
+    ban_csrf_token: &str,
+) -> Result<()> {
+    let context = crate::handlers::board::load_board_access_context(
+        conn,
+        &prepared.short_name,
+        admin_session_id,
+        access_cookie,
+    )?;
+    let current = &context.board;
+    if current.id != prepared.id || !context.can_post {
+        return Err(AppError::Forbidden(
+            "Board posting access changed. Reload the board.".into(),
+        ));
+    }
+    crate::handlers::board::ensure_actor_not_banned(conn, ip_hash, ban_csrf_token.to_owned())?;
+    // These settings determined media acceptance and body preparation. Refuse
+    // stale preparation rather than publishing under a different policy.
+    let media_policy = |board: &Board| {
+        (
+            (
+                board.allow_images,
+                board.allow_video,
+                board.allow_audio,
+                board.allow_pdf,
+                board.allow_any_files,
+            ),
+            (
+                board.max_image_size,
+                board.max_video_size,
+                board.max_audio_size,
+                board.max_pdf_size,
+            ),
+            (
+                board.allow_tripcodes,
+                board.allow_captcha,
+                board.collapse_greentext,
+            ),
+        )
+    };
+    if media_policy(current) != media_policy(prepared)
+        || load_word_filters(conn)? != prepared_filters
+    {
+        return Err(AppError::Conflict(
+            "Board posting settings changed. Reload the board and try again.".into(),
+        ));
+    }
+    if !context.is_admin && current.post_cooldown_secs > 0 {
+        if let Some(seconds) = db::get_seconds_since_last_post(conn, current.id, ip_hash)? {
+            let remaining = current.post_cooldown_secs.saturating_sub(seconds);
+            if remaining > 0 {
+                return Err(AppError::BadRequest(format!(
+                    "Please wait {remaining} more second{} before posting again.",
+                    if remaining == 1 { "" } else { "s" }
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn is_admin_session(
@@ -389,7 +475,7 @@ fn process_uploads(
     file_data: Option<(crate::handlers::TempUpload, String)>,
     audio_file_data: Option<(crate::handlers::TempUpload, String)>,
     board: &Board,
-    conn: &rusqlite::Connection,
+    pool: &db::DbPool,
     config: &UploadConfig<'_>,
 ) -> Result<ProcessedUploads> {
     let stage_root =
@@ -409,7 +495,10 @@ fn process_uploads(
         image_file_data,
         file_data,
         board,
-        conn,
+        |hash| {
+            let conn = pool.get()?;
+            Ok(db::find_file_by_hash(&conn, hash)?)
+        },
         config.upload_dir,
         save_root_str,
         config.thumb_size,
@@ -428,17 +517,24 @@ fn process_uploads(
         }
     };
 
-    let pending_finalize = stage_root
+    let pending_payload = stage_root
         .as_ref()
         .map(|stage_dir| {
             build_upload_finalize_payload(stage_dir, primary.as_mut(), audio.as_mut(), primary_hash)
         })
-        .transpose()?
-        .flatten()
-        .map(|payload| PendingUploadFinalize {
-            op_id: uuid::Uuid::new_v4().to_string(),
-            payload,
-        });
+        .transpose();
+    let pending_finalize = match pending_payload {
+        Ok(payload) => payload,
+        Err(error) => {
+            cleanup_unused_upload_stage(stage_root.as_deref());
+            return Err(error);
+        }
+    }
+    .flatten()
+    .map(|payload| PendingUploadFinalize {
+        op_id: uuid::Uuid::new_v4().to_string(),
+        payload,
+    });
 
     if pending_finalize.is_none() {
         cleanup_unused_upload_stage(stage_root.as_deref());
@@ -495,6 +591,15 @@ fn build_new_post(
     }
 }
 
+/// Submit with independently scoped preparation, persistence and promotion.
+pub(super) fn submit_post(
+    pool: &db::DbPool,
+    job_queue: &crate::workers::JobQueue,
+    command: SubmitPostCommand,
+) -> Result<SubmitPostResult> {
+    submit_post_with_preparation(pool, job_queue, command, || Ok(()))
+}
+
 #[expect(
     clippy::cognitive_complexity,
     reason = "post validation and transactional creation share one consistency boundary"
@@ -503,10 +608,12 @@ fn build_new_post(
     clippy::too_many_lines,
     reason = "validation, transactional insertion, attachment updates, and job enqueueing share one boundary"
 )]
-pub(super) fn submit_post(
-    conn: &rusqlite::Connection,
+/// The preparation callback permits deterministic interleaving in regression tests.
+fn submit_post_with_preparation(
+    pool: &db::DbPool,
     job_queue: &crate::workers::JobQueue,
     command: SubmitPostCommand,
+    prepare: impl FnOnce() -> Result<()>,
 ) -> Result<SubmitPostResult> {
     let SubmitPostCommand {
         mode,
@@ -514,6 +621,7 @@ pub(super) fn submit_post(
         identity_key,
         cookie_secret,
         admin_session_id,
+        access_cookie,
         ban_csrf_token,
         submission_token,
         name,
@@ -529,7 +637,8 @@ pub(super) fn submit_post(
         ffmpeg_available,
     } = command;
 
-    let board = db::get_board_by_short(conn, &board_short)?
+    let conn = pool.get()?;
+    let board = db::get_board_by_short(&conn, &board_short)?
         .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
     let effective_max_image_size = board.max_image_size_bytes();
     let effective_max_video_size = board.max_video_size_bytes();
@@ -538,7 +647,7 @@ pub(super) fn submit_post(
 
     let reply_context = match &mode {
         SubmitPostMode::Reply { thread_id, sage } => {
-            let thread = db::get_thread(conn, *thread_id)?
+            let thread = db::get_thread(&conn, *thread_id)?
                 .ok_or_else(|| AppError::NotFound("Thread not found.".into()))?;
 
             if thread.board_id != board.id {
@@ -551,20 +660,20 @@ pub(super) fn submit_post(
                 return Err(AppError::Forbidden("This thread is archived.".into()));
             }
 
-            Some((*thread_id, *sage, thread.reply_count))
+            Some((*thread_id, *sage))
         }
         SubmitPostMode::NewThread { .. } => None,
     };
 
     let ip_hash = hash_ip(&identity_key, &cookie_secret);
-    crate::handlers::board::ensure_actor_not_banned(conn, &ip_hash, ban_csrf_token)?;
-    if let Some(existing) = db::get_post_submission(conn, &submission_token, &ip_hash, board.id)? {
-        return existing_submission_result(conn, board.short_name, existing);
+    crate::handlers::board::ensure_actor_not_banned(&conn, &ip_hash, ban_csrf_token.clone())?;
+    if let Some(existing) = db::get_post_submission(&conn, &submission_token, &ip_hash, board.id)? {
+        return existing_submission_result(&conn, board.short_name, existing);
     }
 
-    let is_admin = is_admin_session(conn, admin_session_id.as_deref());
+    let is_admin = is_admin_session(&conn, admin_session_id.as_deref());
     if board.post_cooldown_secs > 0 && !is_admin {
-        let elapsed = db::get_seconds_since_last_post(conn, board.id, &ip_hash)?;
+        let elapsed = db::get_seconds_since_last_post(&conn, board.id, &ip_hash)?;
         if let Some(secs) = elapsed {
             let remaining = board.post_cooldown_secs.saturating_sub(secs);
             if remaining > 0 {
@@ -581,7 +690,9 @@ pub(super) fn submit_post(
             .map_err(|error| AppError::BadRequest(error.user_message().to_owned()))?;
     }
 
-    let filters = load_word_filters(conn)?;
+    let filters = load_word_filters(&conn)?;
+    drop(conn);
+    prepare()?;
     let (name, tripcode) = resolve_post_identity(&name, board.allow_tripcodes);
     let board_allows_media = board.allow_images
         || board.allow_video
@@ -602,7 +713,7 @@ pub(super) fn submit_post(
         file_data,
         audio_file_data,
         &board,
-        conn,
+        pool,
         &UploadConfig {
             upload_dir: &upload_dir,
             thumb_size,
@@ -614,7 +725,13 @@ pub(super) fn submit_post(
         },
     )?;
     let deletion_token = resolve_deletion_token(&deletion_token);
-    let pending_upload_op = build_pending_upload_op(&uploads)?;
+    let pending_upload_op = match build_pending_upload_op(&uploads) {
+        Ok(op) => op,
+        Err(error) => {
+            uploads.rollback_new_files(pool, &upload_dir)?;
+            return Err(error);
+        }
+    };
     let deduplicated_paths: Vec<&str> = uploads
         .primary
         .iter()
@@ -622,6 +739,18 @@ pub(super) fn submit_post(
         .map(|upload| upload.file_path.as_str())
         .collect();
 
+    let validate = |conn: &rusqlite::Connection| {
+        revalidate_posting_policy(
+            conn,
+            &board,
+            &filters,
+            admin_session_id.as_deref(),
+            access_cookie.as_deref(),
+            &ip_hash,
+            &ban_csrf_token,
+        )
+        .map_err(anyhow::Error::new)
+    };
     let (post_id, thread_id, redirect_url, prune_board_id) = match mode {
         SubmitPostMode::NewThread {
             subject,
@@ -653,19 +782,19 @@ pub(super) fn submit_post(
                 None
             } else {
                 if q.is_empty() {
-                    uploads.rollback_new_files(conn, &upload_dir)?;
+                    uploads.rollback_new_files(pool, &upload_dir)?;
                     return Err(AppError::BadRequest(
                         "Polls need a question and at least two options.".into(),
                     ));
                 }
                 if valid_opts.len() < 2 {
-                    uploads.rollback_new_files(conn, &upload_dir)?;
+                    uploads.rollback_new_files(pool, &upload_dir)?;
                     return Err(AppError::BadRequest(
                         "Polls need a question and at least two options.".into(),
                     ));
                 }
                 let Some(secs) = poll_duration_secs else {
-                    uploads.rollback_new_files(conn, &upload_dir)?;
+                    uploads.rollback_new_files(pool, &upload_dir)?;
                     return Err(AppError::BadRequest(
                         "A duration is required when creating a poll.".into(),
                     ));
@@ -678,28 +807,36 @@ pub(super) fn submit_post(
                     expires_at,
                 })
             };
+            let conn = checkout_post_connection(pool, &uploads, &upload_dir)?;
             let create_result = db::threads::create_thread_submission(
-                conn,
+                &conn,
                 board.id,
                 subject.as_deref(),
                 &new_post,
                 &submission_token,
                 poll_insert.as_ref(),
-                db::threads::PostFilesystemCommit::new(
+                db::threads::PostFilesystemCommit::new_with_validation(
                     pending_upload_op.as_ref(),
                     &deduplicated_paths,
                     true,
+                    validate,
                 ),
             );
             let (thread_id, post_id, _) = match create_result {
-                Ok(db::threads::PostCreationOutcome::Created(ids)) => ids,
+                Ok(db::threads::PostCreationOutcome::Created(ids)) => {
+                    drop(conn);
+                    ids
+                }
                 Ok(db::threads::PostCreationOutcome::Replayed(existing)) => {
-                    uploads.rollback_new_files(conn, &upload_dir)?;
-                    return existing_submission_result(conn, board.short_name, existing);
+                    let result = existing_submission_result(&conn, board.short_name, existing);
+                    drop(conn);
+                    uploads.rollback_new_files(pool, &upload_dir)?;
+                    return result;
                 }
                 Err(error) => {
-                    uploads.rollback_new_files(conn, &upload_dir)?;
-                    return Err(error.into());
+                    drop(conn);
+                    uploads.rollback_new_files(pool, &upload_dir)?;
+                    return Err(post_creation_error(error));
                 }
             };
             (
@@ -710,9 +847,9 @@ pub(super) fn submit_post(
             )
         }
         SubmitPostMode::Reply { .. } => {
-            let (thread_id, sage, reply_count) = reply_context
+            let (thread_id, sage) = reply_context
                 .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Missing reply context")))?;
-            let should_bump = !sage && reply_count < board.bump_limit;
+            let should_bump = !sage;
             let new_post = build_new_post(
                 thread_id,
                 board.id,
@@ -726,28 +863,36 @@ pub(super) fn submit_post(
                 deletion_token.clone(),
                 false,
             );
+            let conn = checkout_post_connection(pool, &uploads, &upload_dir)?;
             let post_id = match db::threads::create_reply_submission(
-                conn,
+                &conn,
                 &new_post,
                 &submission_token,
                 should_bump,
-                db::threads::PostFilesystemCommit::new(
+                db::threads::PostFilesystemCommit::new_with_validation(
                     pending_upload_op.as_ref(),
                     &deduplicated_paths,
                     false,
+                    validate,
                 ),
             ) {
-                Ok(db::threads::PostCreationOutcome::Created(post_id)) => post_id,
+                Ok(db::threads::PostCreationOutcome::Created(post_id)) => {
+                    drop(conn);
+                    post_id
+                }
                 Ok(db::threads::PostCreationOutcome::Replayed(existing)) => {
-                    uploads.rollback_new_files(conn, &upload_dir)?;
-                    return existing_submission_result(conn, board.short_name, existing);
+                    let result = existing_submission_result(&conn, board.short_name, existing);
+                    drop(conn);
+                    uploads.rollback_new_files(pool, &upload_dir)?;
+                    return result;
                 }
                 Err(error) => {
-                    uploads.rollback_new_files(conn, &upload_dir)?;
+                    drop(conn);
+                    uploads.rollback_new_files(pool, &upload_dir)?;
                     if let Some(closed) = error.downcast_ref::<db::threads::ThreadClosed>() {
                         return Err(AppError::Forbidden(closed.message().to_owned()));
                     }
-                    return Err(error.into());
+                    return Err(post_creation_error(error));
                 }
             };
             (
@@ -759,10 +904,10 @@ pub(super) fn submit_post(
         }
     };
 
-    finalize_pending_uploads(conn, &upload_dir, &uploads);
+    finalize_pending_uploads(pool, &upload_dir, &uploads);
     crate::handlers::enqueue_post_jobs(
         job_queue,
-        conn,
+        pool,
         post_id,
         &ip_hash,
         body_text.len(),
@@ -770,7 +915,8 @@ pub(super) fn submit_post(
         &board.short_name,
     )?;
     if let Some(prune_board_id) = prune_board_id {
-        if let Err(error) = job_queue.notify_persisted_thread_prune(conn) {
+        let conn = pool.get()?;
+        if let Err(error) = job_queue.notify_persisted_thread_prune(&conn) {
             tracing::warn!(
                 target: "workers",
                 board = %board.short_name,
@@ -788,7 +934,7 @@ pub(super) fn submit_post(
     } else {
         tracing::info!(target: "board", post_id = post_id, thread_id = thread_id, board = %board.short_name, "Reply posted");
     }
-    if let Err(error) = crate::media::prune::run_configured_prune(conn, &upload_dir) {
+    if let Err(error) = crate::media::prune::run_configured_prune_with_pool(pool, &upload_dir) {
         tracing::warn!(
             target: "media_prune",
             post_id,
@@ -797,7 +943,8 @@ pub(super) fn submit_post(
         );
     }
 
-    let stored_post = db::get_post(conn, post_id)?
+    let conn = pool.get()?;
+    let stored_post = db::get_post(&conn, post_id)?
         .ok_or_else(|| AppError::NotFound("Posted row not found.".into()))?;
 
     Ok(SubmitPostResult {
@@ -847,7 +994,7 @@ mod tests {
         }};
     }
 
-    const TEST_BOARD: &str = "test";
+    pub(super) const TEST_BOARD: &str = "test";
     const TEST_COOKIE_SECRET: &str = "cookie-secret";
     const TEST_IDENTITY_KEY: &str = "127.0.0.1";
 
@@ -882,7 +1029,7 @@ mod tests {
         }
     }
 
-    fn thread_command(
+    pub(super) fn thread_command(
         board_short: &str,
         submission_token: &str,
         body: &str,
@@ -899,6 +1046,7 @@ mod tests {
             identity_key: TEST_IDENTITY_KEY.to_owned(),
             cookie_secret: TEST_COOKIE_SECRET.to_owned(),
             admin_session_id: None,
+            access_cookie: None,
             ban_csrf_token: "ban-csrf".to_owned(),
             submission_token: submission_token.to_owned(),
             name: "anon".to_owned(),
@@ -935,6 +1083,7 @@ mod tests {
             identity_key: TEST_IDENTITY_KEY.to_owned(),
             cookie_secret: TEST_COOKIE_SECRET.to_owned(),
             admin_session_id: None,
+            access_cookie: None,
             ban_csrf_token: "ban-csrf".to_owned(),
             submission_token: submission_token.to_owned(),
             name: "anon".to_owned(),
@@ -967,6 +1116,7 @@ mod tests {
             identity_key: TEST_IDENTITY_KEY.to_owned(),
             cookie_secret: TEST_COOKIE_SECRET.to_owned(),
             admin_session_id: None,
+            access_cookie: None,
             ban_csrf_token: "ban-csrf".to_owned(),
             submission_token: submission_token.to_owned(),
             name: "anon".to_owned(),
@@ -983,7 +1133,7 @@ mod tests {
         }
     }
 
-    fn temp_upload(name: &str, bytes: &[u8]) -> Result<(TempUpload, String)> {
+    pub(super) fn temp_upload(name: &str, bytes: &[u8]) -> Result<(TempUpload, String)> {
         let temp_file = tempfile::Builder::new()
             .prefix("rustchan-posting-test-upload-")
             .tempfile()
@@ -1068,8 +1218,7 @@ mod tests {
                 let job_queue = std::sync::Arc::clone(&job_queue);
                 handles.push(scope.spawn(move || {
                     barrier.wait();
-                    let conn = pool.get()?;
-                    submit_post(&conn, job_queue.as_ref(), command)
+                    submit_post(&pool, job_queue.as_ref(), command)
                 }));
             }
 
@@ -1179,7 +1328,7 @@ mod tests {
             .context("failed to add ban")?;
 
         let error = match submit_post(
-            &conn,
+            &state.db,
             state.job_queue.as_ref(),
             thread_command(
                 TEST_BOARD,
@@ -1242,7 +1391,7 @@ mod tests {
         .context("failed to create thread")?;
 
         let error = match submit_post(
-            &conn,
+            &state.db,
             state.job_queue.as_ref(),
             reply_command(
                 TEST_BOARD,
@@ -1286,7 +1435,7 @@ mod tests {
         .context("failed to enable CAPTCHA")?;
 
         let error = match submit_post(
-            &conn,
+            &state.db,
             state.job_queue.as_ref(),
             thread_command(
                 TEST_BOARD,
@@ -1349,7 +1498,7 @@ mod tests {
         command.captcha_id = captcha_id.to_owned();
         command.captcha_answer = "abc23".to_owned();
 
-        let result = submit_post(&conn, state.job_queue.as_ref(), command)
+        let result = submit_post(&state.db, state.job_queue.as_ref(), command)
             .context("failed to submit post with valid CAPTCHA")?;
         assert_eq!(result.board_short, TEST_BOARD);
 
@@ -1364,7 +1513,7 @@ mod tests {
         );
         replay.captcha_id = captcha_id.to_owned();
         replay.captcha_answer = "ABC23".to_owned();
-        let error = match submit_post(&conn, state.job_queue.as_ref(), replay) {
+        let error = match submit_post(&state.db, state.job_queue.as_ref(), replay) {
             Ok(result) => bail!(
                 "expected captcha replay rejection, got {}",
                 result.redirect_url
@@ -1409,7 +1558,7 @@ mod tests {
         command.captcha_id = captcha_id.to_owned();
         command.captcha_answer = "ABC23".to_owned();
 
-        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+        let error = match submit_post(&state.db, state.job_queue.as_ref(), command) {
             Ok(result) => bail!(
                 "expected expired captcha rejection, got {}",
                 result.redirect_url
@@ -1432,7 +1581,7 @@ mod tests {
             .context("failed to create board")?;
 
         let error = match submit_post(
-            &conn,
+            &state.db,
             state.job_queue.as_ref(),
             thread_command_with_poll(
                 TEST_BOARD,
@@ -1484,7 +1633,7 @@ mod tests {
             None,
             Some(bad_audio),
             &board,
-            &conn,
+            &state.db,
             &UploadConfig {
                 upload_dir: upload_dir
                     .path()
@@ -1530,7 +1679,7 @@ mod tests {
         );
         command.file_data = Some(temp_upload("cover.png", &one_pixel_png()?)?);
 
-        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+        let error = match submit_post(&state.db, state.job_queue.as_ref(), command) {
             Ok(result) => bail!(
                 "board-specific image cap should reject upload, got {}",
                 result.redirect_url
@@ -1568,7 +1717,7 @@ mod tests {
         );
         command.file_data = Some(temp_upload("tiny.flac", &flac_header_bytes())?);
 
-        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+        let error = match submit_post(&state.db, state.job_queue.as_ref(), command) {
             Ok(result) => bail!(
                 "audio-disabled board should reject, got {}",
                 result.redirect_url
@@ -1615,7 +1764,7 @@ mod tests {
         command.file_data = Some(temp_upload("broken.aac", &malformed_aac_bytes()?)?);
         command.ffmpeg_available = true;
 
-        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+        let error = match submit_post(&state.db, state.job_queue.as_ref(), command) {
             Ok(result) => bail!("malformed AAC should reject, got {}", result.redirect_url),
             Err(error) => error,
         };
@@ -1665,7 +1814,7 @@ mod tests {
         );
         command.file_data = Some(temp_upload("tiny.mp4", &mp4_header_bytes())?);
 
-        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+        let error = match submit_post(&state.db, state.job_queue.as_ref(), command) {
             Ok(result) => bail!(
                 "video-disabled board should reject, got {}",
                 result.redirect_url
@@ -1711,7 +1860,7 @@ mod tests {
         );
         command.file_data = Some(temp_upload("tiny.flac", &flac_header_bytes())?);
 
-        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+        let error = match submit_post(&state.db, state.job_queue.as_ref(), command) {
             Ok(result) => bail!(
                 "over-limit audio should reject, got {}",
                 result.redirect_url
@@ -1757,7 +1906,7 @@ mod tests {
         );
         command.file_data = Some(temp_upload("tiny.mp4", &mp4_header_bytes())?);
 
-        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+        let error = match submit_post(&state.db, state.job_queue.as_ref(), command) {
             Ok(result) => bail!(
                 "over-limit video should reject, got {}",
                 result.redirect_url
@@ -1802,7 +1951,7 @@ mod tests {
         );
         command.file_data = Some(temp_upload("cover.png", &one_pixel_png()?)?);
 
-        let error = match submit_post(&conn, state.job_queue.as_ref(), command) {
+        let error = match submit_post(&state.db, state.job_queue.as_ref(), command) {
             Ok(result) => bail!(
                 "poll validation should reject submission, got {}",
                 result.redirect_url
@@ -1852,7 +2001,7 @@ mod tests {
         );
         command.file_data = Some(temp_upload("cover.png", &one_pixel_png()?)?);
 
-        let result = submit_post(&conn, state.job_queue.as_ref(), command)
+        let result = submit_post(&state.db, state.job_queue.as_ref(), command)
             .context("board-specific raised image cap should allow upload")?;
 
         assert_eq!(result.board_short, TEST_BOARD);
@@ -1896,7 +2045,7 @@ mod tests {
             Some(temp_upload("same-but-renamed.jpg", &bytes)?),
             None,
             &board,
-            &conn,
+            &state.db,
             &UploadConfig {
                 upload_dir: upload_dir
                     .path()
@@ -1984,7 +2133,7 @@ mod tests {
                 Some(temp_upload(&format!("failure-{index}.png"), &png)?),
                 None,
                 &board,
-                &conn,
+                &state.db,
                 &UploadConfig {
                     upload_dir: upload_dir.path().to_str().context("UTF-8 upload root")?,
                     thumb_size: 64,
@@ -2039,7 +2188,7 @@ mod tests {
             .context("failed to create board")?;
 
         submit_post(
-            &conn,
+            &state.db,
             state.job_queue.as_ref(),
             thread_command(
                 TEST_BOARD,
@@ -2062,7 +2211,7 @@ mod tests {
         .context("failed to age original post")?;
 
         let duplicate = submit_post(
-            &conn,
+            &state.db,
             state.job_queue.as_ref(),
             thread_command(
                 TEST_BOARD,
@@ -2130,7 +2279,7 @@ mod tests {
         .context("failed to create thread")?;
 
         submit_post(
-            &conn,
+            &state.db,
             state.job_queue.as_ref(),
             reply_command(
                 TEST_BOARD,
@@ -2146,7 +2295,7 @@ mod tests {
         .context("failed to create first reply")?;
 
         let duplicate = submit_post(
-            &conn,
+            &state.db,
             state.job_queue.as_ref(),
             reply_command(
                 TEST_BOARD,
@@ -2417,7 +2566,7 @@ mod tests {
             .context("failed to create board")?;
 
         let first_thread = submit_post(
-            &conn,
+            &state.db,
             state.job_queue.as_ref(),
             thread_command(
                 TEST_BOARD,
@@ -2427,7 +2576,7 @@ mod tests {
             ),
         )?;
         let replayed_thread = submit_post(
-            &conn,
+            &state.db,
             state.job_queue.as_ref(),
             thread_command(
                 TEST_BOARD,
@@ -2482,7 +2631,7 @@ mod tests {
             None,
         )?;
         let first_reply = submit_post(
-            &conn,
+            &state.db,
             state.job_queue.as_ref(),
             reply_command(
                 TEST_BOARD,
@@ -2493,7 +2642,7 @@ mod tests {
             ),
         )?;
         let replayed_reply = submit_post(
-            &conn,
+            &state.db,
             state.job_queue.as_ref(),
             reply_command(
                 TEST_BOARD,
@@ -2535,7 +2684,7 @@ mod tests {
             .get()
             .context("failed to get rollback database connection")?;
         conn.execute_batch(
-            "CREATE TEMP TRIGGER fail_submission_post
+            "CREATE TRIGGER fail_submission_post
              BEFORE INSERT ON posts
              WHEN NEW.body IN ('force thread rollback', 'force reply rollback')
              BEGIN
@@ -2543,7 +2692,7 @@ mod tests {
              END;",
         )?;
         let failed_thread = submit_post(
-            &conn,
+            &state.db,
             state.job_queue.as_ref(),
             thread_command(
                 TEST_BOARD,
@@ -2554,7 +2703,7 @@ mod tests {
         );
         assert!(failed_thread.is_err());
         let failed_reply = submit_post(
-            &conn,
+            &state.db,
             state.job_queue.as_ref(),
             reply_command(
                 TEST_BOARD,
@@ -2575,7 +2724,7 @@ mod tests {
         conn.execute_batch("DROP TRIGGER fail_submission_post")?;
 
         let corrected_thread = submit_post(
-            &conn,
+            &state.db,
             state.job_queue.as_ref(),
             thread_command(
                 TEST_BOARD,
@@ -2585,7 +2734,7 @@ mod tests {
             ),
         )?;
         let corrected_reply = submit_post(
-            &conn,
+            &state.db,
             state.job_queue.as_ref(),
             reply_command(
                 TEST_BOARD,
@@ -2620,4 +2769,245 @@ mod tests {
         assert_database_integrity(&conn, upload_dir.path())?;
         Ok(())
     }
+
+    /// Replace the test state's pool with one connection to expose nested borrowing.
+    fn single_connection_state() -> Result<crate::middleware::AppState> {
+        let mut state = crate::test_support::app_state();
+        let path = {
+            let conn = state.db.get()?;
+            conn.path().context("test database has no path")?.to_owned()
+        };
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(path).with_init(|conn| {
+            conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=1000;")
+        });
+        state.db = r2d2::Pool::builder()
+            .max_size(1)
+            .connection_timeout(std::time::Duration::from_secs(1))
+            .build(manager)?;
+        state.job_queue = std::sync::Arc::new(crate::workers::JobQueue::new(state.db.clone()));
+        Ok(state)
+    }
+
+    #[test]
+    fn independent_preparation_releases_the_only_pool_connection() -> Result<()> {
+        let state = single_connection_state()?;
+        let uploads = tempfile::tempdir()?;
+        crate::db::create_board(&*state.db.get()?, TEST_BOARD, "Test", "", false)?;
+        let command = thread_command(
+            TEST_BOARD,
+            "single-pool-post",
+            "body",
+            uploads.path().to_str().context("upload path")?,
+        );
+        let result =
+            super::submit_post_with_preparation(&state.db, &state.job_queue, command, || {
+                let conn = state
+                    .db
+                    .try_get()
+                    .context("preparation must release the sole connection")?;
+                crate::db::database_ready_probe(&conn)?;
+                Ok(())
+            })?;
+        let conn = state
+            .db
+            .try_get()
+            .context("submission must return its connection")?;
+        assert!(crate::db::get_post(&conn, result.post_id)?.is_some());
+        assert!(
+            crate::db::pending_job_count(&conn)? > 0,
+            "spam scheduling must not exhaust a one-connection pool"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reply_rechecks_thread_state_after_independent_preparation() -> Result<()> {
+        for archived in [false, true] {
+            let state = single_connection_state()?;
+            let uploads = tempfile::tempdir()?;
+            let conn = state.db.get()?;
+            let board = crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)?;
+            let (thread, _, _) = crate::db::create_thread_with_optional_poll(
+                &conn,
+                board,
+                None,
+                &sample_post(board, 0, "op", true, None),
+                "",
+                None,
+                None,
+            )?;
+            drop(conn);
+            let command = reply_command(
+                TEST_BOARD,
+                thread,
+                "state-race",
+                "reply",
+                uploads.path().to_str().context("upload path")?,
+            );
+            let result =
+                super::submit_post_with_preparation(&state.db, &state.job_queue, command, || {
+                    let conn = state.db.try_get().context("preparation held the pool")?;
+                    if archived {
+                        crate::db::set_thread_archived(&conn, thread, true)?;
+                    } else {
+                        crate::db::set_thread_locked(&conn, thread, true)?;
+                    }
+                    Ok(())
+                });
+            assert!(matches!(result, Err(AppError::Forbidden(_))));
+            let conn = state.db.get()?;
+            assert_eq!(crate::db::get_posts_for_thread(&conn, thread)?.len(), 1);
+            assert_eq!(
+                crate::db::get_thread(&conn, thread)?
+                    .context("thread")?
+                    .reply_count,
+                0
+            );
+            assert!(conn.is_autocommit());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn posting_rechecks_access_media_and_bans_at_commit() -> Result<()> {
+        for mutation in ["access", "media", "ban", "captcha", "cooldown", "filters"] {
+            let state = single_connection_state()?;
+            let uploads = tempfile::tempdir()?;
+            crate::db::create_board(&*state.db.get()?, TEST_BOARD, "Test", "", false)?;
+            let command = thread_command(
+                TEST_BOARD,
+                "policy-race",
+                "body",
+                uploads.path().to_str().context("upload path")?,
+            );
+            let result = super::submit_post_with_preparation(
+                &state.db,
+                &state.job_queue,
+                command,
+                || {
+                    let conn = state.db.try_get().context("preparation held the pool")?;
+                    match mutation {
+                        "access" => {
+                            conn.execute("UPDATE boards SET access_mode='post_password',access_password_hash='changed'", [])?;
+                        }
+                        "media" => {
+                            conn.execute("UPDATE boards SET allow_images=0", [])?;
+                        }
+                        "captcha" => {
+                            conn.execute("UPDATE boards SET allow_captcha=1", [])?;
+                        }
+                        "filters" => {
+                            conn.execute("INSERT INTO word_filters(pattern,replacement) VALUES('body','filtered')", [])?;
+                        }
+                        "cooldown" => {
+                            let board = crate::db::get_board_by_short(&conn, TEST_BOARD)?
+                                .context("board")?;
+                            conn.execute("UPDATE boards SET post_cooldown_secs=60", [])?;
+                            crate::db::create_thread_with_optional_poll(
+                                &conn,
+                                board.id,
+                                None,
+                                &sample_post(
+                                    board.id,
+                                    0,
+                                    "other post",
+                                    true,
+                                    Some(crate::utils::crypto::hash_ip(
+                                        TEST_IDENTITY_KEY,
+                                        TEST_COOKIE_SECRET,
+                                    )),
+                                ),
+                                "",
+                                None,
+                                None,
+                            )?;
+                        }
+                        _ => {
+                            crate::db::add_ban(
+                                &conn,
+                                &crate::utils::crypto::hash_ip(
+                                    TEST_IDENTITY_KEY,
+                                    TEST_COOKIE_SECRET,
+                                ),
+                                "new ban",
+                                None,
+                            )?;
+                        }
+                    }
+                    Ok(())
+                },
+            );
+            assert!(
+                result.is_err(),
+                "concurrent policy change {mutation} must reject the write"
+            );
+            let conn = state.db.get()?;
+            assert!(conn.is_autocommit());
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM post_submissions WHERE submission_token='policy-race'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(count, 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_cooldown_submissions_cannot_both_commit() -> Result<()> {
+        let state = crate::test_support::app_state();
+        let uploads = tempfile::tempdir()?;
+        let conn = state.db.get()?;
+        crate::db::create_board(&conn, TEST_BOARD, "Test", "", false)?;
+        conn.execute("UPDATE boards SET post_cooldown_secs=60", [])?;
+        drop(conn);
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|scope| -> Result<Vec<_>> {
+            let mut handles = Vec::new();
+            for number in 0..2 {
+                let command = thread_command(
+                    TEST_BOARD,
+                    &format!("cooldown-{number}"),
+                    "body",
+                    uploads.path().to_str().context("upload path")?,
+                );
+                let state = &state;
+                let barrier = &barrier;
+                handles.push(scope.spawn(move || {
+                    super::submit_post_with_preparation(
+                        &state.db,
+                        &state.job_queue,
+                        command,
+                        || {
+                            barrier.wait();
+                            Ok(())
+                        },
+                    )
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .map_err(|_| anyhow::anyhow!("posting worker panicked"))
+                })
+                .collect()
+        })?;
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(AppError::BadRequest(_))))
+                .count(),
+            1
+        );
+        let conn = state.db.get()?;
+        crate::db::verify_database_schema(&conn)?;
+        Ok(())
+    }
 }
+
+#[cfg(test)]
+/// Opt-in posting/media connection-lifetime measurements.
+mod performance;

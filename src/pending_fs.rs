@@ -1210,6 +1210,35 @@ pub(crate) fn finalize_upload_payload_for_op(
     pending_op_id: Option<&str>,
     payload: &UploadFinalizePayload,
 ) -> Result<()> {
+    finalize_upload_payload_with(upload_dir, pending_op_id, payload, |missing_optional| {
+        commit_upload_finalize_metadata(conn, pending_op_id, payload, missing_optional)
+    })
+}
+
+/// Promote staged files while borrowing from the pool only for metadata commit.
+/// The durable intent remains replayable until successful promotion and commit.
+///
+/// # Errors
+/// Returns an error if validation, promotion, checkout or metadata commit fails.
+pub fn finalize_upload_payload_with_pool(
+    pool: &crate::db::DbPool,
+    upload_dir: &str,
+    pending_op_id: Option<&str>,
+    payload: &UploadFinalizePayload,
+) -> Result<()> {
+    finalize_upload_payload_with(upload_dir, pending_op_id, payload, |missing_optional| {
+        let conn = pool.get()?;
+        commit_upload_finalize_metadata(&conn, pending_op_id, payload, missing_optional)
+    })
+}
+
+/// Share promotion/recovery semantics while allowing scoped database ownership.
+fn finalize_upload_payload_with(
+    upload_dir: &str,
+    pending_op_id: Option<&str>,
+    payload: &UploadFinalizePayload,
+    commit: impl FnOnce(Option<&str>) -> Result<Vec<i64>>,
+) -> Result<()> {
     let upload_root = Path::new(upload_dir);
     let stage_dir = Path::new(&payload.stage_dir);
     validate_upload_finalize_payload(upload_root, payload)?;
@@ -1256,8 +1285,7 @@ pub(crate) fn finalize_upload_payload_for_op(
         }
     }
 
-    let repaired_post_ids =
-        commit_upload_finalize_metadata(conn, pending_op_id, payload, missing_optional)?;
+    let repaired_post_ids = commit(missing_optional)?;
 
     if missing_optional.is_some() {
         tracing::warn!(
@@ -1466,8 +1494,13 @@ fn cleanup_orphan_banner_files_in_dir(
 }
 
 /// Remove unreferenced banner files from global, home, and board storage roots.
-fn cleanup_orphan_banner_files(conn: &rusqlite::Connection, upload_dir: &Path) -> Result<()> {
-    let referenced = referenced_banner_paths(conn)?;
+fn cleanup_orphan_banner_files(pool: &crate::db::DbPool, upload_dir: &Path) -> Result<()> {
+    let referenced = {
+        let conn = pool
+            .get()
+            .context("Get DB connection for banner cleanup references failed")?;
+        referenced_banner_paths(&conn)?
+    };
     cleanup_orphan_banner_files_in_dir(&crate::banner::global_banner_dir(), &referenced)?;
     cleanup_orphan_banner_files_in_dir(&crate::banner::home_banner_dir(), &referenced)?;
     if upload_dir.exists() {
@@ -1554,9 +1587,6 @@ pub fn reconcile_pending_fs_ops(pool: &crate::db::DbPool, upload_dir: &str) -> R
         }
     }
 
-    let conn = pool
-        .get()
-        .context("Get DB connection for startup filesystem cleanup failed")?;
     cleanup_known_upload_temp_paths(Path::new(upload_dir))?;
     // Global runtime cleanup belongs only to the configured live upload tree.
     // Keeping it out of reconciliation calls for isolated restore/test roots
@@ -1570,7 +1600,7 @@ pub fn reconcile_pending_fs_ops(pool: &crate::db::DbPool, upload_dir: &str) -> R
             &crate::banner::backup_source_dir(),
             &["restore-stage", "restore-old"],
         )?;
-        cleanup_orphan_banner_files(&conn, Path::new(upload_dir))?;
+        cleanup_orphan_banner_files(pool, Path::new(upload_dir))?;
     }
 
     Ok(())
@@ -1583,16 +1613,16 @@ fn apply_pending_fs_op(
     op: &crate::db::PendingFsOpRow,
     referenced_upload_stage_dirs: &mut std::collections::HashSet<String>,
 ) -> Result<()> {
+    if op.kind == UPLOAD_FINALIZE_KIND {
+        let payload: UploadFinalizePayload = serde_json::from_str(&op.payload_json)
+            .with_context(|| format!("Parse upload_finalize payload for {}", op.id))?;
+        referenced_upload_stage_dirs.insert(payload.stage_dir.clone());
+        return finalize_upload_payload_with_pool(pool, upload_dir, Some(&op.id), &payload);
+    }
     let conn = pool
         .get()
         .context("Get DB connection for pending_fs_op application failed")?;
     match op.kind.as_str() {
-        UPLOAD_FINALIZE_KIND => {
-            let payload: UploadFinalizePayload = serde_json::from_str(&op.payload_json)
-                .with_context(|| format!("Parse upload_finalize payload for {}", op.id))?;
-            referenced_upload_stage_dirs.insert(payload.stage_dir.clone());
-            finalize_upload_payload_for_op(&conn, upload_dir, Some(&op.id), &payload)?;
-        }
         DELETE_FILES_KIND => {
             let payload: DeleteFilesPayload = serde_json::from_str(&op.payload_json)
                 .with_context(|| format!("Parse delete_files payload for {}", op.id))?;
@@ -1635,9 +1665,7 @@ fn apply_pending_fs_op(
         }
         other => anyhow::bail!("Unknown pending_fs_op kind {other:?} for {}", op.id),
     }
-    if op.kind != UPLOAD_FINALIZE_KIND {
-        crate::db::delete_pending_fs_op(&conn, &op.id)?;
-    }
+    crate::db::delete_pending_fs_op(&conn, &op.id)?;
     Ok(())
 }
 

@@ -92,8 +92,8 @@ mod tests {
             "background: rgba(0,0,0,0.42);",
             ".user-preferences-mobile-close {\n  display: none;",
             "visibility: hidden;",
-            ".user-preferences-panel[open] .user-preferences-form {\n    position: fixed;"
-            ,"bottom: 0;",
+            ".user-preferences-panel[open] .user-preferences-form {\n    position: fixed;",
+            "bottom: 0;",
             "inset-block-end: 0;",
             "margin: 0 auto;",
             "transform: translate3d(0, 0, 0);",
@@ -164,10 +164,10 @@ mod tests {
             "max-height: min(70vh, 26rem);",
             ".edit-modal,\n  .compress-modal {",
             "align-items: flex-start;",
-            "padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom));"
-            ,".edit-modal-box,\n  .compress-modal-box {",
-            "max-height: calc(100svh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));"
-            ,".edit-modal-box .post-form td:last-child {",
+            "padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom));",
+            ".edit-modal-box,\n  .compress-modal-box {",
+            "max-height: calc(100svh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));",
+            ".edit-modal-box .post-form td:last-child {",
             ".edit-modal-box .edit-btn[data-action=\"close-edit-modal\"]",
         ] {
             assert!(
