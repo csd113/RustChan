@@ -35,10 +35,99 @@ const VP9_COMPAT_PIXEL_FORMAT: &str = "yuv420p";
 /// Color metadata used for broadly compatible VP9 output.
 const VP9_COMPAT_COLOR_SPACE: &str = "bt709";
 
-/// Cached output from probing the configured encoder list.
-static ENCODER_LIST: LazyLock<Option<String>> = LazyLock::new(|| {
-    output_stdout_with_timeout(&crate::config::CONFIG.ffmpeg_path, &["-encoders"])
-});
+/// AV1 decoding and encoding are independent build capabilities.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Av1Capabilities {
+    /// Specific AV1 decoder names reported by `FFmpeg`.
+    pub decoders: Vec<String>,
+    /// Specific AV1 encoder names reported by `FFmpeg`.
+    pub encoders: Vec<String>,
+}
+
+/// Capabilities of the retained video backend, interrogated independently.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct VideoCapabilities {
+    /// Installed AV1 decoders and encoders, not inferred from the version.
+    pub av1: Av1Capabilities,
+    /// The policy-selected VP9 encoder exists.
+    pub vp9: bool,
+    /// The policy-selected Opus encoder exists.
+    pub opus: bool,
+    /// The `WebM` output muxer exists.
+    pub webm_muxer: bool,
+}
+
+impl VideoCapabilities {
+    /// Whether the established VP9/Opus `WebM` output pipeline is available.
+    #[must_use]
+    pub const fn webm_available(&self) -> bool {
+        self.vp9 && self.opus && self.webm_muxer
+    }
+}
+
+/// Probe the configured build once; missing or failed lists fail closed.
+#[must_use]
+pub fn video_capabilities() -> &'static VideoCapabilities {
+    static CAPS: LazyLock<VideoCapabilities> = LazyLock::new(|| {
+        let program = &crate::config::CONFIG.ffmpeg_path;
+        capabilities_from_lists(
+            output_stdout_with_timeout(program, &["-hide_banner", "-decoders"]).as_deref(),
+            output_stdout_with_timeout(program, &["-hide_banner", "-encoders"]).as_deref(),
+            output_stdout_with_timeout(program, &["-hide_banner", "-muxers"]).as_deref(),
+        )
+    });
+    &CAPS
+}
+
+/// Parse actual capability rows, excluding legends and description-only matches.
+fn codec_rows(output: &str, kind: char) -> impl Iterator<Item = (&str, &str)> {
+    output.lines().filter_map(move |line| {
+        let mut fields = line.split_whitespace();
+        let flags = fields.next()?;
+        let name = fields.next()?;
+        if flags.len() != 6 || !flags.starts_with(kind) || name == "=" {
+            return None;
+        }
+        Some((name, line))
+    })
+}
+
+/// Recognize codec aliases by their declared codec, including future implementations.
+fn av1_names(output: &str) -> Vec<String> {
+    codec_rows(output, 'V')
+        .filter(|(name, line)| {
+            line.contains("(codec av1)")
+                || matches!(
+                    *name,
+                    "av1" | "libaom-av1" | "libsvtav1" | "librav1e" | "libdav1d"
+                )
+                || name.starts_with("av1_")
+                || name.ends_with("_av1")
+        })
+        .map(|(name, _)| name.to_owned())
+        .collect()
+}
+
+/// Combine independently probed build lists into video pipeline capabilities.
+fn capabilities_from_lists(
+    decoders: Option<&str>,
+    encoders: Option<&str>,
+    muxers: Option<&str>,
+) -> VideoCapabilities {
+    let encoders = encoders.unwrap_or("");
+    VideoCapabilities {
+        av1: Av1Capabilities {
+            decoders: av1_names(decoders.unwrap_or("")),
+            encoders: av1_names(encoders),
+        },
+        vp9: codec_rows(encoders, 'V').any(|(name, _)| name == "libvpx-vp9"),
+        opus: codec_rows(encoders, 'A').any(|(name, _)| name == "libopus"),
+        webm_muxer: muxers.unwrap_or("").lines().any(|line| {
+            let mut fields = line.split_whitespace();
+            fields.next() == Some("E") && fields.next() == Some("webm")
+        }),
+    }
+}
 
 /// Probe whether the `ffmpeg` binary is reachable on the current PATH.
 ///
@@ -119,39 +208,45 @@ fn mapped_stream_exists(path: &str, selector: &str, frames: &str) -> Result<bool
     Ok(output.status.success())
 }
 
-/// Generate a WebP thumbnail from a video by extracting the first
-/// frame and scaling to fit within `max_dim × max_dim`.
-///
-/// The `-2` height modifier ensures the scaled height is rounded to an even
-/// number, required by many video codecs.  Aspect ratio is always preserved.
-/// Thumbnail quality is fixed at 80 per project spec.
-///
-/// Works for both static images and video/animation sources.
+/// Extract a video frame with `FFmpeg` and encode its WebP thumbnail in Rust.
 ///
 /// # Errors
-/// Returns an error if ffmpeg exits non-zero or cannot be spawned.
+/// Returns an error on extraction, bounded image decode, encoding or persistence.
 pub fn ffmpeg_thumbnail(input: &Path, output: &Path, max_dim: u32) -> Result<()> {
-    let in_str = path_to_str(input)?;
-    let out_str = path_to_str(output)?;
+    let parent = output.parent().context("thumbnail output has no parent")?;
+    let frame = tempfile::Builder::new()
+        .suffix(".png")
+        .tempfile_in(parent)?;
+    let thumbnail = tempfile::Builder::new()
+        .suffix(".webp")
+        .tempfile_in(parent)?;
     let scale = format!("scale='if(gt(iw,ih),{max_dim},-2)':'if(gt(iw,ih),-2,{max_dim})'");
-
     run_ffmpeg(&[
         "-loglevel",
         "error",
         "-i",
-        in_str,
-        "-vframes",
+        path_to_str(input)?,
+        "-map",
+        "0:v:0",
+        "-frames:v",
         "1",
         "-vf",
         &scale,
         "-c:v",
-        "libwebp",
-        "-quality",
-        "80",
+        "png",
+        "-f",
+        "image2",
+        "-update",
+        "1",
         "-y",
-        out_str,
+        path_to_str(frame.path())?,
     ])
-    .with_context(|| format!("thumbnail generation failed for {in_str}"))
+    .context("video frame extraction failed")?;
+    super::thumbnail::image_crate_thumbnail(frame.path(), "image/png", thumbnail.path(), max_dim)?;
+    thumbnail
+        .persist(output)
+        .context("persist Rust-encoded video thumbnail")?;
+    Ok(())
 }
 
 #[must_use]
@@ -175,6 +270,10 @@ pub fn build_vp9_transcode_args(input: &str, output: &str) -> Vec<String> {
             "error",
             "-i",
             input,
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
             "-c:v",
             "libvpx-vp9",
             "-deadline",
@@ -215,6 +314,8 @@ pub fn build_vp9_transcode_args(input: &str, output: &str) -> Vec<String> {
             "libopus",
             "-b:a",
             "128k",
+            "-f",
+            "webm",
             "-map_metadata",
             "-1",
             "-y",
@@ -352,53 +453,97 @@ fn output_stdout_with_timeout(program: &str, args: &[&str]) -> Option<String> {
     .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Probe whether the current ffmpeg binary has the `libwebp` encoder compiled in.
-///
-/// Runs `ffmpeg -encoders` and scans stdout for a line containing `libwebp`.
-/// Returns `true` only when ffmpeg is present AND the encoder is available.
-///
-/// This is a synchronous, blocking call intended for use at server startup
-/// inside a `spawn_blocking` task, or called directly from the startup path
-/// where blocking is acceptable.
-#[must_use]
-pub fn check_webp_encoder() -> bool {
-    ENCODER_LIST
-        .as_deref()
-        .is_some_and(|stdout| stdout.lines().any(|line| line.contains("libwebp")))
-}
-
-/// Probe whether the current ffmpeg binary has the `libvpx-vp9` encoder compiled in.
-///
-/// Required for MP4→WebM and WebM/AV1→WebM/VP9 transcoding.  Runs
-/// `ffmpeg -encoders` and scans stdout for a line containing `libvpx-vp9`.
-/// Returns `true` only when ffmpeg is present AND the encoder is available.
-///
-/// This is a synchronous, blocking call intended for use at server startup.
-#[must_use]
-pub fn check_vp9_encoder() -> bool {
-    ENCODER_LIST
-        .as_deref()
-        .is_some_and(|stdout| stdout.lines().any(|line| line.contains("libvpx-vp9")))
-}
-
-/// Probe whether the current ffmpeg binary has the `libopus` encoder compiled in.
-///
-/// Required for audio encoding during MP4→WebM and WebM/AV1→WebM/VP9 transcoding.
-/// Runs `ffmpeg -encoders` and scans stdout for a line containing `libopus`.
-/// Returns `true` only when ffmpeg is present AND the encoder is available.
-///
-/// This is a synchronous, blocking call intended for use at server startup.
-#[must_use]
-pub fn check_opus_encoder() -> bool {
-    ENCODER_LIST
-        .as_deref()
-        .is_some_and(|stdout| stdout.lines().any(|line| line.contains("libopus")))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{build_vp9_transcode_args, VP9_COMPAT_COLOR_SPACE, VP9_COMPAT_PIXEL_FORMAT};
-    use anyhow::{Context as _, Result};
+    use super::{
+        build_vp9_transcode_args, capabilities_from_lists, VP9_COMPAT_COLOR_SPACE,
+        VP9_COMPAT_PIXEL_FORMAT,
+    };
+    use anyhow::{ensure, Context as _, Result};
+
+    #[test]
+    fn av1_decoder_does_not_imply_av1_encoder_or_webm_conversion() {
+        let caps = capabilities_from_lists(
+            Some(" V..... libdav1d dav1d AV1 decoder (codec av1)\n V....D av1 AV1"),
+            Some(" A....D wmav1 Windows Media Audio 1"),
+            Some(" E webm WebM"),
+        );
+        assert_eq!(caps.av1.decoders, ["libdav1d", "av1"]);
+        assert_eq!(caps.av1.encoders, Vec::<String>::new());
+        assert!(!caps.webm_available());
+    }
+
+    #[test]
+    fn av1_encoder_names_and_webm_requirements_are_independent() {
+        let encoders = " V....D libaom-av1 libaom AV1\n V..... libsvtav1 SVT (codec av1)\n V..... librav1e rav1e AV1\n V..... av1_nvenc NVIDIA AV1\n V..... future_encoder future (codec av1)\n V....D libvpx-vp9 VP9\n A....D libopus Opus";
+        let caps = capabilities_from_lists(None, Some(encoders), Some(" E webm WebM"));
+        assert_eq!(caps.av1.decoders, Vec::<String>::new());
+        assert_eq!(
+            caps.av1.encoders,
+            [
+                "libaom-av1",
+                "libsvtav1",
+                "librav1e",
+                "av1_nvenc",
+                "future_encoder"
+            ]
+        );
+        assert!(caps.webm_available());
+        assert!(!capabilities_from_lists(None, Some(encoders), None).webm_available());
+        assert!(!capabilities_from_lists(
+            None,
+            Some(" V..... libvpx-vp9 VP9"),
+            Some(" E webm WebM")
+        )
+        .webm_available());
+        assert!(
+            !capabilities_from_lists(None, Some(" A..... libopus Opus"), Some(" E webm WebM"))
+                .webm_available()
+        );
+    }
+
+    #[test]
+    fn unavailable_ffmpeg_and_description_matches_fail_closed() {
+        let missing = capabilities_from_lists(None, None, None);
+        assert_eq!(missing, super::VideoCapabilities::default());
+        let misleading = capabilities_from_lists(
+            Some(" V..... h264 text mentions av1\n A..... av1 not video"),
+            Some(" V..... unrelated mentions libvpx-vp9 libopus libaom-av1\n V..... libvpx-vp9-extra other\n A..... libopus_extra other\n V..... = libaom-av1"),
+            Some(" E webm_chunk WebM Chunk\n E other mentions webm"),
+        );
+        assert_eq!(misleading, missing);
+    }
+
+    #[test]
+    fn real_av1_inputs_convert_to_vp9_webm_and_native_webp_thumbnails() -> Result<()> {
+        if !super::detect_ffmpeg() {
+            return Ok(());
+        }
+        let caps = super::video_capabilities();
+        if !caps.webm_available() || caps.av1.decoders.is_empty() {
+            return Ok(());
+        }
+        let dir = tempfile::tempdir()?;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
+        for name in ["av1.webm", "av1.mkv", "av1.mp4"] {
+            let input = root.join(name);
+            let output = dir.path().join(format!("{name}.webm"));
+            let args = build_vp9_transcode_args(
+                input.to_str().context("input path")?,
+                output.to_str().context("output path")?,
+            );
+            super::run_ffmpeg(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+            crate::media::probe::validate_webm_output_file(&output)?;
+            let thumbnail = dir.path().join(format!("{name}.webp"));
+            super::ffmpeg_thumbnail(&input, &thumbnail, 32)?;
+            let image = image::open(&thumbnail)?;
+            ensure!(
+                image.width() == 32 && image.height() == 32,
+                "bad video thumbnail"
+            );
+        }
+        Ok(())
+    }
 
     fn paired_arg_index(args: &[String], flag: &str, value: &str) -> Option<usize> {
         args.windows(2).position(|window| {
@@ -496,8 +641,8 @@ mod tests {
     fn ffmpeg_builders_with_forced_compat_pixel_formats_normalise_color_metadata() -> Result<()> {
         let args = build_vp9_transcode_args("input.mp4", "output.webm");
 
-        // Other ffmpeg builders in this crate either produce WebP thumbnails/images
-        // through libwebp or audio waveform PNGs and do not force VP9/H.26x-style
+        // Other ffmpeg builders extract PNG video frames or audio waveform
+        // PNGs and do not force VP9/H.26x-style
         // compatibility pixel formats. VP9 transcode is the path that combines
         // a forced yuv420p profile-0 output with potentially inherited source
         // color metadata, so it owns the explicit BT.709 normalization contract.

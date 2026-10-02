@@ -495,8 +495,6 @@ async fn run_server_lifecycle(
             CONFIG.ffmpeg_path
         );
     }
-    // libwebp is required only by the retained video-frame thumbnail command.
-    let ffmpeg_webp_available = crate::detect::detect_webp_encoder(ffmpeg_available);
     // libvpx-vp9 + libopus encoders: needed for MP4→WebM transcoding and
     // WebM/AV1→VP9 re-encoding.  Checked independently so that a build missing
     // only these codecs still enables image conversion and thumbnail generation.
@@ -582,7 +580,11 @@ async fn run_server_lifecycle(
         runtime_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         db: pool.clone(),
         ffmpeg_available,
-        ffmpeg_webp_available,
+        ffmpeg_av1: if ffmpeg_available {
+            crate::media::ffmpeg::video_capabilities().av1.clone()
+        } else {
+            crate::media::ffmpeg::Av1Capabilities::default()
+        },
         ffmpeg_vp9_available,
         ffmpeg_vp9_encoder_available: ffmpeg_webm_status.vp9,
         ffmpeg_opus_available: ffmpeg_webm_status.opus,

@@ -127,9 +127,6 @@ pub struct ProcessedMedia {
 pub struct MediaProcessor {
     /// Whether the `ffmpeg` binary was detected on startup.
     pub ffmpeg_available: bool,
-    /// Whether the libwebp encoder is compiled into the detected ffmpeg build.
-    /// Controls the retained video-frame thumbnail encoder.
-    pub ffmpeg_webp_available: bool,
 }
 
 impl MediaProcessor {
@@ -146,32 +143,13 @@ impl MediaProcessor {
                 "ffmpeg not found — video transcoding and video thumbnails are disabled."
             );
         }
-        let mut processor = Self::new_with_ffmpeg(available);
-        processor.ffmpeg_webp_available = available && ffmpeg::check_webp_encoder();
-        processor
+        Self::new_with_ffmpeg(available)
     }
 
-    /// Create a `MediaProcessor` with pre-detected capability flags.
-    ///
-    /// Use this in request handlers to avoid re-detecting ffmpeg on every upload.
-    /// Both flags should come from `AppState` which is populated once at startup.
-    #[must_use]
-    pub const fn new_with_ffmpeg_caps(ffmpeg_available: bool, ffmpeg_webp_available: bool) -> Self {
-        Self {
-            ffmpeg_available,
-            ffmpeg_webp_available,
-        }
-    }
-
-    /// Convenience constructor when only the base ffmpeg flag is known.
-    /// `ffmpeg_webp_available` defaults to the same value as `ffmpeg_available`.
-    /// Prefer [`new_with_ffmpeg_caps`](Self::new_with_ffmpeg_caps) in handlers.
+    /// Create a processor with the video capability detected at startup.
     #[must_use]
     pub const fn new_with_ffmpeg(ffmpeg_available: bool) -> Self {
-        Self {
-            ffmpeg_available,
-            ffmpeg_webp_available: ffmpeg_available,
-        }
+        Self { ffmpeg_available }
     }
 
     /// Process an uploaded file: convert to an optimal web format and generate
@@ -244,7 +222,6 @@ impl MediaProcessor {
                             file_stem,
                             conv.final_mime,
                             self.ffmpeg_available,
-                            self.ffmpeg_webp_available,
                         ))
                     }
                     None => self.generate_thumbnail(
@@ -317,13 +294,8 @@ impl MediaProcessor {
         file_stem: &str,
         thumb_max: u32,
     ) -> Result<PathBuf> {
-        let thumb_path = thumbnail::thumbnail_output_path(
-            thumb_dir,
-            file_stem,
-            mime,
-            self.ffmpeg_available,
-            self.ffmpeg_webp_available,
-        );
+        let thumb_path =
+            thumbnail::thumbnail_output_path(thumb_dir, file_stem, mime, self.ffmpeg_available);
 
         // Forward the actual path returned by generate_thumbnail (may differ from
         // thumb_path when a video placeholder falls back to .svg extension).
@@ -333,7 +305,6 @@ impl MediaProcessor {
             &thumb_path,
             thumb_max,
             self.ffmpeg_available,
-            self.ffmpeg_webp_available,
         )
     }
 }

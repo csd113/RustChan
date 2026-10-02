@@ -1,5 +1,8 @@
 # Non-video media backend migration
 
+Current video pipeline note (2026-10-02): FFmpeg extracts PNG video frames; Rust encodes their WebP thumbnails. FFmpeg WebP encoder detection and installation requirements have been removed. WebM conversion retains VP9 + Opus with independent AV1 decoder/encoder diagnostics. Historical validation results below describe the implementation at the time of that audit.
+
+
 > Historical report for the initial migration at `16f4b91`. The current [capability matrix and follow-up evidence](media-capabilities.md) supersede the uncommitted status, Opus compatibility limitations and unavailable Docker-base conclusions below. Remaining compatibility calls and PDF limitations are still explicit.
 
 Implemented backend migration, with the explicitly authorized FFmpeg compatibility fallback for uncovered audio codecs/variants. All changes remain uncommitted. Rust 1.99 is now the minimum in Cargo, CI, release builds, Docker and setup documentation. Actual video frame decoding and VP9/Opus WebM transcoding remain on FFmpeg.
@@ -14,7 +17,7 @@ Implemented backend migration, with the explicitly authorized FFmpeg compatibili
 | Same helper with GIF input | IMAGE | Animated WebP, composited frames, delays, transparency and repeat behavior | Existing `image` GIF compositor and lossless WebP encoder, bounded animation container writer | Decode every output frame and compare pixels, delays and loops |
 | `ffmpeg_image_to_webp_scaled`, used by `banner.rs` | IMAGE | GIF and animated WebP banners scaled without flattening | Same animation pipeline, existing image WebP decoder | Partial frames, disposal, bounds and stored animation compatibility |
 | `thumbnail.rs` image branch -> `ffmpeg_thumbnail` | IMAGE | First composited frame thumbnail, alpha, aspect ratio, no upload mutation | Existing `image` decoder/resizer/encoder plus HEIC still decoder | Thumbnail dimensions/pixels with FFmpeg absent |
-| `thumbnail.rs` video branch -> `ffmpeg_thumbnail` | VIDEO | Decode compressed video frame, fit thumbnail; SVG fallback on failure | Retain FFmpeg command and libwebp capability for this video operation | Existing video thumbnail tests |
+| `thumbnail.rs` video branch -> `ffmpeg_thumbnail` | VIDEO | Decode compressed video frame, fit thumbnail; SVG fallback on failure | FFmpeg extracts a PNG frame; Rust encodes WebP (updated by the AV1 follow-up) | Existing video thumbnail tests |
 | `probe_stream_kind`, called from upload validation and worker output validation | CONTAINER PROBING | Audio/video classification; MP4/M4A, WebM/MKV, standalone audio; malformed/ambiguous handling | Symphonia ISOBMFF/Matroska/audio format parsers | Old/new stream-kind and malformed fixture comparison |
 | `probe_stream_kind_with_ffmpeg` -> two zero-frame stream-map commands | CONTAINER PROBING | Establish ambiguous WebM kind without decoding, neutral download if ambiguous | Same Rust container parsers; unsupported audio containers retain bounded zero-frame FFmpeg maps | Audio WebM, video WebM and ambiguous policy tests |
 | `probe_video_codec`, called by transcode preparation/output validation | CONTAINER PROBING | First video codec, skip existing VP9, verify generated VP9 | Same container parsers; actual video processing retained | MP4 H.264 and WebM VP9 before/after |
@@ -58,7 +61,7 @@ HEIC and Opus decoders are recent focused implementations. Their selected behavi
 | Opus mono/stereo, voice/SILK | FFmpeg | Rust, including exact encoder-delay/end-padding handling and header gain |
 | Uncovered audio: AC-3, Speex, unsupported AAC profiles, mapped Opus/multistream | FFmpeg when present, otherwise placeholder | Approved FFmpeg compatibility path, selected only for unavailable formats/codecs/variants; AC-3 M4A and standard 5.1 Opus waveform output verified |
 | PDF | External Poppler/MuPDF/QuickLook preview when available, otherwise SVG | Hayro renders a small bounded uncompressed vector/text subset; broader or unsafe rendering uses the existing SVG without changing/rejecting the PDF download |
-| Video frame thumbnails | FFmpeg/libwebp or SVG | Retained command unchanged; actual WebP video thumbnail browser pass |
+| Video frame thumbnails | FFmpeg/libwebp or SVG | FFmpeg PNG extraction and Rust WebP encoding; SVG fallback on failure |
 | Video → WebM | FFmpeg libvpx-vp9/libopus | Retained encoder arguments, color normalization, CPU tuning, timeouts, cancellation, atomic DB/file lifecycle; actual browser transcode, WebM playback markup and stale-MP4 redirect pass |
 
 The compatibility fallback was explicitly authorized after reproducing AC-3 M4A failure in Rust and success with the original `showwavespic` command. It overrides the objective's earlier strict no-audio-FFmpeg rule. Common codecs never consult an executable to render their waveforms.
@@ -79,7 +82,7 @@ Useful debug measurements on this Apple-silicon host: isolated HEIC decode was a
 
 ## Remaining process responsibilities
 
-- `media/ffmpeg.rs::ffmpeg_thumbnail`: actual video-frame decoding and WebP preview encoding. The function body was compared with HEAD and is unchanged.
+- `media/ffmpeg.rs::ffmpeg_thumbnail`: actual video-frame decoding to PNG. Rust now encodes the WebP preview; the AV1 follow-up removed FFmpeg WebP encoder detection.
 - `workers::transcode_video` / `media/ffmpeg.rs::build_vp9_transcode_args`: retained video WebM transcoder. Both the argument builder and CPU profile selection were compared with HEAD and are unchanged.
 - `workers::render_waveform_with_compatibility`: original bounded `showwavespic` command for uncovered audio only, sharing the worker deadline, process-group shutdown and atomic publication.
 - `media/ffmpeg.rs::probe_uncovered_audio`: bounded zero-frame stream maps only after an unsupported audio container/parser result, preserving accepted codec/container variants.

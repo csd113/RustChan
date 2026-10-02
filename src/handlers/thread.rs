@@ -396,7 +396,6 @@ pub(in crate::server) async fn post_reply(
         let pool = state.db.clone();
         let job_queue = std::sync::Arc::clone(&state.job_queue);
         let ffmpeg_available = state.ffmpeg_available;
-        let ffmpeg_webp_available = state.ffmpeg_webp_available;
         move || -> Result<posting::SubmitPostResult> {
             // `spawn_blocking` work is not cancelled when its join handle is
             // dropped. Keep the permit inside this closure so a disconnected
@@ -425,7 +424,6 @@ pub(in crate::server) async fn post_reply(
                     upload_dir: CONFIG.upload_dir.clone(),
                     thumb_size: CONFIG.thumb_size,
                     ffmpeg_available,
-                    ffmpeg_webp_available,
                 },
             )
         }

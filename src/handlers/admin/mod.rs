@@ -616,7 +616,7 @@ struct AdminPanelSnapshot {
     media_auto_prune_enabled: bool,
     media_max_active_content_size_bytes: u64,
     ffmpeg_available: bool,
-    ffmpeg_webp_available: bool,
+    ffmpeg_av1: crate::media::ffmpeg::Av1Capabilities,
     ffmpeg_vp9_available: bool,
     ffmpeg_vp9_encoder_available: bool,
     ffmpeg_opus_available: bool,
@@ -815,7 +815,7 @@ struct MaintenanceDomainData {
     media_auto_prune_enabled: bool,
     media_max_active_content_size_bytes: u64,
     ffmpeg_available: bool,
-    ffmpeg_webp_available: bool,
+    ffmpeg_av1: crate::media::ffmpeg::Av1Capabilities,
     ffmpeg_vp9_available: bool,
     ffmpeg_vp9_encoder_available: bool,
     ffmpeg_opus_available: bool,
@@ -1306,7 +1306,7 @@ fn load_maintenance_domain_data(
         media_auto_prune_enabled: db::get_media_auto_prune_enabled(conn),
         media_max_active_content_size_bytes: db::get_media_max_active_content_size_bytes(conn),
         ffmpeg_available: state.ffmpeg_available,
-        ffmpeg_webp_available: state.ffmpeg_webp_available,
+        ffmpeg_av1: state.ffmpeg_av1.clone(),
         ffmpeg_vp9_available: state.ffmpeg_vp9_available,
         ffmpeg_vp9_encoder_available: state.ffmpeg_vp9_encoder_available,
         ffmpeg_opus_available: state.ffmpeg_opus_available,
@@ -1385,7 +1385,7 @@ fn load_admin_panel_snapshot(
             media_max_active_content_size_bytes: maintenance_domain
                 .media_max_active_content_size_bytes,
             ffmpeg_available: maintenance_domain.ffmpeg_available,
-            ffmpeg_webp_available: maintenance_domain.ffmpeg_webp_available,
+            ffmpeg_av1: maintenance_domain.ffmpeg_av1,
             ffmpeg_vp9_available: maintenance_domain.ffmpeg_vp9_available,
             ffmpeg_vp9_encoder_available: maintenance_domain.ffmpeg_vp9_encoder_available,
             ffmpeg_opus_available: maintenance_domain.ffmpeg_opus_available,
@@ -1662,16 +1662,16 @@ fn dashboard_dependency_status(
     ffmpeg_required: bool,
 ) -> (String, String, crate::templates::AdminDashboardState) {
     let ffmpeg = detection_word(maintenance.ffmpeg_available);
-    let state = if maintenance.ffmpeg_available {
+    let state = if maintenance.ffmpeg_vp9_available {
         crate::templates::AdminDashboardState::Ok
-    } else if ffmpeg_required {
+    } else if ffmpeg_required && !maintenance.ffmpeg_available {
         crate::templates::AdminDashboardState::ActionNeeded
     } else {
         crate::templates::AdminDashboardState::Informational
     };
-    let status = if maintenance.ffmpeg_available {
+    let status = if maintenance.ffmpeg_vp9_available {
         "ready"
-    } else if ffmpeg_required {
+    } else if ffmpeg_required && !maintenance.ffmpeg_available {
         "required tool missing"
     } else {
         "limited"
@@ -1679,10 +1679,11 @@ fn dashboard_dependency_status(
     (
         status.to_owned(),
         format!(
-            "ffmpeg {ffmpeg}; WebP {}; VP9 {}; Opus {}.",
-            detection_word(maintenance.ffmpeg_webp_available),
+            "WebP/images built in (Rust); ffmpeg video {ffmpeg}; VP9 {}; Opus {}; AV1 decoding {}; AV1 encoding {} (output policy: VP9 + Opus).",
             detection_word(maintenance.ffmpeg_vp9_encoder_available),
-            detection_word(maintenance.ffmpeg_opus_available)
+            detection_word(maintenance.ffmpeg_opus_available),
+            detection_word(!maintenance.ffmpeg_av1.decoders.is_empty()),
+            detection_word(!maintenance.ffmpeg_av1.encoders.is_empty())
         ),
         state,
     )
@@ -1913,11 +1914,8 @@ fn render_admin_panel_from_snapshot(
                 } else {
                     crate::templates::AdminDetectionStatus::Missing
                 },
-                webp_encoder: if snapshot.ffmpeg_webp_available {
-                    crate::templates::AdminDetectionStatus::Detected
-                } else {
-                    crate::templates::AdminDetectionStatus::Missing
-                },
+                av1_decoder: detection_status(!snapshot.ffmpeg_av1.decoders.is_empty()),
+                av1_encoder: detection_status(!snapshot.ffmpeg_av1.encoders.is_empty()),
                 vp9_pipeline: if snapshot.ffmpeg_vp9_available {
                     crate::templates::AdminDetectionStatus::Detected
                 } else {
@@ -1995,9 +1993,10 @@ fn build_site_health_view<'a>(
         tor_detail: &snapshot.dashboard.tor_detail,
         dependency_summary: crate::templates::AdminSiteHealthDependencySummary {
             ffmpeg: detection_status(snapshot.ffmpeg_available),
-            webp: detection_status(snapshot.ffmpeg_webp_available),
             vp9: detection_status(snapshot.ffmpeg_vp9_encoder_available),
             opus: detection_status(snapshot.ffmpeg_opus_available),
+            av1_decoder: detection_status(!snapshot.ffmpeg_av1.decoders.is_empty()),
+            av1_encoder: detection_status(!snapshot.ffmpeg_av1.encoders.is_empty()),
         },
         running_jobs: snapshot.site_health.running_jobs,
         queued_jobs: snapshot.site_health.queued_jobs,
@@ -2039,7 +2038,10 @@ fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&st
          Database schema: {schema}\n\
          OS: {os}-{arch}\n\
          SQLite: {sqlite}\n\
-         ffmpeg: {ffmpeg}\n\
+         WebP/images: built in (Rust), including animation\n\
+         ffmpeg video: {ffmpeg}\n\
+         WebM conversion (VP9 + Opus): {webm}\n\
+         AV1 decoding: {av1_decoding}; AV1 encoding: {av1_encoding}\n\
          Tor enabled: {tor_enabled} ({tor_detail})\n\
          TLS enabled: {tls_enabled}\n\
          Reverse proxy: {reverse_proxy}\n\
@@ -2053,6 +2055,9 @@ fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&st
         arch = std::env::consts::ARCH,
         sqlite = rusqlite::version(),
         ffmpeg = detection_word(snapshot.ffmpeg_available),
+        webm = detection_word(snapshot.ffmpeg_vp9_available),
+        av1_decoding = detection_word(!snapshot.ffmpeg_av1.decoders.is_empty()),
+        av1_encoding = detection_word(!snapshot.ffmpeg_av1.encoders.is_empty()),
         warnings = indent_diagnostics_block(&snapshot.site_health.recent_warnings),
     )
 }
@@ -2754,7 +2759,7 @@ mod tests {
             media_auto_prune_enabled: false,
             media_max_active_content_size_bytes: 0,
             ffmpeg_available: ffmpeg,
-            ffmpeg_webp_available: false,
+            ffmpeg_av1: crate::media::ffmpeg::Av1Capabilities::default(),
             ffmpeg_vp9_available: false,
             ffmpeg_vp9_encoder_available: false,
             ffmpeg_opus_available: false,
@@ -2765,6 +2770,9 @@ mod tests {
     #[test]
     fn dashboard_optional_media_tools_are_informational_not_warning() {
         let maintenance = maintenance_with_media_tools(false);
+        let detail = dashboard_dependency_status(&maintenance, false).1;
+        assert!(detail.contains("WebP/images built in (Rust)"));
+        assert!(detail.contains("AV1 decoding missing; AV1 encoding missing"));
 
         assert_eq!(
             dashboard_dependency_status(&maintenance, false).2,
@@ -2774,6 +2782,15 @@ mod tests {
             dashboard_dependency_status(&maintenance, true).2,
             crate::templates::AdminDashboardState::ActionNeeded,
         );
+    }
+
+    #[test]
+    fn admin_av1_status_distinguishes_decoding_from_encoding() {
+        let mut maintenance = maintenance_with_media_tools(true);
+        maintenance.ffmpeg_av1.decoders.push("libdav1d".to_owned());
+        let detail = dashboard_dependency_status(&maintenance, false).1;
+        assert!(detail.contains("AV1 decoding found; AV1 encoding missing"));
+        assert!(detail.contains("output policy: VP9 + Opus"));
     }
 
     #[test]

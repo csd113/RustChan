@@ -176,7 +176,7 @@ Common settings:
 | `port` | The HTTP port; normally `8080` |
 | `enable_tor_support` | Whether the built-in Tor onion service runs |
 | `tor_only` | Whether the site is served through Tor with a local-only listener |
-| `require_ffmpeg` | Whether startup requires the enhanced media tools |
+| `require_ffmpeg` | Whether startup requires FFmpeg for video and uncovered audio codecs |
 | `auto_full_backup_interval_hours` | How often automatic full-site backups run |
 | `backup_directory` | An optional absolute path for saved backups |
 | `[tls].enabled` | Whether the app's built-in HTTPS listener runs |

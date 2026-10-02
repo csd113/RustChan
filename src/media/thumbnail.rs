@@ -125,51 +125,20 @@ pub fn override_pdf_renderer_mode(mode: TestPdfRendererMode) -> PdfRendererTestG
     }
 }
 
-/// Generate a thumbnail for a media file and write it to `output_path`.
+/// Generate a thumbnail and return the actual path written.
 ///
-/// All thumbnails are produced as WebP.  The strategy depends on the MIME
-/// type and whether ffmpeg (and its libwebp encoder) is available:
-///
-/// | Source MIME       | ffmpeg | libwebp | Action                          |
-/// |-------------------|--------|---------|---------------------------------|
-/// | `image/*`         | either | —       | Rust decode → resize → WebP     |
-/// | `application/pdf` | either | —       | Rust preview or SVG placeholder |
-/// | `video/webm`      | yes    | yes     | ffmpeg first-frame + WebP       |
-/// | `video/webm`      | yes    | no      | static SVG placeholder          |
-/// | `video/webm`      | no     | —       | static SVG placeholder          |
-/// | `image/svg+xml`   | either | —       | static SVG placeholder          |
-/// | `audio/*`         | either | —       | static SVG placeholder          |
-///
-/// # Arguments
-/// * `input_path`             — Absolute path to the (already converted) media file.
-/// * `mime`                   — Final MIME type of the input file.
-/// * `output_path`            — Where to write the thumbnail (WebP or SVG).
-/// * `max_dim`                — Maximum width and height in pixels (aspect preserved).
-/// * `ffmpeg_available`       — Whether ffmpeg was detected at startup.
-/// * `ffmpeg_webp_available`  — Whether ffmpeg has the libwebp encoder compiled in.
+/// Images, including animated WebP, use the Rust decoder and WebP encoder.
+/// Videos use `FFmpeg` only to extract a PNG frame, then the same Rust encoder.
+/// Failed video extraction writes a `.svg` sibling placeholder.
 ///
 /// # Errors
-/// Returns an error only if all strategies (including placeholder writing)
-/// fail.  Individual strategy failures are demoted to warnings so that a
-/// thumbnail failure never causes the upload to fail.
-/// Generate a thumbnail and return the **actual path written**.
-///
-/// The returned path may differ from `output_path` when a fallback SVG
-/// placeholder is written for a video whose thumbnail extraction failed.
-/// `thumbnail_output_path` selects `.webp` for video when ffmpeg+libwebp are
-/// both present (because it cannot know ahead of time whether ffmpeg will
-/// succeed).  If extraction fails, writing SVG bytes into a `.webp` file
-/// produces a file whose content and extension disagree — browsers reject it
-/// and show a broken thumbnail.  To avoid this, the video fallback writes the
-/// placeholder to a `.svg` sibling path instead and returns that path, so the
-/// caller can store the correct path in the database.
+/// Returns an error if thumbnail generation and placeholder writing both fail.
 pub fn generate_thumbnail(
     input_path: &Path,
     mime: &str,
     output_path: &Path,
     max_dim: u32,
     ffmpeg_available: bool,
-    ffmpeg_webp_available: bool,
 ) -> Result<PathBuf> {
     match mime {
         // SVG and audio: always use static placeholder
@@ -193,19 +162,13 @@ pub fn generate_thumbnail(
             }
         }
 
-        // Video (WebM, MP4, and any other video/*): requires ffmpeg AND libwebp
-        // `thumbnail_output_path` pre-selects `.webp` when both are present.
-        // If ffmpeg_thumbnail then fails, write the SVG placeholder to the
-        // `.svg`-extension sibling so the file content and extension match.
-        // The `else` branch (ffmpeg absent / libwebp absent) already has the
-        // `.svg` extension pre-selected by `thumbnail_output_path`, so no
-        // rename is needed there.
         m if m.starts_with("video/") => {
-            if ffmpeg_available && ffmpeg_webp_available {
+            if ffmpeg_available {
                 match ffmpeg::ffmpeg_thumbnail(input_path, output_path, max_dim) {
                     Ok(()) => Ok(output_path.to_path_buf()),
                     Err(e) => {
                         tracing::warn!("ffmpeg video thumbnail failed ({}); using placeholder", e);
+                        drop(std::fs::remove_file(output_path));
                         // Write the SVG placeholder with a .svg extension so its
                         // content and file extension agree.  Browsers that receive
                         // SVG bytes served as image/webp silently show nothing.
@@ -220,9 +183,7 @@ pub fn generate_thumbnail(
             }
         }
 
-        // WebP: skip ffmpeg entirely — use image crate directly
-        // ffmpeg fails on animated WebP (VP8L) and emits a spurious warning
-        // even though the image crate handles all WebP variants correctly.
+        // WebP previews always use the Rust decoder, including animation.
         "image/webp" => image_crate_thumbnail(input_path, mime, output_path, max_dim)
             .map(|()| output_path.to_path_buf()),
 
@@ -236,26 +197,15 @@ pub fn generate_thumbnail(
     }
 }
 
-/// Determine the correct output path for a thumbnail given the media MIME type.
-///
-/// Always returns a `.webp` path, except for types that produce an
-/// SVG placeholder (video without ffmpeg or libwebp, audio, svg source).
-///
-/// # Arguments
-/// * `thumb_dir`              — The `thumbs/` directory (absolute path).
-/// * `file_stem`              — UUID stem shared with the media file.
-/// * `mime`                   — Final MIME of the converted media file.
-/// * `ffmpeg_available`       — Whether ffmpeg was detected.
-/// * `ffmpeg_webp_available`  — Whether ffmpeg has the libwebp encoder.
+/// Select a WebP thumbnail path, or SVG for audio, SVG and video without `FFmpeg`.
 #[must_use]
 pub fn thumbnail_output_path(
     thumb_dir: &Path,
     file_stem: &str,
     mime: &str,
     ffmpeg_available: bool,
-    ffmpeg_webp_available: bool,
 ) -> PathBuf {
-    let ext = thumbnail_extension(mime, ffmpeg_available, ffmpeg_webp_available);
+    let ext = thumbnail_extension(mime, ffmpeg_available);
     thumb_dir.join(format!("{file_stem}.{ext}"))
 }
 
@@ -282,7 +232,7 @@ pub fn write_placeholder(output_path: &Path, kind: PlaceholderKind) -> Result<()
 ///
 /// Decodes `input_path`, resizes to fit within `max_dim × max_dim` (aspect
 /// preserved), and saves as WebP. This path handles all supported images.
-fn image_crate_thumbnail(
+pub(super) fn image_crate_thumbnail(
     input_path: &Path,
     _mime: &str,
     output_path: &Path,
@@ -381,35 +331,12 @@ pub fn detect_pdf_renderers() -> Vec<PdfRenderer> {
     vec![PdfRenderer::Hayro]
 }
 
-/// Map a MIME type to an `image::ImageFormat` for decoding.
-///
-/// Returns `None` for types the `image` crate cannot decode (video, SVG,
-/// Return the file extension to use for a thumbnail.
-///
-/// All thumbnails are `.webp` unless the source requires a static SVG
-/// placeholder (video without ffmpeg, audio, SVG sources).
-///
-/// For `video/webm`, a WebP thumbnail can only be produced when ffmpeg is
-/// available AND the `libwebp` encoder is compiled in.  When either is
-/// absent, `ffmpeg_thumbnail` will fail and `write_placeholder` will be
-/// called — we must pre-select `.svg` so the placeholder is written to a
-/// path whose extension matches its actual SVG content.  Mismatching the
-/// extension (SVG bytes in a `.webp` file) causes browsers to reject the
-/// file and display nothing.
-fn thumbnail_extension(
-    mime: &str,
-    ffmpeg_available: bool,
-    ffmpeg_webp_available: bool,
-) -> &'static str {
+/// Select the extension for a thumbnail or its placeholder.
+fn thumbnail_extension(mime: &str, ffmpeg_available: bool) -> &'static str {
     match mime {
         "image/svg+xml" => "svg",
         m if m.starts_with("audio/") => "svg",
-        // Video thumbnails need both ffmpeg (to demux the stream) AND libwebp
-        // (to encode the extracted frame as WebP).  If either is missing the
-        // fallback is an SVG placeholder.  This applies to all video/* types,
-        // not just WebM — MP4 and any other video format go through ffmpeg the
-        // same way and need the same extension pre-selection logic.
-        m if m.starts_with("video/") && (!ffmpeg_available || !ffmpeg_webp_available) => "svg",
+        m if m.starts_with("video/") && !ffmpeg_available => "svg",
         _ => "webp",
     }
 }
@@ -425,7 +352,7 @@ mod tests {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/inline-image.pdf");
         let before = std::fs::read(&source)?;
         let output = dir.path().join("page.webp");
-        let result = generate_thumbnail(&source, "application/pdf", &output, 100, false, false)?;
+        let result = generate_thumbnail(&source, "application/pdf", &output, 100, false)?;
         anyhow::ensure!(
             result.extension().and_then(std::ffi::OsStr::to_str) == Some("svg"),
             "unsupported preview did not use SVG"
@@ -444,41 +371,34 @@ mod tests {
 
     #[test]
     fn thumbnail_ext_is_webp_for_images_no_ffmpeg() {
-        // Images use image-crate fallback, so webp even without ffmpeg
-        assert_eq!(thumbnail_extension("image/jpeg", false, false), "webp");
-        assert_eq!(thumbnail_extension("image/png", false, false), "webp");
-        assert_eq!(thumbnail_extension("image/webp", false, false), "webp");
+        // Image previews use the built-in Rust encoder.
+        assert_eq!(thumbnail_extension("image/jpeg", false), "webp");
+        assert_eq!(thumbnail_extension("image/png", false), "webp");
+        assert_eq!(thumbnail_extension("image/webp", false), "webp");
     }
 
     #[test]
     fn thumbnail_ext_is_svg_for_video_without_ffmpeg() {
-        assert_eq!(thumbnail_extension("video/webm", false, false), "svg");
-        assert_eq!(thumbnail_extension("video/mp4", false, false), "svg");
+        assert_eq!(thumbnail_extension("video/webm", false), "svg");
+        assert_eq!(thumbnail_extension("video/mp4", false), "svg");
     }
 
     #[test]
-    fn thumbnail_ext_is_svg_for_video_with_ffmpeg_but_no_webp() {
-        // ffmpeg available but libwebp missing — placeholder path must be .svg
-        assert_eq!(thumbnail_extension("video/webm", true, false), "svg");
-        assert_eq!(thumbnail_extension("video/mp4", true, false), "svg");
-    }
-
-    #[test]
-    fn thumbnail_ext_is_webp_for_video_with_ffmpeg_and_webp() {
-        assert_eq!(thumbnail_extension("video/webm", true, true), "webp");
-        assert_eq!(thumbnail_extension("video/mp4", true, true), "webp");
+    fn thumbnail_ext_is_webp_for_video_with_ffmpeg() {
+        assert_eq!(thumbnail_extension("video/webm", true), "webp");
+        assert_eq!(thumbnail_extension("video/mp4", true), "webp");
     }
 
     #[test]
     fn thumbnail_ext_is_svg_for_audio() {
-        assert_eq!(thumbnail_extension("audio/mpeg", true, true), "svg");
-        assert_eq!(thumbnail_extension("audio/mpeg", false, false), "svg");
+        assert_eq!(thumbnail_extension("audio/mpeg", true), "svg");
+        assert_eq!(thumbnail_extension("audio/mpeg", false), "svg");
     }
 
     #[test]
     fn thumbnail_ext_is_svg_for_svg_source() {
-        assert_eq!(thumbnail_extension("image/svg+xml", true, true), "svg");
-        assert_eq!(thumbnail_extension("image/svg+xml", false, false), "svg");
+        assert_eq!(thumbnail_extension("image/svg+xml", true), "svg");
+        assert_eq!(thumbnail_extension("image/svg+xml", false), "svg");
     }
 
     #[test]
@@ -519,7 +439,7 @@ mod tests {
         let output = tempdir.path().join("thumb.webp");
         std::fs::write(&input, b"not decoded by image crate")?;
 
-        let actual = generate_thumbnail(&input, "image/heic", &output, 64, false, false)?;
+        let actual = generate_thumbnail(&input, "image/heic", &output, 64, false)?;
 
         assert_eq!(
             actual.extension().and_then(|ext| ext.to_str()),
@@ -537,7 +457,7 @@ mod tests {
         let output = dir.path().join("thread.webp");
         let _override = override_pdf_renderer_mode(TestPdfRendererMode::Fail);
         let generated = std::thread::spawn(move || {
-            generate_thumbnail(&input, "application/pdf", &output, 100, false, false)
+            generate_thumbnail(&input, "application/pdf", &output, 100, false)
         })
         .join()
         .map_err(|_| anyhow::anyhow!("PDF preview test thread panicked"))??;

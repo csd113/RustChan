@@ -1,4 +1,4 @@
-//! Bounded MP4 edit-list timing missing from Symphonia's current demuxer.
+//! Bounded MP4 metadata supplements: edit timing and video codec declarations.
 
 use anyhow::{ensure, Context as _, Result};
 use std::fs::File;
@@ -209,6 +209,73 @@ fn one(atoms: &[Atom], kind: [u8; 4]) -> Result<Atom> {
     Ok(atom)
 }
 
+/// Recover a declared AV1/VP8/VP9 sample-entry codec for one validated MP4 track.
+/// Symphonia 0.6 recognizes these entries but leaves their codec ID unset.
+/// Walk structural boxes by track ID; never scan media payloads for codec tags.
+pub(in crate::media) fn declared_video_codec(
+    path: &Path,
+    track_id: u32,
+    check: impl FnMut() -> Result<()>,
+) -> Result<Option<&'static str>> {
+    let file = File::open(path)?;
+    let metadata = file.metadata()?;
+    ensure!(metadata.is_file(), "MP4 codec source is not a regular file");
+    let mut reader = Reader {
+        file,
+        boxes: 0,
+        check,
+    };
+    let root = reader.children(0, metadata.len())?;
+    let moov = one(&root, *b"moov")?;
+    let movie = reader.children(moov.body, moov.end)?;
+    let mut chosen = None;
+    for track in movie.iter().filter(|atom| atom.kind == *b"trak") {
+        let children = reader.children(track.body, track.end)?;
+        let tkhd = one(&children, *b"tkhd")?;
+        let offset = reader.timestamp_offset(tkhd)?;
+        if u32::from_be_bytes(reader.field::<4>(tkhd, offset)?) == track_id {
+            ensure!(chosen.is_none(), "duplicate MP4 video track identifier");
+            chosen = Some(children);
+        }
+    }
+    let mut children = chosen.context("MP4 video codec track missing")?;
+    for kind in [*b"mdia", *b"minf", *b"stbl"] {
+        let parent = one(&children, kind)?;
+        children = reader.children(parent.body, parent.end)?;
+    }
+    let stsd = one(&children, *b"stsd")?;
+    ensure!(
+        reader.field::<1>(stsd, 0)? == [0],
+        "invalid MP4 sample description version"
+    );
+    ensure!(
+        u32::from_be_bytes(reader.field::<4>(stsd, 4)?) == 1,
+        "ambiguous MP4 video sample descriptions"
+    );
+    let entries = reader.children(
+        stsd.body
+            .checked_add(8)
+            .context("MP4 stsd offset overflow")?,
+        stsd.end,
+    )?;
+    ensure!(
+        entries.len() == 1,
+        "invalid MP4 video sample description extent"
+    );
+    let entry = entries.first().context("MP4 video sample entry missing")?;
+    let codec = match &entry.kind {
+        b"av01" => "av1",
+        b"vp08" => "vp8",
+        b"vp09" => "vp9",
+        _ => return Ok(None),
+    };
+    ensure!(
+        entry.end - entry.body >= 78,
+        "truncated MP4 visual sample entry"
+    );
+    Ok(Some(codec))
+}
+
 /// Convert rational timestamps to the nearest whole decoded sample frame.
 fn frames(units: u64, scale: u32, rate: u32) -> Result<u64> {
     ensure!(scale > 0 && rate > 0, "invalid MP4 timing scale");
@@ -333,6 +400,72 @@ pub(super) fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_codec_declarations_obey_track_identity_and_box_boundaries() -> Result<()> {
+        let original = include_bytes!("../../tests/fixtures/media/av1.mp4");
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("misleading.webm");
+        std::fs::write(&path, original)?;
+        ensure!(
+            declared_video_codec(&path, 1, || Ok(()))? == Some("av1"),
+            "AV1 declaration lost"
+        );
+        ensure!(
+            declared_video_codec(&path, 999, || Ok(())).is_err(),
+            "wrong track matched"
+        );
+        ensure!(
+            declared_video_codec(&path, 1, || anyhow::bail!("cancelled")).is_err(),
+            "cancelled inspection continued"
+        );
+
+        let stsd = original
+            .windows(4)
+            .position(|bytes| bytes == b"stsd")
+            .context("missing sample descriptions")?;
+        let entry = stsd
+            .checked_add(16)
+            .context("sample entry offset overflow")?;
+        ensure!(
+            original.get(entry..entry + 4) == Some(b"av01"),
+            "fixture layout changed"
+        );
+        let mut unrelated_tag = original.to_vec();
+        unrelated_tag
+            .get_mut(entry..entry + 4)
+            .context("sample entry bounds")?
+            .copy_from_slice(b"zzzz");
+        // An AV1-looking tag inside an unrelated free-box payload is not metadata.
+        unrelated_tag.extend_from_slice(b"\0\0\0\x0cfreeav01");
+        std::fs::write(&path, unrelated_tag)?;
+        ensure!(
+            declared_video_codec(&path, 1, || Ok(()))?.is_none(),
+            "payload tag became a codec"
+        );
+
+        let mut excessive_entries = original.to_vec();
+        excessive_entries
+            .get_mut(stsd + 8..stsd + 12)
+            .context("stsd count bounds")?
+            .copy_from_slice(&u32::MAX.to_be_bytes());
+        std::fs::write(&path, excessive_entries)?;
+        ensure!(
+            declared_video_codec(&path, 1, || Ok(())).is_err(),
+            "unbounded sample descriptions accepted"
+        );
+        std::fs::write(
+            &path,
+            original
+                .get(..entry + 3)
+                .context("truncated fixture bounds")?,
+        )?;
+        ensure!(
+            declared_video_codec(&path, 1, || Ok(())).is_err(),
+            "truncated movie accepted"
+        );
+        Ok(())
+    }
 
     /// Empty edits, gaps, and multiple forward ranges preserve presentation order.
     #[test]

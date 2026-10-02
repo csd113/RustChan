@@ -1255,12 +1255,12 @@ fn media_job_identity(job: &Job) -> Option<MediaJobIdentity> {
 }
 
 // VideoTranscode
-/// Transcode an MP4 upload to `WebM` (VP9 + Opus), then update the post's
-/// `file_path` and `mime_type`. The original MP4 is deleted on success.
+/// Convert video to VP9/Opus `WebM`, then atomically update media metadata.
+/// Compatible VP8/VP9 `WebM` is retained; source cleanup is journaled on success.
 ///
 /// Requires both `ffmpeg_available` (binary present) and `ffmpeg_vp9_available`
-/// (libvpx-vp9 + libopus compiled in).  If either flag is false the job is
-/// skipped gracefully — no error is returned and the file remains as-is.
+/// (libvpx-vp9 + libopus and the `WebM` muxer compiled in). If either is false,
+/// the job is skipped gracefully — no error is returned and the file remains as-is.
 ///
 /// The command runs in its own process group. Timeout, cancellation, and scope
 /// cleanup terminate that whole group so descendants cannot outlive the job.
@@ -1287,15 +1287,13 @@ async fn transcode_video(
 
     if !ffmpeg_vp9_available {
         warn!(
-            "VideoTranscode skipped for post {post_id}: libvpx-vp9 or libopus not available. \
+            "VideoTranscode skipped for post {post_id}: libvpx-vp9, libopus or the WebM muxer not available. \
              Install ffmpeg with VP9 + Opus support to enable MP4/MKV→WebM transcoding."
         );
         return Ok(JobExecution::NeedsCompletion);
     }
 
     let timeout_secs = crate::config::ffmpeg_timeout_secs();
-    let ffmpeg_timeout = Duration::from_secs(timeout_secs);
-
     // File checks, codec probing, and temporary-file creation are blocking.
     let prepare_result = {
         let file_path2 = file_path.clone();
@@ -1311,10 +1309,29 @@ async fn transcode_video(
         return Ok(JobExecution::NeedsCompletion);
     };
 
-    // `kill_on_drop` terminates ffmpeg when its timeout future is dropped.
     let mut command = ffmpeg_command();
+    command.args(&args);
+    run_video_transcode(command, post_id, timeout_secs, cancel).await?;
+
+    // File persistence and database updates are blocking.
+    let finalise_result = tokio::task::spawn_blocking(move || {
+        transcode_video_finalise(
+            job_id, post_id, &file_path, &src_path, &webm_abs, &webm_rel, tmp, &pool,
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in finalise: {e}"))?;
+    finalise_result
+}
+
+/// Run the bounded video process; only a successful exit permits finalisation.
+async fn run_video_transcode(
+    mut command: TokioCommand,
+    post_id: i64,
+    timeout_secs: u64,
+    cancel: CancellationToken,
+) -> Result<()> {
     command
-        .args(&args)
         .stderr(Stdio::piped())
         .stdout(Stdio::null())
         .kill_on_drop(true);
@@ -1323,6 +1340,7 @@ async fn transcode_video(
         .map_err(|e| anyhow::anyhow!("failed to spawn ffmpeg '{}': {e}", CONFIG.ffmpeg_path))?;
     drop(command);
 
+    let ffmpeg_timeout = Duration::from_secs(timeout_secs);
     match wait_for_ffmpeg_output(child, ffmpeg_timeout, cancel).await? {
         AsyncWaitOutcome::Exited(output) => {
             if !output.status.success() {
@@ -1346,23 +1364,14 @@ async fn transcode_video(
         }
     }
 
-    // File persistence and database updates are blocking.
-    let finalise_result = tokio::task::spawn_blocking(move || {
-        transcode_video_finalise(
-            job_id, post_id, &file_path, &src_path, &webm_abs, &webm_rel, tmp, &pool,
-        )
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in finalise: {e}"))?;
-    finalise_result
+    Ok(())
 }
 
-/// Prepare a video transcode: validate the source file, optionally probe the
-/// codec for `WebM` inputs, create a temp output file, and return the ffmpeg
+/// Prepare a video transcode: validate the source file, inspect container and
+/// stream metadata, create a temp output file, and return the ffmpeg
 /// argument list along with the relevant paths.
 ///
-/// Returns `Ok(None)` when the job should be skipped gracefully (unrecognised
-/// extension, or `WebM` that is already VP8/VP9). Returns `Ok(Some(...))` when
+/// Returns `Ok(None)` for compatible VP8/VP9 `WebM`. Returns `Ok(Some(...))` when
 /// ffmpeg should be invoked. `Err` for genuine failures.
 ///
 /// This is a pure synchronous function; call it from `spawn_blocking` or at
@@ -1377,10 +1386,6 @@ type TranscodePrepareParts = (
     tempfile::NamedTempFile,
 );
 
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "source validation and codec-specific preparation share one preflight boundary"
-)]
 /// Validates and prepares all paths and arguments needed for a video transcode.
 fn transcode_video_prepare(
     post_id: i64,
@@ -1396,34 +1401,19 @@ fn transcode_video_prepare(
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if ext != "mp4" && ext != "webm" && ext != "mkv" {
-        debug!("VideoTranscode: skipping unrecognised extension {file_path}");
+    let info = crate::media::probe::inspect_video(&src)
+        .context("VideoTranscode: failed to inspect source container/streams")?;
+    if !info.needs_webm_conversion() {
+        debug!("VideoTranscode: preserving compatible VP8/VP9 WebM for post {post_id}");
         return Ok(None);
     }
-
-    if ext == "webm" {
-        let src_str = src
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8: {}", src.display()))?;
-        match crate::media::probe::probe_video_codec(src_str) {
-            Ok(codec) if codec == "av1" => {
-                tracing::info!(target: "workers", post_id = post_id, codec = "av1", "VideoTranscode: re-encoding WebM/AV1 to VP9");
-            }
-            Ok(codec) => {
-                debug!(
-                    "VideoTranscode: skipping WebM with codec '{}' for post {} (already VP8/VP9)",
-                    codec, post_id
-                );
-                return Ok(None);
-            }
-            Err(e) => {
-                warn!(
-                    "VideoTranscode: could not probe codec for post {} ({}); skipping",
-                    post_id, e
-                );
-                return Ok(None);
-            }
-        }
+    if info.codecs.first() == Some(&"av1")
+        && crate::media::ffmpeg::video_capabilities()
+            .av1
+            .decoders
+            .is_empty()
+    {
+        anyhow::bail!("VideoTranscode: installed FFmpeg has no AV1 decoder");
     }
 
     let stem = src
@@ -1574,13 +1564,8 @@ fn transcode_video_finalise(
             return Ok(JobExecution::NeedsCompletion);
         }
         Err(error) => {
-            tracing::warn!(
-                target: "workers",
-                post_id,
-                error = %error,
-                "VideoTranscode: output validation failed; keeping original media"
-            );
-            return Ok(JobExecution::NeedsCompletion);
+            return Err(error)
+                .context("VideoTranscode: output validation failed; original retained")
         }
     }
 
@@ -1757,22 +1742,7 @@ fn validate_transcoded_webm_output(
         });
     }
 
-    if crate::media::probe::probe_stream_kind(output_path)?
-        != crate::media::probe::StreamKind::Video
-    {
-        return Ok(TranscodeOutputDecision::Skip {
-            reason: "transcoded output has no video stream",
-        });
-    }
-    let output_str = output_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Transcoded output path is non-UTF-8"))?;
-    let codec = crate::media::probe::probe_video_codec(output_str)?;
-    if codec != "vp9" {
-        return Ok(TranscodeOutputDecision::Skip {
-            reason: "transcoded output is not VP9",
-        });
-    }
+    crate::media::probe::validate_webm_output_file(output_path)?;
 
     Ok(TranscodeOutputDecision::Accept)
 }
@@ -4634,6 +4604,100 @@ mod tests {
         assert!(src.exists());
         assert!(!webm_abs.exists());
         assert!(!tmp_path.exists());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn failed_video_process_cannot_promote_partial_output() -> anyhow::Result<()> {
+        use super::{install_deterministic_output, run_video_transcode};
+        use tokio::process::Command as TokioCommand;
+        use tokio_util::sync::CancellationToken;
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("original.mp4");
+        std::fs::write(&source, b"original media")?;
+        let destination = dir.path().join("converted.webm");
+        for (script, cancel) in [
+            (
+                "printf partial > \"$1\"; echo 'AV1 decode failed' >&2; exit 1",
+                CancellationToken::new(),
+            ),
+            (
+                "printf partial > \"$1\"; sleep 30",
+                CancellationToken::new(),
+            ),
+            ("printf partial > \"$1\"; sleep 30", {
+                let cancel = CancellationToken::new();
+                cancel.cancel();
+                cancel
+            }),
+        ] {
+            let tmp = tempfile::Builder::new()
+                .suffix(".webm")
+                .tempfile_in(dir.path())?;
+            let temporary_path = tmp.path().to_owned();
+            let mut command = TokioCommand::new("/bin/sh");
+            command.process_group(0);
+            command
+                .args(["-c", script, "video-fixture"])
+                .arg(tmp.path());
+            // The same process gate used by production must reject promotion.
+            let result = run_video_transcode(command, 1, 1, cancel)
+                .await
+                .and_then(|()| install_deterministic_output(tmp, &destination));
+            anyhow::ensure!(result.is_err(), "failed video process accepted");
+            anyhow::ensure!(!temporary_path.exists(), "partial output leaked");
+            anyhow::ensure!(!destination.exists(), "partial output promoted");
+            anyhow::ensure!(
+                std::fs::read(&source)? == b"original media",
+                "source changed"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_transcode_output_is_not_promoted_or_recorded() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("original.mp4");
+        std::fs::write(&source, vec![0; 16_384])?;
+        let destination = dir.path().join("converted.webm");
+        let pool = crate::db::init_test_pool()?;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
+        for name in [
+            "av1.webm",
+            "av1.mkv",
+            "av1.mp4",
+            "vp8.webm",
+            "video.mp4",
+            "audio.webm",
+        ] {
+            let tmp = tempfile::Builder::new()
+                .suffix(".webm")
+                .tempfile_in(dir.path())?;
+            let temporary_path = tmp.path().to_owned();
+            std::fs::copy(root.join(name), tmp.path())?;
+            let result = transcode_video_finalise(
+                1,
+                1,
+                "b/original.mp4",
+                &source,
+                &destination,
+                "b/converted.webm",
+                tmp,
+                &pool,
+            );
+            anyhow::ensure!(result.is_err(), "invalid output {name} accepted");
+            anyhow::ensure!(
+                !temporary_path.exists() && !destination.exists(),
+                "invalid output leaked"
+            );
+            let conn = pool.get()?;
+            anyhow::ensure!(
+                file_hash_count(&conn, "b/converted.webm") == 0,
+                "invalid output persisted"
+            );
+        }
+        Ok(())
     }
 
     #[test]

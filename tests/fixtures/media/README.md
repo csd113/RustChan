@@ -29,3 +29,12 @@ The `opus-surround-distinct.opus` fixture contains six generated sine waves at 2
 `speex-chained-multiplexed.spx` joins two complete multiplexed groups with four distinct serials and recomputed CRCs. Completed logical streams must not block the next chain’s grouped BOS pages.
 
 `speex-stereo.spx` is Debian FFmpeg 5.1.9/libspeex encoding of the synthetic stereo `tone.m4a`, resampled to 32 kHz (`-ar 32000 -ac 2 -c:a libspeex`). Together with mono `tone.spx`, it protects count-preserving mono/stereo layout negotiation before the legacy Debian waveform filter.
+
+`av1.webm`, `av1.mkv`, `av1.mp4`, and `vp8.webm` contain only a generated 64 × 64 test pattern at 5 fps for 0.4 seconds, without audio. They were generated with FFmpeg 9.0.2/SVT-AV1 4.2.0; the AV1 packet stream was remuxed unchanged to Matroska and MP4. Tests probe these checked-in bytes without needing an installed AV1 encoder. The optional real conversion test needs only an AV1 decoder and the established VP9/Opus output pipeline.
+
+```sh
+ffmpeg -f lavfi -i 'testsrc2=size=64x64:rate=5:duration=0.4' -c:v libsvtav1 -preset 12 -crf 35 -threads 2 -an -y av1.webm
+ffmpeg -i av1.webm -c copy -f matroska -y av1.mkv
+ffmpeg -i av1.webm -c copy -y av1.mp4
+ffmpeg -f lavfi -i 'testsrc2=size=64x64:rate=5:duration=0.4' -c:v libvpx -threads 2 -an -y vp8.webm
+```

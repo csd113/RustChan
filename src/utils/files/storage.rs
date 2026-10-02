@@ -49,8 +49,6 @@ pub struct SaveUploadOptions<'a> {
     pub max_pdf_size: usize,
     /// Whether the retained `FFmpeg` video backend is available.
     pub ffmpeg_available: bool,
-    /// Whether the installed `ffmpeg` supports WebP output.
-    pub ffmpeg_webp_available: bool,
     /// Whether otherwise-unrecognized files may be stored as downloads.
     pub allow_any_files: bool,
 }
@@ -312,6 +310,9 @@ fn build_upload_plan(
     original_size: usize,
     options: &SaveUploadOptions<'_>,
 ) -> Result<UploadPlan> {
+    let video_needs_conversion = validated.media_type != crate::models::MediaType::Video
+        || !options.ffmpeg_available
+        || crate::media::probe::inspect_video(&validated.input_path)?.needs_webm_conversion();
     let dest_dir = PathBuf::from(options.boards_dir).join(options.board_short);
     let thumbs_dir = dest_dir.join("thumbs");
     std::fs::create_dir_all(&dest_dir).context("Failed to create board directory")?;
@@ -323,8 +324,8 @@ fn build_upload_plan(
             .context("Upload thumbnail directory failed safety validation")?;
     }
     check_disk_space(&dest_dir, original_size)?;
-    let processing_pending = (validated.media_type == crate::models::MediaType::Audio
-        || options.ffmpeg_available)
+    let processing_pending = video_needs_conversion
+        && (validated.media_type == crate::models::MediaType::Audio || options.ffmpeg_available)
         && matches!(
             validated.media_type,
             crate::models::MediaType::Video | crate::models::MediaType::Audio
@@ -511,10 +512,7 @@ fn save_processed_upload(
     file_id: &str,
 ) -> Result<UploadedFile> {
     let processor_input = prepare_processor_input(input_path, &plan.dest_dir, &plan.mime_type)?;
-    let processor = crate::media::MediaProcessor::new_with_ffmpeg_caps(
-        options.ffmpeg_available,
-        options.ffmpeg_webp_available,
-    );
+    let processor = crate::media::MediaProcessor::new_with_ffmpeg(options.ffmpeg_available);
     let processed = processor
         .process_upload(
             processor_input.path(),
@@ -1240,9 +1238,39 @@ mod tests {
             max_audio_size: 1024 * 1024,
             max_pdf_size: 1024 * 1024,
             ffmpeg_available: false,
-            ffmpeg_webp_available: false,
             allow_any_files: false,
         })
+    }
+
+    #[test]
+    fn video_upload_plans_use_container_codec_policy_without_extension_assumptions() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
+        let input = dir.path().join("misleading.jpg");
+        for (name, mime, pending) in [
+            ("av1.webm", "video/webm", true),
+            ("av1.mkv", "video/x-matroska", true),
+            ("av1.mp4", "video/mp4", true),
+            ("vp8.webm", "video/webm", false),
+            ("video.webm", "video/webm", false),
+            ("video.mp4", "video/mp4", true),
+        ] {
+            let bytes = std::fs::read(root.join(name))?;
+            std::fs::write(&input, &bytes)?;
+            for ffmpeg in [true, false] {
+                let mut options = test_upload_options(dir.path(), "misleading.jpg")?;
+                options.ffmpeg_available = ffmpeg;
+                let validated =
+                    super::validate_upload_for_storage(&input, &bytes, bytes.len(), &options)?;
+                let plan = super::build_upload_plan(validated, bytes.len(), &options)?;
+                anyhow::ensure!(plan.mime_type == mime, "wrong MIME for {name}");
+                anyhow::ensure!(
+                    plan.processing_pending == (pending && ffmpeg),
+                    "wrong processing decision for {name}"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Creates upload options that permit arbitrary downloadable files.

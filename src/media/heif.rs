@@ -223,7 +223,6 @@ mod tests {
                 &thumbnail,
                 64,
                 false,
-                false,
             )?;
             let thumb = image::open(thumbnail)?;
             ensure!(

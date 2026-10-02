@@ -147,7 +147,7 @@ pub struct OperatorSnapshot {
     /// Queue capacity rejections since process startup.
     pub dropped: u64,
     /// `FFmpeg` capabilities detected at startup; None before first sample.
-    pub ffmpeg: Option<(bool, bool, bool)>,
+    pub ffmpeg: Option<(bool, bool)>,
     /// Maintenance currently holding the gate.
     pub maintenance: Option<String>,
     /// Effective runtime automatic-backup interval and retention count.
@@ -253,11 +253,7 @@ impl OperatorSnapshot {
     pub fn attach_runtime(&mut self, app: &AppState) {
         self.reconcile = crate::media::reconcile::metrics_snapshot();
         self.dropped = app.job_queue.dropped_count();
-        self.ffmpeg = Some((
-            app.ffmpeg_available,
-            app.ffmpeg_webp_available,
-            app.ffmpeg_vp9_available,
-        ));
+        self.ffmpeg = Some((app.ffmpeg_available, app.ffmpeg_vp9_available));
         self.maintenance = app
             .maintenance_gate
             .active_label()

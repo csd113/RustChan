@@ -219,7 +219,6 @@ fn static_formats_encode_to_decodable_metadata_free_webp() -> Result<()> {
             &thumbnail,
             6,
             false,
-            false,
         )?;
         ensure!(
             image::open(thumbnail)?.into_rgba8().dimensions() == (6, 3),
@@ -269,7 +268,7 @@ fn jpeg_exif_rotation_survives_conversion_and_thumbnailing_without_tools() -> Re
         "JPEG EXIF rotation was lost"
     );
     let thumbnail = dir.path().join("thumb.webp");
-    super::super::thumbnail::generate_thumbnail(&input, "image/jpeg", &thumbnail, 6, false, false)?;
+    super::super::thumbnail::generate_thumbnail(&input, "image/jpeg", &thumbnail, 6, false)?;
     ensure!(
         image::open(thumbnail)?.into_rgba8().dimensions() == (3, 6),
         "oriented thumbnail dimensions changed"
@@ -308,7 +307,7 @@ fn large_valid_image_and_truncated_formats_preserve_atomic_output() -> Result<()
     let pixels =
         DynamicImage::ImageRgba8(RgbaImage::from_pixel(4096, 2048, Rgba([42, 73, 101, 128])));
     pixels.save_with_format(&input, ImageFormat::Png)?;
-    super::super::thumbnail::generate_thumbnail(&input, "image/png", &output, 256, false, false)?;
+    super::super::thumbnail::generate_thumbnail(&input, "image/png", &output, 256, false)?;
     let image = decode_still(&output)?.into_rgba8();
     ensure!(
         image.dimensions() == (256, 128),

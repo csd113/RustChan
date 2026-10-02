@@ -80,7 +80,7 @@ pub(crate) fn app_state() -> crate::middleware::AppState {
         runtime_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         db: pool,
         ffmpeg_available: false,
-        ffmpeg_webp_available: false,
+        ffmpeg_av1: crate::media::ffmpeg::Av1Capabilities::default(),
         ffmpeg_vp9_available: false,
         ffmpeg_vp9_encoder_available: false,
         ffmpeg_opus_available: false,

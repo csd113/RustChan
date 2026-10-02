@@ -3,7 +3,7 @@
 use anyhow::{ensure, Context as _, Result};
 use image::{Rgba, RgbaImage};
 #[path = "audio_mp4.rs"]
-mod mp4;
+pub(super) mod mp4;
 #[path = "audio_opus.rs"]
 mod opus;
 use std::path::Path;

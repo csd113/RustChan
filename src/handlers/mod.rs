@@ -1274,7 +1274,6 @@ pub(crate) fn process_primary_upload(
     max_audio_size: usize,
     max_pdf_size: usize,
     ffmpeg_available: bool,
-    ffmpeg_webp_available: bool,
 ) -> Result<(Option<crate::utils::files::UploadedFile>, Option<String>)> {
     let Some((upload, fname)) = file_data else {
         return Ok((None, None));
@@ -1341,7 +1340,6 @@ pub(crate) fn process_primary_upload(
         max_audio_size,
         max_pdf_size,
         ffmpeg_available,
-        ffmpeg_webp_available,
         allow_any_files,
     };
     let validated = crate::utils::files::storage::validate_upload_for_storage(
@@ -1499,7 +1497,6 @@ pub(crate) fn process_audio_first_uploads(
     max_audio_size: usize,
     max_pdf_size: usize,
     ffmpeg_available: bool,
-    ffmpeg_webp_available: bool,
 ) -> Result<(
     Option<crate::utils::files::UploadedFile>,
     Option<crate::utils::files::UploadedFile>,
@@ -1521,7 +1518,6 @@ pub(crate) fn process_audio_first_uploads(
             max_audio_size,
             max_pdf_size,
             ffmpeg_available,
-            ffmpeg_webp_available,
         )
     };
 
@@ -2507,7 +2503,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             false,
-            false,
         );
 
         let Err(error) = result else {
@@ -2569,7 +2564,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
-            false,
             false,
         );
 
@@ -2636,7 +2630,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             false,
-            false,
         )
         .context("accept PDF upload")?;
         let uploaded = uploaded.context("PDF upload result was empty")?;
@@ -2676,7 +2669,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
-            false,
             false,
         );
 
@@ -2720,7 +2712,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             board.max_pdf_size_bytes(),
             false,
-            false,
         );
 
         let Err(error) = result else {
@@ -2758,7 +2749,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
-            false,
             false,
         );
 
@@ -2801,7 +2791,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
-            false,
             false,
         )
         .context("accept PDF upload")?;

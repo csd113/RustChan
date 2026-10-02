@@ -173,14 +173,24 @@ fn render_media_detection_cards(view: &AdminPanelViewModel<'_>) -> String {
             "video thumbnails and transcoding entrypoint",
         ),
         (
-            "WebP encoder",
-            view.maintenance.media_detection.webp_encoder.is_detected(),
-            "video frame thumbnails",
+            "WebP/images",
+            true,
+            "built in (Rust), including animated WebP",
         ),
         (
             "VP9/WebM pipeline",
             view.maintenance.media_detection.vp9_pipeline.is_detected(),
-            "MP4 to WebM transcoding with VP9 + Opus",
+            "video conversion to WebM with VP9 + Opus",
+        ),
+        (
+            "AV1 decoding",
+            view.maintenance.media_detection.av1_decoder.is_detected(),
+            "AV1 video inputs; independent of AV1 encoding",
+        ),
+        (
+            "AV1 encoding",
+            view.maintenance.media_detection.av1_encoder.is_detected(),
+            "installed build capability; RustChan output uses VP9 + Opus",
         ),
         (
             "PDF thumbnails",

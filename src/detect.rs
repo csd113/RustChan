@@ -22,13 +22,15 @@ pub struct WebmEncoderStatus {
     pub vp9: bool,
     /// Whether the `libopus` audio encoder is available.
     pub opus: bool,
+    /// Whether the `WebM` output muxer is available.
+    pub muxer: bool,
 }
 
 impl WebmEncoderStatus {
-    /// Returns whether both required `WebM` encoders are available.
+    /// Returns whether both selected encoders and the `WebM` muxer are available.
     #[must_use]
     pub const fn is_available(self) -> bool {
-        self.vp9 && self.opus
+        self.vp9 && self.opus && self.muxer
     }
 }
 
@@ -67,74 +69,10 @@ pub fn detect_ffmpeg(require_ffmpeg: bool) -> ToolStatus {
     }
 }
 
-/// Probe whether the detected ffmpeg has `libwebp` compiled in.
-pub fn detect_webp_encoder(ffmpeg_ok: bool) -> bool {
-    if !ffmpeg_ok {
-        return false;
-    }
-
-    let has_webp = crate::media::ffmpeg::check_webp_encoder();
-
-    if has_webp {
-        tracing::info!(
-            target: "rustchan::detect",
-            webp = true,
-            "ffmpeg libwebp encoder available — video-frame thumbnails enabled"
-        );
-    } else {
-        tracing::warn!(
-            target: "rustchan::detect",
-            webp = false,
-            "ffmpeg libwebp encoder missing — video-frame thumbnails use placeholders"
-        );
-        if crate::logging::is_tty() {
-            crate::logging::console_print_raw(&webp_install_hint());
-        }
-    }
-
-    has_webp
-}
-
 /// Reports the built-in pure-Rust PDF preview renderer.
 #[must_use]
 pub fn detect_pdf_thumbnail_renderers() -> Vec<crate::media::thumbnail::PdfRenderer> {
     crate::media::thumbnail::detect_pdf_renderers()
-}
-
-/// Builds the platform-specific `WebP` encoder installation hint.
-fn webp_install_hint() -> String {
-    let mut s = String::new();
-
-    #[cfg(target_os = "macos")]
-    {
-        s.push_str(
-            "  ── macOS: reinstall ffmpeg with libwebp ─────────────────────────────\n\
-             \n\
-             \x1b[2m  brew uninstall ffmpeg\n\
-             \x1b[2m  brew tap homebrew-ffmpeg/ffmpeg\n\
-             \x1b[2m  brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-webp\x1b[0m\n\n",
-        );
-    }
-    #[cfg(target_os = "linux")]
-    {
-        s.push_str(
-            "  ── Linux: install ffmpeg with libwebp ───────────────────────────────\n\
-             \n\
-             \x1b[2m  sudo apt update && sudo apt install ffmpeg libwebp-dev\x1b[0m\n\n",
-        );
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        s.push_str(
-            "  Reinstall ffmpeg with libwebp support. See: https://ffmpeg.org/download.html\n\n",
-        );
-    }
-
-    if !crate::logging::is_tty() {
-        // Strip any ANSI codes we added for TTY mode
-        s.retain(|c| c != '\x1b');
-    }
-    s
 }
 
 /// Probes an external tool using its conventional version argument.
@@ -175,14 +113,23 @@ pub fn detect_webm_encoder(ffmpeg_ok: bool) -> WebmEncoderStatus {
         return WebmEncoderStatus {
             vp9: false,
             opus: false,
+            muxer: false,
         };
     }
 
-    let has_vp9 = crate::media::ffmpeg::check_vp9_encoder();
-    let has_opus = crate::media::ffmpeg::check_opus_encoder();
+    let caps = crate::media::ffmpeg::video_capabilities();
+    tracing::info!(
+        target: "rustchan::detect",
+        av1_decoders = ?caps.av1.decoders,
+        av1_encoders = ?caps.av1.encoders,
+        "ffmpeg AV1 build capabilities; RustChan output policy remains VP9 + Opus"
+    );
+    let has_vp9 = caps.vp9;
+    let has_opus = caps.opus;
     let status = WebmEncoderStatus {
         vp9: has_vp9,
         opus: has_opus,
+        muxer: caps.webm_muxer,
     };
 
     if status.is_available() {
@@ -203,10 +150,15 @@ pub fn detect_webm_encoder(ffmpeg_ok: bool) -> WebmEncoderStatus {
             target: "rustchan::detect",
             vp9   = has_vp9,
             opus  = has_opus,
-            "ffmpeg VP9/Opus encoders missing — MP4 uploads stored as MP4"
+            webm_muxer = caps.webm_muxer,
+            "ffmpeg VP9/Opus encoders or WebM muxer missing — videos stored as uploaded"
         );
         if crate::logging::is_tty() {
-            crate::logging::console_print_raw(&webm_install_hint(has_vp9, has_opus));
+            crate::logging::console_print_raw(&webm_install_hint(
+                has_vp9,
+                has_opus,
+                caps.webm_muxer,
+            ));
         }
     }
 
@@ -214,13 +166,16 @@ pub fn detect_webm_encoder(ffmpeg_ok: bool) -> WebmEncoderStatus {
 }
 
 /// Builds a platform-specific installation hint for missing `WebM` encoders.
-fn webm_install_hint(has_vp9: bool, has_opus: bool) -> String {
+fn webm_install_hint(has_vp9: bool, has_opus: bool, has_muxer: bool) -> String {
     let mut s = String::new();
     if !has_vp9 {
         s.push_str("  Missing: libvpx-vp9 (VP9 video encoder)\n");
     }
     if !has_opus {
         s.push_str("  Missing: libopus   (Opus audio encoder)\n");
+    }
+    if !has_muxer {
+        s.push_str("  Missing: webm (WebM output muxer)\n");
     }
     s.push('\n');
 

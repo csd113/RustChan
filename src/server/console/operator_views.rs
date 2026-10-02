@@ -318,14 +318,14 @@ pub(super) fn render_system(
                 fmt_bytes(stats.mem_bytes)
             }
         ),
+        "WebP/images: built in (Rust), including animation".to_owned(),
         format!(
-            "FFmpeg: {}",
+            "FFmpeg video: {}",
             snapshot.ffmpeg.map_or_else(
                 || "Unknown · awaiting snapshot".to_owned(),
-                |(available, webp, vp9)| format!(
-                    "{} · WebP {} · WebM VP9/Opus {}",
+                |(available, vp9)| format!(
+                    "{} · WebM VP9/Opus {}",
                     availability(available),
-                    availability(webp),
                     availability(vp9)
                 )
             )

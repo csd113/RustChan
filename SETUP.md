@@ -145,34 +145,36 @@ require_ffmpeg = true
 
 ## Verify WebP and WebM Support
 
-RustChan checks more than just whether `ffmpeg` exists. It also checks whether your build includes:
+WebP images, GIF → animated WebP, and animated WebP validation are built into RustChan through Rust crates and remain available without FFmpeg. Video thumbnails use FFmpeg to extract a PNG frame and Rust to encode WebP.
 
-- `libwebp` for WebP image thumbnails and conversions
+For video/WebM conversion, RustChan checks the installed decoder, encoder and muxer lists independently:
+
 - `libvpx-vp9` for WebM video encoding
 - `libopus` for WebM audio encoding
+- the `webm` muxer for output
+- AV1 decoders for AV1 inputs (AV1 encoder availability is reported separately; output remains VP9 + Opus)
 
 Use these commands:
 
 ```bash
-ffmpeg -encoders | rg libwebp
 ffmpeg -encoders | rg libvpx-vp9
 ffmpeg -encoders | rg libopus
+ffmpeg -muxers | rg webm
+ffmpeg -decoders | rg av1
 ```
 
 If you do not have `rg`, use:
 
 ```bash
-ffmpeg -encoders | grep libwebp
 ffmpeg -encoders | grep libvpx-vp9
 ffmpeg -encoders | grep libopus
 ```
 
-You want all three to appear.
+WebM conversion needs both selected encoders and the WebM muxer. AV1 input also needs an AV1 decoder; an AV1 encoder is optional and is not selected for RustChan output.
 
 ### What Each Encoder Enables
 
-- `libwebp`: WebP thumbnail and image conversion support
-- `libvpx-vp9` + `libopus`: MP4 to WebM transcoding support
+- `libvpx-vp9` + `libopus`: MP4/Matroska and WebM/AV1 to VP9/Opus WebM conversion. Compatible VP8/VP9 WebM with Opus/Vorbis audio is preserved.
 
 ### Linux Notes
 
@@ -180,7 +182,7 @@ On Debian-family systems, the usual install is:
 
 ```bash
 sudo apt update
-sudo apt install -y ffmpeg libwebp-dev libvpx-dev libopus-dev
+sudo apt install -y ffmpeg libvpx-dev libopus-dev
 ```
 
 The important part is still the actual `ffmpeg -encoders` output. Package names alone do not guarantee your installed FFmpeg binary was built with every encoder enabled.
@@ -190,7 +192,7 @@ The important part is still the actual `ffmpeg -encoders` output. Package names 
 Most Homebrew FFmpeg installs are fine, but verify with:
 
 ```bash
-ffmpeg -encoders | rg 'libwebp|libvpx-vp9|libopus'
+ffmpeg -encoders | rg 'libvpx-vp9|libopus'
 ```
 
 If one is missing, reinstall FFmpeg from a build source that includes that codec set.
@@ -200,7 +202,6 @@ If one is missing, reinstall FFmpeg from a build source that includes that codec
 Use a full FFmpeg build rather than a minimal one, then verify with:
 
 ```powershell
-ffmpeg -encoders | Select-String libwebp
 ffmpeg -encoders | Select-String libvpx-vp9
 ffmpeg -encoders | Select-String libopus
 ```
@@ -209,8 +210,9 @@ ffmpeg -encoders | Select-String libopus
 
 RustChan will log warnings and continue:
 
-- missing `libwebp`: image thumbnails stay in original-friendly formats where needed
-- missing VP9 or Opus: MP4 uploads are stored as MP4 instead of transcoded to WebM
+- missing VP9, Opus or the WebM muxer: video uploads retain their originals
+- missing an AV1 decoder: AV1 conversion fails with a useful diagnostic and retains the original
+- missing FFmpeg: Rust-native still and animated WebP continue to work
 
 These warnings appear in the console at startup and in `rustchan-data/logs/`.
 
@@ -655,7 +657,7 @@ Run:
 
 ```bash
 ffmpeg -version
-ffmpeg -encoders | rg 'libwebp|libvpx-vp9|libopus'
+ffmpeg -encoders | rg 'libvpx-vp9|libopus'
 ```
 
 If one of those encoders is missing, RustChan will still run but some media features will be downgraded.

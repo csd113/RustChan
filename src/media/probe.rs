@@ -65,6 +65,174 @@ pub struct MediaInfo {
     pub audio_codec: Option<&'static str>,
 }
 
+/// Containers accepted by the `WebM` conversion policy, distinct from codecs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VideoContainer {
+    /// EBML with the `WebM` document type.
+    Webm,
+    /// EBML with the Matroska document type.
+    Matroska,
+    /// ISO base media container (including MP4).
+    Mp4,
+    /// Another container recognized by the Rust reader.
+    Other,
+}
+
+/// Video metadata used for conversion decisions and output validation.
+#[derive(Debug)]
+pub(crate) struct VideoInfo {
+    /// Container established from signatures and the actual format reader.
+    pub container: VideoContainer,
+    /// Video codecs in stream order; never inferred from filename or MIME.
+    pub codecs: Vec<&'static str>,
+    /// Audio codecs in stream order.
+    pub audio_codecs: Vec<&'static str>,
+    /// First video stream's coded dimensions.
+    pub dimensions: Option<(u16, u16)>,
+    /// Duration from the container timebase, when declared.
+    pub duration: Option<symphonia::core::units::Time>,
+}
+
+impl VideoInfo {
+    /// Preserve compatible VP8/VP9 `WebM`; AV1 follows the established VP9 policy.
+    pub(crate) fn needs_webm_conversion(&self) -> bool {
+        self.container != VideoContainer::Webm
+            || self.codecs.is_empty()
+            || !self
+                .codecs
+                .iter()
+                .all(|codec| matches!(*codec, "vp8" | "vp9"))
+            || !self
+                .audio_codecs
+                .iter()
+                .all(|codec| matches!(*codec, "opus" | "vorbis"))
+    }
+
+    /// Enforce the generated VP9/Opus `WebM` contract before promotion.
+    pub(crate) fn validate_webm_output(&self) -> Result<()> {
+        ensure!(
+            self.container == VideoContainer::Webm,
+            "output container is not WebM"
+        );
+        ensure!(
+            self.codecs.as_slice() == ["vp9"],
+            "output must contain one VP9 video stream"
+        );
+        ensure!(
+            self.audio_codecs.is_empty() || self.audio_codecs.as_slice() == ["opus"],
+            "output audio must be Opus"
+        );
+        let (width, height) = self.dimensions.context("output has no video dimensions")?;
+        ensure!(width > 0 && height > 0, "output has zero video dimensions");
+        ensure!(
+            u64::from(width) * u64::from(height) <= super::MAX_UNTRUSTED_IMAGE_PIXELS,
+            "output video dimensions exceed the media pixel budget"
+        );
+        if let Some(duration) = self.duration {
+            // Time::is_positive in Symphonia 0.6 checks whole seconds only.
+            ensure!(
+                duration > symphonia::core::units::Time::ZERO,
+                "output duration is not positive"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Inspect video tracks with the existing bounded Rust container reader.
+/// The header determines `WebM` versus Matroska; the parser determines codecs.
+pub(crate) fn inspect_video(path: &Path) -> Result<VideoInfo> {
+    use std::io::Read as _;
+    use symphonia::core::formats::well_known::{FORMAT_ID_ISOMP4, FORMAT_ID_MKV};
+    let format = open_format(path)?;
+    let mut header = Vec::with_capacity(512);
+    File::open(path)?.take(512).read_to_end(&mut header)?;
+    let container = match format.format_info().format {
+        FORMAT_ID_MKV => match crate::utils::files::video_container_mime(&header)? {
+            "video/webm" => VideoContainer::Webm,
+            "video/x-matroska" => VideoContainer::Matroska,
+            _ => anyhow::bail!("Matroska parser and header disagree"),
+        },
+        FORMAT_ID_ISOMP4 => VideoContainer::Mp4,
+        _ => VideoContainer::Other,
+    };
+    let mut codecs = Vec::new();
+    let mut audio_codecs = Vec::new();
+    let mut dimensions = None;
+    for track in format.tracks() {
+        match &track.codec_params {
+            Some(CodecParameters::Video(params)) => {
+                if codecs.is_empty() {
+                    dimensions = params.width.zip(params.height);
+                }
+                codecs.push(video_track_codec(
+                    path,
+                    track.id,
+                    params.codec,
+                    container == VideoContainer::Mp4,
+                )?);
+            }
+            Some(CodecParameters::Audio(params)) => {
+                audio_codecs.push(audio_codec_name(params.codec));
+            }
+            _ => {}
+        }
+    }
+    ensure!(!codecs.is_empty(), "container has no video stream");
+    let media = format.media_info();
+    let duration = media
+        .time_base
+        .zip(media.duration)
+        .map(|(base, duration)| {
+            base.calc_duration(duration)
+                .context("video duration overflow")
+        })
+        .transpose()?;
+    Ok(VideoInfo {
+        container,
+        codecs,
+        audio_codecs,
+        dimensions,
+        duration,
+    })
+}
+
+/// Scan generated packets to EOF with bounded reads; reject header-only output.
+fn validate_video_packets(path: &Path) -> Result<()> {
+    let (mut format, window) = open_bounded_format(
+        path,
+        Instant::now(),
+        Duration::from_secs(crate::config::ffmpeg_timeout_secs()),
+        None,
+    )?;
+    let track_id = format
+        .first_track(TrackType::Video)
+        .context("missing video stream")?
+        .id;
+    let mut has_video = false;
+    loop {
+        window.start_packet();
+        let Some(packet) = format.next_packet()? else {
+            break;
+        };
+        if packet.track_id == track_id {
+            ensure!(!packet.data.is_empty(), "empty video packet");
+            has_video = true;
+        }
+    }
+    ensure!(has_video, "output has no video packets");
+    Ok(())
+}
+
+/// Validate generated VP9/Opus `WebM` metadata and its bounded packet stream.
+///
+/// # Errors
+/// Returns an error for the wrong container, codec, geometry, duration or packets.
+pub fn validate_webm_output_file(path: &Path) -> Result<()> {
+    inspect_video(path)?.validate_webm_output()?;
+    validate_video_packets(path)
+}
+
 /// Bound parser work even while it is scanning headers before returning packets.
 struct ContainerSource {
     /// The validated regular file.
@@ -302,7 +470,15 @@ pub fn inspect(path: &Path) -> Result<MediaInfo> {
     for track in format.tracks() {
         match &track.codec_params {
             Some(CodecParameters::Video(params)) => {
-                video_codec.get_or_insert_with(|| video_codec_name(params.codec));
+                if video_codec.is_none() {
+                    video_codec = Some(video_track_codec(
+                        path,
+                        track.id,
+                        params.codec,
+                        format.format_info().format
+                            == symphonia::core::formats::well_known::FORMAT_ID_ISOMP4,
+                    )?);
+                }
             }
             Some(CodecParameters::Audio(params)) => {
                 audio_codec.get_or_insert_with(|| audio_codec_name(params.codec));
@@ -366,8 +542,39 @@ pub fn probe_audio_codec(path: &Path) -> Result<String> {
         .map(str::to_owned)
 }
 
+/// Supplement only missing MP4 codec declarations using the bounded box reader.
+fn video_track_codec(
+    path: &Path,
+    track_id: u32,
+    codec: video::VideoCodecId,
+    is_mp4: bool,
+) -> Result<&'static str> {
+    let name = video_codec_name(codec);
+    if name != "unknown" || !is_mp4 {
+        return Ok(name);
+    }
+    let started = Instant::now();
+    let timeout = Duration::from_secs(crate::config::ffmpeg_timeout_secs());
+    super::audio::mp4::declared_video_codec(path, track_id, || {
+        ensure!(
+            started.elapsed() < timeout,
+            "MP4 video codec inspection timed out"
+        );
+        Ok(())
+    })
+    .map(|codec| codec.unwrap_or("unknown"))
+}
+
 /// Normalize common video codec declarations used by the upload/transcode paths.
 const fn video_codec_name(codec: video::VideoCodecId) -> &'static str {
+    // Normalize opaque sample-entry FourCC IDs as well as well-known IDs.
+    // These fixed ASCII literals satisfy FourCc::new's documented invariant.
+    const MP4_AV1: video::VideoCodecId =
+        video::VideoCodecId::new(symphonia::core::common::FourCc::new(*b"av01"));
+    const MP4_VP8: video::VideoCodecId =
+        video::VideoCodecId::new(symphonia::core::common::FourCc::new(*b"vp08"));
+    const MP4_VP9: video::VideoCodecId =
+        video::VideoCodecId::new(symphonia::core::common::FourCc::new(*b"vp09"));
     use video::well_known::{
         CODEC_ID_AV1, CODEC_ID_H264, CODEC_ID_HEVC, CODEC_ID_MJPEG, CODEC_ID_MPEG4, CODEC_ID_VP8,
         CODEC_ID_VP9,
@@ -377,9 +584,9 @@ const fn video_codec_name(codec: video::VideoCodecId) -> &'static str {
         CODEC_ID_MPEG4 => "mpeg4",
         CODEC_ID_MJPEG => "mjpeg",
         CODEC_ID_HEVC => "hevc",
-        CODEC_ID_VP8 => "vp8",
-        CODEC_ID_VP9 => "vp9",
-        CODEC_ID_AV1 => "av1",
+        CODEC_ID_VP8 | MP4_VP8 => "vp8",
+        CODEC_ID_VP9 | MP4_VP9 => "vp9",
+        CODEC_ID_AV1 | MP4_AV1 => "av1",
         _ => "unknown",
     }
 }
@@ -419,6 +626,155 @@ mod tests {
     use super::*;
     use std::io::Read as _;
     use symphonia::core::io::ReadBytes as _;
+
+    #[test]
+    fn av1_vp8_vp9_detection_and_container_policy_use_stream_metadata() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
+        let dir = tempfile::tempdir()?;
+        let disguised = dir.path().join("misleading.jpg");
+        for (name, container, codec, convert) in [
+            ("av1.webm", VideoContainer::Webm, "av1", true),
+            ("av1.mkv", VideoContainer::Matroska, "av1", true),
+            ("av1.mp4", VideoContainer::Mp4, "av1", true),
+            ("vp8.webm", VideoContainer::Webm, "vp8", false),
+            ("video.webm", VideoContainer::Webm, "vp9", false),
+            ("video.mkv", VideoContainer::Matroska, "h264", true),
+            ("video.mp4", VideoContainer::Mp4, "h264", true),
+        ] {
+            std::fs::copy(root.join(name), &disguised)?;
+            let info = inspect_video(&disguised).with_context(|| format!("inspect {name}"))?;
+            ensure!(
+                info.container == container,
+                "wrong container for {name}: {info:?}"
+            );
+            ensure!(info.codecs == [codec], "wrong codec for {name}: {info:?}");
+            ensure!(
+                info.needs_webm_conversion() == convert,
+                "wrong policy for {name}"
+            );
+            ensure!(
+                inspect(&disguised)?.video_codec == Some(codec),
+                "legacy probe disagrees"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn webm_policy_checks_all_video_and_audio_tracks() {
+        let mut info = VideoInfo {
+            container: VideoContainer::Webm,
+            codecs: vec!["vp9"],
+            audio_codecs: vec!["opus", "vorbis"],
+            dimensions: Some((64, 64)),
+            duration: None,
+        };
+        assert!(!info.needs_webm_conversion());
+        for codec in ["av1", "h264", "unknown"] {
+            info.codecs = vec!["vp9", codec];
+            assert!(info.needs_webm_conversion());
+        }
+        info.codecs = vec!["vp9"];
+        info.audio_codecs.push("aac");
+        assert!(info.needs_webm_conversion());
+        info.audio_codecs.clear();
+        info.container = VideoContainer::Matroska;
+        assert!(info.needs_webm_conversion());
+    }
+
+    #[test]
+    fn generated_webm_validation_rejects_wrong_container_codec_geometry_and_duration() -> Result<()>
+    {
+        let mut info = VideoInfo {
+            container: VideoContainer::Webm,
+            codecs: vec!["vp9"],
+            audio_codecs: vec!["opus"],
+            dimensions: Some((64, 64)),
+            duration: Some(symphonia::core::units::Time::from_millis(400)),
+        };
+        info.validate_webm_output()?;
+        for container in [
+            VideoContainer::Matroska,
+            VideoContainer::Mp4,
+            VideoContainer::Other,
+        ] {
+            info.container = container;
+            ensure!(
+                info.validate_webm_output().is_err(),
+                "wrong container accepted"
+            );
+        }
+        info.container = VideoContainer::Webm;
+        for codecs in [vec![], vec!["vp8"], vec!["av1"], vec!["vp9", "vp9"]] {
+            info.codecs = codecs;
+            ensure!(
+                info.validate_webm_output().is_err(),
+                "wrong video streams accepted"
+            );
+        }
+        info.codecs = vec!["vp9"];
+        info.audio_codecs = vec!["aac"];
+        ensure!(info.validate_webm_output().is_err(), "wrong audio accepted");
+        info.audio_codecs.clear();
+        for dimensions in [
+            None,
+            Some((0, 64)),
+            Some((64, 0)),
+            Some((u16::MAX, u16::MAX)),
+        ] {
+            info.dimensions = dimensions;
+            ensure!(
+                info.validate_webm_output().is_err(),
+                "invalid geometry accepted"
+            );
+        }
+        info.dimensions = Some((64, 64));
+        for duration in [
+            symphonia::core::units::Time::ZERO,
+            symphonia::core::units::Time::from_millis(-1),
+        ] {
+            info.duration = Some(duration);
+            ensure!(
+                info.validate_webm_output().is_err(),
+                "invalid duration accepted"
+            );
+        }
+        info.duration = None;
+        info.validate_webm_output()?;
+        Ok(())
+    }
+
+    #[test]
+    fn generated_webm_file_validation_ignores_extension_and_rejects_invalid_files() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
+        let dir = tempfile::tempdir()?;
+        let output = dir.path().join("generated.webm");
+        for name in [
+            "av1.webm",
+            "av1.mkv",
+            "av1.mp4",
+            "vp8.webm",
+            "video.mkv",
+            "video.mp4",
+            "audio.webm",
+        ] {
+            std::fs::copy(root.join(name), &output)?;
+            ensure!(
+                validate_webm_output_file(&output).is_err(),
+                "invalid output {name} accepted"
+            );
+        }
+        for bytes in [b"".as_slice(), b"partial WebM", b"\x1a\x45\xdf\xa3\x01"] {
+            std::fs::write(&output, bytes)?;
+            ensure!(
+                validate_webm_output_file(&output).is_err(),
+                "partial output accepted"
+            );
+        }
+        std::fs::copy(root.join("video.webm"), &output)?;
+        validate_webm_output_file(&output)?;
+        Ok(())
+    }
 
     #[test]
     fn parser_exact_reads_obey_packet_budget_cancellation_and_deadline() -> Result<()> {

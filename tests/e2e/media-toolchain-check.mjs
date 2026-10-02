@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const REQUIRED_ENCODERS = ['libwebp', 'libvpx-vp9', 'libopus'];
+// FFmpeg extracts PNG frames; RustChan itself encodes their WebP thumbnails.
+const REQUIRED_ENCODERS = ['png', 'libvpx-vp9', 'libopus'];
 
 if (process.argv.includes('--self-test')) {
   runSelfTest();
@@ -13,19 +14,8 @@ if (process.argv.includes('--self-test')) {
 
 function runRealCheck() {
   const ffmpeg = process.env.RUSTCHAN_E2E_FFMPEG_PATH ?? 'ffmpeg';
-
-  const version = run(ffmpeg, ['-version']);
-  if (!version.ok) fail(`FFmpeg is required for npm run test:e2e:media but '${ffmpeg}' is not usable.\n${version.detail}`);
-
-  const encoders = run(ffmpeg, ['-hide_banner', '-encoders']);
-  if (!encoders.ok) fail(`Could not inspect FFmpeg encoders for '${ffmpeg}'.\n${encoders.detail}`);
-
-  const missing = REQUIRED_ENCODERS.filter((encoder) => !encoders.stdout.includes(encoder));
-  if (missing.length > 0) {
-    fail(`FFmpeg is missing required encoder support for the media E2E pass: ${missing.join(', ')}.`);
-  }
-
-
+  const errors = checkToolchain(ffmpeg);
+  if (errors.length > 0) fail(errors.join('\n'));
 }
 
 function runSelfTest() {
@@ -45,6 +35,11 @@ function runSelfTest() {
     fs.chmodSync(noCodecs, 0o755);
     const codecErrors = checkToolchain(noCodecs);
     assert(codecErrors.some((message) => message.includes('missing required encoder')), 'missing codecs should be visible');
+
+    const nativeWebp = path.join(temp, 'ffmpeg-video-only');
+    fs.writeFileSync(nativeWebp, '#!/bin/sh\nif [ "$1" = "-version" ]; then exit 0; fi\nif [ "$2" = "-muxers" ]; then printf " E webm WebM\\n"; exit 0; fi\nprintf " V..... png PNG\\n V..... libvpx-vp9 VP9\\n A..... libopus Opus\\n"\n');
+    fs.chmodSync(nativeWebp, 0o755);
+    assert(checkToolchain(nativeWebp).length === 0, 'video pass must not require an FFmpeg WebP encoder');
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
@@ -55,9 +50,14 @@ function checkToolchain(ffmpeg) {
   if (!run(ffmpeg, ['-version']).ok) errors.push(`FFmpeg '${ffmpeg}' is not usable.`);
   const encoders = run(ffmpeg, ['-hide_banner', '-encoders']);
   if (encoders.ok) {
-    const missing = REQUIRED_ENCODERS.filter((encoder) => !encoders.stdout.includes(encoder));
+    const names = encoders.stdout.split('\n').map((line) => line.trim().split(/\s+/)).filter(([flags, name]) => /^[VA][A-Z.]{5}$/.test(flags ?? '') && name !== '=').map(([, name]) => name);
+    const missing = REQUIRED_ENCODERS.filter((encoder) => !names.includes(encoder));
     if (missing.length > 0) errors.push(`FFmpeg is missing required encoder support: ${missing.join(', ')}.`);
+  } else {
+    errors.push(`Could not inspect FFmpeg encoders: ${encoders.detail}`);
   }
+  const muxers = run(ffmpeg, ['-hide_banner', '-muxers']);
+  if (!muxers.ok || !muxers.stdout.split('\n').some((line) => /^\s*E\s+webm\s/.test(line))) errors.push('FFmpeg is missing the WebM muxer.');
   return errors;
 }
 

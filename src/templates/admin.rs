@@ -364,8 +364,10 @@ pub struct AdminPanelSiteHealthView<'a> {
 pub struct AdminSiteHealthDependencySummary {
     /// `ffmpeg` detection state.
     pub ffmpeg: AdminDetectionStatus,
-    /// WebP encoder detection state.
-    pub webp: AdminDetectionStatus,
+    /// AV1 decoder availability; independent of encoding.
+    pub av1_decoder: AdminDetectionStatus,
+    /// AV1 encoder availability; output policy still uses VP9.
+    pub av1_encoder: AdminDetectionStatus,
     /// VP9 pipeline detection state.
     pub vp9: AdminDetectionStatus,
     /// Opus encoder detection state.
@@ -426,8 +428,10 @@ impl AdminDetectionStatus {
 pub struct AdminMediaDetectionView {
     /// `ffmpeg` detection state.
     pub ffmpeg: AdminDetectionStatus,
-    /// WebP encoder detection state.
-    pub webp_encoder: AdminDetectionStatus,
+    /// AV1 decoder availability; independent of encoding.
+    pub av1_decoder: AdminDetectionStatus,
+    /// AV1 encoder availability; output policy still uses VP9.
+    pub av1_encoder: AdminDetectionStatus,
     /// VP9 and Opus pipeline detection state.
     pub vp9_pipeline: AdminDetectionStatus,
     /// Selected PDF thumbnail executable, when available.
@@ -2262,7 +2266,9 @@ mod tests {
             tor_detail: "Set enable_tor_support = true in settings.toml, then restart RustChan.",
             dependency_summary: AdminSiteHealthDependencySummary {
                 ffmpeg: AdminDetectionStatus::Detected,
-                webp: AdminDetectionStatus::Detected,
+                av1_decoder: AdminDetectionStatus::Missing,
+                av1_encoder: AdminDetectionStatus::Missing,
+
                 vp9: AdminDetectionStatus::Detected,
                 opus: AdminDetectionStatus::Detected,
             },
@@ -2298,7 +2304,8 @@ mod tests {
             tor_detail: "Set enable_tor_support = true in settings.toml, then restart RustChan.",
             tor_state: AdminDashboardState::Disabled,
             dependency_status: "ready",
-            dependency_detail: "ffmpeg found; WebP found; VP9 found; Opus found.",
+            dependency_detail:
+                "WebP/images built in (Rust); ffmpeg video found; VP9 found; Opus found.",
             dependency_state: AdminDashboardState::Ok,
             job_status: "idle",
             job_detail: "Recently completed 0; backup job idle; restore jobs not available.",
@@ -2392,7 +2399,9 @@ mod tests {
                 media_max_active_content_size_bytes: 0,
                 media_detection: AdminMediaDetectionView {
                     ffmpeg: AdminDetectionStatus::Detected,
-                    webp_encoder: AdminDetectionStatus::Detected,
+                    av1_decoder: AdminDetectionStatus::Missing,
+                    av1_encoder: AdminDetectionStatus::Missing,
+
                     vp9_pipeline: AdminDetectionStatus::Detected,
                     pdf_thumbnail_renderer: Some("hayro (Rust)".to_owned()),
                 },
@@ -3138,7 +3147,9 @@ mod tests {
                 media_max_active_content_size_bytes: 0,
                 media_detection: AdminMediaDetectionView {
                     ffmpeg: AdminDetectionStatus::Missing,
-                    webp_encoder: AdminDetectionStatus::Missing,
+                    av1_decoder: AdminDetectionStatus::Missing,
+                    av1_encoder: AdminDetectionStatus::Missing,
+
                     vp9_pipeline: AdminDetectionStatus::Missing,
                     pdf_thumbnail_renderer: None,
                 },
@@ -3149,6 +3160,8 @@ mod tests {
         });
 
         assert!(html.contains("using built-in generic PDF placeholder thumbnail"));
+        assert!(html.contains("built in (Rust), including animated WebP"));
+        assert!(!html.contains("WebP encoder"));
         assert!(html.contains(r#"admin-detection-pill admin-detection-pill-missing">missing"#));
     }
 
@@ -3234,7 +3247,9 @@ mod tests {
                 media_max_active_content_size_bytes: 0,
                 media_detection: AdminMediaDetectionView {
                     ffmpeg: AdminDetectionStatus::Detected,
-                    webp_encoder: AdminDetectionStatus::Detected,
+                    av1_decoder: AdminDetectionStatus::Missing,
+                    av1_encoder: AdminDetectionStatus::Missing,
+
                     vp9_pipeline: AdminDetectionStatus::Detected,
                     pdf_thumbnail_renderer: None,
                 },
@@ -3318,7 +3333,9 @@ mod tests {
                 media_max_active_content_size_bytes: 0,
                 media_detection: AdminMediaDetectionView {
                     ffmpeg: AdminDetectionStatus::Detected,
-                    webp_encoder: AdminDetectionStatus::Detected,
+                    av1_decoder: AdminDetectionStatus::Missing,
+                    av1_encoder: AdminDetectionStatus::Missing,
+
                     vp9_pipeline: AdminDetectionStatus::Detected,
                     pdf_thumbnail_renderer: None,
                 },

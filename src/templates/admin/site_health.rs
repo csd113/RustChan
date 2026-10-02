@@ -211,9 +211,17 @@ fn render_dependency_summary(view: &AdminPanelViewModel<'_>) -> String {
     let mut rows = String::new();
     for (label, status) in [
         ("ffmpeg", dependencies.ffmpeg),
-        ("WebP support", dependencies.webp),
+        (
+            "WebP/images (built in, Rust)",
+            AdminDetectionStatus::Detected,
+        ),
         ("VP9 support", dependencies.vp9),
         ("Opus support", dependencies.opus),
+        ("AV1 decoding", dependencies.av1_decoder),
+        (
+            "AV1 encoding (output policy: VP9)",
+            dependencies.av1_encoder,
+        ),
     ] {
         append_health_row(&mut rows, label, detection_label(status));
     }

@@ -422,8 +422,9 @@ RUSTCHAN_E2E_FFMPEG_PATH=/path/to/ffmpeg \
 npm run test:e2e:media
 ```
 
-The video pass requires FFmpeg and the `libwebp`, `libvpx-vp9`, and
-`libopus` encoders. PDF previews use the built-in Rust renderer or SVG fallback.
+The video pass requires FFmpeg with PNG frame extraction, the `libvpx-vp9` and
+`libopus` encoders, and the WebM muxer. WebP encoding (including video previews)
+uses Rust and does not require an FFmpeg WebP encoder. PDF previews use the built-in Rust renderer or SVG fallback.
 Common audio waveforms, image conversion and metadata inspection also run in
 the default harness with FFmpeg unavailable.
 

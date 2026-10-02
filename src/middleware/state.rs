@@ -399,8 +399,8 @@ pub struct AppState {
     pub db: crate::db::DbPool,
     /// Whether the `FFmpeg` executable is available.
     pub ffmpeg_available: bool,
-    /// Whether `FFmpeg` supports `WebP` output.
-    pub ffmpeg_webp_available: bool,
+    /// Independent AV1 decoder and encoder capabilities.
+    pub ffmpeg_av1: crate::media::ffmpeg::Av1Capabilities,
     /// Whether `FFmpeg` supports `VP9` output.
     pub ffmpeg_vp9_available: bool,
     /// Whether a usable `VP9` encoder is available.

@@ -1,5 +1,8 @@
 # Public interface polish audit — 2026-09-30
 
+Current video pipeline note (2026-10-02): FFmpeg extracts PNG video frames; Rust encodes their WebP thumbnails. FFmpeg WebP encoder detection and installation requirements have been removed. WebM conversion retains VP9 + Opus with independent AV1 decoder/encoder diagnostics. Historical validation results below describe the implementation at the time of that audit.
+
+
 Scope: home, board indexes, catalog, threads, search, archives, preferences, media, and polls. Admin changes were excluded; shared behavior was checked with the maintained regression harness. ChanNet is already removed from this branch; no obsolete infrastructure was restored.
 
 The initial `interface-audit` working tree was clean. At the audit handoff, all changes were local and uncommitted. No dependencies, framework, route renames, deployment, or visual redesign were introduced.

@@ -49,7 +49,6 @@ pub(super) struct SubmitPostCommand {
     pub upload_dir: String,
     pub thumb_size: u32,
     pub ffmpeg_available: bool,
-    pub ffmpeg_webp_available: bool,
 }
 
 pub(super) struct SubmitPostResult {
@@ -93,7 +92,6 @@ struct UploadConfig<'a> {
     pub max_audio_size: usize,
     pub max_pdf_size: usize,
     pub ffmpeg_available: bool,
-    pub ffmpeg_webp_available: bool,
 }
 
 #[derive(Clone)]
@@ -420,7 +418,6 @@ fn process_uploads(
         config.max_audio_size,
         config.max_pdf_size,
         config.ffmpeg_available,
-        config.ffmpeg_webp_available,
     );
 
     let (mut primary, mut audio, primary_hash) = match processed {
@@ -530,7 +527,6 @@ pub(super) fn submit_post(
         upload_dir,
         thumb_size,
         ffmpeg_available,
-        ffmpeg_webp_available,
     } = command;
 
     let board = db::get_board_by_short(conn, &board_short)?
@@ -615,7 +611,6 @@ pub(super) fn submit_post(
             max_audio_size: effective_max_audio_size,
             max_pdf_size: effective_max_pdf_size,
             ffmpeg_available,
-            ffmpeg_webp_available,
         },
     )?;
     let deletion_token = resolve_deletion_token(&deletion_token);
@@ -917,7 +912,6 @@ mod tests {
             upload_dir: upload_dir.to_owned(),
             thumb_size: 250,
             ffmpeg_available: false,
-            ffmpeg_webp_available: false,
         }
     }
 
@@ -954,7 +948,6 @@ mod tests {
             upload_dir: upload_dir.to_owned(),
             thumb_size: 250,
             ffmpeg_available: false,
-            ffmpeg_webp_available: false,
         }
     }
 
@@ -987,7 +980,6 @@ mod tests {
             upload_dir: upload_dir.to_owned(),
             thumb_size: 250,
             ffmpeg_available: false,
-            ffmpeg_webp_available: false,
         }
     }
 
@@ -1504,7 +1496,6 @@ mod tests {
                 max_audio_size: 1024 * 1024,
                 max_pdf_size: 1024 * 1024,
                 ffmpeg_available: false,
-                ffmpeg_webp_available: false,
             },
         );
 
@@ -1917,7 +1908,6 @@ mod tests {
                 max_audio_size: 1024 * 1024,
                 max_pdf_size: 1024 * 1024,
                 ffmpeg_available: false,
-                ffmpeg_webp_available: false,
             },
         )
         .context("failed to process deduplicated upload")?;
@@ -2003,7 +1993,6 @@ mod tests {
                     max_audio_size: 1024 * 1024,
                     max_pdf_size: 1024 * 1024,
                     ffmpeg_available: false,
-                    ffmpeg_webp_available: false,
                 },
             )?;
 
