@@ -162,5 +162,24 @@ rustchan-e2e-*/
 /.cargo/credentials
 /.cargo/credentials.toml
 
-# Personal working instructions.
+# Local AI tooling: keep instructions, configuration, and sessions on this machine.
+# CI checks this block even if an ignored file is accidentally force-added.
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.agents/
+.codex/
+.claude/
+.cursor/
+.continue/
+.windsurf/
+.aider*
+/.mcp.json
+/mcp.json
+/.cursorrules
+/.windsurfrules
+/.github/copilot-instructions.md
+/.github/instructions/
+/.github/prompts/
 /rules.md
+# End local AI tooling.
