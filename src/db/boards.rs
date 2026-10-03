@@ -142,9 +142,13 @@ fn normalize_board_group_order(
 
     let mut update = conn.prepare_cached("UPDATE boards SET display_order = ?1 WHERE id = ?2")?;
     for (position, board_id) in ordered_ids.iter().enumerate() {
-        let display_order =
-            i64::try_from(position).context("board display_order index must fit in i64")? + 1;
-        update.execute(params![display_order, board_id])?;
+        let display_order = i64::try_from(position)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .context("board display_order index must fit in i64")?;
+        update
+            .execute(params![display_order, board_id])
+            .map(|_affected_rows| ())?;
     }
     Ok(())
 }
@@ -174,7 +178,8 @@ pub fn set_site_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> 
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![key, value],
     )
-    .context("Failed to upsert site setting")?;
+    .context("Failed to upsert site setting")
+    .map(|_affected_rows| ())?;
     Ok(())
 }
 
@@ -410,13 +415,11 @@ pub fn count_new_threads_for_boards(
         return Ok(HashMap::new());
     }
 
-    let values_sql = markers
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            let base = index * 3;
-            format!("(?{}, ?{}, ?{})", base + 1, base + 2, base + 3)
-        })
+    let parameter_count = markers
+        .len()
+        .checked_mul(3)
+        .context("board marker parameter count overflow")?;
+    let values_sql = std::iter::repeat_n("(?, ?, ?)", markers.len())
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
@@ -437,7 +440,7 @@ pub fn count_new_threads_for_boards(
          GROUP BY t.board_id"
     );
 
-    let mut params = Vec::with_capacity(markers.len() * 3);
+    let mut params = Vec::with_capacity(parameter_count);
     for marker in markers {
         params.push(rusqlite::types::Value::Integer(marker.board_id));
         params.push(rusqlite::types::Value::Integer(
@@ -456,7 +459,7 @@ pub fn count_new_threads_for_boards(
     let mut counts = HashMap::new();
     for row in rows {
         let (board_id, count) = row?;
-        counts.insert(board_id, count);
+        let _previous_value = counts.insert(board_id, count);
     }
     Ok(counts)
 }
@@ -486,13 +489,11 @@ pub fn count_new_replies_for_boards(
         return Ok(HashMap::new());
     }
 
-    let values_sql = markers
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            let base = index * 2;
-            format!("(?{}, ?{})", base + 1, base + 2)
-        })
+    let parameter_count = markers
+        .len()
+        .checked_mul(2)
+        .context("reply marker parameter count overflow")?;
+    let values_sql = std::iter::repeat_n("(?, ?)", markers.len())
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
@@ -506,7 +507,7 @@ pub fn count_new_replies_for_boards(
          GROUP BY t.board_id"
     );
 
-    let mut params = Vec::with_capacity(markers.len() * 2);
+    let mut params = Vec::with_capacity(parameter_count);
     for marker in markers {
         params.push(rusqlite::types::Value::Integer(marker.thread_id));
         params.push(rusqlite::types::Value::Integer(
@@ -523,7 +524,7 @@ pub fn count_new_replies_for_boards(
     for row in rows {
         let (board_id, count) = row?;
         if count > 0 {
-            counts.insert(board_id, count);
+            let _previous_value = counts.insert(board_id, count);
         }
     }
     Ok(counts)
@@ -657,7 +658,7 @@ pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Re
     let board_nsfw: bool = tx.query_row(
         "SELECT nsfw FROM boards WHERE id = ?1",
         params![id],
-        |row| row.get::<_, i32>(0).map(|value| value != 0),
+        |row| row.get::<_, i32>(0).map(|value| value != 0_i32),
     )?;
     let mut stmt = tx.prepare_cached(&format!(
         "SELECT id FROM boards WHERE nsfw = ?1 ORDER BY {BOARD_GROUP_ORDER_SQL}"
@@ -674,10 +675,10 @@ pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Re
 
     let swap_with = if move_up {
         index.checked_sub(1)
-    } else if index + 1 < ordered_ids.len() {
-        Some(index + 1)
     } else {
-        None
+        index
+            .checked_add(1)
+            .filter(|next| *next < ordered_ids.len())
     };
 
     let Some(target_index) = swap_with else {
@@ -690,9 +691,13 @@ pub fn move_board(conn: &mut rusqlite::Connection, id: i64, move_up: bool) -> Re
     {
         let mut update = tx.prepare_cached("UPDATE boards SET display_order = ?1 WHERE id = ?2")?;
         for (position, board_id) in ordered_ids.iter().enumerate() {
-            let display_order =
-                i64::try_from(position).context("board display_order index must fit in i64")? + 1;
-            update.execute(params![display_order, board_id])?;
+            let display_order = i64::try_from(position)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .context("board display_order index must fit in i64")?;
+            update
+                .execute(params![display_order, board_id])
+                .map(|_affected_rows| ())?;
         }
     }
     tx.commit()?;
@@ -752,7 +757,7 @@ pub fn update_board_settings(
     let current_nsfw: bool = tx.query_row(
         "SELECT nsfw FROM boards WHERE id = ?1",
         params![id],
-        |row| row.get::<_, i32>(0).map(|value| value != 0),
+        |row| row.get::<_, i32>(0).map(|value| value != 0_i32),
     )?;
 
     let affected = if current_nsfw == nsfw {
@@ -1169,14 +1174,16 @@ mod tests {
             "INSERT INTO boards (id, short_name, name, created_at)
              VALUES (1, 'test', 'Test', 1_700_000_000)",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         conn.execute(
             "INSERT INTO threads (id, board_id, subject, archived) VALUES
              (1, 1, 'visible one', 0),
              (2, 1, 'visible two', 0),
              (3, 1, 'archived', 1)",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
 
         let stats = get_all_boards_with_stats(&conn)?;
         let board_stats = stats
@@ -1230,11 +1237,13 @@ mod tests {
         conn.execute(
             "INSERT INTO boards (id, short_name, name) VALUES (1, 'test', 'Test')",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         conn.execute(
             "INSERT INTO threads (id, board_id, subject) VALUES (1, 1, 'test thread')",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
 
         conn.execute(
             "INSERT INTO posts (
@@ -1250,7 +1259,8 @@ mod tests {
              (4, 1, 1, 'text post', '<p>text</p>', 'tok4', 0,
               NULL, NULL, NULL, NULL, NULL)",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         conn.execute(
             "UPDATE posts
              SET audio_file_path = 'test/track.flac',
@@ -1259,7 +1269,8 @@ mod tests {
                  audio_mime_type = 'audio/flac'
              WHERE id = 2",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
 
         let stats = get_site_stats(&conn)?;
         assert_eq!(stats.total_posts, 4, "all posts should be counted");
@@ -1288,13 +1299,15 @@ mod tests {
         conn.execute(
             "INSERT INTO boards (id, short_name, name) VALUES (1, 'test', 'Test')",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         conn.execute(
             "INSERT INTO threads (id, board_id, subject, archived) VALUES
              (1, 1, 'live thread', 0),
              (2, 1, 'archived thread', 1)",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         conn.execute(
             "INSERT INTO posts (
                  id, thread_id, board_id, body, body_html, deletion_token, is_op,
@@ -1303,7 +1316,7 @@ mod tests {
              (1, 1, 1, 'live', '<p>live</p>', 'tok1', 0, 'live.webp', 'live.webp', 100),
              (2, 2, 1, 'archived', '<p>archived</p>', 'tok2', 0, 'archived.webp', 'archived.webp', 900)",
             [],
-        )?;
+        ).map(|_affected_rows| ())?;
 
         let stats = get_site_stats(&conn)?;
         assert_eq!(
@@ -1371,7 +1384,8 @@ mod tests {
             true,
             true,
             true,
-        )?;
+        )
+        .map(|_created_id| ())?;
 
         let board = get_board_by_short(&conn, "audio")?.context("audio board should exist")?;
         assert!(board.allow_images, "image uploads should be enabled");
@@ -1411,7 +1425,7 @@ mod tests {
         let pool = crate::db::init_test_pool()?;
         let conn = pool.get()?;
 
-        create_board(&conn, "fresh", "Fresh", "", false)?;
+        create_board(&conn, "fresh", "Fresh", "", false).map(|_created_id| ())?;
 
         let board = get_board_by_short(&conn, "fresh")?.context("fresh board should exist")?;
         assert_eq!(
@@ -1485,7 +1499,8 @@ mod tests {
         conn.execute(
             "INSERT INTO threads (id, board_id, subject) VALUES (1, ?1, 'delete me')",
             rusqlite::params![board_id],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         conn.execute(
             "INSERT INTO posts (
                  id, thread_id, board_id, body, body_html, deletion_token, is_op,
@@ -1494,7 +1509,8 @@ mod tests {
              (1, 1, ?1, 'body', '<p>body</p>', 'tok', 1,
               'gone/file.webp', 'file.webp', 4, 'gone/thumbs/file.webp')",
             rusqlite::params![board_id],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
 
         let deleted = delete_board(&conn, board_id)?;
         assert_eq!(

@@ -51,7 +51,7 @@ fn admin_login_fail_window_secs() -> u64 {
 /// Admin login CSRF scope used by this handler.
 const ADMIN_LOGIN_CSRF_SCOPE: &str = "admin-login";
 
-/// `ip_hash` → (`fail_count`, `window_start_secs`)
+/// `ip_hash` → (`fail_count`, `window_start_secs`).
 static ADMIN_LOGIN_FAILS: LazyLock<DashMap<String, (u32, u64)>> = LazyLock::new(DashMap::new);
 static LOGIN_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
 
@@ -123,7 +123,7 @@ pub(super) fn record_login_fail(ip_key: &str) -> u32 {
 }
 
 fn clear_login_fails(ip_key: &str) {
-    ADMIN_LOGIN_FAILS.remove(ip_key);
+    drop(ADMIN_LOGIN_FAILS.remove(ip_key));
 }
 
 /// Remove login-fail entries whose window has expired.
@@ -184,7 +184,7 @@ async fn render_admin_login_response(
         }
     })
     .await
-    .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
+    .map_err(|join_error| AppError::Internal(anyhow::anyhow!(join_error)))??;
     Ok((
         jar,
         Html(templates::admin_login_page(
@@ -346,12 +346,17 @@ pub(in crate::server) async fn admin_login(
             clear_login_fails(&ip_key);
             let session_id = new_session_id();
             let bootstrap_session_id = session_id.clone();
-            let expires_at = Utc::now().timestamp() + CONFIG.session_duration;
+            let expires_at = Utc::now()
+                .timestamp()
+                .checked_add(CONFIG.session_duration)
+                .ok_or_else(|| {
+                    AppError::Internal(anyhow::anyhow!("administrator session expiry overflows"))
+                })?;
             let sid_clone = session_id.clone();
             tokio::task::spawn_blocking({
-                let pool = state.db.clone();
+                let session_pool = state.db.clone();
                 move || -> Result<()> {
-                    let conn = pool.get()?;
+                    let conn = session_pool.get()?;
                     db::create_session(&conn, &sid_clone, admin_id, expires_at)?;
                     Ok(())
                 }
@@ -433,7 +438,6 @@ mod tests {
         routing::post,
         Router,
     };
-    use axum_extra::extract::cookie::{Cookie, CookieJar};
     use tower::ServiceExt as _;
 
     const TEST_CSRF_COOKIE: &str = "csrf123";
@@ -481,7 +485,9 @@ mod tests {
             .db
             .get()
             .context("get database connection for test board")?;
-        db::create_board(&conn, "test", "Test", "", false).context("create test board")?;
+        db::create_board(&conn, "test", "Test", "", false)
+            .context("create test board")
+            .map(|_completed_value| ())?;
         Ok(())
     }
 
@@ -492,8 +498,12 @@ mod tests {
             .context("get database connection for test administrator")?;
         let password_hash = crate::utils::crypto::hash_password("hunter2")
             .context("hash test administrator password")?;
-        db::create_admin(&conn, "admin", &password_hash).context("create test administrator")?;
-        db::create_board(&conn, "test", "Test", "", false).context("create test board")?;
+        db::create_admin(&conn, "admin", &password_hash)
+            .context("create test administrator")
+            .map(|_completed_value| ())?;
+        db::create_board(&conn, "test", "Test", "", false)
+            .context("create test board")
+            .map(|_completed_value| ())?;
         Ok(())
     }
 
@@ -542,39 +552,42 @@ mod tests {
     fn locked_after_exceeding_fail_limit() {
         let key = login_ip_key("test-lock-unique-99887766");
         // Clean up any residue from a previous run
-        ADMIN_LOGIN_FAILS.remove(&key);
+        drop(ADMIN_LOGIN_FAILS.remove(&key));
 
         let now = login_now_secs();
-        ADMIN_LOGIN_FAILS.insert(key.clone(), (admin_login_fail_limit(), now));
+        let _previous_failure_window =
+            ADMIN_LOGIN_FAILS.insert(key.clone(), (admin_login_fail_limit(), now));
         assert!(is_login_locked(&key));
 
         // Cleanup
-        ADMIN_LOGIN_FAILS.remove(&key);
+        drop(ADMIN_LOGIN_FAILS.remove(&key));
     }
 
     #[test]
     fn not_locked_below_fail_limit() {
         let key = login_ip_key("test-below-limit-11223344");
-        ADMIN_LOGIN_FAILS.remove(&key);
+        drop(ADMIN_LOGIN_FAILS.remove(&key));
 
         let now = login_now_secs();
-        ADMIN_LOGIN_FAILS.insert(key.clone(), (admin_login_fail_limit() - 1, now));
+        let _previous_failure_window =
+            ADMIN_LOGIN_FAILS.insert(key.clone(), (admin_login_fail_limit() - 1, now));
         assert!(!is_login_locked(&key));
 
-        ADMIN_LOGIN_FAILS.remove(&key);
+        drop(ADMIN_LOGIN_FAILS.remove(&key));
     }
 
     #[test]
     fn expired_window_is_not_locked() {
         let key = login_ip_key("test-expired-window-55667788");
-        ADMIN_LOGIN_FAILS.remove(&key);
+        drop(ADMIN_LOGIN_FAILS.remove(&key));
 
         // window_start far in the past, beyond admin_login_fail_window_secs()
         let old_ts = login_now_secs().saturating_sub(admin_login_fail_window_secs() + 60);
-        ADMIN_LOGIN_FAILS.insert(key.clone(), (admin_login_fail_limit() + 10, old_ts));
+        let _previous_failure_window =
+            ADMIN_LOGIN_FAILS.insert(key.clone(), (admin_login_fail_limit() + 10, old_ts));
         assert!(!is_login_locked(&key));
 
-        ADMIN_LOGIN_FAILS.remove(&key);
+        drop(ADMIN_LOGIN_FAILS.remove(&key));
     }
 
     #[tokio::test]
@@ -583,8 +596,9 @@ mod tests {
         create_test_board(&state)?;
 
         let ip_key = login_ip_key("192.0.2.44");
-        ADMIN_LOGIN_FAILS.remove(&ip_key);
-        ADMIN_LOGIN_FAILS.insert(ip_key.clone(), (admin_login_fail_limit(), login_now_secs()));
+        drop(ADMIN_LOGIN_FAILS.remove(&ip_key));
+        let _previous_failure_window =
+            ADMIN_LOGIN_FAILS.insert(ip_key.clone(), (admin_login_fail_limit(), login_now_secs()));
 
         let router = Router::new()
             .route("/admin/login", post(admin_login))
@@ -594,18 +608,15 @@ mod tests {
             "username=admin&password=wrong&_csrf={}",
             signed_admin_csrf()
         ))?;
-        request
-            .extensions_mut()
-            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
-                [192, 0, 2, 44],
-                41000,
-            ))));
+        let _previous_peer = request.extensions_mut().insert(axum::extract::ConnectInfo(
+            std::net::SocketAddr::from(([192, 0, 2, 44], 41000)),
+        ));
         let response = router
             .oneshot(request)
             .await
             .context("send locked-out admin login request")?;
 
-        ADMIN_LOGIN_FAILS.remove(&ip_key);
+        drop(ADMIN_LOGIN_FAILS.remove(&ip_key));
 
         anyhow::ensure!(
             response.status() == StatusCode::OK,
@@ -636,7 +647,7 @@ mod tests {
             "username=admin&password=hunter2&_csrf={}",
             signed_admin_csrf()
         ))?;
-        request
+        let _previous_transport = request
             .extensions_mut()
             .insert(crate::middleware::RequestTransport { direct_https: true });
         let response = router

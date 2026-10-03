@@ -58,6 +58,7 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
   </form>
 </div>
 
+<!-- settings-restart -->
 {settings_search}
 <div class="admin-panel-workspace">
 {section_index}

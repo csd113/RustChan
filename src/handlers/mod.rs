@@ -31,6 +31,15 @@ use std::collections::HashSet;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt as _;
 
+/// Classify enhanced requests; authentication and CSRF checks remain independent.
+#[must_use]
+pub(crate) fn is_xml_http_request(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-requested-with")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("XMLHttpRequest"))
+}
+
 /// MIME sniff bytes used by this handler.
 const MIME_SNIFF_BYTES: usize = 512;
 /// Text multipart field max bytes used by this handler.
@@ -606,7 +615,10 @@ async fn discard_rejected_upload_field(
     budget: &mut PublicMultipartBudget,
     initial_excess_bytes: usize,
 ) -> bool {
-    let deadline = tokio::time::Instant::now() + REJECTED_UPLOAD_DISCARD_TIMEOUT;
+    let Some(deadline) = tokio::time::Instant::now().checked_add(REJECTED_UPLOAD_DISCARD_TIMEOUT)
+    else {
+        return false;
+    };
     budget.rejected_upload = Some(RejectedUploadRecovery {
         bytes_seen: initial_excess_bytes,
         deadline,
@@ -740,7 +752,7 @@ async fn read_upload_field(
     let submitted_filename = field.file_name().map(str::to_owned);
     let fname = submitted_filename
         .as_deref()
-        .filter(|name| !name.is_empty())
+        .filter(|filename| !filename.is_empty())
         .unwrap_or(default_name)
         .to_owned();
     let upload = stream_field_to_temp_file(
@@ -755,7 +767,7 @@ async fn read_upload_field(
     if upload.size_bytes == 0 {
         if submitted_filename
             .as_deref()
-            .is_some_and(|name| !name.is_empty())
+            .is_some_and(|filename| !filename.is_empty())
         {
             return Err(AppError::BadRequest("Uploaded file is empty.".into()));
         }
@@ -789,7 +801,7 @@ pub(crate) struct PostFormData {
     // Poll fields are used only when creating a new thread.
     pub poll_question: String,
     pub poll_options: Vec<String>,
-    /// Duration in seconds (parsed from value + unit)
+    /// Duration in seconds (parsed from value + unit).
     pub poll_duration_secs: Option<i64>,
     /// Sage — when true the reply must not bump the thread.
     pub sage: bool,
@@ -823,7 +835,7 @@ pub(crate) fn native_post_error_response(
         false,
         "/",
     );
-    response
+    let _previous_value = response
         .extensions_mut()
         .insert(crate::error::ErrorPage::Content {
             title: "Posting error".into(),
@@ -928,7 +940,9 @@ async fn recover_rejected_post_tail(
                     capture_post_draft(&name, &value, draft)?;
                 }
                 "file" | "audio_file" | "image_file" => {
-                    draft.had_attachments |= field.file_name().is_some_and(|name| !name.is_empty());
+                    draft.had_attachments |= field
+                        .file_name()
+                        .is_some_and(|filename| !filename.is_empty());
                     loop {
                         let next_chunk = field.chunk().await.map_err(|error| {
                             multipart_read_error("rejected upload tail", &error)
@@ -1100,7 +1114,9 @@ pub(crate) async fn parse_post_multipart(
                         "Duplicate upload field 'file'.".into(),
                     ));
                 }
-                draft.had_attachments |= field.file_name().is_some_and(|name| !name.is_empty());
+                draft.had_attachments |= field
+                    .file_name()
+                    .is_some_and(|filename| !filename.is_empty());
                 let upload_result = read_upload_field(
                     field,
                     max_image_size
@@ -1125,7 +1141,9 @@ pub(crate) async fn parse_post_multipart(
                         "Duplicate upload field 'audio_file'.".into(),
                     ));
                 }
-                draft.had_attachments |= field.file_name().is_some_and(|name| !name.is_empty());
+                draft.had_attachments |= field
+                    .file_name()
+                    .is_some_and(|filename| !filename.is_empty());
                 let upload_result = read_upload_field(
                     field,
                     max_audio_size,
@@ -1147,7 +1165,9 @@ pub(crate) async fn parse_post_multipart(
                         "Duplicate upload field 'image_file'.".into(),
                     ));
                 }
-                draft.had_attachments |= field.file_name().is_some_and(|name| !name.is_empty());
+                draft.had_attachments |= field
+                    .file_name()
+                    .is_some_and(|filename| !filename.is_empty());
                 let upload_result = read_upload_field(
                     field,
                     max_image_size,
@@ -1221,7 +1241,7 @@ pub(crate) async fn parse_post_multipart(
 ///   • "Insufficient disk space" → 413 `UploadTooLarge`
 ///   • "File type not allowed"   → 415 `InvalidMediaType`
 ///   • "Not an audio file"       → 415 `InvalidMediaType`
-///   • anything else             → 400 `BadRequest`
+///   • anything else             → 400 `BadRequest`.
 pub(crate) fn classify_upload_error(e: &anyhow::Error) -> AppError {
     let msg = e.to_string();
     // Compare lower-cased so minor wording changes in save_upload don't silently
@@ -1265,7 +1285,7 @@ use crate::models::Board;
 pub(crate) fn process_primary_upload(
     file_data: Option<(TempUpload, String)>,
     board: &Board,
-    conn: &rusqlite::Connection,
+    mut lookup: impl FnMut(&str) -> Result<Option<crate::db::CachedFile>>,
     upload_dir: &str,
     save_root: &str,
     thumb_size: u32,
@@ -1274,8 +1294,6 @@ pub(crate) fn process_primary_upload(
     max_audio_size: usize,
     max_pdf_size: usize,
     ffmpeg_available: bool,
-    ffprobe_available: bool,
-    ffmpeg_webp_available: bool,
 ) -> Result<(Option<crate::utils::files::UploadedFile>, Option<String>)> {
     let Some((upload, fname)) = file_data else {
         return Ok((None, None));
@@ -1285,7 +1303,6 @@ pub(crate) fn process_primary_upload(
     let detected_mime = crate::utils::files::classify_upload_mime(
         upload.temp_file.path(),
         &upload.sniff_bytes,
-        ffprobe_available,
         allow_any_files,
     )
     .map_err(|error| classify_upload_error(&error))?;
@@ -1343,8 +1360,6 @@ pub(crate) fn process_primary_upload(
         max_audio_size,
         max_pdf_size,
         ffmpeg_available,
-        ffprobe_available,
-        ffmpeg_webp_available,
         allow_any_files,
     };
     let validated = crate::utils::files::storage::validate_upload_for_storage(
@@ -1368,7 +1383,7 @@ pub(crate) fn process_primary_upload(
     // record_file_hash uses INSERT OR REPLACE, so the cache entry is
     // automatically refreshed to point at the newly saved files.
     let hash = sha256_file_hex(upload.temp_file.path())?;
-    if let Some(cached) = crate::db::find_file_by_hash(conn, &hash)? {
+    if let Some(cached) = lookup(&hash)? {
         let same_board_cache = cached_paths_belong_to_board(&cached, &board.short_name);
         let file_ok = std::path::Path::new(upload_dir)
             .join(&cached.file_path)
@@ -1426,15 +1441,10 @@ fn upload_path_belongs_to_board(path: &str, board_short: &str) -> bool {
     path.split('/').next() == Some(board_short)
 }
 
-fn temp_upload_mime(
-    upload: &TempUpload,
-    ffprobe_available: bool,
-    allow_any_files: bool,
-) -> Result<String> {
+fn temp_upload_mime(upload: &TempUpload, allow_any_files: bool) -> Result<String> {
     crate::utils::files::classify_upload_mime(
         upload.temp_file.path(),
         &upload.sniff_bytes,
-        ffprobe_available,
         allow_any_files,
     )
     .map_err(|error| classify_upload_error(&error))
@@ -1451,7 +1461,6 @@ pub(crate) fn process_audio_combo(
     board: &Board,
     upload_dir: &str,
     max_audio_size: usize,
-    ffprobe_available: bool,
 ) -> Result<Option<crate::utils::files::UploadedFile>> {
     let Some((audio_upload, aud_fname)) = audio_file_data else {
         return Ok(None);
@@ -1480,7 +1489,6 @@ pub(crate) fn process_audio_combo(
         upload_dir,
         &board.short_name,
         max_audio_size,
-        ffprobe_available,
     )
     .map_err(|e| classify_upload_error(&e))?;
 
@@ -1500,7 +1508,7 @@ pub(crate) fn process_audio_first_uploads(
     image_file_data: Option<(TempUpload, String)>,
     fallback_file_data: Option<(TempUpload, String)>,
     board: &Board,
-    conn: &rusqlite::Connection,
+    mut lookup: impl FnMut(&str) -> Result<Option<crate::db::CachedFile>>,
     upload_dir: &str,
     save_root_str: &str,
     thumb_size: u32,
@@ -1509,8 +1517,6 @@ pub(crate) fn process_audio_first_uploads(
     max_audio_size: usize,
     max_pdf_size: usize,
     ffmpeg_available: bool,
-    ffprobe_available: bool,
-    ffmpeg_webp_available: bool,
 ) -> Result<(
     Option<crate::utils::files::UploadedFile>,
     Option<crate::utils::files::UploadedFile>,
@@ -1519,11 +1525,11 @@ pub(crate) fn process_audio_first_uploads(
     let allow_any_files =
         crate::config::CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
     let has_audio_or_image_upload = audio_file_data.is_some() || image_file_data.is_some();
-    let save_primary = |file_data| {
+    let mut save_primary = |file_data| {
         process_primary_upload(
             file_data,
             board,
-            conn,
+            &mut lookup,
             upload_dir,
             save_root_str,
             thumb_size,
@@ -1532,8 +1538,6 @@ pub(crate) fn process_audio_first_uploads(
             max_audio_size,
             max_pdf_size,
             ffmpeg_available,
-            ffprobe_available,
-            ffmpeg_webp_available,
         )
     };
 
@@ -1553,14 +1557,13 @@ pub(crate) fn process_audio_first_uploads(
             board,
             save_root_str,
             max_audio_size,
-            ffprobe_available,
         )?;
 
         return Ok((primary, audio, primary_hash));
     }
 
     if let Some((audio_upload, audio_name)) = audio_file_data {
-        let audio_mime = temp_upload_mime(&audio_upload, ffprobe_available, allow_any_files)?;
+        let audio_mime = temp_upload_mime(&audio_upload, allow_any_files)?;
         if crate::models::MediaType::from_mime(&audio_mime) != crate::models::MediaType::Audio {
             return Err(AppError::BadRequest(
                 "The audio slot only accepts audio files.".into(),
@@ -1600,7 +1603,7 @@ fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
 /// post.  Shared by `create_thread` and `post_reply`.
 pub(crate) fn enqueue_post_jobs(
     job_queue: &JobQueue,
-    conn: &rusqlite::Connection,
+    pool: &crate::db::DbPool,
     post_id: i64,
     ip_hash: &str,
     body_len: usize,
@@ -1626,7 +1629,9 @@ pub(crate) fn enqueue_post_jobs(
                 | crate::models::MediaType::Other => None,
             };
             if let Some(j) = job {
-                match job_queue.enqueue_media(conn, &j) {
+                let conn = pool.get()?;
+                let enqueued = job_queue.enqueue_media(&conn, &j);
+                match enqueued {
                     Ok(crate::workers::EnqueueOutcome::Enqueued(job_id)) => tracing::debug!(
                         target: "workers",
                         post_id,
@@ -1683,6 +1688,7 @@ mod tests {
         parse_post_multipart, process_audio_first_uploads, MultipartEnvelopeScanner, TempUpload,
         PUBLIC_MULTIPART_ENVELOPE_LIMIT_MARKER, PUBLIC_MULTIPART_ENVELOPE_MAX_BYTES,
     };
+    use crate::test_support::valid_pdf;
     use anyhow::{bail, ensure, Context as _};
     use axum::{
         body::Body,
@@ -1717,19 +1723,6 @@ mod tests {
             },
             name.to_owned(),
         ))
-    }
-
-    fn valid_pdf() -> &'static [u8] {
-        b"%PDF-1.4
-1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
-2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
-3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents 4 0 R >> endobj
-4 0 obj << /Length 0 >> stream
-
-endstream endobj
-trailer << /Root 1 0 R >>
-%%EOF
-"
     }
 
     async fn multipart_from_bytes(
@@ -1788,19 +1781,23 @@ trailer << /Root 1 0 R >>
         );
         ensure!(budget.bytes_seen == 2048);
 
-        let (boundary, body) =
+        let (response_boundary, resolved_body) =
             multipart_body_with_files(&[], &[("file", "oversized.png", &[1; 2048], "image/png")]);
-        let mut multipart = multipart_from_bytes(&boundary, body).await?;
-        let mut field = multipart
+        let mut resolved_multipart =
+            multipart_from_bytes(&response_boundary, resolved_body).await?;
+        let mut resolved_field = resolved_multipart
             .next_field()
             .await?
             .context("missing upload field")?;
-        let mut budget = super::PublicMultipartBudget {
+        let mut resolved_budget = super::PublicMultipartBudget {
             fields_seen: 0,
             bytes_seen: super::PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES,
             ..super::PublicMultipartBudget::default()
         };
-        ensure!(!super::discard_rejected_upload_field(&mut field, &mut budget, 0).await);
+        ensure!(
+            !super::discard_rejected_upload_field(&mut resolved_field, &mut resolved_budget, 0)
+                .await
+        );
         Ok(())
     }
 
@@ -2067,7 +2064,8 @@ trailer << /Root 1 0 R >>
             )",
             [],
         )
-        .context("create file_hashes table")?;
+        .context("create file_hashes table")
+        .map(|_completed_value| ())?;
         Ok(())
     }
 
@@ -2117,7 +2115,8 @@ trailer << /Root 1 0 R >>
                 draft: &mut crate::templates::forms::PostFormState::default(),
             },
         )
-        .await?;
+        .await
+        .map(|_completed_value| ())?;
         Ok("ok")
     }
 
@@ -2209,7 +2208,8 @@ trailer << /Root 1 0 R >>
                 draft: &mut crate::templates::forms::PostFormState::default(),
             },
         )
-        .await?;
+        .await
+        .map(|_completed_value| ())?;
         Ok("ok")
     }
 
@@ -2426,26 +2426,26 @@ trailer << /Root 1 0 R >>
         ensure!(response.status() == StatusCode::OK);
 
         let over_pdf = vec![b'p'; 2_049];
-        let (boundary, body) = multipart_body_with_files(
+        let (response_boundary, resolved_body) = multipart_body_with_files(
             &[("_csrf", "csrf123"), ("body", "pdf")],
             &[("file", "over.pdf", &over_pdf, "application/pdf")],
         );
-        let response = router
+        let resolved_response = router
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/parse")
                     .header(
                         header::CONTENT_TYPE,
-                        format!("multipart/form-data; boundary={boundary}"),
+                        format!("multipart/form-data; boundary={response_boundary}"),
                     )
-                    .body(Body::from(body))
+                    .body(Body::from(resolved_body))
                     .context("build over-limit PDF multipart request")?,
             )
             .await
             .context("receive over-limit PDF multipart response")?;
 
-        ensure!(response.status() == StatusCode::PAYLOAD_TOO_LARGE);
+        ensure!(resolved_response.status() == StatusCode::PAYLOAD_TOO_LARGE);
         Ok(())
     }
 
@@ -2484,9 +2484,9 @@ trailer << /Root 1 0 R >>
         }
         ensure!(budget.note_field().is_err());
 
-        let mut budget = super::PublicMultipartBudget::default();
-        budget.note_chunk(super::PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES)?;
-        ensure!(budget.note_chunk(1).is_err());
+        let mut resolved_budget = super::PublicMultipartBudget::default();
+        resolved_budget.note_chunk(super::PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES)?;
+        ensure!(resolved_budget.note_chunk(1).is_err());
         Ok(())
     }
 
@@ -2505,7 +2505,7 @@ trailer << /Root 1 0 R >>
             None,
             Some(other),
             &board,
-            &conn,
+            |candidate_hash| Ok(crate::db::find_file_by_hash(&conn, candidate_hash)?),
             boards_dir
                 .path()
                 .to_str()
@@ -2519,8 +2519,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
-            false,
-            false,
             false,
         );
 
@@ -2569,7 +2567,7 @@ trailer << /Root 1 0 R >>
         let result = super::process_primary_upload(
             Some(upload),
             &board,
-            &conn,
+            |candidate_hash| Ok(crate::db::find_file_by_hash(&conn, candidate_hash)?),
             uploads_dir
                 .path()
                 .to_str()
@@ -2583,8 +2581,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
-            false,
-            false,
             false,
         );
 
@@ -2636,7 +2632,7 @@ trailer << /Root 1 0 R >>
         let (uploaded, primary_hash) = super::process_primary_upload(
             Some(temp_upload("doc.pdf", pdf)?),
             &board,
-            &conn,
+            |candidate_hash| Ok(crate::db::find_file_by_hash(&conn, candidate_hash)?),
             uploads_dir
                 .path()
                 .to_str()
@@ -2650,8 +2646,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
-            false,
-            false,
             false,
         )
         .context("accept PDF upload")?;
@@ -2678,7 +2672,7 @@ trailer << /Root 1 0 R >>
         let result = super::process_primary_upload(
             Some(temp_upload("doc.pdf", valid_pdf())?),
             &board,
-            &conn,
+            |candidate_hash| Ok(crate::db::find_file_by_hash(&conn, candidate_hash)?),
             uploads_dir
                 .path()
                 .to_str()
@@ -2692,8 +2686,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
-            false,
-            false,
             false,
         );
 
@@ -2722,7 +2714,7 @@ trailer << /Root 1 0 R >>
         let result = super::process_primary_upload(
             Some(temp_upload("doc.pdf", valid_pdf())?),
             &board,
-            &conn,
+            |candidate_hash| Ok(crate::db::find_file_by_hash(&conn, candidate_hash)?),
             uploads_dir
                 .path()
                 .to_str()
@@ -2736,8 +2728,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             board.max_pdf_size_bytes(),
-            false,
-            false,
             false,
         );
 
@@ -2762,7 +2752,7 @@ trailer << /Root 1 0 R >>
         let result = super::process_primary_upload(
             Some(temp_upload("not-really.pdf", b"plain text")?),
             &board,
-            &conn,
+            |candidate_hash| Ok(crate::db::find_file_by_hash(&conn, candidate_hash)?),
             uploads_dir
                 .path()
                 .to_str()
@@ -2776,8 +2766,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
-            false,
-            false,
             false,
         );
 
@@ -2806,7 +2794,7 @@ trailer << /Root 1 0 R >>
         let (uploaded, _) = super::process_primary_upload(
             Some(temp_upload("doc.pdf", valid_pdf())?),
             &board,
-            &conn,
+            |candidate_hash| Ok(crate::db::find_file_by_hash(&conn, candidate_hash)?),
             uploads_dir
                 .path()
                 .to_str()
@@ -2820,8 +2808,6 @@ trailer << /Root 1 0 R >>
             1024 * 1024,
             1024 * 1024,
             1024 * 1024,
-            false,
-            false,
             false,
         )
         .context("accept PDF upload")?;

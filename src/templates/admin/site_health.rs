@@ -1,7 +1,6 @@
 //! Runtime health and dependency diagnostics for the admin panel.
 
 use super::{escape_html, AdminDetectionStatus, AdminPanelViewModel};
-use std::fmt::Write as _;
 
 /// Renders the complete site-health section.
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
@@ -138,11 +137,13 @@ fn append_job_rows(rows: &mut String, view: &AdminPanelViewModel<'_>) {
 
 /// Appends one escaped label-value health row.
 fn append_health_row(out: &mut String, label: &str, value: &str) {
-    let _ = write!(
+    crate::templates::append_html(
         out,
-        r#"<div class="admin-health-row"><span>{label}</span><strong>{value}</strong></div>"#,
-        label = escape_html(label),
-        value = escape_html(value),
+        format_args!(
+            r#"<div class="admin-health-row"><span>{label}</span><strong>{value}</strong></div>"#,
+            label = escape_html(label),
+            value = escape_html(value),
+        ),
     );
 }
 
@@ -154,33 +155,39 @@ fn append_health_job_row(out: &mut String, label: &str, value: &str, key: &str, 
         } else {
             ""
         };
-        let _ = write!(
+        crate::templates::append_html(
             out,
-            r#"<div class="admin-health-row admin-health-row-actions"><button type="button" class="admin-health-inspect-button admin-health-count-button" data-admin-health-toggle="failed" aria-expanded="false" aria-controls="admin-health-job-panel-failed" disabled><span>{label} (<strong data-admin-health-job="{key}">{value}</strong>)</span></button><form method="POST" action="/admin/site-health/jobs/dismiss" class="admin-health-dismiss-form"><input type="hidden" name="_csrf" value="{csrf}"><button type="submit" data-admin-health-failed-dismiss{disabled_attr}>dismiss counter</button></form></div>"#,
-            label = escape_html(label),
-            key = escape_html(key),
-            value = escape_html(value),
-            csrf = escape_html(csrf_token),
-            disabled_attr = disabled_attr,
+            format_args!(
+                r#"<div class="admin-health-row admin-health-row-actions"><button type="button" class="admin-health-inspect-button admin-health-count-button" data-admin-health-toggle="failed" aria-expanded="false" aria-controls="admin-health-job-panel-failed" disabled><span>{label} (<strong data-admin-health-job="{key}">{value}</strong>)</span></button><form method="POST" action="/admin/site-health/jobs/dismiss" class="admin-health-dismiss-form"><input type="hidden" name="_csrf" value="{csrf}"><button type="submit" data-admin-health-failed-dismiss{disabled_attr}>dismiss counter</button></form></div>"#,
+                label = escape_html(label),
+                key = escape_html(key),
+                value = escape_html(value),
+                csrf = escape_html(csrf_token),
+                disabled_attr = disabled_attr,
+            ),
         );
         return;
     }
     if key == "recent_completed_jobs" {
-        let _ = write!(
+        crate::templates::append_html(
             out,
-            r#"<div class="admin-health-row"><button type="button" class="admin-health-inspect-button admin-health-count-button" data-admin-health-toggle="completed" aria-expanded="false" aria-controls="admin-health-job-panel-completed" disabled><span>{label} (<strong data-admin-health-job="{key}">{value}</strong>)</span></button></div>"#,
-            label = escape_html(label),
-            key = escape_html(key),
-            value = escape_html(value),
+            format_args!(
+                r#"<div class="admin-health-row"><button type="button" class="admin-health-inspect-button admin-health-count-button" data-admin-health-toggle="completed" aria-expanded="false" aria-controls="admin-health-job-panel-completed" disabled><span>{label} (<strong data-admin-health-job="{key}">{value}</strong>)</span></button></div>"#,
+                label = escape_html(label),
+                key = escape_html(key),
+                value = escape_html(value),
+            ),
         );
         return;
     }
-    let _ = write!(
+    crate::templates::append_html(
         out,
-        r#"<div class="admin-health-row"><span>{label}</span><strong data-admin-health-job="{key}">{value}</strong></div>"#,
-        label = escape_html(label),
-        key = escape_html(key),
-        value = escape_html(value),
+        format_args!(
+            r#"<div class="admin-health-row"><span>{label}</span><strong data-admin-health-job="{key}">{value}</strong></div>"#,
+            label = escape_html(label),
+            key = escape_html(key),
+            value = escape_html(value),
+        ),
     );
 }
 
@@ -211,10 +218,17 @@ fn render_dependency_summary(view: &AdminPanelViewModel<'_>) -> String {
     let mut rows = String::new();
     for (label, status) in [
         ("ffmpeg", dependencies.ffmpeg),
-        ("ffprobe", dependencies.ffprobe),
-        ("WebP support", dependencies.webp),
+        (
+            "WebP/images (built in, Rust)",
+            AdminDetectionStatus::Detected,
+        ),
         ("VP9 support", dependencies.vp9),
         ("Opus support", dependencies.opus),
+        ("AV1 decoding", dependencies.av1_decoder),
+        (
+            "AV1 encoding (output policy: VP9)",
+            dependencies.av1_encoder,
+        ),
     ] {
         append_health_row(&mut rows, label, detection_label(status));
     }

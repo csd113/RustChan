@@ -245,16 +245,18 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, stats: &ChanStats, offset
     let panels_height = if wide {
         service_height.max(operations_height)
     } else {
-        service_height + operations_height + 1
+        service_height
+            .saturating_add(operations_height)
+            .saturating_add(1)
     };
-    let content_height = panels_height + 8;
+    let content_height = panels_height.saturating_add(8);
     render_scrollable(frame, area, content_height, offset, |buffer, content| {
         let rows = Layout::vertical([
             Constraint::Length(2),
             Constraint::Length(panels_height),
             Constraint::Length(5),
         ])
-        .spacing(1)
+        .spacing(1_i32)
         .split(content);
         let attention = if !stats.is_ready {
             "[LOADING] Collecting server state…".to_owned()
@@ -298,7 +300,7 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, stats: &ChanStats, offset
         if wide {
             let columns =
                 Layout::horizontal([Constraint::Percentage(51), Constraint::Percentage(49)])
-                    .spacing(1)
+                    .spacing(1_i32)
                     .split(body);
             render_operations_panel(buffer, columns.first().copied().unwrap_or(body), stats);
             render_service_panel(buffer, columns.get(1).copied().unwrap_or(body), stats);
@@ -307,7 +309,7 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, stats: &ChanStats, offset
                 Constraint::Length(operations_height),
                 Constraint::Length(service_height),
             ])
-            .spacing(1)
+            .spacing(1_i32)
             .split(body);
             render_operations_panel(buffer, sections.first().copied().unwrap_or(body), stats);
             render_service_panel(buffer, sections.get(1).copied().unwrap_or(body), stats);
@@ -456,7 +458,7 @@ fn render_operations_panel(buffer: &mut Buffer, area: Rect, stats: &ChanStats) {
 
 /// Build authoritative overview labels independently of panel geometry.
 fn operations_rows(stats: &ChanStats) -> Vec<(Line<'static>, Line<'static>)> {
-    let rate_style = if stats.rps >= 1.0 {
+    let rate_style = if stats.rps >= 1.0_f64 {
         Style::default().fg(SUCCESS)
     } else {
         Style::default().fg(MUTED)
@@ -556,7 +558,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &ConsoleState) {
     let hints = footer_hints(app, area.width);
     let mut lines = Vec::new();
     let mut spans = Vec::new();
-    let mut columns = 0;
+    let mut columns = 0_usize;
     for (key, label) in hints {
         let pair = [
             Span::styled(
@@ -569,16 +571,17 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &ConsoleState) {
             Span::styled(format!(" {label}"), Style::default().fg(MUTED)),
         ];
         let width: usize = pair.iter().map(Span::width).sum();
-        if columns > 0 && columns + 3 + width > usize::from(area.width) {
+        if columns > 0 && columns.saturating_add(3).saturating_add(width) > usize::from(area.width)
+        {
             lines.push(Line::from(std::mem::take(&mut spans)));
             columns = 0;
         }
         if columns > 0 {
             spans.push(Span::raw("   "));
-            columns += 3;
+            columns = columns.saturating_add(3);
         }
         spans.extend(pair);
-        columns += width;
+        columns = columns.saturating_add(width);
     }
     lines.push(Line::from(spans));
     Paragraph::new(lines)
@@ -613,7 +616,7 @@ const fn footer_hints(app: &ConsoleState, width: u16) -> &'static [(&'static str
         Screen::Boards => app.board_filter.editing,
         Screen::Tasks => app.task_filter.editing,
         Screen::Logs => app.log_filter.editing,
-        _ => false,
+        Screen::Dashboard | Screen::System | Screen::Configuration | Screen::Help => false,
     };
     if editing {
         &[
@@ -703,7 +706,7 @@ fn render_to_buffer(
     let mut terminal =
         ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))?;
     let mut app = app.clone();
-    terminal.draw(|frame| render(frame, &mut app, metrics, logs))?;
+    let _completed_frame = terminal.draw(|frame| render(frame, &mut app, metrics, logs))?;
     Ok(terminal.backend().buffer().clone())
 }
 

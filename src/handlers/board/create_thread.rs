@@ -2,12 +2,11 @@ use super::{
     board_access_cookie_from_jar, board_access_preflight, current_theme_from_jar, db,
     handled_post_error_status, identity_key, index_reply_previews, index_threads_per_page,
     is_xml_http_request, make_scoped_csrf_form_token, parse_post_multipart, posting,
-    remember_owned_post_until_with_secure, render, self_action_window_secs,
-    should_set_public_secure_cookie, unlock_redirect_url, user_preferences_from_jar,
-    xhr_error_response, xhr_post_error_response, xhr_redirect_response, AppError, AppState,
-    BoardAccessDecision, BoardAccessRequirement, CookieJar, HashMap, HeaderMap, Html, Multipart,
-    Path, PostFormData, Redirect, Response, Result, SecureCookieContext, State,
-    ADMIN_SESSION_COOKIE, CONFIG,
+    remember_owned_post_until_with_secure, render, should_set_public_secure_cookie,
+    unlock_redirect_url, user_preferences_from_jar, xhr_error_response, xhr_post_error_response,
+    xhr_redirect_response, AppError, AppState, BoardAccessDecision, BoardAccessRequirement,
+    CookieJar, HashMap, HeaderMap, Html, Multipart, Path, PostFormData, Redirect, Response, Result,
+    SecureCookieContext, State, ADMIN_SESSION_COOKIE, CONFIG,
 };
 use axum::response::IntoResponse as _;
 
@@ -40,7 +39,7 @@ pub(in crate::server) async fn create_thread(
         &state,
         &board_short,
         admin_session_id.clone(),
-        access_cookie,
+        access_cookie.clone(),
         BoardAccessRequirement::Post,
         format!("/{board_short}"),
     )
@@ -130,16 +129,13 @@ pub(in crate::server) async fn create_thread(
         let pool = state.db.clone();
         let job_queue = std::sync::Arc::clone(&state.job_queue);
         let ffmpeg_available = state.ffmpeg_available;
-        let ffprobe_available = state.ffprobe_available;
-        let ffmpeg_webp_available = state.ffmpeg_webp_available;
         move || -> Result<posting::SubmitPostResult> {
             // `spawn_blocking` work is not cancelled when its join handle is
             // dropped. Keep the permit inside this closure so a disconnected
             // request cannot release the media gate while parsing continues.
             let _media_upload_guard = media_upload_guard;
-            let conn = pool.get()?;
             posting::submit_post(
-                &conn,
+                &pool,
                 &job_queue,
                 posting::SubmitPostCommand {
                     mode: posting::SubmitPostMode::NewThread {
@@ -152,6 +148,7 @@ pub(in crate::server) async fn create_thread(
                     identity_key,
                     cookie_secret: CONFIG.cookie_secret.clone(),
                     admin_session_id,
+                    access_cookie,
                     ban_csrf_token,
                     submission_token,
                     name,
@@ -165,8 +162,6 @@ pub(in crate::server) async fn create_thread(
                     upload_dir: CONFIG.upload_dir.clone(),
                     thumb_size: CONFIG.thumb_size,
                     ffmpeg_available,
-                    ffprobe_available,
-                    ffmpeg_webp_available,
                 },
             )
         }
@@ -265,7 +260,7 @@ pub(in crate::server) async fn create_thread(
         submit_result.thread_id,
         submit_result.post_id,
         &submit_result.deletion_token,
-        submit_result.created_at + self_action_window_secs(),
+        super::self_action_expiry(submit_result.created_at)?,
         should_set_public_secure_cookie(&req_headers, secure_context),
     );
 

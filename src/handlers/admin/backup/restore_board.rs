@@ -216,7 +216,8 @@ fn sync_autoincrement_sequence(
                 AppError::Internal(anyhow::anyhow!(
                     "Advance sqlite_sequence for {table} during restore: {error}"
                 ))
-            })?;
+            })
+            .map(|_completed_value| ())?;
             Ok(())
         }
         None => {
@@ -228,7 +229,8 @@ fn sync_autoincrement_sequence(
                 AppError::Internal(anyhow::anyhow!(
                     "Insert sqlite_sequence for {table} during restore: {error}"
                 ))
-            })?;
+            })
+            .map(|_completed_value| ())?;
             Ok(())
         }
     }
@@ -389,17 +391,24 @@ where
     conn.execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Snapshot board DB: {error}")))?;
     conn.execute("BEGIN IMMEDIATE", [])
-        .map_err(|error| AppError::Internal(anyhow::anyhow!("Begin tx: {error}")))?;
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Begin tx: {error}")))
+        .map(|_completed_value| ())?;
 
     let restore_result = (|| -> Result<()> {
         let live_board_id: i64 = if let Some(existing_id) = existing_id {
-            conn.execute(
-                "DELETE FROM threads WHERE board_id = ?1",
-                params![existing_id],
-            )
-            .map_err(|error| {
-                map_board_restore_sqlite_error(restore_label, &board_short, "Clear threads", &error)
-            })?;
+            let _removed_threads = conn
+                .execute(
+                    "DELETE FROM threads WHERE board_id = ?1",
+                    params![existing_id],
+                )
+                .map_err(|error| {
+                    map_board_restore_sqlite_error(
+                        restore_label,
+                        &board_short,
+                        "Clear threads",
+                        &error,
+                    )
+                })?;
             conn.execute(
                 "UPDATE boards SET name=?1, description=?2, nsfw=?3,
                  max_threads=?4, max_archived_threads=?5, bump_limit=?6,
@@ -437,12 +446,13 @@ where
                     existing_id,
                 ],
             )
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Update board: {error}")))?;
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Update board: {error}"))).map(|_completed_value| ())?;
             conn.execute(
                 "DELETE FROM banner_assets WHERE scope_type = 'board' AND board_id = ?1",
                 params![existing_id],
             )
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Clear board banners: {error}")))?;
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Clear board banners: {error}")))
+            .map(|_completed_value| ())?;
             existing_id
         } else {
             insert_returning_id(
@@ -511,7 +521,8 @@ where
                     banner.created_at,
                 ],
             )
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Insert board banner: {error}")))?;
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Insert board banner: {error}")))
+            .map(|_completed_value| ())?;
         }
 
         let preserve_thread_ids = can_reuse_row_ids(
@@ -572,7 +583,7 @@ where
             .map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Insert thread {}: {error}", thread.id))
             })?;
-            thread_id_map.insert(thread.id, new_thread_id);
+            let _previous_value = thread_id_map.insert(thread.id, new_thread_id);
         }
         if preserve_thread_ids {
             sync_autoincrement_sequence(
@@ -658,7 +669,7 @@ where
             .map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Insert post {}: {error}", post.id))
             })?;
-            post_id_map.insert(post.id, new_post_id);
+            let _previous_value = post_id_map.insert(post.id, new_post_id);
         }
         if preserve_post_ids {
             sync_autoincrement_sequence(
@@ -693,7 +704,8 @@ where
                         AppError::Internal(anyhow::anyhow!(
                             "Fixup quotelinks for post {new_post_id}: {error}"
                         ))
-                    })?;
+                    })
+                    .map(|_completed_value| ())?;
                 }
             }
         }
@@ -738,7 +750,7 @@ where
             .map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Insert poll {}: {error}", poll.id))
             })?;
-            poll_id_map.insert(poll.id, new_poll_id);
+            let _previous_value = poll_id_map.insert(poll.id, new_poll_id);
         }
         if preserve_poll_ids {
             sync_autoincrement_sequence(
@@ -777,7 +789,7 @@ where
             .map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Insert option {}: {error}", option.id))
             })?;
-            option_id_map.insert(option.id, new_option_id);
+            let _previous_value = option_id_map.insert(option.id, new_option_id);
         }
         if preserve_option_ids {
             sync_autoincrement_sequence(
@@ -809,7 +821,8 @@ where
             )
             .map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Insert vote {}: {error}", vote.id))
-            })?;
+            })
+            .map(|_completed_value| ())?;
         }
 
         for file_hash in &manifest.file_hashes {
@@ -833,7 +846,8 @@ where
             AppError::Internal(anyhow::anyhow!(
                 "Recompute restored thread reply counts: {error}"
             ))
-        })?;
+        })
+        .map(|_completed_value| ())?;
 
         db::insert_pending_fs_op(conn, &workspace.pending_restore_op)?;
         Ok(())
@@ -842,7 +856,8 @@ where
     match restore_result {
         Ok(()) => {
             conn.execute("COMMIT", [])
-                .map_err(|error| AppError::Internal(anyhow::anyhow!("Commit tx: {error}")))?;
+                .map_err(|error| AppError::Internal(anyhow::anyhow!("Commit tx: {error}")))
+                .map(|_completed_value| ())?;
             if let Err(error) = crate::pending_fs::finalize_board_restore_payload(
                 &workspace.pending_restore_payload,
                 Path::new(upload_dir),
@@ -938,7 +953,7 @@ pub(in crate::server) async fn extract_board_from_full_backup(
         let pool = state.db.clone();
         move || -> Result<ExtractBoardFromFullBackupOutcome> {
             let mut conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
 
             let full_backup_dir_path = crate::config::backups_dir().join(&safe_filename);
             let full_backup_path = full_backup_dir().join(&safe_filename);
@@ -1073,7 +1088,7 @@ pub(in crate::server) async fn restore_saved_board_backup(
         let pool = state.db.clone();
         move || -> Result<String> {
             let mut conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let root_dir = crate::config::backups_dir().join(&safe_filename);
             let legacy_zip_path = board_backup_dir().join(&safe_filename);
             let restore_archive_path = if root_dir.is_dir() {
@@ -1183,7 +1198,8 @@ pub(in crate::server) async fn board_restore(
                 use std::io::Read as _;
 
                 let mut conn = pool.get()?;
-                require_admin_session_sid(&conn, session_id.as_deref())?;
+                require_admin_session_sid(&conn, session_id.as_deref())
+                    .map(|_completed_value| ())?;
 
                 let mut magic = [0u8; 4];
                 let mut probe = zip_tmp

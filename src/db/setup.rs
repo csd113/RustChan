@@ -128,7 +128,8 @@ pub fn close_reopened_setup(conn: &rusqlite::Connection) -> Result<()> {
         "DELETE FROM site_settings WHERE key IN (?1, ?2)",
         params![SETUP_REOPENED_AT_KEY, SETUP_REOPENED_BY_KEY],
     )
-    .context("clear setup reopen marker")?;
+    .context("clear setup reopen marker")
+    .map(|_affected_rows| ())?;
     Ok(())
 }
 
@@ -144,7 +145,8 @@ pub fn mark_setup_complete(conn: &rusqlite::Connection) -> Result<()> {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![SETUP_COMPLETED_AT_KEY, now],
         )
-        .context("write setup completion marker")?;
+        .context("write setup completion marker")
+        .map(|_affected_rows| ())?;
         close_reopened_setup(conn)
     })();
     finish_savepoint(
@@ -237,7 +239,7 @@ mod tests {
     fn admin_without_marker_blocks_setup_as_initialized() -> Result<()> {
         let pool = crate::db::init_test_pool()?;
         let conn = pool.get()?;
-        crate::db::create_admin(&conn, "admin", "hash")?;
+        crate::db::create_admin(&conn, "admin", "hash").map(|_created_id| ())?;
 
         let state = setup_state(&conn)?;
 
@@ -265,7 +267,7 @@ mod tests {
     fn admin_reopen_makes_setup_available_but_admin_authenticated() -> Result<()> {
         let pool = crate::db::init_test_pool()?;
         let conn = pool.get()?;
-        crate::db::create_admin(&conn, "admin", "hash")?;
+        crate::db::create_admin(&conn, "admin", "hash").map(|_created_id| ())?;
         reopen_setup(&conn, 1)?;
 
         let state = setup_state(&conn)?;

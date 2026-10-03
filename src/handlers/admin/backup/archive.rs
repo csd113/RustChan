@@ -86,7 +86,8 @@ pub(super) fn extract_sqlite_db_from_full_backup_archive<R: std::io::Read + Seek
         ))
     })?;
     copy_limited(&mut db_entry, &mut out, ZIP_ENTRY_MAX_BYTES)
-        .map_err(|error| AppError::Internal(anyhow::anyhow!("Write temp DB: {error}")))?;
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Write temp DB: {error}")))
+        .map(|_completed_value| ())?;
     drop(out);
 
     let mut header = [0u8; 16];
@@ -143,7 +144,7 @@ fn canonicalize_restored_banner_dir_inner(
             continue;
         }
         let rel_name = rel.to_string_lossy();
-        banner::validate_banner_restore_entry_name(&rel_name)?;
+        banner::validate_banner_restore_entry_name(&rel_name).map(|_completed_value| ())?;
         let bytes = std::fs::read(&path).map_err(|error| {
             AppError::Internal(anyhow::anyhow!(
                 "Read restored banner file {}: {error}",
@@ -189,7 +190,8 @@ fn copy_board_upload_entries_from_full_backup<R: std::io::Read + Seek, W: Write 
         zip.start_file(&name, zip_file_options_for_path(Path::new(&name)))
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip file entry: {error}")))?;
         std::io::copy(&mut entry, zip)
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy board upload: {error}")))?;
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy board upload: {error}")))
+            .map(|_completed_value| ())?;
     }
     Ok(())
 }
@@ -204,6 +206,19 @@ fn write_verified_file_to_archive<W: Write + Seek>(
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip {zip_path}: {error}")))?;
     storage::copy_verified_file_to_writer(source, zip)
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy {zip_path}: {error}")))
+}
+
+/// Finalize ZIP metadata and surface buffered-output flush failures to the caller.
+fn finalize_archive<W: Write + Seek>(zip: zip::ZipWriter<W>, destination: &Path) -> Result<()> {
+    let mut writer = zip.finish().map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Finalize {}: {error}",
+            destination.display()
+        ))
+    })?;
+    writer.flush().map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Flush {}: {error}", destination.display()))
+    })
 }
 
 fn temporary_archive_path(prefix: &str) -> PathBuf {
@@ -256,7 +271,17 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
                     | storage::BackupFileKind::Favicon => {
                         upload_file_count = upload_file_count.saturating_add(1);
                     }
-                    _ => {}
+                    storage::BackupFileKind::Db
+                    | storage::BackupFileKind::Settings
+                    | storage::BackupFileKind::BoardJson
+                    | storage::BackupFileKind::ThreadExport
+                    | storage::BackupFileKind::PostExport
+                    | storage::BackupFileKind::FileInventoryExport
+                    | storage::BackupFileKind::Audio
+                    | storage::BackupFileKind::TorKey
+                    | storage::BackupFileKind::Maintenance
+                    | storage::BackupFileKind::PendingFsOps
+                    | storage::BackupFileKind::Log => {}
                 }
             }
         } else if let Some(rel) = name.strip_prefix("site-assets/favicon/") {
@@ -296,7 +321,7 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
     let manifest = serde_json::json!({
-        "version": 3,
+        "version": 3_i32,
         "generated_at": Utc::now().timestamp(),
         "rustchan_version": env!("CARGO_PKG_VERSION"),
         "db_bytes": db_bytes,
@@ -323,7 +348,8 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
             AppError::Internal(anyhow::anyhow!("Read Backup v4 DB entry: {error}"))
         })?;
         copy_limited(&mut entry, &mut zip, ZIP_ENTRY_MAX_BYTES)
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy chan.db: {error}")))?;
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy chan.db: {error}")))
+            .map(|_completed_value| ())?;
     }
 
     for (index, zip_path) in mapped_files {
@@ -335,12 +361,11 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
             ))
         })?;
         copy_limited(&mut entry, &mut zip, ZIP_ENTRY_MAX_BYTES)
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy {zip_path}: {error}")))?;
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy {zip_path}: {error}")))
+            .map(|_completed_value| ())?;
     }
 
-    zip.finish().map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("Finalize {}: {error}", temp_zip.display()))
-    })?;
+    finalize_archive(zip, &temp_zip)?;
     Ok(temp_zip)
 }
 
@@ -424,7 +449,7 @@ fn create_full_restore_archive(verified: &storage::VerifiedBackup) -> Result<Pat
         .map_or(0, |snapshot| snapshot.size);
 
     let legacy_manifest = serde_json::json!({
-        "version": 3,
+        "version": 3_i32,
         "generated_at": manifest.created_at,
         "rustchan_version": manifest.rustchan_version,
         "db_bytes": db_bytes,
@@ -474,7 +499,17 @@ fn create_full_restore_archive(verified: &storage::VerifiedBackup) -> Result<Pat
                         entry,
                     )?;
                 }
-                _ => {}
+                storage::BackupFileKind::Db
+                | storage::BackupFileKind::Settings
+                | storage::BackupFileKind::BoardJson
+                | storage::BackupFileKind::ThreadExport
+                | storage::BackupFileKind::PostExport
+                | storage::BackupFileKind::FileInventoryExport
+                | storage::BackupFileKind::Audio
+                | storage::BackupFileKind::TorKey
+                | storage::BackupFileKind::Maintenance
+                | storage::BackupFileKind::PendingFsOps
+                | storage::BackupFileKind::Log => {}
             }
         }
     }
@@ -522,9 +557,7 @@ fn create_full_restore_archive(verified: &storage::VerifiedBackup) -> Result<Pat
         )?;
     }
 
-    zip.finish().map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("Finalize {}: {error}", temp_zip.display()))
-    })?;
+    finalize_archive(zip, &temp_zip)?;
     Ok(temp_zip)
 }
 
@@ -591,9 +624,7 @@ fn create_board_restore_archive(
         write_verified_file_to_archive(&mut zip, &format!("uploads/{runtime_path}"), entry)?;
     }
 
-    zip.finish().map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("Finalize {}: {error}", temp_zip.display()))
-    })?;
+    finalize_archive(zip, &temp_zip)?;
     Ok((temp_zip, filename))
 }
 
@@ -680,6 +711,38 @@ pub(super) fn extract_board_archive_from_full_backup(
 
 #[cfg(test)]
 mod tests {
+    struct FlushFailure(std::io::Cursor<Vec<u8>>);
+
+    impl Write for FlushFailure {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.write(bytes)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("injected final flush failure"))
+        }
+    }
+
+    impl Seek for FlushFailure {
+        fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.0.seek(position)
+        }
+    }
+
+    #[test]
+    fn archive_publication_reports_final_flush_failures() -> TestResult<()> {
+        let output = FlushFailure(std::io::Cursor::new(Vec::new()));
+        let zip = zip::ZipWriter::new(output);
+        let error = finalize_archive(zip, Path::new("test.zip"))
+            .err()
+            .context("final flush failure was hidden")?;
+        ensure!(
+            error.to_string().contains("injected final flush failure"),
+            "underlying flush error was lost"
+        );
+        Ok(())
+    }
+
     use super::*;
     use anyhow::{ensure, Context as _, Result as TestResult};
 
@@ -692,7 +755,8 @@ mod tests {
             storage::board_file_fixtures(),
             Some(storage::database_snapshot_fixture()?),
             1_715_010_000_i64,
-        )?;
+        )
+        .map(|_completed_value| ())?;
         Ok((dir, root))
     }
 
@@ -705,7 +769,8 @@ mod tests {
             storage::board_file_fixtures(),
             None,
             1_715_020_000_i64,
-        )?;
+        )
+        .map(|_completed_value| ())?;
         Ok((dir, root))
     }
 

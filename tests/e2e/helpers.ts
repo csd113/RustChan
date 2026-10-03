@@ -210,9 +210,6 @@ export class RustChanServer {
       CHAN_FFMPEG_PATH: this.mediaToolchain
         ? (process.env.RUSTCHAN_E2E_FFMPEG_PATH ?? 'ffmpeg')
         : '__rustchan_e2e_no_ffmpeg__',
-      CHAN_FFPROBE_PATH: this.mediaToolchain
-        ? (process.env.RUSTCHAN_E2E_FFPROBE_PATH ?? 'ffprobe')
-        : '__rustchan_e2e_no_ffprobe__',
       CHAN_HTTPS_COOKIES: '0',
       CHAN_ENABLE_ANY_FILE_UPLOADS_FEATURE: '1',
       CHAN_RATE_GETS: '1000',
@@ -477,22 +474,11 @@ export class RustChanServer {
     if (this.mediaToolchain) {
       await this.createRealMediaFixtures();
     } else {
-      await fsp.writeFile(path.join(this.fixtureDir, 'tiny.mp4'), Buffer.concat([
-        Buffer.from([0x00, 0x00, 0x00, 0x18]),
-        Buffer.from('ftypisom'),
-        Buffer.from([0x00, 0x00, 0x02, 0x00]),
-        Buffer.from('isomiso2mp41'),
-        Buffer.from([0x00, 0x00, 0x00, 0x08]),
-        Buffer.from('free'),
-      ]));
-      await fsp.writeFile(path.join(this.fixtureDir, 'tiny.ogg'), Buffer.concat([
-        Buffer.from('OggS'),
-        Buffer.alloc(64, 0),
-      ]));
+      const media = path.join(repoRoot, 'tests/fixtures/media');
+      await fsp.copyFile(path.join(media, 'video.mp4'), path.join(this.fixtureDir, 'tiny.mp4'));
+      await fsp.copyFile(path.join(media, 'tone.ogg'), path.join(this.fixtureDir, 'tiny.ogg'));
     }
-    await fsp.writeFile(path.join(this.fixtureDir, 'tiny.pdf'), Buffer.from(
-      '%PDF-1.1\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] >>\nendobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \ntrailer\n<< /Root 1 0 R /Size 4 >>\nstartxref\n186\n%%EOF\n',
-    ));
+    await fsp.copyFile(path.join(repoRoot, 'tests/fixtures/media/simple.pdf'), path.join(this.fixtureDir, 'tiny.pdf'));
     await fsp.writeFile(path.join(this.fixtureDir, 'invalid.txt'), 'plain text is not an accepted media file');
     // Store PNG data without compression so its wire size exceeds 1 MiB.
     await fsp.writeFile(path.join(this.fixtureDir, 'oversized.bin'), pngRgba(900, 900, (index) => (index * 37 + 19) % 256, 0));

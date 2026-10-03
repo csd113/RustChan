@@ -1285,22 +1285,33 @@ test.describe('permissions, CSRF, and ownership', () => {
     const postId = await postIdFrom(page);
     const storedName = sqliteQuery(app, `SELECT file_name FROM posts WHERE id = ${postId};`);
     const storedPath = sqliteQuery(app, `SELECT file_path FROM posts WHERE id = ${postId};`);
+    const storedMime = sqliteQuery(app, `SELECT mime_type FROM posts WHERE id = ${postId};`);
     expect(storedName).not.toMatch(/["/\\:]/);
     expect(storedName).toContain('unicode-é');
     expect(storedPath).not.toContain('..');
+    // The deterministic 1x1 PNG fixture benefits from the existing native WebP optimization.
+    expect(storedMime).toBe('image/webp');
+    expect(storedPath).toMatch(/\.webp$/);
 
     const mediaHref = await page.locator('.post.op .file-info a').first().getAttribute('href');
     expect(mediaHref).toBeTruthy();
     expect(mediaHref).toMatch(new RegExp(`^/boards/img/`));
     expect(mediaHref).not.toContain('..');
+    expect(mediaHref).toMatch(/\.webp$/);
     const lastSegment = mediaHref!.split('/').pop() ?? '';
     expect(lastSegment).not.toMatch(/[\r\n"\\]/);
 
     const response = await page.request.get(`${app.baseURL}${mediaHref}`, { maxRedirects: 0 });
     expect(response.status()).toBe(200);
     const headers = response.headers();
-    expect(headers['content-type']).toMatch(/^image\/png/);
+    expect(headers['content-type']).toBe('image/webp');
     expect(headers['x-content-type-options']).toBe('nosniff');
+    const output = await response.body();
+    const originalSize = (await fsp.stat(app.fixtures().oddNamePng)).size;
+    expect(output.subarray(0, 4).toString('ascii')).toBe('RIFF');
+    expect(output.subarray(8, 12).toString('ascii')).toBe('WEBP');
+    expect(output.length).toBeLessThan(originalSize);
+    noteEvent('hostile-filename-optimization', `${originalSize} PNG bytes became ${output.length} WebP bytes`);
     const disposition = headers['content-disposition'];
     if (disposition !== undefined) {
       expect(disposition).toMatch(/^(inline|attachment); filename="[^"\r\n]*"$/);

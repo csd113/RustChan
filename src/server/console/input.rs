@@ -60,7 +60,32 @@ const fn map_key(code: KeyCode, modifiers: KeyModifiers) -> Option<KeyEvent> {
             KeyCode::Char('c' | 'C') => Some(KeyEvent::ForceQuit),
             KeyCode::Char('u' | 'U') => Some(KeyEvent::ClearLine),
             KeyCode::Enter => Some(KeyEvent::Submit),
-            _ => None,
+            KeyCode::Backspace
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Tab
+            | KeyCode::BackTab
+            | KeyCode::Delete
+            | KeyCode::Insert
+            | KeyCode::F(_)
+            | KeyCode::Char(_)
+            | KeyCode::Null
+            | KeyCode::Esc
+            | KeyCode::CapsLock
+            | KeyCode::ScrollLock
+            | KeyCode::NumLock
+            | KeyCode::PrintScreen
+            | KeyCode::Pause
+            | KeyCode::Menu
+            | KeyCode::KeypadBegin
+            | KeyCode::Media(_)
+            | KeyCode::Modifier(_) => None,
         };
     }
     if modifiers.contains(KeyModifiers::ALT) {
@@ -83,7 +108,18 @@ const fn map_key(code: KeyCode, modifiers: KeyModifiers) -> Option<KeyEvent> {
         KeyCode::End => Some(KeyEvent::End),
         KeyCode::Esc => Some(KeyEvent::Escape),
         KeyCode::F(2) => Some(KeyEvent::Submit),
-        _ => None,
+        KeyCode::Insert
+        | KeyCode::F(_)
+        | KeyCode::Null
+        | KeyCode::CapsLock
+        | KeyCode::ScrollLock
+        | KeyCode::NumLock
+        | KeyCode::PrintScreen
+        | KeyCode::Pause
+        | KeyCode::Menu
+        | KeyCode::KeypadBegin
+        | KeyCode::Media(_)
+        | KeyCode::Modifier(_) => None,
     }
 }
 
@@ -129,7 +165,7 @@ fn map_event(event: Event) -> Option<KeyEvent> {
 ///
 /// Returns an error if the operating system refuses to create the thread.
 pub fn spawn(tx: mpsc::Sender<KeyEvent>, redraw: Arc<Notify>) -> std::io::Result<()> {
-    std::thread::Builder::new()
+    let input_thread = std::thread::Builder::new()
         .name("console-input".into())
         .spawn(move || loop {
             if tx.is_closed() || !super::is_active() {
@@ -165,6 +201,8 @@ pub fn spawn(tx: mpsc::Sender<KeyEvent>, redraw: Arc<Notify>) -> std::io::Result
                 }
             }
         })?;
+    // Dropping the handle detaches the reader; channel closure stops its loop.
+    drop(input_thread);
     Ok(())
 }
 

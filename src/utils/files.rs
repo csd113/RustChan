@@ -7,6 +7,10 @@ mod mime;
 /// Validated upload persistence.
 pub(crate) mod storage;
 
+/// Inspect the content signature used to distinguish accepted video containers.
+pub(crate) fn video_container_mime(header: &[u8]) -> anyhow::Result<&'static str> {
+    mime::detect_mime_type(header)
+}
 pub use mime::fallback_download_mime_type;
 pub use storage::{
     classify_upload_mime, delete_file_checked, format_file_size, mime_to_ext_pub,

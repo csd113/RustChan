@@ -347,11 +347,15 @@ function requiredMediaToolchainSkipReason(): string | undefined {
     return `ffprobe is required for auto-compress live fixtures: ${ffprobe}`;
   }
   const encoders = spawnSync(ffmpeg, ['-hide_banner', '-encoders'], { encoding: 'utf8' });
-  const output = `${encoders.stdout}\n${encoders.stderr}`;
-  for (const encoder of ['libwebp', 'libvpx-vp9', 'libopus']) {
-    if (!output.includes(encoder)) {
+  const names = (encoders.stdout ?? '').split('\n').map((line) => line.trim().split(/\s+/)).filter(([flags, name]) => /^[VA][A-Z.]{5}$/.test(flags ?? '') && name !== '=').map(([, name]) => name);
+  for (const encoder of ['png', 'libvpx-vp9', 'libopus']) {
+    if (encoders.status !== 0 || !names.includes(encoder)) {
       return `ffmpeg encoder ${encoder} is required for auto-compress live verification`;
     }
+  }
+  const muxers = spawnSync(ffmpeg, ['-hide_banner', '-muxers'], { encoding: 'utf8' });
+  if (muxers.status !== 0 || !(muxers.stdout ?? '').split('\n').some((line) => /^\s*E\s+webm\s/.test(line))) {
+    return 'ffmpeg WebM muxer is required for auto-compress live verification';
   }
   return undefined;
 }

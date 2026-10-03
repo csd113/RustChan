@@ -272,7 +272,7 @@ fn prompt_terminal(label: &str, secret: bool) -> Option<String> {
                         value.clear();
                     }
                     KeyCode::Backspace => {
-                        value.pop();
+                        let _removed_character = value.pop();
                     }
                     KeyCode::Char(character)
                         if !key
@@ -283,7 +283,31 @@ fn prompt_terminal(label: &str, secret: bool) -> Option<String> {
                     {
                         value.push(character);
                     }
-                    _ => {}
+                    KeyCode::Enter
+                    | KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Home
+                    | KeyCode::End
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+                    | KeyCode::Tab
+                    | KeyCode::BackTab
+                    | KeyCode::Delete
+                    | KeyCode::Insert
+                    | KeyCode::F(_)
+                    | KeyCode::Char(_)
+                    | KeyCode::Null
+                    | KeyCode::CapsLock
+                    | KeyCode::ScrollLock
+                    | KeyCode::NumLock
+                    | KeyCode::PrintScreen
+                    | KeyCode::Pause
+                    | KeyCode::Menu
+                    | KeyCode::KeypadBegin
+                    | KeyCode::Media(_)
+                    | KeyCode::Modifier(_) => {}
                 }
             }
             Event::Paste(content) => {
@@ -295,7 +319,11 @@ fn prompt_terminal(label: &str, secret: bool) -> Option<String> {
                         .take(remaining),
                 );
             }
-            _ => {}
+            Event::FocusGained
+            | Event::FocusLost
+            | Event::Key(_)
+            | Event::Mouse(_)
+            | Event::Resize(..) => {}
         }
         redraw_prompt(label, &value, secret);
     }

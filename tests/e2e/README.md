@@ -408,7 +408,7 @@ npx playwright test tests/e2e/phase4-accessibility-progressive.spec.ts --project
 ## Opt-In Heavy Passes
 
 Real media toolchain validation is disabled by default. The default harness sets
-`CHAN_REQUIRE_FFMPEG=0` and points FFmpeg/ffprobe to sentinel binary names so
+`CHAN_REQUIRE_FFMPEG=0` and points FFmpeg to a sentinel binary name so
 local codec installs do not affect deterministic browser tests.
 
 ```sh
@@ -419,14 +419,14 @@ Override media tool paths when needed:
 
 ```sh
 RUSTCHAN_E2E_FFMPEG_PATH=/path/to/ffmpeg \
-RUSTCHAN_E2E_FFPROBE_PATH=/path/to/ffprobe \
 npm run test:e2e:media
 ```
 
-The media pass requires FFmpeg, ffprobe, and the `libwebp`, `libvpx-vp9`, and
-`libopus` encoders. PDF renderers are optional; if Poppler `pdftoppm`, MuPDF
-`mutool`, or macOS `qlmanage` is unavailable, the test asserts RustChan's SVG
-PDF thumbnail fallback.
+The video pass requires FFmpeg with PNG frame extraction, the `libvpx-vp9` and
+`libopus` encoders, and the WebM muxer. WebP encoding (including video previews)
+uses Rust and does not require an FFmpeg WebP encoder. PDF previews use the built-in Rust renderer or SVG fallback.
+Common audio waveforms, image conversion and metadata inspection also run in
+the default harness with FFmpeg unavailable.
 
 The upload matrix runs only against an isolated local runtime:
 

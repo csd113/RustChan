@@ -49,6 +49,8 @@ mod linux {
         starting: AtomicBool,
         /// Tracks the installation worker lifetime.
         installing: AtomicBool,
+        /// Includes restart preflight and lost acknowledgments, before phase publication.
+        restarting: AtomicBool,
     }
     impl Admission {
         /// Authorize startup only in a phase that has safe persistent state.
@@ -67,11 +69,11 @@ mod linux {
             "updater configuration must be a root-owned non-writable regular file"
         );
         let config: Config = toml::from_str(&fs::read_to_string(config_path)?)
-            .map_err(|_| anyhow::anyhow!("invalid updater configuration"))?;
+            .context("invalid updater configuration")?;
         super::super::transaction::native::protected_ancestors(&config.public_key, config.web_uid)?;
-        let metadata = fs::symlink_metadata(&config.public_key)?;
+        let key_metadata = fs::symlink_metadata(&config.public_key)?;
         anyhow::ensure!(
-            metadata.is_file() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0,
+            key_metadata.is_file() && key_metadata.uid() == 0 && key_metadata.mode() & 0o022 == 0,
             "release trust key must be root owned and non-writable"
         );
         let key_text = fs::read_to_string(&config.public_key)?;
@@ -111,6 +113,7 @@ mod linux {
     /// Run the separate operator-configured Linux updater daemon.
     pub(super) async fn run(config_path: &Path) -> anyhow::Result<()> {
         let engine = Arc::new(configured_engine(config_path)?);
+        crate::config::configure_data_dir(Some(&engine.config.data_dir))?;
         // Exclusive daemon lock prevents two listeners/recovery workers. File
         // locks release on death, unlike pid files or lock directories.
         let daemon_lock = fs::File::options()
@@ -154,7 +157,8 @@ mod linux {
         let admission = Arc::new(Admission::default());
         let recovery_admission = Arc::clone(&admission);
         let recovery_engine = Arc::clone(&engine);
-        tokio::task::spawn_blocking(move || {
+        // The daemon serves IPC while this detached recovery task records its own failures.
+        drop(tokio::task::spawn_blocking(move || {
             let service = SystemService {
                 port: recovery_engine.config.health_port,
                 admission: Arc::clone(&recovery_admission),
@@ -165,7 +169,7 @@ mod linux {
             } else {
                 recovery_admission.recovered.store(true, Ordering::Release);
             }
-        });
+        }));
         let slots = Arc::new(tokio::sync::Semaphore::new(16));
         loop {
             let (mut socket, _) = listener.accept().await?;
@@ -177,7 +181,8 @@ mod linux {
             };
             let engine = Arc::clone(&engine);
             let admission = Arc::clone(&admission);
-            tokio::spawn(async move {
+            // The permit bounds detached IPC tasks; each task reports its own failure below.
+            drop(tokio::spawn(async move {
                 let _permit = permit;
                 let result = async {
                     let mut bytes = Vec::new();
@@ -185,7 +190,8 @@ mod linux {
                         Duration::from_secs(5),
                         (&mut socket).take(4097).read_to_end(&mut bytes),
                     )
-                    .await??;
+                    .await?
+                    .map(|_bytes_read| ())?;
                     anyhow::ensure!(bytes.len() <= 4096, "updater request exceeds limit");
                     let request: Request = serde_json::from_slice(&bytes)?;
                     let reply =
@@ -199,7 +205,7 @@ mod linux {
                 if let Err(error) = result {
                     tracing::warn!(error = %error, "updater IPC request rejected");
                 }
-            });
+            }));
         }
     }
 
@@ -217,6 +223,7 @@ mod linux {
         let result = match request {
             Request::Status => engine.status().map(|status| {
                 let writable = admission.recovered.load(Ordering::Acquire)
+                    && !admission.restarting.load(Ordering::Acquire)
                     && !status.phase.blocks_writes()
                     && status.phase != super::super::Phase::FailedManualIntervention;
                 (status, writable)
@@ -228,6 +235,22 @@ mod linux {
                         .is_ok_and(|current| current == version);
                 (status, ready)
             }),
+            Request::Started {
+                instance,
+                configuration,
+            } => {
+                anyhow::ensure!(
+                    admission.may_start(engine.status()?.phase),
+                    "startup admission is closed"
+                );
+                engine
+                    .started(instance, &configuration)
+                    .map(|status| (status, true))
+            }
+            Request::Restart {
+                instance,
+                administrator,
+            } => launch_restart(engine, admission, instance, administrator),
             Request::Check => {
                 anyhow::ensure!(
                     admission.recovered.load(Ordering::Acquire),
@@ -280,8 +303,75 @@ mod linux {
             }),
             Err(error) => {
                 tracing::warn!(error = %error, "updater operation failed");
-                Ok(Reply { status: engine.status()?, error: Some("Update operation could not proceed. Another operation may be running, or preflight/verification failed. Check updater logs.".into()), ready: false })
+                Ok(Reply { status: engine.status()?, error: Some("Operation could not proceed. Another operation may be running, or preflight/verification failed. Check updater logs.".into()), ready: false })
             }
+        }
+    }
+
+    /// Transfer both transaction leases to one settings restart worker.
+    fn launch_restart(
+        engine: &Arc<Engine>,
+        admission: &Arc<Admission>,
+        instance: uuid::Uuid,
+        administrator: i64,
+    ) -> anyhow::Result<(super::super::Status, bool)> {
+        anyhow::ensure!(
+            admission
+                .restarting
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok(),
+            "restart already in progress"
+        );
+        let activity = RestartActivity(Arc::clone(admission));
+        anyhow::ensure!(
+            admission.recovered.load(Ordering::Acquire),
+            "recovery is incomplete"
+        );
+        let service = SystemService {
+            port: engine.config.health_port,
+            admission: Arc::clone(admission),
+        };
+        let (status, update_lock, settings_lock) =
+            engine.approve_restart(instance, administrator, &service)?;
+        let mut worker_status = status.clone();
+        let worker_engine = Arc::clone(engine);
+        let worker_admission = Arc::clone(admission);
+        let spawned = std::thread::Builder::new()
+            .name("rustchan-settings-restart".into())
+            .spawn(move || {
+                let _activity = activity;
+                let _update_lock = update_lock;
+                let _settings_lock = settings_lock;
+                let worker_service = SystemService {
+                    port: worker_engine.config.health_port,
+                    admission: Arc::clone(&worker_admission),
+                };
+                // Let the acknowledgment and no-JS redirect finish before service stop.
+                std::thread::sleep(Duration::from_secs(1));
+                let result = worker_engine.restart_settings(&mut worker_status, &worker_service);
+                if let Err(error) = result {
+                    worker_admission.recovered.store(false, Ordering::Release);
+                    tracing::error!(%error, "settings restart journal failure; recovery required");
+                }
+            });
+        if let Err(error) = spawned {
+            let mut failed = status;
+            failed.restart_instance = None;
+            engine.save(
+                &mut failed,
+                super::super::Phase::Failed,
+                "Restart worker could not start; running configuration retained.",
+            )?;
+            return Err(error.into());
+        }
+        Ok((status, false))
+    }
+
+    /// Close mutation admission from restart preflight through the worker's complete result.
+    struct RestartActivity(Arc<Admission>);
+    impl Drop for RestartActivity {
+        fn drop(&mut self) {
+            self.0.restarting.store(false, Ordering::Release);
         }
     }
 
@@ -321,7 +411,9 @@ mod linux {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?;
-        let deadline = Instant::now() + Duration::from_secs(90);
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(90))
+            .context("service control deadline overflow")?;
         loop {
             if let Some(status) = child.try_wait()? {
                 anyhow::ensure!(status.success(), "RustChan service control failed");
@@ -329,7 +421,7 @@ mod linux {
             }
             if Instant::now() >= deadline {
                 child.kill()?;
-                child.wait()?;
+                child.wait().map(|_exit_status| ())?;
                 anyhow::bail!("RustChan service control timed out");
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -367,6 +459,15 @@ mod linux {
             control("start")
         }
         fn health(&self, version: &str, _schema: &str) -> anyhow::Result<()> {
+            self.probe_health(version, None)
+        }
+        fn health_instance(&self, version: &str, previous: uuid::Uuid) -> anyhow::Result<()> {
+            self.probe_health(version, Some(previous))
+        }
+    }
+    impl SystemService {
+        /// Probe the fixed loopback endpoint with bounded time, size and generation checks.
+        fn probe_health(&self, version: &str, previous: Option<uuid::Uuid>) -> anyhow::Result<()> {
             struct Reset<'a>(&'a AtomicBool);
             impl Drop for Reset<'_> {
                 fn drop(&mut self) {
@@ -378,7 +479,9 @@ mod linux {
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(2))
                 .build()?;
-            let deadline = Instant::now() + Duration::from_secs(60);
+            let deadline = Instant::now()
+                .checked_add(Duration::from_secs(60))
+                .context("health check deadline overflow")?;
             while Instant::now() < deadline {
                 let checked = (|| {
                     use std::io::Read as _;
@@ -386,12 +489,24 @@ mod linux {
                         .get(format!("http://127.0.0.1:{}/readyz", self.port))
                         .send()?
                         .error_for_status()?;
+                    let observed_instance = response
+                        .headers()
+                        .get("x-rustchan-instance")
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| uuid::Uuid::parse_str(value).ok());
                     let mut bytes = Vec::new();
-                    response.take(4097).read_to_end(&mut bytes)?;
+                    response
+                        .take(4097)
+                        .read_to_end(&mut bytes)
+                        .map(|_bytes_read| ())?;
                     anyhow::ensure!(bytes.len() <= 4096, "readiness response exceeds limit");
                     let health: ReadyHealth = serde_json::from_slice(&bytes)?;
                     anyhow::ensure!(
-                        health.version == version && health.status == "ready",
+                        health.version == version
+                            && health.status == "ready"
+                            && previous.is_none_or(|old| {
+                                observed_instance.is_some_and(|instance| instance != old)
+                            }),
                         "RustChan health or version mismatch"
                     );
                     Ok::<_, anyhow::Error>(())

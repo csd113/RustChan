@@ -94,7 +94,7 @@ pub fn generate_captcha_image(
     prune_expired(chrono::Utc::now().timestamp());
 
     let mut captcha = Captcha::new();
-    captcha
+    let _configured = captcha
         .set_chars(CAPTCHA_CHARSET)
         .add_chars(CAPTCHA_ANSWER_LEN)
         .apply_filter(Noise::new(0.25))
@@ -163,7 +163,7 @@ pub fn verify_captcha(
 /// Hash and store one challenge when its generated answer is valid.
 fn store_challenge(board_short: &str, captcha_id: &str, answer: &str, now: i64) {
     if let Some(answer_hash) = answer_hash(board_short, captcha_id, answer) {
-        CAPTCHA_CHALLENGES.insert(
+        let _previous_value = CAPTCHA_CHALLENGES.insert(
             captcha_id.to_owned(),
             StoredCaptchaChallenge {
                 board_short: board_short.to_owned(),
@@ -232,7 +232,7 @@ pub mod testing {
         let Some(answer_hash) = super::answer_hash(board_short, captcha_id, answer) else {
             return;
         };
-        super::CAPTCHA_CHALLENGES.insert(
+        let _previous_value = super::CAPTCHA_CHALLENGES.insert(
             captcha_id.to_owned(),
             super::StoredCaptchaChallenge {
                 board_short: board_short.to_owned(),
@@ -250,7 +250,7 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
-    use super::{testing, *};
+    use super::*;
 
     #[test]
     fn generated_captcha_is_png_and_stores_server_side_answer() {

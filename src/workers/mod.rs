@@ -24,10 +24,10 @@ use tracing::{debug, error, warn};
 /// Builds an `FFmpeg` command using the configured executable path.
 fn ffmpeg_command() -> TokioCommand {
     let mut command = TokioCommand::new(&CONFIG.ffmpeg_path);
-    command.stdin(Stdio::null());
+    let _stdin_configuration = command.stdin(Stdio::null());
     #[cfg(unix)]
     {
-        command.process_group(0);
+        let _process_group_configuration = command.process_group(0);
     }
     command
 }
@@ -168,16 +168,16 @@ pub enum Job {
     VideoTranscode {
         /// Database identifier of the post owning the upload.
         post_id: i64,
-        /// Path relative to `CONFIG.upload_dir`, e.g. "b/abc123.mp4"
+        /// Path relative to `CONFIG.upload_dir`, e.g. "b/abc123.mp4".
         file_path: String,
         /// Short name of the board containing the post.
         board_short: String,
     },
-    /// Generate a waveform PNG thumbnail for an audio upload via ffmpeg.
+    /// Generate a waveform PNG thumbnail with streaming Rust audio decoders.
     AudioWaveform {
         /// Database identifier of the post owning the upload.
         post_id: i64,
-        /// Path relative to `CONFIG.upload_dir`
+        /// Path relative to `CONFIG.upload_dir`.
         file_path: String,
         /// Short name of the board containing the post.
         board_short: String,
@@ -203,10 +203,22 @@ impl Job {
     #[must_use]
     pub const fn type_str(&self) -> &'static str {
         match self {
-            Self::VideoTranscode { .. } => "video_transcode",
-            Self::AudioWaveform { .. } => "audio_waveform",
-            Self::ThreadPrune { .. } => "thread_prune",
-            Self::SpamCheck { .. } => "spam_check",
+            Self::VideoTranscode {
+                post_id: _,
+                file_path: _,
+                board_short: _,
+            } => "video_transcode",
+            Self::AudioWaveform {
+                post_id: _,
+                file_path: _,
+                board_short: _,
+            } => "audio_waveform",
+            Self::ThreadPrune { board_id: _ } => "thread_prune",
+            Self::SpamCheck {
+                post_id: _,
+                ip_hash: _,
+                body_len: _,
+            } => "spam_check",
         }
     }
 
@@ -223,7 +235,12 @@ impl Job {
                 file_path,
                 board_short,
             } => Some((*post_id, file_path.as_str(), board_short.as_str())),
-            Self::ThreadPrune { .. } | Self::SpamCheck { .. } => None,
+            Self::ThreadPrune { board_id: _ }
+            | Self::SpamCheck {
+                post_id: _,
+                ip_hash: _,
+                body_len: _,
+            } => None,
         }
     }
 }
@@ -261,6 +278,10 @@ fn log_thread_prune_schedule(board_id: i64, schedule: crate::db::ThreadPruneSche
 /// Cheaply-cloneable handle to the shared job queue.
 /// Clone this into every handler that needs to enqueue work.
 #[derive(Clone, Debug)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public operational handles preserve the queue API; accounting counters stay private to preserve invariants"
+)]
 pub struct JobQueue {
     /// Database pool used to persist and claim background jobs.
     pub pool: DbPool,
@@ -335,7 +356,7 @@ impl JobQueue {
                 .context("Get DB connection for required board prune intent failed")?;
             let schedule = crate::db::persist_thread_prune_intent(&conn, *board_id)?;
             if schedule.inserted {
-                self.pending_jobs.fetch_add(1, Ordering::Relaxed);
+                let _previous_count = self.pending_jobs.fetch_add(1, Ordering::Relaxed);
             }
             log_thread_prune_schedule(*board_id, schedule);
             self.notify.notify_one();
@@ -349,7 +370,7 @@ impl JobQueue {
             let conn = match self.pool.get() {
                 Ok(conn) => conn,
                 Err(error) => {
-                    self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
+                    let _previous_count = self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
                     return Err(error.into());
                 }
             };
@@ -360,12 +381,12 @@ impl JobQueue {
                     Ok(EnqueueOutcome::Enqueued(id))
                 }
                 Err(error) => {
-                    self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
+                    let _previous_count = self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
                     Err(error)
                 }
             }
         } else {
-            self.dropped_jobs.fetch_add(1, Ordering::Relaxed);
+            let _previous_count = self.dropped_jobs.fetch_add(1, Ordering::Relaxed);
             Ok(EnqueueOutcome::DroppedAtCapacity)
         }
     }
@@ -397,7 +418,7 @@ impl JobQueue {
             if let Some(job_id) = active {
                 return Ok(EnqueueOutcome::Enqueued(job_id));
             }
-            self.dropped_jobs.fetch_add(1, Ordering::Relaxed);
+            let _previous_count = self.dropped_jobs.fetch_add(1, Ordering::Relaxed);
             return Ok(EnqueueOutcome::DroppedAtCapacity);
         }
 
@@ -419,7 +440,7 @@ impl JobQueue {
                 Ok(EnqueueOutcome::Enqueued(schedule.job_id))
             }
             Err(error) => {
-                self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
+                let _previous_count = self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
                 error!(
                     target: "workers",
                     post_id,
@@ -472,7 +493,7 @@ impl JobQueue {
     /// Atomically reserves capacity for a job before it is persisted.
     fn reserve_pending_slot(&self, job_type: &str) -> bool {
         if CONFIG.job_queue_capacity == 0 {
-            self.pending_jobs.fetch_add(1, Ordering::Relaxed);
+            let _previous_count = self.pending_jobs.fetch_add(1, Ordering::Relaxed);
             return true;
         }
 
@@ -508,17 +529,17 @@ impl JobQueue {
     /// Saturating queue-accounting decrement used after claims and coalescing.
     fn decrement_pending_by(&self, count: usize) {
         let count = u64::try_from(count).unwrap_or(u64::MAX);
-        self.pending_jobs
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
-                Some(pending.saturating_sub(count))
-            })
-            .ok();
+        let _previous_count =
+            self.pending_jobs
+                .update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
+                    pending.saturating_sub(count)
+                });
     }
 
     /// Restores the pending-job gauge when a failed job is scheduled to retry.
     fn mark_job_failure_state(&self, failure_state: crate::db::JobFailureState) {
         if failure_state == crate::db::JobFailureState::Retrying {
-            self.pending_jobs.fetch_add(1, Ordering::Relaxed);
+            let _previous_count = self.pending_jobs.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -535,13 +556,12 @@ impl JobQueue {
 ///
 /// Typical shutdown sequence:
 ///   `queue.cancel.cancel()`;
-///   `for h in handles { h.await.ok(); }`
+///   `for h in handles { h.await.ok(); }`.
 ///
 /// Workers are pure async Tokio tasks — they do not consume OS threads at rest.
 pub fn start_worker_pool(
     queue: &Arc<JobQueue>,
     ffmpeg_available: bool,
-    ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let n = std::thread::available_parallelism()
@@ -554,14 +574,7 @@ pub fn start_worker_pool(
         .map(|idx| {
             let q = Arc::clone(queue);
             tokio::spawn(async move {
-                worker_loop(
-                    idx,
-                    q,
-                    ffmpeg_available,
-                    ffprobe_available,
-                    ffmpeg_vp9_available,
-                )
-                .await;
+                worker_loop(idx, q, ffmpeg_available, ffmpeg_vp9_available).await;
             })
         })
         .collect()
@@ -749,7 +762,7 @@ fn recover_job_after_completion_error_once(
                 // The external work has already succeeded (or was proven stale).
                 // Re-queueing it could repeat a non-idempotent mutation, so retain
                 // the attempt count and force a safe terminal state.
-                conn.execute(
+                let _failed_jobs = conn.execute(
                     "UPDATE background_jobs
                      SET status = 'failed',
                          last_error = ?2,
@@ -759,7 +772,7 @@ fn recover_job_after_completion_error_once(
                 )?;
                 if matches!(completion, JobCompletion::Done) {
                     if let Some(identity) = media_identity {
-                        conn.execute(
+                        let _completed_posts = conn.execute(
                             "UPDATE posts
                              SET media_processing_state = '', media_processing_error = NULL
                              WHERE id = ?1 AND file_path = ?2
@@ -907,7 +920,12 @@ async fn persist_job_completion(
     let mut consecutive_errors = 0_u32;
     let mut shutdown_deadline = cancel
         .is_cancelled()
-        .then(|| tokio::time::Instant::now() + COMPLETION_SHUTDOWN_GRACE);
+        .then(|| {
+            tokio::time::Instant::now()
+                .checked_add(COMPLETION_SHUTDOWN_GRACE)
+                .context("completion shutdown deadline overflow")
+        })
+        .transpose()?;
     loop {
         let attempt_pool = pool.clone();
         let attempt_completion = completion.clone();
@@ -962,7 +980,7 @@ async fn persist_job_completion(
                 () = sleep(delay) => {}
                 () = cancel.cancelled() => {
                     shutdown_deadline =
-                        Some(tokio::time::Instant::now() + COMPLETION_SHUTDOWN_GRACE);
+                        Some(tokio::time::Instant::now().checked_add(COMPLETION_SHUTDOWN_GRACE).context("completion shutdown deadline overflow")?);
                 }
             }
         }
@@ -979,7 +997,6 @@ async fn worker_loop(
     id: usize,
     queue: Arc<JobQueue>,
     ffmpeg_available: bool,
-    ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
 ) {
     debug!("Worker {id} started");
@@ -1025,9 +1042,9 @@ async fn worker_loop(
                                 queue.mark_job_failure_state(failure_state);
                             }
                             Ok(None) => {}
-                            Err(error) => {
+                            Err(completion_error) => {
                                 error!(
-                                    "Worker {id}: could not resolve broken job #{job_id}: {error}"
+                                    "Worker {id}: could not resolve broken job #{job_id}: {completion_error}"
                                 );
                                 return;
                             }
@@ -1040,7 +1057,6 @@ async fn worker_loop(
                     job_id,
                     job,
                     ffmpeg_available,
-                    ffprobe_available,
                     ffmpeg_vp9_available,
                     queue.pool.clone(),
                     Arc::clone(&queue.in_progress),
@@ -1133,7 +1149,7 @@ fn backoff_duration(consecutive_errors: u32) -> Duration {
     let jitter = u64::from(crate::utils::crypto::os_random_u32_or_exit(
         "computing worker retry jitter",
     )) % JITTER_MAX_MS;
-    Duration::from_millis(base + jitter)
+    Duration::from_millis(base.saturating_add(jitter))
 }
 
 // Job dispatch
@@ -1147,7 +1163,6 @@ async fn handle_job(
     job_id: i64,
     job: Job,
     ffmpeg_available: bool,
-    ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
     pool: DbPool,
     in_progress: Arc<DashMap<String, bool>>,
@@ -1171,21 +1186,20 @@ async fn handle_job(
                 );
                 return Ok(JobExecution::Stale);
             }
-            active_video_jobs.fetch_add(1, Ordering::Relaxed);
+            let _active_before_start = active_video_jobs.fetch_add(1, Ordering::Relaxed);
             let result = transcode_video(
                 job_id,
                 post_id,
                 file_path.clone(),
                 board_short,
                 ffmpeg_available,
-                ffprobe_available,
                 ffmpeg_vp9_available,
                 pool,
                 cancel,
             )
             .await;
-            active_video_jobs.fetch_sub(1, Ordering::Relaxed);
-            in_progress.remove(&file_path);
+            let _active_before_completion = active_video_jobs.fetch_sub(1, Ordering::Relaxed);
+            let _removed_entry = in_progress.remove(&file_path);
             result
         }
 
@@ -1213,7 +1227,7 @@ async fn handle_job(
                 cancel,
             )
             .await;
-            in_progress.remove(&file_path);
+            let _removed_entry = in_progress.remove(&file_path);
             result
         }
 
@@ -1262,24 +1276,28 @@ fn media_job_identity(job: &Job) -> Option<MediaJobIdentity> {
             job_type: "audio_waveform",
             expected_source: file_path.clone(),
         }),
-        Job::ThreadPrune { .. } | Job::SpamCheck { .. } => None,
+        Job::ThreadPrune { board_id: _ }
+        | Job::SpamCheck {
+            post_id: _,
+            ip_hash: _,
+            body_len: _,
+        } => None,
     }
 }
 
 // VideoTranscode
-/// Transcode an MP4 upload to `WebM` (VP9 + Opus), then update the post's
-/// `file_path` and `mime_type`. The original MP4 is deleted on success.
+/// Convert video to VP9/Opus `WebM`, then atomically update media metadata.
+/// Compatible VP8/VP9 `WebM` is retained; source cleanup is journaled on success.
 ///
 /// Requires both `ffmpeg_available` (binary present) and `ffmpeg_vp9_available`
-/// (libvpx-vp9 + libopus compiled in).  If either flag is false the job is
-/// skipped gracefully — no error is returned and the file remains as-is.
+/// (libvpx-vp9 + libopus and the `WebM` muxer compiled in). If either is false,
+/// the job is skipped gracefully — no error is returned and the file remains as-is.
 ///
 /// The command runs in its own process group. Timeout, cancellation, and scope
 /// cleanup terminate that whole group so descendants cannot outlive the job.
 ///
 /// A hard timeout of the live `ffmpeg_timeout_secs` setting is applied.
 #[expect(
-    clippy::cognitive_complexity,
     clippy::too_many_arguments,
     reason = "transcode process control and fail-closed cleanup share one lifecycle"
 )]
@@ -1289,7 +1307,6 @@ async fn transcode_video(
     file_path: String,
     board_short: String,
     ffmpeg_available: bool,
-    ffprobe_available: bool,
     ffmpeg_vp9_available: bool,
     pool: DbPool,
     cancel: CancellationToken,
@@ -1299,25 +1316,15 @@ async fn transcode_video(
         return Ok(JobExecution::NeedsCompletion);
     }
 
-    if !ffprobe_available {
-        warn!(
-            "VideoTranscode skipped for post {post_id}: ffprobe not available. \
-             Install ffprobe alongside ffmpeg to enable safe video transcoding."
-        );
-        return Ok(JobExecution::NeedsCompletion);
-    }
-
     if !ffmpeg_vp9_available {
         warn!(
-            "VideoTranscode skipped for post {post_id}: libvpx-vp9 or libopus not available. \
+            "VideoTranscode skipped for post {post_id}: libvpx-vp9, libopus or the WebM muxer not available. \
              Install ffmpeg with VP9 + Opus support to enable MP4/MKV→WebM transcoding."
         );
         return Ok(JobExecution::NeedsCompletion);
     }
 
     let timeout_secs = crate::config::ffmpeg_timeout_secs();
-    let ffmpeg_timeout = Duration::from_secs(timeout_secs);
-
     // File checks, codec probing, and temporary-file creation are blocking.
     let prepare_result = {
         let file_path2 = file_path.clone();
@@ -1333,10 +1340,29 @@ async fn transcode_video(
         return Ok(JobExecution::NeedsCompletion);
     };
 
-    // `kill_on_drop` terminates ffmpeg when its timeout future is dropped.
     let mut command = ffmpeg_command();
-    command
-        .args(&args)
+    let _configured_command = command.args(&args);
+    run_video_transcode(command, post_id, timeout_secs, cancel).await?;
+
+    // File persistence and database updates are blocking.
+    let finalise_result = tokio::task::spawn_blocking(move || {
+        transcode_video_finalise(
+            job_id, post_id, &file_path, &src_path, &webm_abs, &webm_rel, tmp, &pool,
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in finalise: {e}"))?;
+    finalise_result
+}
+
+/// Run the bounded video process; only a successful exit permits finalisation.
+async fn run_video_transcode(
+    mut command: TokioCommand,
+    post_id: i64,
+    timeout_secs: u64,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let _configured_command = command
         .stderr(Stdio::piped())
         .stdout(Stdio::null())
         .kill_on_drop(true);
@@ -1345,6 +1371,7 @@ async fn transcode_video(
         .map_err(|e| anyhow::anyhow!("failed to spawn ffmpeg '{}': {e}", CONFIG.ffmpeg_path))?;
     drop(command);
 
+    let ffmpeg_timeout = Duration::from_secs(timeout_secs);
     match wait_for_ffmpeg_output(child, ffmpeg_timeout, cancel).await? {
         AsyncWaitOutcome::Exited(output) => {
             if !output.status.success() {
@@ -1368,23 +1395,14 @@ async fn transcode_video(
         }
     }
 
-    // File persistence and database updates are blocking.
-    let finalise_result = tokio::task::spawn_blocking(move || {
-        transcode_video_finalise(
-            job_id, post_id, &file_path, &src_path, &webm_abs, &webm_rel, tmp, &pool,
-        )
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in finalise: {e}"))?;
-    finalise_result
+    Ok(())
 }
 
-/// Prepare a video transcode: validate the source file, optionally probe the
-/// codec for `WebM` inputs, create a temp output file, and return the ffmpeg
+/// Prepare a video transcode: validate the source file, inspect container and
+/// stream metadata, create a temp output file, and return the ffmpeg
 /// argument list along with the relevant paths.
 ///
-/// Returns `Ok(None)` when the job should be skipped gracefully (unrecognised
-/// extension, or `WebM` that is already VP8/VP9). Returns `Ok(Some(...))` when
+/// Returns `Ok(None)` for compatible VP8/VP9 `WebM`. Returns `Ok(Some(...))` when
 /// ffmpeg should be invoked. `Err` for genuine failures.
 ///
 /// This is a pure synchronous function; call it from `spawn_blocking` or at
@@ -1399,10 +1417,6 @@ type TranscodePrepareParts = (
     tempfile::NamedTempFile,
 );
 
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "source validation and codec-specific preparation share one preflight boundary"
-)]
 /// Validates and prepares all paths and arguments needed for a video transcode.
 fn transcode_video_prepare(
     post_id: i64,
@@ -1418,34 +1432,19 @@ fn transcode_video_prepare(
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if ext != "mp4" && ext != "webm" && ext != "mkv" {
-        debug!("VideoTranscode: skipping unrecognised extension {file_path}");
+    let info = crate::media::probe::inspect_video(&src)
+        .context("VideoTranscode: failed to inspect source container/streams")?;
+    if !info.needs_webm_conversion() {
+        debug!("VideoTranscode: preserving compatible VP8/VP9 WebM for post {post_id}");
         return Ok(None);
     }
-
-    if ext == "webm" {
-        let src_str = src
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8: {}", src.display()))?;
-        match crate::media::ffmpeg::probe_video_codec(src_str) {
-            Ok(codec) if codec == "av1" => {
-                tracing::info!(target: "workers", post_id = post_id, codec = "av1", "VideoTranscode: re-encoding WebM/AV1 to VP9");
-            }
-            Ok(codec) => {
-                debug!(
-                    "VideoTranscode: skipping WebM with codec '{}' for post {} (already VP8/VP9)",
-                    codec, post_id
-                );
-                return Ok(None);
-            }
-            Err(e) => {
-                warn!(
-                    "VideoTranscode: could not probe codec for post {} ({}); skipping",
-                    post_id, e
-                );
-                return Ok(None);
-            }
-        }
+    if info.codecs.first() == Some(&"av1")
+        && crate::media::ffmpeg::video_capabilities()
+            .av1
+            .decoders
+            .is_empty()
+    {
+        anyhow::bail!("VideoTranscode: installed FFmpeg has no AV1 decoder");
     }
 
     let stem = src
@@ -1459,8 +1458,9 @@ fn transcode_video_prepare(
     let webm_name = transcoded_webm_name(&stem, &ext);
     let webm_abs = board_dir.join(&webm_name);
     let webm_rel = format!("{board_short}/{webm_name}");
-    crate::utils::fs_security::canonical_parent_for_new_child(&upload_root, &webm_abs)
-        .context("Transcode destination failed safety validation")?;
+    let _validated_path =
+        crate::utils::fs_security::canonical_parent_for_new_child(&upload_root, &webm_abs)
+            .context("Transcode destination failed safety validation")?;
 
     // temp file in the same directory for POSIX-atomic rename.
     let tmp = tempfile::Builder::new()
@@ -1490,7 +1490,7 @@ fn validated_board_media_dir(upload_root: &std::path::Path, board_short: &str) -
     let board_component = single_normal_component(board_short)
         .ok_or_else(|| anyhow::anyhow!("Transcode board name contains unsafe path components"))?;
     let board_dir = upload_root.join(board_component);
-    crate::utils::fs_security::canonical_child_of(upload_root, &board_dir)
+    let _validated_path = crate::utils::fs_security::canonical_child_of(upload_root, &board_dir)
         .context("Transcode board directory failed safety validation")?;
     crate::utils::fs_security::assert_dir_no_symlink(&board_dir)
         .context("Transcode board directory is not safe")?;
@@ -1596,13 +1596,8 @@ fn transcode_video_finalise(
             return Ok(JobExecution::NeedsCompletion);
         }
         Err(error) => {
-            tracing::warn!(
-                target: "workers",
-                post_id,
-                error = %error,
-                "VideoTranscode: output validation failed; keeping original media"
-            );
-            return Ok(JobExecution::NeedsCompletion);
+            return Err(error)
+                .context("VideoTranscode: output validation failed; original retained")
         }
     }
 
@@ -1709,8 +1704,11 @@ fn install_deterministic_output(
         );
         return Ok(false);
     }
-    tmp.persist_noclobber(destination)
-        .map_err(|error| anyhow::anyhow!("Failed to atomically install media output: {error}"))?;
+    drop(
+        tmp.persist_noclobber(destination).map_err(|error| {
+            anyhow::anyhow!("Failed to atomically install media output: {error}")
+        })?,
+    );
     crate::utils::fs_security::assert_regular_file_no_symlink(destination)
         .context("Installed deterministic media output is unsafe")?;
     Ok(true)
@@ -1779,44 +1777,16 @@ fn validate_transcoded_webm_output(
         });
     }
 
-    if crate::media::ffmpeg::probe_stream_kind(output_path)?
-        != crate::media::ffmpeg::StreamKind::Video
-    {
-        return Ok(TranscodeOutputDecision::Skip {
-            reason: "transcoded output has no video stream",
-        });
-    }
-    let output_str = output_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Transcoded output path is non-UTF-8"))?;
-    let codec = crate::media::ffmpeg::probe_video_codec(output_str)?;
-    if codec != "vp9" {
-        return Ok(TranscodeOutputDecision::Skip {
-            reason: "transcoded output is not VP9",
-        });
-    }
+    crate::media::probe::validate_webm_output_file(output_path)?;
 
     Ok(TranscodeOutputDecision::Accept)
 }
 
 // AudioWaveform
-/// Generate a waveform PNG thumbnail for an audio upload via ffmpeg.
-///
-/// Same `kill_on_drop` fix as `transcode_video`. Uses
-/// `tokio::process::Command` so the OS process is actually killed when the
-/// timeout fires, rather than continuing to run in an abandoned blocking thread.
-/// Parts produced by [`waveform_prepare`] that are consumed by the ffmpeg
-/// phase and [`waveform_finalise`].
-type WaveformPrepareParts = (
-    Vec<String>,
-    PathBuf,
-    String,
-    PathBuf,
-    String,
-    tempfile::NamedTempFile,
-);
+/// Parts prepared for atomic waveform persistence after in-process decoding.
+type WaveformPrepareParts = (PathBuf, String, PathBuf, String, tempfile::NamedTempFile);
 
-/// Generates and persists an audio waveform thumbnail with bounded process time.
+/// Generate a Rust waveform, retaining the authorized uncovered-codec fallback.
 async fn generate_waveform(
     job_id: i64,
     post_id: i64,
@@ -1826,60 +1796,19 @@ async fn generate_waveform(
     pool: DbPool,
     cancel: CancellationToken,
 ) -> Result<JobExecution> {
-    if !ffmpeg_available {
+    let (png_abs, png_rel, src_path, expected_file_path, tmp_png) =
+        tokio::task::spawn_blocking(move || waveform_prepare(&file_path, &board_short))
+            .await
+            .map_err(|error| anyhow::anyhow!("waveform preparation failed: {error}"))??;
+    if !render_waveform_with_compatibility(&src_path, tmp_png.path(), ffmpeg_available, &cancel)
+        .await?
+    {
         return Ok(JobExecution::NeedsCompletion);
     }
-
-    let timeout_secs = crate::config::ffmpeg_timeout_secs();
-    let ffmpeg_timeout = Duration::from_secs(timeout_secs);
-
-    // File I/O and temporary-file creation are blocking.
-    let (args, png_abs, png_rel, src_path, expected_file_path, tmp_png) = {
-        let file_path2 = file_path.clone();
-        let board_short2 = board_short.clone();
-        tokio::task::spawn_blocking(move || waveform_prepare(&file_path2, &board_short2))
-            .await
-            .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in waveform prepare: {e}"))??
-    };
-
-    // `kill_on_drop` terminates ffmpeg when its timeout future is dropped.
-    let mut command = ffmpeg_command();
-    command
-        .args(&args)
-        .stderr(Stdio::piped())
-        .stdout(Stdio::null())
-        .kill_on_drop(true);
-    let child = command.spawn().map_err(|e| {
-        anyhow::anyhow!(
-            "failed to spawn ffmpeg '{}' for waveform: {e}",
-            CONFIG.ffmpeg_path
-        )
-    })?;
-    drop(command);
-
-    match wait_for_ffmpeg_output(child, ffmpeg_timeout, cancel).await? {
-        AsyncWaitOutcome::Exited(output) => {
-            if !output.status.success() {
-                return Err(anyhow::anyhow!(
-                    "ffmpeg waveform exited with {}: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ));
-            }
-        }
-        AsyncWaitOutcome::TimedOut => {
-            warn!("AudioWaveform: job for post {post_id} timed out after {timeout_secs}s — ffmpeg process killed");
-            return Err(anyhow::anyhow!(
-                "ffmpeg waveform timed out after {timeout_secs}s"
-            ));
-        }
-        AsyncWaitOutcome::Cancelled => {
-            return Err(anyhow::anyhow!("ffmpeg waveform cancelled during shutdown"));
-        }
+    if cancel.is_cancelled() {
+        anyhow::bail!("audio waveform cancelled before persistence");
     }
-
-    // File persistence and the database update are blocking.
-    let finalise_result = tokio::task::spawn_blocking(move || {
+    let finalised = tokio::task::spawn_blocking(move || {
         waveform_finalise(
             job_id,
             post_id,
@@ -1893,8 +1822,97 @@ async fn generate_waveform(
         )
     })
     .await
-    .map_err(|e| anyhow::anyhow!("spawn_blocking panicked in waveform finalise: {e}"))?;
-    finalise_result
+    .map_err(|error| anyhow::anyhow!("waveform persistence failed: {error}"))?;
+    finalised
+}
+
+/// Render common codecs internally; only unavailable codecs may invoke `FFmpeg`.
+/// Both paths share the existing deadline, shutdown handling and temp output.
+async fn render_waveform_with_compatibility(
+    src_path: &std::path::Path,
+    output_path: &std::path::Path,
+    ffmpeg_available: bool,
+    cancel: &CancellationToken,
+) -> Result<bool> {
+    let started = std::time::Instant::now();
+    let source = src_path.to_path_buf();
+    let decoder_output_path = output_path.to_path_buf();
+    let decoder_cancel = cancel.clone();
+    let rendered = tokio::task::spawn_blocking(move || {
+        crate::media::audio::render_waveform(
+            &source,
+            &decoder_output_path,
+            CONFIG.thumb_size,
+            (CONFIG.thumb_size / 2).max(1),
+            &decoder_cancel,
+        )
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("waveform decoder failed: {error}"))?;
+    if let Err(error) = rendered {
+        if !crate::media::audio::is_unsupported(&error) {
+            return Err(error);
+        }
+        if !ffmpeg_available {
+            return Ok(false);
+        }
+        if cancel.is_cancelled() {
+            anyhow::bail!("audio decoding cancelled before compatibility fallback");
+        }
+        let remaining = Duration::from_secs(crate::config::ffmpeg_timeout_secs())
+            .checked_sub(started.elapsed())
+            .ok_or_else(|| anyhow::anyhow!("waveform deadline exceeded"))?;
+        let mut command = ffmpeg_command();
+        // Debian FFmpeg's Speex decoder leaves frame layouts unspecified. Its
+        // validated header permits only mono/stereo; negotiate either without
+        // downmixing or changing the channel count before showwavespic.
+        let layout = if error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<symphonia::core::errors::Error>(),
+                Some(symphonia::core::errors::Error::Unsupported(
+                    "Speex requires the compatibility decoder"
+                ))
+            )
+        }) {
+            "aformat=channel_layouts=mono|stereo,"
+        } else {
+            ""
+        };
+        let filter = format!(
+            "{layout}showwavespic=s={}x{}:colors=0x888888",
+            CONFIG.thumb_size,
+            CONFIG.thumb_size / 2
+        );
+        let _configured_command = command
+            .args(["-loglevel", "error", "-i"])
+            .arg(src_path)
+            .args(["-filter_complex", &filter, "-frames:v", "1", "-y"])
+            .arg(output_path)
+            .stderr(Stdio::piped())
+            .stdout(Stdio::null())
+            .kill_on_drop(true);
+        let child = command.spawn().map_err(|spawn_error| {
+            anyhow::anyhow!(
+                "uncovered audio codec requires FFmpeg '{}': {spawn_error}",
+                CONFIG.ffmpeg_path
+            )
+        })?;
+        drop(command);
+        match wait_for_ffmpeg_output(child, remaining, cancel.clone()).await? {
+            AsyncWaitOutcome::Exited(output) if output.status.success() => {}
+            AsyncWaitOutcome::Exited(output) => anyhow::bail!(
+                "FFmpeg audio compatibility decoder failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            AsyncWaitOutcome::TimedOut => {
+                anyhow::bail!("FFmpeg audio compatibility decoder timed out")
+            }
+            AsyncWaitOutcome::Cancelled => {
+                anyhow::bail!("audio compatibility decoding cancelled during shutdown")
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Formats the actionable warning emitted when video re-encoding times out.
@@ -1906,24 +1924,19 @@ fn video_reencode_timeout_warning(post_id: i64, timeout_secs: u64) -> String {
 }
 
 /// Blocking prepare phase for [`generate_waveform`]: validate the source,
-/// create a temp output file, and build the ffmpeg arg list.
+/// and create a temp output file.
 fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepareParts> {
     use anyhow::Context as _;
     let upload_dir = &CONFIG.upload_dir;
-    let src = PathBuf::from(upload_dir).join(file_path);
-    if !src.exists() {
-        return Err(anyhow::anyhow!(
-            "Audio source not found for waveform: {}",
-            src.display()
-        ));
-    }
+    let upload_root = std::path::Path::new(upload_dir);
+    let board_dir = validated_board_media_dir(upload_root, board_short)?;
+    let src = validated_board_media_file(upload_root, file_path, board_short)?;
     let stem = src
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("Malformed audio filename: {}", src.display()))?
         .to_owned();
-    let thumb_size = CONFIG.thumb_size;
-    let thumbs_dir = PathBuf::from(upload_dir).join(board_short).join("thumbs");
+    let thumbs_dir = board_dir.join("thumbs");
     std::fs::create_dir_all(&thumbs_dir)?;
     let png_name = format!("{stem}.png");
     let png_abs = thumbs_dir.join(&png_name);
@@ -1933,35 +1946,7 @@ fn waveform_prepare(file_path: &str, board_short: &str) -> Result<WaveformPrepar
         .suffix(".png")
         .tempfile_in(&thumbs_dir)
         .context("Failed to create temp file for waveform PNG")?;
-    let src_str = src
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Source path is non-UTF-8"))?
-        .to_owned();
-    let tmp_str = tmp_png
-        .path()
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Temp path is non-UTF-8"))?
-        .to_owned();
-    let filter = format!(
-        "showwavespic=s={thumb_size}x{}:colors=0x888888",
-        thumb_size / 2
-    );
-    let args: Vec<String> = [
-        "-loglevel",
-        "error",
-        "-i",
-        &src_str,
-        "-filter_complex",
-        &filter,
-        "-frames:v",
-        "1",
-        "-y",
-        &tmp_str,
-    ]
-    .iter()
-    .map(|s| (*s).to_owned())
-    .collect();
-    Ok((args, png_abs, png_rel, src, file_path.to_owned(), tmp_png))
+    Ok((png_abs, png_rel, src, file_path.to_owned(), tmp_png))
 }
 
 /// Blocking finalise phase for [`generate_waveform`]: atomically persist the
@@ -2492,7 +2477,7 @@ pub(crate) fn normalize_legacy_thread_prune_jobs(pool: &DbPool, limit: usize) ->
     for (job_id, payload) in jobs {
         match serde_json::from_str::<Job>(&payload) {
             Ok(Job::ThreadPrune { board_id }) => {
-                board_ids.insert(board_id);
+                let _previous_entry = board_ids.insert(board_id);
             }
             Ok(_) => {
                 error!(target: "workers", job_id, "thread_prune row contained another job type");
@@ -2644,7 +2629,7 @@ pub fn reconcile_media_job_states(
             let job = match parsed {
                 Ok(job) if job.type_str() == stored_type => job,
                 Ok(_) | Err(_) => {
-                    conn.execute(
+                    let _rows_affected = conn.execute(
                         "UPDATE background_jobs
                          SET status = 'failed',
                              last_error = 'malformed legacy media job payload',
@@ -2701,7 +2686,7 @@ pub fn reconcile_media_job_states(
                 continue;
             }
 
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "UPDATE background_jobs
                  SET status = 'done',
                      last_error = ?2,
@@ -2759,7 +2744,7 @@ pub fn reconcile_media_job_states(
 
         for (post_id, source, current_thumb) in posts {
             let Some(source) = source else {
-                conn.execute(
+                let _rows_affected = conn.execute(
                     "UPDATE posts SET media_processing_state = ?1,
                          media_processing_error = 'pending media post has no source'
                      WHERE id = ?2 AND media_processing_state = ?3",
@@ -2829,7 +2814,7 @@ pub fn reconcile_media_job_states(
                     Job::VideoTranscode {
                         file_path,
                         board_short,
-                        ..
+                        post_id: _,
                     } => {
                         let expected_output_path =
                             deterministic_video_output_path(&file_path, &board_short);
@@ -2849,7 +2834,7 @@ pub fn reconcile_media_job_states(
                     Job::AudioWaveform {
                         file_path,
                         board_short,
-                        ..
+                        post_id: _,
                     } => {
                         let expected_thumb_path =
                             deterministic_waveform_output_path(&file_path, &board_short);
@@ -2863,10 +2848,15 @@ pub fn reconcile_media_job_states(
                             None
                         }
                     }
-                    Job::ThreadPrune { .. } | Job::SpamCheck { .. } => None,
+                    Job::ThreadPrune { board_id: _ }
+                    | Job::SpamCheck {
+                        post_id: _,
+                        ip_hash: _,
+                        body_len: _,
+                    } => None,
                 };
-                if let Some((status, error)) = disposition {
-                    terminal = Some((status.to_owned(), error));
+                if let Some((terminal_status, terminal_error)) = disposition {
+                    terminal = Some((terminal_status.to_owned(), terminal_error));
                     break;
                 }
             }
@@ -2881,7 +2871,7 @@ pub fn reconcile_media_job_states(
                     Some("pending media state has no durable compatible job".to_owned()),
                 ),
             };
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "UPDATE posts SET media_processing_state = ?1, media_processing_error = ?2
                  WHERE id = ?3 AND file_path = ?4 AND media_processing_state = ?5",
                 rusqlite::params![
@@ -2919,14 +2909,13 @@ pub fn reconcile_media_job_states(
 
 // SpamCheck
 /// Records lightweight abuse signals for later operational review.
-fn run_spam_check(post_id: i64, ip_hash: &str, body_len: usize) {
+fn run_spam_check(post_id: i64, _ip_hash: &str, body_len: usize) {
     if body_len > 3500 {
         debug!(
             "SpamCheck: post {} body_len={} exceeds 3500 chars (flagged for review)",
             post_id, body_len
         );
     }
-    let _ = ip_hash;
 }
 
 // Thumbnail / waveform cache eviction
@@ -2943,6 +2932,30 @@ pub struct ThumbCacheEvictionReport {
     pub removed_bytes: u64,
 }
 
+/// Sum cache bytes before filesystem mutation, rejecting unrepresentable totals.
+fn thumbnail_cache_bytes(mut sizes: impl Iterator<Item = u64>) -> Result<u64> {
+    sizes.try_fold(0_u64, |total, size| {
+        total
+            .checked_add(size)
+            .context("thumbnail cache size overflow")
+    })
+}
+
+/// Load every live thumbnail reference before considering cache eviction.
+fn referenced_thumbnail_paths(
+    conn: &rusqlite::Connection,
+) -> Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT thumb_path
+         FROM posts
+         WHERE thumb_path IS NOT NULL AND TRIM(thumb_path) != ''",
+    )?;
+    let referenced = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(referenced)
+}
+
 /// Walk every board's `thumbs/` subdirectory and evict unreferenced files.
 ///
 /// Only files inside `{upload_dir}/{board}/thumbs/` are considered — original
@@ -2957,14 +2970,7 @@ pub fn evict_thumb_cache(
     upload_dir: &str,
     max_bytes: u64,
 ) -> Result<ThumbCacheEvictionReport> {
-    let mut reference_stmt = conn.prepare(
-        "SELECT DISTINCT thumb_path
-         FROM posts
-         WHERE thumb_path IS NOT NULL AND TRIM(thumb_path) != ''",
-    )?;
-    let referenced: std::collections::HashSet<String> = reference_stmt
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let referenced = referenced_thumbnail_paths(conn)?;
 
     // Collect (mtime_secs, path, size) for every file inside any thumbs/ dir.
     let mut files: Vec<(u64, PathBuf, u64, bool)> = Vec::new();
@@ -3019,11 +3025,8 @@ pub fn evict_thumb_cache(
         }
     }
 
-    // Dereference `sz` explicitly and annotate the sum type for
-    // clarity.  `Iterator<Item = &u64>` implements `Sum<&u64>` in std so this
-    // compiled before, but the explicit form is more readable and avoids the
-    // implicit coercion.
-    let total: u64 = files.iter().map(|(_, _, size, _)| *size).sum::<u64>();
+    // Validate the entire byte total before removing any cache file.
+    let total = thumbnail_cache_bytes(files.iter().map(|(_, _, size, _)| *size))?;
     let mut report = ThumbCacheEvictionReport {
         total_before_bytes: total,
         total_after_bytes: total,
@@ -3049,9 +3052,13 @@ pub fn evict_thumb_cache(
         match std::fs::remove_file(path) {
             Ok(()) => {
                 remaining = remaining.saturating_sub(*size);
-                deleted += 1;
+                deleted = deleted
+                    .checked_add(1)
+                    .context("thumbnail eviction count overflow")?;
                 // Dereference `size` for clarity.
-                deleted_bytes += *size;
+                deleted_bytes = deleted_bytes
+                    .checked_add(*size)
+                    .context("thumbnail eviction size overflow")?;
             }
             Err(e) => {
                 warn!("evict_thumb_cache: failed to delete {:?}: {}", path, e);
@@ -3069,6 +3076,19 @@ pub fn evict_thumb_cache(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn thumbnail_cache_size_overflow_is_rejected_before_eviction() -> anyhow::Result<()> {
+        anyhow::ensure!(
+            super::thumbnail_cache_bytes([0, 4, 8].into_iter())? == 12,
+            "ordinary cache total changed"
+        );
+        anyhow::ensure!(
+            super::thumbnail_cache_bytes([u64::MAX, 1].into_iter()).is_err(),
+            "overflowing cache total was accepted"
+        );
+        Ok(())
+    }
+
     use super::{
         media_job_identity, normalize_legacy_thread_prune_jobs, persist_job_completion,
         persist_job_completion_once, persist_transcoded_webm, prune_threads,
@@ -3102,17 +3122,17 @@ mod tests {
         state: &str,
     ) -> anyhow::Result<i64> {
         let conn = pool.get().context("get media fixture connection")?;
-        conn.execute(
+        let _inserted_boards = conn.execute(
             "INSERT INTO boards (short_name, name, description) VALUES (?1, ?1, '')",
             rusqlite::params![board],
         )?;
         let board_id = conn.last_insert_rowid();
-        conn.execute(
+        let _inserted_threads = conn.execute(
             "INSERT INTO threads (board_id, subject) VALUES (?1, 'media')",
             rusqlite::params![board_id],
         )?;
         let thread_id = conn.last_insert_rowid();
-        conn.execute(
+        let _inserted_posts = conn.execute(
             "INSERT INTO posts
              (thread_id, board_id, name, body, body_html, deletion_token, is_op,
               file_path, file_size, mime_type, media_type, media_processing_state)
@@ -3144,7 +3164,7 @@ mod tests {
     ) -> anyhow::Result<i64> {
         let conn = pool.get().context("get retention fixture connection")?;
         let board_id = crate::db::create_board(&conn, short, short, "", false)?;
-        conn.execute(
+        let _rows_affected = conn.execute(
             "UPDATE boards
              SET max_threads = ?2, max_archived_threads = ?3, allow_archive = ?4
              WHERE id = ?1",
@@ -3166,14 +3186,14 @@ mod tests {
     ) -> anyhow::Result<()> {
         let conn = pool.get().context("get thread fixture connection")?;
         for ordinal in 0..live {
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "INSERT INTO threads (board_id, subject, bumped_at)
                  VALUES (?1, 'live', ?2)",
                 rusqlite::params![board_id, i64::try_from(ordinal).unwrap_or(i64::MAX)],
             )?;
         }
         for ordinal in 0..archived {
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "INSERT INTO threads (board_id, subject, bumped_at, archived, locked)
                  VALUES (?1, 'archived', ?2, 1, 1)",
                 rusqlite::params![board_id, i64::try_from(ordinal).unwrap_or(i64::MAX)],
@@ -3190,6 +3210,89 @@ mod tests {
             rusqlite::params![board_id],
             |row| row.get(0),
         )?)
+    }
+
+    #[tokio::test]
+    async fn waveform_common_codecs_work_without_tools_and_uncovered_codecs_use_fallback(
+    ) -> anyhow::Result<()> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
+        let dir = tempfile::tempdir()?;
+        let output = dir.path().join("wave.png");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        for file in [
+            "tone.opus",
+            "surround.opus",
+            "opus-surround-distinct.opus",
+            "opus-surround-padded-gain.opus",
+            "opus-surround-discrete.opus",
+        ] {
+            anyhow::ensure!(
+                super::render_waveform_with_compatibility(
+                    &root.join(file),
+                    &output,
+                    false,
+                    &cancel
+                )
+                .await?,
+                "common audio {file} requires a tool"
+            );
+            anyhow::ensure!(
+                image::open(&output)?.width() == crate::config::CONFIG.thumb_size,
+                "waveform width changed"
+            );
+            std::fs::remove_file(&output)?;
+        }
+        for file in [
+            "ac3.m4a",
+            "he-aac.m4a",
+            "he-aac-inband.aac",
+            "tone.spx",
+            "speex-stereo.spx",
+            "speex-chained.spx",
+            "speex-multiplexed.spx",
+            "speex-chained-multiplexed.spx",
+        ] {
+            anyhow::ensure!(
+                !super::render_waveform_with_compatibility(
+                    &root.join(file),
+                    &output,
+                    false,
+                    &cancel
+                )
+                .await?,
+                "uncovered variant {file} was decoded without its fallback"
+            );
+            anyhow::ensure!(
+                !output.exists(),
+                "uncovered variant published invalid output"
+            );
+            if crate::media::ffmpeg::detect_ffmpeg() {
+                anyhow::ensure!(
+                    super::render_waveform_with_compatibility(
+                        &root.join(file),
+                        &output,
+                        true,
+                        &cancel
+                    )
+                    .await?,
+                    "compatibility fallback did not render {file}"
+                );
+                anyhow::ensure!(
+                    image::open(&output)?.width() == crate::config::CONFIG.thumb_size,
+                    "fallback dimensions changed"
+                );
+                std::fs::remove_file(&output)?;
+            }
+        }
+        let malformed = dir.path().join("bad.wav");
+        std::fs::write(&malformed, b"RIFF\xff\xff\xff\xffWAVE")?;
+        anyhow::ensure!(
+            super::render_waveform_with_compatibility(&malformed, &output, true, &cancel)
+                .await
+                .is_err(),
+            "malformed audio invoked a permissive fallback"
+        );
+        Ok(())
     }
 
     #[test]
@@ -3296,7 +3399,7 @@ mod tests {
         };
         {
             let conn = pool.get()?;
-            claim_job(&queue, &conn, job_id);
+            let _claimed_job = claim_job(&queue, &conn, job_id);
             conn.execute_batch("BEGIN IMMEDIATE")?;
             let finish = crate::db::finish_video_media_job_in_tx(
                 &conn,
@@ -3349,11 +3452,11 @@ mod tests {
         let identity = media_job_identity(&job).context("media identity")?;
         {
             let conn = pool.get()?;
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "DELETE FROM posts WHERE id = ?1",
                 rusqlite::params![post_id],
             )?;
-            claim_job(&queue, &conn, job_id);
+            let _claimed_job = claim_job(&queue, &conn, job_id);
         }
         let state = persist_job_completion_once(
             &pool,
@@ -3420,10 +3523,10 @@ mod tests {
             EnqueueOutcome::DroppedAtCapacity => bail!("retry fixture dropped"),
         };
         let identity = media_job_identity(&job).context("media identity")?;
-        for attempt in 1..=3 {
+        for attempt in 1_i32..=3_i32 {
             {
                 let conn = pool.get()?;
-                claim_job(&queue, &conn, job_id);
+                let _claimed_job = claim_job(&queue, &conn, job_id);
             }
             let failure = persist_job_completion_once(
                 &pool,
@@ -3439,7 +3542,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
             ensure!(source == "retry/video.mp4");
-            if attempt < 3 {
+            if attempt < 3_i32 {
                 ensure!(failure == Some(crate::db::JobFailureState::Retrying));
                 ensure!(job_status == "pending");
                 ensure!(post_state == crate::db::MEDIA_PROCESSING_PENDING);
@@ -3452,14 +3555,19 @@ mod tests {
         }
 
         let replacement_id = match queue.enqueue(&job)? {
-            EnqueueOutcome::Enqueued(job_id) => job_id,
+            EnqueueOutcome::Enqueued(enqueued_id) => enqueued_id,
             EnqueueOutcome::DroppedAtCapacity => bail!("rescheduled fixture dropped"),
         };
         {
             let conn = pool.get()?;
-            claim_job(&queue, &conn, replacement_id);
+            let _claimed_job = claim_job(&queue, &conn, replacement_id);
         }
-        persist_job_completion_once(&pool, replacement_id, Some(&identity), &JobCompletion::Done)?;
+        let _completion_state = persist_job_completion_once(
+            &pool,
+            replacement_id,
+            Some(&identity),
+            &JobCompletion::Done,
+        )?;
         let conn = pool.get()?;
         let state: String = conn.query_row(
             "SELECT media_processing_state FROM posts WHERE id = ?1",
@@ -3491,11 +3599,11 @@ mod tests {
             };
             {
                 let conn = pool.get()?;
-                claim_job(&queue, &conn, old_job_id);
+                let _claimed_job = claim_job(&queue, &conn, old_job_id);
                 if board == "newsrc" {
                     conn.execute_batch("BEGIN IMMEDIATE")?;
                 }
-                conn.execute(
+                let _rows_affected = conn.execute(
                     "UPDATE posts SET file_path = ?2, media_processing_state = ?3 WHERE id = ?1",
                     rusqlite::params![post_id, format!("{board}/new.mp4"), replacement_state],
                 )?;
@@ -3505,7 +3613,7 @@ mod tests {
                         file_path: "newsrc/new.mp4".to_owned(),
                         board_short: "newsrc".to_owned(),
                     };
-                    crate::db::enqueue_job(
+                    let _job_id = crate::db::enqueue_job(
                         &conn,
                         newer.type_str(),
                         &serde_json::to_string(&newer)?,
@@ -3553,7 +3661,7 @@ mod tests {
                 rusqlite::params![post_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "INSERT INTO posts
                  (thread_id, board_id, name, body, body_html, deletion_token,
                   file_path, file_size, mime_type, media_type)
@@ -3573,7 +3681,7 @@ mod tests {
             EnqueueOutcome::DroppedAtCapacity => bail!("shared-source fixture dropped"),
         };
         let conn = pool.get()?;
-        claim_job(&queue, &conn, job_id);
+        let _claimed_job = claim_job(&queue, &conn, job_id);
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let finish = crate::db::finish_video_media_job_in_tx(
             &conn,
@@ -3622,7 +3730,7 @@ mod tests {
         };
         {
             let conn = pool.get()?;
-            claim_job(&queue, &conn, job_id);
+            let _claimed_job = claim_job(&queue, &conn, job_id);
             conn.execute_batch("BEGIN IMMEDIATE")?;
             let finish = crate::db::finish_video_media_job_in_tx(
                 &conn,
@@ -3664,8 +3772,9 @@ mod tests {
         let pool = crate::db::init_test_pool().expect("test pool");
         let board_id = seed_retention_board(&pool, "coalesce", 1, 10, true).expect("seed board");
         let conn = pool.get().expect("database connection");
-        for _ in 0..100 {
-            crate::db::persist_thread_prune_intent(&conn, board_id).expect("coalesce prune intent");
+        for _ in 0_i32..100_i32 {
+            let _schedule = crate::db::persist_thread_prune_intent(&conn, board_id)
+                .expect("coalesce prune intent");
         }
         assert_eq!(
             active_prune_count(&conn, board_id).expect("count intents"),
@@ -3699,8 +3808,8 @@ mod tests {
         seed_threads(&pool, board_id, 3, 0)?;
         {
             let conn = pool.get()?;
-            crate::db::persist_thread_prune_intent(&conn, board_id)?;
-            conn.execute(
+            let _schedule = crate::db::persist_thread_prune_intent(&conn, board_id)?;
+            let _rows_affected = conn.execute(
                 "UPDATE boards SET max_threads = 3, allow_archive = 0 WHERE id = ?1",
                 rusqlite::params![board_id],
             )?;
@@ -3714,7 +3823,7 @@ mod tests {
                 live == 3,
                 "increased current limit must preserve all threads"
             );
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "UPDATE boards SET max_threads = 1 WHERE id = ?1",
                 rusqlite::params![board_id],
             )?;
@@ -3732,8 +3841,8 @@ mod tests {
         seed_threads(&pool, board_id, 0, 3)?;
         {
             let conn = pool.get()?;
-            crate::db::persist_thread_prune_intent(&conn, board_id)?;
-            conn.execute(
+            let _schedule = crate::db::persist_thread_prune_intent(&conn, board_id)?;
+            let _rows_affected = conn.execute(
                 "UPDATE boards SET max_archived_threads = 3 WHERE id = ?1",
                 rusqlite::params![board_id],
             )?;
@@ -3743,7 +3852,7 @@ mod tests {
         {
             let conn = pool.get()?;
             ensure!(crate::db::count_archived_threads_for_board(&conn, board_id)? == 3);
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "UPDATE boards SET max_archived_threads = 1 WHERE id = ?1",
                 rusqlite::params![board_id],
             )?;
@@ -3768,7 +3877,7 @@ mod tests {
                 |row| row.get(0),
             )?;
             conn.execute_batch("DROP TRIGGER boards_domain_update")?;
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "UPDATE boards SET max_threads = 0 WHERE id = ?1",
                 rusqlite::params![board_id],
             )?;
@@ -3820,22 +3929,22 @@ mod tests {
             "d": {
                 "board_id": board_id,
                 "board_short": "legacy",
-                "max_threads": 1,
-                "max_archived_threads": 10,
+                "max_threads": 1_i32,
+                "max_archived_threads": 10_i32,
                 "allow_archive": false
             }
         })
         .to_string();
-        for _ in 0..3 {
-            crate::db::enqueue_job(&conn, "thread_prune", &legacy_payload)?;
+        for _ in 0_i32..3_i32 {
+            let _job_id = crate::db::enqueue_job(&conn, "thread_prune", &legacy_payload)?;
         }
         let missing_payload = serde_json::json!({
             "t": "ThreadPrune",
             "d": {
-                "board_id": 999_999,
+                "board_id": 999_999_i32,
                 "board_short": "gone",
-                "max_threads": 1,
-                "max_archived_threads": 1,
+                "max_threads": 1_i32,
+                "max_archived_threads": 1_i32,
                 "allow_archive": false
             }
         })
@@ -3845,9 +3954,9 @@ mod tests {
 
         normalize_legacy_thread_prune_jobs(&pool, 128)?;
 
-        let conn = pool.get()?;
-        ensure!(active_prune_count(&conn, board_id)? == 1);
-        let missing_status: String = conn.query_row(
+        let verification_conn = pool.get()?;
+        ensure!(active_prune_count(&verification_conn, board_id)? == 1);
+        let missing_status: String = verification_conn.query_row(
             "SELECT status FROM background_jobs WHERE id = ?1",
             rusqlite::params![missing_job_id],
             |row| row.get(0),
@@ -3864,7 +3973,7 @@ mod tests {
     fn media_reconciliation_repairs_legacy_matrix_and_reaches_fixed_point() -> anyhow::Result<()> {
         fn insert_job(conn: &rusqlite::Connection, job: &Job, status: &str) -> anyhow::Result<i64> {
             let id = crate::db::enqueue_job(conn, job.type_str(), &serde_json::to_string(job)?)?;
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "UPDATE background_jobs SET status = ?2 WHERE id = ?1",
                 rusqlite::params![id, status],
             )?;
@@ -3910,7 +4019,7 @@ mod tests {
             crate::db::MEDIA_PROCESSING_PENDING,
         )?;
         let conn = pool.get()?;
-        insert_job(
+        let _completed_job_id = insert_job(
             &conn,
             &Job::VideoTranscode {
                 post_id: completed,
@@ -3962,7 +4071,7 @@ mod tests {
             },
             "pending",
         )?;
-        crate::db::enqueue_job(&conn, "video_transcode", "{malformed")?;
+        let _malformed_job_id = crate::db::enqueue_job(&conn, "video_transcode", "{malformed")?;
         let valid_job = insert_job(
             &conn,
             &Job::VideoTranscode {
@@ -3978,7 +4087,7 @@ mod tests {
         ensure!(first.jobs_resolved >= 6);
         ensure!(first.posts_repaired >= 3);
         ensure!(first.malformed_jobs == 1);
-        let conn = pool.get()?;
+        let verification_conn = pool.get()?;
         for job_id in [
             normal_job,
             missing_job,
@@ -3986,7 +4095,7 @@ mod tests {
             resolved_duplicate,
             changed_job,
         ] {
-            let status: String = conn.query_row(
+            let status: String = verification_conn.query_row(
                 "SELECT status FROM background_jobs WHERE id = ?1",
                 rusqlite::params![job_id],
                 |row| row.get(0),
@@ -3994,26 +4103,26 @@ mod tests {
             ensure!(status == "done");
         }
         for job_id in [kept_duplicate, valid_job] {
-            let status: String = conn.query_row(
+            let status: String = verification_conn.query_row(
                 "SELECT status FROM background_jobs WHERE id = ?1",
                 rusqlite::params![job_id],
                 |row| row.get(0),
             )?;
             ensure!(status == "pending");
         }
-        let no_job_state: String = conn.query_row(
+        let no_job_state: String = verification_conn.query_row(
             "SELECT media_processing_state FROM posts WHERE id = ?1",
             rusqlite::params![no_job],
             |row| row.get(0),
         )?;
-        let completed_state: String = conn.query_row(
+        let completed_state: String = verification_conn.query_row(
             "SELECT media_processing_state FROM posts WHERE id = ?1",
             rusqlite::params![completed],
             |row| row.get(0),
         )?;
         ensure!(no_job_state == crate::db::MEDIA_PROCESSING_FAILED);
         ensure!(completed_state.is_empty());
-        drop(conn);
+        drop(verification_conn);
 
         let second = reconcile_media_job_states(&pool, 0, 0, 128)?;
         ensure!(second.jobs_resolved == 0);
@@ -4076,7 +4185,7 @@ mod tests {
         let job_id = enqueue_spam_job(&queue).expect("enqueue spam-check fixture");
         let conn = pool.get().expect("db connection");
 
-        claim_job(&queue, &conn, job_id);
+        let _claimed_job = claim_job(&queue, &conn, job_id);
         assert_eq!(
             crate::db::pending_job_count(&conn).expect("pending jobs"),
             0
@@ -4107,8 +4216,8 @@ mod tests {
         let conn = pool.get().expect("db connection");
         let mut saw_permanent_failure = false;
 
-        for _ in 0..8 {
-            claim_job(&queue, &conn, job_id);
+        for _ in 0_i32..8_i32 {
+            let _claimed_job = claim_job(&queue, &conn, job_id);
             let failure_state =
                 crate::db::fail_job(&conn, job_id, "persistent failure").expect("fail job");
             queue.mark_job_failure_state(failure_state);
@@ -4142,7 +4251,7 @@ mod tests {
         let job_id = enqueue_spam_job(&queue).expect("enqueue spam-check fixture");
         {
             let conn = pool.get().expect("claim connection");
-            claim_job(&queue, &conn, job_id);
+            let _claimed_job = claim_job(&queue, &conn, job_id);
         }
 
         let held_connection = pool.get().expect("exhaust pool");
@@ -4195,7 +4304,7 @@ mod tests {
         let job_id = enqueue_spam_job(&queue).expect("enqueue spam-check fixture");
         {
             let conn = pool.get().expect("claim connection");
-            claim_job(&queue, &conn, job_id);
+            let _claimed_job = claim_job(&queue, &conn, job_id);
         }
 
         let held_connection = pool.get().expect("exhaust pool");
@@ -4235,12 +4344,13 @@ mod tests {
         let job_id = enqueue_spam_job(&queue).expect("enqueue spam-check fixture");
         {
             let conn = pool.get().expect("claim connection");
-            claim_job(&queue, &conn, job_id);
-            conn.execute(
-                "DELETE FROM background_jobs WHERE id = ?1",
-                rusqlite::params![job_id],
-            )
-            .expect("delete claimed job");
+            let _claimed_job = claim_job(&queue, &conn, job_id);
+            let _rows_affected = conn
+                .execute(
+                    "DELETE FROM background_jobs WHERE id = ?1",
+                    rusqlite::params![job_id],
+                )
+                .expect("delete claimed job");
         }
 
         let result = tokio::time::timeout(
@@ -4270,28 +4380,31 @@ mod tests {
         let queue = JobQueue::new(pool.clone());
         let post_id = {
             let conn = pool.get().context("get seed connection")?;
-            conn.execute(
-                "INSERT INTO boards (short_name, name, description)
+            let _inserted_boards = conn
+                .execute(
+                    "INSERT INTO boards (short_name, name, description)
                  VALUES ('finished', 'Finished', '')",
-                [],
-            )
-            .context("insert terminal-state board")?;
+                    [],
+                )
+                .context("insert terminal-state board")?;
             let board_id = conn.last_insert_rowid();
-            conn.execute(
-                "INSERT INTO threads (board_id, subject) VALUES (?1, 'finished thread')",
-                rusqlite::params![board_id],
-            )
-            .context("insert terminal-state thread")?;
+            let _inserted_threads = conn
+                .execute(
+                    "INSERT INTO threads (board_id, subject) VALUES (?1, 'finished thread')",
+                    rusqlite::params![board_id],
+                )
+                .context("insert terminal-state thread")?;
             let thread_id = conn.last_insert_rowid();
-            conn.execute(
-                "INSERT INTO posts
+            let _inserted_posts = conn
+                .execute(
+                    "INSERT INTO posts
                  (thread_id, board_id, name, body, body_html, deletion_token,
                   is_op, file_path, media_processing_state)
                  VALUES (?1, ?2, 'anon', 'body', 'body', 'token', 1,
                          'finished/final.webm', ?3)",
-                rusqlite::params![thread_id, board_id, ""],
-            )
-            .context("insert terminal-state media post")?;
+                    rusqlite::params![thread_id, board_id, ""],
+                )
+                .context("insert terminal-state media post")?;
             conn.last_insert_rowid()
         };
         let job = Job::VideoTranscode {
@@ -4305,12 +4418,13 @@ mod tests {
         };
         {
             let conn = pool.get().context("get claim connection")?;
-            conn.execute(
-                "UPDATE background_jobs SET attempts = 2 WHERE id = ?1",
-                rusqlite::params![job_id],
-            )
-            .context("place job at final claimable attempt")?;
-            claim_job(&queue, &conn, job_id);
+            let _rows_affected = conn
+                .execute(
+                    "UPDATE background_jobs SET attempts = 2 WHERE id = ?1",
+                    rusqlite::params![job_id],
+                )
+                .context("place job at final claimable attempt")?;
+            let _claimed_job = claim_job(&queue, &conn, job_id);
             conn.execute_batch(
                 "CREATE TRIGGER reject_done_completion
                  BEFORE UPDATE OF status ON background_jobs
@@ -4389,7 +4503,7 @@ mod tests {
         let job_id = enqueue_spam_job(&queue).expect("enqueue spam-check fixture");
         {
             let conn = pool.get().expect("claim connection");
-            claim_job(&queue, &conn, job_id);
+            let _claimed_job = claim_job(&queue, &conn, job_id);
             conn.execute_batch(
                 "CREATE TRIGGER reject_original_job_failure
                  BEFORE UPDATE OF status ON background_jobs
@@ -4439,28 +4553,31 @@ mod tests {
         let queue = JobQueue::new(pool.clone());
         let post_id = {
             let conn = pool.get().context("get seed connection")?;
-            conn.execute(
-                "INSERT INTO boards (short_name, name, description)
+            let _inserted_boards = conn
+                .execute(
+                    "INSERT INTO boards (short_name, name, description)
                  VALUES ('media', 'Media', '')",
-                [],
-            )
-            .context("insert media board")?;
+                    [],
+                )
+                .context("insert media board")?;
             let board_id = conn.last_insert_rowid();
-            conn.execute(
-                "INSERT INTO threads (board_id, subject) VALUES (?1, 'media thread')",
-                rusqlite::params![board_id],
-            )
-            .context("insert media thread")?;
+            let _inserted_threads = conn
+                .execute(
+                    "INSERT INTO threads (board_id, subject) VALUES (?1, 'media thread')",
+                    rusqlite::params![board_id],
+                )
+                .context("insert media thread")?;
             let thread_id = conn.last_insert_rowid();
-            conn.execute(
-                "INSERT INTO posts
+            let _inserted_posts = conn
+                .execute(
+                    "INSERT INTO posts
                  (thread_id, board_id, name, body, body_html, deletion_token,
                   is_op, file_path, media_processing_state)
                  VALUES (?1, ?2, 'anon', 'body', 'body', 'token', 1,
                          'media/new.mp4', ?3)",
-                rusqlite::params![thread_id, board_id, crate::db::MEDIA_PROCESSING_PENDING],
-            )
-            .context("insert media post")?;
+                    rusqlite::params![thread_id, board_id, crate::db::MEDIA_PROCESSING_PENDING],
+                )
+                .context("insert media post")?;
             conn.last_insert_rowid()
         };
         let job = Job::VideoTranscode {
@@ -4475,12 +4592,13 @@ mod tests {
         };
         {
             let conn = pool.get().context("get claim connection")?;
-            claim_job(&queue, &conn, job_id);
+            let _claimed_job = claim_job(&queue, &conn, job_id);
         }
 
         let identity = media_job_identity(&job).context("media job identity")?;
-        persist_job_completion_once(&pool, job_id, Some(&identity), &JobCompletion::Stale)
-            .context("persist stale completion")?;
+        let _completion_state =
+            persist_job_completion_once(&pool, job_id, Some(&identity), &JobCompletion::Stale)
+                .context("persist stale completion")?;
 
         let conn = pool.get().context("get verification connection")?;
         let (job_status, media_state): (String, String) = conn
@@ -4556,7 +4674,7 @@ mod tests {
         let tmp_path = tmp.path().to_path_buf();
         let pool = crate::db::init_test_pool().expect("test pool");
 
-        transcode_video_finalise(
+        let _execution = transcode_video_finalise(
             998,
             999,
             "b/video.mp4",
@@ -4571,6 +4689,100 @@ mod tests {
         assert!(src.exists());
         assert!(!webm_abs.exists());
         assert!(!tmp_path.exists());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn failed_video_process_cannot_promote_partial_output() -> anyhow::Result<()> {
+        use super::{install_deterministic_output, run_video_transcode};
+        use tokio::process::Command as TokioCommand;
+        use tokio_util::sync::CancellationToken;
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("original.mp4");
+        std::fs::write(&source, b"original media")?;
+        let destination = dir.path().join("converted.webm");
+        for (script, cancel) in [
+            (
+                "printf partial > \"$1\"; echo 'AV1 decode failed' >&2; exit 1",
+                CancellationToken::new(),
+            ),
+            (
+                "printf partial > \"$1\"; sleep 30",
+                CancellationToken::new(),
+            ),
+            ("printf partial > \"$1\"; sleep 30", {
+                let cancel = CancellationToken::new();
+                cancel.cancel();
+                cancel
+            }),
+        ] {
+            let tmp = tempfile::Builder::new()
+                .suffix(".webm")
+                .tempfile_in(dir.path())?;
+            let temporary_path = tmp.path().to_owned();
+            let mut command = TokioCommand::new("/bin/sh");
+            let _configured_command = command
+                .process_group(0)
+                .args(["-c", script, "video-fixture"])
+                .arg(tmp.path());
+            // The same process gate used by production must reject promotion.
+            let result = run_video_transcode(command, 1, 1, cancel)
+                .await
+                .and_then(|()| install_deterministic_output(tmp, &destination));
+            anyhow::ensure!(result.is_err(), "failed video process accepted");
+            anyhow::ensure!(!temporary_path.exists(), "partial output leaked");
+            anyhow::ensure!(!destination.exists(), "partial output promoted");
+            anyhow::ensure!(
+                std::fs::read(&source)? == b"original media",
+                "source changed"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_transcode_output_is_not_promoted_or_recorded() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("original.mp4");
+        std::fs::write(&source, vec![0; 16_384])?;
+        let destination = dir.path().join("converted.webm");
+        let pool = crate::db::init_test_pool()?;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
+        for name in [
+            "av1.webm",
+            "av1.mkv",
+            "av1.mp4",
+            "vp8.webm",
+            "video.mp4",
+            "audio.webm",
+        ] {
+            let tmp = tempfile::Builder::new()
+                .suffix(".webm")
+                .tempfile_in(dir.path())?;
+            let temporary_path = tmp.path().to_owned();
+            let _bytes_copied = std::fs::copy(root.join(name), tmp.path())?;
+            let result = transcode_video_finalise(
+                1,
+                1,
+                "b/original.mp4",
+                &source,
+                &destination,
+                "b/converted.webm",
+                tmp,
+                &pool,
+            );
+            anyhow::ensure!(result.is_err(), "invalid output {name} accepted");
+            anyhow::ensure!(
+                !temporary_path.exists() && !destination.exists(),
+                "invalid output leaked"
+            );
+            let verification_conn = pool.get()?;
+            anyhow::ensure!(
+                file_hash_count(&verification_conn, "b/converted.webm") == 0,
+                "invalid output persisted"
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -4618,9 +4830,13 @@ mod tests {
         unix_fs::symlink(&outside_dir, board_dir.join("thumbs")).expect("symlink thumbs dir");
 
         let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("test connection");
-        super::evict_thumb_cache(&conn, upload_root.to_str().expect("utf8 upload root"), 0)
-            .expect("evict thumbnail cache");
+        let verification_conn = pool.get().expect("test connection");
+        let _eviction_report = super::evict_thumb_cache(
+            &verification_conn,
+            upload_root.to_str().expect("utf8 upload root"),
+            0,
+        )
+        .expect("evict thumbnail cache");
 
         assert_eq!(
             std::fs::read(&outside_file).expect("read outside"),
@@ -4648,9 +4864,13 @@ mod tests {
         unix_fs::symlink(&outside_board, upload_root.join("b")).expect("symlink board dir");
 
         let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("test connection");
-        super::evict_thumb_cache(&conn, upload_root.to_str().expect("utf8 upload root"), 0)
-            .expect("evict thumbnail cache");
+        let verification_conn = pool.get().expect("test connection");
+        let _eviction_report = super::evict_thumb_cache(
+            &verification_conn,
+            upload_root.to_str().expect("utf8 upload root"),
+            0,
+        )
+        .expect("evict thumbnail cache");
 
         assert_eq!(
             std::fs::read(&outside_file).expect("read outside"),
@@ -4676,9 +4896,13 @@ mod tests {
         unix_fs::symlink(&outside_file, thumbs_dir.join("thumb.webp")).expect("symlink thumb file");
 
         let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("test connection");
-        super::evict_thumb_cache(&conn, upload_root.to_str().expect("utf8 upload root"), 0)
-            .expect("evict thumbnail cache");
+        let verification_conn = pool.get().expect("test connection");
+        let _eviction_report = super::evict_thumb_cache(
+            &verification_conn,
+            upload_root.to_str().expect("utf8 upload root"),
+            0,
+        )
+        .expect("evict thumbnail cache");
 
         assert_eq!(
             std::fs::read(&outside_file).expect("read outside"),
@@ -4711,10 +4935,10 @@ mod tests {
         }
 
         let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("test connection");
-        let board_id =
-            crate::db::create_board(&conn, "b", "Random", "", false).expect("create board");
-        let thread_id: i64 = conn
+        let verification_conn = pool.get().expect("test connection");
+        let board_id = crate::db::create_board(&verification_conn, "b", "Random", "", false)
+            .expect("create board");
+        let thread_id: i64 = verification_conn
             .query_row(
                 "INSERT INTO threads (board_id, subject) VALUES (?1, 'thread') RETURNING id",
                 [board_id],
@@ -4722,16 +4946,17 @@ mod tests {
             )
             .expect("create thread");
         let fixtures = [
-            (101, "normal.webp", ""),
-            (102, "pending.webp", crate::db::MEDIA_PROCESSING_PENDING),
-            (103, "failed.webp", crate::db::MEDIA_PROCESSING_FAILED),
-            (104, "pruned.webp", crate::db::MEDIA_ORIGINAL_PRUNED),
-            (105, "shared.webp", ""),
-            (106, "shared.webp", crate::db::MEDIA_ORIGINAL_PRUNED),
+            (101_i32, "normal.webp", ""),
+            (102_i32, "pending.webp", crate::db::MEDIA_PROCESSING_PENDING),
+            (103_i32, "failed.webp", crate::db::MEDIA_PROCESSING_FAILED),
+            (104_i32, "pruned.webp", crate::db::MEDIA_ORIGINAL_PRUNED),
+            (105_i32, "shared.webp", ""),
+            (106_i32, "shared.webp", crate::db::MEDIA_ORIGINAL_PRUNED),
         ];
         for (post_id, thumb_name, state) in fixtures {
-            conn.execute(
-                "INSERT INTO posts (
+            let _rows_affected = verification_conn
+                .execute(
+                    "INSERT INTO posts (
                     id, thread_id, board_id, name, body, body_html, file_path,
                     file_name, file_size, thumb_path, mime_type, deletion_token,
                     is_op, media_type, media_processing_state, created_at
@@ -4739,21 +4964,22 @@ mod tests {
                     ?1, ?2, ?3, 'anon', 'body', 'body', ?4, 'file.webp', 4,
                     ?5, 'image/webp', ?6, 0, 'image', ?7, ?1
                  )",
-                rusqlite::params![
-                    post_id,
-                    thread_id,
-                    board_id,
-                    format!("b/file-{post_id}.webp"),
-                    format!("b/thumbs/{thumb_name}"),
-                    format!("token-{post_id}"),
-                    state,
-                ],
-            )
-            .expect("insert media post");
+                    rusqlite::params![
+                        post_id,
+                        thread_id,
+                        board_id,
+                        format!("b/file-{post_id}.webp"),
+                        format!("b/thumbs/{thumb_name}"),
+                        format!("token-{post_id}"),
+                        state,
+                    ],
+                )
+                .expect("insert media post");
         }
 
         let upload_dir = upload_root.to_str().expect("UTF-8 upload root");
-        let first = super::evict_thumb_cache(&conn, upload_dir, 0).expect("first eviction");
+        let first =
+            super::evict_thumb_cache(&verification_conn, upload_dir, 0).expect("first eviction");
         assert_eq!(first.total_before_bytes, 24);
         assert_eq!(first.total_after_bytes, 20);
         assert_eq!(first.removed_files, 1);
@@ -4765,7 +4991,8 @@ mod tests {
             );
         }
 
-        let second = super::evict_thumb_cache(&conn, upload_dir, 0).expect("second eviction");
+        let second =
+            super::evict_thumb_cache(&verification_conn, upload_dir, 0).expect("second eviction");
         assert_eq!(second.total_before_bytes, 20);
         assert_eq!(second.total_after_bytes, 20);
         assert_eq!(second.removed_files, 0, "fixed point is idempotent");
@@ -4806,9 +5033,9 @@ mod tests {
 
         assert!(crate::db::is_stale_media_target_error(&error));
         assert!(!png_abs.exists());
-        let conn = pool.get().expect("db connection");
-        assert_eq!(file_hash_count(&conn, "b/audio.mp3"), 0);
-        assert_eq!(file_hash_count(&conn, "b/thumbs/audio.png"), 0);
+        let verification_conn = pool.get().expect("db connection");
+        assert_eq!(file_hash_count(&verification_conn, "b/audio.mp3"), 0);
+        assert_eq!(file_hash_count(&verification_conn, "b/thumbs/audio.png"), 0);
     }
 
     #[test]
@@ -4830,19 +5057,19 @@ mod tests {
             .context("write temporary waveform")?;
         let pool = crate::db::init_test_pool().context("create test pool")?;
         let post_id = {
-            let conn = pool.get().context("get seed connection")?;
-            conn.execute(
+            let verification_conn = pool.get().context("get seed connection")?;
+            let _inserted_boards = verification_conn.execute(
                 "INSERT INTO boards (short_name, name, description)
                  VALUES ('b', 'B', '')",
                 [],
             )?;
-            let board_id = conn.last_insert_rowid();
-            conn.execute(
+            let board_id = verification_conn.last_insert_rowid();
+            let _inserted_threads = verification_conn.execute(
                 "INSERT INTO threads (board_id, subject) VALUES (?1, 'audio')",
                 rusqlite::params![board_id],
             )?;
-            let thread_id = conn.last_insert_rowid();
-            conn.execute(
+            let thread_id = verification_conn.last_insert_rowid();
+            let _inserted_posts = verification_conn.execute(
                 "INSERT INTO posts
                  (thread_id, board_id, name, body, body_html, deletion_token, is_op,
                   file_path, file_size, thumb_path, mime_type, media_type)
@@ -4850,10 +5077,10 @@ mod tests {
                          'b/audio.mp3', 12, 'b/thumbs/audio.svg', 'audio/mpeg', 'audio')",
                 rusqlite::params![thread_id, board_id],
             )?;
-            let post_id = conn.last_insert_rowid();
+            let post_id = verification_conn.last_insert_rowid();
             let audio_hash = super::sha256_file_hex(&src)?;
             crate::db::record_file_hash(
-                &conn,
+                &verification_conn,
                 &audio_hash,
                 "b/audio.mp3",
                 "b/thumbs/audio.svg",
@@ -4873,10 +5100,10 @@ mod tests {
             EnqueueOutcome::DroppedAtCapacity => bail!("waveform fixture dropped at capacity"),
         };
         {
-            let conn = pool.get()?;
-            claim_job(&queue, &conn, job_id);
+            let verification_conn = pool.get()?;
+            let _claimed_job = claim_job(&queue, &verification_conn, job_id);
         }
-        waveform_finalise(
+        let _execution = waveform_finalise(
             job_id,
             post_id,
             &png_abs,
@@ -4893,8 +5120,8 @@ mod tests {
             !svg_abs.exists(),
             "obsolete SVG placeholder was not removed"
         );
-        let conn = pool.get().context("get verification connection")?;
-        let thumb_path: String = conn.query_row(
+        let verification_conn = pool.get().context("get verification connection")?;
+        let thumb_path: String = verification_conn.query_row(
             "SELECT thumb_path FROM posts WHERE id = ?1",
             rusqlite::params![post_id],
             |row| row.get(0),

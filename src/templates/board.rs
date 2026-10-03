@@ -3,7 +3,6 @@
 use crate::models::{Board, Pagination, Post, Thread, ThreadSummary, SEARCH_QUERY_MAX_CHARS};
 use crate::utils::sanitize::escape_html;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write as _;
 
 use super::{
     base_layout, base_layout_with_preferences, compress_modal_script, embed_thumb_from_body,
@@ -642,7 +641,7 @@ fn board_cards<S: std::hash::BuildHasher>(
             admin_csrf_token,
             show_reorder_controls,
             index == 0,
-            index + 1 == list.len(),
+            index.checked_add(1) == Some(list.len()),
             user_preferences,
         ));
     }
@@ -747,9 +746,11 @@ pub fn index_page<S: std::hash::BuildHasher>(
     let mut access_links = String::new();
     if let Some(addr) = onion_address {
         let escaped_addr = escape_html(addr);
-        let _ = write!(
-            access_links,
-            r#"<p class="index-onion"><code class="onion-addr">{escaped_addr}</code><button type="button" class="tor-copy-button" data-tor-address="{escaped_addr}" aria-label="Copy Tor address" hidden>Copy</button><span class="tor-copy-status" aria-live="polite"></span></p>"#
+        crate::templates::append_html(
+            &mut access_links,
+            format_args!(
+                r#"<p class="index-onion"><code class="onion-addr">{escaped_addr}</code><button type="button" class="tor-copy-button" data-tor-address="{escaped_addr}" aria-label="Copy Tor address" hidden>Copy</button><span class="tor-copy-status" aria-live="polite"></span></p>"#
+            ),
         );
     }
     let onion_html = if access_links.is_empty() {
@@ -884,17 +885,20 @@ pub fn board_page<S: std::hash::BuildHasher>(
     let admin_form_csrf = admin_csrf_token.unwrap_or(csrf_token);
 
     if let Some(msg) = error {
-        let _ = write!(
-            body,
-            r#"<div class="post-error-banner">&#9888; {}</div>"#,
-            escape_html(msg)
+        crate::templates::append_html(
+            &mut body,
+            format_args!(
+                r#"<div class="post-error-banner">&#9888; {}</div>"#,
+                escape_html(msg)
+            ),
         );
     }
 
     if is_admin {
-        let _ = write!(
-            body,
-            r#"<div class="admin-toolbar">
+        crate::templates::append_html(
+            &mut body,
+            format_args!(
+                r#"<div class="admin-toolbar">
 <span class="admin-toolbar-label">&#9632; ADMIN</span>
 <form method="POST" action="/admin/logout" style="display:inline">
 <input type="hidden" name="_csrf" value="{csrf}">
@@ -902,8 +906,9 @@ pub fn board_page<S: std::hash::BuildHasher>(
 <button type="submit" class="admin-toolbar-btn">logout</button>
 </form>
 </div>"#,
-            csrf = escape_html(admin_form_csrf),
-            board = escape_html(&board.short_name)
+                csrf = escape_html(admin_form_csrf),
+                board = escape_html(&board.short_name)
+            ),
         );
     }
 
@@ -917,41 +922,45 @@ pub fn board_page<S: std::hash::BuildHasher>(
         } else {
             String::new()
         };
-        let _ = write!(
-            body,
-            r#"<div class="board-header board-index-header" data-activity-page="board-index"><h1>/{short}/  — {name}{access_badge}</h1><p class="board-desc">{desc}</p></div>
+        crate::templates::append_html(
+            &mut body,
+            format_args!(
+                r#"<div class="board-header board-index-header" data-activity-page="board-index"><h1>/{short}/  — {name}{access_badge}</h1><p class="board-desc">{desc}</p></div>
 {board_banner_html}
 <div class="board-nav"><a class="board-nav-link active" href="/{short}">[Index]</a><a class="board-nav-link" href="/{short}/catalog">[Catalog]</a>{nav_archive}</div>"#
+            ),
         );
     }
 
     if can_post {
         let show_post_form = error.is_some() || new_thread_prefill.is_some();
-        let _ = write!(
-            body,
-            r##"<div class="post-toggle-bar centered catalog-toggle-bar">
+        crate::templates::append_html(
+            &mut body,
+            format_args!(
+                r##"<div class="post-toggle-bar centered catalog-toggle-bar">
   <a class="post-toggle-btn" href="#post-form-wrap" data-action="toggle-post-form">[ Post a New Thread ]</a>
 </div>
 <div class="{post_form_class}" id="post-form-wrap" style="{post_form_style}">
   {}
 </div>"##,
-            super::forms::new_thread_form(
-                &board.short_name,
-                csrf_token,
-                board,
-                new_thread_prefill,
-                &format!("/{}", board.short_name),
+                super::forms::new_thread_form(
+                    &board.short_name,
+                    csrf_token,
+                    board,
+                    new_thread_prefill,
+                    &format!("/{}", board.short_name),
+                ),
+                post_form_class = if show_post_form {
+                    "post-form-wrap is-open"
+                } else {
+                    "post-form-wrap is-collapsed"
+                },
+                post_form_style = if show_post_form {
+                    "display:block"
+                } else {
+                    "display:none"
+                },
             ),
-            post_form_class = if show_post_form {
-                "post-form-wrap is-open"
-            } else {
-                "post-form-wrap is-collapsed"
-            },
-            post_form_style = if show_post_form {
-                "display:block"
-            } else {
-                "display:none"
-            },
         );
     } else if board.access_mode.requires_unlock_for_posting() {
         body.push_str(&render_post_access_gate(
@@ -1038,62 +1047,72 @@ fn render_thread_summary(
         ""
     };
 
-    let _ = write!(
-        html,
-        r#"<div class="thread" id="t{tid}">
+    crate::templates::append_html(
+        &mut html,
+        format_args!(
+            r#"<div class="thread" id="t{tid}">
 <div class="op post" id="p{op_id}">"#,
-        tid = t.id,
-        op_id = t.op_id.unwrap_or(0)
+            tid = t.id,
+            op_id = t.op_id.unwrap_or(0)
+        ),
     );
 
     let thread_state_badges = super::thread::render_thread_state_badges(t.sticky, t.locked);
 
     if let (Some(_file), Some(thumb)) = (&t.op_file, &t.op_thumb) {
-        let _ = write!(
-            html,
-            r#"<div class="file-container thread-summary-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" decoding="async" alt="image"></a>{badges}</div>"#,
-            board = escape_html(board_short),
-            tid = t.id,
-            th = escape_html(thumb),
-            badges = thread_state_badges
+        crate::templates::append_html(
+            &mut html,
+            format_args!(
+                r#"<div class="file-container thread-summary-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb" src="/boards/{th}" loading="lazy" decoding="async" alt="image"></a>{badges}</div>"#,
+                board = escape_html(board_short),
+                tid = t.id,
+                th = escape_html(thumb),
+                badges = thread_state_badges
+            ),
         );
     } else if let Some(embed_thumb) = t.op_body.as_deref().and_then(embed_thumb_from_body) {
-        let _ = write!(
-            html,
-            r#"<div class="file-container thread-summary-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb embed-index-thumb" src="{src}" loading="lazy" decoding="async" alt="video thumbnail"></a>{badges}</div>"#,
-            board = escape_html(board_short),
-            tid = t.id,
-            src = escape_html(&embed_thumb),
-            badges = thread_state_badges
+        crate::templates::append_html(
+            &mut html,
+            format_args!(
+                r#"<div class="file-container thread-summary-thumb-wrap"><a href="/{board}/thread/{tid}"><img class="thumb embed-index-thumb" src="{src}" loading="lazy" decoding="async" alt="video thumbnail"></a>{badges}</div>"#,
+                board = escape_html(board_short),
+                tid = t.id,
+                src = escape_html(&embed_thumb),
+                badges = thread_state_badges
+            ),
         );
     }
 
-    let _ = write!(
-        html,
-        r#"<div class="post-meta">
+    crate::templates::append_html(
+        &mut html,
+        format_args!(
+            r#"<div class="post-meta">
 {sticky}{locked}
 <strong class="name">{name}</strong>
 <span class="post-time" data-utc="{ts}">{time}</span>
 <a class="post-num" href="/{board}/thread/{tid}">No.{op_id}</a>
 <a class="thread-id-link" href="/{board}/thread/{tid}" title="Thread #{tid}">[ #{tid} ]</a>
 </div>"#,
-        sticky = sticky_label,
-        locked = locked_label,
-        name = escape_html(t.op_name.as_deref().unwrap_or("Anonymous")),
-        ts = t.created_at,
-        time = fmt_ts_short(t.created_at),
-        board = escape_html(board_short),
-        tid = t.id,
-        op_id = t.op_id.unwrap_or(0)
+            sticky = sticky_label,
+            locked = locked_label,
+            name = escape_html(t.op_name.as_deref().unwrap_or("Anonymous")),
+            ts = t.created_at,
+            time = fmt_ts_short(t.created_at),
+            board = escape_html(board_short),
+            tid = t.id,
+            op_id = t.op_id.unwrap_or(0)
+        ),
     );
 
     if let Some(subject) = &t.subject {
-        let _ = write!(
-            html,
-            r#"<div class="subject"><a href="/{b}/thread/{tid}"><strong>{s}</strong></a></div>"#,
-            b = escape_html(board_short),
-            tid = t.id,
-            s = escape_html(subject)
+        crate::templates::append_html(
+            &mut html,
+            format_args!(
+                r#"<div class="subject"><a href="/{b}/thread/{tid}"><strong>{s}</strong></a></div>"#,
+                b = escape_html(board_short),
+                tid = t.id,
+                s = escape_html(subject)
+            ),
         );
     }
 
@@ -1113,7 +1132,10 @@ fn render_thread_summary(
         } else {
             escape_html(body)
         };
-        let _ = write!(html, r#"<div class="post-body">{truncated}</div>"#);
+        crate::templates::append_html(
+            &mut html,
+            format_args!(r#"<div class="post-body">{truncated}</div>"#),
+        );
     }
 
     let activity_badge = unread_reply_count
@@ -1126,24 +1148,26 @@ fn render_thread_summary(
         })
         .unwrap_or_default();
     if !activity_badge.is_empty() {
-        let _ = write!(
-            html,
-            r#"<div class="thread-summary-activity-row">{activity_badge}</div>"#
+        crate::templates::append_html(
+            &mut html,
+            format_args!(r#"<div class="thread-summary-activity-row">{activity_badge}</div>"#),
         );
     }
 
-    let _ = write!(
-        html,
-        r#"<div class="thread-footer">
+    crate::templates::append_html(
+        &mut html,
+        format_args!(
+            r#"<div class="thread-footer">
 <a href="/{board}/thread/{tid}">[reply] ({n} {word})</a>"#,
-        board = escape_html(board_short),
-        tid = t.id,
-        n = t.reply_count,
-        word = if t.reply_count == 1 {
-            "reply"
-        } else {
-            "replies"
-        },
+            board = escape_html(board_short),
+            tid = t.id,
+            n = t.reply_count,
+            word = if t.reply_count == 1 {
+                "reply"
+            } else {
+                "replies"
+            },
+        ),
     );
 
     if is_admin {
@@ -1159,9 +1183,10 @@ fn render_thread_summary(
         } else {
             "&#128274; lock"
         };
-        let _ = write!(
-            html,
-            r#" <form method="POST" action="/admin/thread/action" style="display:inline">
+        crate::templates::append_html(
+            &mut html,
+            format_args!(
+                r#" <form method="POST" action="/admin/thread/action" style="display:inline">
 <input type="hidden" name="_csrf"      value="{csrf}">
 <input type="hidden" name="thread_id"  value="{tid}">
 <input type="hidden" name="board"      value="{board}">
@@ -1182,25 +1207,28 @@ fn render_thread_summary(
 <button type="submit" class="admin-del-btn"
         data-confirm="Delete thread No.{tid} and all its posts?">&#x2715; del</button>
 </form>"#,
-            csrf = escape_html(admin_form_csrf),
-            tid = t.id,
-            board = escape_html(board_short),
-            sticky_act = sticky_act,
-            sticky_lbl = sticky_lbl,
-            lock_act = lock_act,
-            lock_lbl = lock_lbl
+                csrf = escape_html(admin_form_csrf),
+                tid = t.id,
+                board = escape_html(board_short),
+                sticky_act = sticky_act,
+                sticky_lbl = sticky_lbl,
+                lock_act = lock_act,
+                lock_lbl = lock_lbl
+            ),
         );
     }
 
     html.push_str("</div>\n</div>");
 
     if summary.omitted > 0 {
-        let _ = write!(
-            html,
-            r#"<div class="omitted">{} posts omitted. <a href="/{b}/thread/{tid}">view thread</a></div>"#,
-            summary.omitted,
-            b = escape_html(board_short),
-            tid = t.id
+        crate::templates::append_html(
+            &mut html,
+            format_args!(
+                r#"<div class="omitted">{} posts omitted. <a href="/{b}/thread/{tid}">view thread</a></div>"#,
+                summary.omitted,
+                b = escape_html(board_short),
+                tid = t.id
+            ),
         );
     }
 
@@ -1269,9 +1297,10 @@ pub fn catalog_page<S: std::hash::BuildHasher>(
     let admin_form_csrf = admin_csrf_token.unwrap_or(csrf_token);
 
     if is_admin {
-        let _ = write!(
-            body,
-            r#"<div class="admin-toolbar">
+        crate::templates::append_html(
+            &mut body,
+            format_args!(
+                r#"<div class="admin-toolbar">
 <span class="admin-toolbar-label">&#9632; ADMIN</span>
 <form method="POST" action="/admin/logout" style="display:inline">
 <input type="hidden" name="_csrf" value="{csrf}">
@@ -1279,8 +1308,9 @@ pub fn catalog_page<S: std::hash::BuildHasher>(
 <button type="submit" class="admin-toolbar-btn">logout</button>
 </form>
 </div>"#,
-            csrf = escape_html(admin_form_csrf),
-            board = escape_html(&board.short_name)
+                csrf = escape_html(admin_form_csrf),
+                board = escape_html(&board.short_name)
+            ),
         );
     }
 
@@ -1305,9 +1335,10 @@ pub fn catalog_page<S: std::hash::BuildHasher>(
     };
     let access_badge = board_access_badge(board);
 
-    let _ = write!(
-        body,
-        r#"<div class="board-header board-catalog-header" data-activity-page="catalog">
+    crate::templates::append_html(
+        &mut body,
+        format_args!(
+            r#"<div class="board-header board-catalog-header" data-activity-page="catalog">
   <div class="catalog-header-left board-catalog-header">
     <h1>/{bs}/  — {bn}{access_badge}{title_suffix}</h1>
     <p class="board-desc">{desc}</p>
@@ -1334,36 +1365,39 @@ pub fn catalog_page<S: std::hash::BuildHasher>(
   <noscript><p class="form-field-help">Sorting and comment toggles require JavaScript. Threads use bump order with comments shown.</p></noscript>
 </div>
 <div class="board-nav"><a class="board-nav-link" href="/{bs}">[Index]</a><a class="board-nav-link{catalog_active}" href="/{bs}/catalog">[Catalog]</a>{nav_archive}{hidden_nav}</div>"#,
-        bs = bs,
-        bn = bn,
-        access_badge = access_badge,
-        title_suffix = title_suffix,
-        desc = escape_html(&board.description),
-        board_banner_html = board_banner_html,
-        catalog_active = if hidden_view { "" } else { " active" },
-        nav_archive = nav_archive,
-        hidden_nav = hidden_nav,
+            bs = bs,
+            bn = bn,
+            access_badge = access_badge,
+            title_suffix = title_suffix,
+            desc = escape_html(&board.description),
+            board_banner_html = board_banner_html,
+            catalog_active = if hidden_view { "" } else { " active" },
+            nav_archive = nav_archive,
+            hidden_nav = hidden_nav,
+        ),
     );
     if can_post {
-        let _ = write!(
-            body,
-            r##"<div class="post-toggle-bar centered catalog-toggle-bar">
+        crate::templates::append_html(
+            &mut body,
+            format_args!(
+                r##"<div class="post-toggle-bar centered catalog-toggle-bar">
   <a class="post-toggle-btn" href="#post-form-wrap" data-action="toggle-post-form">[ Start a New Thread ]</a>
 </div>
 <div class="post-form-wrap" id="post-form-wrap" style="display:none">
   {form}
 </div>"##,
-            form = super::forms::new_thread_form(
-                &board.short_name,
-                csrf_token,
-                board,
-                None,
-                &if hidden_view {
-                    format!("/{}/hidden", board.short_name)
-                } else {
-                    format!("/{}/catalog", board.short_name)
-                },
-            )
+                form = super::forms::new_thread_form(
+                    &board.short_name,
+                    csrf_token,
+                    board,
+                    None,
+                    &if hidden_view {
+                        format!("/{}/hidden", board.short_name)
+                    } else {
+                        format!("/{}/catalog", board.short_name)
+                    },
+                )
+            ),
         );
     } else if board.access_mode.requires_unlock_for_posting() {
         body.push_str(&render_post_access_gate(
@@ -1419,10 +1453,12 @@ pub fn catalog_page<S: std::hash::BuildHasher>(
     }
 
     if threads.is_empty() {
-        let _ = write!(
-            body,
-            r#"<p class="catalog-empty-state">{}</p>"#,
-            escape_html(empty_message)
+        crate::templates::append_html(
+            &mut body,
+            format_args!(
+                r#"<p class="catalog-empty-state">{}</p>"#,
+                escape_html(empty_message)
+            ),
         );
     }
 
@@ -1505,10 +1541,12 @@ pub fn search_page(
             r#"<p class="catalog-empty-state board-search-empty">no results found. try a different query.</p>"#,
         );
     } else {
-        let _ = write!(
-            body,
-            r#"<p class="board-search-summary board-search-summary-results">{}</p>"#,
-            escape_html(&result_label)
+        crate::templates::append_html(
+            &mut body,
+            format_args!(
+                r#"<p class="board-search-summary board-search-summary-results">{}</p>"#,
+                escape_html(&result_label)
+            ),
         );
         for post in posts {
             body.push_str(&super::thread::render_search_post(
@@ -1746,7 +1784,11 @@ mod tests {
             thread_count: 4,
         };
         let mut badges = HashMap::new();
-        badges.insert(stats.board.id, 2);
+        assert_eq!(
+            badges.insert(stats.board.id, 2),
+            None,
+            "the board badge fixture must be unique"
+        );
 
         let html = board_cards(
             &[&stats],
@@ -1918,7 +1960,10 @@ mod tests {
         let board = sample_board();
         let thread = sample_thread();
         let mut pinned_ids = HashSet::new();
-        pinned_ids.insert(thread.id);
+        assert!(
+            pinned_ids.insert(thread.id),
+            "the pinned thread fixture must be unique"
+        );
 
         let html = catalog_page(
             &board,

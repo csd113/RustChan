@@ -113,8 +113,8 @@ pub(super) async fn theme_error_response(
             ),
         };
         *response.body_mut() = axum::body::Body::from(html);
-        response.headers_mut().remove(header::CONTENT_LENGTH);
-        response.headers_mut().insert(
+        let _previous_content_length = response.headers_mut().remove(header::CONTENT_LENGTH);
+        let _previous_value = response.headers_mut().insert(
             header::CACHE_CONTROL,
             header::HeaderValue::from_static("private, no-store"),
         );
@@ -153,7 +153,7 @@ fn boundary_error_response(
     message: &'static str,
 ) -> axum::response::Response {
     let mut response = (status, message).into_response();
-    response.headers_mut().insert(
+    let _previous_value = response.headers_mut().insert(
         header::CONNECTION,
         header::HeaderValue::from_static("close"),
     );
@@ -175,7 +175,7 @@ pub(super) async fn hsts_middleware_with_mode(
 
     let mut resp = next.run(req).await;
     if emit_hsts {
-        resp.headers_mut().insert(
+        let _previous_value = resp.headers_mut().insert(
             header::HeaderName::from_static("strict-transport-security"),
             header::HeaderValue::from_static("max-age=31536000; includeSubDomains"),
         );
@@ -881,18 +881,18 @@ mod tests {
             return false;
         };
         while let Some(relative_open) = search_tail.find(script_open) {
-            let open = search_from + relative_open;
+            let open = search_from.saturating_add(relative_open);
             let Some(after_open) = source.get(open..) else {
                 break;
             };
             let Some(tag_end_relative) = after_open.find('>') else {
                 break;
             };
-            let tag_end = open + tag_end_relative;
+            let tag_end = open.saturating_add(tag_end_relative);
             let Some(tag) = source.get(open..=tag_end) else {
                 break;
             };
-            let body_start = tag_end + 1;
+            let body_start = tag_end.saturating_add(1);
 
             let Some(body_tail) = source.get(body_start..) else {
                 break;
@@ -900,7 +900,7 @@ mod tests {
             let Some(close_relative) = body_tail.find(script_close) else {
                 break;
             };
-            let body_end = body_start + close_relative;
+            let body_end = body_start.saturating_add(close_relative);
             let Some(body) = source.get(body_start..body_end).map(str::trim) else {
                 break;
             };
@@ -909,7 +909,7 @@ mod tests {
                 return true;
             }
 
-            search_from = body_end + script_close.len();
+            search_from = body_end.saturating_add(script_close.len());
             let Some(next_tail) = source.get(search_from..) else {
                 break;
             };
@@ -1004,7 +1004,7 @@ mod tests {
             .uri("/")
             .header("x-forwarded-proto", "https")
             .body(Body::empty())?;
-        request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+        let _previous_value = request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)),
             8080,
         )));

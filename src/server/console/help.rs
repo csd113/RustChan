@@ -51,19 +51,21 @@ pub(super) fn render_help(frame: &mut Frame<'_>, area: Rect, offset: &mut u16) {
     let minimum_height = if wide {
         navigation_height.max(editing_height)
     } else {
-        navigation_height + editing_height + 1
+        navigation_height
+            .saturating_add(editing_height)
+            .saturating_add(1)
     };
     render_scrollable(frame, area, minimum_height, offset, |buffer, area| {
         let sections = if wide {
             Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .spacing(1)
+                .spacing(1_i32)
                 .split(area)
         } else {
             Layout::vertical([
                 Constraint::Length(navigation_height),
                 Constraint::Min(editing_height),
             ])
-            .spacing(1)
+            .spacing(1_i32)
             .split(area)
         };
         render_help_panel(
@@ -87,7 +89,7 @@ fn help_description(description: &str, panel_width: u16) -> Text<'static> {
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in description.split_whitespace() {
-        if !line.is_empty() && line.len() + 1 + word.len() > width {
+        if !line.is_empty() && line.len().saturating_add(1).saturating_add(word.len()) > width {
             lines.push(Line::from(std::mem::take(&mut line)));
         }
         if !line.is_empty() {

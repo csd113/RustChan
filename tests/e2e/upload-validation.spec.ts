@@ -445,10 +445,10 @@ function buildScenarios(ctx: ScenarioContext): Scenario[] {
 
   scenarios.push(
     acceptScenario('image-size-under-cap', 'image just under cap is accepted', 'request-new-thread', b.media, f.pngUnderImageCap, mediaBoardSettings, async (inner) => {
-      return expectAcceptedRequest(inner, b.media, f.pngUnderImageCap, { compareBytes: inner.runtime.mode === 'local' });
+      return expectAcceptedRequest(inner, b.media, f.pngUnderImageCap);
     }, true),
     acceptScenario('image-size-exact-cap', 'image exactly at cap is accepted', 'request-new-thread', b.media, f.pngExactImageCap, mediaBoardSettings, async (inner) => {
-      return expectAcceptedRequest(inner, b.media, f.pngExactImageCap, { compareBytes: inner.runtime.mode === 'local' });
+      return expectAcceptedRequest(inner, b.media, f.pngExactImageCap);
     }, true),
     rejectScenario('image-size-over-cap', 'image just over cap is rejected', 'request-new-thread', b.media, f.pngOverImageCap, mediaBoardSettings, true),
     rejectScenario('image-size-clear-over-cap', 'image clearly over cap is rejected', 'request-new-thread', b.media, f.pngClearOverImageCap, mediaBoardSettings),
@@ -456,10 +456,10 @@ function buildScenarios(ctx: ScenarioContext): Scenario[] {
       return expectAcceptedRequest(inner, b.media, f.mp4ExactVideoCap, { compareBytes: inner.runtime.mode === 'local' });
     }, true),
     rejectScenario('video-size-over-cap', 'video just over cap is rejected', 'request-new-thread', b.media, f.mp4OverVideoCap, mediaBoardSettings, true),
-    acceptScenario('audio-size-exact-cap', 'audio exactly at cap is accepted', 'request-new-thread', b.media, f.oggExactAudioCap, mediaBoardSettings, async (inner) => {
-      return expectAcceptedRequest(inner, b.media, f.oggExactAudioCap, { compareBytes: inner.runtime.mode === 'local' });
+    acceptScenario('audio-size-exact-cap', 'audio exactly at cap is accepted', 'request-new-thread', b.media, f.flacExactAudioCap, mediaBoardSettings, async (inner) => {
+      return expectAcceptedRequest(inner, b.media, f.flacExactAudioCap, { compareBytes: inner.runtime.mode === 'local' });
     }, true),
-    rejectScenario('audio-size-over-cap', 'audio just over cap is rejected', 'request-new-thread', b.media, f.oggOverAudioCap, mediaBoardSettings, true),
+    rejectScenario('audio-size-over-cap', 'audio just over cap is rejected', 'request-new-thread', b.media, f.flacOverAudioCap, mediaBoardSettings, true),
     acceptScenario('pdf-size-exact-generic-cap', 'PDF exactly at generic cap is accepted', 'request-new-thread', b.media, f.pdfExactGenericCap, mediaBoardSettings, async (inner) => {
       return expectAcceptedRequest(inner, b.media, f.pdfExactGenericCap, { compareBytes: inner.runtime.mode === 'local' });
     }, true),
@@ -1084,18 +1084,16 @@ async function createUploadFixtures(dir: string): Promise<Record<string, Fixture
   await add('webp', 'tiny.webp', 'image/webp', 'image', Buffer.from(WEBP_1X1_BASE64, 'base64'));
   await add('bmp', 'tiny.bmp', 'image/bmp', 'image', bmp1x1());
   await add('tiff', 'tiny.tiff', 'image/tiff', 'image', tiff1x1());
-  await add('heic', 'tiny.heic', 'image/heic', 'image', ftypFile('heic'));
-  await add('heif', 'tiny.heif', 'image/heif', 'image', ftypFile('mif1'));
+  await add('heic', 'tiny.heic', 'image/heic', 'image', bundledMedia('alpha.heic'));
+  await add('heif', 'tiny.heif', 'image/heif', 'image', bundledMedia('irot90.heic'));
   await add('mp4', 'tiny.mp4', 'video/mp4', 'video', mp4Fixture(4096));
-  // This header-only fixture is accepted and preserved as a neutral download
-  // when the isolated validation runtime intentionally has no ffprobe.
-  await add('webm', 'tiny.webm', 'video/webm', 'other', webmFixture(4096));
-  await add('mp3', 'tiny.mp3', 'audio/mpeg', 'audio', prefixedFixture(Buffer.from([0xff, 0xfb, 0x90, 0x64]), 2048));
-  await add('ogg', 'tiny.ogg', 'audio/ogg', 'audio', prefixedFixture(Buffer.from('OggS'), 2048));
-  await add('flac', 'tiny.flac', 'audio/flac', 'audio', prefixedFixture(Buffer.from('fLaC'), 2048));
-  await add('wav', 'tiny.wav', 'audio/wav', 'audio', wavFixture(2048));
-  await add('m4a', 'tiny.m4a', 'audio/mp4', 'audio', m4aFixture(2048));
-  await add('aac', 'tiny.aac', 'audio/aac', 'audio', tinyAacFixture());
+  await add('webm', 'tiny.webm', 'video/webm', 'video', bundledMedia('video.webm'));
+  await add('mp3', 'tiny.mp3', 'audio/mpeg', 'audio', bundledMedia('tone.mp3'));
+  await add('ogg', 'tiny.ogg', 'audio/ogg', 'audio', bundledMedia('tone.ogg'));
+  await add('flac', 'tiny.flac', 'audio/flac', 'audio', bundledMedia('tone.flac'));
+  await add('wav', 'tiny.wav', 'audio/wav', 'audio', bundledMedia('tone.wav'));
+  await add('m4a', 'tiny.m4a', 'audio/mp4', 'audio', bundledMedia('tone.m4a'));
+  await add('aac', 'tiny.aac', 'audio/aac', 'audio', bundledMedia('tone.aac'));
   await add('pdf', 'tiny.pdf', 'application/pdf', 'pdf', pdfFixture(2048));
   await add('genericText', 'notes.txt', 'text/plain', 'other', Buffer.from('plain text generic download fixture\n'));
   await add('textRenamedPng', 'fake.png', 'image/png', 'other', Buffer.from('plain text renamed as png\n'));
@@ -1116,8 +1114,8 @@ async function createUploadFixtures(dir: string): Promise<Record<string, Fixture
   await add('pngClearOverImageCap', 'image-clear-over-cap.png', 'image/png', 'image', pngWithTargetSize(2 * MIB + 256));
   await add('mp4ExactVideoCap', 'video-exact-cap.mp4', 'video/mp4', 'video', mp4Fixture(2 * MIB));
   await add('mp4OverVideoCap', 'video-over-cap.mp4', 'video/mp4', 'video', mp4Fixture(2 * MIB + 1));
-  await add('oggExactAudioCap', 'audio-exact-cap.ogg', 'audio/ogg', 'audio', prefixedFixture(Buffer.from('OggS'), MIB));
-  await add('oggOverAudioCap', 'audio-over-cap.ogg', 'audio/ogg', 'audio', prefixedFixture(Buffer.from('OggS'), MIB + 1));
+  await add('flacExactAudioCap', 'audio-exact-cap.flac', 'audio/flac', 'audio', flacWithPadding(MIB));
+  await add('flacOverAudioCap', 'audio-over-cap.flac', 'audio/flac', 'audio', flacWithPadding(MIB + 1));
   await add('pdfExactGenericCap', 'pdf-exact-generic-cap.pdf', 'application/pdf', 'pdf', pdfFixture(2 * MIB));
   await add('pdfOverGenericCap', 'pdf-over-generic-cap.pdf', 'application/pdf', 'pdf', pdfFixture(2 * MIB + 1));
   await add('genericExactCap', 'generic-exact-cap.bin', 'application/octet-stream', 'other', deterministicBytes(2 * MIB, 91));
@@ -1255,49 +1253,31 @@ function tiff1x1(): Buffer {
   return out;
 }
 
-function ftypFile(brand: string): Buffer {
-  const out = Buffer.alloc(96, 0);
-  out.writeUInt32BE(24, 0);
-  out.write('ftyp', 4, 'ascii');
-  out.write(brand, 8, 'ascii');
-  out.writeUInt32BE(0, 12);
-  out.write(brand, 16, 'ascii');
-  out.write('isom', 20, 'ascii');
-  return out;
+// Real packets protect container validation; padding atoms/metadata keep cap tests exact.
+function bundledMedia(name: string): Buffer {
+  return fs.readFileSync(path.resolve(__dirname, '../fixtures/media', name));
 }
 
 function mp4Fixture(size: number): Buffer {
-  const prefix = Buffer.concat([
-    Buffer.from([0x00, 0x00, 0x00, 0x18]),
-    Buffer.from('ftypisom'),
-    Buffer.from([0x00, 0x00, 0x02, 0x00]),
-    Buffer.from('isomiso2mp41'),
-  ]);
-  return prefixedFixture(prefix, size);
+  const media = bundledMedia('video.mp4');
+  const padding = size - media.length;
+  if (padding < 8) throw new Error('MP4 padding atom needs eight bytes');
+  const atom = Buffer.alloc(padding);
+  atom.writeUInt32BE(padding, 0);
+  atom.write('free', 4, 'ascii');
+  return Buffer.concat([media, atom]);
 }
 
-function m4aFixture(size: number): Buffer {
-  const prefix = Buffer.concat([
-    Buffer.from([0x00, 0x00, 0x00, 0x18]),
-    Buffer.from('ftypM4A '),
-    Buffer.from([0x00, 0x00, 0x00, 0x00]),
-    Buffer.from('M4A isom'),
-  ]);
-  return prefixedFixture(prefix, size);
-}
-
-function webmFixture(size: number): Buffer {
-  const prefix = Buffer.from([
-    0x1a, 0x45, 0xdf, 0xa3, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x42, 0x82, 0x84, 0x77, 0x65, 0x62, 0x6d,
-  ]);
-  return prefixedFixture(prefix, size);
-}
-
-function wavFixture(size: number): Buffer {
-  const out = prefixedFixture(Buffer.from('RIFF\x00\x00\x00\x00WAVEfmt ', 'binary'), size);
-  out.writeUInt32LE(Math.max(0, size - 8), 4);
-  return out;
+function flacWithPadding(size: number): Buffer {
+  const media = bundledMedia('tone.flac');
+  const padding = size - media.length - 4;
+  if (padding < 0 || padding > 0xffffff) throw new Error('invalid FLAC padding size');
+  // Insert a nonfinal PADDING metadata block before the original metadata chain.
+  const block = Buffer.alloc(padding + 4);
+  block[0] = 1;
+  block.writeUIntBE(padding, 1, 3);
+  // STREAMINFO must remain the first block (34 bytes plus its four-byte header).
+  return Buffer.concat([media.subarray(0, 42), block, media.subarray(42)]);
 }
 
 function pdfFixture(size: number): Buffer {
@@ -1311,13 +1291,6 @@ function pdfFixture(size: number): Buffer {
 function prefixedFixture(prefix: Buffer, size: number): Buffer {
   if (prefix.length > size) throw new Error(`prefix length ${prefix.length} exceeds target ${size}`);
   return Buffer.concat([prefix, deterministicBytes(size - prefix.length, prefix.length)]);
-}
-
-function tinyAacFixture(): Buffer {
-  return Buffer.from(
-    '//FQQCP//N4CAExhdmM2Mi4yOC4xMDEAAjCrXOkMQg6tTc5via6bg0VF1KZJ29kiABKEgimESckithJkIjGSSDEu2VnbKkNwMnm9hZ+GweZRce05ctx5NdRTCIVkkiIyGkmxiMkRIkPHsQkNhFgSRSfxfw32H2r7D9O9Z+K7B7i654y4juLbujtG6qxHQ3MPXXZPN2zdjbJ0lsHMWqcW4zvXHd62nesTjsbYrjZtBxVxsVhuU7ap21TtarM9Sz2g2K42Kw3Kw2qdtUa/PsdStqVs+v0bTRtWa00a/PsdCtoVVCqlK5SuUrlK7V4asdWOrRq0YaMNEk0k1U1U0k0lD0SUSTSTVTVTVTSUSUSUSUVTVTVTVTSUSURRRRRRRRf/8VBAI7/8AWaY2TbrNROLcJqStxUj/T/vri2Fxerrv19dBer1/XoTV2T+t8L41cqQYr0YePLcimsQ49gpMwRHXZMkmGT5tJ6KqxA/ZluNjnge5PthjkjvHRrVU6dqlP/G/Vrt3/k6JBga7kEhIMDO4SEgwMDO7hISsGBgZ3cJCTgMOZd3CTjQMyDXnd8gkJyXkHPkr+3ol1qd2JF0BPB7e64Pm1A4CVikjwv1OZY64pqrX1O3NLNtuFkyUppVJmul2kmkmxwxrrZ2kmkbHCmt2dpJnbGtndnZ2kZ2dscGdndnZ2dnZ0Z2dnnQrKiL6c7xAAgQdvvWTNCJdPnTPE3pu/QK6LGi10WMTOilElElE/KdEhITMlCUt1Lg01z/8VBAHR/8ATSZssxE4s1oTlEHoevP615Jer1//a8/XnjUAKN+IhFAhkagw4oswecTtaqYXuqlkQDtE1LQB1TP/GBpVf8kJBgZ3CQkGBncJCQYGBndwkJCQYGBndwkJKgwMDO7hITTBkQMid3cJCWstL2cCeZUTIswx4HIIrDGsxK+qwGOTutcIrfos11md61z1aa6dusonOftfbv1PLdidukUGkg8v/fs1214WpanXEWf9qr7m8tS3OcOReLbg4Vdc2tKcBoXr5aEb/B1PC0/Bd33cAr/0L+k/Vnd3AB8CP/6/FPjf2rg//FQQAGf/AEYgbRw',
-    'base64',
-  );
 }
 
 function deterministicBytes(size: number, seed: number): Buffer {

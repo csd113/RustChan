@@ -35,7 +35,10 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
         .layer(axum_middleware::from_fn(
             crate::middleware::rate_limit_middleware,
         ))
-        .layer(axum_middleware::from_fn(track_requests))
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            track_requests,
+        ))
         .layer(axum_middleware::from_fn(
             super::headers::theme_error_response,
         ))
@@ -77,7 +80,8 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
         }))
         .layer(axum_middleware::from_fn(
             move |mut req: axum::extract::Request, next: axum_middleware::Next| async move {
-                req.extensions_mut()
+                let _previous_value = req
+                    .extensions_mut()
                     .insert(crate::middleware::RequestTransport { direct_https });
                 next.run(req).await
             },
@@ -140,7 +144,8 @@ mod tests {
     ) -> TestResult {
         let conn = state.db.get().context("get database connection")?;
         crate::db::create_board(&conn, short_name, "Board", "", false)
-            .context("create public media board")?;
+            .context("create public media board")
+            .map(|_completed_value| ())?;
         let boards = crate::db::get_all_boards(&conn).context("load live boards")?;
         crate::templates::set_live_boards(boards);
         Ok(())
@@ -160,7 +165,8 @@ mod tests {
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE id = ?3",
             rusqlite::params!["view_password", password_hash, board_id],
         )
-        .context("protect media board")?;
+        .context("protect media board")
+        .map(|_completed_value| ())?;
         let admin_hash =
             crate::utils::crypto::hash_password("hunter2").context("hash admin password")?;
         let admin_id =
@@ -908,8 +914,12 @@ mod tests {
             let conn = state.db.get().context("get database connection")?;
             let password_hash =
                 crate::utils::crypto::hash_password("hunter2").context("hash admin password")?;
-            crate::db::create_admin(&conn, "admin", &password_hash).context("create admin")?;
-            crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
+            crate::db::create_admin(&conn, "admin", &password_hash)
+                .context("create admin")
+                .map(|_completed_value| ())?;
+            crate::db::create_board(&conn, "test", "Test", "", false)
+                .context("create board")
+                .map(|_completed_value| ())?;
         }
 
         let router = build_router(state, false);

@@ -50,6 +50,11 @@ fn absolute_resolved_path(path: &Path) -> anyhow::Result<PathBuf> {
     super::resolve_storage_dir(&absolute, "protected storage path")
 }
 
+/// Check saved backup paths without creating directories or changing permissions.
+pub(super) fn validate_backup_directory(path: &Path, config: &Config) -> anyhow::Result<()> {
+    validate_backup_children(&resolve_backup_directory(path, config)?)
+}
+
 /// Validate and prepare an absolute private backup root and legacy subdirectories.
 ///
 /// # Errors
@@ -188,10 +193,10 @@ mod tests {
         let existing = temp.path().join("existing");
         std::fs::create_dir(&existing)?;
         std::fs::write(existing.join("operator-file"), "keep")?;
-        let result = prepare_and_persist(&existing, &config, |_| {
+        let preserve_existing_result = prepare_and_persist(&existing, &config, |_| {
             anyhow::bail!("injected persistence failure")
         });
-        ensure!(result.is_err());
+        ensure!(preserve_existing_result.is_err());
         ensure!(std::fs::read_to_string(existing.join("operator-file"))? == "keep");
         ensure!(
             std::fs::read_dir(&existing)?.count() == 1,

@@ -18,7 +18,7 @@ Conversations are organized into **boards** (topics such as photography or techn
 
 RustChan runs as a single app, with a built-in database. You do not need to set up a separate database server.
 
-**Source version:** v1.6.0. **Downloads:** [latest published release](https://github.com/csd113/RustChan/releases/latest). **Docker image:** `ghcr.io/csd113/rustchan:latest`.
+**Source version:** v1.6.5. **Downloads:** [latest published release](https://github.com/csd113/RustChan/releases/latest). **Docker image:** `ghcr.io/csd113/rustchan:latest`.
 
 ## Quick start
 
@@ -28,7 +28,7 @@ Choose the option that suits you:
 |---|---|---|
 | [Docker](#start-with-docker) | Running the ready-made app with its media tools included | Docker running on your computer or server |
 | [Download the app](#download-the-app) | Running RustChan directly, without Docker or compiling code | A supported Linux, macOS, or Windows computer |
-| [Build from source](#build-from-source) | Developers who want to build the app themselves | Git and Rust 1.91 or newer |
+| [Build from source](#build-from-source) | Developers who want to build the app themselves | Git and Rust 1.99 or newer |
 
 ### Start with Docker
 
@@ -62,7 +62,7 @@ docker stop rustchan     # Stop the site
 docker start rustchan    # Start it again
 ```
 
-The image includes `ffmpeg` and `ffprobe` for video thumbnails, audio waveforms, and supported media conversion. Tor is off by default in Docker.
+Images, animated GIF/WebP conversion, HEIC/HEIF, container inspection, common audio waveforms, and supported PDF previews run in Rust. The image includes `ffmpeg` for video thumbnails, WebM transcoding, and audio codecs the Rust decoders do not cover. Tor is off by default in Docker.
 
 For **Docker Compose, updates, backups, or a public website**, follow the [container guide](docs/containers.md). Public sites need HTTPS and suitable network settings; complete setup before allowing visitors. The guide also explains how to pin an image to a specific revision instead of following `latest`.
 
@@ -70,14 +70,14 @@ For **Docker Compose, updates, backups, or a public website**, follow the [conta
 
 Open the [latest release](https://github.com/csd113/RustChan/releases/latest), download the ZIP for your operating system, and extract it into a folder where the app can save files.
 
-ZIP names include the release version; the v1.6.0 names are shown below. Choose the matching files from the published release you download.
+ZIP names include the release version; the v1.6.5 names are shown below. Choose the matching files from the published release you download.
 
 | Your computer | Download |
 |---|---|
-| Linux, Intel or AMD 64-bit | `rustchan-cli-v1.6.0-linux-x86_64.zip` |
-| Linux, ARM64 | `rustchan-cli-v1.6.0-linux-arm64.zip` |
-| macOS, Apple silicon | `rustchan-cli-v1.6.0-macos-apple-silicon.zip` |
-| Windows, Intel or AMD 64-bit | `rustchan-cli-v1.6.0-windows-x86_64.zip` |
+| Linux, Intel or AMD 64-bit | `rustchan-cli-v1.6.5-linux-x86_64.zip` |
+| Linux, ARM64 | `rustchan-cli-v1.6.5-linux-arm64.zip` |
+| macOS, Apple silicon | `rustchan-cli-v1.6.5-macos-apple-silicon.zip` |
+| Windows, Intel or AMD 64-bit | `rustchan-cli-v1.6.5-windows-x86_64.zip` |
 
 From a terminal in the extracted folder, run:
 
@@ -89,11 +89,11 @@ chmod +x rustchan-cli
 
 On Windows, run `rustchan-cli.exe` (or `./rustchan-cli.exe` in PowerShell). Follow the terminal's first-run prompts to create your administrator and, optionally, your first board. You can also create boards in [the admin panel](http://localhost:8080/admin). Keep the app running while you use the site.
 
-RustChan creates a `rustchan-data` folder next to the app. Keep that folder when updating. Installing `ffmpeg` and `ffprobe` adds the enhanced media features; see [SETUP.md](SETUP.md) for installation and deployment details.
+RustChan creates a `rustchan-data` folder next to the app. Keep that folder when updating. Installing `ffmpeg` enables video processing and the audio compatibility fallback; see [SETUP.md](SETUP.md) for installation and deployment details.
 
 ### Build from source
 
-With Git and Rust **1.91 or newer** installed:
+With Git and Rust **1.99 or newer** installed:
 
 ```bash
 git clone https://github.com/csd113/RustChan.git
@@ -176,7 +176,7 @@ Common settings:
 | `port` | The HTTP port; normally `8080` |
 | `enable_tor_support` | Whether the built-in Tor onion service runs |
 | `tor_only` | Whether the site is served through Tor with a local-only listener |
-| `require_ffmpeg` | Whether startup requires the enhanced media tools |
+| `require_ffmpeg` | Whether startup requires FFmpeg for video and uncovered audio codecs |
 | `auto_full_backup_interval_hours` | How often automatic full-site backups run |
 | `backup_directory` | An optional absolute path for saved backups |
 | `[tls].enabled` | Whether the app's built-in HTTPS listener runs |
@@ -211,13 +211,23 @@ As a site owner, keep settings, secrets, databases, backups, TLS keys, and Tor i
 
 RustChan is written in Rust using Axum, Tokio, bundled SQLite, server-rendered templates, Rustls, and Arti. Docker is optional for development.
 
-Run the Rust checks before submitting changes:
+Use Rust 1.99.0 and run the Rust checks before submitting changes:
 
 ```bash
 cargo fmt --all --check
-cargo clippy --locked --workspace --all-targets --all-features
+cargo check --locked --workspace --all-targets --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 ```
+
+The workspace lint tables in `Cargo.toml` enforce the Rust and Clippy policy for
+every RustChan target. They deny the main Clippy groups (`all`, `pedantic`,
+`nursery`, and `cargo`) and explicit checks for panic paths, unchecked arithmetic
+and indexing, conversions, ignored results, documentation, and resource safety.
+Unsafe Rust is forbidden. New workspace packages must inherit this policy with
+`[lints] workspace = true`. The patched upstream AAC dependency under `vendor/`
+is excluded from the workspace and retains its upstream lint configuration.
 
 Browser tests run locally; their harness and npm files are tracked, but GitHub Actions does not run browser checks. Keep browser reports and temporary screenshots out of commits; the demonstration screenshots in `docs/screenshots/` are published documentation. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance.
 

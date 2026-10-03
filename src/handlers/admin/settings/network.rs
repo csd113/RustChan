@@ -27,12 +27,12 @@ pub(in crate::server) async fn update_network_settings(
         .map(|cookie| cookie.value().to_owned());
     tokio::task::spawn_blocking(move || -> Result<Response> {
         let conn = state.db.get()?;
-        require_admin_session_sid(&conn, session_id.as_deref())?;
+        require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
         let save_result = crate::config::admin::save_network(&form);
         match save_result {
-            Ok(()) => Ok(admin_panel_redirect_anchor("Network settings saved. Restart required; environment and launcher overrides still take precedence.", "network-security").into_response()),
+            Ok(()) => Ok(admin_panel_redirect_anchor(if crate::config::admin::restart_pending().unwrap_or(true) { "Settings saved. Restart required: use Restart RustChan to apply these changes." } else { "Settings saved. No restart is required for the effective configuration." }, "network-security").into_response()),
             Err(error) => {
-                let mut fields = crate::config::admin::network_snapshot().map_err(|_| "unavailable".to_owned());
+                let mut fields = crate::config::admin::network_snapshot().map_err(|snapshot_error| { tracing::warn!(error = %snapshot_error, "operator settings snapshot unavailable"); "unavailable".to_owned() });
                 if let Ok(fields) = &mut fields {
                     for field in fields {
                         if let Some(value) = form.get(field.definition.key) { field.input.clone_from(value); }

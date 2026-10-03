@@ -121,7 +121,7 @@ pub struct RecentBackgroundJob {
 ///   5  subject       13 `mime_type`      21 `audio_mime_type`
 ///   6  body          14 `created_at`     22 `edited_at`
 ///   7  `body_html`     15 `deletion_token` 23 `media_processing_state`
-///                                           24 `media_processing_error`
+///                                           24 `media_processing_error`.
 ///
 /// # Errors
 /// Returns an error if the database operation fails.
@@ -225,10 +225,7 @@ pub fn get_posts_by_ids_in_thread(
         return Ok(Vec::new());
     }
 
-    let placeholders = post_ids
-        .iter()
-        .enumerate()
-        .map(|(index, _)| format!("?{}", index + 3))
+    let placeholders = std::iter::repeat_n("?", post_ids.len())
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
@@ -265,13 +262,9 @@ pub fn get_preview_posts_for_threads(
         return Ok(HashMap::new());
     }
 
-    let placeholders = thread_ids
-        .iter()
-        .enumerate()
-        .map(|(index, _)| format!("?{}", index + 1))
+    let placeholders = std::iter::repeat_n("?", thread_ids.len())
         .collect::<Vec<_>>()
         .join(", ");
-    let limit_param = thread_ids.len() + 1;
     let sql = format!(
         "SELECT {POST_SELECT_COLUMNS}
          FROM (
@@ -283,7 +276,7 @@ pub fn get_preview_posts_for_threads(
              FROM posts
              WHERE is_op = 0 AND thread_id IN ({placeholders})
          )
-         WHERE preview_rank <= ?{limit_param}
+         WHERE preview_rank <= ?
          ORDER BY thread_id ASC, created_at ASC, id ASC"
     );
     let mut stmt = conn.prepare_cached(&sql)?;
@@ -382,7 +375,7 @@ pub fn get_post_submission(
                 Ok(PostSubmissionRecord {
                     thread_id: row.get(0)?,
                     post_id: row.get(1)?,
-                    is_thread: row.get::<_, i32>(2)? != 0,
+                    is_thread: row.get::<_, i32>(2)? != 0_i32,
                 })
             },
         )
@@ -419,13 +412,15 @@ pub fn record_post_submission(
             i32::from(is_thread)
         ],
     )
-    .context("Failed to record unique post submission token")?;
+    .context("Failed to record unique post submission token")
+    .map(|_affected_rows| ())?;
 
     conn.execute(
         "DELETE FROM post_submissions WHERE created_at < unixepoch() - 604800",
         [],
     )
-    .context("Failed to prune expired post submission tokens")?;
+    .context("Failed to prune expired post submission tokens")
+    .map(|_affected_rows| ())?;
 
     Ok(())
 }
@@ -459,7 +454,8 @@ pub(super) fn create_poll_inner(
                 text,
                 i64::try_from(i).context("poll option index overflow")?
             ])
-            .context("Failed to insert poll option")?;
+            .context("Failed to insert poll option")
+            .map(|_affected_rows| ())?;
     }
 
     Ok(poll_id)
@@ -540,7 +536,7 @@ fn delete_post_reply_in_tx(
             .query_row(params![post_id], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
-                    r.get::<_, i32>(1)? != 0,
+                    r.get::<_, i32>(1)? != 0_i32,
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, Option<String>>(3)?,
                     r.get::<_, Option<String>>(4)?,
@@ -646,7 +642,12 @@ pub fn post_thread_allows_self_actions(
              JOIN threads t ON t.id = p.thread_id
              WHERE p.id = ?1",
             params![post_id],
-            |row| Ok((row.get::<_, i32>(0)? != 0, row.get::<_, i32>(1)? != 0)),
+            |row| {
+                Ok((
+                    row.get::<_, i32>(0)? != 0_i32,
+                    row.get::<_, i32>(1)? != 0_i32,
+                ))
+            },
         )
         .optional()?;
     Ok(flags.is_some_and(|(locked, archived)| !locked && !archived))
@@ -681,11 +682,11 @@ pub fn self_delete_post(
                     |r| {
                         Ok((
                             r.get::<_, i64>(0)?,
-                            r.get::<_, i32>(1)? != 0,
+                            r.get::<_, i32>(1)? != 0_i32,
                             r.get::<_, String>(2)?,
                             r.get::<_, i64>(3)?,
-                            r.get::<_, i32>(4)? != 0,
-                            r.get::<_, i32>(5)? != 0,
+                            r.get::<_, i32>(4)? != 0_i32,
+                            r.get::<_, i32>(5)? != 0_i32,
                         ))
                     },
                 )
@@ -784,8 +785,8 @@ pub fn edit_post(
                     Ok((
                         r.get(0)?,
                         r.get(1)?,
-                        r.get::<_, i32>(2)? != 0,
-                        r.get::<_, i32>(3)? != 0,
+                        r.get::<_, i32>(2)? != 0_i32,
+                        r.get::<_, i32>(3)? != 0_i32,
                     ))
                 },
             )
@@ -811,7 +812,8 @@ pub fn edit_post(
         conn.execute(
             "UPDATE posts SET body = ?1, body_html = ?2, edited_at = ?3 WHERE id = ?4",
             params![new_body, new_body_html, now, post_id],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
 
         // Belt-and-suspenders: confirm the row was actually written.
         Ok(conn.changes() > 0)
@@ -903,23 +905,24 @@ pub fn search_posts(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Post>> {
+    let _timing = super::diagnostics::QueryTiming::start("search_posts");
     let Some(fts_query) = to_fts_query(query) else {
         return Ok(Vec::new());
     };
-    let mut stmt = conn.prepare_cached(
-        "SELECT posts.id, posts.thread_id, posts.board_id, posts.name, posts.tripcode,
+    // Prefix MATCH queries drive from FTS so each matching row is looked up
+    // once, instead of running an FTS prefix probe for every board post.
+    let sql = "SELECT posts.id, posts.thread_id, posts.board_id, posts.name, posts.tripcode,
                 posts.subject, posts.body, posts.body_html, posts.ip_hash,
                 posts.file_path, posts.file_name, posts.file_size, posts.thumb_path,
                 posts.mime_type, posts.created_at, posts.deletion_token, posts.is_op,
                 posts.media_type, posts.audio_file_path, posts.audio_file_name,
                 posts.audio_file_size, posts.audio_mime_type, posts.edited_at,
                 posts.media_processing_state, posts.media_processing_error
-         FROM posts
-         JOIN posts_fts ON posts_fts.rowid = posts.id
+         FROM posts_fts CROSS JOIN posts ON posts.id = posts_fts.rowid
          WHERE posts.board_id = ?1 AND posts_fts MATCH ?2
          ORDER BY posts.created_at DESC, posts.id DESC
-         LIMIT ?3 OFFSET ?4",
-    )?;
+         LIMIT ?3 OFFSET ?4";
+    let mut stmt = conn.prepare_cached(sql)?;
     let posts = stmt
         .query_map(params![board_id, fts_query, limit, offset], map_post)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -933,17 +936,17 @@ pub fn count_search_results(
     board_id: i64,
     query: &str,
 ) -> Result<i64> {
+    let _timing = super::diagnostics::QueryTiming::start("count_search_results");
     let Some(fts_query) = to_fts_query(query) else {
         return Ok(0);
     };
-    Ok(conn.query_row(
-        "SELECT COUNT(*)
-         FROM posts
-         JOIN posts_fts ON posts_fts.rowid = posts.id
-         WHERE posts.board_id = ?1 AND posts_fts MATCH ?2",
-        params![board_id, fts_query],
-        |r| r.get(0),
-    )?)
+    Ok(conn
+        .prepare_cached(
+            "SELECT COUNT(*)
+             FROM posts_fts CROSS JOIN posts ON posts.id = posts_fts.rowid
+             WHERE posts.board_id = ?1 AND posts_fts MATCH ?2",
+        )?
+        .query_row(params![board_id, fts_query], |r| r.get(0))?)
 }
 
 // File deduplication
@@ -1012,7 +1015,8 @@ pub fn record_file_hash(
         "INSERT OR REPLACE INTO file_hashes (sha256, file_path, thumb_path, mime_type)
          VALUES (?1, ?2, ?3, ?4)",
         params![sha256, file_path, thumb_path, mime_type],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     Ok(())
 }
 
@@ -1327,7 +1331,8 @@ pub fn persist_media_job(
                          updated_at = unixepoch()
                      WHERE id = ?1 AND status IN ('pending', 'running')",
                     params![id],
-                )?;
+                )
+                .map(|_affected_rows| ())?;
                 if status == "pending" {
                     pending_jobs_resolved = pending_jobs_resolved.saturating_add(1);
                 }
@@ -1352,7 +1357,8 @@ pub fn persist_media_job(
                         expected_source,
                         MEDIA_PROCESSING_FAILED
                     ],
-                )?;
+                )
+                .map(|_affected_rows| ())?;
             }
             return Ok(MediaJobSchedule {
                 job_id,
@@ -1444,7 +1450,8 @@ pub fn reject_media_job_at_capacity(
                 expected_source,
                 MEDIA_PROCESSING_FAILED
             ],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         Ok(None)
     })();
     match result {
@@ -1522,7 +1529,8 @@ pub(crate) fn persist_thread_prune_intent_in_tx(
              WHERE id = ?1 AND status = 'pending'",
             params![job_id, payload],
         )
-        .context("Refresh coalesced board prune intent failed")?;
+        .context("Refresh coalesced board prune intent failed")
+        .map(|_affected_rows| ())?;
 
         for duplicate_id in duplicate_ids {
             conn.execute(
@@ -1533,7 +1541,8 @@ pub(crate) fn persist_thread_prune_intent_in_tx(
                  WHERE id = ?1 AND status = 'pending'",
                 params![duplicate_id],
             )
-            .context("Resolve duplicate legacy board prune intent failed")?;
+            .context("Resolve duplicate legacy board prune intent failed")
+            .map(|_affected_rows| ())?;
         }
 
         return Ok(ThreadPruneSchedule {
@@ -1865,7 +1874,8 @@ pub fn recover_interrupted_background_jobs(
                              WHERE id = ?1
                                AND media_processing_state IN (?2, 'running')",
                             params![post_id, MEDIA_PROCESSING_PENDING],
-                        )?;
+                        )
+                        .map(|_affected_rows| ())?;
                     }
                 }
             }
@@ -1971,16 +1981,24 @@ fn interrupted_media_job_disposition(
             media_post_id: None,
         });
     };
-    let post_id = match &target {
-        InterruptedMediaTarget::Video { post_id, .. }
-        | InterruptedMediaTarget::Audio { post_id, .. } => *post_id,
+    let target_post_id = match &target {
+        InterruptedMediaTarget::Video {
+            post_id,
+            source_path: _,
+            expected_output_path: _,
+        }
+        | InterruptedMediaTarget::Audio {
+            post_id,
+            source_path: _,
+            expected_thumb_path: _,
+        } => *post_id,
     };
     let post = conn
         .query_row(
             "SELECT file_path, thumb_path, media_processing_state
              FROM posts
              WHERE id = ?1",
-            rusqlite::params![post_id],
+            rusqlite::params![target_post_id],
             |row| {
                 Ok((
                     row.get::<_, Option<String>>(0)?,
@@ -2160,7 +2178,8 @@ pub fn set_post_media_processing_state(
              media_processing_error = ?2
          WHERE id = ?3",
         params![normalized_state, normalized_error, post_id],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     Ok(())
 }
 
@@ -2287,7 +2306,8 @@ pub fn complete_media_job_without_output_in_tx(
          WHERE id = ?1 AND file_path = ?2
            AND media_processing_state IN (?3, 'running')",
         params![post_id, expected_source, MEDIA_PROCESSING_PENDING],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     complete_job(conn, job_id)
 }
 
@@ -2344,7 +2364,8 @@ pub fn fail_media_job_in_tx(
                  WHERE id = ?2 AND file_path = ?3
                    AND media_processing_state IN (?1, 'running')",
                 params![MEDIA_PROCESSING_PENDING, post_id, expected_source],
-            )?;
+            )
+            .map(|_affected_rows| ())?;
         }
         JobFailureState::PermanentlyFailed => {
             let error: String = error.trim().chars().take(512).collect();
@@ -2360,7 +2381,8 @@ pub fn fail_media_job_in_tx(
                     expected_source,
                     MEDIA_PROCESSING_PENDING
                 ],
-            )?;
+            )
+            .map(|_affected_rows| ())?;
         }
     }
     Ok(Some(failure_state))
@@ -2509,7 +2531,8 @@ pub fn finish_waveform_media_job_in_tx(
         "UPDATE file_hashes SET thumb_path = ?1
          WHERE sha256 = ?2 AND file_path = ?3",
         params![output_path, source_sha256, expected_source],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     let cleanup = if previous_thumb
         .as_deref()
         .is_some_and(|path| path != output_path)
@@ -2590,7 +2613,8 @@ pub fn replace_transcoded_media(
         conn.execute(
             "DELETE FROM file_hashes WHERE file_path = ?1",
             params![old_path],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         record_file_hash(conn, new_sha256, new_path, &thumb_path, new_mime)?;
         Ok(())
     })();
@@ -2645,7 +2669,8 @@ pub fn delete_file_hash_by_path(conn: &rusqlite::Connection, file_path: &str) ->
     conn.execute(
         "DELETE FROM file_hashes WHERE file_path = ?1",
         params![file_path],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     Ok(())
 }
 
@@ -2666,7 +2691,7 @@ mod tests {
     };
     use crate::error::AppError;
     use anyhow::{Context as _, Result};
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection};
 
     fn test_conn() -> Result<Connection> {
         let conn = Connection::open_in_memory()?;
@@ -2675,7 +2700,7 @@ mod tests {
     }
 
     fn seed_search_post(conn: &Connection, board_short: &str, body: &str) -> Result<i64> {
-        create_board(conn, board_short, board_short, "", false)?;
+        create_board(conn, board_short, board_short, "", false).map(|_created_id| ())?;
         let board =
             get_board_by_short(conn, board_short)?.context("seeded search board should exist")?;
         let post = NewPost {
@@ -2707,7 +2732,7 @@ mod tests {
     }
 
     fn seed_media_post(conn: &Connection, board_short: &str, file_path: &str) -> Result<i64> {
-        create_board(conn, board_short, board_short, "", false)?;
+        create_board(conn, board_short, board_short, "", false).map(|_created_id| ())?;
         let board =
             get_board_by_short(conn, board_short)?.context("seeded media board should exist")?;
         let post = NewPost {
@@ -2775,7 +2800,8 @@ mod tests {
             insert_background_job(&conn, "spam_check", payload, "failed", 3, Some("older"))?;
         let newer =
             insert_background_job(&conn, "thread_prune", payload, "failed", 2, Some("newer"))?;
-        insert_background_job(&conn, "spam_check", payload, "pending", 0, None)?;
+        insert_background_job(&conn, "spam_check", payload, "pending", 0, None)
+            .map(|_created_id| ())?;
 
         let jobs = recent_background_jobs(&conn, "failed", 1)?;
 
@@ -2809,7 +2835,8 @@ mod tests {
     fn failed_background_job_acknowledgement_preserves_history() -> Result<()> {
         let conn = test_conn()?;
         let payload = r#"{"t":"SpamCheck","d":{"post_id":1,"ip_hash":"hash","body_len":5}}"#;
-        insert_background_job(&conn, "spam_check", payload, "failed", 3, Some("older"))?;
+        insert_background_job(&conn, "spam_check", payload, "failed", 3, Some("older"))
+            .map(|_created_id| ())?;
         let acknowledged =
             insert_background_job(&conn, "thread_prune", payload, "failed", 3, Some("newer"))?;
 
@@ -2841,7 +2868,8 @@ mod tests {
             "failed",
             3,
             Some("new failure"),
-        )?;
+        )
+        .map(|_created_id| ())?;
         assert_eq!(
             background_job_summary(&conn)?.failed,
             1,
@@ -2910,7 +2938,7 @@ mod tests {
     )]
     fn search_posts_reads_joined_fts_rows_without_ambiguous_columns() -> Result<()> {
         let conn = test_conn()?;
-        seed_search_post(&conn, "tech", "rust search body")?;
+        seed_search_post(&conn, "tech", "rust search body").map(|_created_id| ())?;
         let board = get_board_by_short(&conn, "tech")?.context("tech board should exist")?;
 
         let posts = search_posts(&conn, board.id, "rust", 20, 0)?;
@@ -2931,8 +2959,8 @@ mod tests {
     )]
     fn search_posts_stays_scoped_to_board() -> Result<()> {
         let conn = test_conn()?;
-        seed_search_post(&conn, "tech", "shared rust term")?;
-        seed_search_post(&conn, "meta", "shared rust term")?;
+        seed_search_post(&conn, "tech", "shared rust term").map(|_created_id| ())?;
+        seed_search_post(&conn, "meta", "shared rust term").map(|_created_id| ())?;
         let tech = get_board_by_short(&conn, "tech")?.context("tech board should exist")?;
 
         let posts = search_posts(&conn, tech.id, "rust", 20, 0)?;
@@ -2959,7 +2987,7 @@ mod tests {
     )]
     fn search_posts_matches_case_insensitively() -> Result<()> {
         let conn = test_conn()?;
-        seed_search_post(&conn, "tech", "AI will find this")?;
+        seed_search_post(&conn, "tech", "AI will find this").map(|_created_id| ())?;
         let board = get_board_by_short(&conn, "tech")?.context("tech board should exist")?;
 
         let posts = search_posts(&conn, board.id, "ai", 20, 0)?;
@@ -2994,6 +3022,59 @@ mod tests {
             posts.is_empty(),
             "punctuation-only search should return no rows"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn search_prefixes_preserve_board_order_offset_and_counts() -> Result<()> {
+        let conn = test_conn()?;
+        let op = seed_search_post(&conn, "search", "common needle")?;
+        let board = get_board_by_short(&conn, "search")?.context("search board")?;
+        let thread = get_post(&conn, op)?.context("search OP")?.thread_id;
+        conn.execute(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1100)
+             INSERT INTO posts(thread_id,board_id,body,body_html,deletion_token,created_at)
+             SELECT ?1,?2,CASE WHEN x%101=0 THEN 'common needle' ELSE 'common' END,
+                 'body','delete',1700000000+x%7 FROM n",
+            params![thread, board.id],
+        )
+        .map(|_affected_rows| ())?;
+        for term in ["common", "needle", "absent"] {
+            let total: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM posts WHERE board_id=?1 AND body LIKE ?2",
+                params![board.id, format!("%{term}%")],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(
+                count_search_results(&conn, board.id, term)? == total,
+                "search count changed"
+            );
+            for offset in [0, 7, 1095] {
+                let mut statement = conn.prepare(
+                    "SELECT id FROM posts WHERE board_id=?1 AND body LIKE ?2
+                     ORDER BY created_at DESC,id DESC LIMIT 20 OFFSET ?3",
+                )?;
+                let expected = statement
+                    .query_map(params![board.id, format!("%{term}%"), offset], |row| {
+                        row.get::<_, i64>(0)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let posts = search_posts(&conn, board.id, term, 20, offset)?;
+                anyhow::ensure!(
+                    expected == posts.iter().map(|post| post.id).collect::<Vec<_>>(),
+                    "search pagination changed"
+                );
+                anyhow::ensure!(
+                    search_posts(&conn, board.id + 1, term, 20, offset)?.is_empty(),
+                    "search escaped board"
+                );
+            }
+        }
+        conn.execute(
+            "INSERT INTO posts_fts(posts_fts,rank) VALUES('integrity-check',1)",
+            [],
+        )
+        .map(|_affected_rows| ())?;
         Ok(())
     }
 
@@ -3297,7 +3378,8 @@ mod tests {
             "running",
             1,
             Some("old error"),
-        )?;
+        )
+        .map(|_created_id| ())?;
 
         let recovery = recover_interrupted_background_jobs(&conn)?;
 
@@ -3335,7 +3417,8 @@ mod tests {
         conn.execute(
             "UPDATE posts SET file_path = 'applied/video.webm' WHERE id = ?1",
             rusqlite::params![post_id],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         let payload = format!(
             r#"{{"t":"VideoTranscode","d":{{"post_id":{post_id},"file_path":"applied/video.mp4","board_short":"applied"}}}}"#
         );
@@ -3398,7 +3481,8 @@ mod tests {
                  media_processing_state = ?2
              WHERE id = ?1",
             rusqlite::params![post_id, MEDIA_PROCESSING_PENDING],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         let payload = format!(
             r#"{{"t":"VideoTranscode","d":{{"post_id":{post_id},"file_path":"newer/old.mp4","board_short":"newer"}}}}"#
         );
@@ -3448,7 +3532,8 @@ mod tests {
                  media_processing_state = 'running'
              WHERE id = ?1",
             rusqlite::params![post_id],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         let payload = format!(
             r#"{{"t":"AudioWaveform","d":{{"post_id":{post_id},"file_path":"audio/track.mp3","board_short":"audio"}}}}"#
         );
@@ -3503,7 +3588,7 @@ mod tests {
         let payload = r#"{"t":"SpamCheck","d":{"post_id":42,"ip_hash":"hash","body_len":5}}"#;
         let job_id = insert_background_job(&conn, "spam_check", payload, "running", 1, None)?;
 
-        recover_interrupted_background_jobs(&conn)?;
+        recover_interrupted_background_jobs(&conn).map(|_operation_summary| ())?;
         let claimed = claim_next_job(&conn)?.context("recovered job should be claimable")?;
 
         assert_eq!(
@@ -3773,7 +3858,7 @@ mod tests {
             "reply creation should increment the thread count"
         );
 
-        super::delete_post(&conn, reply_id)?;
+        super::delete_post(&conn, reply_id).map(|_operation_summary| ())?;
 
         let after_count: i64 = conn.query_row(
             "SELECT reply_count FROM threads WHERE id = ?1",
@@ -3944,11 +4029,12 @@ mod tests {
             deletion_token: "reply-token".to_owned(),
             is_op: false,
         };
-        create_reply_with_thread_update(&conn, &reply, "", false, None)?;
+        create_reply_with_thread_update(&conn, &reply, "", false, None).map(|_created_id| ())?;
         conn.execute(
             "UPDATE threads SET reply_count = 0 WHERE id = ?1",
             [thread_id],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
 
         let (outcome, deleted) = self_delete_post(&conn, op_id, "op-token", 60)?;
 

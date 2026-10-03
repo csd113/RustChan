@@ -13,6 +13,8 @@ pub mod admin;
 pub mod banners;
 /// Board configuration, statistics, and deletion operations.
 pub mod boards;
+/// Thresholded timing for pooled connections and atomic posting writes.
+mod diagnostics;
 /// Durable filesystem-operation records.
 mod fs_ops;
 /// Database schema-version bookkeeping.
@@ -33,6 +35,9 @@ pub mod threads;
 mod types;
 /// Anonymous per-thread display preferences.
 mod user_thread_prefs;
+#[cfg(test)]
+/// Explicitly invoked populated SQLite workload and query-plan evidence.
+mod workload;
 
 pub use pool::{first_run_check, has_no_admin, init_pool};
 pub use types::{CachedFile, DbPool, NewPost};
@@ -219,7 +224,8 @@ pub fn paths_safe_to_delete(
                     "DELETE FROM file_hashes WHERE file_path = ?1",
                     params![file_path],
                 )
-                .context("Delete stale file_hashes row failed")?;
+                .context("Delete stale file_hashes row failed")
+                .map(|_affected_rows| ())?;
             }
         }
     }

@@ -1,7 +1,5 @@
 //! Dedicated Network & Security forms with honest startup configuration state.
 
-use std::fmt::Write as _;
-
 use crate::config::admin::{InputKind, SettingField};
 use crate::utils::sanitize::escape_html;
 
@@ -42,11 +40,11 @@ pub(super) fn render_section(
         r#"<section class="admin-section admin-settings-section admin-task" id="{key}" aria-labelledby="{key}-title">
 <h2 id="{key}-title">{label}</h2>
 <p>{description}</p>{capabilities}
-<p class="admin-meta-note">Save writes settings.toml atomically. These settings require a restart; running listeners and workers keep their active values. Environment and launcher overrides take precedence on restart.</p>
+<p class="admin-meta-note">Save writes settings.toml atomically. Controls marked restart required use process initialization; running listeners and workers keep their active values. Environment and launcher overrides take precedence on restart.</p>
 <form method="POST" action="{action}" id="admin-{form_key}-settings">
 <input type="hidden" name="_csrf" value="{csrf}">
 {controls}
-<div class="admin-settings-save"><button type="submit">Save for next restart</button><span>Review saved values and overrides before restarting your service.</span></div>
+<div class="admin-settings-save"><button type="submit">Save for next restart</button><span>Review saved values, then use Restart RustChan in Configuration restart.</span></div>
 </form></section>"#,
         label = escape_html(label),
         description = escape_html(description),
@@ -103,7 +101,6 @@ fn render_control_groups(fields: &[SettingField], section: &str) -> String {
                 &[
                     "require_ffmpeg",
                     "ffmpeg_path",
-                    "ffprobe_path",
                     "thumb_size",
                     "job_queue_capacity",
                     "waveform_cache_max_mb",
@@ -136,7 +133,7 @@ fn render_control_groups(fields: &[SettingField], section: &str) -> String {
             .filter(|f| keys.contains(&f.definition.key))
             .map(render_field)
             .collect::<String>();
-        let _ = write!(output, "<fieldset class=\"admin-settings-group\"><legend>{label}</legend><div class=\"admin-settings-grid\">{controls}</div></fieldset>");
+        crate::templates::append_html(&mut output, format_args!( "<fieldset class=\"admin-settings-group\"><legend>{label}</legend><div class=\"admin-settings-grid\">{controls}</div></fieldset>"));
     }
     output
 }
@@ -176,7 +173,9 @@ fn render_field(field: &SettingField) -> String {
             option("reads", "Reads: GET and HEAD", &field.input)
         ),
     };
-    let state = if field.overridden {
+    let state = if definition.application == crate::config::admin::ApplicationMode::Live {
+        "Applies live through its existing save control"
+    } else if field.overridden {
         "Override prevents the saved value taking effect; manage the environment or launcher"
     } else if field.pending {
         "Saved configuration differs — restart required; check overrides"
@@ -185,7 +184,7 @@ fn render_field(field: &SettingField) -> String {
     };
     format!(
         r#"<div class="admin-setting" data-setting-search="{} {} {}">
-<label for="setting-{key}">{}</label>{control}
+<label for="setting-{key}">{}</label><span class="admin-meta-note">{application}</span>{control}
 <p id="help-{key}" class="admin-setting-help">{}</p>
 <dl id="state-{key}" class="admin-setting-state"><dt>Active</dt><dd>{}</dd><dt>Saved</dt><dd>{}</dd><dt>Next restart</dt><dd>{}</dd><dt>Source</dt><dd>{}</dd><dt>Application</dt><dd>{state}</dd></dl>
 </div>"#,
@@ -197,7 +196,12 @@ fn render_field(field: &SettingField) -> String {
         escape_html(&field.active),
         escape_html(&field.saved),
         escape_html(&field.next_start),
-        escape_html(&field.source)
+        escape_html(&field.source),
+        application = if definition.application == crate::config::admin::ApplicationMode::Restart {
+            "Restart required"
+        } else {
+            "Applies live"
+        }
     )
 }
 

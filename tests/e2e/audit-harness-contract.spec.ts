@@ -120,12 +120,33 @@ test.describe('deep audit harness contract', () => {
     );
     expect(wrongStatus.matchedRecords).toEqual([]);
 
-    // Console declarations match on the message pattern only.
+    // Console declarations without a URL constraint retain pattern matching.
     const consoleStatus = declarationStatus(
       [record({ kind: 'console-error', detail: 'Failed to load resource: 404', method: undefined, path: undefined, status: undefined })],
       [expectation({ kind: 'console-error', pattern: /Failed to load resource/ })],
     );
     expect(consoleStatus.consumed).toEqual([0]);
+
+    // A native-control declaration must not consume an application error with
+    // the same words, an unknown source, a different icon, or an extra message.
+    // Its finite capacity also leaves a repeated excess event unexpected.
+    const nativeMessage = 'Button failed to load, iconName = invalid-placard, layoutTraits = [MacOSLayoutTraits Inline], src = blob:http://127.0.0.1:1234/00000000-0000-4000-8000-000000000000';
+    const nativeStatus = declarationStatus([
+      record({ kind: 'console-error', url: 'http://127.0.0.1:1234/static/main.js', detail: nativeMessage }),
+      record({ kind: 'console-error', url: undefined, detail: nativeMessage }),
+      record({ kind: 'console-error', url: '', detail: `${nativeMessage} unexpected application failure` }),
+      record({ kind: 'console-error', url: '', detail: nativeMessage.replace('invalid-placard', 'custom-control') }),
+      record({ kind: 'console-error', url: '', detail: nativeMessage }),
+      record({ kind: 'console-error', url: '', detail: nativeMessage }),
+    ], [expectation({
+      kind: 'console-error',
+      pattern: /^Button failed to load, iconName = invalid-placard, layoutTraits = \[MacOSLayoutTraits Inline\], src = blob:http:\/\/127\.0\.0\.1:1234\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      url: /^$/,
+      times: 1,
+    })]);
+    expect(nativeStatus.consumed).toEqual([0]);
+    expect(nativeStatus.matchedRecords).toEqual([4]);
+    expect(nativeStatus.unmatched).toEqual([]);
   });
 
   test('manual contexts inherit the project JavaScript mode', async ({ browser }, testInfo) => {

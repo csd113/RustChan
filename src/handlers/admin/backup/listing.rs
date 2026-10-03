@@ -57,7 +57,7 @@ fn current_source_modified(dir: &Path) -> Option<SystemTime> {
 }
 
 pub(super) fn invalidate_backup_list_cache(dir: &Path, kind: BackupListKind) {
-    BACKUP_LIST_CACHE
+    let _previous_value = BACKUP_LIST_CACHE
         .lock()
         .remove(&backup_list_cache_key(dir, kind));
 }
@@ -457,7 +457,7 @@ pub(in crate::server) fn list_backup_files(dir: &Path, kind: BackupListKind) -> 
             .then_with(|| right.backup_ref.cmp(&left.backup_ref))
     });
 
-    BACKUP_LIST_CACHE.lock().insert(
+    let _previous_value = BACKUP_LIST_CACHE.lock().insert(
         cache_key,
         BackupListCacheEntry {
             generated_at: Instant::now(),

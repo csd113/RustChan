@@ -50,6 +50,8 @@ pub mod test_fixtures;
 #[cfg(test)]
 /// Shared state and request builders for crate-local tests.
 pub(crate) use test_fixtures as test_support;
+/// Settings restart coordination and supervisor recovery.
+pub mod restart;
 /// Built-in theme metadata.
 pub mod theme;
 /// Custom theme configuration and CSS generation.

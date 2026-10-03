@@ -161,7 +161,7 @@ pub fn start(
     let metrics_reader = Arc::clone(shared_metrics);
     let app_writer = Arc::clone(shared_app);
     let redraw_for_render = Arc::clone(&redraw);
-    tokio::spawn(async move {
+    let render_task = tokio::spawn(async move {
         let mut spinner_tick = 0u8;
         let mut logs = dashboard::LogSnapshot::default();
         let mut last_log_refresh = None;
@@ -204,10 +204,10 @@ pub fn start(
 
             let mut app = app_writer.write().await;
             app.expire_notice(Instant::now());
-            animated = matches!(app.dialog, Some(state::Dialog::Progress { .. }))
+            animated = matches!(app.dialog, Some(state::Dialog::Progress { label: _ }))
                 || snapshot.active_uploads > 0;
             let draw_result = {
-                let _terminal_guard = TERMINAL_IO.lock();
+                let _render_terminal_guard = TERMINAL_IO.lock();
                 if !is_active() {
                     return;
                 }
@@ -223,6 +223,9 @@ pub fn start(
             }
         }
     });
+    // The task owns the terminal until console cleanup stops its loop.
+    // Dropping this handle intentionally detaches it from the startup caller.
+    drop(render_task);
 
     redraw.notify_one();
     Ok((key_rx, redraw))

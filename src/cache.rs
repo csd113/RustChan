@@ -18,14 +18,14 @@ pub const CACHE_CONTROL_IMMUTABLE_MEDIA: &str = "public, max-age=31536000, immut
 
 /// Insert `Cache-Control` only when the response does not already define it.
 pub fn insert_cache_control_if_absent(headers: &mut HeaderMap, value: &'static str) {
-    headers
+    let _configured = headers
         .entry(header::CACHE_CONTROL)
         .or_insert(HeaderValue::from_static(value));
 }
 
 /// Replace the response's `Cache-Control` header with `value`.
 pub fn set_cache_control(headers: &mut HeaderMap, value: &'static str) {
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
+    let _previous_value = headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
 }
 
 /// Ensure a response's `Vary` header includes `Cookie`.
@@ -34,7 +34,7 @@ pub fn insert_vary_cookie(headers: &mut HeaderMap) {
         .get(header::VARY)
         .and_then(|value| value.to_str().ok())
     else {
-        headers.insert(header::VARY, HeaderValue::from_static("Cookie"));
+        let _previous_value = headers.insert(header::VARY, HeaderValue::from_static("Cookie"));
         return;
     };
 
@@ -47,6 +47,6 @@ pub fn insert_vary_cookie(headers: &mut HeaderMap) {
 
     let combined = format!("{existing}, Cookie");
     if let Ok(value) = HeaderValue::from_str(&combined) {
-        headers.insert(header::VARY, value);
+        let _previous_value = headers.insert(header::VARY, value);
     }
 }

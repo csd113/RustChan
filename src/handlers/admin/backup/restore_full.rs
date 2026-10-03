@@ -78,8 +78,8 @@ fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Resul
             ))
         })?;
         validate_board_short_name(&short_name)?;
-        valid_board_shorts.insert(short_name.clone());
-        board_ids_to_shorts.insert(board_id, short_name);
+        let _completed_value = valid_board_shorts.insert(short_name.clone());
+        let _previous_value = board_ids_to_shorts.insert(board_id, short_name);
     }
 
     let mut post_stmt = conn
@@ -223,14 +223,16 @@ fn recompute_restored_post_body_html(conn: &rusqlite::Connection) -> Result<()> 
                 AppError::Internal(anyhow::anyhow!(
                     "Update restored body_html for post {post_id}: {error}"
                 ))
-            })?;
+            })
+            .map(|_completed_value| ())?;
     }
     Ok(())
 }
 
 fn scrub_full_restore_runtime_state(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute("DELETE FROM admin_sessions", [])
-        .map_err(|error| AppError::Internal(anyhow::anyhow!("Clear restored sessions: {error}")))?;
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Clear restored sessions: {error}")))
+        .map(|_completed_value| ())?;
     Ok(())
 }
 
@@ -390,6 +392,22 @@ fn create_live_restore_snapshot(
     Ok(())
 }
 
+/// Validate expiry across Chrono's entire timestamp range before restore mutation.
+/// This permits calculating the full lifetime at issuance even if the clock moves.
+fn validate_restored_session_duration(duration: i64) -> Result<()> {
+    let _earliest_expiry =
+        restored_session_expiry(chrono::DateTime::<Utc>::MIN_UTC.timestamp(), duration)?;
+    let _latest_expiry =
+        restored_session_expiry(chrono::DateTime::<Utc>::MAX_UTC.timestamp(), duration)?;
+    Ok(())
+}
+
+/// Compute a checked replacement-session expiry at the actual issuance time.
+fn restored_session_expiry(now: i64, duration: i64) -> Result<i64> {
+    now.checked_add(duration)
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("restored session expiry overflows")))
+}
+
 #[expect(
     clippy::cognitive_complexity,
     reason = "full restore validation, replacement, and rollback remain one fail-closed operation"
@@ -413,6 +431,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
 ) -> Result<String> {
     validate_full_restore_archive_layout(archive)?;
     let manifest = verify_full_backup_archive(archive)?;
+    validate_restored_session_duration(CONFIG.session_duration)?;
     if restore_tor_hidden_service_keys && !manifest.tor_hidden_service_keys_included {
         return Err(AppError::BadRequest(
             "This backup does not include Tor hidden service keys.".into(),
@@ -523,7 +542,8 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
                 RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
                 "Full restore archive",
             )
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Write temp DB: {error}")))?;
+            .map_err(|error| AppError::Internal(anyhow::anyhow!("Write temp DB: {error}")))
+            .map(|_completed_value| ())?;
             restrict_restore_temp_file(&temp_db)?;
 
             let mut header = [0u8; 16];
@@ -571,7 +591,8 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
                 )
                 .map_err(|error| {
                     AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display()))
-                })?;
+                })
+                .map(|_completed_value| ())?;
             }
         } else if let Some(rel_path) = validate_entry_path_under_prefix(&name, "favicon/")? {
             favicon_extracted = true;
@@ -599,7 +620,8 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
                 )
                 .map_err(|error| {
                     AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display()))
-                })?;
+                })
+                .map(|_completed_value| ())?;
             }
         } else if let Some(rel) = name.strip_prefix("banner/") {
             if rel.is_empty() {
@@ -636,7 +658,8 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
             )
             .map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display()))
-            })?;
+            })
+            .map(|_completed_value| ())?;
         } else if let (Some(rel_path), Some(staged_tor_hidden_service_keys_dir)) = (
             validate_entry_path_under_prefix(&name, safety::FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX)?,
             staged_tor_hidden_service_keys_dir.as_ref(),
@@ -665,7 +688,8 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
                 )
                 .map_err(|error| {
                     AppError::Internal(anyhow::anyhow!("Write {}: {error}", target.display()))
-                })?;
+                })
+                .map(|_completed_value| ())?;
                 tor_hidden_service_key_files_extracted =
                     tor_hidden_service_key_files_extracted.saturating_add(1);
             }
@@ -829,7 +853,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
     drop(std::fs::remove_file(&db_snapshot));
 
     let fresh_sid = new_session_id();
-    let expires_at = Utc::now().timestamp() + CONFIG.session_duration;
+    let expires_at = restored_session_expiry(Utc::now().timestamp(), CONFIG.session_duration)?;
     let session_result = match db::create_session(live_conn, &fresh_sid, admin_id, expires_at) {
         Ok(()) => {
             tracing::info!(target: "admin", admin_id = admin_id, "{completion_log}");
@@ -952,7 +976,8 @@ pub(in crate::server) async fn admin_restore(
         let session_id =
             restore_auth_preflight(&state, &headers, &jar, secure_context.peer).await?;
         let upload = stream_restore_upload_to_tempfile(RestoreKind::Full, &mut multipart).await?;
-        validate_streamed_restore_upload(RestoreKind::Full, &jar, &upload)?;
+        validate_streamed_restore_upload(RestoreKind::Full, &jar, &upload)
+            .map(|_completed_value| ())?;
         let zip_tmp = upload.temp_file;
         let restore_tor_hidden_service_keys = upload.restore_tor_hidden_service_keys;
         let uploaded_filename = upload.uploaded_filename;
@@ -1144,6 +1169,66 @@ pub(in crate::server) async fn restore_saved_full_backup(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restore_preflight_bounds_session_duration_for_any_clock_value() -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        let minimum = chrono::DateTime::<super::Utc>::MIN_UTC.timestamp();
+        let maximum = chrono::DateTime::<super::Utc>::MAX_UTC.timestamp();
+        super::validate_restored_session_duration(3600)?;
+        let longest = i64::MAX
+            .checked_sub(maximum)
+            .context("maximum lifetime boundary overflow")?;
+        super::validate_restored_session_duration(longest)?;
+        anyhow::ensure!(
+            super::restored_session_expiry(maximum, longest)? == i64::MAX,
+            "maximum boundary changed"
+        );
+        anyhow::ensure!(
+            super::validate_restored_session_duration(
+                longest
+                    .checked_add(1)
+                    .context("lifetime increment overflow")?
+            )
+            .is_err(),
+            "overflowing future expiry was accepted"
+        );
+        let shortest = i64::MIN
+            .checked_sub(minimum)
+            .context("minimum lifetime boundary overflow")?;
+        super::validate_restored_session_duration(shortest)?;
+        anyhow::ensure!(
+            super::restored_session_expiry(minimum, shortest)? == i64::MIN,
+            "minimum boundary changed"
+        );
+        anyhow::ensure!(
+            super::validate_restored_session_duration(
+                shortest
+                    .checked_sub(1)
+                    .context("lifetime decrement overflow")?
+            )
+            .is_err(),
+            "underflowing past expiry was accepted"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restored_session_expiry_rejects_overflow() -> anyhow::Result<()> {
+        anyhow::ensure!(
+            super::restored_session_expiry(100, 3600)? == 3700,
+            "ordinary session duration changed"
+        );
+        anyhow::ensure!(
+            super::restored_session_expiry(i64::MAX, 1).is_err(),
+            "overflowing session expiry was accepted"
+        );
+        anyhow::ensure!(
+            super::restored_session_expiry(i64::MIN, -1).is_err(),
+            "underflowing session expiry was accepted"
+        );
+        Ok(())
+    }
+
     use super::{
         execute_full_restore, full_restore_success_response,
         validate_full_restore_db_trust_boundary,
@@ -1178,7 +1263,7 @@ mod tests {
 
     impl Drop for FullRestoreRuntimeTmpRootOverride {
         fn drop(&mut self) {
-            super::FULL_RESTORE_RUNTIME_TMP_ROOT_FOR_TEST
+            let _previous_value = super::FULL_RESTORE_RUNTIME_TMP_ROOT_FOR_TEST
                 .with(|root| root.replace(self.previous.take()));
         }
     }
@@ -1189,7 +1274,8 @@ mod tests {
         let pool = crate::db::init_test_pool().context("create test database pool")?;
         let conn = pool.get().context("get test database connection")?;
         crate::db::create_board(&conn, "tech", "Technology", "", false)
-            .context("create fixture board")?;
+            .context("create fixture board")
+            .map(|_completed_value| ())?;
         let db_path_str = db_path
             .to_str()
             .context("snapshot fixture path is not UTF-8")?
@@ -1344,7 +1430,7 @@ mod tests {
             });
         let manifest_json = if legacy_manifest {
             serde_json::json!({
-                "version": 2,
+                "version": 2_i32,
                 "generated_at": 1_700_000_000_i64,
                 "rustchan_version": "1.1.3",
                 "db_bytes": db_bytes.len(),
@@ -1355,7 +1441,7 @@ mod tests {
             })
         } else {
             serde_json::json!({
-                "version": 3,
+                "version": 3_i32,
                 "generated_at": 1_700_000_000_i64,
                 "rustchan_version": "1.1.3",
                 "db_bytes": db_bytes.len(),
@@ -1395,7 +1481,7 @@ mod tests {
                     .context("write Tor key entry")?;
             }
         }
-        zip.finish().context("finish backup ZIP")?;
+        drop(zip.finish().context("finish backup ZIP")?);
         Ok(())
     }
 
@@ -1460,7 +1546,8 @@ mod tests {
             "Test restore completed",
             "Test restore",
             "Test restore",
-        )?;
+        )
+        .map(|_completed_value| ())?;
 
         ensure_full_restore_temp_dir_empty(&runtime_tmp_root)
     }
@@ -1485,7 +1572,7 @@ mod tests {
                         .replace('\\', "/");
                     let contents = std::fs::read_to_string(&path)
                         .with_context(|| format!("read tree file {}", path.display()))?;
-                    out.insert(rel, contents);
+                    let _previous_value = out.insert(rel, contents);
                 }
             }
             Ok(())
@@ -1502,7 +1589,7 @@ mod tests {
     fn saved_full_restore_success_response_sets_session_cookie_and_reopens_section(
     ) -> TestResult<()> {
         let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, HeaderValue::from_static("localhost"));
+        let _previous_value = headers.insert(header::HOST, HeaderValue::from_static("localhost"));
 
         let response = full_restore_success_response(
             CookieJar::new(),
@@ -1574,7 +1661,8 @@ mod tests {
             "Test restore completed",
             "Test restore",
             "Test restore",
-        )?;
+        )
+        .map(|_completed_value| ())?;
 
         let live_tree = read_tree(&tor_keys_dir)?;
         ensure!(
@@ -1620,7 +1708,8 @@ mod tests {
             "Test restore completed",
             "Test restore",
             "Test restore",
-        )?;
+        )
+        .map(|_completed_value| ())?;
         Ok(())
     }
 
@@ -1635,13 +1724,15 @@ mod tests {
                  VALUES (1, 'restored-admin', 'restored-hash')",
                 [],
             )
-            .context("seed restored administrator")?;
+            .context("seed restored administrator")
+            .map(|_completed_value| ())?;
             conn.execute(
                 "INSERT INTO admin_sessions (id, admin_id, expires_at)
                  VALUES ('stale-session-from-backup', 1, unixepoch() + 86400)",
                 [],
             )
-            .context("seed stale session")?;
+            .context("seed stale session")
+            .map(|_completed_value| ())?;
         }
         let zip_path = temp_dir.path().join("backup.zip");
         write_full_backup_zip_from_db(&zip_path, &db_path, None, false)?;
@@ -1720,7 +1811,8 @@ mod tests {
             "Test restore completed",
             "Test restore",
             "Test restore",
-        )?;
+        )
+        .map(|_completed_value| ())?;
 
         let body_html: String = live_conn
             .query_row(
@@ -1751,7 +1843,8 @@ mod tests {
             conn.execute_batch("DROP TRIGGER boards_domain_update")
                 .context("temporarily remove board domain trigger")?;
             conn.execute("UPDATE boards SET short_name = '../admin'", [])
-                .context("seed invalid board short name")?;
+                .context("seed invalid board short name")
+                .map(|_completed_value| ())?;
             conn.execute_batch(&invariant_trigger)
                 .context("restore board domain trigger")?;
         }
@@ -1785,7 +1878,18 @@ mod tests {
             crate::error::AppError::BadRequest(message) => {
                 ensure!(message.contains("boards has 1 row(s)"));
             }
-            other => bail!("expected BadRequest, got {other:?}"),
+            other @ (crate::error::AppError::NotFound(_)
+            | crate::error::AppError::Forbidden(_)
+            | crate::error::AppError::BannedUser {
+                reason: _,
+                csrf_token: _,
+            }
+            | crate::error::AppError::UploadTooLarge(_)
+            | crate::error::AppError::InvalidMediaType(_)
+            | crate::error::AppError::Conflict(_)
+            | crate::error::AppError::DbBusy
+            | crate::error::AppError::Internal(_)
+            | crate::error::AppError::Tls(_)) => bail!("expected BadRequest, got {other:?}"),
         }
         Ok(())
     }
@@ -1808,7 +1912,7 @@ mod tests {
                  VALUES (1, ?1, 'ghost', unixepoch(), unixepoch(), 0, 0, 0, 0)",
                 [board_id],
             )
-            .context("seed thread")?;
+            .context("seed thread").map(|_completed_value| ())?;
             conn.execute(
                 "INSERT INTO posts
                  (id, thread_id, board_id, name, body, body_html, file_path, file_name, file_size,
@@ -1818,13 +1922,14 @@ mod tests {
                   'ghost/thumbs/doc.svg', 'application/pdf', 'pdf', unixepoch(), 'token', 1)",
                 [board_id],
             )
-            .context("seed invalid restored media path")?;
+            .context("seed invalid restored media path")
+            .map(|_completed_value| ())?;
             conn.execute(
                 "INSERT INTO file_hashes (sha256, file_path, thumb_path, mime_type, created_at)
                  VALUES ('ghost-hash', 'ghost/doc.pdf', 'ghost/thumbs/doc.svg', 'application/pdf', unixepoch())",
                 [],
             )
-            .context("seed invalid restored file-hash path")?;
+            .context("seed invalid restored file-hash path").map(|_completed_value| ())?;
         }
         let zip_path = temp_dir.path().join("backup.zip");
         write_full_backup_zip_from_db(&zip_path, &db_path, None, false)?;
@@ -1856,7 +1961,18 @@ mod tests {
             crate::error::AppError::BadRequest(message) => {
                 ensure!(message.contains("points to unknown board /ghost/"));
             }
-            other => bail!("expected BadRequest, got {other:?}"),
+            other @ (crate::error::AppError::NotFound(_)
+            | crate::error::AppError::Forbidden(_)
+            | crate::error::AppError::BannedUser {
+                reason: _,
+                csrf_token: _,
+            }
+            | crate::error::AppError::UploadTooLarge(_)
+            | crate::error::AppError::InvalidMediaType(_)
+            | crate::error::AppError::Conflict(_)
+            | crate::error::AppError::DbBusy
+            | crate::error::AppError::Internal(_)
+            | crate::error::AppError::Tls(_)) => bail!("expected BadRequest, got {other:?}"),
         }
         Ok(())
     }
@@ -1868,7 +1984,8 @@ mod tests {
         {
             let conn = rusqlite::Connection::open(&db_path).context("open database snapshot")?;
             crate::db::create_board(&conn, "b", "Random", "", false)
-                .context("create second board")?;
+                .context("create second board")
+                .map(|_completed_value| ())?;
             let tech_board_id: i64 = conn
                 .query_row(
                     "SELECT id FROM boards WHERE short_name = 'tech'",
@@ -1881,7 +1998,7 @@ mod tests {
                  VALUES (1, ?1, 'doc', unixepoch(), unixepoch(), 0, 0, 0, 0)",
                 [tech_board_id],
             )
-            .context("seed thread")?;
+            .context("seed thread").map(|_completed_value| ())?;
             conn.execute(
                 "INSERT INTO posts
                  (id, thread_id, board_id, name, body, body_html, file_path, file_name, file_size,
@@ -1891,13 +2008,14 @@ mod tests {
                   'b/thumbs/doc.svg', 'application/pdf', 'pdf', unixepoch(), 'token', 1)",
                 [tech_board_id],
             )
-            .context("seed cross-board thumbnail path")?;
+            .context("seed cross-board thumbnail path")
+            .map(|_completed_value| ())?;
             conn.execute(
                 "INSERT INTO file_hashes (sha256, file_path, thumb_path, mime_type, created_at)
                  VALUES ('cross-board-hash', 'tech/doc.pdf', 'b/thumbs/doc.svg', 'application/pdf', unixepoch())",
                 [],
             )
-            .context("seed cross-board file hash")?;
+            .context("seed cross-board file hash").map(|_completed_value| ())?;
         }
         let zip_path = temp_dir.path().join("backup.zip");
         write_full_backup_zip_from_db(&zip_path, &db_path, None, false)?;
@@ -1929,7 +2047,18 @@ mod tests {
             crate::error::AppError::BadRequest(message) => {
                 ensure!(message.contains("escapes its board /tech/"));
             }
-            other => bail!("expected BadRequest, got {other:?}"),
+            other @ (crate::error::AppError::NotFound(_)
+            | crate::error::AppError::Forbidden(_)
+            | crate::error::AppError::BannedUser {
+                reason: _,
+                csrf_token: _,
+            }
+            | crate::error::AppError::UploadTooLarge(_)
+            | crate::error::AppError::InvalidMediaType(_)
+            | crate::error::AppError::Conflict(_)
+            | crate::error::AppError::DbBusy
+            | crate::error::AppError::Internal(_)
+            | crate::error::AppError::Tls(_)) => bail!("expected BadRequest, got {other:?}"),
         }
         Ok(())
     }
@@ -1943,7 +2072,8 @@ mod tests {
              VALUES ('generic-hash', 'tech/file.bin', '', 'application/octet-stream', unixepoch())",
             [],
         )
-        .context("seed generic file hash")?;
+        .context("seed generic file hash")
+        .map(|_completed_value| ())?;
 
         validate_full_restore_db_trust_boundary(&conn)?;
         Ok(())
@@ -1953,13 +2083,15 @@ mod tests {
     fn full_restore_trust_boundary_rejects_cross_board_file_hash_pairing() -> TestResult<()> {
         let db_path = create_snapshot_db()?;
         let conn = rusqlite::Connection::open(&db_path).context("open database snapshot")?;
-        crate::db::create_board(&conn, "b", "Random", "", false).context("create second board")?;
+        crate::db::create_board(&conn, "b", "Random", "", false)
+            .context("create second board")
+            .map(|_completed_value| ())?;
         conn.execute(
             "INSERT INTO file_hashes (sha256, file_path, thumb_path, mime_type, created_at)
              VALUES ('cross-board-hash', 'tech/doc.pdf', 'b/thumbs/doc.svg', 'application/pdf', unixepoch())",
             [],
         )
-        .context("seed cross-board file hash")?;
+        .context("seed cross-board file hash").map(|_completed_value| ())?;
 
         let error = validate_full_restore_db_trust_boundary(&conn)
             .err()
@@ -1969,7 +2101,18 @@ mod tests {
             crate::error::AppError::BadRequest(message) => {
                 ensure!(message.contains("mixes boards between file_path and thumb_path"));
             }
-            other => bail!("expected BadRequest, got {other:?}"),
+            other @ (crate::error::AppError::NotFound(_)
+            | crate::error::AppError::Forbidden(_)
+            | crate::error::AppError::BannedUser {
+                reason: _,
+                csrf_token: _,
+            }
+            | crate::error::AppError::UploadTooLarge(_)
+            | crate::error::AppError::InvalidMediaType(_)
+            | crate::error::AppError::Conflict(_)
+            | crate::error::AppError::DbBusy
+            | crate::error::AppError::Internal(_)
+            | crate::error::AppError::Tls(_)) => bail!("expected BadRequest, got {other:?}"),
         }
         Ok(())
     }
@@ -2014,7 +2157,18 @@ mod tests {
             crate::error::AppError::BadRequest(message) => {
                 ensure!(message.contains("Tor hidden service key restore is not available"));
             }
-            other => bail!("expected BadRequest, got {other:?}"),
+            other @ (crate::error::AppError::NotFound(_)
+            | crate::error::AppError::Forbidden(_)
+            | crate::error::AppError::BannedUser {
+                reason: _,
+                csrf_token: _,
+            }
+            | crate::error::AppError::UploadTooLarge(_)
+            | crate::error::AppError::InvalidMediaType(_)
+            | crate::error::AppError::Conflict(_)
+            | crate::error::AppError::DbBusy
+            | crate::error::AppError::Internal(_)
+            | crate::error::AppError::Tls(_)) => bail!("expected BadRequest, got {other:?}"),
         }
         Ok(())
     }
@@ -2055,7 +2209,8 @@ mod tests {
             "Test restore completed",
             "Test restore",
             "Test restore",
-        )?;
+        )
+        .map(|_completed_value| ())?;
 
         ensure!(
             read_tree(&tor_keys_dir)?
@@ -2117,7 +2272,8 @@ mod tests {
             "Test restore completed",
             "Test restore",
             "Test restore",
-        )?;
+        )
+        .map(|_completed_value| ())?;
 
         let live_tree = read_tree(&tor_keys_dir)?;
         ensure!(
@@ -2264,7 +2420,18 @@ mod tests {
             crate::error::AppError::BadRequest(message) => {
                 ensure!(message.contains("does not include Tor hidden service keys"));
             }
-            other => bail!("expected BadRequest, got {other:?}"),
+            other @ (crate::error::AppError::NotFound(_)
+            | crate::error::AppError::Forbidden(_)
+            | crate::error::AppError::BannedUser {
+                reason: _,
+                csrf_token: _,
+            }
+            | crate::error::AppError::UploadTooLarge(_)
+            | crate::error::AppError::InvalidMediaType(_)
+            | crate::error::AppError::Conflict(_)
+            | crate::error::AppError::DbBusy
+            | crate::error::AppError::Internal(_)
+            | crate::error::AppError::Tls(_)) => bail!("expected BadRequest, got {other:?}"),
         }
         Ok(())
     }
@@ -2298,7 +2465,8 @@ mod tests {
             "Test restore completed",
             "Test restore",
             "Test restore",
-        )?;
+        )
+        .map(|_completed_value| ())?;
 
         ensure!(
             read_tree(&tor_keys_dir)?

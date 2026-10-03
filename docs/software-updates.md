@@ -8,7 +8,7 @@ package version**. It never reports release discovery or update transactions.
 
 ## Boundary and supported deployments
 
-The web process sends only Status, Check, Ready and Install operations over
+The web process sends only Status, Check, Ready, Started, Restart and Install operations over
 `/run/rustchan-updater/control.sock`. Install contains a one-use opaque approval
 and an authenticated administrator ID; no request supplies a path, URL, command,
 service or environment. Existing session-scoped CSRF and same-origin checks apply
@@ -184,3 +184,7 @@ immutable snapshots as the operator. Correct permissions, space, service/polkit 
 snapshot integrity issues before restarting the updater. No web action can force
 an unverified restore or clear failed recovery. Keep independent manual/offsite
 backups; native rollback snapshots protect the local transaction, not disk loss.
+
+## Settings restarts
+
+[Administrator settings restarts](settings-restarts.md) reuse this same socket, service controller, transaction lock, journal and recovery admission. Their rollback restores configuration only. Install the matching updater build before enabling this UI; newly packaged releases require updater 1.6.0 or newer. Software installation retains its existing password/approval and complete snapshot protections.

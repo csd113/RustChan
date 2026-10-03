@@ -1,15 +1,16 @@
 # Container deployment
 
-RustChan's container listens on HTTP port **8080**. The image includes `ffmpeg`, `ffprobe`, and CA certificates. It runs as the unprivileged `rustchan` user (UID/GID 10001). Templates and static assets are embedded in the server binary.
+RustChan's container listens on HTTP port **8080**. The image includes `ffmpeg` and CA certificates. It runs as the unprivileged `rustchan` user (UID/GID 10001). Templates and static assets are embedded in the server binary.
 
 ## Pull and run
 
 ```bash
 docker pull ghcr.io/csd113/rustchan:latest
 docker volume create rustchan-data
-docker run -d --name rustchan --restart unless-stopped \
+docker run -d --name rustchan --restart unless-stopped --stop-timeout 90 \
   -p 8080:8080 \
   -e CHAN_HOST=0.0.0.0 -e CHAN_PORT=8080 -e CHAN_TOR_SUPPORT=false \
+  -e RUSTCHAN_RESTART_ON_EXIT=1 \
   -v rustchan-data:/data \
   ghcr.io/csd113/rustchan:latest
 ```
@@ -68,3 +69,7 @@ GHCR image: `ghcr.io/csd113/rustchan`. The publishing workflow builds `linux/amd
 ### Software update checks
 
 Administrators can check stable RustChan releases in Software Updates. Container images remain deployment-managed; there is no Install control. Pull the chosen image and recreate the container while retaining the whole data volume. `/readyz` includes the running package `version`, without latest-release or update state. See [Software Updates](software-updates.md).
+
+## Applying saved settings
+
+Compose opts into graceful administrator settings restarts using its existing restart policy. The docker run command above pairs the same opt-in with `--restart unless-stopped`. Saving never restarts the container; choose **Restart RustChan** after reviewing pending settings. A bounded readiness check commits the replacement, and failed startup restores the last healthy configuration before the next startup. Keep the loopback HTTP health listener on CHAN_PORT available. Do not set RUSTCHAN_RESTART_ON_EXIT without an automatic process restart policy. See [settings restarts](settings-restarts.md) for classification, shutdown and recovery details.

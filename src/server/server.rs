@@ -45,6 +45,24 @@ fn should_run_background_maintenance(state: &AppState, max_in_flight: u64) -> bo
         && IN_FLIGHT.load(Ordering::Relaxed) <= max_in_flight
 }
 
+/// Validates an operator-configured interval before constructing timer state.
+/// Zero remains available to callers as the existing disabled-period sentinel.
+fn configured_timer_interval(
+    value: u64,
+    seconds_per_unit: u64,
+    label: &str,
+) -> anyhow::Result<Duration> {
+    let seconds = value
+        .checked_mul(seconds_per_unit)
+        .with_context(|| format!("{label} interval overflows"))?;
+    let interval = Duration::from_secs(seconds);
+    anyhow::ensure!(
+        tokio::time::Instant::now().checked_add(interval).is_some(),
+        "{label} interval exceeds the supported timer range"
+    );
+    Ok(interval)
+}
+
 /// Initial retry delay for a failed scheduled full backup.
 const SCHEDULED_FULL_BACKUP_RETRY_BASE_SECS: u64 = 15 * 60;
 /// Maximum retry delay for a failed scheduled full backup.
@@ -93,10 +111,10 @@ pub(super) struct ScopedDecrement<'a>(pub(super) &'a AtomicU64);
 
 impl Drop for ScopedDecrement<'_> {
     fn drop(&mut self) {
-        // Saturating decrement: fetch_update retries on spurious failure.
+        // Saturating decrement: try_update retries on spurious failure.
         let _previous_value = self
             .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(1))
             });
     }
@@ -157,7 +175,7 @@ async fn tls_plaintext_backend_gate(
         "HTTPS is required",
     )
         .into_response();
-    response.headers_mut().insert(
+    let _previous_value = response.headers_mut().insert(
         header::CONNECTION,
         header::HeaderValue::from_static("close"),
     );
@@ -181,6 +199,30 @@ fn protect_tls_plaintext_backend(
     ))
 }
 
+/// Initialize and run the configured HTTP, HTTPS, Tor, and background services.
+///
+/// # Errors
+///
+/// Returns an error when configuration validation, filesystem or database
+/// initialization, listener startup, or coordinated listener execution fails.
+pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
+    let (ready, started) = tokio::sync::oneshot::channel();
+    if !crate::updates::managed() && !crate::restart::container_restart_enabled() {
+        let result = run_server_lifecycle(port_override, ready).await;
+        drop(started);
+        return result;
+    }
+    let server = run_server_lifecycle(port_override, ready);
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result,
+        initialized = tokio::time::timeout(crate::restart::STARTUP_TIMEOUT, started) => {
+            initialized.context("RustChan initialization timed out")?.context("RustChan initialization stopped before readiness")?;
+            server.await
+        }
+    }
+}
+
 #[expect(
     clippy::cognitive_complexity,
     reason = "startup, listener selection, and coordinated shutdown form one server lifecycle"
@@ -189,13 +231,11 @@ fn protect_tls_plaintext_backend(
     clippy::too_many_lines,
     reason = "startup ordering and shutdown ownership are one cohesive server lifecycle"
 )]
-/// Initialize and run the configured HTTP, HTTPS, Tor, and background services.
-///
-/// # Errors
-///
-/// Returns an error when configuration validation, filesystem or database
-/// initialization, listener startup, or coordinated listener execution fails.
-pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
+/// Initialize resources, report readiness once, then own their bounded shutdown.
+async fn run_server_lifecycle(
+    port_override: Option<u16>,
+    ready: tokio::sync::oneshot::Sender<()>,
+) -> anyhow::Result<()> {
     crate::updates::await_startup().await?;
     // rustls 0.23 requires an explicit process-wide crypto provider.
     // install_default() is idempotent — a second call (e.g. in tests) returns
@@ -207,10 +247,30 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     migrate_runtime_layout_if_needed()?;
 
     generate_settings_file_if_missing();
+    let startup_digest = crate::restart::startup_digest()?;
 
     // Validate critical configuration values immediately — fail fast with a
     // clear error rather than discovering misconfiguration at runtime (#8).
     CONFIG.validate()?;
+
+    let media_reconcile_interval = configured_timer_interval(
+        CONFIG.media_reconcile_interval_hours,
+        3600,
+        "media reconciliation",
+    )?;
+    let vacuum_interval =
+        configured_timer_interval(CONFIG.auto_vacuum_interval_hours, 3600, "automatic VACUUM")?;
+    let wal_interval =
+        configured_timer_interval(CONFIG.wal_checkpoint_interval, 1, "WAL checkpoint")?;
+    let poll_cleanup_interval =
+        configured_timer_interval(CONFIG.poll_cleanup_interval_hours, 3600, "poll cleanup")?;
+    let _validated_backup_interval = configured_timer_interval(
+        CONFIG.auto_full_backup_interval_hours,
+        3600,
+        "automatic full backup",
+    )?;
+    let poll_retention_cutoff_secs = i64::try_from(poll_cleanup_interval.as_secs())
+        .context("poll retention interval exceeds supported timestamp range")?;
 
     let data_dir = super::parent_dir_or_current(std::path::Path::new(&CONFIG.database_path));
 
@@ -472,13 +532,6 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
             CONFIG.ffmpeg_path
         );
     }
-    // ffprobe is used lazily for WebM codec inspection, so probe it at startup
-    // to make explicit configured paths authoritative and catch bogus paths early.
-    let ffprobe_available = crate::detect::detect_ffprobe();
-    // libwebp encoder: needed for image→WebP conversion.  Checked independently
-    // so that a stock ffmpeg build (missing libwebp) still enables video/audio
-    // features while image conversion degrades gracefully.
-    let ffmpeg_webp_available = crate::detect::detect_webp_encoder(ffmpeg_available);
     // libvpx-vp9 + libopus encoders: needed for MP4→WebM transcoding and
     // WebM/AV1→VP9 re-encoding.  Checked independently so that a build missing
     // only these codecs still enables image conversion and thumbnail generation.
@@ -496,7 +549,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
             tracing::warn!(
                 target: "server",
                 bind_addr = %bind_addr,
-                fallback = 8080,
+                fallback = 8_080_i32,
                 "Could not parse port from bind_addr — Tor proxy will use port 8080"
             );
             8080
@@ -557,18 +610,18 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         );
     }
     let worker_queue = Arc::new(crate::workers::JobQueue::new(pool.clone()));
-    let worker_handles = crate::workers::start_worker_pool(
-        &worker_queue,
-        ffmpeg_available,
-        ffprobe_available,
-        ffmpeg_vp9_available,
-    );
+    let worker_handles =
+        crate::workers::start_worker_pool(&worker_queue, ffmpeg_available, ffmpeg_vp9_available);
 
     let state = AppState {
+        runtime_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         db: pool.clone(),
         ffmpeg_available,
-        ffprobe_available,
-        ffmpeg_webp_available,
+        ffmpeg_av1: if ffmpeg_available {
+            crate::media::ffmpeg::video_capabilities().av1.clone()
+        } else {
+            crate::media::ffmpeg::Av1Capabilities::default()
+        },
         ffmpeg_vp9_available,
         ffmpeg_vp9_encoder_available: ffmpeg_webm_status.vp9,
         ffmpeg_opus_available: ffmpeg_webm_status.opus,
@@ -594,7 +647,11 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     // and the Tor task. Declared here so it is available to background tasks
     // spawned below. detect_tor is called later, after the first-run wizard.
     let worker_cancel = state.job_queue.cancel.clone();
+    let _cancel_on_exit = worker_cancel.clone().drop_guard();
     let start_time = Instant::now();
+    // Each JoinSet retains task ownership through shutdown; the optional
+    // per-task abort handles are intentionally unused.
+    let mut background_tasks = tokio::task::JoinSet::new();
 
     // Media reconciliation is deliberately paged and periodic: workers poll
     // durable pending rows independently, while this pass repairs only bounded
@@ -603,11 +660,11 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         let reconcile_pool = pool.clone();
         let reconcile_queue = Arc::clone(&state.job_queue);
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        let _task_abort_handle = background_tasks.spawn(async move {
             let mut job_cursor = startup_media_reconciliation.next_job_id;
             let mut post_cursor = startup_media_reconciliation.next_post_id;
             let mut interval = tokio::time::interval(Duration::from_mins(1));
-            interval.tick().await;
+            let _completed_value = interval.tick().await;
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -661,11 +718,10 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     if CONFIG.media_reconcile_interval_hours > 0 {
         let reconcile_pool = pool.clone();
         let cancel_clone = worker_cancel.clone();
-        let interval_hours = CONFIG.media_reconcile_interval_hours;
-        tokio::spawn(async move {
+        let _task_abort_handle = background_tasks.spawn(async move {
             let mut cursor = startup_managed_media_cursor;
-            let mut interval = tokio::time::interval(Duration::from_hours(interval_hours));
-            interval.tick().await;
+            let mut interval = tokio::time::interval(media_reconcile_interval);
+            let _completed_value = interval.tick().await;
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -714,10 +770,10 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         let reconcile_pool = pool.clone();
         let reconcile_queue = Arc::clone(&state.job_queue);
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        let _task_abort_handle = background_tasks.spawn(async move {
             let mut cursor = startup_prune_reconciliation.next_board_id;
             let mut interval = tokio::time::interval(Duration::from_mins(1));
-            interval.tick().await;
+            let _completed_value = interval.tick().await;
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -769,21 +825,21 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     {
         let bg = pool.clone();
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        let _task_abort_handle = background_tasks.spawn(async move {
             let mut iv = tokio::time::interval(Duration::from_hours(1));
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
-                        let connection = bg.get();
-                        if let Ok(conn) = connection {
-                            let purge_result = crate::db::purge_expired_sessions(&conn);
-                            match purge_result {
-                                Ok(n) if n > 0 => {
-                                    tracing::info!(target: "sessions", purged = n, "Expired sessions purged");
-                                }
-                                Err(e) => tracing::error!("Session purge error: {e}"),
-                                Ok(_) => {}
-                            }
+                        let purge_pool = bg.clone();
+                        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+                            let conn = purge_pool.get()?;
+                            crate::db::purge_expired_sessions(&conn)
+                        }).await;
+                        match result {
+                            Ok(Ok(n)) if n > 0 => tracing::info!(target: "sessions", purged = n, "Expired sessions purged"),
+                            Ok(Ok(_)) => {},
+                            Ok(Err(error)) => tracing::error!(error = %error, "Session purge error"),
+                            Err(error) => tracing::error!(error = %error, "Session purge blocking task failed"),
                         }
                     }
                     () = cancel_clone.cancelled() => {
@@ -801,16 +857,16 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     if CONFIG.wal_checkpoint_interval > 0 {
         let bg = pool.clone();
         let maintenance_state = state.clone();
-        let interval_secs = CONFIG.wal_checkpoint_interval;
+        let interval_secs = wal_interval.as_secs();
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        let _task_abort_handle = background_tasks.spawn(async move {
             // Stagger the first run by half the interval so it doesn't fire
             // immediately at startup alongside the session purge.
             tokio::select! {
-                () = tokio::time::sleep(Duration::from_secs(interval_secs / 2 + 1)) => {}
+                () = tokio::time::sleep(Duration::from_secs((interval_secs / 2).saturating_add(1))) => {}
                 () = cancel_clone.cancelled() => { return; }
             }
-            let mut iv = tokio::time::interval(Duration::from_secs(interval_secs));
+            let mut iv = tokio::time::interval(wal_interval);
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
@@ -824,18 +880,22 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                             );
                             continue;
                         }
-                        let connection = bg.get();
-                        if let Ok(conn) = connection {
-                            match crate::db::run_wal_checkpoint(&conn) {
-                                Ok((pages, moved, backfill)) => {
-                                    tracing::debug!("WAL checkpoint: {pages} pages total, {moved} moved, {backfill} backfilled");
-                                }
-                                Err(e) => tracing::warn!("WAL checkpoint failed: {e}"),
-                            }
-                            // Fix #7: reuse `conn` instead of calling bg.get() again.
-                            // A second acquire while the first is still alive deadlocks
-                            // with a pool size of 1.
-                            drop(conn.execute_batch("PRAGMA optimize;"));
+                        let checkpoint_pool = bg.clone();
+                        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                            let conn = checkpoint_pool.get()?;
+                            let (log_pages, checkpointed_pages, busy) = crate::db::run_wal_checkpoint(&conn)?;
+                            tracing::debug!(target: "db", log_pages, checkpointed_pages, busy,
+                                "WAL checkpoint completed");
+                            // Reuse the connection so a one-connection pool cannot
+                            // deadlock on a nested checkout. Both operations can
+                            // wait for SQLite and must stay off async workers.
+                            conn.execute_batch("PRAGMA optimize;")?;
+                            Ok(())
+                        }).await;
+                        match result {
+                            Ok(Ok(())) => {},
+                            Ok(Err(error)) => tracing::warn!(target: "db", error = %error, "WAL checkpoint or planner maintenance failed"),
+                            Err(error) => tracing::warn!(target: "db", error = %error, "WAL maintenance blocking task failed"),
                         }
                     }
                     () = cancel_clone.cancelled() => {
@@ -850,7 +910,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     // Background: prune stale IPs from ACTIVE_IPS every 5 min
     {
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        let _task_abort_handle = background_tasks.spawn(async move {
             let mut iv = tokio::time::interval(Duration::from_mins(5));
             loop {
                 tokio::select! {
@@ -875,7 +935,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     // opportunistic prune path inside clear_login_fails).
     {
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        let _task_abort_handle = background_tasks.spawn(async move {
             let mut iv = tokio::time::interval(Duration::from_mins(5));
             loop {
                 tokio::select! {
@@ -896,16 +956,16 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     if CONFIG.auto_vacuum_interval_hours > 0 {
         let bg = pool.clone();
         let maintenance_state = state.clone();
-        let interval_secs = CONFIG.auto_vacuum_interval_hours * 3600;
+        let interval_secs = vacuum_interval.as_secs();
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        let _task_abort_handle = background_tasks.spawn(async move {
             // Stagger the first run by half the interval to avoid hammering the
             // DB immediately at startup alongside WAL checkpoint and session purge.
             tokio::select! {
-                () = tokio::time::sleep(Duration::from_secs(interval_secs / 2 + 7)) => {}
+                () = tokio::time::sleep(Duration::from_secs((interval_secs / 2).saturating_add(7))) => {}
                 () = cancel_clone.cancelled() => { return; }
             }
-            let mut iv = tokio::time::interval(Duration::from_secs(interval_secs));
+            let mut iv = tokio::time::interval(vacuum_interval);
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
@@ -968,7 +1028,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         let bg = pool.clone();
         let maintenance_state = state.clone();
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        let _task_abort_handle = background_tasks.spawn(async move {
             let scheduler_started_at = SystemTime::now();
             let mut failure_streak = 0u32;
             let mut retry_not_before: Option<SystemTime> = None;
@@ -987,7 +1047,13 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                             continue;
                         }
 
-                        let interval = Duration::from_secs(settings.interval_hours.saturating_mul(3600));
+                        let interval = match configured_timer_interval(settings.interval_hours, 3600, "automatic full backup") {
+                            Ok(interval) => interval,
+                            Err(error) => {
+                                tracing::error!(target: "admin", %error, "Scheduled full backup interval is invalid");
+                                continue;
+                            }
+                        };
                         let last_saved_at = crate::handlers::admin::latest_verified_full_backup_modified_time()
                             .unwrap_or(scheduler_started_at);
                         let due = SystemTime::now()
@@ -1089,22 +1155,20 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     // poll_votes table from growing indefinitely.
     if CONFIG.poll_cleanup_interval_hours > 0 {
         let bg = pool.clone();
-        let interval_secs = CONFIG.poll_cleanup_interval_hours * 3600;
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        let _task_abort_handle = background_tasks.spawn(async move {
             tokio::select! {
                 () = tokio::time::sleep(Duration::from_mins(10)) => {} // initial delay
                 () = cancel_clone.cancelled() => { return; }
             }
-            let mut iv = tokio::time::interval(Duration::from_secs(interval_secs));
+            let mut iv = tokio::time::interval(poll_cleanup_interval);
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
                         let bg2 = bg.clone();
-                        let retention_cutoff_secs = interval_secs.cast_signed();
                         let task_result = tokio::task::spawn_blocking(move || {
                             if let Ok(conn) = bg2.get() {
-                                let cutoff = chrono::Utc::now().timestamp() - retention_cutoff_secs;
+                                let cutoff = chrono::Utc::now().timestamp().saturating_sub(poll_retention_cutoff_secs);
                                 match crate::db::cleanup_expired_poll_votes(&conn, cutoff) {
                                     Ok(n) if n > 0 => {
                                         tracing::info!(target: "polls", removed = n, "Expired poll vote rows purged");
@@ -1137,7 +1201,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     {
         let bg = pool.clone();
         let cancel_clone = worker_cancel.clone();
-        tokio::spawn(async move {
+        let _task_abort_handle = background_tasks.spawn(async move {
             tokio::select! {
                 () = tokio::time::sleep(Duration::from_mins(5)) => {}
                 () = cancel_clone.cancelled() => { return; }
@@ -1185,7 +1249,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         let max_bytes = CONFIG.waveform_cache_max_bytes;
         let cancel_clone = worker_cancel.clone();
         let bg = pool.clone();
-        tokio::spawn(async move {
+        let _task_abort_handle = background_tasks.spawn(async move {
             tokio::select! {
                 () = tokio::time::sleep(Duration::from_mins(30)) => {} // initial stagger
                 () = cancel_clone.cancelled() => { return; }
@@ -1274,9 +1338,11 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
 
     // Install shutdown handling before raw first-run input can begin.
     let signal_cancel = worker_cancel.clone();
-    tokio::spawn(async move {
-        shutdown_signal().await;
-        signal_cancel.cancel();
+    let _signal_task_abort_handle = background_tasks.spawn(async move {
+        tokio::select! {
+            () = shutdown_signal() => signal_cancel.cancel(),
+            () = signal_cancel.cancelled() => {},
+        }
         super::console::cleanup();
     });
 
@@ -1333,7 +1399,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
             let cancel_stats = worker_cancel.clone();
             let onion_addr = Arc::clone(&state.onion_address);
             let force_reload = Arc::clone(&force_reload_notify);
-            tokio::spawn(async move {
+            let _task_abort_handle = background_tasks.spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(3));
                 let mut sampler = super::console::stats::Sampler::new(start_time);
                 loop {
@@ -1384,7 +1450,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         let cancel_d = worker_cancel.clone();
         let shutdown_tx = worker_cancel.clone();
         let operation_pool = pool.clone();
-        tokio::spawn(async move {
+        let _task_abort_handle = background_tasks.spawn(async move {
             loop {
                 let next_key = tokio::select! {
                     biased;
@@ -1436,7 +1502,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                         let state_for_work = Arc::clone(&console);
                         let reload_after_work = Arc::clone(&force_reload);
                         let redraw_after_work = Arc::clone(&redraw);
-                        tokio::spawn(async move {
+                        drop(tokio::spawn(async move {
                             let result = tokio::task::spawn_blocking(move || {
                                 super::console::wizard::execute(&request_for_work, &pool_for_work)
                             })
@@ -1450,7 +1516,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                                 reload_after_work.notify_one();
                             }
                             redraw_after_work.notify_one();
-                        });
+                        }));
                     }
                 }
             }
@@ -1513,7 +1579,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                     "Admin panel available over HTTPS"
                 );
 
-                listener_tasks.spawn(async move {
+                let _task_abort_handle = listener_tasks.spawn(async move {
                     (
                         "HTTPS",
                         run_https_static(https_tcp, rustls_cfg, app_tls, cancel_tls)
@@ -1538,7 +1604,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                     "Admin panel available over HTTPS (ACME)"
                 );
 
-                listener_tasks.spawn(async move {
+                let _task_abort_handle = listener_tasks.spawn(async move {
                     (
                         "HTTPS/ACME",
                         run_https_acme(https_tcp, acme_acceptor, server_cfg, app_tls, cancel_tls)
@@ -1570,7 +1636,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
                 anyhow::anyhow!("Failed to bind HTTP→HTTPS redirect listener on {http_addr}: {e}")
             })?;
         tracing::info!(target: "server", addr = %http_addr, "HTTP→HTTPS redirect listening");
-        listener_tasks.spawn(async move {
+        let _task_abort_handle = listener_tasks.spawn(async move {
             (
                 "HTTP redirect",
                 run_http_redirect(http_listener, https_port, cancel_redirect)
@@ -1583,7 +1649,7 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
     let wait_shutdown = worker_cancel.clone();
     if let Some((listener, app)) = plaintext_server {
         let serve_cancel = worker_cancel.clone();
-        listener_tasks.spawn(async move {
+        let _task_abort_handle = listener_tasks.spawn(async move {
             (
                 "HTTP",
                 run_plain_http(listener, app, serve_cancel)
@@ -1593,27 +1659,58 @@ pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
         });
     }
 
+    {
+        let conn = pool.get()?;
+        crate::db::database_ready_probe(&conn)?;
+    }
+    crate::restart::started(startup_digest).await?;
+    state.runtime_ready.store(true, Ordering::Release);
+    ready
+        .send(())
+        .map_err(|()| anyhow::anyhow!("startup readiness receiver dropped"))?;
+
     let runtime_result = tokio::select! {
         () = wait_shutdown.cancelled() => Ok(()),
         result = next_listener_exit(&mut listener_tasks, &worker_cancel) => result,
     };
+    let deadline = tokio::time::Instant::now()
+        .checked_add(crate::restart::SHUTDOWN_TIMEOUT)
+        .ok_or_else(|| anyhow::anyhow!("shutdown deadline overflows"))?;
     worker_cancel.cancel();
     let listener_shutdown_result = finish_listener_tasks(&mut listener_tasks).await;
-
-    // Each worker gets `ffmpeg_timeout + 10s` to finish its in-flight job.
-    tracing::info!(target: "server", "Signalling background workers to shut down…");
-    worker_cancel.cancel();
-    let shutdown_timeout = Duration::from_secs(crate::config::ffmpeg_timeout_secs() + 10);
-    for handle in worker_handles {
-        drop(tokio::time::timeout(shutdown_timeout, handle).await);
+    tracing::info!(target: "server", "Draining background workers and persistent operations");
+    for mut handle in worker_handles {
+        if tokio::time::timeout_at(deadline, &mut handle)
+            .await
+            .is_err()
+        {
+            handle.abort();
+        }
     }
-    // The cancellation token interrupts Tor's retry backoff. This 15-second
-    // safety-net timeout
-    // below is only a last resort for the in-flight copy_bidirectional on any
-    // active stream — Arti sends RELAY_END cells synchronously on drop, which
-    // completes well within this window under normal conditions.
-    if let Some(h) = tor_handle {
-        drop(tokio::time::timeout(Duration::from_secs(15), h).await);
+    if let Some(mut handle) = tor_handle {
+        if tokio::time::timeout_at(deadline, &mut handle)
+            .await
+            .is_err()
+        {
+            handle.abort();
+        }
+    }
+    let drain = async { while background_tasks.join_next().await.is_some() {} };
+    if tokio::time::timeout_at(deadline, drain).await.is_err() {
+        background_tasks.shutdown().await;
+    }
+    let checkpoint_pool = pool.clone();
+    let checkpoint = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let conn = checkpoint_pool.get()?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        Ok(())
+    });
+    match tokio::time::timeout_at(deadline, checkpoint).await {
+        Ok(Ok(Ok(()))) => {}
+        result => tracing::warn!(
+            ?result,
+            "Final SQLite checkpoint did not complete; SQLite WAL recovery remains available"
+        ),
     }
 
     runtime_result?;
@@ -1669,8 +1766,8 @@ fn seed_initial_default_theme(conn: &rusqlite::Connection, initial_default_theme
 fn configure_http_limits(
     builder: &mut hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor>,
 ) {
-    builder.http1().max_buf_size(headers::HTTP_MAX_HEADER_BYTES);
-    builder
+    let _configured_http1 = builder.http1().max_buf_size(headers::HTTP_MAX_HEADER_BYTES);
+    let _configured_http2 = builder
         .http2()
         .max_header_list_size(u32::try_from(headers::HTTP_MAX_HEADER_BYTES).unwrap_or(u32::MAX));
 }
@@ -1721,7 +1818,12 @@ async fn finish_listener_tasks(
         first_error.map_or(Ok(()), Err)
     };
 
-    if let Ok(result) = tokio::time::timeout(Duration::from_secs(3), drain).await {
+    if let Ok(result) = tokio::time::timeout(
+        crate::restart::HTTP_DRAIN.saturating_add(Duration::from_secs(2)),
+        drain,
+    )
+    .await
+    {
         return result;
     }
     tracing::warn!(
@@ -1740,10 +1842,10 @@ async fn run_plain_http(
 ) -> std::io::Result<()> {
     let handle = axum_server::Handle::new();
     let shutdown_handle = handle.clone();
-    tokio::spawn(async move {
+    drop(tokio::spawn(async move {
         cancel.cancelled().await;
-        shutdown_handle.graceful_shutdown(Some(Duration::from_secs(1)));
-    });
+        shutdown_handle.graceful_shutdown(Some(crate::restart::HTTP_DRAIN));
+    }));
 
     let std_listener = listener.into_std()?;
     let mut server = axum_server::from_tcp(std_listener)?;
@@ -1781,10 +1883,10 @@ pub async fn run_https_static(
 
     // Wire graceful shutdown to the same CancellationToken that controls
     // background workers and the HTTP listener.
-    tokio::spawn(async move {
+    drop(tokio::spawn(async move {
         cancel.cancelled().await;
-        handle_clone.graceful_shutdown(Some(Duration::from_secs(1)));
-    });
+        handle_clone.graceful_shutdown(Some(crate::restart::HTTP_DRAIN));
+    }));
 
     // Convert tokio TcpListener → std TcpListener for axum_server::from_tcp_rustls.
     // set_nonblocking(true) is required — axum-server expects a non-blocking socket.
@@ -1836,7 +1938,7 @@ pub async fn run_https_acme(
                 let server_cfg = Arc::clone(&server_cfg);
                 let svc           = app.clone();
 
-                connections.spawn(async move {
+                let _task_abort_handle = connections.spawn(async move {
                     use tokio_util::compat::{TokioAsyncReadCompatExt as _, FuturesAsyncReadCompatExt as _};
                     // rustls-acme requires futures::{AsyncRead, AsyncWrite}; wrap
                     // the tokio TcpStream with the tokio-util compat shim.
@@ -1853,15 +1955,15 @@ pub async fn run_https_acme(
                                     // per-request — axum::Router is Arc-backed so this is cheap.
                                     let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                                         let (mut parts, body) = req.into_parts();
-                                        parts.extensions.insert(axum::extract::ConnectInfo(peer_addr));
-                                        let req = axum::extract::Request::from_parts(
+                                        let _previous_value = parts.extensions.insert(axum::extract::ConnectInfo(peer_addr));
+                                        let request = axum::extract::Request::from_parts(
                                             parts,
                                             axum::body::Body::new(body),
                                         );
-                                        svc.clone().call(req)
+                                        svc.clone().call(request)
                                     });
                                     let mut builder = http1::Builder::new();
-                                    builder.max_buf_size(headers::HTTP_MAX_HEADER_BYTES);
+                                    let _configured = builder.max_buf_size(headers::HTTP_MAX_HEADER_BYTES);
                                     let connection_result = builder.serve_connection(io, svc).await;
                                     if let Err(e) = connection_result {
                                         tracing::debug!(
@@ -1917,7 +2019,7 @@ pub async fn run_https_acme(
             }
         }
     };
-    if tokio::time::timeout(Duration::from_secs(1), drain_connections)
+    if tokio::time::timeout(crate::restart::HTTP_DRAIN, drain_connections)
         .await
         .is_err()
     {
@@ -2096,7 +2198,7 @@ fn is_local_redirect_host(host: &str) -> bool {
 ///   - The onion address is not yet known (Arti still bootstrapping)
 ///   - The request already came in via the onion address (no double-redirect)
 ///
-/// Spec: <https://community.torproject.org/onion-services/advanced/onion-location/>
+/// Spec: <https://community.torproject.org/onion-services/advanced/onion-location/>.
 async fn onion_location_middleware(
     axum::extract::State(state): axum::extract::State<AppState>,
     req: axum::extract::Request,
@@ -2132,7 +2234,8 @@ async fn onion_location_middleware(
 
         if is_html && !already_on_onion {
             if let Ok(val) = header::HeaderValue::from_str(&format!("http://{addr}")) {
-                resp.headers_mut()
+                let _previous_value = resp
+                    .headers_mut()
                     .insert(header::HeaderName::from_static("onion-location"), val);
             }
         }
@@ -2144,11 +2247,12 @@ async fn onion_location_middleware(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_redirect_response, format_redirect_authority, next_listener_exit,
-        protect_tls_plaintext_backend, redirect_host, redirect_trusted_hosts_with, run_plain_http,
-        scheduled_full_backup_failure_retry_delay, seed_initial_default_theme,
-        PlaintextAppListener,
+        build_redirect_response, configured_timer_interval, format_redirect_authority,
+        next_listener_exit, protect_tls_plaintext_backend, redirect_host,
+        redirect_trusted_hosts_with, run_plain_http, scheduled_full_backup_failure_retry_delay,
+        seed_initial_default_theme, PlaintextAppListener,
     };
+
     use axum::{
         body::Body,
         extract::{ConnectInfo, Request},
@@ -2160,6 +2264,28 @@ mod tests {
     use std::{net::SocketAddr, time::Duration};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tower::ServiceExt as _;
+
+    /// Disabled intervals and ordinary hours survive validation; huge values fail before scheduling.
+    #[test]
+    fn configured_timer_intervals_reject_overflow_and_preserve_disable() -> anyhow::Result<()> {
+        anyhow::ensure!(
+            configured_timer_interval(0, 3600, "test")? == Duration::ZERO,
+            "zero must preserve the disabled timer sentinel"
+        );
+        anyhow::ensure!(
+            configured_timer_interval(24, 3600, "test")? == Duration::from_hours(24),
+            "valid hours must retain their exact duration"
+        );
+        anyhow::ensure!(
+            configured_timer_interval(u64::MAX, 3600, "test").is_err(),
+            "hour-to-second overflow must fail before timer creation"
+        );
+        anyhow::ensure!(
+            configured_timer_interval(u64::MAX, 1, "test").is_err(),
+            "an unrepresentable timer deadline must fail even when seconds fit u64"
+        );
+        Ok(())
+    }
 
     /// Build a test request containing the supplied Host header.
     fn request_with_host(host: &str) -> anyhow::Result<Request> {
@@ -2297,7 +2423,7 @@ mod tests {
     async fn tls_tor_backend_allows_only_registered_tor_proxy_peers() -> anyhow::Result<()> {
         let peer: SocketAddr = "127.0.0.1:61002".parse()?;
         let same_port_other_loopback: SocketAddr = "127.0.0.2:61002".parse()?;
-        crate::detect::TOR_STREAM_TOKENS.insert(peer, "tor:test".into());
+        let _previous_value = crate::detect::TOR_STREAM_TOKENS.insert(peer, "tor:test".into());
 
         let response = tls_backend_app(true)
             .oneshot(request_from_peer(peer)?)
@@ -2305,7 +2431,7 @@ mod tests {
         let spoofed = tls_backend_app(true)
             .oneshot(request_from_peer(same_port_other_loopback)?)
             .await?;
-        crate::detect::TOR_STREAM_TOKENS.remove(&peer);
+        let _removed_stream_token = crate::detect::TOR_STREAM_TOKENS.remove(&peer);
 
         anyhow::ensure!(response.status() == StatusCode::NO_CONTENT);
         anyhow::ensure!(spoofed.status() == StatusCode::PERMANENT_REDIRECT);
@@ -2340,7 +2466,8 @@ mod tests {
         let cancel = tokio_util::sync::CancellationToken::new();
         let mut listeners: tokio::task::JoinSet<super::ListenerTaskResult> =
             tokio::task::JoinSet::new();
-        listeners.spawn(async { ("HTTPS", Err(anyhow::anyhow!("injected listener failure"))) });
+        let _task_abort_handle =
+            listeners.spawn(async { ("HTTPS", Err(anyhow::anyhow!("injected listener failure"))) });
 
         let Err(error) = next_listener_exit(&mut listeners, &cancel).await else {
             anyhow::bail!("unexpected listener failure must stop the runtime");
@@ -2440,7 +2567,8 @@ mod tests {
     fn initial_default_theme_skips_disabled_theme() -> anyhow::Result<()> {
         let conn = test_conn()?;
         conn.execute("UPDATE themes SET enabled = 0 WHERE slug = 'terminal'", [])
-            .map_err(|error| anyhow::anyhow!("disable terminal theme: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("disable terminal theme: {error}"))
+            .map(|_completed_value| ())?;
 
         seed_initial_default_theme(&conn, "terminal");
 
@@ -2507,5 +2635,55 @@ mod tests {
             scheduled_full_backup_failure_retry_delay(interval, 10),
             interval
         );
+    }
+}
+
+#[cfg(test)]
+/// Actual HTTP listener tests for the bounded graceful drain.
+mod shutdown_tests {
+    use super::*;
+    use axum::{routing::get, Router};
+
+    /// An accepted request can finish after cancellation while new connections stop.
+    #[tokio::test]
+    async fn graceful_shutdown_drains_an_in_flight_http_response() -> anyhow::Result<()> {
+        drop(rustls::crypto::ring::default_provider().install_default());
+        let accepted = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let handler_accepted = Arc::clone(&accepted);
+        let handler_release = Arc::clone(&release);
+        let app = Router::new().route(
+            "/",
+            get(move || {
+                let request_accepted = Arc::clone(&handler_accepted);
+                let resume_response = Arc::clone(&handler_release);
+                async move {
+                    request_accepted.notify_one();
+                    resume_response.notified().await;
+                    "completed"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let server_cancel = cancel.clone();
+        let server =
+            tokio::spawn(async move { run_plain_http(listener, app, server_cancel).await });
+        let request = tokio::spawn(async move {
+            reqwest::get(format!("http://{address}/"))
+                .await?
+                .text()
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), accepted.notified()).await?;
+        cancel.cancel();
+        release.notify_one();
+        anyhow::ensure!(
+            tokio::time::timeout(Duration::from_secs(3), request).await??? == "completed",
+            "accepted response must finish during graceful drain"
+        );
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
+        Ok(())
     }
 }

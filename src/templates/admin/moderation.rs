@@ -1,7 +1,6 @@
 //! Report, appeal, ban, and word-filter sections of the admin panel.
 
 use super::{escape_html, fmt_ts, AdminPanelViewModel};
-use std::fmt::Write as _;
 
 /// Renders the complete moderation tab of the admin panel.
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
@@ -45,9 +44,10 @@ fn render_ban_rows(view: &AdminPanelViewModel<'_>) -> String {
         let expires = ban
             .expires_at
             .map_or_else(|| "permanent".to_owned(), fmt_ts);
-        let _ = write!(
-            ban_rows,
-            r#"<tr>
+        crate::templates::append_html(
+            &mut ban_rows,
+            format_args!(
+                r#"<tr>
 <td class="ip-hash">{}</td><td>{}</td><td>{}</td>
 <td>
 <form method="POST" action="/admin/ban/remove" style="display:inline">
@@ -57,11 +57,12 @@ fn render_ban_rows(view: &AdminPanelViewModel<'_>) -> String {
 </form>
 </td>
 </tr>"#,
-            escape_html(ban.ip_hash.get(..16).unwrap_or(&ban.ip_hash)),
-            escape_html(ban.reason.as_deref().unwrap_or("")),
-            escape_html(&expires),
-            csrf = escape_html(view.csrf_token),
-            id = ban.id
+                escape_html(ban.ip_hash.get(..16).unwrap_or(&ban.ip_hash)),
+                escape_html(ban.reason.as_deref().unwrap_or("")),
+                escape_html(&expires),
+                csrf = escape_html(view.csrf_token),
+                id = ban.id
+            ),
         );
     }
     ban_rows
@@ -71,9 +72,10 @@ fn render_ban_rows(view: &AdminPanelViewModel<'_>) -> String {
 fn render_filter_rows(view: &AdminPanelViewModel<'_>) -> String {
     let mut filter_rows = String::new();
     for f in view.moderation.filters {
-        let _ = write!(
-            filter_rows,
-            r#"<tr>
+        crate::templates::append_html(
+            &mut filter_rows,
+            format_args!(
+                r#"<tr>
 <td>{}</td><td>{}</td>
 <td>
 <form method="POST" action="/admin/filter/remove" style="display:inline">
@@ -83,10 +85,11 @@ fn render_filter_rows(view: &AdminPanelViewModel<'_>) -> String {
 </form>
 </td>
 </tr>"#,
-            escape_html(&f.pattern),
-            escape_html(&f.replacement),
-            csrf = escape_html(view.csrf_token),
-            id = f.id
+                escape_html(&f.pattern),
+                escape_html(&f.replacement),
+                csrf = escape_html(view.csrf_token),
+                id = f.id
+            ),
         );
     }
     filter_rows
@@ -124,9 +127,10 @@ fn render_report_rows(view: &AdminPanelViewModel<'_>) -> String {
                 )
             },
         );
-        let _ = write!(
-            report_rows,
-            r#"<tr>
+        crate::templates::append_html(
+            &mut report_rows,
+            format_args!(
+                r#"<tr>
 <td><a href="/{board}/thread/{tid}#p{pid}" title="view post">/{board}/ No.{pid}</a></td>
 <td>{user_info}</td>
 <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{preview}">{preview}</td>
@@ -140,15 +144,16 @@ fn render_report_rows(view: &AdminPanelViewModel<'_>) -> String {
   </form>
 </td>
 </tr>"#,
-            board = escape_html(&rc.board_short),
-            tid = rc.report.thread_id,
-            pid = rc.report.post_id,
-            user_info = user_info,
-            preview = preview,
-            reason = reason,
-            age = escape_html(&age),
-            csrf = escape_html(view.csrf_token),
-            rid = rc.report.id
+                board = escape_html(&rc.board_short),
+                tid = rc.report.thread_id,
+                pid = rc.report.post_id,
+                user_info = user_info,
+                preview = preview,
+                reason = reason,
+                age = escape_html(&age),
+                csrf = escape_html(view.csrf_token),
+                rid = rc.report.id
+            ),
         );
     }
     report_rows
@@ -167,9 +172,10 @@ fn render_appeal_rows(csrf_token: &str, appeals: &[crate::models::BanAppeal]) ->
         let age = fmt_ts(a.created_at);
         let ip_short = a.ip_hash.get(..16).unwrap_or(&a.ip_hash);
         let ip_short = escape_html(ip_short);
-        let _ = write!(
-            appeal_rows,
-            r#"<tr>
+        crate::templates::append_html(
+            &mut appeal_rows,
+            format_args!(
+                r#"<tr>
 <td style="font-size:0.78rem;font-family:monospace">{ip_short}…</td>
 <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{reason}">{reason}</td>
 <td style="white-space:nowrap;font-size:0.78rem">{age}</td>
@@ -188,12 +194,13 @@ fn render_appeal_rows(csrf_token: &str, appeals: &[crate::models::BanAppeal]) ->
   </form>
 </td>
 </tr>"#,
-            ip_short = ip_short,
-            reason = reason,
-            age = escape_html(&age),
-            csrf = escape_html(csrf_token),
-            aid = a.id,
-            ip_hash = escape_html(&a.ip_hash)
+                ip_short = ip_short,
+                reason = reason,
+                age = escape_html(&age),
+                csrf = escape_html(csrf_token),
+                aid = a.id,
+                ip_hash = escape_html(&a.ip_hash)
+            ),
         );
     }
     appeal_rows

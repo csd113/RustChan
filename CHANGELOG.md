@@ -2,6 +2,14 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## RustChan 1.6.5 — 2026-10-03
+
+- Moved image processing, supported audio decoding, media probing and PDF previews into Rust, with optional FFmpeg fallback for video and uncovered audio codecs.
+- Added verified administrator settings restarts, configuration rollback and recovery handling.
+- Improved SQLite connection ownership and measured query performance; CLI startup proceeds once one usable database connection is ready.
+- Fixed media timing, multistream audio, bounded previews, Speex waveform layouts, AV1 WebM conversion and Windows restart builds.
+- Hardened the Rust 1.99 lint policy and consolidated console, request and test utilities.
+
 ## RustChan 1.6.0 — 2026-10-01
 
 This release includes every integrated change since the published v1.5.0 release:
@@ -10,7 +18,7 @@ upgrades, public posting and reading improvements, and verified native software 
 
 ### Upgrade notes
 
-- Back up the complete data directory before upgrading. Existing database structures are verified and stamped for the running 1.6.0 package; Rust 1.91 remains the minimum supported compiler.
+- Back up the complete data directory before upgrading. Existing database structures are verified and stamped for the running 1.6.0 package; Rust 1.99 is the minimum supported compiler.
 - Native self-updates require one-time operator setup on Linux GNU x86_64 or ARM64: separate service identities, the supplied systemd/polkit configuration, a protected updater executable and independently provisioned trusted public key. The updater is operator-managed and is not replaced by application updates. See [Software Updates](docs/software-updates.md).
 - Containers, macOS, Windows and custom installations use their deployment tools to install releases. Their admin panel can check releases but does not offer native installation. Keep container data volumes when recreating an instance.
 - `/readyz` additionally reports the running package version. It does not expose release availability, updater transactions or retained backup metadata.
@@ -32,6 +40,8 @@ upgrades, public posting and reading improvements, and verified native software 
 - Refreshed the README, setup and container guides, demonstration screenshots, and operator documentation for the terminal/admin workflows and native update boundary.
 
 ### Fixed
+
+- Let CLI startup proceed once one fully initialized database connection is ready while spare connections fill in the background; retain the pool capacity, one-second checkout bound, and database validation.
 
 - Completed native updates clear the availability notice; stale discovery records cannot offer installation of the running or an older version. Rollbacks retain notice of a newer release.
 

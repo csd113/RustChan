@@ -107,7 +107,40 @@ pub fn prune_to_limit(
     max_bytes: u64,
 ) -> Result<PruneReport> {
     let upload_root = Path::new(upload_dir);
-    let mut candidates = load_candidates(conn, upload_root)?;
+    let candidates = load_candidates(conn, upload_root)?;
+    prune_candidates(candidates, upload_dir, max_bytes, || Ok(conn))
+}
+
+/// Run configured pruning with no pooled connection during candidate filesystem scans.
+///
+/// # Errors
+/// Returns an error if settings, candidate queries or checkout fail.
+pub fn run_configured_prune_with_pool(
+    pool: &crate::db::DbPool,
+    upload_dir: &str,
+) -> Result<PruneReport> {
+    let (max_bytes, rows) = {
+        let conn = pool.get()?;
+        if !crate::db::get_media_auto_prune_enabled(&conn) {
+            return Ok(PruneReport::default());
+        }
+        let max_bytes = crate::db::get_media_max_active_content_size_bytes(&conn);
+        if max_bytes == 0 {
+            return Ok(PruneReport::default());
+        }
+        (max_bytes, load_candidate_rows(&conn)?)
+    };
+    let candidates = validate_candidate_rows(rows, Path::new(upload_dir))?;
+    prune_candidates(candidates, upload_dir, max_bytes, || Ok(pool.get()?))
+}
+
+/// Process candidates, checking out only for the race-safe mutation boundary.
+fn prune_candidates<C: std::ops::Deref<Target = rusqlite::Connection>>(
+    mut candidates: Vec<Candidate>,
+    upload_dir: &str,
+    max_bytes: u64,
+    mut connection: impl FnMut() -> Result<C>,
+) -> Result<PruneReport> {
     candidates.sort_by_key(|candidate| {
         (
             candidate.created_at,
@@ -131,7 +164,8 @@ pub fn prune_to_limit(
         if remaining <= max_bytes {
             break;
         }
-        let intent = match persist_prune_intent(conn, &candidate) {
+        let conn = connection()?;
+        let intent = match persist_prune_intent(&conn, &candidate) {
             Ok(intent) => intent,
             Err(error) => {
                 report.skipped_files = report.skipped_files.saturating_add(1);
@@ -145,7 +179,9 @@ pub fn prune_to_limit(
             }
         };
 
-        match finalize_original_prune_payload(conn, upload_dir, &intent.id, &intent.payload) {
+        let finalized =
+            finalize_original_prune_payload(&conn, upload_dir, &intent.id, &intent.payload);
+        match finalized {
             Ok(finalized) => {
                 remaining = remaining.saturating_sub(candidate.size);
                 report.removed_files = report.removed_files.saturating_add(finalized.removed_files);
@@ -177,12 +213,24 @@ pub fn prune_to_limit(
     Ok(report)
 }
 
-/// Load and validate all active original-media candidates.
+/// Database-only candidate columns, collected before filesystem validation.
+type CandidateRow = (
+    i64,
+    i64,
+    String,
+    Option<i64>,
+    String,
+    Option<String>,
+    Option<i64>,
+);
+
+/// Collect and validate candidates for callers already owning a connection.
 fn load_candidates(conn: &rusqlite::Connection, upload_root: &Path) -> Result<Vec<Candidate>> {
-    // Resolve the upload root once; every candidate path is checked against it.
-    let canonical_root = upload_root
-        .canonicalize()
-        .with_context(|| format!("Canonicalize upload root {}", upload_root.display()))?;
+    validate_candidate_rows(load_candidate_rows(conn)?, upload_root)
+}
+
+/// Collect candidate rows without performing filesystem access.
+fn load_candidate_rows(conn: &rusqlite::Connection) -> Result<Vec<CandidateRow>> {
     let mut stmt = conn.prepare_cached(
         "SELECT p.id, p.created_at, p.file_path, p.file_size, b.short_name,
                 p.audio_file_path, p.audio_file_size
@@ -214,6 +262,14 @@ fn load_candidates(conn: &rusqlite::Connection, upload_root: &Path) -> Result<Ve
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
+    Ok(rows)
+}
+
+/// Inspect untrusted paths and group references after releasing the pool borrow.
+fn validate_candidate_rows(rows: Vec<CandidateRow>, upload_root: &Path) -> Result<Vec<Candidate>> {
+    let canonical_root = upload_root
+        .canonicalize()
+        .with_context(|| format!("Canonicalize upload root {}", upload_root.display()))?;
     let mut posts = Vec::new();
     for (post_id, created_at, path, db_size, board_short, audio_path, audio_size) in rows {
         let mut paths = Vec::new();
@@ -296,7 +352,7 @@ fn group_shared_candidates(posts: &[PostCandidate]) -> Vec<Candidate> {
             post_ids.push(post.post_id);
             created_at = created_at.min(post.created_at);
             for path in &post.paths {
-                unique_paths
+                let _entry = unique_paths
                     .entry(path.path.clone())
                     .or_insert_with(|| path.clone());
             }
@@ -606,7 +662,7 @@ fn validate_prune_payload(payload: &OriginalPrunePayload) -> Result<()> {
         anyhow::bail!("original-prune payload contains duplicate posts or paths");
     }
     for path in &payload.paths {
-        validate_post_original_path(&path.path, &path.board_short)
+        let _validated_path = validate_post_original_path(&path.path, &path.board_short)
             .ok_or_else(|| anyhow::anyhow!("unsafe original-prune path {:?}", path.path))?;
     }
     Ok(())
@@ -675,7 +731,7 @@ fn finalize_original_prune_payload_in_tx(
         match state.as_deref() {
             None | Some(crate::db::MEDIA_ORIGINAL_PRUNED) => {}
             Some(crate::db::MEDIA_ORIGINAL_PRUNE_PENDING) => {
-                conn.execute(
+                let _rows_affected = conn.execute(
                     "UPDATE posts
                      SET media_processing_state = ?1, media_processing_error = ?2
                      WHERE id = ?3 AND media_processing_state = ?4",
@@ -706,7 +762,8 @@ fn finalize_original_prune_payload_in_tx(
             .optional()?
             .is_some();
         if !still_required {
-            conn.execute("DELETE FROM file_hashes WHERE file_path = ?1", [&path.path])?;
+            let _rows_affected =
+                conn.execute("DELETE FROM file_hashes WHERE file_path = ?1", [&path.path])?;
         }
     }
     crate::db::delete_pending_fs_op(conn, pending_op_id)?;
@@ -785,7 +842,6 @@ fn validate_current_target_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Result;
 
     struct MediaPostFixture<'a> {
         board_id: i64,
@@ -801,7 +857,7 @@ mod tests {
         conn: &rusqlite::Connection,
         fixture: &MediaPostFixture<'_>,
     ) -> Result<()> {
-        conn.execute(
+        let _rows_affected = conn.execute(
             "INSERT INTO posts (
                 id, thread_id, board_id, name, body, body_html, file_path,
                 file_name, file_size, thumb_path, mime_type, deletion_token,
@@ -1071,7 +1127,7 @@ mod tests {
                 file_size: 4,
             },
         )?;
-        conn.execute(
+        let _rows_affected = conn.execute(
             "UPDATE posts
              SET audio_file_path = 'b/track.flac',
                  audio_file_name = 'track.flac',
@@ -1157,7 +1213,7 @@ mod tests {
         assert_eq!(post_state(&conn, 101)?, "");
         assert_eq!(post_state(&conn, 102)?, "");
 
-        conn.execute(
+        let _rows_affected = conn.execute(
             "UPDATE threads SET archived = 0 WHERE id = ?1",
             [archived_thread_id],
         )?;
@@ -1243,7 +1299,7 @@ mod tests {
                     file_size: 4,
                 },
             )?;
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "UPDATE posts
                  SET audio_file_path = 'b/audio.flac', audio_file_size = 6
                  WHERE id = 101",
@@ -1271,9 +1327,12 @@ mod tests {
             let after_second = std::fs::read_dir(dir.path().join("b"))?
                 .filter_map(std::result::Result::ok)
                 .count();
-            let conn = pool.get()?;
-            assert_eq!(post_state(&conn, 101)?, crate::db::MEDIA_ORIGINAL_PRUNED);
-            assert!(crate::db::list_pending_fs_ops(&conn)?.is_empty());
+            let verification_conn = pool.get()?;
+            assert_eq!(
+                post_state(&verification_conn, 101)?,
+                crate::db::MEDIA_ORIGINAL_PRUNED
+            );
+            assert!(crate::db::list_pending_fs_ops(&verification_conn)?.is_empty());
             assert!(!dir.path().join("b/image.webp").exists());
             assert!(!dir.path().join("b/audio.flac").exists());
             assert_eq!(
@@ -1334,9 +1393,12 @@ mod tests {
             &pool,
             dir.path().to_str().context("UTF-8 path")?,
         )?;
-        let conn = pool.get()?;
-        assert_eq!(post_state(&conn, 101)?, crate::db::MEDIA_ORIGINAL_PRUNED);
-        assert!(crate::db::list_pending_fs_ops(&conn)?.is_empty());
+        let verification_conn = pool.get()?;
+        assert_eq!(
+            post_state(&verification_conn, 101)?,
+            crate::db::MEDIA_ORIGINAL_PRUNED
+        );
+        assert!(crate::db::list_pending_fs_ops(&verification_conn)?.is_empty());
         Ok(())
     }
 
@@ -1363,23 +1425,25 @@ mod tests {
                 file_size: 8,
             },
         )?;
-        pending_prune_intent(&conn, dir.path())?;
-        conn.execute("DELETE FROM posts WHERE id = 101", [])?;
+        let _persisted_intent = pending_prune_intent(&conn, dir.path())?;
+        let _rows_affected = conn.execute("DELETE FROM posts WHERE id = 101", [])?;
         drop(conn);
 
         crate::pending_fs::reconcile_pending_fs_ops(
             &pool,
             dir.path().to_str().context("UTF-8 path")?,
         )?;
-        let conn = pool.get()?;
+        let verification_conn = pool.get()?;
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM posts WHERE id = 101", [], |row| {
-                row.get::<_, i64>(0)
-            })?,
+            verification_conn.query_row(
+                "SELECT COUNT(*) FROM posts WHERE id = 101",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )?,
             0
         );
         assert!(!dir.path().join("b/file.webp").exists());
-        assert!(crate::db::list_pending_fs_ops(&conn)?.is_empty());
+        assert!(crate::db::list_pending_fs_ops(&verification_conn)?.is_empty());
         Ok(())
     }
 
@@ -1430,14 +1494,17 @@ mod tests {
             "new normal reference must fail deletion closed"
         );
         assert_eq!(post_state(&conn, 102)?, "");
-        conn.execute("DELETE FROM posts WHERE id = 102", [])?;
+        let _rows_affected = conn.execute("DELETE FROM posts WHERE id = 102", [])?;
         drop(conn);
 
         crate::pending_fs::reconcile_pending_fs_ops(&pool, upload_dir)?;
-        let conn = pool.get()?;
-        assert_eq!(post_state(&conn, 101)?, crate::db::MEDIA_ORIGINAL_PRUNED);
+        let verification_conn = pool.get()?;
+        assert_eq!(
+            post_state(&verification_conn, 101)?,
+            crate::db::MEDIA_ORIGINAL_PRUNED
+        );
         assert!(!dir.path().join("b/file.webp").exists());
-        assert!(crate::db::list_pending_fs_ops(&conn)?.is_empty());
+        assert!(crate::db::list_pending_fs_ops(&verification_conn)?.is_empty());
         Ok(())
     }
 
@@ -1464,8 +1531,8 @@ mod tests {
                 file_size: 8,
             },
         )?;
-        pending_prune_intent(&conn, dir.path())?;
-        conn.execute(
+        let _persisted_intent = pending_prune_intent(&conn, dir.path())?;
+        let _rows_affected = conn.execute(
             "INSERT INTO pending_fs_ops (id, kind, payload_json, created_at)
              VALUES ('malformed-prune', 'original_prune', '{', unixepoch() - 10)",
             [],
@@ -1477,10 +1544,13 @@ mod tests {
             dir.path().to_str().context("UTF-8 path")?,
         );
         assert!(result.is_err(), "malformed entry remains fail-closed");
-        let conn = pool.get()?;
-        assert_eq!(post_state(&conn, 101)?, crate::db::MEDIA_ORIGINAL_PRUNED);
+        let verification_conn = pool.get()?;
+        assert_eq!(
+            post_state(&verification_conn, 101)?,
+            crate::db::MEDIA_ORIGINAL_PRUNED
+        );
         assert!(!dir.path().join("b/file.webp").exists());
-        let pending = crate::db::list_pending_fs_ops(&conn)?;
+        let pending = crate::db::list_pending_fs_ops(&verification_conn)?;
         assert_eq!(pending.len(), 1);
         assert_eq!(
             pending.first().map(|op| op.id.as_str()),
@@ -1517,22 +1587,25 @@ mod tests {
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let upload_dir = dir.path().to_str().context("UTF-8 path")?.to_owned();
         let mut handles = Vec::new();
-        for _ in 0..2 {
+        for _ in 0_i32..2_i32 {
             let thread_pool = pool.clone();
             let thread_barrier = std::sync::Arc::clone(&barrier);
             let thread_upload_dir = upload_dir.clone();
             handles.push(std::thread::spawn(move || -> Result<PruneReport> {
-                let conn = thread_pool.get()?;
-                thread_barrier.wait();
-                prune_to_limit(&conn, &thread_upload_dir, 0)
+                let worker_conn = thread_pool.get()?;
+                let _barrier_state = thread_barrier.wait();
+                prune_to_limit(&worker_conn, &thread_upload_dir, 0)
             }));
         }
         let reports = handles
             .into_iter()
             .map(|handle| {
-                handle
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("prune thread panicked"))?
+                handle.join().map_err(|panic| {
+                    anyhow::anyhow!(
+                        "prune thread panicked: {}",
+                        super::super::process::panic_message(panic.as_ref())
+                    )
+                })?
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -1544,9 +1617,12 @@ mod tests {
             1,
             "the physical file is removed exactly once"
         );
-        let conn = pool.get()?;
-        assert_eq!(post_state(&conn, 101)?, crate::db::MEDIA_ORIGINAL_PRUNED);
-        assert!(crate::db::list_pending_fs_ops(&conn)?.is_empty());
+        let verification_conn = pool.get()?;
+        assert_eq!(
+            post_state(&verification_conn, 101)?,
+            crate::db::MEDIA_ORIGINAL_PRUNED
+        );
+        assert!(crate::db::list_pending_fs_ops(&verification_conn)?.is_empty());
         assert!(!dir.path().join("b/file.webp").exists());
         Ok(())
     }

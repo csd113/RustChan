@@ -159,10 +159,10 @@ mod tests {
     #[test]
     fn client_ip_extractor_is_ready_with_or_without_peer_metadata() -> anyhow::Result<()> {
         let peer = SocketAddr::from(([198, 51, 100, 10], 8080));
-        for (peer, expected) in [(Some(peer), "198.51.100.10"), (None, "unknown")] {
+        for (test_peer, expected) in [(Some(peer), "198.51.100.10"), (None, "unknown")] {
             let (mut parts, ()) = axum::http::Request::new(()).into_parts();
-            if let Some(peer) = peer {
-                parts.extensions.insert(ConnectInfo(peer));
+            if let Some(client_peer) = test_peer {
+                let _previous_peer = parts.extensions.insert(ConnectInfo(client_peer));
             }
             let resolved = ClientIp::from_request_parts(&mut parts, &())
                 .now_or_never()
@@ -243,19 +243,19 @@ mod tests {
     #[test]
     fn tor_stream_token_precedes_spoofed_forwarded_headers_for_loopback_peer() {
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 49_152);
-        crate::detect::TOR_STREAM_TOKENS.insert(peer, Arc::from("tor:test-stream"));
+        drop(crate::detect::TOR_STREAM_TOKENS.insert(peer, Arc::from("tor:test-stream")));
 
         let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.10"));
-        headers.insert(
+        drop(headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.10")));
+        drop(headers.insert(
             "x-forwarded-for",
             HeaderValue::from_static("203.0.113.7, 127.0.0.1"),
-        );
+        ));
         let trusted = vec!["127.0.0.1/32".to_owned(), "::1/128".to_owned()];
 
         let resolved = resolved_client_ip(&headers, Some(peer), true, &trusted, true);
 
-        crate::detect::TOR_STREAM_TOKENS.remove(&peer);
+        drop(crate::detect::TOR_STREAM_TOKENS.remove(&peer));
         assert_eq!(resolved, "tor:test-stream");
     }
 
@@ -263,7 +263,7 @@ mod tests {
     fn forwarded_headers_still_apply_for_non_tor_trusted_proxy_peer() {
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 49_153);
         let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.10"));
+        drop(headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.10")));
         let trusted = vec!["127.0.0.1/32".to_owned(), "::1/128".to_owned()];
 
         assert_eq!(
@@ -275,8 +275,8 @@ mod tests {
     fn untrusted_forwarded_headers_do_not_control_identity() {
         let peer = SocketAddr::from(([198, 51, 100, 10], 8080));
         let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", HeaderValue::from_static("203.0.113.20"));
-        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.21"));
+        drop(headers.insert("x-real-ip", HeaderValue::from_static("203.0.113.20")));
+        drop(headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.21")));
         let trusted = vec!["127.0.0.1/32".to_owned()];
         assert_eq!(
             resolved_client_ip(&headers, Some(peer), true, &trusted, false),
@@ -289,21 +289,21 @@ mod tests {
     fn malformed_forwarded_identity_falls_back_and_ipv6_is_canonical() {
         let peer = SocketAddr::from(([127, 0, 0, 1], 8080));
         let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", HeaderValue::from_static("invented-visitor"));
-        headers.insert(
+        drop(headers.insert("x-real-ip", HeaderValue::from_static("invented-visitor")));
+        drop(headers.insert(
             "x-forwarded-for",
             HeaderValue::from_static("also-invalid, 203.0.113.1"),
-        );
+        ));
         let trusted = vec!["127.0.0.1/32".to_owned()];
         assert_eq!(
             resolved_client_ip(&headers, Some(peer), true, &trusted, false),
             "127.0.0.1",
             "malformed proxy identities must not create arbitrary counters"
         );
-        headers.insert(
+        drop(headers.insert(
             "x-real-ip",
             HeaderValue::from_static("2001:0db8:0:0:0:0:0:1"),
-        );
+        ));
         assert_eq!(
             resolved_client_ip(&headers, Some(peer), true, &trusted, false),
             "2001:db8::1",

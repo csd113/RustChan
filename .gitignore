@@ -10,6 +10,19 @@ Desktop.ini
 *.orig
 *.rej
 
+# Local tests.
+tests/
+# Migration unit tests compile these sanitized fixtures into the binary.
+!tests/
+tests/*
+!tests/fixtures/
+tests/fixtures/*
+!tests/fixtures/media/
+!tests/e2e/
+tests/e2e/*
+!tests/e2e/non-video-media.spec.ts
+!tests/e2e/settings-restart.spec.ts
+
 # Build output, dependency caches, coverage, and profiling output.
 target/
 node_modules/

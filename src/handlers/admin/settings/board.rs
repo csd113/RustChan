@@ -164,7 +164,7 @@ pub(in crate::server) async fn update_board_settings(
         let pool = state.db.clone();
         move || -> Result<String> {
             let mut conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let board_short: String = conn.query_row(
                 "SELECT short_name FROM boards WHERE id = ?1",
                 rusqlite::params![board_id],

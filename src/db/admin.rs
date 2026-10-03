@@ -191,7 +191,8 @@ pub fn create_session(
         "INSERT INTO admin_sessions (id, admin_id, expires_at) VALUES (?1, ?2, ?3)",
         params![session_id, admin_id, expires_at],
     )
-    .context("Failed to create admin session")?;
+    .context("Failed to create admin session")
+    .map(|_affected_rows| ())?;
     Ok(())
 }
 
@@ -221,7 +222,8 @@ pub fn delete_session(conn: &rusqlite::Connection, session_id: &str) -> Result<(
     conn.execute(
         "DELETE FROM admin_sessions WHERE id = ?1",
         params![session_id],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     Ok(())
 }
 
@@ -361,23 +363,22 @@ pub fn add_word_filter(
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn remove_word_filter(conn: &rusqlite::Connection, id: i64) -> Result<()> {
-    conn.execute("DELETE FROM word_filters WHERE id = ?1", params![id])?;
+    conn.execute("DELETE FROM word_filters WHERE id = ?1", params![id])
+        .map(|_affected_rows| ())?;
     Ok(())
 }
 
 // Reports
 /// Return whether an `SQLite` error represents the open-report uniqueness guard.
 fn is_open_report_unique_violation(error: &rusqlite::Error) -> bool {
-    match error {
-        rusqlite::Error::SqliteFailure(inner, message) => {
-            inner.code == rusqlite::ErrorCode::ConstraintViolation
-                && message.as_deref().is_some_and(|text| {
-                    text.contains("idx_reports_open_unique")
-                        || (text.contains("reports.post_id")
-                            && text.contains("reports.reporter_hash"))
-                })
-        }
-        _ => false,
+    if let rusqlite::Error::SqliteFailure(inner, message) = error {
+        inner.code == rusqlite::ErrorCode::ConstraintViolation
+            && message.as_deref().is_some_and(|text| {
+                text.contains("idx_reports_open_unique")
+                    || (text.contains("reports.post_id") && text.contains("reports.reporter_hash"))
+            })
+    } else {
+        false
     }
 }
 
@@ -505,7 +506,8 @@ pub fn log_mod_action(
             board_short,
             detail
         ],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     Ok(())
 }
 
@@ -662,7 +664,8 @@ pub fn accept_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64) -> Result<
             .context("Failed to accept ban appeal")?
             .with_context(|| format!("Ban appeal id {appeal_id} not found or already handled"))?;
         conn.execute("DELETE FROM bans WHERE ip_hash=?1", params![ip_hash])
-            .context("Failed to lift ban during appeal acceptance")?;
+            .context("Failed to lift ban during appeal acceptance")
+            .map(|_affected_rows| ())?;
         Ok(ip_hash)
     })();
 
@@ -755,7 +758,7 @@ pub fn get_posts_by_ip_hash(
 /// The raw PRAGMA `wal_checkpoint` pragma returns three columns in this order:
 ///   col 0 — busy:         1 if a checkpoint could not complete due to an active reader/writer
 ///   col 1 — log:          total pages in the WAL file
-///   col 2 — checkpointed: pages actually written back to the database
+///   col 2 — checkpointed: pages actually written back to the database.
 ///
 /// This function returns `(log_pages, checkpointed_pages, busy)` — intentionally
 /// reordered so the two informational values come first and the error flag last.
@@ -1102,7 +1105,7 @@ mod tests {
     fn ban_appeal_submission_is_deduplicated_within_window() -> Result<()> {
         let pool = crate::db::init_test_pool()?;
         let conn = pool.get()?;
-        crate::db::add_ban(&conn, "hash1", "reason", None)?;
+        crate::db::add_ban(&conn, "hash1", "reason", None).map(|_created_id| ())?;
 
         let first = file_ban_appeal(&conn, "hash1", "please unban")?;
         let second = file_ban_appeal(&conn, "hash1", "second try")?;
@@ -1146,8 +1149,8 @@ mod tests {
     fn appeal_resolution_uses_the_stored_address_and_is_single_transition() -> Result<()> {
         let pool = crate::db::init_test_pool()?;
         let conn = pool.get()?;
-        crate::db::add_ban(&conn, "appealed-hash", "appealed", None)?;
-        crate::db::add_ban(&conn, "other-hash", "other", None)?;
+        crate::db::add_ban(&conn, "appealed-hash", "appealed", None).map(|_created_id| ())?;
+        crate::db::add_ban(&conn, "other-hash", "other", None).map(|_created_id| ())?;
         assert_eq!(
             file_ban_appeal(&conn, "appealed-hash", "please unban")?,
             BanAppealSubmission::Filed
@@ -1392,7 +1395,7 @@ mod tests {
         let conn = pool.get()?;
         let ip_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-        create_board(&conn, "test", "Test", "", false)?;
+        create_board(&conn, "test", "Test", "", false).map(|_created_id| ())?;
         let board = get_board_by_short(&conn, "test")?.context("test board should exist")?;
         let post = NewPost {
             thread_id: 0,
@@ -1427,19 +1430,22 @@ mod tests {
         )?;
 
         let posts = get_posts_by_ip_hash(&conn, ip_hash, 25, 0)?;
-        let (post, board_short) = posts
+        let (history_post, board_short) = posts
             .first()
             .context("IP history should contain the post")?;
 
         assert_eq!(posts.len(), 1, "exactly one post should match the IP hash");
-        assert_eq!(post.id, post_id, "the created post should be returned");
         assert_eq!(
-            post.media_processing_state.as_deref(),
+            history_post.id, post_id,
+            "the created post should be returned"
+        );
+        assert_eq!(
+            history_post.media_processing_state.as_deref(),
             Some("pending"),
             "media processing state should be decoded"
         );
         assert_eq!(
-            post.media_processing_error.as_deref(),
+            history_post.media_processing_error.as_deref(),
             Some("transcoding"),
             "media processing error should be decoded"
         );

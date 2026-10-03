@@ -115,7 +115,8 @@ pub(in crate::server) async fn serve_banner_asset(
         |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         |resp| {
             let mut resp = resp.map(axum::body::Body::new);
-            resp.headers_mut()
+            let _previous_value = resp
+                .headers_mut()
                 .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
             crate::cache::set_cache_control(
                 resp.headers_mut(),
@@ -267,7 +268,8 @@ mod tests {
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE id = ?3",
             rusqlite::params!["view_password", password_hash, board_id],
         )
-        .context("protect board")?;
+        .context("protect board")
+        .map(|_completed_value| ())?;
         let banner_id = crate::db::insert_banner_asset(
             &conn,
             crate::models::BannerScope::Board,
@@ -354,7 +356,8 @@ mod tests {
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE id = ?3",
             rusqlite::params!["view_password", password_hash, board_id],
         )
-        .context("protect board")?;
+        .context("protect board")
+        .map(|_completed_value| ())?;
         let admin_hash =
             crate::utils::crypto::hash_password("hunter2").context("hash admin password")?;
         let admin_id =

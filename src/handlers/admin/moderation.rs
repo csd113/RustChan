@@ -40,7 +40,11 @@ pub(in crate::server) async fn add_ban(
         .filter(|&h| h > 0)
         // Cap at 87_600 hours (10 years) to prevent overflow in h * 3600.
         // Permanent bans are represented by None (duration_hours absent or zero).
-        .map(|h| Utc::now().timestamp() + h.min(87_600).saturating_mul(3600));
+        .map(|h| {
+            Utc::now()
+                .timestamp()
+                .saturating_add(h.min(87_600).saturating_mul(3600))
+        });
 
     let ip_hash_log = form.ip_hash.chars().take(8).collect::<String>();
 
@@ -50,7 +54,8 @@ pub(in crate::server) async fn add_ban(
             let conn = pool.get()?;
             let (admin_id, admin_name) =
                 super::require_admin_session_with_name(&conn, session_id.as_deref())?;
-            db::add_ban(&conn, &form.ip_hash, &form.reason, expires_at)?;
+            db::add_ban(&conn, &form.ip_hash, &form.reason, expires_at)
+                .map(|_completed_value| ())?;
             if let Err(error) = db::log_mod_action(
                 &conn,
                 admin_id,
@@ -101,7 +106,8 @@ pub(in crate::server) async fn remove_ban(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())
+                .map(|_completed_value| ())?;
             db::remove_ban(&conn, form.ban_id)?;
             Ok(())
         }
@@ -155,10 +161,11 @@ pub(in crate::server) async fn admin_ban_and_delete(
         .filter(|r| !r.is_empty())
         .unwrap_or_else(|| "Rule violation".to_owned());
 
-    let expires_at = form
-        .duration_hours
-        .filter(|&h| h > 0)
-        .map(|h| Utc::now().timestamp() + h.min(87_600).saturating_mul(3600));
+    let expires_at = form.duration_hours.filter(|&h| h > 0).map(|h| {
+        Utc::now()
+            .timestamp()
+            .saturating_add(h.min(87_600).saturating_mul(3600))
+    });
 
     let ip_hash_log = form.ip_hash.chars().take(8).collect::<String>();
     let post_id = form.post_id;
@@ -187,7 +194,7 @@ pub(in crate::server) async fn admin_ban_and_delete(
             }
 
             // Ban first so the IP cannot re-post before the delete lands
-            db::add_ban(&conn, &form.ip_hash, &reason, expires_at)?;
+            db::add_ban(&conn, &form.ip_hash, &reason, expires_at).map(|_completed_value| ())?;
             if let Err(error) = db::log_mod_action(
                 &conn,
                 admin_id,
@@ -326,7 +333,8 @@ pub(in crate::server) async fn dismiss_appeal(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())
+                .map(|_completed_value| ())?;
             db::dismiss_ban_appeal(&conn, form.appeal_id)?;
             Ok(())
         }
@@ -429,8 +437,9 @@ pub(in crate::server) async fn add_filter(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
-            db::add_word_filter(&conn, &pattern, &replacement)?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())
+                .map(|_completed_value| ())?;
+            db::add_word_filter(&conn, &pattern, &replacement).map(|_completed_value| ())?;
             Ok(())
         }
     })
@@ -462,7 +471,8 @@ pub(in crate::server) async fn remove_filter(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())
+                .map(|_completed_value| ())?;
             db::remove_word_filter(&conn, form.filter_id)?;
             Ok(())
         }
@@ -520,7 +530,8 @@ pub(in crate::server) async fn admin_ip_history(
         move || -> Result<String> {
             const PER_PAGE: i64 = 25;
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())
+                .map(|_completed_value| ())?;
 
             let total = db::count_posts_by_ip_hash(&conn, &ip_hash)?;
             let pagination = crate::models::Pagination::new(page, PER_PAGE, total);
@@ -724,17 +735,9 @@ pub(in crate::server) async fn admin_ip_report(
 mod tests {
     use super::super::{admin_panel_redirect_anchor_open, SESSION_COOKIE};
     use super::*;
+    use crate::test_support::admin_signed_csrf;
     use anyhow::{ensure, Context as _};
-    use axum::extract::State;
-    use axum_extra::extract::cookie::{Cookie, CookieJar};
-
-    fn admin_signed_csrf() -> String {
-        crate::utils::crypto::make_scoped_csrf_form_token(
-            "csrf123",
-            &crate::config::CONFIG.cookie_secret,
-            "session123",
-        )
-    }
+    use axum_extra::extract::cookie::Cookie;
 
     fn build_admin_jar() -> CookieJar {
         CookieJar::new()
@@ -744,14 +747,14 @@ mod tests {
 
     fn admin_headers() -> axum::http::HeaderMap {
         let mut headers = axum::http::HeaderMap::new();
-        headers.insert(
+        drop(headers.insert(
             axum::http::header::HOST,
             axum::http::HeaderValue::from_static("localhost"),
-        );
-        headers.insert(
+        ));
+        drop(headers.insert(
             axum::http::header::ORIGIN,
             axum::http::HeaderValue::from_static("http://localhost"),
-        );
+        ));
         headers
     }
 
@@ -830,7 +833,9 @@ mod tests {
             db::create_admin(&conn, "admin", &password_hash).context("create test admin")?;
         db::create_session(&conn, "session123", admin_id, Utc::now().timestamp() + 3600)
             .context("create test admin session")?;
-        db::create_board(&conn, "test", "Test", "", false).context("create test board")?;
+        db::create_board(&conn, "test", "Test", "", false)
+            .context("create test board")
+            .map(|_completed_value| ())?;
         let board = db::get_board_by_short(&conn, "test")
             .context("load test board")?
             .context("test board was not persisted")?;
@@ -875,8 +880,8 @@ mod tests {
             "administrator report redirect did not target the reports anchor"
         );
 
-        let conn = state.db.get().context("get verification connection")?;
-        let (reporter_hash, reason): (String, String) = conn
+        let verification_conn = state.db.get().context("get verification connection")?;
+        let (reporter_hash, reason): (String, String) = verification_conn
             .query_row(
                 "SELECT reporter_hash, reason FROM reports WHERE post_id = ?1",
                 rusqlite::params![reply_id],
@@ -936,7 +941,8 @@ pub(in crate::server) async fn mod_log_page(
         move || -> Result<String> {
             const PER_PAGE: i64 = 50;
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())
+                .map(|_completed_value| ())?;
 
             let total = db::count_mod_log(&conn)?;
             let pagination = crate::models::Pagination::new(page, PER_PAGE, total);

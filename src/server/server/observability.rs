@@ -75,7 +75,11 @@ pub(super) async fn healthz() -> impl IntoResponse {
 
 /// Return configured public or detailed readiness.
 pub(super) async fn readyz(State(state): State<AppState>) -> Response {
-    readyz_response(state, CONFIG.public_readiness_details).await
+    let mut response = readyz_response(state, CONFIG.public_readiness_details).await;
+    if let Ok(value) = axum::http::HeaderValue::from_str(&crate::restart::INSTANCE.to_string()) {
+        let _previous_value = response.headers_mut().insert("x-rustchan-instance", value);
+    }
+    response
 }
 
 /// Build a readiness response with optional operational details.
@@ -99,6 +103,7 @@ async fn readyz_response(state: AppState, include_details: bool) -> Response {
         .await
         .unwrap_or(false);
 
+        let database_ready = database_ready && !state.job_queue.cancel.is_cancelled();
         let status_label = if database_ready { "ready" } else { "degraded" };
         let status = if database_ready {
             StatusCode::OK
@@ -170,6 +175,7 @@ async fn readyz_response(state: AppState, include_details: bool) -> Response {
     } else {
         false
     };
+    let database_ready = database_ready && !state.job_queue.cancel.is_cancelled();
     let status_label = if database_ready { "ready" } else { "degraded" };
     let status = if database_ready {
         StatusCode::OK
@@ -227,11 +233,12 @@ async fn metrics_response(state: AppState) -> Response {
         move || -> (i64, i64, bool, i64, bool, i64) {
             let full_backups = list_backup_files(&full_backup_dir(), BackupListKind::Full);
             let full_backup_count = i64::try_from(full_backups.len()).unwrap_or(i64::MAX);
-            let latest_full_backup_verified =
-                full_backups.first().is_some_and(|backup| backup.verified);
+            let latest_full_backup_verified = full_backups
+                .first()
+                .is_some_and(|backup_file| backup_file.verified);
             let latest_full_backup_age_seconds = full_backups
                 .first()
-                .and_then(|backup| backup.modified_epoch)
+                .and_then(|backup_file| backup_file.modified_epoch)
                 .map_or(-1, |ts| {
                     chrono::Utc::now().timestamp().saturating_sub(ts).max(0)
                 });
@@ -269,6 +276,18 @@ async fn metrics_response(state: AppState) -> Response {
     .await
     .unwrap_or((0, 0, false, 0, false, -1));
 
+    let pool_state = state.db.state();
+    let database_bytes = tokio::fs::metadata(&CONFIG.database_path)
+        .await
+        .map_or(-1, |metadata| {
+            i64::try_from(metadata.len()).unwrap_or(i64::MAX)
+        });
+    let wal_bytes = tokio::fs::metadata(format!("{}-wal", CONFIG.database_path))
+        .await
+        .map_or(-1, |metadata| {
+            i64::try_from(metadata.len()).unwrap_or(i64::MAX)
+        });
+
     let body = format!(
         concat!(
             "# TYPE rustchan_requests_total counter\n",
@@ -305,6 +324,14 @@ async fn metrics_response(state: AppState) -> Response {
             "rustchan_media_reconcile_scan_incomplete_total {}\n",
             "# TYPE rustchan_database_schema_valid gauge\n",
             "rustchan_database_schema_valid{{version=\"{}\"}} {}\n",
+            "# TYPE rustchan_database_pool_connections gauge\n",
+            "rustchan_database_pool_connections {}\n",
+            "# TYPE rustchan_database_pool_idle gauge\n",
+            "rustchan_database_pool_idle {}\n",
+            "# TYPE rustchan_database_file_bytes gauge\n",
+            "rustchan_database_file_bytes {}\n",
+            "# TYPE rustchan_database_wal_file_bytes gauge\n",
+            "rustchan_database_wal_file_bytes {}\n",
             "# TYPE rustchan_full_backups_saved gauge\n",
             "rustchan_full_backups_saved {}\n",
             "# TYPE rustchan_latest_full_backup_verified gauge\n",
@@ -346,6 +373,10 @@ async fn metrics_response(state: AppState) -> Response {
         media_reconcile.incomplete_scans_total,
         crate::db::baseline_schema_version(),
         u8::from(database_schema_valid),
+        pool_state.connections,
+        pool_state.idle_connections,
+        database_bytes,
+        wal_bytes,
         full_backup_count,
         u8::from(latest_full_backup_verified),
         latest_full_backup_age_seconds,
@@ -495,6 +526,10 @@ mod tests {
         );
 
         for metric in [
+            "rustchan_database_pool_connections",
+            "rustchan_database_pool_idle",
+            "rustchan_database_file_bytes",
+            "rustchan_database_wal_file_bytes",
             "rustchan_requests_total",
             "rustchan_job_queue_pending",
             "rustchan_media_reconcile_files_scanned_total",

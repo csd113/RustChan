@@ -10,6 +10,7 @@ use crate::{
     config::CONFIG,
     db,
     error::{AppError, Result},
+    handlers::is_xml_http_request,
     middleware::AppState,
     models::{BackupInfo, BoardAccessMode},
     utils::crypto::{new_session_id, verify_password},
@@ -105,10 +106,10 @@ use downloads::{prune_stale_temp_board_downloads, write_temp_board_download_toke
 #[cfg(test)]
 use http::admin_xhr_error_response;
 use http::{
-    is_xml_http_request, log_restore_upload_started, redirect_page_response,
-    restore_auth_preflight, restore_error_redirect_target, restore_failure_response,
-    restore_start_response, restore_success_redirect_target, restore_upload_parse_response,
-    sanitize_board_short_value, stream_restore_upload_to_tempfile, validate_backup_zip_filename,
+    log_restore_upload_started, redirect_page_response, restore_auth_preflight,
+    restore_error_redirect_target, restore_failure_response, restore_start_response,
+    restore_success_redirect_target, restore_upload_parse_response, sanitize_board_short_value,
+    stream_restore_upload_to_tempfile, validate_backup_zip_filename,
     validate_saved_backup_reference, validate_streamed_restore_upload, RestoreKind,
 };
 pub(in crate::server) use listing::latest_verified_full_backup_modified_time;
@@ -142,7 +143,7 @@ pub(in crate::server) async fn admin_backup(
         let pool = state.db.clone();
         move || -> Result<(PathBuf, String, u64)> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let uploads_base = Path::new(&upload_dir);
 
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
@@ -229,8 +230,9 @@ pub(in crate::server) async fn admin_backup(
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Stream DB to zip: {e}")))?;
                 drop(db_src);
                 drop(std::fs::remove_file(&temp_db));
-                progress.files_done.fetch_add(1, Ordering::Relaxed);
-                progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
+                let _files_before_snapshot = progress.files_done.fetch_add(1, Ordering::Relaxed);
+                let _bytes_before_snapshot =
+                    progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
                 log_backup_progress(&progress);
 
                 // Upload files (streamed file-by-file via io::copy)
@@ -315,10 +317,10 @@ pub(in crate::server) async fn admin_backup(
 
     // Schedule temp-file cleanup after a generous window so even slow clients finish.
     let cleanup_path = tmp_path;
-    tokio::spawn(async move {
+    drop(tokio::spawn(async move {
         tokio::time::sleep(Duration::from_mins(10)).await;
         drop(tokio::fs::remove_file(cleanup_path).await);
-    });
+    }));
 
     let disposition = format!("attachment; filename=\"{filename}\"");
     Ok((
@@ -349,11 +351,11 @@ fn count_files_in_dir(dir: &Path) -> u64 {
         if metadata.file_type().is_symlink() {
             acc
         } else if metadata.file_type().is_dir() {
-            acc + count_files_in_dir(&p)
+            acc.saturating_add(count_files_in_dir(&p))
         } else if metadata.file_type().is_file()
             && crate::utils::fs_security::assert_regular_file_no_symlink(&p).is_ok()
         {
-            acc + 1
+            acc.saturating_add(1)
         } else {
             acc
         }
@@ -364,7 +366,7 @@ fn count_files_in_dir(dir: &Path) -> u64 {
 ///
 /// MEM-FIX: Uses `std::io::copy` with the zip writer directly, streaming each
 /// file through a kernel buffer (~8 KiB) instead of reading the whole file
-/// into a Vec<u8> first.  Peak RAM per file = `io::copy`'s 8 KiB stack buffer.
+/// into a `Vec<u8>` first.  Peak RAM per file = `io::copy`'s 8 KiB stack buffer.
 ///
 /// Progress tracking: increments `progress.files_done` and `progress.bytes_done`
 /// after each file is written to the zip.
@@ -424,8 +426,9 @@ pub(super) fn add_dir_to_zip_with_prefix<W: Write + Seek>(
             let copied = std::io::copy(&mut src, zip).map_err(|e| {
                 AppError::Internal(anyhow::anyhow!("copy {} to zip: {}", path.display(), e))
             })?;
-            progress.files_done.fetch_add(1, Ordering::Relaxed);
-            progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
+            let _files_before_archive_entry = progress.files_done.fetch_add(1, Ordering::Relaxed);
+            let _bytes_before_archive_entry =
+                progress.bytes_done.fetch_add(copied, Ordering::Relaxed);
             log_backup_progress(progress);
         }
     }
@@ -518,7 +521,7 @@ fn unique_backup_filename(dir: &Path, base_name: &str) -> String {
     }
 }
 
-/// rustchan-data/runtime/tmp/board-downloads/
+/// rustchan-data/runtime/tmp/board-downloads/.
 fn temp_board_download_dir() -> PathBuf {
     crate::config::runtime_temp_board_downloads_dir()
 }
@@ -557,7 +560,7 @@ pub(in crate::server) async fn board_backup(
         let safe_board = safe_board.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             conn.query_row(
                 "SELECT 1 FROM boards WHERE short_name = ?1",
                 params![safe_board],
@@ -625,6 +628,7 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::models::BackupBoardSummary;
+    use crate::test_support::admin_signed_csrf;
     use anyhow::{bail, ensure, Context as _, Result as TestResult};
     use axum::{
         body::{to_bytes, Body},
@@ -666,13 +670,17 @@ mod tests {
         );
         install_admin_session(&state)?;
         for path in ["", "relative", "%00"] {
-            let body = format!("_csrf={}&backup_directory={path}", admin_signed_csrf());
-            let response = app
+            let invalid_update_body =
+                format!("_csrf={}&backup_directory={path}", admin_signed_csrf());
+            let invalid_update_response = app
                 .clone()
-                .oneshot(admin_form_post("/admin/backup/settings", body)?)
+                .oneshot(admin_form_post(
+                    "/admin/backup/settings",
+                    invalid_update_body,
+                )?)
                 .await?;
-            ensure!(response.status() == StatusCode::BAD_REQUEST);
-            ensure!(response_body_string(response)
+            ensure!(invalid_update_response.status() == StatusCode::BAD_REQUEST);
+            ensure!(response_body_string(invalid_update_response)
                 .await?
                 .contains("backup_directory"));
         }
@@ -701,14 +709,14 @@ mod tests {
             let temp = tempfile::tempdir()?;
             let data = temp.path().join("data");
             let mut command = std::process::Command::new(std::env::current_exe()?);
-            command
+            let _base_environment = command
                 .args(["--exact", name, "--nocapture"])
                 .env("RUSTCHAN_TEST_BACKUP_DATA", &data)
                 .env("CHAN_TOR_SUPPORT", "0")
                 .env_remove("CHAN_BACKUP_DIRECTORY");
             let custom = temp.path().join("disk/custom-backups");
             if source == "environment" {
-                command.env("CHAN_BACKUP_DIRECTORY", &custom);
+                let _custom_backup_environment = command.env("CHAN_BACKUP_DIRECTORY", &custom);
             } else if source == "settings" {
                 std::fs::create_dir(&data)?;
                 std::fs::write(
@@ -774,9 +782,11 @@ mod tests {
             )?;
             let saved = root.join(&filename);
             ensure!(saved.is_dir());
-            super::storage::verify_saved_backup(&saved, &[super::storage::BackupScope::FullSite])?;
-            let listed = super::list_backup_files(&full_backup_dir(), BackupListKind::Full);
-            ensure!(listed
+            super::storage::verify_saved_backup(&saved, &[super::storage::BackupScope::FullSite])
+                .map(|_completed_value| ())?;
+            let updated_listing =
+                super::list_backup_files(&full_backup_dir(), BackupListKind::Full);
+            ensure!(updated_listing
                 .iter()
                 .any(|backup| backup.backup_ref == filename && backup.verified));
             ensure!(latest_verified_full_backup_modified_time().is_some());
@@ -795,7 +805,8 @@ mod tests {
                 "Storage test",
                 "Storage test",
                 "Storage test",
-            )?;
+            )
+            .map(|_completed_value| ())?;
         }
         let removed = super::enforce_full_backup_retention(1)?;
         ensure!(!removed.is_empty());
@@ -841,7 +852,10 @@ mod tests {
                     .write_all(body)
                     .with_context(|| format!("write ZIP entry {name}"))?;
             }
-            writer.finish().context("finish ZIP archive")?;
+            writer
+                .finish()
+                .context("finish ZIP archive")
+                .map(|_completed_value| ())?;
         }
         cursor.set_position(0);
         zip::ZipArchive::new(cursor).context("parse ZIP archive")
@@ -942,18 +956,10 @@ mod tests {
             &conn,
             "session123",
             admin_id,
-            chrono::Utc::now().timestamp() + 3600,
+            chrono::Utc::now().timestamp().saturating_add(3600),
         )
         .context("create test admin session")?;
         Ok(())
-    }
-
-    fn admin_signed_csrf() -> String {
-        crate::utils::crypto::make_scoped_csrf_form_token(
-            "csrf123",
-            &crate::config::CONFIG.cookie_secret,
-            "session123",
-        )
     }
 
     fn admin_cookie_jar() -> CookieJar {
@@ -999,7 +1005,8 @@ mod tests {
         {
             let conn = state.db.get().context("get database connection")?;
             crate::db::create_board(&conn, &board_short, "Board", "", false)
-                .context("create board")?;
+                .context("create board")
+                .map(|_completed_value| ())?;
         }
         let app = Router::new()
             .route("/admin/board/backup/{board}", get(super::board_backup))
@@ -1170,7 +1177,8 @@ mod tests {
         {
             let conn = state.db.get().context("get database connection")?;
             crate::db::create_board(&conn, &marker_board, "Maintenance Marker", "", false)
-                .context("create marker board")?;
+                .context("create marker board")
+                .map(|_completed_value| ())?;
         }
 
         std::fs::create_dir_all(full_backup_dir()).context("create full backup directory")?;
@@ -1347,8 +1355,8 @@ mod tests {
         std::fs::write(&backup_path, b"not-a-zip").context("write invalid ZIP")?;
 
         let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, HeaderValue::from_static("localhost"));
-        headers.insert(header::ORIGIN, HeaderValue::from_static("http://localhost"));
+        drop(headers.insert(header::HOST, HeaderValue::from_static("localhost")));
+        drop(headers.insert(header::ORIGIN, HeaderValue::from_static("http://localhost")));
 
         let response = super::restore_saved_full_backup(
             axum::extract::State(state),
@@ -1570,8 +1578,8 @@ mod tests {
             admin_cookie_jar(),
             {
                 let mut headers = HeaderMap::new();
-                headers.insert(header::HOST, HeaderValue::from_static("localhost"));
-                headers.insert(header::ORIGIN, HeaderValue::from_static("http://localhost"));
+                drop(headers.insert(header::HOST, HeaderValue::from_static("localhost")));
+                drop(headers.insert(header::ORIGIN, HeaderValue::from_static("http://localhost")));
                 headers
             },
             crate::test_support::connect_info(),
@@ -1817,7 +1825,8 @@ mod tests {
             .get()
             .context("get source database connection")?;
         crate::db::create_board(&source_conn, "tech", "Technology", "", false)
-            .context("create source board")?;
+            .context("create source board")
+            .map(|_completed_value| ())?;
         let mut manifest = build_board_backup_manifest(&source_conn, "tech")?;
         manifest.board.access_mode = "definitely_not_valid".to_owned();
 
@@ -1855,7 +1864,8 @@ mod tests {
             .get()
             .context("get source database connection")?;
         crate::db::create_board(&source_conn, "tech", "Technology", "", false)
-            .context("create source board")?;
+            .context("create source board")
+            .map(|_completed_value| ())?;
         let mut manifest = build_board_backup_manifest(&source_conn, "tech")?;
         manifest.board.access_mode = "view_password".to_owned();
         manifest.board.access_password_hash.clear();
@@ -1900,7 +1910,8 @@ mod tests {
                 "UPDATE boards SET allow_pdf = 1 WHERE id = ?1",
                 params![board_id],
             )
-            .context("enable PDF uploads")?;
+            .context("enable PDF uploads")
+            .map(|_completed_value| ())?;
 
         let manifest = build_board_backup_manifest(&source_conn, "tech")?;
 
@@ -1921,7 +1932,8 @@ mod tests {
                 "UPDATE boards SET allow_pdf = 1 WHERE id = ?1",
                 params![board_id],
             )
-            .context("enable PDF uploads")?;
+            .context("enable PDF uploads")
+            .map(|_completed_value| ())?;
         let manifest = build_board_backup_manifest(&source_conn, "tech")?;
 
         let target_pool = crate::db::init_test_pool().context("create target database pool")?;
@@ -1941,7 +1953,8 @@ mod tests {
             "Test PDF setting restore",
             "Test PDF setting restore completed",
         )
-        .context("restore board")?;
+        .context("restore board")
+        .map(|_completed_value| ())?;
 
         let restored = crate::db::get_board_by_short(&target_conn, "tech")
             .context("load restored board")?
@@ -1975,7 +1988,8 @@ mod tests {
             true,
             None,
         )
-        .context("create source reply")?;
+        .context("create source reply")
+        .map(|_completed_value| ())?;
         let mut manifest = build_board_backup_manifest(&source_conn, "tech")?;
         manifest
             .threads
@@ -2000,7 +2014,8 @@ mod tests {
             "Test reply-count restore",
             "Test reply-count restore completed",
         )
-        .context("restore board")?;
+        .context("restore board")
+        .map(|_completed_value| ())?;
 
         let restored_count = target_conn
             .query_row(
@@ -2019,22 +2034,22 @@ mod tests {
     #[test]
     fn older_board_restore_manifests_default_pdf_uploads_off() -> TestResult<()> {
         let json = serde_json::json!({
-            "version": 1,
+            "version": 1_i32,
             "board": {
-                "id": 1,
+                "id": 1_i32,
                 "short_name": "tech",
                 "name": "Technology",
                 "description": "",
                 "nsfw": false,
-                "max_threads": 100,
-                "max_archived_threads": 150,
-                "bump_limit": 300,
+                "max_threads": 100_i32,
+                "max_archived_threads": 150_i32,
+                "bump_limit": 300_i32,
                 "allow_images": true,
                 "allow_video": true,
                 "allow_audio": true,
                 "allow_any_files": false,
                 "allow_tripcodes": true,
-                "edit_window_secs": 300,
+                "edit_window_secs": 300_i32,
                 "allow_editing": true,
                 "allow_self_delete": true,
                 "allow_archive": true,
@@ -2042,11 +2057,11 @@ mod tests {
                 "allow_captcha": false,
                 "show_poster_ids": false,
                 "collapse_greentext": false,
-                "post_cooldown_secs": 0,
+                "post_cooldown_secs": 0_i32,
                 "banner_mode": "inherit",
                 "access_mode": "public",
                 "access_password_hash": "",
-                "created_at": 1_700_000_000
+                "created_at": 1_700_000_000_i32
             },
             "threads": [],
             "posts": [],
@@ -2166,7 +2181,8 @@ mod tests {
         {
             let conn = pool.get().context("get database connection")?;
             crate::db::create_board(&conn, board_short, "Technology", "", false)
-                .context("create fixture board")?;
+                .context("create fixture board")
+                .map(|_completed_value| ())?;
             let board = crate::db::get_board_by_short(&conn, board_short)
                 .context("load fixture board")?
                 .context("fixture board not found")?;
@@ -2201,7 +2217,8 @@ mod tests {
                 None,
                 None,
             )
-            .context("create fixture thread")?;
+            .context("create fixture thread")
+            .map(|_completed_value| ())?;
 
             let db_path_str = db_path
                 .to_str()
@@ -2250,7 +2267,7 @@ mod tests {
             zip.start_file(format!("uploads/{board_short}/hello.txt"), options)
                 .context("start upload ZIP entry")?;
             zip.write_all(b"hello").context("write upload ZIP entry")?;
-            zip.finish().context("finish backup ZIP")?;
+            drop(zip.finish().context("finish backup ZIP")?);
         }
         Ok(())
     }
@@ -2342,7 +2359,8 @@ mod tests {
             crate::handlers::admin::backup::storage::board_file_fixtures(),
             Some(b"sqlite".to_vec()),
             4_102_444_800,
-        )?;
+        )
+        .map(|_completed_value| ())?;
         std::thread::sleep(std::time::Duration::from_millis(20));
         crate::handlers::admin::backup::storage::write_saved_backup_fixture(
             &newer_dir_mtime_dir,
@@ -2350,7 +2368,8 @@ mod tests {
             crate::handlers::admin::backup::storage::board_file_fixtures(),
             Some(b"sqlite".to_vec()),
             4_102_444_700,
-        )?;
+        )
+        .map(|_completed_value| ())?;
         invalidate_backup_list_cache(&full_backup_dir(), BackupListKind::Full);
 
         let modified = latest_verified_full_backup_modified_time()
@@ -2401,7 +2420,9 @@ mod tests {
         let upload_dir = tempfile::tempdir().context("create upload directory")?;
         let mut conn = pool.get().context("get database connection")?;
 
-        crate::db::create_board(&conn, "tech", "Technology", "", false).context("create board")?;
+        crate::db::create_board(&conn, "tech", "Technology", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
         let tech_board = crate::db::get_board_by_short(&conn, "tech")
             .context("load board")?
             .context("tech board not found")?;
@@ -2427,9 +2448,13 @@ mod tests {
         .context("create reply")?;
 
         let manifest = build_board_backup_manifest(&conn, "tech")?;
-        crate::db::delete_board(&conn, tech_board.id).context("delete board")?;
+        crate::db::delete_board(&conn, tech_board.id)
+            .context("delete board")
+            .map(|_completed_value| ())?;
 
-        crate::db::create_board(&conn, "b", "Random", "", false).context("create other board")?;
+        crate::db::create_board(&conn, "b", "Random", "", false)
+            .context("create other board")
+            .map(|_completed_value| ())?;
         let other_board = crate::db::get_board_by_short(&conn, "b")
             .context("load other board")?
             .context("other board not found")?;
@@ -2458,7 +2483,8 @@ mod tests {
             "Test board restore",
             "Test board restore completed",
         )
-        .context("restore board")?;
+        .context("restore board")
+        .map(|_completed_value| ())?;
 
         let restored_op = crate::db::get_post_on_board(&conn, "tech", op_post_id)
             .context("load restored OP")?
@@ -2490,11 +2516,12 @@ mod tests {
             .get()
             .context("get source database connection")?;
         crate::db::create_board(&source_conn, "pad", "Padding", "", false)
-            .context("create padding board")?;
+            .context("create padding board")
+            .map(|_completed_value| ())?;
         let pad_board = crate::db::get_board_by_short(&source_conn, "pad")
             .context("load padding board")?
             .context("padding board not found")?;
-        for idx in 0..5 {
+        for idx in 0_i32..5_i32 {
             crate::db::create_thread_with_optional_poll(
                 &source_conn,
                 pad_board.id,
@@ -2504,10 +2531,12 @@ mod tests {
                 None,
                 None,
             )
-            .context("create padding thread")?;
+            .context("create padding thread")
+            .map(|_completed_value| ())?;
         }
         crate::db::create_board(&source_conn, "tech", "Technology", "", false)
-            .context("create source tech board")?;
+            .context("create source tech board")
+            .map(|_completed_value| ())?;
         let source_tech_board = crate::db::get_board_by_short(&source_conn, "tech")
             .context("load source tech board")?
             .context("source tech board not found")?;
@@ -2543,7 +2572,8 @@ mod tests {
             .get()
             .context("get target database connection")?;
         crate::db::create_board(&target_conn, "b", "Random", "", false)
-            .context("create target board")?;
+            .context("create target board")
+            .map(|_completed_value| ())?;
         let target_b = crate::db::get_board_by_short(&target_conn, "b")
             .context("load target board")?
             .context("target board not found")?;
@@ -2556,7 +2586,8 @@ mod tests {
             None,
             None,
         )
-        .context("create target thread")?;
+        .context("create target thread")
+        .map(|_completed_value| ())?;
 
         let upload_dir = tempfile::tempdir().context("create upload directory")?;
         let upload_dir_str = upload_dir
@@ -2571,7 +2602,8 @@ mod tests {
             "Test board restore high ids",
             "Test board restore high ids completed",
         )
-        .context("restore board with high IDs")?;
+        .context("restore board with high IDs")
+        .map(|_completed_value| ())?;
 
         let restored_op = crate::db::get_post_on_board(&target_conn, "tech", source_op_id)
             .context("load restored OP")?
@@ -2613,7 +2645,8 @@ mod tests {
             .get()
             .context("get source database connection")?;
         crate::db::create_board(&source_conn, "tech", "Technology", "", false)
-            .context("create source tech board")?;
+            .context("create source tech board")
+            .map(|_completed_value| ())?;
         let source_board = crate::db::get_board_by_short(&source_conn, "tech")
             .context("load source tech board")?
             .context("source tech board not found")?;
@@ -2650,7 +2683,8 @@ mod tests {
             .get()
             .context("get target database connection")?;
         crate::db::create_board(&target_conn, "b", "Random", "", false)
-            .context("create target board")?;
+            .context("create target board")
+            .map(|_completed_value| ())?;
         let target_board = crate::db::get_board_by_short(&target_conn, "b")
             .context("load target board")?
             .context("target board not found")?;
@@ -2687,7 +2721,8 @@ mod tests {
             "Test board restore remap",
             "Test board restore remap completed",
         )
-        .context("restore board with ID collisions")?;
+        .context("restore board with ID collisions")
+        .map(|_completed_value| ())?;
 
         let restored_board_id: i64 = target_conn
             .query_row(

@@ -158,14 +158,20 @@ fn agent() -> anyhow::Result<reqwest::blocking::Client> {
 #[cfg(unix)]
 /// Fetch bounded artifact bytes only from allowlisted HTTPS release sources.
 pub(super) fn fetch(url: &str, limit: u64) -> anyhow::Result<Vec<u8>> {
-    fetch_before(url, limit, Instant::now() + Duration::from_secs(30))
+    fetch_before(
+        url,
+        limit,
+        Instant::now()
+            .checked_add(Duration::from_secs(30))
+            .context("release request deadline overflow")?,
+    )
 }
 
 /// Follow a bounded allowlisted redirect chain within one absolute deadline.
 fn fetch_before(url: &str, limit: u64, deadline: Instant) -> anyhow::Result<Vec<u8>> {
     let mut url = url.to_owned();
     let client = agent()?;
-    for _ in 0..4 {
+    for _ in 0_i32..4_i32 {
         validate_source(&url)?;
         let remaining = deadline
             .checked_duration_since(Instant::now())
@@ -189,7 +195,15 @@ fn fetch_before(url: &str, limit: u64, deadline: Instant) -> anyhow::Result<Vec<
             "GitHub release request failed"
         );
         let mut bytes = Vec::new();
-        response.by_ref().take(limit + 1).read_to_end(&mut bytes)?;
+        response
+            .by_ref()
+            .take(
+                limit
+                    .checked_add(1)
+                    .context("release byte limit overflow")?,
+            )
+            .read_to_end(&mut bytes)
+            .map(|_bytes_read| ())?;
         anyhow::ensure!(
             u64::try_from(bytes.len())? <= limit,
             "release response exceeds size limit"
@@ -242,7 +256,7 @@ pub(super) fn verify_manifest(
 ) -> anyhow::Result<Manifest> {
     UnparsedPublicKey::new(&ED25519, key)
         .verify(bytes, signature)
-        .map_err(|_| anyhow::anyhow!("release signature failed verification"))?;
+        .map_err(|error| anyhow::anyhow!("release signature failed verification: {error:?}"))?;
     let manifest: Manifest = serde_json::from_slice(bytes)?;
     anyhow::ensure!(
         manifest.format == 1
@@ -326,7 +340,9 @@ fn discover_inner(
     key: Option<&[u8]>,
     schema: Option<&str>,
 ) -> anyhow::Result<Discovery> {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(30))
+        .context("release request deadline overflow")?;
     let releases = candidates(&fetch_before(API, 2 * 1024 * 1024, deadline)?, current)?;
     let mut latest_unusable = None;
     for release in releases {
@@ -358,7 +374,7 @@ fn bounded_notes(mut text: String) -> String {
     if text.len() > LIMIT {
         let mut boundary = LIMIT;
         while !text.is_char_boundary(boundary) {
-            boundary -= 1;
+            boundary = boundary.saturating_sub(1);
         }
         text.truncate(boundary);
         text.push_str("\n[Release notes truncated; see the official release for the remainder.]");
@@ -411,21 +427,25 @@ fn inspect_release(
     };
     let verified = (|| {
         let name = format!("rustchan-update-{target}.json");
-        let find = |name: &str| -> anyhow::Result<&Asset> {
-            let matching: Vec<_> = release.assets.iter().filter(|a| a.name == name).collect();
+        let find = |asset_name: &str| -> anyhow::Result<&Asset> {
+            let matching: Vec<_> = release
+                .assets
+                .iter()
+                .filter(|a| a.name == asset_name)
+                .collect();
             anyhow::ensure!(
                 matching.len() == 1,
                 "release is missing a unique compatible artifact"
             );
             let asset = matching.first().context("missing release asset")?;
             anyhow::ensure!(
-                asset.browser_download_url == asset_url(&result.version, name)?,
+                asset.browser_download_url == asset_url(&result.version, asset_name)?,
                 "disallowed release asset source"
             );
             Ok(asset)
         };
-        find(&name)?;
-        find(&format!("{name}.sig"))?;
+        find(&name).map(|_operation_summary| ())?;
+        find(&format!("{name}.sig")).map(|_operation_summary| ())?;
         let manifest = verify_manifest(
             &fetch_before(&asset_url(&result.version, &name)?, 16 * 1024, deadline)?,
             &fetch_before(
@@ -511,11 +531,11 @@ mod tests {
     #[test]
     fn semantic_selection_and_prerelease_exclusion() -> anyhow::Result<()> {
         let releases = serde_json::json!([
-            {"id":1,"tag_name":"v1.9.0","draft":false,"prerelease":false,"published_at":"2026-09-30T00:00:00Z","assets":[]},
-            {"id":2,"tag_name":"v1.10.0","draft":false,"prerelease":false,"published_at":"2026-09-30T00:00:00Z","assets":[]},
-            {"id":3,"tag_name":"v2.0.0-rc.1","draft":false,"prerelease":false,"published_at":"2026-09-30T00:00:00Z","assets":[]},
-            {"id":4,"tag_name":"v3.0.0","draft":false,"prerelease":true,"published_at":"2026-09-30T00:00:00Z","assets":[]},
-            {"id":5,"tag_name":"v4.0.0","draft":true,"prerelease":false,"published_at":"2026-09-30T00:00:00Z","assets":[]}
+            {"id":1_i32,"tag_name":"v1.9.0","draft":false,"prerelease":false,"published_at":"2026-09-30T00:00:00Z","assets":[]},
+            {"id":2_i32,"tag_name":"v1.10.0","draft":false,"prerelease":false,"published_at":"2026-09-30T00:00:00Z","assets":[]},
+            {"id":3_i32,"tag_name":"v2.0.0-rc.1","draft":false,"prerelease":false,"published_at":"2026-09-30T00:00:00Z","assets":[]},
+            {"id":4_i32,"tag_name":"v3.0.0","draft":false,"prerelease":true,"published_at":"2026-09-30T00:00:00Z","assets":[]},
+            {"id":5_i32,"tag_name":"v4.0.0","draft":true,"prerelease":false,"published_at":"2026-09-30T00:00:00Z","assets":[]}
         ]);
         let bytes = serde_json::to_vec(&releases)?;
         anyhow::ensure!(
@@ -545,19 +565,19 @@ mod tests {
             "valid compatible manifest must verify"
         );
         for (field, value) in [
-            ("format", serde_json::json!(2)),
+            ("format", serde_json::json!(2_i32)),
             ("version", serde_json::json!("1.7.0")),
-            ("release_id", serde_json::json!(43)),
+            ("release_id", serde_json::json!(43_i32)),
             ("target", serde_json::json!("aarch64-unknown-linux-gnu")),
             ("minimum_updater", serde_json::json!("99.0.0")),
             ("minimum_schema", serde_json::json!("9.0.0")),
             ("sha256", serde_json::json!("bad")),
-            ("size", serde_json::json!(0)),
+            ("size", serde_json::json!(0_i32)),
             ("filename", serde_json::json!("../../outside")),
             ("unknown", serde_json::json!(true)),
         ] {
             let mut altered = valid.clone();
-            altered
+            let _previous_value = altered
                 .as_object_mut()
                 .context("manifest object")?
                 .insert(field.to_owned(), value);
@@ -624,16 +644,22 @@ mod tests {
             return Ok(());
         }
         let source: GithubRelease = serde_json::from_value(serde_json::json!({
-            "id":42,"tag_name":"v1.6.0","draft":false,"prerelease":false,
+            "id":42_i32,"tag_name":"v1.6.0","draft":false,"prerelease":false,
             "published_at":"2026-09-30T00:00:00Z","body":"release",
             "assets":[
-                {"name":"rustchan-cli-v1.6.0-linux-x86_64.zip","size":1234,"browser_download_url":"https://github.com/csd113/RustChan/releases/download/v1.6.0/fixture.zip"},
-                {"name":"rustchan-cli-v1.6.0-linux-arm64.zip","size":1234,"browser_download_url":"https://github.com/csd113/RustChan/releases/download/v1.6.0/fixture.zip"},
-                {"name":"rustchan-cli-v1.6.0-macos-apple-silicon.zip","size":1234,"browser_download_url":"https://github.com/csd113/RustChan/releases/download/v1.6.0/fixture.zip"},
-                {"name":"rustchan-cli-v1.6.0-windows-x86_64.zip","size":1234,"browser_download_url":"https://github.com/csd113/RustChan/releases/download/v1.6.0/fixture.zip"}
+                {"name":"rustchan-cli-v1.6.0-linux-x86_64.zip","size":1_234_i32,"browser_download_url":"https://github.com/csd113/RustChan/releases/download/v1.6.0/fixture.zip"},
+                {"name":"rustchan-cli-v1.6.0-linux-arm64.zip","size":1_234_i32,"browser_download_url":"https://github.com/csd113/RustChan/releases/download/v1.6.0/fixture.zip"},
+                {"name":"rustchan-cli-v1.6.0-macos-apple-silicon.zip","size":1_234_i32,"browser_download_url":"https://github.com/csd113/RustChan/releases/download/v1.6.0/fixture.zip"},
+                {"name":"rustchan-cli-v1.6.0-windows-x86_64.zip","size":1_234_i32,"browser_download_url":"https://github.com/csd113/RustChan/releases/download/v1.6.0/fixture.zip"}
             ]
         }))?;
-        let release = inspect_release(source, None, Instant::now() + Duration::from_secs(30))?;
+        let release = inspect_release(
+            source,
+            None,
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .context("release request deadline overflow")?,
+        )?;
         anyhow::ensure!(
             release.size == Some(1234) && !release.compatible && release.manifest.is_none(),
             "legacy ZIP metadata must be visible without authorizing unsigned installation"

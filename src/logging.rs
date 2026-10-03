@@ -13,7 +13,7 @@ use std::fmt;
 use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, OnceLock};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use tracing::field::{Field, Visit};
@@ -48,10 +48,12 @@ static CONSOLE_MUTEX: LazyLock<parking_lot::Mutex<()>> =
 // requiring callers to thread it through their own state, and without changing
 // the public `init_logging(&Path)` signature.
 /// Keeps the main log writer's background worker alive for the process lifetime.
-static MAIN_FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+static MAIN_FILE_GUARD: parking_lot::Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> =
+    parking_lot::Mutex::new(None);
 /// Keeps the dependency log writer's background worker alive for the process lifetime.
-static DEPENDENCY_FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> =
-    OnceLock::new();
+static DEPENDENCY_FILE_GUARD: parking_lot::Mutex<
+    Option<tracing_appender::non_blocking::WorkerGuard>,
+> = parking_lot::Mutex::new(None);
 
 /// Fallback main-log filename used when daily rotation cannot be initialized.
 pub const MAIN_LOG_FALLBACK_FILE_NAME: &str = "rustchan.log";
@@ -74,8 +76,9 @@ pub fn is_tty() -> bool {
 }
 
 /// Returns `true` when stdout is an interactive terminal that can consume ANSI
+/// escape sequences.
 ///
-/// escape sequences. On Windows this also probes/enables virtual terminal
+/// On Windows this also probes/enables virtual terminal
 /// processing so raw colour sequences are not printed literally.
 pub fn ansi_enabled() -> bool {
     ANSI_ENABLED.load(Ordering::Relaxed)
@@ -185,20 +188,22 @@ pub fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool), St
     // complete line instead of dropping it as an assumed partial prefix.
     let read_start = start.saturating_sub(1);
     file.seek(SeekFrom::Start(read_start))
-        .map_err(|error| format!("Seek log: {error}"))?;
+        .map_err(|error| format!("Seek log: {error}"))
+        .map(|_completed_value| ())?;
     let mut bytes =
         Vec::with_capacity(usize::try_from(length.saturating_sub(read_start)).unwrap_or(max_bytes));
     io::copy(
         &mut file.take(length.saturating_sub(read_start)),
         &mut bytes,
     )
-    .map_err(|error| format!("Read log: {error}"))?;
+    .map_err(|error| format!("Read log: {error}"))
+    .map(|_completed_value| ())?;
     let truncated = start > 0;
     let content = if truncated {
         let prefix = bytes
             .iter()
             .position(|byte| *byte == b'\n')
-            .map_or(1, |index| index + 1);
+            .map_or(1, |index| index.saturating_add(1));
         bytes.get(prefix..).unwrap_or_default()
     } else {
         bytes.as_slice()
@@ -242,7 +247,7 @@ fn is_dependency_log_target(target: &str) -> bool {
 /// `rustchan::server::server` → `server`
 /// `rustchan::db::mod`        → `db`
 /// `rustchan::workers`        → `workers`
-/// `tower_http::trace`        → `trace`
+/// `tower_http::trace`        → `trace`.
 fn extract_component(target: &str) -> &str {
     let mut parts = target.rsplit("::");
     let last = parts.next().unwrap_or(target);
@@ -475,14 +480,14 @@ fn parse_compound_duration(value: &str) -> Option<String> {
             .find(|ch: char| !ch.is_ascii_digit())
             .filter(|&index| index > 0)?;
         let (number, unit) = part.split_at(split);
-        let value = number.parse::<u128>().ok()?;
+        let duration_value = number.parse::<u128>().ok()?;
         let nanos = match unit {
-            "h" => value.saturating_mul(3_600_000_000_000),
-            "m" => value.saturating_mul(60_000_000_000),
-            "s" => value.saturating_mul(1_000_000_000),
-            "ms" => value.saturating_mul(1_000_000),
-            "us" | "µs" => value.saturating_mul(1_000),
-            "ns" => value,
+            "h" => duration_value.saturating_mul(3_600_000_000_000),
+            "m" => duration_value.saturating_mul(60_000_000_000),
+            "s" => duration_value.saturating_mul(1_000_000_000),
+            "ms" => duration_value.saturating_mul(1_000_000),
+            "us" | "µs" => duration_value.saturating_mul(1_000),
+            "ns" => duration_value,
             _ => return None,
         };
         total_nanos = total_nanos.saturating_add(nanos);
@@ -857,7 +862,7 @@ fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields
         "reactor" => {
             if message.eq_ignore_ascii_case("removing circuit leg") {
                 fields.message = Some("Tor circuit closed".to_owned());
-                remove_field(&mut fields.fields, "tunnel_id");
+                let _previous_value = remove_field(&mut fields.fields, "tunnel_id");
             } else if message.contains("descriptor upload")
                 || message.contains("Unable to upload")
                 || message.contains("publish")
@@ -1024,10 +1029,10 @@ fn env_filter() -> EnvFilter {
 /// Writes one compact line per log event to the terminal.
 ///
 /// TTY mode (local dev):
-///   `14:22:01.123 [INFO ] [server  ] HTTP server listening  addr=0.0.0.0:8080`
+///   `14:22:01.123 [INFO ] [server  ] HTTP server listening  addr=0.0.0.0:8080`.
 ///
 /// Non-TTY mode (piped / systemd / Docker):
-///   `2026-03-18 14:22:01.123 [INFO ] [server  ] HTTP server listening  addr=0.0.0.0:8080`
+///   `2026-03-18 14:22:01.123 [INFO ] [server  ] HTTP server listening  addr=0.0.0.0:8080`.
 ///
 /// Columns are fixed-width so the message text always starts at the same
 /// horizontal position, making it easy to scan down a busy log stream.
@@ -1076,7 +1081,7 @@ where
 ///
 /// Format:
 ///   `2026-03-18 14:22:01.123 [INFO ] [server  ] HTTP server listening  addr=0.0.0.0:8080`
-///   `2026-03-18 14:22:01.456 [ERROR] [error   ] DB query failed  err=no such table  (src/db/posts.rs:79)`
+///   `2026-03-18 14:22:01.456 [ERROR] [error   ] DB query failed  err=no such table  (src/db/posts.rs:79)`.
 ///
 /// Differences from the terminal format:
 ///   • Always UTC with the full date — the file is an archive, not a live view.
@@ -1244,7 +1249,7 @@ pub fn init_logging(log_dir: &Path) {
     // The WorkerGuard is stored in MAIN_FILE_GUARD so it lives for the entire
     // process — see the comment on that static for why this matters.
     let (main_file_writer, main_guard) = tracing_appender::non_blocking(rolling);
-    drop(MAIN_FILE_GUARD.set(main_guard));
+    *MAIN_FILE_GUARD.lock() = Some(main_guard);
 
     let file_layer = tracing_subscriber::fmt::layer()
         .event_format(FileFormatter)
@@ -1254,7 +1259,7 @@ pub fn init_logging(log_dir: &Path) {
 
     let dependency_log = tracing_appender::rolling::never(log_dir, DEPENDENCY_LOG_FILE_NAME);
     let (dependency_file_writer, dependency_guard) = tracing_appender::non_blocking(dependency_log);
-    drop(DEPENDENCY_FILE_GUARD.set(dependency_guard));
+    *DEPENDENCY_FILE_GUARD.lock() = Some(dependency_guard);
 
     let dependency_file_layer = tracing_subscriber::fmt::layer()
         .event_format(FileFormatter)
@@ -1273,12 +1278,6 @@ pub fn init_logging(log_dir: &Path) {
 // All helpers acquire `CONSOLE_MUTEX` before writing so they serialise
 // correctly with the tracing terminal layer. Use these instead of
 // `println!`/`print!` in `console.rs` and `detect.rs`.
-
-/// Print `msg` followed by a newline to stdout, under the console lock.
-pub fn console_println(msg: &str) {
-    let _guard = CONSOLE_MUTEX.lock();
-    drop(writeln!(io::stdout(), "{msg}"));
-}
 
 /// Write a raw pre-formatted block exactly as provided (no trailing newline added).
 ///
@@ -1299,6 +1298,12 @@ pub fn console_prompt(msg: &str) {
     drop(write!(io::stdout(), "{msg}"));
     drop(io::stdout().flush());
     // _guard dropped here — stdin read happens outside the lock
+}
+
+/// Drain queued file logging at the end of the executable lifecycle.
+pub fn shutdown() {
+    drop(MAIN_FILE_GUARD.lock().take());
+    drop(DEPENDENCY_FILE_GUARD.lock().take());
 }
 
 #[cfg(test)]
@@ -1368,7 +1373,7 @@ mod tests {
                 .iter()
                 .filter_map(|(name, value)| {
                     let clean = normalize_field_value(name, value);
-                    (!super::should_hide_field(name, &clean)).then(|| ((*name).to_string(), clean))
+                    (!super::should_hide_field(name, &clean)).then(|| ((*name).to_owned(), clean))
                 })
                 .collect(),
         };
@@ -1580,17 +1585,17 @@ mod tests {
             vec![("retry_in".to_owned(), "30s".to_owned())]
         );
 
-        let fields = rewrite_for_test(
+        let disabled_guard_fields = rewrite_for_test(
             "tor_guardmgr::guard",
             "Disabling guard: 72.5% of circuits died under mysterious circumstances, exceeding threshold of 70.0%",
             &[("guard", "GuardId(abc)")],
         );
         assert_eq!(
-            fields.message.as_deref(),
+            disabled_guard_fields.message.as_deref(),
             Some("Tor disabled an unstable guard")
         );
         assert_eq!(
-            fields.fields,
+            disabled_guard_fields.fields,
             vec![("failure_rate".to_owned(), "72.5%".to_owned())]
         );
     }
@@ -1617,16 +1622,19 @@ mod tests {
             )]
         );
 
-        let fields = rewrite_for_test(
+        let bootstrap_failure_fields = rewrite_for_test(
             "tor_dirmgr::bootstrap",
             "We failed 3 times to bootstrap a directory. We're going to give up.",
             &[],
         );
         assert_eq!(
-            fields.message.as_deref(),
+            bootstrap_failure_fields.message.as_deref(),
             Some("Tor directory bootstrap failed")
         );
-        assert_eq!(fields.fields, vec![("attempts".to_owned(), "3".to_owned())]);
+        assert_eq!(
+            bootstrap_failure_fields.fields,
+            vec![("attempts".to_owned(), "3".to_owned())]
+        );
     }
 
     #[test]
@@ -1641,14 +1649,17 @@ mod tests {
             Some("Tor onion-service circuits are failing; waiting before retrying")
         );
 
-        let fields = rewrite_for_test(
+        let circuit_fields = rewrite_for_test(
             "tor_proto::client::reactor",
             "removing circuit leg",
             &[("tunnel_id", "Circ 8.98"), ("reason", "closed")],
         );
-        assert_eq!(fields.message.as_deref(), Some("Tor circuit closed"));
         assert_eq!(
-            fields.fields,
+            circuit_fields.message.as_deref(),
+            Some("Tor circuit closed")
+        );
+        assert_eq!(
+            circuit_fields.fields,
             vec![("reason".to_owned(), "closed".to_owned())]
         );
     }

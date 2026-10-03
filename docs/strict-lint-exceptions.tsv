@@ -1,6 +1,6 @@
 path	line	attribute	lints	reason	scope
 src/banner.rs	1125	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn rejects_banner_gif_frame_bomb
-src/banner.rs	1148	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn animated_gif_banner_falls_back_to_gif_without_ffmpeg
+src/banner.rs	1148	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn animated_gif_banner_converts_to_animated_webp_without_ffmpeg
 src/banner.rs	1196	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn deleting_banner_asset_removes_webp_and_gif_siblings
 src/banner.rs	1235	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn animated_webp_banner_is_preserved_without_static_decode
 src/banner.rs	1264	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn rejects_oversized_banner_dimensions
@@ -149,7 +149,7 @@ src/handlers/admin/settings/themes.rs	252	expect	clippy::too_many_lines	builder 
 src/handlers/board/access_preferences.rs	959	expect	clippy::too_many_lines	rate limiting, credential checks, signed access grants, and redirect validation form one request	fn unlock_board_access
 src/handlers/board/catalog.rs	26	expect	clippy::too_many_lines	access control, catalog loading, unread-state calculation, and rendering form one request	fn catalog
 src/handlers/board/create_thread.rs	15	expect	clippy::too_many_lines	access checks, multipart validation, thread creation, and response cookies form one request	fn create_thread
-src/handlers/board/media.rs	91	expect	clippy::too_many_lines	path validation, access policy, legacy redirect handling, and file response form one request	fn serve_board_media
+src/handlers/board/media.rs	103	expect	clippy::too_many_lines	path validation, access policy, legacy redirect handling, and file response form one request	fn serve_board_media
 src/handlers/board/pages.rs	37	expect	clippy::too_many_lines	home-page data loading, activity markers, banner selection, and rendering form one request	fn index
 src/handlers/board/pages.rs	226	expect	clippy::too_many_lines	board access, pagination, activity markers, banner selection, and rendering form one request	fn board_index
 src/handlers/board/tests.rs	432	expect	clippy::too_many_lines	the end-to-end test keeps its fixture setup and ordered assertions in one scenario	fn post_password_board_write_actions_require_unlock
@@ -189,11 +189,8 @@ src/media/prune.rs	524	expect	clippy::panic_in_result_fn	test assertions intenti
 src/media/prune.rs	595	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn pruning_removes_secondary_audio_original_with_combo_post
 src/media/prune.rs	657	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn pruning_refuses_symlink_media_paths
 src/media/prune.rs	711	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn pruning_refuses_symlink_parent_components
-src/media/thumbnail.rs	383	expect	clippy::cognitive_complexity	the renderer fallback and fail-closed validation sequence is intentionally linear	fn pdf_first_page_thumbnail
-src/media/thumbnail.rs	387	expect	clippy::too_many_lines	PDF rendering keeps subprocess validation, fallback, and cleanup in one auditable sequence	fn pdf_first_page_thumbnail
-src/media/thumbnail.rs	830	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn write_pdf_placeholder_outputs_svg
-src/media/thumbnail.rs	845	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn unsupported_image_thumbnail_falls_back_to_svg_placeholder_without_ffmpeg
-src/media/thumbnail.rs	868	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn mutool_command_caps_render_dimensions
+src/media/thumbnail.rs	497	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn write_pdf_placeholder_outputs_svg
+src/media/thumbnail.rs	512	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn unsupported_image_thumbnail_falls_back_to_svg_placeholder_without_ffmpeg
 src/middleware/state.rs	342	expect	clippy::struct_excessive_bools	independent runtime capability flags are shared across handlers and workers	struct AppState
 src/middleware/state.rs	435	expect	clippy::panic_in_result_fn	assertions provide precise regression failures after fallible test-database setup	fn db_maintenance_jobs_assign_monotonic_job_ids_and_preserve_them_in_terminal_states
 src/middleware/state.rs	527	expect	clippy::panic_in_result_fn	assertions provide precise regression failures after fallible test-database setup	fn db_maintenance_jobs_finished_updates_only_matching_running_job
@@ -326,11 +323,10 @@ src/tls/self_signed.rs	283	expect	clippy::panic_in_result_fn	assertions intentio
 src/tls/self_signed.rs	342	expect	clippy::panic_in_result_fn	assertions intentionally report violations of missing-key recovery	fn missing_key_triggers_regeneration_on_next_startup
 src/utils/crypto.rs	70	expect	clippy::exit	fail-closed randomness failures must terminate before issuing weak tokens	fn fatal_randomness_error
 src/utils/crypto.rs	212	expect	clippy::panic_in_result_fn	test assertions intentionally panic on failure	fn hash_and_verify_password
-src/utils/files/storage.rs	34	expect	clippy::struct_excessive_bools	the booleans are independent upload-policy and media-capability flags	struct SaveUploadOptions
-src/utils/files/storage.rs	135	expect	clippy::too_many_arguments	the arguments mirror independent upload metadata and board limits at the handler boundary	fn save_audio_with_image_thumb_from_path
-src/utils/files/storage.rs	246	expect	clippy::as_conversions,clippy::cast_precision_loss	human-readable size display intentionally rounds integral byte counts to one decimal place	fn format_file_size
-src/utils/files/storage.rs	1499	expect	clippy::print_stderr	test skip diagnostics must remain visible when optional ffmpeg fixtures are unavailable	fn valid_audio_uploads_accept_common_formats_with_ffprobe
-src/utils/files/storage.rs	1554	expect	clippy::print_stderr	test skip diagnostics must remain visible when optional ffmpeg fixtures are unavailable	fn valid_mkv_uploads_save_as_video_with_probe
+src/utils/files/storage.rs	121	expect	clippy::redundant_pub_crate	this opaque validated-upload handoff is shared across sibling crate modules	fn save_validated_upload_from_path
+src/utils/files/storage.rs	247	expect	clippy::as_conversions,clippy::cast_precision_loss	human-readable size display intentionally rounds integral byte counts to one decimal place	fn format_file_size
+src/utils/files/storage.rs	349	expect	clippy::redundant_pub_crate	this opaque validation token crosses the private storage-module boundary	struct ValidatedUpload
+src/utils/files/storage.rs	385	expect	clippy::redundant_pub_crate	the posting handler must obtain the opaque token without exposing it publicly	fn validate_upload_for_storage
 src/utils/sanitize.rs	29	expect	clippy::expect_used	the reply-reference regex is a source literal covered by sanitizer tests	item RE_REPLY
 src/utils/sanitize.rs	37	expect	clippy::expect_used	the cross-board-link regex is a source literal covered by sanitizer tests	item RE_CROSSLINK
 src/utils/sanitize.rs	46	expect	clippy::expect_used	the URL regex is a source literal covered by sanitizer tests	item RE_URL
@@ -338,31 +334,46 @@ src/utils/sanitize.rs	55	expect	clippy::expect_used	the bold-markup regex is a s
 src/utils/sanitize.rs	63	expect	clippy::expect_used	the italic-markup regex is a source literal covered by sanitizer tests	item RE_ITALIC
 src/utils/sanitize.rs	71	expect	clippy::expect_used	the spoiler-markup regex is a source literal covered by sanitizer tests	item RE_SPOILER
 src/utils/sanitize.rs	80	expect	clippy::expect_used	the dice-expression regex is a source literal covered by sanitizer tests	item RE_DICE
-src/workers/mod.rs	699	expect	clippy::cognitive_complexity,clippy::too_many_lines	claim, execution, completion persistence, retry, and shutdown form one worker state machine	fn worker_loop
-src/workers/mod.rs	864	expect	clippy::cognitive_complexity	the dispatcher mirrors the closed set of background job variants	fn handle_job
-src/workers/mod.rs	996	expect	clippy::cognitive_complexity	transcode process control and fail-closed cleanup share one lifecycle	fn transcode_video
-src/workers/mod.rs	1111	expect	clippy::cognitive_complexity	source validation and codec-specific preparation share one preflight boundary	fn transcode_video_prepare
-src/workers/mod.rs	1660	expect	clippy::cognitive_complexity	archive, prune, and filesystem finalization remain one consistency operation	fn prune_threads
-src/workers/mod.rs	1850	expect	clippy::expect_used	test database queries stop locally with fixture-specific failure context	fn file_hash_count
-src/workers/mod.rs	1875	expect	clippy::expect_used	constructing the constrained test pool is a prerequisite for completion-retry tests	fn single_connection_test_pool
-src/workers/mod.rs	1905	expect	clippy::expect_used	claiming the seeded job is a prerequisite for each queue-state assertion	fn claim_job
-src/workers/mod.rs	1918	expect	clippy::expect_used	test fixture failures stop the individual queue accounting test with local context	fn retryable_failure_restores_queue_pending_count
-src/workers/mod.rs	1948	expect	clippy::expect_used	test fixture failures stop the individual queue accounting test with local context	fn permanent_failure_leaves_queue_pending_count_at_zero
-src/workers/mod.rs	1984	expect	clippy::expect_used	the async retry test requires every timed and database fixture step to succeed	fn completion_retries_the_same_job_after_pool_exhaustion
-src/workers/mod.rs	2037	expect	clippy::expect_used	the shutdown recovery test requires every timed and database fixture step to succeed	fn completion_stops_retrying_after_shutdown_grace_and_startup_can_recover
-src/workers/mod.rs	2077	expect	clippy::expect_used	the completion recovery fixture must resolve within its explicit test timeout	fn already_resolved_completion_error_does_not_wedge_worker
-src/workers/mod.rs	2113	expect	clippy::too_many_lines	the regression keeps job seeding, terminal persistence, and replay checks in one end-to-end scenario	fn non_transient_done_completion_is_terminal_and_never_replayed
-src/workers/mod.rs	2231	expect	clippy::expect_used	the injected retry-state fixture requires each database and timeout step to succeed	fn non_transient_failed_completion_preserves_bounded_attempt_count
-src/workers/mod.rs	2349	expect	clippy::expect_used	temporary-file and database fixture setup must succeed before cleanup assertions	fn stale_transcode_persist_removes_unattached_webm_and_writes_no_hash
-src/workers/mod.rs	2385	expect	clippy::expect_used	temporary-file fixture setup must succeed before transcode output assertions	fn transcode_finalise_skips_larger_output_and_cleans_temp_file
-src/workers/mod.rs	2429	expect	clippy::expect_used	temporary upload fixture setup must succeed before path validation assertions	fn transcode_source_validation_rejects_escape_paths
-src/workers/mod.rs	2448	expect	clippy::expect_used	Unix symlink fixture setup must succeed before containment assertions	fn thumb_cache_eviction_skips_symlinked_thumbs_dir
-src/workers/mod.rs	2475	expect	clippy::expect_used	Unix symlink fixture setup must succeed before containment assertions	fn thumb_cache_eviction_skips_symlinked_board_dir
-src/workers/mod.rs	2502	expect	clippy::expect_used	Unix symlink fixture setup must succeed before containment assertions	fn thumb_cache_eviction_skips_symlinked_thumb_file
-src/workers/mod.rs	2526	expect	clippy::expect_used	temporary-file and database fixture setup must succeed before cleanup assertions	fn stale_waveform_finalise_removes_unattached_png_and_writes_no_hash
+src/workers/mod.rs	964	expect	clippy::cognitive_complexity,clippy::too_many_lines	claim, execution, completion persistence, retry, and shutdown form one worker state machine	fn worker_loop
+src/workers/mod.rs	1130	expect	clippy::cognitive_complexity,clippy::too_many_arguments	the dispatcher mirrors the closed set of background job variants	fn handle_job
+src/workers/mod.rs	1269	expect	clippy::too_many_arguments	transcode process control and fail-closed cleanup share one lifecycle	fn transcode_video
+src/workers/mod.rs	1380	expect	clippy::cognitive_complexity	source validation and codec-specific preparation share one preflight boundary	fn transcode_video_prepare
+src/workers/mod.rs	1551	expect	clippy::too_many_arguments	the finalisation boundary carries the durable job and all validated filesystem identities	fn transcode_video_finalise
+src/workers/mod.rs	1593	expect	clippy::too_many_arguments	output installation and atomic DB completion require the full validated transcode identity	fn persist_transcoded_webm
+src/workers/mod.rs	1934	expect	clippy::too_many_arguments	the finalisation boundary explicitly carries all validated paths and DB identity	fn waveform_finalise
+src/workers/mod.rs	2115	expect	clippy::cognitive_complexity	archive, prune, and filesystem finalization remain one consistency operation	fn prune_threads
+src/workers/mod.rs	2561	expect	clippy::cognitive_complexity,clippy::too_many_lines	the bounded legacy-state matrix is intentionally explicit	fn reconcile_media_job_states
+src/workers/mod.rs	3050	expect	clippy::expect_used	test database queries stop locally with fixture-specific failure context	fn file_hash_count
+src/workers/mod.rs	3227	expect	clippy::expect_used	fixture setup failures should stop this queue durability test	fn required_thread_prune_bypasses_capacity_and_survives_queue_recreation
+src/workers/mod.rs	3690	expect	clippy::expect_used	fixture setup failures should stop this coalescing test	fn board_prune_coalesces_and_running_work_leaves_one_dirty_evaluation
+src/workers/mod.rs	3891	expect	clippy::too_many_lines	the legacy reconciliation matrix remains explicit in one fixed-point test	fn media_reconciliation_repairs_legacy_matrix_and_reaches_fixed_point
+src/workers/mod.rs	4056	expect	clippy::expect_used	constructing the constrained test pool is a prerequisite for completion-retry tests	fn single_connection_test_pool
+src/workers/mod.rs	4086	expect	clippy::expect_used	claiming the seeded job is a prerequisite for each queue-state assertion	fn claim_job
+src/workers/mod.rs	4099	expect	clippy::expect_used	test fixture failures stop the individual queue accounting test with local context	fn retryable_failure_restores_queue_pending_count
+src/workers/mod.rs	4129	expect	clippy::expect_used	test fixture failures stop the individual queue accounting test with local context	fn permanent_failure_leaves_queue_pending_count_at_zero
+src/workers/mod.rs	4165	expect	clippy::expect_used	the async retry test requires every timed and database fixture step to succeed	fn completion_retries_the_same_job_after_pool_exhaustion
+src/workers/mod.rs	4218	expect	clippy::expect_used	the shutdown recovery test requires every timed and database fixture step to succeed	fn completion_stops_retrying_after_shutdown_grace_and_startup_can_recover
+src/workers/mod.rs	4258	expect	clippy::expect_used	the completion recovery fixture must resolve within its explicit test timeout	fn already_resolved_completion_error_does_not_wedge_worker
+src/workers/mod.rs	4294	expect	clippy::too_many_lines	the regression keeps job seeding, terminal persistence, and replay checks in one end-to-end scenario	fn non_transient_done_completion_is_terminal_and_never_replayed
+src/workers/mod.rs	4412	expect	clippy::expect_used	the injected retry-state fixture requires each database and timeout step to succeed	fn non_transient_failed_completion_preserves_bounded_attempt_count
+src/workers/mod.rs	4532	expect	clippy::expect_used	temporary-file and database fixture setup must succeed before cleanup assertions	fn stale_transcode_persist_removes_unattached_webm_and_writes_no_hash
+src/workers/mod.rs	4569	expect	clippy::expect_used	temporary-file fixture setup must succeed before transcode output assertions	fn transcode_finalise_skips_larger_output_and_cleans_temp_file
+src/workers/mod.rs	4614	expect	clippy::expect_used	temporary upload fixture setup must succeed before path validation assertions	fn transcode_source_validation_rejects_escape_paths
+src/workers/mod.rs	4633	expect	clippy::expect_used	Unix symlink fixture setup must succeed before containment assertions	fn thumb_cache_eviction_skips_symlinked_thumbs_dir
+src/workers/mod.rs	4663	expect	clippy::expect_used	Unix symlink fixture setup must succeed before containment assertions	fn thumb_cache_eviction_skips_symlinked_board_dir
+src/workers/mod.rs	4693	expect	clippy::expect_used	Unix symlink fixture setup must succeed before containment assertions	fn thumb_cache_eviction_skips_symlinked_thumb_file
+src/workers/mod.rs	4721	expect	clippy::expect_used	fixture setup must succeed before eviction assertions	fn thumb_cache_evicts_only_unreferenced_files_across_all_media_states
+src/workers/mod.rs	4805	expect	clippy::expect_used	temporary-file and database fixture setup must succeed before cleanup assertions	fn stale_waveform_finalise_removes_unattached_png_and_writes_no_hash
 tests/cli_runtime.rs	1	expect	unused_crate_dependencies	Cargo exposes all package dependencies to this black-box integration target, which intentionally interacts only with the compiled CLI	crate
 tests/cli_runtime.rs	263	expect	clippy::panic_in_result_fn	assertions intentionally report violated CLI filesystem invariants	fn help_and_version_do_not_create_runtime_state
 tests/cli_runtime.rs	304	expect	clippy::panic_in_result_fn	assertions intentionally report violated CLI filesystem invariants	fn explicit_data_dir_owns_all_initialized_runtime_state
 tests/cli_runtime.rs	356	expect	clippy::panic_in_result_fn	assertions intentionally report violated CLI filesystem invariants	fn relative_data_dir_is_rejected_before_filesystem_mutation
 tests/cli_runtime.rs	396	expect	clippy::too_many_lines	one subprocess lifecycle verifies the complete direct-HTTPS topology and cookie contract	fn direct_https_process_exposes_only_https_and_redirect_with_secure_login_cookies
 tests/cli_runtime.rs	400	expect	clippy::panic_in_result_fn	assertions intentionally report violated TLS topology and cookie invariants	fn direct_https_process_exposes_only_https_and_redirect_with_secure_login_cookies
+src/media/audio.rs	521	expect	clippy::cast_possible_truncation,clippy::cast_sign_loss,clippy::as_conversions	clamped normalized amplitudes map to a bounded pixel radius	fn render_peaks
+src/media/heif.rs	12	expect	clippy::redundant_pub_crate	keep codec helpers internal while allowing upload and banner callers	fn decode
+src/media/images.rs	21	expect	clippy::redundant_pub_crate	keep codec helpers internal while allowing upload and banner callers	fn validate_dimensions
+src/media/images.rs	35	expect	clippy::redundant_pub_crate	keep codec helpers internal while allowing upload and banner callers	fn decode_still
+src/media/images.rs	74	expect	clippy::redundant_pub_crate	keep codec helpers internal while allowing upload and banner callers	fn image_to_webp
+src/media/pdf.rs	31	expect	clippy::redundant_pub_crate	PDF rendering is an internal media helper	fn render
+src/media/pdf.rs	35	expect	clippy::cast_possible_truncation,clippy::cast_sign_loss,clippy::as_conversions	finite positive viewport dimensions are clamped to a checked u16 bound before rounding	fn render

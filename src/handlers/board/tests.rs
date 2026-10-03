@@ -54,7 +54,7 @@ fn seed_post_password_board(
         "UPDATE boards SET access_mode = ?1, access_password_hash = ?2, allow_editing = 1, allow_self_delete = 1 WHERE id = ?3",
         rusqlite::params!["post_password", password_hash, board_id],
     )
-    .context("update board access")?;
+    .context("update board access").map(|_completed_value| ())?;
     let post = crate::db::NewPost {
         thread_id: 0,
         board_id,
@@ -80,7 +80,7 @@ fn seed_post_password_board(
     let poll = crate::db::threads::PollInsert {
         question: "pick one",
         options: &["yes".to_owned(), "no".to_owned()],
-        expires_at: chrono::Utc::now().timestamp() + 3600,
+        expires_at: chrono::Utc::now().timestamp().saturating_add(3600),
     };
     let (thread_id, post_id, poll_id) = crate::db::create_thread_with_optional_poll(
         &conn,
@@ -257,7 +257,8 @@ fn create_reply_on_thread(
         is_op: false,
     };
     crate::db::create_reply_with_thread_update(&conn, &reply, "", true, None)
-        .context("create reply")?;
+        .context("create reply")
+        .map(|_completed_value| ())?;
     Ok(())
 }
 
@@ -290,9 +291,9 @@ fn update_cookie_store(store: &mut HashMap<String, String>, headers: &HeaderMap)
             continue;
         };
         if cookie_value.is_empty() {
-            store.remove(name);
+            let _previous_value = store.remove(name);
         } else {
-            store.insert(name.to_owned(), cookie_value.to_owned());
+            let _previous_value = store.insert(name.to_owned(), cookie_value.to_owned());
         }
     }
 }
@@ -322,7 +323,7 @@ fn activity_restore_js_uses_explicit_page_markers() -> anyhow::Result<()> {
 #[test]
 fn board_activity_cookie_removal_keeps_root_path_attributes() -> anyhow::Result<()> {
     let mut headers = HeaderMap::new();
-    headers.insert(
+    let _previous_value = headers.insert(
         header::COOKIE,
         "rustchan_board_activity=v1|1.100.1.200"
             .parse()
@@ -348,7 +349,7 @@ fn board_activity_cookie_removal_keeps_root_path_attributes() -> anyhow::Result<
 #[test]
 fn thread_activity_cookie_removal_keeps_root_path_attributes() -> anyhow::Result<()> {
     let mut headers = HeaderMap::new();
-    headers.insert(
+    let _previous_value = headers.insert(
         header::COOKIE,
         "rustchan_thread_activity=v1|1.2.200"
             .parse()
@@ -490,7 +491,7 @@ async fn post_password_board_write_actions_require_unlock() -> anyhow::Result<()
         Some("/secret/unlock?return_to=%2Fsecret")
     );
 
-    let (boundary, body) =
+    let (response_boundary, resolved_body) =
         crate::test_support::multipart_body(&[("_csrf", "csrf123"), ("body", "reply")], None);
     let reply_response = router
         .clone()
@@ -500,11 +501,11 @@ async fn post_password_board_write_actions_require_unlock() -> anyhow::Result<()
                 .uri(format!("/secret/thread/{thread_id}"))
                 .header(
                     header::CONTENT_TYPE,
-                    format!("multipart/form-data; boundary={boundary}"),
+                    format!("multipart/form-data; boundary={response_boundary}"),
                 )
                 .header(header::COOKIE, "csrf_token=csrf123")
                 .extension(crate::test_support::connect_info())
-                .body(Body::from(body))
+                .body(Body::from(resolved_body))
                 .context("request")?,
         )
         .await
@@ -609,7 +610,8 @@ async fn self_delete_requires_owned_post_cookie() -> anyhow::Result<()> {
         "UPDATE boards SET allow_self_delete = 1 WHERE id = ?1",
         rusqlite::params![board_id],
     )
-    .context("enable self delete")?;
+    .context("enable self delete")
+    .map(|_completed_value| ())?;
     let op = crate::db::NewPost {
         thread_id: 0,
         board_id,
@@ -753,7 +755,8 @@ async fn search_returns_results_without_500() -> anyhow::Result<()> {
             is_op: true,
         };
         crate::db::create_thread_with_optional_poll(&conn, board_id, None, &post, "", None, None)
-            .context("create thread")?;
+            .context("create thread")
+            .map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -788,7 +791,9 @@ async fn search_without_q_param_returns_empty_results_page() -> anyhow::Result<(
     let state = crate::test_support::app_state();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
+        crate::db::create_board(&conn, "test", "Test", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -823,14 +828,16 @@ async fn locked_board_search_returns_forbidden_unlock_page() -> anyhow::Result<(
     let state = crate::test_support::app_state();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "slock", "Secret", "", false).context("create board")?;
+        crate::db::create_board(&conn, "slock", "Secret", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
         let password_hash =
             crate::utils::crypto::hash_password("swordfish").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'slock'",
             rusqlite::params!["view_password", password_hash],
         )
-        .context("update board access")?;
+        .context("update board access").map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -872,7 +879,9 @@ async fn create_thread_accepts_valid_multipart_submission() -> anyhow::Result<()
     let state = crate::test_support::app_state();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
+        crate::db::create_board(&conn, "test", "Test", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -913,7 +922,9 @@ async fn create_thread_xhr_returns_explicit_redirect_header() -> anyhow::Result<
     let state = crate::test_support::app_state();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
+        crate::db::create_board(&conn, "test", "Test", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -968,7 +979,9 @@ async fn create_thread_xhr_validation_failure_returns_json_error() -> anyhow::Re
     let state = crate::test_support::app_state();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
+        crate::db::create_board(&conn, "test", "Test", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -1011,14 +1024,14 @@ async fn create_thread_xhr_validation_failure_returns_json_error() -> anyhow::Re
         Some(StatusCode::UNPROCESSABLE_ENTITY.as_str())
     );
 
-    let body = String::from_utf8(
+    let resolved_body = String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
             .await
             .context("response body")?
             .to_vec(),
     )
     .context("utf8 body")?;
-    anyhow::ensure!(body.contains("\"error\""));
+    anyhow::ensure!(resolved_body.contains("\"error\""));
     Ok(())
 }
 
@@ -1123,7 +1136,9 @@ async fn create_thread_rejects_mime_mismatch_with_415_inline_error() -> anyhow::
     let state = crate::test_support::app_state();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
+        crate::db::create_board(&conn, "test", "Test", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -1152,15 +1167,15 @@ async fn create_thread_rejects_mime_mismatch_with_415_inline_error() -> anyhow::
         .context("response")?;
 
     ensure_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
-    let body = String::from_utf8(
+    let resolved_body = String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
             .await
             .context("response body")?
             .to_vec(),
     )
     .context("utf8 body")?;
-    anyhow::ensure!(body.contains("post-error-banner"));
-    anyhow::ensure!(body.contains("File type not allowed"));
+    anyhow::ensure!(resolved_body.contains("post-error-banner"));
+    anyhow::ensure!(resolved_body.contains("File type not allowed"));
     Ok(())
 }
 
@@ -1169,7 +1184,9 @@ async fn create_thread_rejects_truncated_png_with_422_inline_error() -> anyhow::
     let state = crate::test_support::app_state();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
+        crate::db::create_board(&conn, "test", "Test", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -1199,15 +1216,15 @@ async fn create_thread_rejects_truncated_png_with_422_inline_error() -> anyhow::
         .context("response")?;
 
     ensure_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let body = String::from_utf8(
+    let resolved_body = String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
             .await
             .context("response body")?
             .to_vec(),
     )
     .context("utf8 body")?;
-    anyhow::ensure!(body.contains("post-error-banner"));
-    anyhow::ensure!(body.contains("image header is malformed"));
+    anyhow::ensure!(resolved_body.contains("post-error-banner"));
+    anyhow::ensure!(resolved_body.contains("image header is malformed"));
     Ok(())
 }
 
@@ -1277,7 +1294,8 @@ async fn absent_homepage_reply_badge_setting_defaults_to_enabled() -> anyhow::Re
         "DELETE FROM site_settings WHERE key = 'homepage_new_reply_badges_enabled'",
         [],
     )
-    .context("delete setting")?;
+    .context("delete setting")
+    .map(|_completed_value| ())?;
 
     anyhow::ensure!(crate::db::get_homepage_new_reply_badges_enabled(&conn));
     Ok(())
@@ -1304,7 +1322,7 @@ async fn homepage_reply_toggle_off_suppresses_only_homepage_reply_badges() -> an
         .await
         .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
-    create_thread_on_board(&state, board_id, "new thread")?;
+    create_thread_on_board(&state, board_id, "new thread").map(|_completed_value| ())?;
     create_reply_on_thread(&state, board_id, thread_id, "reply")?;
 
     let home_response = router
@@ -1433,7 +1451,7 @@ async fn homepage_thread_toggle_off_does_not_suppress_homepage_reply_badges() ->
         .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_thread_on_board(&state, board_id, "new thread")?;
+    create_thread_on_board(&state, board_id, "new thread").map(|_completed_value| ())?;
     create_reply_on_thread(&state, board_id, thread_id, "reply")?;
 
     let response = router
@@ -1574,7 +1592,7 @@ async fn new_thread_after_board_baseline_shows_homepage_badge() -> anyhow::Resul
         .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_thread_on_board(&state, board_id, "new thread")?;
+    create_thread_on_board(&state, board_id, "new thread").map(|_completed_value| ())?;
 
     let response = router
         .oneshot(
@@ -1663,7 +1681,7 @@ async fn homepage_thread_and_reply_badges_can_render_together() -> anyhow::Resul
         .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_thread_on_board(&state, board_id, "new thread")?;
+    create_thread_on_board(&state, board_id, "new thread").map(|_completed_value| ())?;
     create_reply_on_thread(&state, board_id, thread_id, "reply")?;
 
     let response = router
@@ -1707,7 +1725,7 @@ async fn board_index_visit_clears_homepage_new_thread_badge() -> anyhow::Result<
         .await
         .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
-    create_thread_on_board(&state, board_id, "new thread")?;
+    create_thread_on_board(&state, board_id, "new thread").map(|_completed_value| ())?;
 
     let clear_response = router
         .clone()
@@ -1761,7 +1779,7 @@ async fn board_catalog_visit_clears_homepage_new_thread_badge() -> anyhow::Resul
         .await
         .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
-    create_thread_on_board(&state, board_id, "new thread")?;
+    create_thread_on_board(&state, board_id, "new thread").map(|_completed_value| ())?;
 
     let clear_response = router
         .clone()
@@ -1815,7 +1833,7 @@ async fn thread_visit_clears_homepage_new_thread_badge() -> anyhow::Result<()> {
         .await
         .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
-    create_thread_on_board(&state, board_id, "new thread")?;
+    create_thread_on_board(&state, board_id, "new thread").map(|_completed_value| ())?;
 
     let clear_response = router
         .clone()
@@ -1877,7 +1895,7 @@ async fn conditional_thread_visit_that_marks_activity_read_returns_full_response
         .context("thread etag")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_thread_on_board(&state, board_id, "new thread")?;
+    create_thread_on_board(&state, board_id, "new thread").map(|_completed_value| ())?;
 
     let clear_response = router
         .clone()
@@ -1917,7 +1935,7 @@ async fn conditional_board_activity_pages_return_full_response_when_tracking_ena
 ) -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     set_new_activity_settings(&state, true, true, true)?;
-    seed_board_with_thread(&state, "tech", "op")?;
+    seed_board_with_thread(&state, "tech", "op").map(|_completed_value| ())?;
     let router = activity_router(state);
 
     for uri in ["/tech", "/tech/catalog"] {
@@ -2478,7 +2496,7 @@ async fn thread_updates_clear_homepage_new_thread_badge_cookie() -> anyhow::Resu
         .context("response")?;
     update_cookie_store(&mut cookies, baseline.headers());
 
-    create_thread_on_board(&state, board_id, "new thread")?;
+    create_thread_on_board(&state, board_id, "new thread").map(|_completed_value| ())?;
 
     let badge_home = router
         .clone()
@@ -2540,7 +2558,8 @@ async fn password_protected_board_does_not_leak_homepage_new_activity_badge() ->
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE id = ?3",
             rusqlite::params!["view_password", password_hash, board_id],
         )
-        .context("update board access")?;
+        .context("update board access")
+        .map(|_completed_value| ())?;
     }
     let router = activity_router(state);
     let cookie = format!(
@@ -2578,7 +2597,8 @@ async fn thread_updates_rejects_thread_id_from_other_board() -> anyhow::Result<(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE id = ?3",
             rusqlite::params!["view_password", password_hash, secret_board_id],
         )
-        .context("protect secret board")?;
+        .context("protect secret board")
+        .map(|_completed_value| ())?;
     }
     create_reply_on_thread(
         &state,
@@ -2733,7 +2753,7 @@ async fn catalog_baseline_tracks_only_highest_priority_threads_within_cookie_lim
     set_new_activity_settings(&state, true, true, true)?;
     let (board_id, first_thread_id) = seed_board_with_thread(&state, "tech", "op")?;
     let mut created_thread_ids = vec![first_thread_id];
-    for index in 0..120 {
+    for index in 0_i32..120_i32 {
         created_thread_ids.push(create_thread_on_board(
             &state,
             board_id,
@@ -2768,7 +2788,7 @@ async fn catalog_baseline_tracks_only_highest_priority_threads_within_cookie_lim
         })
         .context("thread activity cookie")?;
     let mut cookie_headers = HeaderMap::new();
-    cookie_headers.insert(
+    let _previous_value = cookie_headers.insert(
         header::COOKIE,
         format!("rustchan_thread_activity={cookie_value}")
             .parse()
@@ -2803,14 +2823,17 @@ async fn create_thread_xhr_banned_user_redirects_to_banned_page() -> anyhow::Res
     let state = crate::test_support::app_state();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
+        crate::db::create_board(&conn, "test", "Test", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
         crate::db::add_ban(
             &conn,
             &crate::utils::crypto::hash_ip("127.0.0.1", &crate::config::CONFIG.cookie_secret),
             "testing ban",
             None,
         )
-        .context("add ban")?;
+        .context("add ban")
+        .map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -2855,12 +2878,15 @@ async fn create_thread_xhr_captcha_failure_returns_inline_json_error() -> anyhow
     let state = crate::test_support::app_state();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
+        crate::db::create_board(&conn, "test", "Test", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
         conn.execute(
             "UPDATE boards SET allow_captcha = 1 WHERE short_name = 'test'",
             [],
         )
-        .context("enable captcha")?;
+        .context("enable captcha")
+        .map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -2905,14 +2931,14 @@ async fn create_thread_xhr_captcha_failure_returns_inline_json_error() -> anyhow
         Some(StatusCode::UNPROCESSABLE_ENTITY.as_str())
     );
 
-    let body = String::from_utf8(
+    let resolved_body = String::from_utf8(
         to_bytes(response.into_body(), usize::MAX)
             .await
             .context("response body")?
             .to_vec(),
     )
     .context("utf8 body")?;
-    anyhow::ensure!(body.contains("CAPTCHA verification failed"));
+    anyhow::ensure!(resolved_body.contains("CAPTCHA verification failed"));
     Ok(())
 }
 
@@ -2956,7 +2982,7 @@ async fn duplicate_report_redirects_back_without_500() -> anyhow::Result<()> {
         .route("/report", post(super::file_report))
         .with_state(state.clone());
 
-    for _ in 0..2 {
+    for _ in 0_i32..2_i32 {
         let response = router
             .clone()
             .oneshot(
@@ -3053,7 +3079,9 @@ async fn banned_actor_cannot_file_reports_and_unban_restores_reporting() -> anyh
     let ip_hash = loopback_ip_hash();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::add_ban(&conn, &ip_hash, "report ban reason", None).context("add ban")?;
+        crate::db::add_ban(&conn, &ip_hash, "report ban reason", None)
+            .context("add ban")
+            .map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -3105,7 +3133,8 @@ async fn banned_actor_cannot_file_reports_and_unban_restores_reporting() -> anyh
             "DELETE FROM bans WHERE ip_hash = ?1",
             rusqlite::params![ip_hash],
         )
-        .context("remove ban")?;
+        .context("remove ban")
+        .map(|_completed_value| ())?;
     }
 
     let after_unban = router
@@ -3153,7 +3182,7 @@ fn seed_votable_poll(state: &crate::middleware::AppState) -> anyhow::Result<i64>
     let poll = crate::db::threads::PollInsert {
         question: "pick one",
         options: &["yes".to_owned(), "no".to_owned()],
-        expires_at: chrono::Utc::now().timestamp() + 3600,
+        expires_at: chrono::Utc::now().timestamp().saturating_add(3600),
     };
     let (_, _, poll_id) = crate::db::create_thread_with_optional_poll(
         &conn,
@@ -3180,7 +3209,9 @@ async fn banned_actor_cannot_vote_and_unban_restores_voting() -> anyhow::Result<
     let ip_hash = loopback_ip_hash();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::add_ban(&conn, &ip_hash, "vote ban reason", None).context("add ban")?;
+        crate::db::add_ban(&conn, &ip_hash, "vote ban reason", None)
+            .context("add ban")
+            .map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -3230,7 +3261,8 @@ async fn banned_actor_cannot_vote_and_unban_restores_voting() -> anyhow::Result<
             "DELETE FROM bans WHERE ip_hash = ?1",
             rusqlite::params![ip_hash],
         )
-        .context("remove ban")?;
+        .context("remove ban")
+        .map(|_completed_value| ())?;
     }
 
     let after_unban = router
@@ -3251,7 +3283,9 @@ async fn create_thread_rejects_uploads_on_upload_disabled_board() -> anyhow::Res
     let state = crate::test_support::app_state();
     {
         let mut conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "test", "Test", "", false).context("create board")?;
+        crate::db::create_board(&conn, "test", "Test", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
         crate::db::update_board_settings(
             &mut conn,
             1,
@@ -3325,14 +3359,16 @@ async fn view_locked_catalog_renders_unlock_page() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "secret", "Secret", "", false).context("create board")?;
+        crate::db::create_board(&conn, "secret", "Secret", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
         let password_hash =
             crate::utils::crypto::hash_password("swordfish").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'secret'",
             rusqlite::params!["view_password", password_hash],
         )
-        .context("update board access")?;
+        .context("update board access").map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -3369,14 +3405,16 @@ async fn unlock_board_access_sets_cookie_and_redirects() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "secret", "Secret", "", false).context("create board")?;
+        crate::db::create_board(&conn, "secret", "Secret", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
         let password_hash =
             crate::utils::crypto::hash_password("swordfish").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'secret'",
             rusqlite::params!["view_password", password_hash],
         )
-        .context("update board access")?;
+        .context("update board access").map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -3424,14 +3462,16 @@ async fn unlock_board_access_rejects_malformed_return_to_and_uses_board_default(
     let state = crate::test_support::app_state();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "secret", "Secret", "", false).context("create board")?;
+        crate::db::create_board(&conn, "secret", "Secret", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
         let password_hash =
             crate::utils::crypto::hash_password("swordfish").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'secret'",
             rusqlite::params!["view_password", password_hash],
         )
-        .context("update board access")?;
+        .context("update board access").map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -3470,14 +3510,16 @@ async fn changing_board_password_invalidates_existing_unlock_cookie() -> anyhow:
     let state = crate::test_support::app_state();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "secret", "Secret", "", false).context("create board")?;
+        crate::db::create_board(&conn, "secret", "Secret", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
         let password_hash =
             crate::utils::crypto::hash_password("swordfish").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'secret'",
             rusqlite::params!["view_password", password_hash],
         )
-        .context("update board access")?;
+        .context("update board access").map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -3519,10 +3561,11 @@ async fn changing_board_password_invalidates_existing_unlock_cookie() -> anyhow:
             "UPDATE boards SET access_password_hash = ?1 WHERE short_name = 'secret'",
             rusqlite::params![password_hash],
         )
-        .context("change board password")?;
+        .context("change board password")
+        .map(|_completed_value| ())?;
     }
 
-    let response = router
+    let resolved_response = router
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -3535,7 +3578,7 @@ async fn changing_board_password_invalidates_existing_unlock_cookie() -> anyhow:
         .await
         .context("catalog response")?;
 
-    ensure_eq!(response.status(), StatusCode::FORBIDDEN);
+    ensure_eq!(resolved_response.status(), StatusCode::FORBIDDEN);
     Ok(())
 }
 
@@ -3618,7 +3661,7 @@ async fn theme_redirect_persists_no_js_theme_without_csrf() -> anyhow::Result<()
     ensure_eq!(rejected.status(), StatusCode::FORBIDDEN);
     anyhow::ensure!(rejected.headers().get(header::SET_COOKIE).is_none());
 
-    let accepted = router
+    let resolved_accepted = router
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -3630,15 +3673,15 @@ async fn theme_redirect_persists_no_js_theme_without_csrf() -> anyhow::Result<()
         .await
         .context("accepted response")?;
 
-    ensure_eq!(accepted.status(), StatusCode::SEE_OTHER);
+    ensure_eq!(resolved_accepted.status(), StatusCode::SEE_OTHER);
     ensure_eq!(
-        accepted
+        resolved_accepted
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok()),
         Some("/secret/catalog")
     );
-    anyhow::ensure!(accepted
+    anyhow::ensure!(resolved_accepted
         .headers()
         .get_all(header::SET_COOKIE)
         .iter()
@@ -3650,7 +3693,7 @@ async fn theme_redirect_persists_no_js_theme_without_csrf() -> anyhow::Result<()
 #[test]
 fn user_preferences_from_jar_defaults_and_ignores_invalid_values() -> anyhow::Result<()> {
     let mut headers = HeaderMap::new();
-    headers.insert(
+    let _previous_value = headers.insert(
         header::COOKIE,
         "rustchan_hide_nsfw=maybe; rustchan_video_audio=loud; rustchan_preferred_view=grid; rustchan_activity_badges=maybe"
             .parse()
@@ -3834,7 +3877,7 @@ async fn set_user_preferences_accepts_admin_scoped_csrf_from_admin_panel() -> an
 async fn preferences_theme_cookie_drives_rendered_theme_after_reload() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     install_preference_test_themes();
-    seed_board_with_thread(&state, "tech", "op")?;
+    seed_board_with_thread(&state, "tech", "op").map(|_completed_value| ())?;
     let router = Router::new()
         .route("/preferences", post(super::set_user_preferences))
         .route("/{board}", get(super::board_index))
@@ -3977,7 +4020,7 @@ async fn partial_preference_updates_preserve_unrelated_cookies() -> anyhow::Resu
 async fn user_theme_overrides_configured_default_and_changes_etag() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     install_preference_test_themes();
-    seed_board_with_thread(&state, "tech", "op")?;
+    seed_board_with_thread(&state, "tech", "op").map(|_completed_value| ())?;
     crate::templates::set_live_default_theme("forest");
     let router = activity_router(state);
 
@@ -4119,14 +4162,20 @@ async fn preference_specific_html_responses_vary_on_cookie() -> anyhow::Result<(
 async fn thread_updates_nav_uses_cookie_preferences() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     let conn = state.db.get().context("db connection")?;
-    crate::db::create_board(&conn, "tech", "Tech", "", false).context("create sfw board")?;
-    crate::db::create_board(&conn, "x", "Adult", "", true).context("create nsfw board")?;
+    crate::db::create_board(&conn, "tech", "Tech", "", false)
+        .context("create sfw board")
+        .map(|_completed_value| ())?;
+    crate::db::create_board(&conn, "x", "Adult", "", true)
+        .context("create nsfw board")
+        .map(|_completed_value| ())?;
     drop(conn);
     let (board_id, thread_id) = seed_board_with_thread(&state, "chat", "op")?;
     create_reply_on_thread(&state, board_id, thread_id, "reply")?;
     {
-        let conn = state.db.get().context("db connection")?;
-        crate::templates::set_live_boards(crate::db::get_all_boards(&conn).context("load boards")?);
+        let recovered_conn = state.db.get().context("db connection")?;
+        crate::templates::set_live_boards(
+            crate::db::get_all_boards(&recovered_conn).context("load boards")?,
+        );
     }
     let router = activity_router(state);
 
@@ -4164,12 +4213,14 @@ async fn malformed_board_password_hash_renders_misconfiguration_message() -> any
     let state = crate::test_support::app_state();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "broken", "Broken", "", false).context("create board")?;
+        crate::db::create_board(&conn, "broken", "Broken", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'broken'",
             rusqlite::params!["view_password", "not-a-phc-string"],
         )
-        .context("update board access")?;
+        .context("update board access").map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -4211,14 +4262,16 @@ async fn unlock_board_access_rate_limits_repeated_failures() -> anyhow::Result<(
     let state = crate::test_support::app_state();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "srate", "Secret", "", false).context("create board")?;
+        crate::db::create_board(&conn, "srate", "Secret", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
         let password_hash =
             crate::utils::crypto::hash_password("swordfish").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'srate'",
             rusqlite::params!["view_password", password_hash],
         )
-        .context("update board access")?;
+        .context("update board access").map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -4282,14 +4335,16 @@ async fn locked_board_media_requires_unlock() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     {
         let conn = state.db.get().context("db connection")?;
-        crate::db::create_board(&conn, "secret", "Secret", "", false).context("create board")?;
+        crate::db::create_board(&conn, "secret", "Secret", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
         let password_hash =
             crate::utils::crypto::hash_password("swordfish").context("hash password")?;
         conn.execute(
             "UPDATE boards SET access_mode = ?1, access_password_hash = ?2 WHERE short_name = 'secret'",
             rusqlite::params!["view_password", password_hash],
         )
-        .context("update board access")?;
+        .context("update board access").map(|_completed_value| ())?;
     }
 
     let router = Router::new()
@@ -4322,7 +4377,8 @@ async fn submit_appeal_is_rate_limited_to_one_open_window() -> anyhow::Result<()
             "test ban",
             None,
         )
-        .context("add ban")?;
+        .context("add ban")
+        .map(|_completed_value| ())?;
     }
 
     let router = Router::new()

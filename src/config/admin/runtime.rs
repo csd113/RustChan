@@ -81,7 +81,14 @@ impl RuntimeSection {
     pub const fn route_key(self) -> &'static str {
         match self {
             Self::Maintenance => "maintenance",
-            _ => self.key(),
+            Self::Tor
+            | Self::Media
+            | Self::System
+            | Self::Https
+            | Self::Access
+            | Self::Display
+            | Self::Logging
+            | Self::Timeouts => self.key(),
         }
     }
 }
@@ -134,25 +141,10 @@ pub fn save_section(
     let after = super::rewrite_root_settings(&before, &updates)?;
     let saved = super::resolve_file(&after, &Environment::Values(&empty))?;
     validate_section(section, &saved)?;
-    if section == RuntimeSection::Media {
-        for (tool, old, new, required) in [
-            (
-                "ffmpeg",
-                &previous.ffmpeg_path,
-                &saved.ffmpeg_path,
-                saved.require_ffmpeg,
-            ),
-            (
-                "ffprobe",
-                &previous.ffprobe_path,
-                &saved.ffprobe_path,
-                false,
-            ),
-        ] {
-            if old != new || required {
-                probe_tool(tool, new)?;
-            }
-        }
+    if section == RuntimeSection::Media
+        && (previous.ffmpeg_path != saved.ffmpeg_path || saved.require_ffmpeg)
+    {
+        probe_tool("ffmpeg", &saved.ffmpeg_path)?;
     }
     super::save_root_at(&path, &updates, &Environment::Process, |candidate| {
         validate_section(section, candidate)
@@ -160,7 +152,7 @@ pub fn save_section(
 }
 
 /// Validate related section values without changing paths, workers or listeners.
-fn validate_section(section: RuntimeSection, config: &Config) -> anyhow::Result<()> {
+pub(super) fn validate_section(section: RuntimeSection, config: &Config) -> anyhow::Result<()> {
     super::validate_network(config)?;
     for definition in section.definitions() {
         if let InputKind::Number(min, max) = definition.kind {
@@ -178,7 +170,20 @@ fn validate_section(section: RuntimeSection, config: &Config) -> anyhow::Result<
         config
             .tor_service_nickname
             .parse::<tor_hsservice::HsNickname>()
-            .context("invalid Tor service nickname")?;
+            .context("invalid Tor service nickname")
+            .map(|_validated_value| ())?;
+    }
+    if section == RuntimeSection::Media {
+        // Existing operator overrides may name an unavailable optional PATH tool.
+        // Newly submitted tool paths still receive the stricter executable probe in save_section.
+        ensure!(
+            !config.ffmpeg_path.is_empty()
+                && !config.ffmpeg_path.chars().any(char::is_control)
+                && !std::path::Path::new(&config.ffmpeg_path)
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir),
+            "FFmpeg path must be nonempty without control characters or parent traversal"
+        );
     }
     Ok(())
 }
@@ -227,46 +232,45 @@ fn probe_tool(tool: &str, path: &str) -> anyhow::Result<()> {
 
 /// Dedicated tor controls.
 static TOR_SETTINGS: &[SettingDefinition] = &[
-    SettingDefinition { key: "enable_tor_support", label: "Built-in onion service", environment: "CHAN_TOR_SUPPORT", kind: InputKind::Boolean, value: |c| c.enable_tor_support.to_string(), help: "Enable the built-in Arti onion service. Disabling it removes onion access after restart." },
-    SettingDefinition { key: "tor_only", label: "Tor-only listener binding", environment: "CHAN_TOR_ONLY", kind: InputKind::Boolean, value: |c| c.tor_only.to_string(), help: "Requires Tor support and forces the primary listener to loopback. Review current clearnet access before restarting. Cannot use ACME." },
-    SettingDefinition { key: "tor_bootstrap_timeout_secs", label: "Tor bootstrap timeout (seconds)", environment: "CHAN_TOR_BOOTSTRAP_TIMEOUT", kind: InputKind::Number(1, 3600), value: |c| c.tor_bootstrap_timeout_secs.to_string(), help: "Deadline per bootstrap attempt; increase on censored networks. Default: 120 seconds." },
-    SettingDefinition { key: "tor_max_concurrent_streams", label: "Concurrent Tor streams", environment: "CHAN_TOR_MAX_STREAMS", kind: InputKind::Number(1, 65536), value: |c| c.tor_max_concurrent_streams.to_string(), help: "Each stream holds a file descriptor. Excess streams are dropped. Default: 512." },
-    SettingDefinition { key: "tor_service_nickname", label: "Onion-service identity nickname", environment: "CHAN_TOR_NICKNAME", kind: InputKind::Text, value: |c| c.tor_service_nickname.clone(), help: "Changing this selects a different identity in the Tor keystore and can change the onion address. Back up the identity first." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "enable_tor_support", label: "Built-in onion service", environment: "CHAN_TOR_SUPPORT", kind: InputKind::Boolean, value: |c| c.enable_tor_support.to_string(), help: "Enable the built-in Arti onion service. Disabling it removes onion access after restart." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "tor_only", label: "Tor-only listener binding", environment: "CHAN_TOR_ONLY", kind: InputKind::Boolean, value: |c| c.tor_only.to_string(), help: "Requires Tor support and forces the primary listener to loopback. Review current clearnet access before restarting. Cannot use ACME." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "tor_bootstrap_timeout_secs", label: "Tor bootstrap timeout (seconds)", environment: "CHAN_TOR_BOOTSTRAP_TIMEOUT", kind: InputKind::Number(1, 3600), value: |c| c.tor_bootstrap_timeout_secs.to_string(), help: "Deadline per bootstrap attempt; increase on censored networks. Default: 120 seconds." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "tor_max_concurrent_streams", label: "Concurrent Tor streams", environment: "CHAN_TOR_MAX_STREAMS", kind: InputKind::Number(1, 65536), value: |c| c.tor_max_concurrent_streams.to_string(), help: "Each stream holds a file descriptor. Excess streams are dropped. Default: 512." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "tor_service_nickname", label: "Onion-service identity nickname", environment: "CHAN_TOR_NICKNAME", kind: InputKind::Text, value: |c| c.tor_service_nickname.clone(), help: "Changing this selects a different identity in the Tor keystore and can change the onion address. Back up the identity first." },
 ];
 
 /// Dedicated media controls.
 static MEDIA_SETTINGS: &[SettingDefinition] = &[
-    SettingDefinition { key: "max_image_size_mb", label: "New-board image upload default (MiB)", environment: "CHAN_MAX_IMAGE_MB", kind: InputKind::Number(1, 100), value: |c| (c.max_image_size / (1024 * 1024)).to_string(), help: "Upload limit for newly created boards. Existing boards retain their own caps. New-board PDFs also derive their cap from this default." },
-    SettingDefinition { key: "max_video_size_mb", label: "New-board video upload default (MiB)", environment: "CHAN_MAX_VIDEO_MB", kind: InputKind::Number(1, 2048), value: |c| (c.max_video_size / (1024 * 1024)).to_string(), help: "Upload limit for newly created boards; edit existing per-board caps under Boards." },
-    SettingDefinition { key: "max_audio_size_mb", label: "New-board audio upload default (MiB)", environment: "CHAN_MAX_AUDIO_MB", kind: InputKind::Number(1, 512), value: |c| (c.max_audio_size / (1024 * 1024)).to_string(), help: "Upload limit for newly created boards; existing boards retain their stored caps." },
-    SettingDefinition { key: "enable_any_file_uploads_feature", label: "Master arbitrary-file upload gate", environment: "CHAN_ENABLE_ANY_FILE_UPLOADS_FEATURE", kind: InputKind::Boolean, value: |c| c.enable_any_file_uploads_feature.to_string(), help: "Both this global gate and the per-board arbitrary-file checkbox must be enabled. This does not change individual board preferences." },
-    SettingDefinition { key: "require_ffmpeg", label: "Require FFmpeg at startup", environment: "CHAN_REQUIRE_FFMPEG", kind: InputKind::Boolean, value: |c| c.require_ffmpeg.to_string(), help: "Missing FFmpeg becomes a startup error. FFprobe is detected separately; this flag does not make missing FFprobe fatal." },
-    SettingDefinition { key: "ffmpeg_path", label: "FFmpeg executable", environment: "CHAN_FFMPEG_PATH", kind: InputKind::Text, value: |c| c.ffmpeg_path.clone(), help: "Use ffmpeg for PATH lookup, or an absolute executable path. New tool paths are checked with a bounded version probe before saving." },
-    SettingDefinition { key: "ffprobe_path", label: "FFprobe executable", environment: "CHAN_FFPROBE_PATH", kind: InputKind::Text, value: |c| c.ffprobe_path.clone(), help: "Use ffprobe for PATH lookup, or an absolute executable path. Missing FFprobe reduces media metadata support." },
-    SettingDefinition { key: "thumb_size", label: "Generated thumbnail dimension (pixels)", environment: "CHAN_THUMB_SIZE", kind: InputKind::Number(16, 4096), value: |c| c.thumb_size.to_string(), help: "Applies to thumbnails generated after restart. Existing thumbnails are not regenerated." },
-    SettingDefinition { key: "job_queue_capacity", label: "Background queue capacity (pending jobs)", environment: "CHAN_JOB_QUEUE_CAPACITY", kind: InputKind::Number(0, 1_000_000), value: |c| c.job_queue_capacity.to_string(), help: "0 is unlimited. Once full, the queue drops new media jobs with a warning. Current queue pressure is shown in Site Health." },
-    SettingDefinition { key: "waveform_cache_max_mb", label: "Thumbnail/waveform cache budget (MiB)", environment: "CHAN_WAVEFORM_CACHE_MAX_MB", kind: InputKind::Number(0, 1_048_576), value: |c| (c.waveform_cache_max_bytes / (1024 * 1024)).to_string(), help: "Oldest cache files are evicted by a background task when the budget is exceeded. 0 disables eviction." },
-    SettingDefinition { key: "archive_before_prune", label: "Always archive overflow threads", environment: "CHAN_ARCHIVE_BEFORE_PRUNE", kind: InputKind::Boolean, value: |c| c.archive_before_prune.to_string(), help: "Overrides per-board overflow deletion/archive policy when enabled. Boards still retain their stored allow_archive preference." },
-    SettingDefinition { key: "media_reconcile_repair_enabled", label: "Permit safe reconciliation repairs", environment: "CHAN_MEDIA_RECONCILE_REPAIR_ENABLED", kind: InputKind::Boolean, value: |c| c.media_reconcile_repair_enabled.to_string(), help: "Separate repair permission from periodic audits. Only bounded, verified safe repairs are scheduled." },
-    SettingDefinition { key: "media_reconcile_interval_hours", label: "Reconciliation audit interval (hours)", environment: "CHAN_MEDIA_RECONCILE_INTERVAL_HOURS", kind: InputKind::Number(0, 8760), value: |c| c.media_reconcile_interval_hours.to_string(), help: "0 disables periodic audit passes. Manual maintenance remains available." },
-    SettingDefinition { key: "media_reconcile_files_per_pass", label: "Filesystem entries per audit pass", environment: "CHAN_MEDIA_RECONCILE_FILES_PER_PASS", kind: InputKind::Number(0, 1_000_000), value: |c| c.media_reconcile_files_per_pass.to_string(), help: "Bound the filesystem work performed by each reconciliation pass." },
-    SettingDefinition { key: "media_reconcile_database_rows_per_pass", label: "Reference rows per audit pass", environment: "CHAN_MEDIA_RECONCILE_DATABASE_ROWS_PER_PASS", kind: InputKind::Number(0, 10_000_000), value: |c| c.media_reconcile_database_rows_per_pass.to_string(), help: "Bound the authoritative-reference snapshot used by each pass." },
-    SettingDefinition { key: "media_reconcile_hash_bytes_per_pass", label: "Bytes hashed per audit pass", environment: "CHAN_MEDIA_RECONCILE_HASH_BYTES_PER_PASS", kind: InputKind::Number(0, 1_099_511_627_776), value: |c| c.media_reconcile_hash_bytes_per_pass.to_string(), help: "I/O budget in bytes. Default: 67108864 bytes (64 MiB)." },
-    SettingDefinition { key: "media_reconcile_repairs_per_pass", label: "Repair attempts per audit pass", environment: "CHAN_MEDIA_RECONCILE_REPAIRS_PER_PASS", kind: InputKind::Number(0, 1_000_000), value: |c| c.media_reconcile_repairs_per_pass.to_string(), help: "Used when repair permission is enabled; caps repair work per pass." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "max_image_size_mb", label: "New-board image upload default (MiB)", environment: "CHAN_MAX_IMAGE_MB", kind: InputKind::Number(1, 100), value: |c| (c.max_image_size / (1024 * 1024)).to_string(), help: "Upload limit for newly created boards. Existing boards retain their own caps. New-board PDFs also derive their cap from this default." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "max_video_size_mb", label: "New-board video upload default (MiB)", environment: "CHAN_MAX_VIDEO_MB", kind: InputKind::Number(1, 2048), value: |c| (c.max_video_size / (1024 * 1024)).to_string(), help: "Upload limit for newly created boards; edit existing per-board caps under Boards." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "max_audio_size_mb", label: "New-board audio upload default (MiB)", environment: "CHAN_MAX_AUDIO_MB", kind: InputKind::Number(1, 512), value: |c| (c.max_audio_size / (1024 * 1024)).to_string(), help: "Upload limit for newly created boards; existing boards retain their stored caps." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "enable_any_file_uploads_feature", label: "Master arbitrary-file upload gate", environment: "CHAN_ENABLE_ANY_FILE_UPLOADS_FEATURE", kind: InputKind::Boolean, value: |c| c.enable_any_file_uploads_feature.to_string(), help: "Both this global gate and the per-board arbitrary-file checkbox must be enabled. This does not change individual board preferences." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "require_ffmpeg", label: "Require FFmpeg at startup", environment: "CHAN_REQUIRE_FFMPEG", kind: InputKind::Boolean, value: |c| c.require_ffmpeg.to_string(), help: "Missing FFmpeg becomes a startup error. Internal Rust image, metadata, PDF and common-audio processing does not need FFmpeg." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "ffmpeg_path", label: "FFmpeg executable", environment: "CHAN_FFMPEG_PATH", kind: InputKind::Text, value: |c| c.ffmpeg_path.clone(), help: "Use ffmpeg for PATH lookup, or an absolute executable path. New tool paths are checked with a bounded version probe before saving." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "thumb_size", label: "Generated thumbnail dimension (pixels)", environment: "CHAN_THUMB_SIZE", kind: InputKind::Number(16, 4096), value: |c| c.thumb_size.to_string(), help: "Applies to thumbnails generated after restart. Existing thumbnails are not regenerated." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "job_queue_capacity", label: "Background queue capacity (pending jobs)", environment: "CHAN_JOB_QUEUE_CAPACITY", kind: InputKind::Number(0, 1_000_000), value: |c| c.job_queue_capacity.to_string(), help: "0 is unlimited. Once full, the queue drops new media jobs with a warning. Current queue pressure is shown in Site Health." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "waveform_cache_max_mb", label: "Thumbnail/waveform cache budget (MiB)", environment: "CHAN_WAVEFORM_CACHE_MAX_MB", kind: InputKind::Number(0, 1_048_576), value: |c| (c.waveform_cache_max_bytes / (1024 * 1024)).to_string(), help: "Oldest cache files are evicted by a background task when the budget is exceeded. 0 disables eviction." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "archive_before_prune", label: "Always archive overflow threads", environment: "CHAN_ARCHIVE_BEFORE_PRUNE", kind: InputKind::Boolean, value: |c| c.archive_before_prune.to_string(), help: "Overrides per-board overflow deletion/archive policy when enabled. Boards still retain their stored allow_archive preference." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "media_reconcile_repair_enabled", label: "Permit safe reconciliation repairs", environment: "CHAN_MEDIA_RECONCILE_REPAIR_ENABLED", kind: InputKind::Boolean, value: |c| c.media_reconcile_repair_enabled.to_string(), help: "Separate repair permission from periodic audits. Only bounded, verified safe repairs are scheduled." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "media_reconcile_interval_hours", label: "Reconciliation audit interval (hours)", environment: "CHAN_MEDIA_RECONCILE_INTERVAL_HOURS", kind: InputKind::Number(0, 8760), value: |c| c.media_reconcile_interval_hours.to_string(), help: "0 disables periodic audit passes. Manual maintenance remains available." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "media_reconcile_files_per_pass", label: "Filesystem entries per audit pass", environment: "CHAN_MEDIA_RECONCILE_FILES_PER_PASS", kind: InputKind::Number(0, 1_000_000), value: |c| c.media_reconcile_files_per_pass.to_string(), help: "Bound the filesystem work performed by each reconciliation pass." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "media_reconcile_database_rows_per_pass", label: "Reference rows per audit pass", environment: "CHAN_MEDIA_RECONCILE_DATABASE_ROWS_PER_PASS", kind: InputKind::Number(0, 10_000_000), value: |c| c.media_reconcile_database_rows_per_pass.to_string(), help: "Bound the authoritative-reference snapshot used by each pass." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "media_reconcile_hash_bytes_per_pass", label: "Bytes hashed per audit pass", environment: "CHAN_MEDIA_RECONCILE_HASH_BYTES_PER_PASS", kind: InputKind::Number(0, 1_099_511_627_776), value: |c| c.media_reconcile_hash_bytes_per_pass.to_string(), help: "I/O budget in bytes. Default: 67108864 bytes (64 MiB)." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "media_reconcile_repairs_per_pass", label: "Repair attempts per audit pass", environment: "CHAN_MEDIA_RECONCILE_REPAIRS_PER_PASS", kind: InputKind::Number(0, 1_000_000), value: |c| c.media_reconcile_repairs_per_pass.to_string(), help: "Used when repair permission is enabled; caps repair work per pass." },
 ];
 
 /// Dedicated maintenance controls.
 static MAINTENANCE_SETTINGS: &[SettingDefinition] = &[
-    SettingDefinition { key: "wal_checkpoint_interval_secs", label: "WAL checkpoint interval (seconds)", environment: "CHAN_WAL_CHECKPOINT_SECS", kind: InputKind::Number(0, 31_536_000), value: |c| c.wal_checkpoint_interval.to_string(), help: "0 disables the recurring checkpoint. Existing manual database actions remain available." },
-    SettingDefinition { key: "auto_vacuum_interval_hours", label: "Automatic VACUUM interval (hours)", environment: "CHAN_AUTO_VACUUM_HOURS", kind: InputKind::Number(0, 8760), value: |c| c.auto_vacuum_interval_hours.to_string(), help: "0 disables recurring VACUUM. Manual VACUUM is available in database maintenance." },
-    SettingDefinition { key: "poll_cleanup_interval_hours", label: "Expired poll-vote cleanup interval (hours)", environment: "CHAN_POLL_CLEANUP_HOURS", kind: InputKind::Number(0, 8760), value: |c| c.poll_cleanup_interval_hours.to_string(), help: "0 disables periodic cleanup. Default: 72 hours." },
-    SettingDefinition { key: "db_warn_threshold_mb", label: "Database size warning threshold (MiB)", environment: "CHAN_DB_WARN_THRESHOLD_MB", kind: InputKind::Number(0, 1_048_576), value: |c| (c.db_warn_threshold_bytes / (1024 * 1024)).to_string(), help: "0 disables the admin warning. This warns about size; it does not cap or delete database contents." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "wal_checkpoint_interval_secs", label: "WAL checkpoint interval (seconds)", environment: "CHAN_WAL_CHECKPOINT_SECS", kind: InputKind::Number(0, 31_536_000), value: |c| c.wal_checkpoint_interval.to_string(), help: "0 disables the recurring checkpoint. Existing manual database actions remain available." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "auto_vacuum_interval_hours", label: "Automatic VACUUM interval (hours)", environment: "CHAN_AUTO_VACUUM_HOURS", kind: InputKind::Number(0, 8760), value: |c| c.auto_vacuum_interval_hours.to_string(), help: "0 disables recurring VACUUM. Manual VACUUM is available in database maintenance." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "poll_cleanup_interval_hours", label: "Expired poll-vote cleanup interval (hours)", environment: "CHAN_POLL_CLEANUP_HOURS", kind: InputKind::Number(0, 8760), value: |c| c.poll_cleanup_interval_hours.to_string(), help: "0 disables periodic cleanup. Default: 72 hours." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "db_warn_threshold_mb", label: "Database size warning threshold (MiB)", environment: "CHAN_DB_WARN_THRESHOLD_MB", kind: InputKind::Number(0, 1_048_576), value: |c| (c.db_warn_threshold_bytes / (1024 * 1024)).to_string(), help: "0 disables the admin warning. This warns about size; it does not cap or delete database contents." },
 ];
 
 /// Dedicated system controls.
 static SYSTEM_SETTINGS: &[SettingDefinition] = &[
-    SettingDefinition { key: "blocking_threads", label: "Tokio blocking-pool size (threads)", environment: "CHAN_BLOCKING_THREADS", kind: InputKind::Number(0, 4096), value: |c| c.blocking_threads.to_string(), help: "0 selects logical CPUs × 4 (16 if CPU detection is unavailable). Active and saved state show the resolved count. Restart required." },
-    SettingDefinition { key: "db_pool_size", label: "SQLite connection-pool size", environment: "CHAN_DB_POOL_SIZE", kind: InputKind::Number(1, 128), value: |c| c.db_pool_size.to_string(), help: "Default: 8 connections. Each connection has roughly 32 MiB of page cache; increasing this can substantially raise memory use." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "blocking_threads", label: "Tokio blocking-pool size (threads)", environment: "CHAN_BLOCKING_THREADS", kind: InputKind::Number(0, 4096), value: |c| c.blocking_threads.to_string(), help: "0 selects logical CPUs × 4 (16 if CPU detection is unavailable). Active and saved state show the resolved count. Restart required." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "db_pool_size", label: "SQLite connection-pool size", environment: "CHAN_DB_POOL_SIZE", kind: InputKind::Number(1, 128), value: |c| c.db_pool_size.to_string(), help: "Default: 8 connections. Each connection has roughly 32 MiB of page cache; increasing this can substantially raise memory use." },
 ];
 
 #[cfg(test)]
@@ -313,8 +317,8 @@ mod tests {
             );
         }
         ensure!(
-            keys.len() == 63,
-            "registry must cover 39 inventoried root controls, 12 TLS leaves and 12 new operator choices"
+            keys.len() == 62,
+            "registry must cover 38 inventoried root controls, 12 TLS leaves and 12 new operator choices"
         );
         let config = resolve_file("", &Environment::Values(&BTreeMap::new()))?;
         ensure!(
@@ -351,7 +355,7 @@ mod tests {
                 RuntimeSection::Logging => ("log_filter", "warn"),
                 RuntimeSection::Timeouts => ("read_timeout_secs", "45"),
             };
-            form.insert(key.to_owned(), replacement.to_owned());
+            let _previous_value = form.insert(key.to_owned(), replacement.to_owned());
             let updates = parse_settings_form(section.definitions(), &form)?;
             save_root_at(
                 &path,
@@ -414,7 +418,7 @@ mod tests {
             (RuntimeSection::System, "db_pool_size", "0"),
         ] {
             let mut form = form_for(section)?;
-            form.insert(key.to_owned(), invalid.to_owned());
+            let _previous_value = form.insert(key.to_owned(), invalid.to_owned());
             let result = parse_settings_form(section.definitions(), &form).and_then(|updates| {
                 save_root_at(
                     &path,
@@ -467,7 +471,6 @@ mod tests {
             );
         }
         validate_tool_path("ffmpeg", "ffmpeg")?;
-        validate_tool_path("ffprobe", "ffprobe")?;
         Ok(())
     }
 

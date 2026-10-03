@@ -37,7 +37,7 @@ async fn serve_named_global_favicon(
         |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         |resp| {
             let mut resp = resp.map(axum::body::Body::new);
-            resp.headers_mut().insert(
+            let _previous_value = resp.headers_mut().insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static(favicon_content_type(file_name)),
             );

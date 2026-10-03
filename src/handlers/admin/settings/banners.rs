@@ -174,7 +174,8 @@ fn restore_board_banner_inheritance_if_empty(
         conn.execute(
             "UPDATE boards SET banner_mode = 'inherit' WHERE id = ?1 AND banner_mode = 'override'",
             rusqlite::params![board_id],
-        )?;
+        )
+        .map(|_completed_value| ())?;
     }
     Ok(())
 }
@@ -211,7 +212,7 @@ fn delete_banner_asset_safely(
     let tx = conn.unchecked_transaction()?;
     let asset = db::get_banner_asset(&tx, banner_id)?
         .ok_or_else(|| AppError::BadRequest("Banner not found.".into()))?;
-    db::delete_banner_asset(&tx, banner_id)?;
+    db::delete_banner_asset(&tx, banner_id).map(|_completed_value| ())?;
     if asset.scope == BannerScope::Board {
         restore_board_banner_inheritance_if_empty(&tx, asset.board_id)?;
     }
@@ -240,11 +241,12 @@ fn clear_board_banner_assets_safely(
     let tx = conn.unchecked_transaction()?;
     let assets = db::list_banner_assets_for_board(&tx, board_id)?;
     let pending_op = banner_cleanup_payload(&assets)?;
-    db::delete_board_banner_assets(&tx, board_id)?;
+    db::delete_board_banner_assets(&tx, board_id).map(|_completed_value| ())?;
     tx.execute(
         "UPDATE boards SET banner_mode = 'inherit' WHERE id = ?1 AND banner_mode = 'override'",
         rusqlite::params![board_id],
-    )?;
+    )
+    .map(|_completed_value| ())?;
     if let Some(op) = pending_op.as_ref() {
         db::insert_pending_fs_op(&tx, op)?;
     }
@@ -270,7 +272,7 @@ async fn upload_banner_for_scope(
 ) -> Result<String> {
     tokio::task::spawn_blocking(move || -> Result<String> {
         let mut conn = state.db.get()?;
-        require_admin_session_sid(&conn, session_id.as_deref())?;
+        require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
         let (target_type, target_value) = resolve_banner_target_selection(
             &parsed.target_type,
             parsed.target_value.as_deref(),
@@ -508,7 +510,7 @@ pub(in crate::server) async fn update_banner_meta(
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let asset = db::get_banner_asset(&conn, form.banner_id)?
                 .ok_or_else(|| AppError::BadRequest("Banner not found.".into()))?;
             let (target_type, target_value) = resolve_banner_target_selection(
@@ -576,7 +578,7 @@ pub(in crate::server) async fn delete_banner(
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let asset = delete_banner_asset_safely(&conn, form.banner_id)?;
             Ok(banner::banner_admin_anchor(
                 asset.scope,
@@ -618,7 +620,7 @@ pub(in crate::server) async fn move_banner(
         let pool = state.db.clone();
         move || -> Result<String> {
             let mut conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let asset = db::get_banner_asset(&conn, form.banner_id)?
                 .ok_or_else(|| AppError::BadRequest("Banner not found.".into()))?;
             db::move_banner_asset(&mut conn, form.banner_id, move_up)?;
@@ -653,7 +655,7 @@ pub(in crate::server) async fn clear_board_banner_override(
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let (board_short, _assets) = clear_board_banner_assets_safely(&conn, form.board_id)?;
             Ok(board_short)
         }
@@ -695,7 +697,8 @@ mod tests {
             "UPDATE boards SET banner_mode = 'override' WHERE id = ?1",
             rusqlite::params![board_id],
         )
-        .context("set override mode")?;
+        .context("set override mode")
+        .map(|_completed_value| ())?;
 
         restore_board_banner_inheritance_if_empty(&conn, Some(board_id))?;
 
@@ -713,7 +716,8 @@ mod tests {
             "UPDATE boards SET banner_mode = 'override' WHERE id = ?1",
             rusqlite::params![board_id],
         )
-        .context("set override mode")?;
+        .context("set override mode")
+        .map(|_completed_value| ())?;
         crate::db::insert_banner_asset(
             &conn,
             crate::models::BannerScope::Board,
@@ -729,7 +733,8 @@ mod tests {
             true,
             true,
         )
-        .context("insert board banner")?;
+        .context("insert board banner")
+        .map(|_completed_value| ())?;
 
         restore_board_banner_inheritance_if_empty(&conn, Some(board_id))?;
 

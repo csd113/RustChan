@@ -98,7 +98,7 @@ body:
     id: data_involvement
     attributes:
       label: Database or media involvement
-      description: State whether SQLite, migrations, uploads, ffmpeg/ffprobe, boards, backups, or restore is involved. Do not upload real data.
+      description: State whether SQLite, migrations, uploads, media processing, FFmpeg video, boards, backups, or restore is involved. Do not upload real data.
       placeholder: "SQLite involved; reproduced on a new disposable database. No media involved."
     validations:
       required: true

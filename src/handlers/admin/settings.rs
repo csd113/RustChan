@@ -134,7 +134,7 @@ pub(in crate::server) async fn update_visitor_defaults(
     let session = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     tokio::task::spawn_blocking(move || -> Result<()> {
         let conn = state.db.get()?;
-        require_admin_session_sid(&conn, session.as_deref())?;
+        require_admin_session_sid(&conn, session.as_deref()).map(|_completed_value| ())?;
         db::set_site_setting(
             &conn,
             "default_hide_nsfw_boards",

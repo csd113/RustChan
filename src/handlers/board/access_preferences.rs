@@ -29,6 +29,13 @@ const OWNED_POSTS_COOKIE_MAX_LEN: usize = 3_800;
 pub(in crate::server::handlers) fn self_action_window_secs() -> i64 {
     CONFIG.operator.self_action_window_secs
 }
+
+/// Bound self-action grants without extending a malformed restored timestamp on overflow.
+pub(in crate::server::handlers) fn self_action_expiry(created_at: i64) -> Result<i64> {
+    created_at
+        .checked_add(self_action_window_secs())
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("self-action expiry timestamp overflow")))
+}
 /// Board activity cookie used by this handler.
 const BOARD_ACTIVITY_COOKIE: &str = "rustchan_board_activity";
 /// Thread activity cookie used by this handler.
@@ -142,7 +149,7 @@ fn prune_owned_post_grants_for_cookie(mut grants: Vec<OwnedPostGrant>) -> Vec<Ow
     });
     grants.truncate(OWNED_POSTS_COOKIE_MAX);
     while owned_posts_cookie_value(&grants).is_none() && !grants.is_empty() {
-        grants.pop();
+        let _previous_value = grants.pop();
     }
     grants
 }
@@ -293,7 +300,7 @@ fn parse_board_activity_cookie(value: &str) -> HashMap<i64, BoardActivityMarker>
     let mut markers = HashMap::new();
     for entry in parse_activity_cookie_entries(value) {
         if let Some(marker) = parse_board_activity_marker(entry, now) {
-            markers.insert(marker.board_id, marker);
+            let _previous_value = markers.insert(marker.board_id, marker);
         }
     }
     markers
@@ -307,7 +314,7 @@ fn parse_thread_activity_cookie(value: &str) -> HashMap<i64, ThreadActivityMarke
     let mut markers = HashMap::new();
     for entry in parse_activity_cookie_entries(value) {
         if let Some(marker) = parse_thread_activity_marker(entry, now) {
-            markers.insert(marker.thread_id, marker);
+            let _previous_value = markers.insert(marker.thread_id, marker);
         }
     }
     markers
@@ -485,7 +492,7 @@ where
         if thread_id <= 0 {
             continue;
         }
-        markers.insert(
+        let _previous_value = markers.insert(
             thread_id,
             ThreadActivityMarker {
                 thread_id,
@@ -1150,6 +1157,23 @@ pub(in crate::server) async fn update_thread_preference(
 // POST /report
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn self_action_expiry_rejects_timestamp_overflow() -> anyhow::Result<()> {
+        anyhow::ensure!(
+            super::self_action_expiry(i64::MAX).is_err(),
+            "overflowed expiry must fail closed"
+        );
+        let created_at = 1_700_000_000_i64;
+        let expected = created_at
+            .checked_add(self_action_window_secs())
+            .ok_or_else(|| anyhow::anyhow!("test expiry overflow"))?;
+        anyhow::ensure!(
+            super::self_action_expiry(created_at)? == expected,
+            "valid expiry must preserve the configured window"
+        );
+        Ok(())
+    }
     use super::{
         board_activity_markers_from_jar, ensure_csrf_with_secure, owned_post_grants_from_jar,
         owned_posts_cookie, owned_posts_cookie_value, prune_board_activity_markers,
@@ -1207,7 +1231,7 @@ mod tests {
     async fn user_preferences_remain_settable_on_plain_http_onion_transport() -> AnyResult<()> {
         let jar = CookieJar::new().add(TestCookie::new("csrf_token", "csrf123"));
         let mut headers = HeaderMap::new();
-        headers.insert(
+        let _previous_value = headers.insert(
             header::HOST,
             HeaderValue::from_static(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion",
@@ -1324,7 +1348,7 @@ mod tests {
             chrono::Utc::now().timestamp() - 1,
         );
 
-        assert!(owned_post_grants_from_jar(&jar).is_empty());
+        assert_eq!(owned_post_grants_from_jar(&jar).len(), 0);
     }
 
     #[test]
@@ -1387,7 +1411,7 @@ mod tests {
                 value,
             ));
 
-            assert!(owned_post_grants_from_jar(&jar).is_empty());
+            assert_eq!(owned_post_grants_from_jar(&jar).len(), 0);
         }
     }
 

@@ -171,7 +171,7 @@ pub(in crate::server) async fn download_backup(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             Ok(())
         }
     })
@@ -302,7 +302,7 @@ pub(in crate::server) async fn backup_progress_json(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             Ok(())
         }
     })
@@ -349,7 +349,7 @@ pub(in crate::server) async fn delete_backup(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
 
             let saved_root = crate::config::backups_dir().join(&safe_filename);
             let legacy_path = backup_dir.join(&safe_filename);
@@ -360,8 +360,8 @@ pub(in crate::server) async fn delete_backup(
                 invalidate_backup_list_cache(&backup_dir, backup_kind);
                 tracing::info!(target: "admin", backup_ref = %safe_filename, "Backup directory deleted");
             } else if legacy_path.exists() {
-                let legacy_path = safe_backup_file_path(&backup_dir, &safe_filename)?;
-                std::fs::remove_file(&legacy_path)
+                let validated_legacy_path = safe_backup_file_path(&backup_dir, &safe_filename)?;
+                std::fs::remove_file(&validated_legacy_path)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Delete backup: {e}")))?;
                 invalidate_backup_list_cache(&backup_dir, backup_kind);
                 tracing::info!(target: "admin", filename = %safe_filename, "Backup file deleted");

@@ -144,7 +144,8 @@ pub(in crate::server) async fn create_board(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())
+                .map(|_completed_value| ())?;
             if db::get_board_by_short(&conn, &short)?.is_some() {
                 return Err(AppError::Conflict(format!(
                     "Board /{short}/ already exists."
@@ -159,7 +160,8 @@ pub(in crate::server) async fn create_board(
                 true,
                 true,
                 allow_audio,
-            )?;
+            )
+            .map(|_completed_value| ())?;
             tracing::info!(target: "admin", board = %short, "Created board");
             // Refresh live board list so the top bar on any subsequent error
             // page includes the newly created board.
@@ -210,7 +212,7 @@ pub(in crate::server) async fn delete_board(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            super::require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
 
             // Fetch the board's short_name before deletion so we can remove
             // its upload directory entirely after cleaning tracked files.
@@ -310,7 +312,8 @@ pub(in crate::server) async fn reorder_board(
         let pool = state.db.clone();
         move || -> Result<()> {
             let mut conn = pool.get()?;
-            super::require_admin_session_sid(&conn, session_id.as_deref())?;
+            super::require_admin_session_sid(&conn, session_id.as_deref())
+                .map(|_completed_value| ())?;
             db::move_board(&mut conn, board_id, move_up)?;
             crate::templates::set_live_boards(db::get_all_boards(&conn)?);
             Ok(())
@@ -624,7 +627,7 @@ mod tests {
     use super::*;
     use anyhow::{bail, ensure, Context as _};
     use axum::http::{header, StatusCode};
-    use axum_extra::extract::cookie::{Cookie, CookieJar};
+    use axum_extra::extract::cookie::Cookie;
 
     fn admin_signed_csrf() -> String {
         crate::utils::crypto::make_scoped_csrf_form_token(
@@ -642,41 +645,41 @@ mod tests {
 
     fn admin_headers() -> axum::http::HeaderMap {
         let mut headers = axum::http::HeaderMap::new();
-        headers.insert(
+        drop(headers.insert(
             header::HOST,
             axum::http::HeaderValue::from_static("localhost"),
-        );
-        headers.insert(
+        ));
+        drop(headers.insert(
             header::ORIGIN,
             axum::http::HeaderValue::from_static("http://localhost"),
-        );
+        ));
         headers
     }
 
     fn tunneled_admin_headers() -> axum::http::HeaderMap {
         let mut headers = axum::http::HeaderMap::new();
-        headers.insert(
+        drop(headers.insert(
             header::HOST,
             axum::http::HeaderValue::from_static("demo.serveo.net"),
-        );
-        headers.insert(header::ORIGIN, axum::http::HeaderValue::from_static("null"));
-        headers.insert(
+        ));
+        drop(headers.insert(header::ORIGIN, axum::http::HeaderValue::from_static("null")));
+        drop(headers.insert(
             header::REFERER,
             axum::http::HeaderValue::from_static("https://demo.serveo.net/test/thread/1"),
-        );
+        ));
         headers
     }
 
     fn cross_origin_headers() -> axum::http::HeaderMap {
         let mut headers = axum::http::HeaderMap::new();
-        headers.insert(
+        drop(headers.insert(
             header::HOST,
             axum::http::HeaderValue::from_static("demo.serveo.net"),
-        );
-        headers.insert(
+        ));
+        drop(headers.insert(
             header::ORIGIN,
             axum::http::HeaderValue::from_static("https://attacker.test"),
-        );
+        ));
         headers
     }
 
@@ -690,10 +693,12 @@ mod tests {
             &conn,
             "session123",
             admin_id,
-            chrono::Utc::now().timestamp() + 3600,
+            chrono::Utc::now().timestamp().saturating_add(3600),
         )
         .context("create admin session")?;
-        db::create_board(&conn, "test", "Test", "", false).context("create board")?;
+        db::create_board(&conn, "test", "Test", "", false)
+            .context("create board")
+            .map(|_completed_value| ())?;
         let board = db::get_board_by_short(&conn, "test")
             .context("load board")?
             .context("test board does not exist")?;

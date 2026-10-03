@@ -2,12 +2,13 @@
 
 Current setup and deployment guide for Linux, macOS, and Windows.
 
-Current version: `1.5.0`.
+Current version: `1.6.5`.
 
 This guide reflects the current RustChan architecture:
 
 - Tor onion hosting is built in via Arti. You do not install or manage a separate `tor` service.
-- `ffmpeg` is optional, but strongly recommended if you want WebP thumbnails, WebM transcoding, video thumbnails, and audio waveforms.
+- Images, GIF/WebP animation, HEIC/HEIF, container metadata, common audio waveforms, and supported PDF previews run internally in Rust. Unsupported PDF previews use the built-in SVG placeholder.
+- `ffmpeg` is optional, but recommended for video thumbnails, WebM transcoding, and uncovered audio codecs. Standalone `ffprobe` and external PDF renderers are not required.
 - The post edit form and self-delete flow share a 60-second self-action window after posting.
 
 ## Contents
@@ -33,9 +34,9 @@ This guide reflects the current RustChan architecture:
 
 RustChan is a single Rust binary. A basic install only needs:
 
-- Rust toolchain to build it
+- Rust 1.99 or newer to build it
 - a writable runtime data directory (next to the binary by default, or selected with `--data-dir`)
-- `ffmpeg` if you want the enhanced media pipeline
+- `ffmpeg` for video processing and uncovered audio codecs
 
 RustChan does not require:
 
@@ -96,11 +97,10 @@ cargo --version
 When `ffmpeg` is available, RustChan can:
 
 - extract video thumbnails
-- generate audio waveform thumbnails
-- convert supported image thumbnails to WebP
+- generate waveform thumbnails for uncovered audio codecs (for example AC-3 or Speex)
 - transcode MP4 uploads to WebM when VP9 and Opus are available
 
-Without `ffmpeg`, RustChan still runs, but video and audio handling degrades gracefully.
+Without `ffmpeg`, images, animation, metadata inspection, supported PDF previews, and common audio waveforms still work. Video processing and uncovered-codec waveform previews use their existing placeholders.
 
 ### Debian / Ubuntu / Raspberry Pi OS
 
@@ -135,7 +135,6 @@ Then make sure the FFmpeg `bin` directory is on `PATH`.
 
 ```bash
 ffmpeg -version
-ffprobe -version
 ```
 
 If you want RustChan to refuse startup when `ffmpeg` is missing, set:
@@ -146,34 +145,36 @@ require_ffmpeg = true
 
 ## Verify WebP and WebM Support
 
-RustChan checks more than just whether `ffmpeg` exists. It also checks whether your build includes:
+WebP images, GIF → animated WebP, and animated WebP validation are built into RustChan through Rust crates and remain available without FFmpeg. Video thumbnails use FFmpeg to extract a PNG frame and Rust to encode WebP.
 
-- `libwebp` for WebP image thumbnails and conversions
+For video/WebM conversion, RustChan checks the installed decoder, encoder and muxer lists independently:
+
 - `libvpx-vp9` for WebM video encoding
 - `libopus` for WebM audio encoding
+- the `webm` muxer for output
+- AV1 decoders for AV1 inputs (AV1 encoder availability is reported separately; output remains VP9 + Opus)
 
 Use these commands:
 
 ```bash
-ffmpeg -encoders | rg libwebp
 ffmpeg -encoders | rg libvpx-vp9
 ffmpeg -encoders | rg libopus
+ffmpeg -muxers | rg webm
+ffmpeg -decoders | rg av1
 ```
 
 If you do not have `rg`, use:
 
 ```bash
-ffmpeg -encoders | grep libwebp
 ffmpeg -encoders | grep libvpx-vp9
 ffmpeg -encoders | grep libopus
 ```
 
-You want all three to appear.
+WebM conversion needs both selected encoders and the WebM muxer. AV1 input also needs an AV1 decoder; an AV1 encoder is optional and is not selected for RustChan output.
 
 ### What Each Encoder Enables
 
-- `libwebp`: WebP thumbnail and image conversion support
-- `libvpx-vp9` + `libopus`: MP4 to WebM transcoding support
+- `libvpx-vp9` + `libopus`: MP4/Matroska and WebM/AV1 to VP9/Opus WebM conversion. Compatible VP8/VP9 WebM with Opus/Vorbis audio is preserved.
 
 ### Linux Notes
 
@@ -181,7 +182,7 @@ On Debian-family systems, the usual install is:
 
 ```bash
 sudo apt update
-sudo apt install -y ffmpeg libwebp-dev libvpx-dev libopus-dev
+sudo apt install -y ffmpeg libvpx-dev libopus-dev
 ```
 
 The important part is still the actual `ffmpeg -encoders` output. Package names alone do not guarantee your installed FFmpeg binary was built with every encoder enabled.
@@ -191,7 +192,7 @@ The important part is still the actual `ffmpeg -encoders` output. Package names 
 Most Homebrew FFmpeg installs are fine, but verify with:
 
 ```bash
-ffmpeg -encoders | rg 'libwebp|libvpx-vp9|libopus'
+ffmpeg -encoders | rg 'libvpx-vp9|libopus'
 ```
 
 If one is missing, reinstall FFmpeg from a build source that includes that codec set.
@@ -201,7 +202,6 @@ If one is missing, reinstall FFmpeg from a build source that includes that codec
 Use a full FFmpeg build rather than a minimal one, then verify with:
 
 ```powershell
-ffmpeg -encoders | Select-String libwebp
 ffmpeg -encoders | Select-String libvpx-vp9
 ffmpeg -encoders | Select-String libopus
 ```
@@ -210,8 +210,9 @@ ffmpeg -encoders | Select-String libopus
 
 RustChan will log warnings and continue:
 
-- missing `libwebp`: image thumbnails stay in original-friendly formats where needed
-- missing VP9 or Opus: MP4 uploads are stored as MP4 instead of transcoded to WebM
+- missing VP9, Opus or the WebM muxer: video uploads retain their originals
+- missing an AV1 decoder: AV1 conversion fails with a useful diagnostic and retains the original
+- missing FFmpeg: Rust-native still and animated WebP continue to work
 
 These warnings appear in the console at startup and in `rustchan-data/logs/`.
 
@@ -329,7 +330,6 @@ enable_tor_support = true
 
 require_ffmpeg = false
 # ffmpeg_path = "/usr/local/bin/ffmpeg"
-# ffprobe_path = "/usr/local/bin/ffprobe"
 ffmpeg_timeout_secs = 600
 
 [tls]
@@ -657,7 +657,7 @@ Run:
 
 ```bash
 ffmpeg -version
-ffmpeg -encoders | rg 'libwebp|libvpx-vp9|libopus'
+ffmpeg -encoders | rg 'libvpx-vp9|libopus'
 ```
 
 If one of those encoders is missing, RustChan will still run but some media features will be downgraded.
@@ -705,3 +705,21 @@ Back that directory up if the onion address matters.
 ### Optional administrator-controlled software updates
 
 For immutable native Linux version directories, a separate restricted updater service, signing trust setup and automatic backup/rollback, follow [Software Updates](docs/software-updates.md). The existing single-binary service remains deployment-managed until explicitly converted.
+
+### Internal media processing
+
+RustChan handles JPEG/PNG/BMP/TIFF, static and animated WebP, GIF conversion,
+HEIC/HEIF still pictures, container metadata, and common audio waveforms in Rust.
+PDF previews cover a small bounded vector/text subset; compressed streams,
+embedded images/fonts and other unbudgeted features use the existing SVG preview
+while the original PDF remains available.
+
+FFmpeg remains the video backend. It also preserves waveform support for audio
+variants the internal decoders do not cover, including AC-3, Speex, unsupported
+AAC profiles and Opus multistream/surround. See the
+[media migration report](docs/non-video-media-migration.md) for format coverage,
+resource limits and verification.
+
+## Applying administrator configuration
+
+Live controls keep applying immediately. Other controls show their active, saved and next-start values. Saving never restarts RustChan; managed Linux and opted-in supervised containers expose **Restart RustChan** for pending settings. See [settings restarts](docs/settings-restarts.md) for the complete classification, supervisor setup, graceful shutdown and failure recovery.

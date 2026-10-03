@@ -11,9 +11,15 @@ const REQUEST_ID_HEADER: &str = "x-request-id";
 
 /// Track request counts, active clients, uploads, tracing, and request IDs.
 pub(super) async fn track_requests(
+    axum::extract::State(state): axum::extract::State<crate::middleware::AppState>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    if state.job_queue.cancel.is_cancelled()
+        || (!state.runtime_ready.load(Ordering::Acquire) && req.uri().path() != "/readyz")
+    {
+        return recovery_unavailable();
+    }
     if crate::updates::managed()
         && !matches!(
             *req.method(),
@@ -24,15 +30,15 @@ pub(super) async fn track_requests(
     {
         return recovery_unavailable();
     }
-    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+    let _previous_request_count = REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let _previous_in_flight_count = IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
     let _in_flight_guard = ScopedDecrement(&IN_FLIGHT);
 
     let req_id = uuid::Uuid::new_v4().to_string();
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
     let mut req = req;
-    req.extensions_mut().insert(req_id.clone());
+    let _previous_request_id = req.extensions_mut().insert(req_id.clone());
     let span = tracing::info_span!(
         "request",
         req_id = %req_id,
@@ -47,7 +53,7 @@ pub(super) async fn track_requests(
         h.update(real_ip.as_bytes());
         let ip_hash = hex::encode(h.finalize());
         if ACTIVE_IPS.len() < 10_000 {
-            ACTIVE_IPS.insert(ip_hash, Instant::now());
+            let _previous_ip_activity = ACTIVE_IPS.insert(ip_hash, Instant::now());
         }
     }
 
@@ -58,13 +64,13 @@ pub(super) async fn track_requests(
         .is_some_and(|ct| ct.contains("multipart/form-data"));
 
     let _upload_guard = is_upload.then(|| {
-        ACTIVE_UPLOADS.fetch_add(1, Ordering::Relaxed);
+        let _previous_upload_count = ACTIVE_UPLOADS.fetch_add(1, Ordering::Relaxed);
         ScopedDecrement(&ACTIVE_UPLOADS)
     });
 
     let mut response = next.run(req).instrument(span).await;
     if let Ok(value) = axum::http::HeaderValue::from_str(&req_id) {
-        response.headers_mut().insert(REQUEST_ID_HEADER, value);
+        let _previous_request_header = response.headers_mut().insert(REQUEST_ID_HEADER, value);
     }
     response
 }
@@ -83,7 +89,7 @@ pub(super) async fn shutdown_signal() {
     let terminate = async {
         match signal::unix::signal(signal::unix::SignalKind::terminate()) {
             Ok(mut sig) => {
-                sig.recv().await;
+                let _previous_value = sig.recv().await;
             }
             Err(e) => {
                 tracing::error!("Failed to register SIGTERM handler: {e}");
@@ -132,6 +138,46 @@ mod tests {
                 && !text.contains("recovery")
                 && !text.contains(crate::updates::VERSION),
             "public availability errors must not expose update state"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+/// Shutdown request admission using the production middleware and cancellation token.
+mod shutdown_tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        middleware::from_fn_with_state,
+        routing::get,
+        Router,
+    };
+    use tower::ServiceExt as _;
+
+    /// Stop new work while allowing already accepted work to complete through listener drain.
+    #[tokio::test]
+    async fn cancelled_runtime_rejects_new_http_work() -> anyhow::Result<()> {
+        let state = crate::test_support::app_state();
+        let app = Router::new()
+            .route("/", get(|| async { StatusCode::NO_CONTENT }))
+            .layer(from_fn_with_state(state.clone(), track_requests));
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty())?)
+            .await?;
+        anyhow::ensure!(
+            response.status() == StatusCode::NO_CONTENT,
+            "running instance should admit HTTP work"
+        );
+        state.job_queue.cancel.cancel();
+        let unavailable_response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty())?)
+            .await?;
+        anyhow::ensure!(
+            unavailable_response.status() == StatusCode::SERVICE_UNAVAILABLE,
+            "shutdown must stop new work"
         );
         Ok(())
     }

@@ -6,7 +6,6 @@ use crate::utils::{
 };
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 
 use super::{
     admin_ban_delete_modal_script, base_layout, base_layout_with_preferences,
@@ -85,16 +84,19 @@ pub fn edit_post_page(
 ) -> String {
     let mut body = String::new();
     if let Some(msg) = error {
-        let _ = write!(
-            body,
-            r#"<div class="post-error-banner">&#9888; {}</div>"#,
-            escape_html(msg)
+        crate::templates::append_html(
+            &mut body,
+            format_args!(
+                r#"<div class="post-error-banner">&#9888; {}</div>"#,
+                escape_html(msg)
+            ),
         );
     }
 
-    let _ = write!(
-        body,
-        r#"<div class="page-box self-action-page">
+    crate::templates::append_html(
+        &mut body,
+        format_args!(
+            r#"<div class="page-box self-action-page">
 <div class="board-thread-header">/{board}/ — edit post No.{pid}</div>
 <p class="self-action-page-note">{hint}</p>
 <p><a href="/{board}/thread/{tid}#p{pid}">back to the thread</a></p>
@@ -112,13 +114,14 @@ pub fn edit_post_page(
   </table>
 </form>
 </div>"#,
-        board = escape_html(&board.short_name),
-        pid = post.id,
-        tid = thread.id,
-        hint = SELF_ACTION_WINDOW_HINT,
-        preview = render_post_preview(post, &board.short_name, csrf_token, thread.op_id),
-        csrf = escape_html(csrf_token),
-        body_text = escape_html(&post.body),
+            board = escape_html(&board.short_name),
+            pid = post.id,
+            tid = thread.id,
+            hint = SELF_ACTION_WINDOW_HINT,
+            preview = render_post_preview(post, &board.short_name, csrf_token, thread.op_id),
+            csrf = escape_html(csrf_token),
+            body_text = escape_html(&post.body),
+        ),
     );
 
     base_layout(
@@ -147,16 +150,19 @@ pub fn delete_post_page(
 ) -> String {
     let mut body = String::new();
     if let Some(msg) = error {
-        let _ = write!(
-            body,
-            r#"<div class="post-error-banner">&#9888; {}</div>"#,
-            escape_html(msg)
+        crate::templates::append_html(
+            &mut body,
+            format_args!(
+                r#"<div class="post-error-banner">&#9888; {}</div>"#,
+                escape_html(msg)
+            ),
         );
     }
 
-    let _ = write!(
-        body,
-        r#"<div class="page-box self-action-page">
+    crate::templates::append_html(
+        &mut body,
+        format_args!(
+            r#"<div class="page-box self-action-page">
 <div class="board-thread-header">/{board}/ — delete post No.{pid}</div>
 <p class="self-action-page-note">{hint}</p>
 <p><a href="/{board}/thread/{tid}#p{pid}">back to the thread</a></p>
@@ -170,12 +176,13 @@ pub fn delete_post_page(
   <a class="edit-btn" href="/{board}/thread/{tid}#p{pid}">cancel</a>
 </form>
 </div>"#,
-        board = escape_html(&board.short_name),
-        pid = post.id,
-        tid = thread.id,
-        hint = SELF_ACTION_WINDOW_HINT,
-        preview = render_post_preview(post, &board.short_name, csrf_token, thread.op_id),
-        csrf = escape_html(csrf_token),
+            board = escape_html(&board.short_name),
+            pid = post.id,
+            tid = thread.id,
+            hint = SELF_ACTION_WINDOW_HINT,
+            preview = render_post_preview(post, &board.short_name, csrf_token, thread.op_id),
+            csrf = escape_html(csrf_token),
+        ),
     );
 
     base_layout(
@@ -388,18 +395,22 @@ pub fn thread_page(
     };
 
     if let Some(msg) = success {
-        let _ = write!(
-            body,
-            r#"<div class="post-success-banner">{}</div>"#,
-            escape_html(msg)
+        crate::templates::append_html(
+            &mut body,
+            format_args!(
+                r#"<div class="post-success-banner">{}</div>"#,
+                escape_html(msg)
+            ),
         );
     }
 
     if let Some(msg) = error {
-        let _ = write!(
-            body,
-            r#"<div class="post-error-banner">&#9888; {}</div>"#,
-            escape_html(msg)
+        crate::templates::append_html(
+            &mut body,
+            format_args!(
+                r#"<div class="post-error-banner">&#9888; {}</div>"#,
+                escape_html(msg)
+            ),
         );
     }
 
@@ -411,17 +422,19 @@ pub fn thread_page(
         ""
     };
 
-    let _ = write!(
-        body,
-        r#"<div id="top"></div>
+    crate::templates::append_html(
+        &mut body,
+        format_args!(
+            r#"<div id="top"></div>
 <div class="thread-board-banner board-thread-header">/{s}/ — {bn}{access_badge}</div>
 {admin_toolbar}
 {top_nav}"#,
-        s = escape_html(&board.short_name),
-        bn = escape_html(&board.name),
-        access_badge = super::board::board_access_badge(board),
-        admin_toolbar = admin_toolbar,
-        top_nav = render_thread_nav(board, thread, false)
+            s = escape_html(&board.short_name),
+            bn = escape_html(&board.name),
+            access_badge = super::board::board_access_badge(board),
+            admin_toolbar = admin_toolbar,
+            top_nav = render_thread_nav(board, thread, false)
+        ),
     );
     body.push_str(thread_notice);
 
@@ -430,15 +443,17 @@ pub fn thread_page(
     }
 
     let last_post_id = posts.iter().map(|p| p.id).max().unwrap_or(0);
-    let _ = write!(
-        body,
-        r#"<div id="thread-posts" data-activity-page="thread" data-thread-id="{tid}" data-board="{board}" data-last-id="{last}" data-locked="{locked}" data-sticky="{sticky}" data-archived="{archived}">"#,
-        tid = thread.id,
-        board = escape_html(&board.short_name),
-        last = last_post_id,
-        locked = thread.locked,
-        sticky = thread.sticky,
-        archived = thread.archived,
+    crate::templates::append_html(
+        &mut body,
+        format_args!(
+            r#"<div id="thread-posts" data-activity-page="thread" data-thread-id="{tid}" data-board="{board}" data-last-id="{last}" data-locked="{locked}" data-sticky="{sticky}" data-archived="{archived}">"#,
+            tid = thread.id,
+            board = escape_html(&board.short_name),
+            last = last_post_id,
+            locked = thread.locked,
+            sticky = thread.sticky,
+            archived = thread.archived,
+        ),
     );
     for post in posts {
         body.push_str(&render_post(
@@ -488,24 +503,26 @@ pub fn thread_page(
             reply_prefill,
         );
         let show_post_form = error.is_some() || reply_prefill.is_some();
-        let _ = write!(
-            body,
-            r##"<div class="post-toggle-bar reply">
+        crate::templates::append_html(
+            &mut body,
+            format_args!(
+                r##"<div class="post-toggle-bar reply">
   <a class="post-toggle-btn" href="#post-form-wrap" data-action="toggle-post-form">[ Reply ]</a>
 </div>
 <div class="{post_form_class}" id="post-form-wrap" style="{post_form_style}">
   {form_html}
 </div>"##,
-            post_form_class = if show_post_form {
-                "post-form-wrap is-open"
-            } else {
-                "post-form-wrap is-collapsed"
-            },
-            post_form_style = if show_post_form {
-                "display:block"
-            } else {
-                "display:none"
-            },
+                post_form_class = if show_post_form {
+                    "post-form-wrap is-open"
+                } else {
+                    "post-form-wrap is-collapsed"
+                },
+                post_form_style = if show_post_form {
+                    "display:block"
+                } else {
+                    "display:none"
+                },
+            ),
         );
     } else if !thread.locked && !thread.archived && board.access_mode.requires_unlock_for_posting()
     {
@@ -532,14 +549,16 @@ pub fn thread_page(
     // Video embed + draft autosave config (data attributes only)
     let embed_enabled_attr = if board.allow_video_embeds { "1" } else { "0" };
     let draft_key = format!("rustchan_draft_{}_{}", board.short_name, thread.id);
-    let _ = write!(
-        body,
-        r#"<div id="thread-config"
+    crate::templates::append_html(
+        &mut body,
+        format_args!(
+            r#"<div id="thread-config"
      data-embed-enabled="{embed_enabled}"
      data-draft-key="{draft_key}"
      style="display:none" aria-hidden="true"></div>"#,
-        embed_enabled = embed_enabled_attr,
-        draft_key = escape_html(&draft_key)
+            embed_enabled = embed_enabled_attr,
+            draft_key = escape_html(&draft_key)
+        ),
     );
 
     base_layout_with_preferences(
@@ -561,16 +580,11 @@ pub fn thread_page(
 }
 
 // Poll renderer
-/// Renders a poll voting form or its results.
-fn render_poll(
-    pd: &crate::models::PollData,
-    thread_id: i64,
-    board_short: &str,
-    csrf_token: &str,
-) -> String {
+/// Formats the remaining voting window for a poll's status label.
+fn poll_expiry_label(pd: &crate::models::PollData) -> String {
     let now = chrono::Utc::now().timestamp();
     let time_left = pd.poll.expires_at.saturating_sub(now);
-    let expires_str = if pd.is_expired {
+    if pd.is_expired {
         "closed".to_owned()
     } else if time_left < 3600 {
         format!("closes in {}m", time_left / 60)
@@ -582,8 +596,17 @@ fn render_poll(
         )
     } else {
         format!("closes {}", fmt_ts(pd.poll.expires_at))
-    };
+    }
+}
 
+/// Renders a poll voting form or its results.
+fn render_poll(
+    pd: &crate::models::PollData,
+    thread_id: i64,
+    board_short: &str,
+    csrf_token: &str,
+) -> String {
+    let expires_str = poll_expiry_label(pd);
     let show_results = pd.is_expired || pd.user_voted_option.is_some();
 
     let mut html = format!(
@@ -617,48 +640,56 @@ fn render_poll(
                 .checked_div(total)
                 .unwrap_or(0);
             let is_voted = pd.user_voted_option == Some(opt.id);
-            let _ = write!(
-                html,
-                r#"<div class="poll-option-result{voted}">
+            crate::templates::append_html(
+                &mut html,
+                format_args!(
+                    r#"<div class="poll-option-result{voted}">
   <div class="poll-option-label">
     {check}<span class="poll-opt-text">{text}</span>
     <span class="poll-opt-count">{votes} ({pct}%)</span>
   </div>
   <div class="poll-bar-track"><div class="poll-bar-fill" style="width:{pct}%"></div></div>
 </div>"#,
-                voted = if is_voted { " user-voted" } else { "" },
-                check = if is_voted { "✓ " } else { "" },
-                text = escape_html(&opt.text),
-                votes = opt.vote_count,
-                pct = pct
+                    voted = if is_voted { " user-voted" } else { "" },
+                    check = if is_voted { "✓ " } else { "" },
+                    text = escape_html(&opt.text),
+                    votes = opt.vote_count,
+                    pct = pct
+                ),
             );
         }
-        let _ = write!(
-            html,
-            r#"<div class="poll-total">{} total vote{}</div></div>"#,
-            pd.total_votes,
-            if pd.total_votes == 1 { "" } else { "s" }
+        crate::templates::append_html(
+            &mut html,
+            format_args!(
+                r#"<div class="poll-total">{} total vote{}</div></div>"#,
+                pd.total_votes,
+                if pd.total_votes == 1 { "" } else { "s" }
+            ),
         );
     } else {
-        let _ = write!(
-            html,
-            r#"<form class="poll-vote-form" method="POST" action="/vote">
+        crate::templates::append_html(
+            &mut html,
+            format_args!(
+                r#"<form class="poll-vote-form" method="POST" action="/vote">
 <input type="hidden" name="_csrf"     value="{csrf}">
 <input type="hidden" name="thread_id" value="{tid}">
 <input type="hidden" name="board"     value="{board}">"#,
-            csrf = escape_html(csrf_token),
-            tid = thread_id,
-            board = escape_html(board_short)
+                csrf = escape_html(csrf_token),
+                tid = thread_id,
+                board = escape_html(board_short)
+            ),
         );
         for opt in &pd.options {
-            let _ = write!(
-                html,
-                r#"<label class="poll-vote-option">
+            crate::templates::append_html(
+                &mut html,
+                format_args!(
+                    r#"<label class="poll-vote-option">
   <input type="radio" name="option_id" value="{id}" required>
   <span class="poll-opt-text">{text}</span>
 </label>"#,
-                id = opt.id,
-                text = escape_html(&opt.text)
+                    id = opt.id,
+                    text = escape_html(&opt.text)
+                ),
             );
         }
         html.push_str(
@@ -760,13 +791,18 @@ fn poster_id_chip_style(poster_id: &str) -> String {
     hasher.update(b":poster-id-chip:");
     hasher.update(poster_id.as_bytes());
     let digest = hasher.finalize();
-    let hue_index = digest
-        .first()
-        .map_or(0, |byte| usize::from(*byte) % POSTER_CHIP_HUES.len());
+    let hue_index = digest.first().map_or(0, |byte| {
+        usize::from(*byte)
+            .checked_rem(POSTER_CHIP_HUES.len())
+            .unwrap_or(0)
+    });
     let hue = POSTER_CHIP_HUES.get(hue_index).copied().unwrap_or(200);
-    let accent_lightness = 60 + digest.get(1).map_or(0, |byte| u16::from(*byte) % 8);
-    let background_lightness = 19 + digest.get(2).map_or(0, |byte| u16::from(*byte) % 8);
-    let shadow_strength = 34 + digest.get(3).map_or(0, |byte| u16::from(*byte) % 18);
+    let accent_lightness =
+        60_u16.saturating_add(digest.get(1).map_or(0, |byte| u16::from(*byte) % 8));
+    let background_lightness =
+        19_u16.saturating_add(digest.get(2).map_or(0, |byte| u16::from(*byte) % 8));
+    let shadow_strength =
+        34_u16.saturating_add(digest.get(3).map_or(0, |byte| u16::from(*byte) % 18));
     format!(
         concat!(
             "--poster-chip-accent:hsl({} 88% {}% / 0.98);",
@@ -1078,19 +1114,21 @@ fn render_post_with_context(
                         )
                     )
                 });
-            let _ = write!(
-                html,
-                r#"<div class="file-container media-pruned">
+            crate::templates::append_html(
+                &mut html,
+                format_args!(
+                    r#"<div class="file-container media-pruned">
 <div class="file-info">
   File: <span title="{orig}">{name}</span> ({sz})
   <span class="post-edited" title="Original full-size file was removed by active media pruning.">original file removed</span>
 </div>
 {thumb_html}
 </div>"#,
-                orig = escape_html(name_str),
-                name = escape_html(&display_file_name(name_str)),
-                sz = escape_html(&size_str),
-                thumb_html = thumb_html,
+                    orig = escape_html(name_str),
+                    name = escape_html(&display_file_name(name_str)),
+                    sz = escape_html(&size_str),
+                    thumb_html = thumb_html,
+                ),
             );
         } else if let (Some(file), Some(thumb)) = (&post.file_path, &post.thumb_path) {
             let size_str = post.file_size.map(format_file_size).unwrap_or_default();
@@ -1121,9 +1159,10 @@ fn render_post_with_context(
             };
 
             if is_audio {
-                let _ = write!(
-                    html,
-                    r#"<div class="file-container audio-container">
+                crate::templates::append_html(
+                    &mut html,
+                    format_args!(
+                        r#"<div class="file-container audio-container">
 <div class="file-info">
   File: {file_link} ({sz})
 </div>
@@ -1135,24 +1174,26 @@ fn render_post_with_context(
   Your browser does not support the audio element.
 </audio>
 </div>"#,
-                    file_link = file_link,
-                    f = escape_html(file),
-                    thumb_html = render_media_thumb(
-                        "thumb",
-                        "thumb",
-                        thumb,
-                        "audio",
-                        thumb_loading,
-                        "preview unavailable",
+                        file_link = file_link,
+                        f = escape_html(file),
+                        thumb_html = render_media_thumb(
+                            "thumb",
+                            "thumb",
+                            thumb,
+                            "audio",
+                            thumb_loading,
+                            "preview unavailable",
+                        ),
+                        orig = escape_html(name_str),
+                        sz = escape_html(&size_str),
+                        mime = escape_html(mime)
                     ),
-                    orig = escape_html(name_str),
-                    sz = escape_html(&size_str),
-                    mime = escape_html(mime)
                 );
             } else if is_video {
-                let _ = write!(
-                    html,
-                    r#"<div class="file-container video-container">
+                crate::templates::append_html(
+                    &mut html,
+                    format_args!(
+                        r#"<div class="file-container video-container">
 <div class="file-info">
   File: {file_link} ({sz})
   <button type="button" class="media-close-btn" data-action="collapse-media" style="display:none" aria-label="Collapse media">&#x2715; close</button>
@@ -1165,24 +1206,26 @@ fn render_post_with_context(
   <source src="/boards/{f}" type="{mime}">
 </video>
 </div>"#,
-                    file_link = file_link,
-                    f = escape_html(file),
-                    thumb_html = render_media_thumb(
-                        "thumb",
-                        "thumb",
-                        thumb,
-                        "video thumbnail",
-                        thumb_loading,
-                        "preview unavailable",
+                        file_link = file_link,
+                        f = escape_html(file),
+                        thumb_html = render_media_thumb(
+                            "thumb",
+                            "thumb",
+                            thumb,
+                            "video thumbnail",
+                            thumb_loading,
+                            "preview unavailable",
+                        ),
+                        sz = escape_html(&size_str),
+                        mime = escape_html(mime),
+                        muted_attr = if video_audio_muted { " muted" } else { "" },
                     ),
-                    sz = escape_html(&size_str),
-                    mime = escape_html(mime),
-                    muted_attr = if video_audio_muted { " muted" } else { "" },
                 );
             } else if is_pdf {
-                let _ = write!(
-                    html,
-                    r#"<div class="file-container pdf-container">
+                crate::templates::append_html(
+                    &mut html,
+                    format_args!(
+                        r#"<div class="file-container pdf-container">
 <div class="file-info">
   File: {file_link} ({sz})
   <button type="button" class="media-close-btn" data-action="collapse-media" style="display:none" aria-label="Collapse media">&#x2715; close</button>
@@ -1193,26 +1236,26 @@ fn render_post_with_context(
 </a>
 <iframe class="media-expanded media-expanded-pdf" src="about:blank" data-src="/boards/{f}" title="{orig}" style="display:none"></iframe>
 </div>"#,
-                    file_link = file_link,
-                    f = escape_html(file),
-                    thumb_html = render_media_thumb(
-                        "thumb",
-                        "thumb",
-                        thumb,
-                        "pdf preview",
-                        thumb_loading,
-                        "Open PDF",
+                        file_link = file_link,
+                        f = escape_html(file),
+                        thumb_html = render_media_thumb(
+                            "thumb",
+                            "thumb",
+                            thumb,
+                            "pdf preview",
+                            thumb_loading,
+                            "Open PDF",
+                        ),
+                        sz = escape_html(&size_str),
+                        orig = escape_html(name_str)
                     ),
-                    sz = escape_html(&size_str),
-                    orig = escape_html(name_str)
                 );
             } else {
                 // Image
                 // Keep the preview as an inline expansion control rather than
                 // a new tab so a slow JS load or missed handler does not
                 // strand the user in a raw-file window.
-                let _ = write!(
-                    html,
+                crate::templates::append_html(&mut html, format_args!(
                     r#"<div class="file-container{combo_class}">
 <div class="file-info">
   File: {file_link} ({sz})
@@ -1265,7 +1308,7 @@ fn render_post_with_context(
                             )
                         }
                     )
-                );
+                ));
             }
         } else if let Some(file) = &post.file_path {
             let size_str = post.file_size.map(format_file_size).unwrap_or_default();
@@ -1276,17 +1319,19 @@ fn render_post_with_context(
                 Some("failed") => "Preview generation failed; original file is still available.",
                 _ => "Preview unavailable.",
             };
-            let _ = write!(
-                html,
-                r#"<div class="file-container">
+            crate::templates::append_html(
+                &mut html,
+                format_args!(
+                    r#"<div class="file-container">
 <div class="file-info">
   File: {file_link} ({sz})
   <span class="post-edited" title="{status}">{status}</span>
 </div>
 </div>"#,
-                file_link = file_link,
-                sz = escape_html(&size_str),
-                status = escape_html(status_note),
+                    file_link = file_link,
+                    sz = escape_html(&size_str),
+                    status = escape_html(status_note),
+                ),
             );
         }
     }
@@ -1299,15 +1344,17 @@ fn render_post_with_context(
             let size_str = post.file_size.map(format_file_size).unwrap_or_default();
             let name_str = post.file_name.as_deref().unwrap_or("download");
             let file_link = render_file_link(file, name_str);
-            let _ = write!(
-                html,
-                r#"<div class="file-container file-download">
+            crate::templates::append_html(
+                &mut html,
+                format_args!(
+                    r#"<div class="file-container file-download">
 <div class="file-info">
   File: {file_link} ({sz})
 </div>
 </div>"#,
-                file_link = file_link,
-                sz = escape_html(&size_str)
+                    file_link = file_link,
+                    sz = escape_html(&size_str)
+                ),
             );
         }
     }
@@ -1324,9 +1371,10 @@ fn render_post_with_context(
                 .map(format_file_size)
                 .unwrap_or_default();
             let audio_link = render_file_link(aud_file, aud_name);
-            let _ = write!(
-                html,
-                r#"<div class="file-container audio-container audio-combo">
+            crate::templates::append_html(
+                &mut html,
+                format_args!(
+                    r#"<div class="file-container audio-container audio-combo">
 <div class="file-info">
   File: {audio_link} ({sz})
 </div>
@@ -1335,11 +1383,12 @@ fn render_post_with_context(
   Your browser does not support the audio element.
 </audio>
 </div>"#,
-                audio_link = audio_link,
-                f = escape_html(aud_file),
-                orig = escape_html(aud_name),
-                sz = escape_html(&aud_size),
-                mime = escape_html(aud_mime)
+                    audio_link = audio_link,
+                    f = escape_html(aud_file),
+                    orig = escape_html(aud_name),
+                    sz = escape_html(&aud_size),
+                    mime = escape_html(aud_mime)
+                ),
             );
         }
     }
@@ -1365,7 +1414,10 @@ fn render_post_with_context(
                 ),
             ),
     };
-    let _ = write!(html, r#"<div class="post-body">{body_html}</div>"#);
+    crate::templates::append_html(
+        &mut html,
+        format_args!(r#"<div class="post-body">{body_html}</div>"#),
+    );
 
     // Edit link + report button (only on thread pages where show_delete=true)
     if show_delete {
@@ -1425,9 +1477,11 @@ fn render_post_with_context(
             "submit report",
         );
 
-        let _ = write!(
-            html,
-            r#"<div class="post-controls">{self_action_controls}{report_btn}{report_fallback}</div>"#
+        crate::templates::append_html(
+            &mut html,
+            format_args!(
+                r#"<div class="post-controls">{self_action_controls}{report_btn}{report_fallback}</div>"#
+            ),
         );
     }
 
@@ -1436,9 +1490,10 @@ fn render_post_with_context(
         let is_op_val = if post.is_op { "1" } else { "0" };
         let return_to = format!("/{}/thread/{}", board_short, post.thread_id);
         let admin_form_csrf = admin_csrf_token.as_deref().unwrap_or(csrf_token);
-        let _ = write!(
-            html,
-            r#"<div class="post-controls admin-post-controls">
+        crate::templates::append_html(
+            &mut html,
+            format_args!(
+                r#"<div class="post-controls admin-post-controls">
 <form method="POST" action="/admin/post/delete">
 <input type="hidden" name="_csrf"   value="{csrf}">
 <input type="hidden" name="post_id" value="{pid}">
@@ -1460,13 +1515,14 @@ fn render_post_with_context(
 </form>
 <a class="admin-ip-link" href="/admin/ip/{ip_hash}?return_to={return_to}" title="View all posts from this hashed IP">&#x1F50D; ip</a>
 </div>"#,
-            csrf = escape_html(admin_form_csrf),
-            pid = post.id,
-            board = escape_html(board_short),
-            ip_hash = escape_html(post.ip_hash.as_deref().unwrap_or("")),
-            tid = post.thread_id,
-            return_to = encode_query_component(&return_to),
-            is_op = is_op_val
+                csrf = escape_html(admin_form_csrf),
+                pid = post.id,
+                board = escape_html(board_short),
+                ip_hash = escape_html(post.ip_hash.as_deref().unwrap_or("")),
+                tid = post.thread_id,
+                return_to = encode_query_component(&return_to),
+                is_op = is_op_val
+            ),
         );
     }
 
@@ -2289,11 +2345,15 @@ mod tests {
         let board = crate::test_fixtures::sample_board();
         let post = sample_post();
         let mut owned = std::collections::BTreeMap::new();
-        owned.insert(
+        let previous_controls = owned.insert(
             post.id,
             OwnedPostControls {
                 expires_at: i64::MAX,
             },
+        );
+        assert!(
+            previous_controls.is_none(),
+            "the owned-post fixture must be unique"
         );
 
         let html = thread_page(

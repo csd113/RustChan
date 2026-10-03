@@ -43,13 +43,13 @@ pub(in crate::server) async fn update_account(
     }
     tokio::task::spawn_blocking(move || -> Result<Response> {
         let mut conn = state.db.get()?;
-        require_admin_session_sid(&conn, session.as_deref())?;
+        require_admin_session_sid(&conn, session.as_deref()).map(|_completed_value| ())?;
         if form.new_password != form.confirm_password { return Ok(super::admin_panel_error_redirect_anchor("Passwords did not match. No account changes saved.", "accounts").into_response()); }
         let result = db::manage_account(&mut conn, session.as_deref().unwrap_or_default(), action, form.username.trim(), &form.current_password, &form.new_password);
         match result {
             Ok(true) => Ok(super::admin_panel_redirect_anchor("Account saved. Password changes revoke all sessions for that account; sign in again if you changed your own password.", "accounts").into_response()),
             Ok(false) => {
-                super::auth::record_login_fail(&key);
+                let _failure_count = super::auth::record_login_fail(&key);
                 Ok(super::admin_panel_error_redirect_anchor("Current password did not verify. No account changes saved.", "accounts").into_response())
             }
             Err(error) => Ok(super::admin_panel_error_redirect_anchor(&format!("No account changes saved: {error}"), "accounts").into_response()),
@@ -87,7 +87,7 @@ pub(in crate::server) async fn rotate_secret(
         let actor = db::get_admin_name_by_id(&conn, actor)?.ok_or_else(|| AppError::Forbidden("Administrator missing".into()))?;
         let user = db::get_admin_by_username(&conn, &actor)?.ok_or_else(|| AppError::Forbidden("Administrator missing".into()))?;
         if password.len() > 1024 || !crate::utils::crypto::verify_password(password, &user.password_hash)? {
-            super::auth::record_login_fail(&key);
+            let _failure_count = super::auth::record_login_fail(&key);
             return Ok(super::admin_panel_error_redirect_anchor("Current password did not verify. No secret changes saved.", "storage").into_response());
         }
         let rotation = crate::config::admin::management::rotate_secret();

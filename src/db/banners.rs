@@ -111,7 +111,7 @@ pub fn next_banner_sort_order(
             params![board_id],
             |row| row.get(0),
         )?,
-        _ => conn.query_row(
+        BannerScope::Global | BannerScope::Home => conn.query_row(
             "SELECT COALESCE(MAX(sort_order) + 1, 1)
              FROM banner_assets
              WHERE scope_type = ?1",
@@ -219,7 +219,8 @@ pub fn delete_banner_asset(conn: &rusqlite::Connection, banner_id: i64) -> Resul
     conn.execute(
         "DELETE FROM banner_assets WHERE id = ?1",
         params![banner_id],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     Ok(asset)
 }
 
@@ -235,7 +236,8 @@ pub fn delete_board_banner_assets(
     conn.execute(
         "DELETE FROM banner_assets WHERE scope_type = 'board' AND board_id = ?1",
         params![board_id],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     Ok(assets)
 }
 
@@ -275,10 +277,10 @@ pub fn move_banner_asset(
         .ok_or_else(|| anyhow::anyhow!("Banner id {banner_id} not found"))?;
     let swap_with = if move_up {
         index.checked_sub(1)
-    } else if index + 1 < ordered_ids.len() {
-        Some(index + 1)
     } else {
-        None
+        index
+            .checked_add(1)
+            .filter(|next| *next < ordered_ids.len())
     };
     let Some(target_index) = swap_with else {
         tx.commit()?;
@@ -289,9 +291,13 @@ pub fn move_banner_asset(
         let mut update =
             tx.prepare_cached("UPDATE banner_assets SET sort_order = ?1 WHERE id = ?2")?;
         for (position, id) in ordered_ids.iter().enumerate() {
-            let sort_order =
-                i64::try_from(position).context("banner sort_order must fit in i64")? + 1;
-            update.execute(params![sort_order, id])?;
+            let sort_order = i64::try_from(position)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .context("banner sort_order must fit in i64")?;
+            update
+                .execute(params![sort_order, id])
+                .map(|_affected_rows| ())?;
         }
     }
     tx.commit()?;

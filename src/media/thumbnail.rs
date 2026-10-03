@@ -3,17 +3,15 @@
 use anyhow::{Context as _, Result};
 use image::{imageops::FilterType, GenericImageView as _, ImageFormat};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
 
 use super::ffmpeg;
 
 #[cfg(test)]
-static PDF_RENDERER_TEST_MODE: std::sync::RwLock<Option<TestPdfRendererMode>> =
-    std::sync::RwLock::new(None);
-#[cfg(test)]
-static PDF_RENDERER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+std::thread_local! {
+    static PDF_RENDERER_TEST_MODE: std::cell::Cell<Option<TestPdfRendererMode>> = const {
+        std::cell::Cell::new(None)
+    };
+}
 
 // Static placeholder SVGs
 // Note: these SVG strings contain `"#` sequences (e.g. fill="#0a0f0a") which
@@ -63,25 +61,17 @@ pub enum PlaceholderKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// External PDF renderer that can produce a first-page preview.
+/// Built-in PDF renderer used for supported first-page previews.
 pub enum PdfRenderer {
-    /// Poppler's `pdftoppm` command.
-    Pdftoppm,
-    /// `MuPDF`'s `mutool` command.
-    Mutool,
-    /// macOS Quick Look's `qlmanage` command.
-    Qlmanage,
+    /// Pure-Rust Hayro PDF rasterizer.
+    Hayro,
 }
 
 impl PdfRenderer {
-    /// Return the executable name used to probe and invoke this renderer.
+    /// Return the renderer name used in maintenance reports.
     #[must_use]
     pub const fn binary_name(self) -> &'static str {
-        match self {
-            Self::Pdftoppm => "pdftoppm",
-            Self::Mutool => "mutool",
-            Self::Qlmanage => "qlmanage",
-        }
+        "hayro (Rust)"
     }
 }
 
@@ -99,7 +89,7 @@ pub enum PdfThumbnailOutcome {
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Test-only override for external PDF renderer behavior.
+/// Test-only override for PDF preview failure behavior.
 pub enum TestPdfRendererMode {
     /// Simulate no available renderer.
     Unavailable,
@@ -111,77 +101,45 @@ pub enum TestPdfRendererMode {
 
 #[cfg(test)]
 #[derive(Debug)]
-/// Guard that serializes and restores PDF-renderer test overrides.
+/// Restore this test thread's override without affecting concurrent tests.
 pub struct PdfRendererTestGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: Option<TestPdfRendererMode>,
+    // The override belongs to the originating thread, so its guard is not Send.
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 #[cfg(test)]
 impl Drop for PdfRendererTestGuard {
     fn drop(&mut self) {
-        *PDF_RENDERER_TEST_MODE
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        PDF_RENDERER_TEST_MODE.with(|value| value.set(self.previous));
     }
 }
 
 #[cfg(test)]
-/// Installs a serialized test-only override for PDF renderer detection.
+/// Install a test-only override on this synchronous processing thread.
+#[must_use]
 pub fn override_pdf_renderer_mode(mode: TestPdfRendererMode) -> PdfRendererTestGuard {
-    let guard = PDF_RENDERER_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *PDF_RENDERER_TEST_MODE
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(mode);
-    PdfRendererTestGuard { _lock: guard }
+    PdfRendererTestGuard {
+        previous: PDF_RENDERER_TEST_MODE.with(|value| value.replace(Some(mode))),
+        _thread: std::marker::PhantomData,
+    }
 }
 
-/// Generate a thumbnail for a media file and write it to `output_path`.
+/// Generate a thumbnail and return the actual path written.
 ///
-/// All thumbnails are produced as WebP.  The strategy depends on the MIME
-/// type and whether ffmpeg (and its libwebp encoder) is available:
-///
-/// | Source MIME       | ffmpeg | libwebp | Action                          |
-/// |-------------------|--------|---------|---------------------------------|
-/// | `image/*`         | yes    | —       | ffmpeg first-frame + WebP       |
-/// | `image/*`         | no     | —       | `image` crate → resize → WebP   |
-/// | `video/webm`      | yes    | yes     | ffmpeg first-frame + WebP       |
-/// | `video/webm`      | yes    | no      | static SVG placeholder          |
-/// | `video/webm`      | no     | —       | static SVG placeholder          |
-/// | `image/svg+xml`   | either | —       | static SVG placeholder          |
-/// | `audio/*`         | either | —       | static SVG placeholder          |
-///
-/// # Arguments
-/// * `input_path`             — Absolute path to the (already converted) media file.
-/// * `mime`                   — Final MIME type of the input file.
-/// * `output_path`            — Where to write the thumbnail (WebP or SVG).
-/// * `max_dim`                — Maximum width and height in pixels (aspect preserved).
-/// * `ffmpeg_available`       — Whether ffmpeg was detected at startup.
-/// * `ffmpeg_webp_available`  — Whether ffmpeg has the libwebp encoder compiled in.
+/// Images, including animated WebP, use the Rust decoder and WebP encoder.
+/// Videos use `FFmpeg` only to extract a PNG frame, then the same Rust encoder.
+/// Failed video extraction writes a `.svg` sibling placeholder.
 ///
 /// # Errors
-/// Returns an error only if all strategies (including placeholder writing)
-/// fail.  Individual strategy failures are demoted to warnings so that a
-/// thumbnail failure never causes the upload to fail.
-/// Generate a thumbnail and return the **actual path written**.
-///
-/// The returned path may differ from `output_path` when a fallback SVG
-/// placeholder is written for a video whose thumbnail extraction failed.
-/// `thumbnail_output_path` selects `.webp` for video when ffmpeg+libwebp are
-/// both present (because it cannot know ahead of time whether ffmpeg will
-/// succeed).  If extraction fails, writing SVG bytes into a `.webp` file
-/// produces a file whose content and extension disagree — browsers reject it
-/// and show a broken thumbnail.  To avoid this, the video fallback writes the
-/// placeholder to a `.svg` sibling path instead and returns that path, so the
-/// caller can store the correct path in the database.
+/// Returns an error if decoding or encoding fails without an available fallback,
+/// or if writing the fallback placeholder fails.
 pub fn generate_thumbnail(
     input_path: &Path,
     mime: &str,
     output_path: &Path,
     max_dim: u32,
     ffmpeg_available: bool,
-    ffmpeg_webp_available: bool,
 ) -> Result<PathBuf> {
     match mime {
         // SVG and audio: always use static placeholder
@@ -195,7 +153,7 @@ pub fn generate_thumbnail(
             drop(std::fs::remove_file(output_path));
             drop(std::fs::remove_file(&placeholder_path));
             match pdf_first_page_thumbnail(input_path, output_path, max_dim) {
-                Ok(PdfThumbnailOutcome::Rendered { .. }) => Ok(output_path.to_path_buf()),
+                Ok(PdfThumbnailOutcome::Rendered { renderer: _ }) => Ok(output_path.to_path_buf()),
                 Ok(PdfThumbnailOutcome::Placeholder) => Ok(placeholder_path),
                 Err(error) => {
                     drop(std::fs::remove_file(output_path));
@@ -205,19 +163,13 @@ pub fn generate_thumbnail(
             }
         }
 
-        // Video (WebM, MP4, and any other video/*): requires ffmpeg AND libwebp
-        // `thumbnail_output_path` pre-selects `.webp` when both are present.
-        // If ffmpeg_thumbnail then fails, write the SVG placeholder to the
-        // `.svg`-extension sibling so the file content and extension match.
-        // The `else` branch (ffmpeg absent / libwebp absent) already has the
-        // `.svg` extension pre-selected by `thumbnail_output_path`, so no
-        // rename is needed there.
         m if m.starts_with("video/") => {
-            if ffmpeg_available && ffmpeg_webp_available {
+            if ffmpeg_available {
                 match ffmpeg::ffmpeg_thumbnail(input_path, output_path, max_dim) {
                     Ok(()) => Ok(output_path.to_path_buf()),
                     Err(e) => {
                         tracing::warn!("ffmpeg video thumbnail failed ({}); using placeholder", e);
+                        drop(std::fs::remove_file(output_path));
                         // Write the SVG placeholder with a .svg extension so its
                         // content and file extension agree.  Browsers that receive
                         // SVG bytes served as image/webp silently show nothing.
@@ -232,28 +184,12 @@ pub fn generate_thumbnail(
             }
         }
 
-        // WebP: skip ffmpeg entirely — use image crate directly
-        // ffmpeg fails on animated WebP (VP8L) and emits a spurious warning
-        // even though the image crate handles all WebP variants correctly.
+        // WebP previews always use the Rust decoder, including animation.
         "image/webp" => image_crate_thumbnail(input_path, mime, output_path, max_dim)
             .map(|()| output_path.to_path_buf()),
 
-        // Other images: try ffmpeg, fall back to image crate
         _ if mime.starts_with("image/") => {
-            if ffmpeg_available {
-                match ffmpeg::ffmpeg_thumbnail(input_path, output_path, max_dim) {
-                    Ok(()) => Ok(output_path.to_path_buf()),
-                    Err(e) => {
-                        tracing::warn!(
-                            "ffmpeg image thumbnail failed ({}); falling back to image crate",
-                            e
-                        );
-                        image_crate_thumbnail_or_placeholder(input_path, mime, output_path, max_dim)
-                    }
-                }
-            } else {
-                image_crate_thumbnail_or_placeholder(input_path, mime, output_path, max_dim)
-            }
+            image_crate_thumbnail_or_placeholder(input_path, mime, output_path, max_dim)
         }
 
         // Unknown MIME: placeholder
@@ -262,26 +198,15 @@ pub fn generate_thumbnail(
     }
 }
 
-/// Determine the correct output path for a thumbnail given the media MIME type.
-///
-/// Always returns a `.webp` path, except for types that produce an
-/// SVG placeholder (video without ffmpeg or libwebp, audio, svg source).
-///
-/// # Arguments
-/// * `thumb_dir`              — The `thumbs/` directory (absolute path).
-/// * `file_stem`              — UUID stem shared with the media file.
-/// * `mime`                   — Final MIME of the converted media file.
-/// * `ffmpeg_available`       — Whether ffmpeg was detected.
-/// * `ffmpeg_webp_available`  — Whether ffmpeg has the libwebp encoder.
+/// Select a WebP thumbnail path, or SVG for audio, SVG and video without `FFmpeg`.
 #[must_use]
 pub fn thumbnail_output_path(
     thumb_dir: &Path,
     file_stem: &str,
     mime: &str,
     ffmpeg_available: bool,
-    ffmpeg_webp_available: bool,
 ) -> PathBuf {
-    let ext = thumbnail_extension(mime, ffmpeg_available, ffmpeg_webp_available);
+    let ext = thumbnail_extension(mime, ffmpeg_available);
     thumb_dir.join(format!("{file_stem}.{ext}"))
 }
 
@@ -307,34 +232,14 @@ pub fn write_placeholder(output_path: &Path, kind: PlaceholderKind) -> Result<()
 /// Generate a thumbnail using the `image` crate (no ffmpeg required).
 ///
 /// Decodes `input_path`, resizes to fit within `max_dim × max_dim` (aspect
-/// preserved), and saves as WebP.  This path is taken for image uploads when
-/// ffmpeg is unavailable.
-fn image_crate_thumbnail(
+/// preserved), and saves as WebP. This path handles all supported images.
+pub(super) fn image_crate_thumbnail(
     input_path: &Path,
-    mime: &str,
+    _mime: &str,
     output_path: &Path,
     max_dim: u32,
 ) -> Result<()> {
-    let format = mime_to_image_format(mime)
-        .ok_or_else(|| anyhow::anyhow!("unsupported image MIME for thumbnail: {mime}"))?;
-    let (width, height) = image::image_dimensions(input_path).with_context(|| {
-        format!(
-            "failed to inspect {} before thumbnailing",
-            input_path.display()
-        )
-    })?;
-    if u64::from(width).saturating_mul(u64::from(height)) > super::MAX_UNTRUSTED_IMAGE_PIXELS {
-        anyhow::bail!("image dimensions {width}x{height} exceed thumbnail safety limit");
-    }
-
-    let data = std::fs::read(input_path)
-        .with_context(|| format!("failed to read {} for thumbnailing", input_path.display()))?;
-
-    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(&data), format);
-    reader.limits(super::untrusted_image_decode_limits());
-    let img = reader
-        .decode()
-        .context("failed to decode image for thumbnail")?;
+    let img = super::images::decode_still(input_path)?;
 
     let (w, h) = img.dimensions();
     let (tw, th) = if w > h {
@@ -377,266 +282,45 @@ fn image_crate_thumbnail_or_placeholder(
     }
 }
 
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "the renderer fallback and fail-closed validation sequence is intentionally linear"
-)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "PDF rendering keeps subprocess validation, fallback, and cleanup in one auditable sequence"
-)]
-/// Render a PDF first page with available tools or publish a placeholder.
+/// Render a supported PDF first page or publish its existing placeholder.
 fn pdf_first_page_thumbnail(
     input_path: &Path,
     output_path: &Path,
     max_dim: u32,
 ) -> Result<PdfThumbnailOutcome> {
-    let parent = output_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("PDF thumbnail output has no parent"))?;
-    let temp_dir = tempfile::Builder::new()
-        .prefix("rustchan-pdf-thumb-")
-        .tempdir_in(parent)
-        .with_context(|| {
-            format!(
-                "failed to create temp PDF thumbnail dir in {}",
-                parent.display()
-            )
-        })?;
-    let png_path = temp_dir.path().join("page1.png");
-
-    let render_result = match render_pdf_with_pdftoppm(input_path, &png_path, max_dim) {
-        Ok(()) => Some(PdfRenderer::Pdftoppm),
-        Err(pdftoppm_error) => match render_pdf_with_mutool(input_path, &png_path, max_dim) {
-            Ok(()) => Some(PdfRenderer::Mutool),
-            Err(mutool_error) => {
-                match render_pdf_with_qlmanage(input_path, &png_path, max_dim, temp_dir.path()) {
-                    Ok(()) => Some(PdfRenderer::Qlmanage),
-                    Err(qlmanage_error) => {
-                        tracing::warn!(
-                            pdftoppm = %pdftoppm_error,
-                            mutool = %mutool_error,
-                            qlmanage = %qlmanage_error,
-                            "PDF thumbnail rendering failed; using built-in generic thumbnail"
-                        );
-                        write_placeholder(
-                            &pdf_placeholder_output_path(output_path),
-                            PlaceholderKind::Pdf,
-                        )?;
-                        return Ok(PdfThumbnailOutcome::Placeholder);
-                    }
-                }
-            }
-        },
-    };
-
-    let Some(renderer) = render_result else {
-        write_placeholder(
-            &pdf_placeholder_output_path(output_path),
-            PlaceholderKind::Pdf,
-        )?;
-        return Ok(PdfThumbnailOutcome::Placeholder);
-    };
-
-    let (width, height) = match image::image_dimensions(&png_path) {
-        Ok(dimensions) => dimensions,
+    let result = render_pdf(input_path, output_path, max_dim);
+    match result {
+        Ok(()) => Ok(PdfThumbnailOutcome::Rendered {
+            renderer: PdfRenderer::Hayro,
+        }),
         Err(error) => {
-            tracing::warn!(
-                renderer = renderer.binary_name(),
-                path = %png_path.display(),
-                %error,
-                "Rendered PDF thumbnail dimensions could not be inspected; using built-in generic thumbnail"
-            );
+            tracing::warn!(%error, "PDF preview unavailable; using built-in generic thumbnail");
+            drop(std::fs::remove_file(output_path));
             write_placeholder(
                 &pdf_placeholder_output_path(output_path),
                 PlaceholderKind::Pdf,
             )?;
-            return Ok(PdfThumbnailOutcome::Placeholder);
+            Ok(PdfThumbnailOutcome::Placeholder)
         }
-    };
-    if u64::from(width).saturating_mul(u64::from(height)) > super::MAX_UNTRUSTED_IMAGE_PIXELS {
-        tracing::warn!(
-            renderer = renderer.binary_name(),
-            path = %png_path.display(),
-            width,
-            height,
-            "Rendered PDF thumbnail exceeds safety pixel limit; using built-in generic thumbnail"
-        );
-        write_placeholder(
-            &pdf_placeholder_output_path(output_path),
-            PlaceholderKind::Pdf,
-        )?;
-        return Ok(PdfThumbnailOutcome::Placeholder);
     }
+}
 
-    let image = match image::open(&png_path) {
-        Ok(image) => image,
-        Err(error) => {
-            tracing::warn!(
-                renderer = renderer.binary_name(),
-                path = %png_path.display(),
-                %error,
-                "Rendered PDF thumbnail could not be decoded; using built-in generic thumbnail"
-            );
-            write_placeholder(
-                &pdf_placeholder_output_path(output_path),
-                PlaceholderKind::Pdf,
-            )?;
-            return Ok(PdfThumbnailOutcome::Placeholder);
-        }
-    };
-    let thumb = image.thumbnail(max_dim, max_dim);
-    if let Err(error) = thumb.save_with_format(output_path, ImageFormat::WebP) {
-        tracing::warn!(
-            renderer = renderer.binary_name(),
-            output = %output_path.display(),
-            %error,
-            "Saving PDF thumbnail failed; using built-in generic thumbnail"
-        );
-        drop(std::fs::remove_file(output_path));
-        write_placeholder(
-            &pdf_placeholder_output_path(output_path),
-            PlaceholderKind::Pdf,
-        )?;
-        return Ok(PdfThumbnailOutcome::Placeholder);
+/// Apply test failure injection, then invoke the in-process renderer.
+fn render_pdf(input_path: &Path, output_path: &Path, max_dim: u32) -> Result<()> {
+    #[cfg(test)]
+    if PDF_RENDERER_TEST_MODE.with(std::cell::Cell::get).is_some() {
+        anyhow::bail!("injected PDF renderer failure");
     }
-
-    Ok(PdfThumbnailOutcome::Rendered { renderer })
+    super::pdf::render(input_path, output_path, max_dim)
 }
 
 /// Scale one dimension proportionally using widened integer arithmetic.
 fn scaled_dimension(side: u32, max_dimension: u32, denominator: u32) -> u32 {
-    let scaled =
-        u64::from(side).saturating_mul(u64::from(max_dimension)) / u64::from(denominator.max(1));
+    let scaled = u64::from(side)
+        .saturating_mul(u64::from(max_dimension))
+        .checked_div(u64::from(denominator.max(1)))
+        .unwrap_or_else(|| u64::from(max_dimension));
     u32::try_from(scaled).unwrap_or(max_dimension)
-}
-
-/// Render a PDF first page using Poppler's `pdftoppm`.
-fn render_pdf_with_pdftoppm(input_path: &Path, png_path: &Path, max_dim: u32) -> Result<()> {
-    #[cfg(test)]
-    {
-        if let Some(result) = test_renderer_override(PdfRenderer::Pdftoppm) {
-            return result;
-        }
-    }
-    let prefix = png_path.with_extension("");
-    let status = run_pdf_renderer_with_timeout(Command::new("pdftoppm").args([
-        "-f",
-        "1",
-        "-l",
-        "1",
-        "-singlefile",
-        "-png",
-        "-scale-to",
-        &max_dim.to_string(),
-        path_to_str(input_path)?,
-        path_to_str(&prefix)?,
-    ]))
-    .context("failed to run pdftoppm")?;
-    if status.success() && png_path.exists() {
-        Ok(())
-    } else {
-        anyhow::bail!("pdftoppm failed")
-    }
-}
-
-/// Render a PDF first page using `MuPDF`'s `mutool`.
-fn render_pdf_with_mutool(input_path: &Path, png_path: &Path, max_dim: u32) -> Result<()> {
-    #[cfg(test)]
-    {
-        if let Some(result) = test_renderer_override(PdfRenderer::Mutool) {
-            return result;
-        }
-    }
-    let mut command = build_mutool_command(input_path, png_path, max_dim)?;
-    let status = run_pdf_renderer_with_timeout(&mut command).context("failed to run mutool")?;
-    if status.success() && png_path.exists() {
-        Ok(())
-    } else {
-        anyhow::bail!("mutool failed")
-    }
-}
-
-/// Build a bounded first-page `mutool draw` command.
-fn build_mutool_command(input_path: &Path, png_path: &Path, max_dim: u32) -> Result<Command> {
-    let mut command = Command::new("mutool");
-    command.args([
-        "draw",
-        "-q",
-        "-w",
-        &max_dim.to_string(),
-        "-h",
-        &max_dim.to_string(),
-        "-o",
-        path_to_str(png_path)?,
-        path_to_str(input_path)?,
-        "1",
-    ]);
-    Ok(command)
-}
-
-/// Render a PDF preview using macOS Quick Look.
-fn render_pdf_with_qlmanage(
-    input_path: &Path,
-    png_path: &Path,
-    max_dim: u32,
-    temp_dir: &Path,
-) -> Result<()> {
-    #[cfg(test)]
-    {
-        if let Some(result) = test_renderer_override(PdfRenderer::Qlmanage) {
-            return result;
-        }
-    }
-    let status = run_pdf_renderer_with_timeout(Command::new("qlmanage").args([
-        "-t",
-        "-s",
-        &max_dim.to_string(),
-        "-o",
-        path_to_str(temp_dir)?,
-        path_to_str(input_path)?,
-    ]))
-    .context("failed to run qlmanage")?;
-    let ql_path = input_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| temp_dir.join(format!("{name}.png")))
-        .ok_or_else(|| anyhow::anyhow!("PDF input path has no UTF-8 filename"))?;
-    if status.success() && ql_path.exists() {
-        std::fs::rename(&ql_path, png_path)
-            .with_context(|| format!("failed to move qlmanage thumbnail {}", ql_path.display()))?;
-        Ok(())
-    } else {
-        anyhow::bail!("qlmanage failed")
-    }
-}
-
-/// Convert a filesystem path to UTF-8 for an external command argument.
-fn path_to_str(path: &Path) -> Result<&str> {
-    path.to_str()
-        .ok_or_else(|| anyhow::anyhow!("path contains non-UTF-8 characters: {}", path.display()))
-}
-
-/// Run a PDF renderer with the configured subprocess timeout.
-fn run_pdf_renderer_with_timeout(command: &mut Command) -> Result<std::process::ExitStatus> {
-    let timeout = Duration::from_secs(10);
-    let mut child = command
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("failed to spawn PDF renderer")?;
-    let started = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        if started.elapsed() >= timeout {
-            drop(child.kill());
-            drop(child.wait());
-            anyhow::bail!("PDF renderer timed out after {}s", timeout.as_secs());
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
 }
 
 /// Return the SVG fallback sibling for a requested PDF thumbnail path.
@@ -645,125 +329,17 @@ fn pdf_placeholder_output_path(output_path: &Path) -> PathBuf {
 }
 
 #[must_use]
-/// Detect all supported PDF renderer executables available on this host.
+/// Report the built-in PDF renderer; no executable detection is needed.
 pub fn detect_pdf_renderers() -> Vec<PdfRenderer> {
-    [
-        PdfRenderer::Pdftoppm,
-        PdfRenderer::Mutool,
-        PdfRenderer::Qlmanage,
-    ]
-    .into_iter()
-    .filter(|renderer| probe_renderer(*renderer))
-    .collect()
+    vec![PdfRenderer::Hayro]
 }
 
-/// Probe one supported PDF renderer for availability.
-fn probe_renderer(renderer: PdfRenderer) -> bool {
-    #[cfg(test)]
-    if matches!(
-        *PDF_RENDERER_TEST_MODE
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-        Some(TestPdfRendererMode::Unavailable)
-    ) {
-        return false;
-    }
-
-    probe_renderer_with_timeout(renderer.binary_name())
-}
-
-/// Run a bounded version probe for an external renderer program.
-fn probe_renderer_with_timeout(program: &str) -> bool {
-    let timeout = Duration::from_secs(10);
-    let Ok(mut child) = Command::new(program)
-        .arg("-h")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return false;
-    };
-    let started = Instant::now();
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(_status)) => return true,
-            Ok(None) => {}
-            Err(_) => return false,
-        }
-        if started.elapsed() >= timeout {
-            drop(child.kill());
-            drop(child.wait());
-            return false;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-}
-
-#[cfg(test)]
-fn test_renderer_override(renderer: PdfRenderer) -> Option<Result<()>> {
-    let mode = *PDF_RENDERER_TEST_MODE
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match mode {
-        Some(TestPdfRendererMode::Unavailable) => Some(Err(anyhow::anyhow!(
-            "{} unavailable in test override",
-            renderer.binary_name()
-        ))),
-        Some(TestPdfRendererMode::Fail) => Some(Err(anyhow::anyhow!(
-            "{} failed in test override",
-            renderer.binary_name()
-        ))),
-        Some(TestPdfRendererMode::Timeout) => Some(Err(anyhow::anyhow!(
-            "{} timed out in test override",
-            renderer.binary_name()
-        ))),
-        None => None,
-    }
-}
-
-/// Map a MIME type to an `image::ImageFormat` for decoding.
-///
-/// Returns `None` for types the `image` crate cannot decode (video, SVG,
-/// audio).
-fn mime_to_image_format(mime: &str) -> Option<ImageFormat> {
-    match mime {
-        "image/jpeg" => Some(ImageFormat::Jpeg),
-        "image/png" => Some(ImageFormat::Png),
-        "image/gif" => Some(ImageFormat::Gif),
-        "image/webp" => Some(ImageFormat::WebP),
-        "image/bmp" => Some(ImageFormat::Bmp),
-        "image/tiff" => Some(ImageFormat::Tiff),
-        _ => None,
-    }
-}
-
-/// Return the file extension to use for a thumbnail.
-///
-/// All thumbnails are `.webp` unless the source requires a static SVG
-/// placeholder (video without ffmpeg, audio, SVG sources).
-///
-/// For `video/webm`, a WebP thumbnail can only be produced when ffmpeg is
-/// available AND the `libwebp` encoder is compiled in.  When either is
-/// absent, `ffmpeg_thumbnail` will fail and `write_placeholder` will be
-/// called — we must pre-select `.svg` so the placeholder is written to a
-/// path whose extension matches its actual SVG content.  Mismatching the
-/// extension (SVG bytes in a `.webp` file) causes browsers to reject the
-/// file and display nothing.
-fn thumbnail_extension(
-    mime: &str,
-    ffmpeg_available: bool,
-    ffmpeg_webp_available: bool,
-) -> &'static str {
+/// Select the extension for a thumbnail or its placeholder.
+fn thumbnail_extension(mime: &str, ffmpeg_available: bool) -> &'static str {
     match mime {
         "image/svg+xml" => "svg",
         m if m.starts_with("audio/") => "svg",
-        // Video thumbnails need both ffmpeg (to demux the stream) AND libwebp
-        // (to encode the extracted frame as WebP).  If either is missing the
-        // fallback is an SVG placeholder.  This applies to all video/* types,
-        // not just WebM — MP4 and any other video format go through ffmpeg the
-        // same way and need the same extension pre-selection logic.
-        m if m.starts_with("video/") && (!ffmpeg_available || !ffmpeg_webp_available) => "svg",
+        m if m.starts_with("video/") && !ffmpeg_available => "svg",
         _ => "webp",
     }
 }
@@ -773,42 +349,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn valid_unsupported_pdf_retains_upload_and_uses_svg_preview() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/inline-image.pdf");
+        let before = std::fs::read(&source)?;
+        let output = dir.path().join("page.webp");
+        let result = generate_thumbnail(&source, "application/pdf", &output, 100, false)?;
+        anyhow::ensure!(
+            result.extension().and_then(std::ffi::OsStr::to_str) == Some("svg"),
+            "unsupported preview did not use SVG"
+        );
+        anyhow::ensure!(
+            std::fs::read_to_string(result)?.contains("PDF"),
+            "PDF placeholder is invalid"
+        );
+        anyhow::ensure!(
+            std::fs::read(&source)? == before,
+            "unsupported preview changed the download"
+        );
+        anyhow::ensure!(!output.exists(), "unsupported preview published WebP");
+        Ok(())
+    }
+
+    #[test]
     fn thumbnail_ext_is_webp_for_images_no_ffmpeg() {
-        // Images use image-crate fallback, so webp even without ffmpeg
-        assert_eq!(thumbnail_extension("image/jpeg", false, false), "webp");
-        assert_eq!(thumbnail_extension("image/png", false, false), "webp");
-        assert_eq!(thumbnail_extension("image/webp", false, false), "webp");
+        // Image previews use the built-in Rust encoder.
+        assert_eq!(thumbnail_extension("image/jpeg", false), "webp");
+        assert_eq!(thumbnail_extension("image/png", false), "webp");
+        assert_eq!(thumbnail_extension("image/webp", false), "webp");
     }
 
     #[test]
     fn thumbnail_ext_is_svg_for_video_without_ffmpeg() {
-        assert_eq!(thumbnail_extension("video/webm", false, false), "svg");
-        assert_eq!(thumbnail_extension("video/mp4", false, false), "svg");
+        assert_eq!(thumbnail_extension("video/webm", false), "svg");
+        assert_eq!(thumbnail_extension("video/mp4", false), "svg");
     }
 
     #[test]
-    fn thumbnail_ext_is_svg_for_video_with_ffmpeg_but_no_webp() {
-        // ffmpeg available but libwebp missing — placeholder path must be .svg
-        assert_eq!(thumbnail_extension("video/webm", true, false), "svg");
-        assert_eq!(thumbnail_extension("video/mp4", true, false), "svg");
-    }
-
-    #[test]
-    fn thumbnail_ext_is_webp_for_video_with_ffmpeg_and_webp() {
-        assert_eq!(thumbnail_extension("video/webm", true, true), "webp");
-        assert_eq!(thumbnail_extension("video/mp4", true, true), "webp");
+    fn thumbnail_ext_is_webp_for_video_with_ffmpeg() {
+        assert_eq!(thumbnail_extension("video/webm", true), "webp");
+        assert_eq!(thumbnail_extension("video/mp4", true), "webp");
     }
 
     #[test]
     fn thumbnail_ext_is_svg_for_audio() {
-        assert_eq!(thumbnail_extension("audio/mpeg", true, true), "svg");
-        assert_eq!(thumbnail_extension("audio/mpeg", false, false), "svg");
+        assert_eq!(thumbnail_extension("audio/mpeg", true), "svg");
+        assert_eq!(thumbnail_extension("audio/mpeg", false), "svg");
     }
 
     #[test]
     fn thumbnail_ext_is_svg_for_svg_source() {
-        assert_eq!(thumbnail_extension("image/svg+xml", true, true), "svg");
-        assert_eq!(thumbnail_extension("image/svg+xml", false, false), "svg");
+        assert_eq!(thumbnail_extension("image/svg+xml", true), "svg");
+        assert_eq!(thumbnail_extension("image/svg+xml", false), "svg");
     }
 
     #[test]
@@ -849,7 +442,7 @@ mod tests {
         let output = tempdir.path().join("thumb.webp");
         std::fs::write(&input, b"not decoded by image crate")?;
 
-        let actual = generate_thumbnail(&input, "image/heic", &output, 64, false, false)?;
+        let actual = generate_thumbnail(&input, "image/heic", &output, 64, false)?;
 
         assert_eq!(
             actual.extension().and_then(|ext| ext.to_str()),
@@ -860,37 +453,25 @@ mod tests {
         assert!(!output.exists(), "failed WebP output must not remain");
         Ok(())
     }
-
     #[test]
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "test assertions intentionally panic on failure"
-    )]
-    fn mutool_command_caps_render_dimensions() -> Result<()> {
-        let command = build_mutool_command(
-            Path::new("/tmp/input.pdf"),
-            Path::new("/tmp/page1.png"),
-            250,
-        )?;
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            args,
-            vec![
-                "draw",
-                "-q",
-                "-w",
-                "250",
-                "-h",
-                "250",
-                "-o",
-                "/tmp/page1.png",
-                "/tmp/input.pdf",
-                "1",
-            ]
+    fn pdf_failure_override_does_not_affect_another_thread() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/text.pdf");
+        let output = dir.path().join("thread.webp");
+        let _override = override_pdf_renderer_mode(TestPdfRendererMode::Fail);
+        let generated = std::thread::spawn(move || {
+            generate_thumbnail(&input, "application/pdf", &output, 100, false)
+        })
+        .join()
+        .map_err(|panic| {
+            anyhow::anyhow!(
+                "PDF preview test thread panicked: {}",
+                super::super::process::panic_message(panic.as_ref())
+            )
+        })??;
+        anyhow::ensure!(
+            generated.extension().is_some_and(|ext| ext == "webp"),
+            "another thread inherited PDF failure injection"
         );
         Ok(())
     }

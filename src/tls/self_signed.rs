@@ -1,6 +1,7 @@
 //! Self-signed development certificate management.
 use crate::error::AppError;
 use crate::error::Result;
+use anyhow::Context as _;
 use rustls::ServerConfig;
 use std::{path::Path, sync::Arc, time::SystemTime};
 use tokio_rustls::TlsAcceptor;
@@ -30,7 +31,7 @@ const CERT_SANS: &[&str] = &["localhost", "127.0.0.1", "::1"];
 ///
 /// # Errors
 ///
-/// Returns [`AppError::Tls`] (wrapped in [`crate::Result`]) if directory
+/// Returns [`AppError::Tls`] (wrapped in [`crate::error::Result`]) if directory
 /// creation fails, certificate/key generation fails, the private files cannot
 /// be written, or the PEM files cannot be loaded into a `TlsAcceptor`.
 pub(super) fn generate_or_load(data_dir: &Path) -> Result<(Arc<TlsAcceptor>, Arc<ServerConfig>)> {
@@ -118,7 +119,9 @@ fn build_cert_params() -> Result<rcgen::CertificateParams> {
 
     // Validity window: now → now + CERT_VALIDITY_DAYS
     let now = OffsetDateTime::now_utc();
-    let expiry = now + time::Duration::days(i64::from(CERT_VALIDITY_DAYS));
+    let expiry = now
+        .checked_add(time::Duration::days(i64::from(CERT_VALIDITY_DAYS)))
+        .context("self-signed certificate expiry exceeds supported dates")?;
     params.not_before = now;
     params.not_after = expiry;
 
@@ -140,7 +143,7 @@ fn build_cert_params() -> Result<rcgen::CertificateParams> {
     Ok(params)
 }
 
-/// Decide the correct [`SanType`] for a raw string: IPv4/6 literals become
+/// Decide the correct [`rcgen::SanType`] for a raw string: IPv4/6 literals become
 /// `IpAddress`, everything else becomes `DnsName`.
 fn san_for(s: &str) -> Result<rcgen::SanType> {
     if let Ok(address) = s.parse::<std::net::IpAddr>() {
@@ -219,7 +222,7 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
 /// Tests for certificate generation, reuse, expiry, and subject names.
 mod tests {
     use super::*;
-    use anyhow::{Context as _, Result};
+    use anyhow::Result;
     use tempfile::TempDir;
 
     /// Install the `ring` crypto provider process-wide.
@@ -244,7 +247,9 @@ mod tests {
             !cert.exists(),
             "certificate must not exist before generation"
         );
-        generate_or_load(tmp.path()).context("generate self-signed certificate")?;
+        generate_or_load(tmp.path())
+            .context("generate self-signed certificate")
+            .map(|_completed_value| ())?;
         assert!(cert.exists(), "cert file should exist after first call");
         assert!(key.exists(), "key file should exist after first call");
         Ok(())
@@ -259,7 +264,9 @@ mod tests {
     fn reuses_valid_cert_on_second_call() -> Result<()> {
         ensure_crypto_provider();
         let tmp = TempDir::new().context("create temporary TLS directory")?;
-        generate_or_load(tmp.path()).context("generate self-signed certificate")?;
+        generate_or_load(tmp.path())
+            .context("generate self-signed certificate")
+            .map(|_completed_value| ())?;
         let cert_path = tmp.path().join("runtime/tls/dev/self-signed.crt");
         let mtime_1 = std::fs::metadata(&cert_path)
             .context("read initial certificate metadata")?
@@ -267,7 +274,9 @@ mod tests {
             .context("read initial certificate modification time")?;
         // Small sleep to ensure mtime would differ if the file were rewritten.
         std::thread::sleep(std::time::Duration::from_millis(10));
-        generate_or_load(tmp.path()).context("reload self-signed certificate")?;
+        generate_or_load(tmp.path())
+            .context("reload self-signed certificate")
+            .map(|_completed_value| ())?;
         let mtime_2 = std::fs::metadata(&cert_path)
             .context("read reused certificate metadata")?
             .modified()
@@ -288,7 +297,9 @@ mod tests {
         ensure_crypto_provider();
         let tmp = TempDir::new().context("create temporary TLS directory")?;
         let before = SystemTime::now();
-        generate_or_load(tmp.path()).context("generate self-signed certificate")?;
+        generate_or_load(tmp.path())
+            .context("generate self-signed certificate")
+            .map(|_completed_value| ())?;
         let after = SystemTime::now();
 
         let cert_path = tmp.path().join("runtime/tls/dev/self-signed.crt");
@@ -344,14 +355,18 @@ mod tests {
     fn missing_key_triggers_regeneration_on_next_startup() -> Result<()> {
         ensure_crypto_provider();
         let tmp = TempDir::new().context("create temporary TLS directory")?;
-        generate_or_load(tmp.path()).context("generate self-signed certificate")?;
+        generate_or_load(tmp.path())
+            .context("generate self-signed certificate")
+            .map(|_completed_value| ())?;
 
         let cert_path = tmp.path().join("runtime/tls/dev/self-signed.crt");
         let key_path = tmp.path().join("runtime/tls/dev/self-signed.key");
         let original_cert = std::fs::read(&cert_path).context("read original certificate")?;
         std::fs::remove_file(&key_path).context("remove private key")?;
 
-        generate_or_load(tmp.path()).context("regenerate missing key")?;
+        generate_or_load(tmp.path())
+            .context("regenerate missing key")
+            .map(|_completed_value| ())?;
 
         let regenerated_cert = std::fs::read(&cert_path).context("read regenerated certificate")?;
         assert!(key_path.exists(), "missing key should be regenerated");

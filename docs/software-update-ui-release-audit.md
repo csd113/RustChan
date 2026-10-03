@@ -1,5 +1,8 @@
 # Software Updates UI and v1.6.0 release audit
 
+Current video pipeline note (2026-10-02): FFmpeg extracts PNG video frames; Rust encodes their WebP thumbnails. FFmpeg WebP encoder detection and installation requirements have been removed. WebM conversion retains VP9 + Opus with independent AV1 decoder/encoder diagnostics. Historical validation results below describe the implementation at the time of that audit.
+
+
 Audit date: 2026-10-01. Candidate repository: `csd113/RustChan`.
 
 ## Prerequisite and scope

@@ -6,18 +6,18 @@ use std::{fmt::Write as _, path::Path, sync::Arc};
 
 /// All twelve inventoried TLS leaves, using their authoritative TOML paths.
 pub static SETTINGS: &[SettingDefinition] = &[
-    SettingDefinition { key: "tls.enabled", label: "Native HTTPS listener", environment: "", kind: InputKind::Boolean, value: |c| c.tls.enabled.to_string(), help: "Enable built-in HTTPS after choosing a certificate source below. Reverse-proxy HTTPS does not require this listener." },
-    SettingDefinition { key: "tls.require_https", label: "Require native HTTPS", environment: "", kind: InputKind::Boolean, value: |c| c.tls.require_https.to_string(), help: "Disables public plaintext application access when native HTTPS is enabled. Verify the HTTPS listener is reachable before restarting." },
-    SettingDefinition { key: "tls.port", label: "HTTPS port", environment: "", kind: InputKind::Number(1, 65535), value: |c| c.tls.port.to_string(), help: "Must differ from the primary HTTP and redirect ports. Your service launcher and firewall must allow this port." },
-    SettingDefinition { key: "tls.redirect_http", label: "HTTP redirect listener", environment: "", kind: InputKind::Boolean, value: |c| c.tls.redirect_http.to_string(), help: "Adds a separate listener that redirects to HTTPS; requires a configured public hostname." },
-    SettingDefinition { key: "tls.http_port", label: "HTTP redirect port", environment: "", kind: InputKind::Number(1, 65535), value: |c| c.tls.http_port.to_string(), help: "Separate from the primary application listener. Default: 8080." },
-    SettingDefinition { key: "tls.acme.enabled", label: "Automatic ACME certificates", environment: "", kind: InputKind::Boolean, value: |c| c.tls.acme.enabled.to_string(), help: "Requires a tls-acme build, public DNS and reachable HTTPS for TLS-ALPN-01 validation. Issuance happens after restart; use staging first." },
-    SettingDefinition { key: "tls.acme.domains", label: "ACME domain names", environment: "", kind: InputKind::List, value: |c| c.tls.acme.domains.join(", "), help: "DNS names only, one per line or separated by commas. These must resolve to your public HTTPS listener." },
-    SettingDefinition { key: "tls.acme.email", label: "ACME contact email (optional)", environment: "", kind: InputKind::OptionalText, value: |c| c.tls.acme.email.clone().unwrap_or_default(), help: "Optional account contact. Leave blank to omit. No ACME request is sent by this form." },
-    SettingDefinition { key: "tls.acme.staging", label: "ACME staging directory", environment: "", kind: InputKind::Boolean, value: |c| c.tls.acme.staging.to_string(), help: "Staging certificates are for testing and are not trusted by browsers. Preserve your current selection until public issuance is ready." },
-    SettingDefinition { key: "tls.acme.cache_dir", label: "ACME private cache directory", environment: "", kind: InputKind::OptionalText, value: |c| c.tls.acme.cache_dir.clone(), help: "Absolute path or path relative to the data directory. Leave blank for the loader default. Contains account credentials; restrict service-user access." },
-    SettingDefinition { key: "tls.manual_cert.cert_path", label: "Manual PEM certificate-chain path", environment: "", kind: InputKind::OptionalText, value: |c| c.tls.manual_cert.as_ref().map_or_else(String::new, |m| m.cert_path.clone()), help: "Install the PEM files on the service host first. Absolute path or relative to the active data directory; chain and key are checked before saving. No file contents are displayed." },
-    SettingDefinition { key: "tls.manual_cert.key_path", label: "Manual PEM private-key path", environment: "", kind: InputKind::OptionalText, value: |c| c.tls.manual_cert.as_ref().map_or_else(String::new, |m| m.key_path.clone()), help: "Select both certificate and key, or leave both blank to remove the manual source. Manual certificates take priority over ACME. Renew files offline, then restart to reload." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "tls.enabled", label: "Native HTTPS listener", environment: "", kind: InputKind::Boolean, value: |c| c.tls.enabled.to_string(), help: "Enable built-in HTTPS after choosing a certificate source below. Reverse-proxy HTTPS does not require this listener." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "tls.require_https", label: "Require native HTTPS", environment: "", kind: InputKind::Boolean, value: |c| c.tls.require_https.to_string(), help: "Disables public plaintext application access when native HTTPS is enabled. Verify the HTTPS listener is reachable before restarting." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "tls.port", label: "HTTPS port", environment: "", kind: InputKind::Number(1, 65535), value: |c| c.tls.port.to_string(), help: "Must differ from the primary HTTP and redirect ports. Your service launcher and firewall must allow this port." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "tls.redirect_http", label: "HTTP redirect listener", environment: "", kind: InputKind::Boolean, value: |c| c.tls.redirect_http.to_string(), help: "Adds a separate listener that redirects to HTTPS; requires a configured public hostname." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "tls.http_port", label: "HTTP redirect port", environment: "", kind: InputKind::Number(1, 65535), value: |c| c.tls.http_port.to_string(), help: "Separate from the primary application listener. Default: 8080." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "tls.acme.enabled", label: "Automatic ACME certificates", environment: "", kind: InputKind::Boolean, value: |c| c.tls.acme.enabled.to_string(), help: "Requires a tls-acme build, public DNS and reachable HTTPS for TLS-ALPN-01 validation. Issuance happens after restart; use staging first." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "tls.acme.domains", label: "ACME domain names", environment: "", kind: InputKind::List, value: |c| c.tls.acme.domains.join(", "), help: "DNS names only, one per line or separated by commas. These must resolve to your public HTTPS listener." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "tls.acme.email", label: "ACME contact email (optional)", environment: "", kind: InputKind::OptionalText, value: |c| c.tls.acme.email.clone().unwrap_or_default(), help: "Optional account contact. Leave blank to omit. No ACME request is sent by this form." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "tls.acme.staging", label: "ACME staging directory", environment: "", kind: InputKind::Boolean, value: |c| c.tls.acme.staging.to_string(), help: "Staging certificates are for testing and are not trusted by browsers. Preserve your current selection until public issuance is ready." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "tls.acme.cache_dir", label: "ACME private cache directory", environment: "", kind: InputKind::OptionalText, value: |c| c.tls.acme.cache_dir.clone(), help: "Absolute path or path relative to the data directory. Leave blank for the loader default. Contains account credentials; restrict service-user access." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "tls.manual_cert.cert_path", label: "Manual PEM certificate-chain path", environment: "", kind: InputKind::OptionalText, value: |c| c.tls.manual_cert.as_ref().map_or_else(String::new, |m| m.cert_path.clone()), help: "Install the PEM files on the service host first. Absolute path or relative to the active data directory; chain and key are checked before saving. No file contents are displayed." },
+    SettingDefinition { application: crate::config::admin::ApplicationMode::Restart, key: "tls.manual_cert.key_path", label: "Manual PEM private-key path", environment: "", kind: InputKind::OptionalText, value: |c| c.tls.manual_cert.as_ref().map_or_else(String::new, |m| m.key_path.clone()), help: "Select both certificate and key, or leave both blank to remove the manual source. Manual certificates take priority over ACME. Renew files offline, then restart to reload." },
 ];
 
 /// Save one complete certificate workflow, validating saved and effective listeners.
@@ -65,7 +65,7 @@ fn confirm_cutover(
 }
 
 /// Validate certificate-source selection without creating files or contacting ACME.
-fn validate(config: &Config) -> anyhow::Result<()> {
+pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
     super::validate_network(config)?;
     let tls = &config.tls;
     ensure!(
@@ -94,7 +94,9 @@ fn validate(config: &Config) -> anyhow::Result<()> {
             "ACME requires a public DNS name"
         );
     }
-    validate_path(&tls.acme.cache_dir)?;
+    if !tls.acme.cache_dir.is_empty() {
+        validate_path(&tls.acme.cache_dir)?;
+    }
     if let Some(manual) = &tls.manual_cert {
         validate_path(&manual.cert_path)?;
         validate_path(&manual.key_path)?;
@@ -159,7 +161,8 @@ fn validate_pair(cert_path: &Path, key_path: &Path) -> anyhow::Result<()> {
         .context("TLS protocol configuration")?
         .with_no_client_auth()
         .with_single_cert(certificates, key)
-        .context("certificate and key do not form a usable pair")?;
+        .context("certificate and key do not form a usable pair")
+        .map(|_validated_value| ())?;
     Ok(())
 }
 
@@ -173,7 +176,9 @@ fn read_material(path: &Path) -> anyhow::Result<Vec<u8>> {
         "certificate/key must be a regular file no larger than 1 MiB"
     );
     let mut bytes = Vec::new();
-    file.take(1_048_577).read_to_end(&mut bytes)?;
+    file.take(1_048_577)
+        .read_to_end(&mut bytes)
+        .map(|_bytes_read| ())?;
     ensure!(
         bytes.len() <= 1_048_576,
         "certificate/key grew beyond 1 MiB"
@@ -196,7 +201,7 @@ pub(super) fn rewrite_tls(
             matches!(table, "tls" | "tls.acme" | "tls.manual_cert"),
             "unknown TLS table"
         );
-        groups
+        let _previous_value = groups
             .entry(table)
             .or_default()
             .insert(key.to_owned(), value.clone());
@@ -210,11 +215,13 @@ pub(super) fn rewrite_tls(
 /// Locate real headers by parsing them; ignore header-like lines in scalar values.
 fn table_range(content: &str, table: &str) -> anyhow::Result<Option<std::ops::Range<usize>>> {
     let spans: BTreeMap<String, toml::Spanned<toml::Value>> = toml::from_str(content)?;
-    let mut offset = 0;
+    let mut offset = 0_usize;
     let mut found = None;
     for line in content.split_inclusive('\n') {
         let start = offset;
-        offset += line.len();
+        offset = offset
+            .checked_add(line.len())
+            .context("TLS table offset overflow")?;
         if !line.trim_start().starts_with('[')
             || spans
                 .values()
@@ -260,14 +267,14 @@ fn rewrite_table(
     }
     for (key, value) in updates {
         if let Some(value) = value {
-            target.insert(key.clone(), value.clone());
+            let _previous_value = target.insert(key.clone(), value.clone());
         } else {
-            target.remove(key);
+            let _previous_value = target.remove(key);
         }
     }
     let remove_manual = table == "tls.manual_cert" && target.is_empty();
     if remove_manual {
-        expected
+        let _previous_value = expected
             .get_mut("tls")
             .and_then(toml::Value::as_table_mut)
             .context("missing TLS")?
@@ -276,7 +283,9 @@ fn rewrite_table(
     let mut output = content.to_owned();
     if let Some(range) = table_range(content, table)? {
         let section = content.get(range.clone()).context("invalid TLS range")?;
-        let header_end = section.find('\n').map_or(section.len(), |p| p + 1);
+        let header_end = section
+            .find('\n')
+            .map_or(section.len(), |p| p.saturating_add(1));
         let body = section.get(header_end..).context("invalid TLS header")?;
         // Parsing the isolated body ensures no nested/inline table gets silently overwritten.
         let parsed: BTreeMap<String, toml::Spanned<toml::Value>> =
@@ -361,7 +370,7 @@ mod tests {
     fn tls_roundtrip_preserves_comments_and_clears_optional_sources() -> anyhow::Result<()> {
         let before = "# keep root\nport = 3000\n[tls] # listener\nenabled = false # keep inline\n[tls.acme]\nstaging = true # test CA\ndomains = [\n 'example.test', # keep note\n]\n[unrelated]\nvalue = 42\n";
         let mut form = form(before)?;
-        form.insert("tls.port".into(), "9443".into());
+        let _previous_value = form.insert("tls.port".into(), "9443".into());
         let updates = super::super::parse_settings_form(SETTINGS, &form)?;
         let after = rewrite_tls(before, &updates)?;
         for comment in [
@@ -399,7 +408,7 @@ mod tests {
             ("tls.acme.cache_dir", "../outside"),
         ] {
             let mut form = form(before)?;
-            form.insert(key.into(), value.into());
+            let _previous_value = form.insert(key.into(), value.into());
             let updates = super::super::parse_settings_form(SETTINGS, &form)?;
             ensure!(
                 super::super::save_root_at(

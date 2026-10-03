@@ -293,7 +293,7 @@ pub enum BannerPlacement {
     Catalog,
 }
 
-/// A board, e.g. /tech/ — Technology
+/// A board, e.g. /tech/ — Technology.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 // This type mirrors serialized or render state, so the boolean count is an intentional tradeoff.
 #[expect(
@@ -472,7 +472,7 @@ pub struct Theme {
     pub custom_css: String,
 }
 
-/// A thread (the OP post + its replies share this record for metadata)
+/// A thread (the OP post + its replies share this record for metadata).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Thread {
     /// Database primary key and public thread number.
@@ -511,7 +511,7 @@ pub struct Thread {
     pub op_id: Option<i64>,
 }
 
-/// A single post (OP or reply)
+/// A single post (OP or reply).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Post {
     /// Database primary key and public post number.
@@ -566,7 +566,7 @@ pub struct Post {
     pub media_processing_error: Option<String>,
 }
 
-/// Admin user record
+/// Admin user record.
 #[derive(Debug, Clone, Serialize)]
 pub struct AdminUser {
     /// Database primary key.
@@ -579,7 +579,7 @@ pub struct AdminUser {
     pub created_at: i64,
 }
 
-/// Active admin session
+/// Active admin session.
 #[derive(Debug, Clone, Serialize)]
 pub struct AdminSession {
     /// Opaque session identifier stored in the authentication cookie.
@@ -592,7 +592,7 @@ pub struct AdminSession {
     pub expires_at: i64,
 }
 
-/// A banned IP hash
+/// A banned IP hash.
 #[derive(Debug, Clone, Serialize)]
 pub struct Ban {
     /// Database primary key.
@@ -607,7 +607,7 @@ pub struct Ban {
     pub created_at: i64,
 }
 
-/// A word filter rule
+/// A word filter rule.
 #[derive(Debug, Clone, Serialize)]
 pub struct WordFilter {
     /// Database primary key.
@@ -618,7 +618,7 @@ pub struct WordFilter {
     pub replacement: String,
 }
 
-/// Board with live thread count, used on the home page
+/// Board with live thread count, used on the home page.
 #[derive(Debug, Clone, Serialize)]
 pub struct BoardStats {
     /// Board configuration and identity.
@@ -627,18 +627,18 @@ pub struct BoardStats {
     pub thread_count: i64,
 }
 
-/// Summary used on board index: thread + its last few reply counts
+/// Summary used on board index: thread + its last few reply counts.
 #[derive(Debug, Clone, Serialize)]
 pub struct ThreadSummary {
     /// Thread metadata and opening-post preview fields.
     pub thread: Thread,
-    /// Latest N replies (for board index preview)
+    /// Latest N replies (for board index preview).
     pub preview_posts: Vec<Post>,
-    /// How many replies are hidden (total - preview shown)
+    /// How many replies are hidden (total - preview shown).
     pub omitted: i64,
 }
 
-/// A poll attached to a thread's OP
+/// A poll attached to a thread's OP.
 #[derive(Debug, Clone, Serialize)]
 pub struct Poll {
     /// Database primary key.
@@ -653,7 +653,7 @@ pub struct Poll {
     pub created_at: i64,
 }
 
-/// A single poll option with live vote count (joined from `poll_votes`)
+/// A single poll option with live vote count (joined from `poll_votes`).
 #[derive(Debug, Clone, Serialize)]
 pub struct PollOption {
     /// Database primary key.
@@ -668,7 +668,7 @@ pub struct PollOption {
     pub vote_count: i64,
 }
 
-/// Full poll data passed to templates
+/// Full poll data passed to templates.
 #[derive(Debug, Clone, Serialize)]
 pub struct PollData {
     /// Poll metadata.
@@ -677,9 +677,9 @@ pub struct PollData {
     pub options: Vec<PollOption>,
     /// Sum of votes across all choices.
     pub total_votes: i64,
-    /// Which `option_id` this user voted for, if any
+    /// Which `option_id` this user voted for, if any.
     pub user_voted_option: Option<i64>,
-    /// true when `expires_at` <= now
+    /// true when `expires_at` <= now.
     pub is_expired: bool,
 }
 
@@ -711,7 +711,7 @@ impl Default for SearchQuery {
     }
 }
 
-/// Pagination helper
+/// Pagination helper.
 #[derive(Debug, Clone, Serialize)]
 pub struct Pagination {
     /// Current one-based page.
@@ -745,7 +745,12 @@ impl Pagination {
         // construction just in case.
         let pp = self.per_page.max(1);
         let t = self.total.max(0);
-        ((t + pp - 1) / pp).max(1)
+        // Computing the ceiling from quotient/remainder avoids overflowing
+        // when a legitimate total approaches i64::MAX. Both operands are
+        // nonnegative and the divisor is strictly positive.
+        t.div_euclid(pp)
+            .saturating_add(i64::from(t.rem_euclid(pp) != 0))
+            .max(1)
     }
 
     /// Returns the zero-based record offset for the current page.
@@ -773,19 +778,19 @@ impl Pagination {
 /// Aggregate site-wide statistics shown on the home page.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SiteStats {
-    /// Total posts ever made
+    /// Total posts ever made.
     pub total_posts: i64,
-    /// Total image files ever uploaded
+    /// Total image files ever uploaded.
     pub total_images: i64,
-    /// Total video files ever uploaded
+    /// Total video files ever uploaded.
     pub total_videos: i64,
-    /// Total audio files ever uploaded
+    /// Total audio files ever uploaded.
     pub total_audio: i64,
-    /// Total bytes of currently stored files (still on disk)
+    /// Total bytes of currently stored files (still on disk).
     pub active_bytes: i64,
 }
 
-/// A user-filed report against a post
+/// A user-filed report against a post.
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     /// Database primary key.
@@ -810,21 +815,21 @@ pub struct Report {
     pub resolved_by: Option<i64>,
 }
 
-/// Report enriched with context from joined tables (used in admin inbox)
+/// Report enriched with context from joined tables (used in admin inbox).
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportWithContext {
     /// Underlying report record.
     pub report: Report,
     /// Short name of the board containing the reported post.
     pub board_short: String,
-    /// First 120 chars of the reported post body for preview
+    /// First 120 chars of the reported post body for preview.
     pub post_preview: String,
     /// IP hash of the post's author (for quick ban from the inbox).
     /// `None` when the post has no inbound client IP.
     pub post_ip_hash: Option<String>,
 }
 
-/// A single entry in the moderation action log
+/// A single entry in the moderation action log.
 #[derive(Debug, Clone, Serialize)]
 pub struct ModLogEntry {
     /// Database primary key.
@@ -833,9 +838,9 @@ pub struct ModLogEntry {
     pub admin_id: i64,
     /// Administrator username captured for display.
     pub admin_name: String,
-    /// E.g. "`delete_post`", "ban", "sticky", "lock", "`resolve_report`"
+    /// E.g. "`delete_post`", "ban", "sticky", "lock", "`resolve_report`".
     pub action: String,
-    /// "post" | "thread" | "board" | "ban" | "report"
+    /// "post" | "thread" | "board" | "ban" | "report".
     pub target_type: String,
     /// Optional identifier of the affected record.
     pub target_id: Option<i64>,
@@ -895,7 +900,7 @@ pub struct BackupInfo {
     pub downloadable_archive: bool,
 }
 
-/// A user-submitted ban appeal
+/// A user-submitted ban appeal.
 #[derive(Debug, Clone, Serialize)]
 pub struct BanAppeal {
     /// Database primary key.
@@ -1244,23 +1249,54 @@ mod tests {
 
     #[test]
     fn pagination_has_prev_and_next() {
-        let p = Pagination::new(1, 10, 30);
-        assert!(!p.has_prev(), "the first page must not have a predecessor");
+        let first_page = Pagination::new(1, 10, 30);
         assert!(
-            p.has_next(),
+            !first_page.has_prev(),
+            "the first page must not have a predecessor"
+        );
+        assert!(
+            first_page.has_next(),
             "the first of three pages must have a successor"
         );
 
-        let p = Pagination::new(2, 10, 30);
-        assert!(p.has_prev(), "the second page must have a predecessor");
+        let second_page = Pagination::new(2, 10, 30);
         assert!(
-            p.has_next(),
+            second_page.has_prev(),
+            "the second page must have a predecessor"
+        );
+        assert!(
+            second_page.has_next(),
             "the second of three pages must have a successor"
         );
 
-        let p = Pagination::new(3, 10, 30);
-        assert!(p.has_prev(), "the third page must have a predecessor");
-        assert!(!p.has_next(), "the final page must not have a successor");
+        let final_page = Pagination::new(3, 10, 30);
+        assert!(
+            final_page.has_prev(),
+            "the third page must have a predecessor"
+        );
+        assert!(
+            !final_page.has_next(),
+            "the final page must not have a successor"
+        );
+    }
+
+    #[test]
+    fn pagination_total_pages_handles_maximum_counts_without_overflow() {
+        assert_eq!(
+            Pagination::new(1, 1, i64::MAX).total_pages(),
+            i64::MAX,
+            "one record per page must preserve the maximum count"
+        );
+        assert_eq!(
+            Pagination::new(1, 2, i64::MAX).total_pages(),
+            4_611_686_018_427_387_904_i64,
+            "partial final pages must round up without overflowing"
+        );
+        assert_eq!(
+            Pagination::new(1, i64::MAX, i64::MAX).total_pages(),
+            1,
+            "the maximum count must fit in a maximum-size page"
+        );
     }
 
     #[test]

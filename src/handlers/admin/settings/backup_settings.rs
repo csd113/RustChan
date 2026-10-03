@@ -52,18 +52,19 @@ fn parse_full_backup_settings_form(
     let storage_mode_value = match storage_mode {
         crate::handlers::admin::BackupStorageMode::Directory => "directory",
         crate::handlers::admin::BackupStorageMode::SplitZip => "split_zip",
-        _ => {
+        crate::handlers::admin::BackupStorageMode::SingleZip
+        | crate::handlers::admin::BackupStorageMode::LegacyZip => {
             return Err(AppError::BadRequest(
                 "Unsupported automatic backup storage mode.".into(),
             ));
         }
     };
-    let split_zip_part_size_gib = form
+    let requested_part_size_gib = form
         .auto_full_backup_split_zip_part_size_gib
         .as_deref()
         .and_then(|value| value.parse::<u64>().ok());
     let split_zip_part_size =
-        crate::handlers::admin::backup::parse_split_zip_part_size_gib(split_zip_part_size_gib)?;
+        crate::handlers::admin::backup::parse_split_zip_part_size_gib(requested_part_size_gib)?;
     let split_zip_part_size_gib =
         crate::handlers::admin::backup::split_zip_part_size_gib(split_zip_part_size);
 
@@ -90,7 +91,7 @@ pub(in crate::server) async fn update_full_backup_settings(
     if let Some(directory) = form.backup_directory {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let conn = state.db.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             crate::config::update_settings_file_backup_directory(std::path::Path::new(&directory))
                 .map_err(|error| AppError::BadRequest(format!("{error:#}")))?;
             Ok(())
@@ -98,7 +99,7 @@ pub(in crate::server) async fn update_full_backup_settings(
         .await
         .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
         return Ok(admin_panel_redirect_anchor(
-            "Backup directory saved. Restart RustChan to apply it. Existing backups have not been moved. CHAN_BACKUP_DIRECTORY, if set, takes precedence.",
+            if crate::config::admin::restart_pending().unwrap_or(true) { "Backup directory saved. Restart RustChan to apply it. Existing backups have not been moved; environment overrides take precedence." } else { "Backup directory saved. The effective configuration does not require a restart." },
             "full-backup-restore",
         ).into_response());
     }
@@ -116,7 +117,7 @@ pub(in crate::server) async fn update_full_backup_settings(
         let auto_backup_settings = state.auto_full_backup_settings.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             crate::config::update_settings_file_auto_full_backup(
                 interval_hours,
                 copies_to_keep,

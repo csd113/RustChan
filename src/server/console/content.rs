@@ -72,7 +72,7 @@ pub(super) fn render_boards(
 
     if area.width >= 78 {
         let columns = Layout::horizontal([Constraint::Percentage(64), Constraint::Percentage(36)])
-            .spacing(1)
+            .spacing(1_i32)
             .split(area);
         render_board_table(frame, columns.first().copied().unwrap_or(area), app, &rows);
         render_board_detail(frame, columns.get(1).copied().unwrap_or(area), app, &rows);

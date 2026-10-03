@@ -56,7 +56,11 @@ fn log_scrolling_disables_follow_and_end_restores_it() {
         ..ConsoleState::default()
     };
 
-    state.handle_key(&KeyEvent::PageUp, 0, (80, 24));
+    assert_eq!(
+        state.handle_key(&KeyEvent::PageUp, 0, (80, 24)),
+        ConsoleAction::None,
+        "navigation and editing must not request server-side work"
+    );
     assert!(
         !state.logs.follow,
         "manual scrolling should pause follow mode"
@@ -66,7 +70,11 @@ fn log_scrolling_disables_follow_and_end_restores_it() {
         "page-up should move ten rows"
     );
 
-    state.handle_key(&KeyEvent::End, 0, (80, 24));
+    assert_eq!(
+        state.handle_key(&KeyEvent::End, 0, (80, 24)),
+        ConsoleAction::None,
+        "navigation and editing must not request server-side work"
+    );
     assert!(state.logs.follow, "end should resume follow mode");
     assert_eq!(
         state.logs.rows_from_bottom, 0,
@@ -96,7 +104,11 @@ fn passwords_are_redacted_from_debug_output() {
 #[test]
 fn delete_thread_uses_a_separate_destructive_confirmation() {
     let mut state = ConsoleState::default();
-    state.handle_key(&KeyEvent::Character('d'), 0, (80, 24));
+    assert_eq!(
+        state.handle_key(&KeyEvent::Character('d'), 0, (80, 24)),
+        ConsoleAction::None,
+        "navigation and editing must not request server-side work"
+    );
     let form_dialog = state.dialog.take();
     assert!(
         matches!(&form_dialog, Some(Dialog::Form(_))),
@@ -194,7 +206,7 @@ fn repeated_enter_cannot_accept_destructive_confirmation() {
             "progress must prevent duplicate operations"
         );
         assert!(
-            matches!(state.dialog, Some(Dialog::Progress { .. })),
+            matches!(state.dialog, Some(Dialog::Progress { label: _ })),
             "in-flight operation must retain its progress state"
         );
     }
@@ -268,18 +280,30 @@ fn form_editing_preserves_unicode_and_limits_large_paste() {
 #[test]
 fn form_focus_and_repeat_keys_do_not_trigger_global_actions() {
     let mut state = ConsoleState::default();
-    state.handle_key(&KeyEvent::RepeatCharacter('a'), 0, (80, 24));
+    assert_eq!(
+        state.handle_key(&KeyEvent::RepeatCharacter('a'), 0, (80, 24)),
+        ConsoleAction::None,
+        "navigation and editing must not request server-side work"
+    );
     assert!(
         state.dialog.is_none(),
         "a held action key must not reopen forms"
     );
-    state.handle_key(&KeyEvent::Character('a'), 0, (80, 24));
+    assert_eq!(
+        state.handle_key(&KeyEvent::Character('a'), 0, (80, 24)),
+        ConsoleAction::None,
+        "navigation and editing must not request server-side work"
+    );
     for key in [
         KeyEvent::BackTab,
         KeyEvent::RepeatCharacter('q'),
         KeyEvent::Character('1'),
     ] {
-        state.handle_key(&key, 0, (80, 24));
+        assert_eq!(
+            state.handle_key(&key, 0, (80, 24)),
+            ConsoleAction::None,
+            "navigation and editing must not request server-side work"
+        );
     }
     assert!(
         matches!(state.dialog, Some(Dialog::Form(_))),
@@ -294,7 +318,11 @@ fn form_focus_and_repeat_keys_do_not_trigger_global_actions() {
         Ok("q1"),
         "global shortcuts and repeated text belong to the focused field"
     );
-    state.handle_key(&KeyEvent::Escape, 0, (80, 24));
+    assert_eq!(
+        state.handle_key(&KeyEvent::Escape, 0, (80, 24)),
+        ConsoleAction::None,
+        "navigation and editing must not request server-side work"
+    );
     assert!(
         state.dialog.is_none(),
         "escape must cancel without submission"
@@ -311,26 +339,46 @@ fn suite_navigation_and_contextual_help_preserve_the_origin() {
         Screen::Configuration,
         Screen::Dashboard,
     ] {
-        app.handle_key(&KeyEvent::Tab, 0, (80, 24));
+        assert_eq!(
+            app.handle_key(&KeyEvent::Tab, 0, (80, 24)),
+            ConsoleAction::None,
+            "navigation and editing must not request server-side work"
+        );
         assert_eq!(
             app.screen, expected,
             "Tab must traverse the shared suite hierarchy"
         );
     }
-    app.handle_key(&KeyEvent::Character('2'), 0, (80, 24));
-    app.handle_key(&KeyEvent::Character('?'), 0, (80, 24));
+    assert_eq!(
+        app.handle_key(&KeyEvent::Character('2'), 0, (80, 24)),
+        ConsoleAction::None,
+        "navigation and editing must not request server-side work"
+    );
+    assert_eq!(
+        app.handle_key(&KeyEvent::Character('?'), 0, (80, 24)),
+        ConsoleAction::None,
+        "navigation and editing must not request server-side work"
+    );
     assert_eq!(
         app.help_return,
         Some(Screen::Tasks),
         "help must remember its origin"
     );
-    app.handle_key(&KeyEvent::Escape, 0, (80, 24));
+    assert_eq!(
+        app.handle_key(&KeyEvent::Escape, 0, (80, 24)),
+        ConsoleAction::None,
+        "navigation and editing must not request server-side work"
+    );
     assert_eq!(
         app.screen,
         Screen::Tasks,
         "closing help must return to the task table"
     );
-    app.handle_key(&KeyEvent::BackTab, 0, (80, 24));
+    assert_eq!(
+        app.handle_key(&KeyEvent::BackTab, 0, (80, 24)),
+        ConsoleAction::None,
+        "navigation and editing must not request server-side work"
+    );
     assert_eq!(
         app.screen,
         Screen::Dashboard,
@@ -364,13 +412,21 @@ fn search_is_modal_and_escape_clears_before_navigating() {
         app.task_filter.query, "qad123q",
         "search must accept literal shortcut characters"
     );
-    app.handle_key(&KeyEvent::Escape, 0, (80, 24));
+    assert_eq!(
+        app.handle_key(&KeyEvent::Escape, 0, (80, 24)),
+        ConsoleAction::None,
+        "navigation and editing must not request server-side work"
+    );
     assert_eq!(
         app.screen,
         Screen::Tasks,
         "first Escape must clear search in place"
     );
-    app.handle_key(&KeyEvent::Escape, 0, (80, 24));
+    assert_eq!(
+        app.handle_key(&KeyEvent::Escape, 0, (80, 24)),
+        ConsoleAction::None,
+        "navigation and editing must not request server-side work"
+    );
     assert_eq!(
         app.screen,
         Screen::Dashboard,
@@ -415,15 +471,37 @@ fn task_identity_survives_refresh_and_inspection_has_no_side_effects() {
         "inspection must be read only"
     );
     assert!(
-        matches!(app.dialog, Some(Dialog::Inspect { .. })),
+        matches!(
+            app.dialog,
+            Some(Dialog::Inspect {
+                title: _,
+                lines: _,
+                scroll: _
+            })
+        ),
         "selected task must open details"
     );
-    app.handle_key(&KeyEvent::Character('d'), 0, (80, 24));
+    assert_eq!(
+        app.handle_key(&KeyEvent::Character('d'), 0, (80, 24)),
+        ConsoleAction::None,
+        "navigation and editing must not request server-side work"
+    );
     assert!(
-        matches!(app.dialog, Some(Dialog::Inspect { .. })),
+        matches!(
+            app.dialog,
+            Some(Dialog::Inspect {
+                title: _,
+                lines: _,
+                scroll: _
+            })
+        ),
         "detail must capture administrative shortcuts"
     );
-    app.handle_key(&KeyEvent::Escape, 0, (80, 24));
+    assert_eq!(
+        app.handle_key(&KeyEvent::Escape, 0, (80, 24)),
+        ConsoleAction::None,
+        "navigation and editing must not request server-side work"
+    );
     stats.operator.tasks.clear();
     app.reconcile_data(&stats);
     assert!(

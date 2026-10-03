@@ -15,7 +15,7 @@ use crate::{
             admin_scoped_csrf_token, check_csrf_jar, ensure_csrf_for_request,
             ensure_csrf_with_secure, BoardAccessContext,
         },
-        parse_post_multipart, posting, render, PostFormData,
+        is_xml_http_request, parse_post_multipart, posting, render, PostFormData,
     },
     middleware::AppState,
     utils::crypto::hash_ip,
@@ -37,13 +37,6 @@ type ThreadViewLoadResult = (
     bool,
     Option<(i64, i64)>,
 );
-
-fn is_xml_http_request(headers: &HeaderMap) -> bool {
-    headers
-        .get("x-requested-with")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case("XMLHttpRequest"))
-}
 
 // GET /:board/thread/:id
 #[expect(
@@ -108,7 +101,7 @@ pub(in crate::server) async fn view_thread(
                 &CONFIG.cookie_secret,
                 is_admin,
             )?;
-            let is_admin = page_data.is_admin;
+            let effective_is_admin = page_data.is_admin;
             let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
             let homepage_thread_badges_enabled = db::get_homepage_new_thread_badges_enabled(&conn);
             let homepage_reply_badges_enabled = db::get_homepage_new_reply_badges_enabled(&conn);
@@ -116,7 +109,7 @@ pub(in crate::server) async fn view_thread(
             Ok((
                 render::thread_page_etag_signature(&page_data),
                 page_data,
-                is_admin,
+                effective_is_admin,
                 thread_badges_enabled,
                 homepage_thread_badges_enabled,
                 homepage_reply_badges_enabled,
@@ -222,16 +215,16 @@ pub(in crate::server) async fn view_thread(
             .status(StatusCode::NOT_MODIFIED)
             .body(axum::body::Body::empty())
             .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-        resp.headers_mut().insert(
+        drop(resp.headers_mut().insert(
             "etag",
             HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("\"0\"")),
-        );
-        resp.headers_mut().insert(
+        ));
+        drop(resp.headers_mut().insert(
             header::CACHE_CONTROL,
             HeaderValue::from_static(crate::handlers::board::activity_html_cache_control(
                 activity_markers_enabled,
             )),
-        );
+        ));
         crate::cache::insert_vary_cookie(resp.headers_mut());
         return Ok((jar, resp).into_response());
     }
@@ -260,14 +253,14 @@ pub(in crate::server) async fn view_thread(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
     let mut resp = Html(html).into_response();
     if let Ok(v) = HeaderValue::from_str(&etag) {
-        resp.headers_mut().insert("etag", v);
+        drop(resp.headers_mut().insert("etag", v));
     }
-    resp.headers_mut().insert(
+    drop(resp.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(crate::handlers::board::activity_html_cache_control(
             activity_markers_enabled,
         )),
-    );
+    ));
     crate::cache::insert_vary_cookie(resp.headers_mut());
     Ok((jar, resp).into_response())
 }
@@ -300,7 +293,7 @@ pub(in crate::server) async fn post_reply(
         &state,
         &board_short,
         admin_session_id.clone(),
-        access_cookie,
+        access_cookie.clone(),
         crate::handlers::board::BoardAccessRequirement::Post,
         format!("/{board_short}/thread/{thread_id}"),
     )
@@ -396,16 +389,13 @@ pub(in crate::server) async fn post_reply(
         let pool = state.db.clone();
         let job_queue = std::sync::Arc::clone(&state.job_queue);
         let ffmpeg_available = state.ffmpeg_available;
-        let ffprobe_available = state.ffprobe_available;
-        let ffmpeg_webp_available = state.ffmpeg_webp_available;
         move || -> Result<posting::SubmitPostResult> {
             // `spawn_blocking` work is not cancelled when its join handle is
             // dropped. Keep the permit inside this closure so a disconnected
             // request cannot release the media gate while parsing continues.
             let _media_upload_guard = media_upload_guard;
-            let conn = pool.get()?;
             posting::submit_post(
-                &conn,
+                &pool,
                 &job_queue,
                 posting::SubmitPostCommand {
                     mode: posting::SubmitPostMode::Reply { thread_id, sage },
@@ -413,6 +403,7 @@ pub(in crate::server) async fn post_reply(
                     identity_key,
                     cookie_secret: CONFIG.cookie_secret.clone(),
                     admin_session_id,
+                    access_cookie,
                     ban_csrf_token,
                     submission_token,
                     name,
@@ -426,8 +417,6 @@ pub(in crate::server) async fn post_reply(
                     upload_dir: CONFIG.upload_dir.clone(),
                     thumb_size: CONFIG.thumb_size,
                     ffmpeg_available,
-                    ffprobe_available,
-                    ffmpeg_webp_available,
                 },
             )
         }
@@ -512,7 +501,7 @@ pub(in crate::server) async fn post_reply(
         submit_result.thread_id,
         submit_result.post_id,
         &submit_result.deletion_token,
-        submit_result.created_at + crate::handlers::board::self_action_window_secs(),
+        crate::handlers::board::self_action_expiry(submit_result.created_at)?,
         crate::handlers::board::should_set_public_secure_cookie(&req_headers, secure_context),
     );
 
@@ -627,10 +616,10 @@ async fn render_edit_post_error_page(
 
     let mut response = Html(html).into_response();
     *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
-    response.headers_mut().insert(
+    drop(response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE),
-    );
+    ));
     Ok((jar, response).into_response())
 }
 
@@ -681,12 +670,7 @@ pub(in crate::server) async fn edit_post_get(
     }
 
     let now = chrono::Utc::now().timestamp();
-    if now
-        > context
-            .post
-            .created_at
-            .saturating_add(crate::handlers::board::self_action_window_secs())
-    {
+    if now > crate::handlers::board::self_action_expiry(context.post.created_at)? {
         return Err(AppError::Forbidden(
             "The 60-second edit window for this post has closed.".into(),
         ));
@@ -717,10 +701,10 @@ pub(in crate::server) async fn edit_post_get(
         None,
     );
     let mut response = Html(html).into_response();
-    response.headers_mut().insert(
+    drop(response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE),
-    );
+    ));
     Ok((jar, response).into_response())
 }
 
@@ -961,12 +945,7 @@ pub(in crate::server) async fn delete_post_get(
     }
 
     let now = chrono::Utc::now().timestamp();
-    if now
-        > context
-            .post
-            .created_at
-            .saturating_add(crate::handlers::board::self_action_window_secs())
-    {
+    if now > crate::handlers::board::self_action_expiry(context.post.created_at)? {
         return Err(AppError::Forbidden(
             "The 60-second self-delete window for this post has closed.".into(),
         ));
@@ -998,10 +977,10 @@ pub(in crate::server) async fn delete_post_get(
         None,
     );
     let mut response = Html(html).into_response();
-    response.headers_mut().insert(
+    drop(response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE),
-    );
+    ));
     Ok((jar, response).into_response())
 }
 
@@ -1227,8 +1206,9 @@ pub(in crate::server) async fn vote_handler(
             // Voting is persisted participation in the thread, so the same ban
             // gate as posting applies; CSRF was validated above.
             crate::handlers::board::ensure_actor_not_banned(&conn, &ip_hash, ban_csrf_token)?;
-            let (poll_id, thread_id, board_short) = db::get_poll_context(&conn, option_id)?
-                .ok_or_else(|| AppError::NotFound("Poll option not found.".into()))?;
+            let (poll_id, resolved_thread_id, resolved_board_short) =
+                db::get_poll_context(&conn, option_id)?
+                    .ok_or_else(|| AppError::NotFound("Poll option not found.".into()))?;
 
             let recorded = db::cast_vote(&conn, poll_id, option_id, &ip_hash)?;
             if !recorded {
@@ -1242,7 +1222,9 @@ pub(in crate::server) async fn vote_handler(
                 option_id = option_id,
                 "Vote cast"
             );
-            Ok(format!("/{board_short}/thread/{thread_id}#poll"))
+            Ok(format!(
+                "/{resolved_board_short}/thread/{resolved_thread_id}#poll"
+            ))
         }
     })
     .await
@@ -1577,10 +1559,8 @@ mod tests {
     }
 
     fn flac_fixture(size: usize) -> Vec<u8> {
-        let mut bytes = vec![0_u8; size.max(4)];
-        if let Some(prefix) = bytes.get_mut(..4) {
-            prefix.copy_from_slice(b"fLaC");
-        }
+        let mut bytes = include_bytes!("../../tests/fixtures/media/tone.flac").to_vec();
+        bytes.resize(size.max(bytes.len()), 0);
         bytes
     }
 
@@ -1595,14 +1575,15 @@ mod tests {
             "UPDATE boards SET allow_audio = 1, max_audio_size = ?1 WHERE id = ?2",
             rusqlite::params![max_audio_size, board_id],
         )
-        .context("failed to enable audio board")?;
+        .context("failed to enable audio board")
+        .map(|_completed_value| ())?;
         Ok(())
     }
 
     #[tokio::test]
     async fn create_thread_and_reply_accept_audio_within_board_limit() -> Result<()> {
         let state = crate::test_support::app_state();
-        seed_audio_board(&state, 5_000)?;
+        seed_audio_board(&state, 20_000)?;
 
         let router = Router::new()
             .route("/{board}", post(crate::handlers::board::create_thread))
@@ -1673,13 +1654,13 @@ mod tests {
     #[tokio::test]
     async fn create_thread_rejects_audio_over_board_limit_with_413() -> Result<()> {
         let state = crate::test_support::app_state();
-        seed_audio_board(&state, 5_000)?;
+        seed_audio_board(&state, 20_000)?;
 
         let router = Router::new()
             .route("/{board}", post(crate::handlers::board::create_thread))
             .with_state(state);
 
-        let audio = flac_fixture(5_001);
+        let audio = flac_fixture(20_001);
         let (boundary, body) = crate::test_support::multipart_body(
             &[("_csrf", "csrf123"), ("body", "")],
             Some(("audio_file", "too-large.flac", &audio, "audio/flac")),
@@ -1776,15 +1757,15 @@ mod tests {
             .context("failed to receive response")?;
 
         assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
-        let body = String::from_utf8(
+        let resolved_body = String::from_utf8(
             to_bytes(response.into_body(), usize::MAX)
                 .await
                 .context("failed to read response body")?
                 .to_vec(),
         )
         .context("response body was not valid UTF-8")?;
-        assert!(body.contains("post-error-banner"));
-        assert!(body.contains("File type not allowed"));
+        assert!(resolved_body.contains("post-error-banner"));
+        assert!(resolved_body.contains("File type not allowed"));
         Ok(())
     }
 
@@ -1808,7 +1789,8 @@ mod tests {
                 board_id
             ],
         )
-        .context("failed to update board toggles")?;
+        .context("failed to update board toggles")
+        .map(|_completed_value| ())?;
         let post = crate::db::NewPost {
             thread_id: 0,
             board_id,
@@ -1838,9 +1820,13 @@ mod tests {
         if age_secs > 0 {
             conn.execute(
                 "UPDATE posts SET created_at = ?1 WHERE id = ?2",
-                rusqlite::params![chrono::Utc::now().timestamp() - age_secs, post_id],
+                rusqlite::params![
+                    chrono::Utc::now().timestamp().saturating_sub(age_secs),
+                    post_id
+                ],
             )
-            .context("failed to age post")?;
+            .context("failed to age post")
+            .map(|_completed_value| ())?;
         }
         drop(conn);
 
@@ -1850,7 +1836,9 @@ mod tests {
             thread_id,
             post_id,
             "edit-token",
-            chrono::Utc::now().timestamp() + crate::handlers::board::self_action_window_secs(),
+            chrono::Utc::now()
+                .timestamp()
+                .saturating_add(crate::handlers::board::self_action_window_secs()),
         );
         let cookie = jar
             .get("rustchan_owned_posts")
@@ -1874,7 +1862,8 @@ mod tests {
             "UPDATE threads SET locked = ?1, archived = ?2 WHERE id = ?3",
             rusqlite::params![i64::from(locked), i64::from(archived), thread_id],
         )
-        .context("failed to update thread state")?;
+        .context("failed to update thread state")
+        .map(|_completed_value| ())?;
         Ok(())
     }
 
@@ -1887,7 +1876,8 @@ mod tests {
                 .get()
                 .context("failed to get database connection")?;
             crate::db::create_board(&conn, "test", "Test", "", false)
-                .context("failed to create board")?;
+                .context("failed to create board")
+                .map(|_completed_value| ())?;
         }
 
         let router = Router::new()
@@ -1985,7 +1975,8 @@ mod tests {
                 .get()
                 .context("failed to get database connection")?;
             crate::db::create_board(&conn, "test", "Test", "", false)
-                .context("failed to create board")?;
+                .context("failed to create board")
+                .map(|_completed_value| ())?;
         }
 
         let router = Router::new()
@@ -2084,7 +2075,8 @@ mod tests {
                 .get()
                 .context("failed to get database connection")?;
             crate::db::create_board(&conn, "test", "Test", "", false)
-                .context("failed to create board")?;
+                .context("failed to create board")
+                .map(|_completed_value| ())?;
         }
 
         let router = Router::new()
@@ -2171,58 +2163,62 @@ mod tests {
         Ok(())
     }
 
+    /// Seed the same-client thread whose cooldown should reject a subsequent reply.
+    fn seed_cooldown_thread(state: &crate::middleware::AppState) -> Result<i64> {
+        let conn = state
+            .db
+            .get()
+            .context("failed to get database connection")?;
+        let board_id = crate::db::create_board(&conn, "test", "Test", "", false)
+            .context("failed to create board")?;
+        conn.execute(
+            "UPDATE boards SET post_cooldown_secs = 60 WHERE short_name = 'test'",
+            [],
+        )
+        .context("failed to enable cooldown")
+        .map(|_completed_value| ())?;
+
+        let ip_hash =
+            crate::utils::crypto::hash_ip("127.0.0.1", &crate::config::CONFIG.cookie_secret);
+        let post = crate::db::NewPost {
+            thread_id: 0,
+            board_id,
+            name: "anon".to_owned(),
+            tripcode: None,
+            subject: Some("subject".to_owned()),
+            body: "op body".to_owned(),
+            body_html: "op body".to_owned(),
+            ip_hash: Some(ip_hash),
+            file_path: None,
+            file_name: None,
+            file_size: None,
+            thumb_path: None,
+            mime_type: None,
+            media_type: None,
+            audio_file_path: None,
+            audio_file_name: None,
+            audio_file_size: None,
+            audio_mime_type: None,
+            deletion_token: "token".to_owned(),
+            is_op: true,
+        };
+        crate::db::create_thread_with_optional_poll(
+            &conn,
+            board_id,
+            Some("subject"),
+            &post,
+            "",
+            None,
+            None,
+        )
+        .map(|(created_thread_id, _, _)| created_thread_id)
+        .context("failed to create thread")
+    }
+
     #[tokio::test]
     async fn reply_cooldown_failure_rerenders_thread_inline() -> Result<()> {
         let state = crate::test_support::app_state();
-        let thread_id = {
-            let conn = state
-                .db
-                .get()
-                .context("failed to get database connection")?;
-            let board_id = crate::db::create_board(&conn, "test", "Test", "", false)
-                .context("failed to create board")?;
-            conn.execute(
-                "UPDATE boards SET post_cooldown_secs = 60 WHERE short_name = 'test'",
-                [],
-            )
-            .context("failed to enable cooldown")?;
-
-            let ip_hash =
-                crate::utils::crypto::hash_ip("127.0.0.1", &crate::config::CONFIG.cookie_secret);
-            let post = crate::db::NewPost {
-                thread_id: 0,
-                board_id,
-                name: "anon".to_owned(),
-                tripcode: None,
-                subject: Some("subject".to_owned()),
-                body: "op body".to_owned(),
-                body_html: "op body".to_owned(),
-                ip_hash: Some(ip_hash),
-                file_path: None,
-                file_name: None,
-                file_size: None,
-                thumb_path: None,
-                mime_type: None,
-                media_type: None,
-                audio_file_path: None,
-                audio_file_name: None,
-                audio_file_size: None,
-                audio_mime_type: None,
-                deletion_token: "token".to_owned(),
-                is_op: true,
-            };
-            let (thread_id, _, _) = crate::db::create_thread_with_optional_poll(
-                &conn,
-                board_id,
-                Some("subject"),
-                &post,
-                "",
-                None,
-                None,
-            )
-            .context("failed to create thread")?;
-            thread_id
-        };
+        let thread_id = seed_cooldown_thread(&state)?;
 
         let router = Router::new()
             .route("/{board}/thread/{id}", post(super::post_reply))

@@ -68,17 +68,48 @@ fn stale_webm_redirect_path(base: &std::path::Path, media_path: &str) -> Option<
     let path = std::path::Path::new(media_path);
     if !path
         .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4") || ext.eq_ignore_ascii_case("mkv"))
     {
         return None;
     }
     let stem = media_path.get(..media_path.len().saturating_sub(4))?;
     let webm_path = format!("{stem}.webm");
-    safe_board_media_file(base, &webm_path).ok()?;
-    Some(format!("/boards/{webm_path}"))
+    safe_board_media_file(base, &webm_path)
+        .ok()
+        .map(|_completed_value| ())?;
+    let location = format!("/boards/{webm_path}");
+    HeaderValue::from_str(&location)
+        .ok()
+        .map(|_completed_value| ())?;
+    axum::http::Uri::try_from(location.as_str())
+        .ok()
+        .map(|_completed_value| ())?;
+    Some(location)
 }
 
-// Legacy `.mp4` links redirect permanently to transcoded `.webm` files; all
+/// A page can still request its SVG just after the worker replaces that file.
+/// Resolve only generated thumbnail paths and validate the PNG under the root.
+fn stale_waveform_redirect_path(base: &std::path::Path, media_path: &str) -> Option<String> {
+    if !is_generated_svg_placeholder_thumb(media_path) {
+        return None;
+    }
+    let png_path = std::path::Path::new(media_path).with_extension("png");
+    let relative = png_path.to_str()?;
+    safe_board_media_file(base, relative)
+        .ok()
+        .map(|_completed_value| ())?;
+    let location = format!("/boards/{relative}");
+    // Validate untrusted stored paths before constructing an HTTP redirect.
+    HeaderValue::from_str(&location)
+        .ok()
+        .map(|_completed_value| ())?;
+    axum::http::Uri::try_from(location.as_str())
+        .ok()
+        .map(|_completed_value| ())?;
+    Some(location)
+}
+
+// Legacy `.mp4` and `.mkv` links redirect to transcoded `.webm` files; all
 // other validated paths are served directly.
 
 #[expect(
@@ -91,7 +122,6 @@ pub(in crate::server) async fn serve_board_media(
     jar: CookieJar,
     req: axum::extract::Request,
 ) -> Response {
-    use axum::http::StatusCode;
     use std::path::PathBuf;
     use tower::ServiceExt as _;
     use tower_http::services::ServeFile;
@@ -148,74 +178,108 @@ pub(in crate::server) async fn serve_board_media(
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
 
-    let target = match safe_board_media_file(&base, &media_path) {
+    let updated_target = match safe_board_media_file(&base, &media_path) {
         Ok(path) => Some(path),
         Err(error)
             if is_not_found_error(&error)
-                && std::path::Path::new(&media_path)
+                && (std::path::Path::new(&media_path)
                     .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4")) =>
+                    .is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("mp4") || ext.eq_ignore_ascii_case("mkv")
+                    })
+                    || is_generated_svg_placeholder_thumb(&media_path)) =>
         {
             None
         }
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
 
-    if let Some(target) = target {
+    if let Some(updated_target) = updated_target {
         // File present — forward the real request (with Range, ETag, etc.) to
         // ServeFile so it can respond with 206 Partial Content when needed.
         // iOS Safari requires Range request support to play video — dropping
         // the request headers caused it to receive 200 instead of 206 and
         // refuse playback on videos it tried to stream in chunks.
         let req = req.map(|_| axum::body::Body::empty());
-        ServeFile::new(&target).oneshot(req).await.map_or_else(
-            |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-            |resp| {
-                let mut resp = resp.map(axum::body::Body::new);
-                crate::cache::set_cache_control(
-                    resp.headers_mut(),
-                    board_media_cache_control(
-                        access_context.board.access_mode.requires_view_password(),
-                        is_board_favicon,
-                        has_version,
-                    ),
-                );
-                if is_generated_svg_placeholder_thumb(&media_path) {
-                    resp.headers_mut()
-                        .insert(CONTENT_TYPE, HeaderValue::from_static("image/svg+xml"));
-                    resp.headers_mut()
-                        .insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
-                    resp.headers_mut().insert(
-                        CONTENT_SECURITY_POLICY,
-                        HeaderValue::from_static("default-src 'none'; script-src 'none'"),
-                    );
-                } else if let Some(ct) = media_content_type(&target) {
-                    resp.headers_mut()
-                        .insert(CONTENT_TYPE, HeaderValue::from_static(ct));
-                } else {
-                    resp.headers_mut().insert(
-                        CONTENT_TYPE,
-                        HeaderValue::from_static("application/octet-stream"),
-                    );
-                    resp.headers_mut()
-                        .insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
-                    let filename = target
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("download.bin")
-                        .replace(['\\', '"'], "_");
-                    if let Ok(value) =
-                        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+        ServeFile::new(&updated_target)
+            .oneshot(req)
+            .await
+            .map_or_else(
+                |_| StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                |resp| {
+                    // The waveform worker can remove the SVG between our path check
+                    // and ServeFile opening it. Resolve the completed PNG again.
+                    if let Some(path) = (resp.status() == StatusCode::NOT_FOUND)
+                        .then(|| stale_waveform_redirect_path(&base, &media_path))
+                        .flatten()
                     {
-                        resp.headers_mut().insert(CONTENT_DISPOSITION, value);
+                        return Redirect::temporary(&path).into_response();
                     }
-                }
-                if is_pdf {
-                    apply_pdf_embed_headers(resp.headers_mut());
-                }
-                resp.into_response()
-            },
-        )
+                    if let Some(path) = (resp.status() == StatusCode::NOT_FOUND)
+                        .then(|| stale_webm_redirect_path(&base, &media_path))
+                        .flatten()
+                    {
+                        return Redirect::permanent(&path).into_response();
+                    }
+                    let mut resp = resp.map(axum::body::Body::new);
+                    crate::cache::set_cache_control(
+                        resp.headers_mut(),
+                        board_media_cache_control(
+                            access_context.board.access_mode.requires_view_password(),
+                            is_board_favicon,
+                            has_version,
+                        ),
+                    );
+                    if is_generated_svg_placeholder_thumb(&media_path) {
+                        drop(
+                            resp.headers_mut()
+                                .insert(CONTENT_TYPE, HeaderValue::from_static("image/svg+xml")),
+                        );
+                        drop(
+                            resp.headers_mut().insert(
+                                X_CONTENT_TYPE_OPTIONS,
+                                HeaderValue::from_static("nosniff"),
+                            ),
+                        );
+                        drop(resp.headers_mut().insert(
+                            CONTENT_SECURITY_POLICY,
+                            HeaderValue::from_static("default-src 'none'; script-src 'none'"),
+                        ));
+                    } else if let Some(ct) = media_content_type(&updated_target) {
+                        drop(
+                            resp.headers_mut()
+                                .insert(CONTENT_TYPE, HeaderValue::from_static(ct)),
+                        );
+                    } else {
+                        drop(resp.headers_mut().insert(
+                            CONTENT_TYPE,
+                            HeaderValue::from_static("application/octet-stream"),
+                        ));
+                        drop(
+                            resp.headers_mut().insert(
+                                X_CONTENT_TYPE_OPTIONS,
+                                HeaderValue::from_static("nosniff"),
+                            ),
+                        );
+                        let filename = updated_target
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("download.bin")
+                            .replace(['\\', '"'], "_");
+                        let disposition = format!("attachment; filename=\"{filename}\"");
+                        let parsed_disposition = HeaderValue::from_str(&disposition);
+                        if let Ok(value) = parsed_disposition {
+                            drop(resp.headers_mut().insert(CONTENT_DISPOSITION, value));
+                        }
+                    }
+                    if is_pdf {
+                        apply_pdf_embed_headers(resp.headers_mut());
+                    }
+                    resp.into_response()
+                },
+            )
+    } else if let Some(redirect_path) = stale_waveform_redirect_path(&base, &media_path) {
+        Redirect::temporary(&redirect_path).into_response()
     } else if let Some(redirect_path) = stale_webm_redirect_path(&base, &media_path) {
         Redirect::permanent(&redirect_path).into_response()
     } else {
@@ -239,13 +303,13 @@ const fn board_media_cache_control(
 }
 
 fn apply_pdf_embed_headers(headers: &mut HeaderMap) {
-    headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("SAMEORIGIN"));
-    headers.insert(
+    drop(headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("SAMEORIGIN")));
+    drop(headers.insert(
         CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
             "default-src 'none'; frame-ancestors 'self'; sandbox allow-same-origin allow-scripts",
         ),
-    );
+    ));
 }
 
 // GET /api/post/{board}/{post_id}
@@ -355,8 +419,6 @@ pub(in crate::server) async fn redirect_to_post(
     Path((board_short, post_id)): Path<(String, i64)>,
     jar: CookieJar,
 ) -> impl axum::response::IntoResponse {
-    use axum::response::Redirect;
-
     let board_short_for_url = board_short.clone();
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
@@ -409,6 +471,25 @@ mod tests {
     use anyhow::{ensure, Context as _, Result as AnyResult};
 
     #[test]
+    fn stale_waveform_svg_redirects_only_to_an_existing_generated_png() -> AnyResult<()> {
+        let dir = tempfile::tempdir()?;
+        let thumbs = dir.path().join("test/thumbs");
+        std::fs::create_dir_all(&thumbs)?;
+        let path = "test/thumbs/clip.svg";
+        ensure!(super::stale_waveform_redirect_path(dir.path(), path).is_none());
+        std::fs::write(thumbs.join("clip.png"), b"fixture")?;
+        ensure!(
+            super::stale_waveform_redirect_path(dir.path(), path).as_deref()
+                == Some("/boards/test/thumbs/clip.png")
+        );
+        ensure!(super::stale_waveform_redirect_path(dir.path(), "test/clip.svg").is_none());
+        ensure!(
+            super::stale_waveform_redirect_path(dir.path(), "../test/thumbs/clip.svg").is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn stale_mp4_redirect_path_accepts_valid_webm_sibling() -> AnyResult<()> {
         let tempdir = tempfile::tempdir().context("create temporary upload root")?;
         let upload_root = tempdir.path().join("uploads");
@@ -416,10 +497,13 @@ mod tests {
         std::fs::create_dir_all(&board_dir).context("create board directory")?;
         std::fs::write(board_dir.join("clip.webm"), b"webm").context("write WebM fixture")?;
 
-        ensure!(
-            stale_webm_redirect_path(&upload_root, "test/clip.mp4").as_deref()
-                == Some("/boards/test/clip.webm")
-        );
+        for path in ["test/clip.mp4", "test/clip.mkv", "test/clip.MKV"] {
+            ensure!(
+                stale_webm_redirect_path(&upload_root, path).as_deref()
+                    == Some("/boards/test/clip.webm")
+            );
+        }
+        ensure!(stale_webm_redirect_path(&upload_root, "test/clip.wav").is_none());
         Ok(())
     }
 
@@ -438,6 +522,7 @@ mod tests {
         unix_fs::symlink(&outside, board_dir.join("link")).context("create escaping symlink")?;
 
         ensure!(stale_webm_redirect_path(&upload_root, "test/link/clip.mp4").is_none());
+        ensure!(stale_webm_redirect_path(&upload_root, "test/link/clip.mkv").is_none());
         Ok(())
     }
 

@@ -1,0 +1,1875 @@
+{
+  "fixture": {
+    "boards": 8,
+    "posts": 40000,
+    "threads": 800
+  },
+  "limitations": "SQL/database workload; media CPU and HTTP excluded; RSS sampled at case end; ps optional; process-kill is not power loss",
+  "measurements": [
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 23849,
+        "p50_us": 3,
+        "p95_us": 8089,
+        "p99_us": 14975
+      },
+      "checkout_over_100us": 1127,
+      "checkpoint": [
+        0,
+        23,
+        23
+      ],
+      "checkpoint_us": 488,
+      "cpu_seconds": 1.73,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 24506,
+        "p50_us": 710,
+        "p95_us": 8933,
+        "p99_us": 15398
+      },
+      "operations": 3200,
+      "operations_per_second": 3545.295698279347,
+      "pool_size": 2,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 24506,
+        "p50_us": 715,
+        "p95_us": 8933,
+        "p99_us": 15398
+      },
+      "rss_kib": 68096,
+      "synchronous": "NORMAL",
+      "transaction": {
+        "max_us": 9003,
+        "p50_us": 493,
+        "p95_us": 2105,
+        "p99_us": 8558
+      },
+      "wal_bytes": 5285992,
+      "workload": "read_heavy",
+      "write_latency": {
+        "max_us": 17964,
+        "p50_us": 588,
+        "p95_us": 8568,
+        "p99_us": 17312
+      },
+      "write_wait": {
+        "max_us": 4635,
+        "p50_us": 3,
+        "p95_us": 113,
+        "p99_us": 1605
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 29813,
+        "p50_us": 2247,
+        "p95_us": 10675,
+        "p99_us": 16328
+      },
+      "checkout_over_100us": 1834,
+      "checkpoint": [
+        0,
+        726,
+        726
+      ],
+      "checkpoint_us": 3057,
+      "cpu_seconds": 1.7299999999999995,
+      "database_bytes": 15204352,
+      "failures": 0,
+      "latency": {
+        "max_us": 397696,
+        "p50_us": 2804,
+        "p95_us": 11863,
+        "p99_us": 20110
+      },
+      "operations": 3200,
+      "operations_per_second": 1861.4113333461153,
+      "pool_size": 2,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 31365,
+        "p50_us": 2811,
+        "p95_us": 11949,
+        "p99_us": 17895
+      },
+      "rss_kib": 61248,
+      "synchronous": "NORMAL",
+      "transaction": {
+        "max_us": 8439,
+        "p50_us": 446,
+        "p95_us": 684,
+        "p99_us": 4483
+      },
+      "wal_bytes": 5426072,
+      "workload": "write_burst",
+      "write_latency": {
+        "max_us": 397696,
+        "p50_us": 2801,
+        "p95_us": 11794,
+        "p99_us": 21820
+      },
+      "write_wait": {
+        "max_us": 397097,
+        "p50_us": 4,
+        "p95_us": 30,
+        "p99_us": 12075
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 22625,
+        "p50_us": 3,
+        "p95_us": 9223,
+        "p99_us": 15908
+      },
+      "checkout_over_100us": 1380,
+      "checkpoint": [
+        0,
+        166,
+        166
+      ],
+      "checkpoint_us": 1143,
+      "cpu_seconds": 1.8300000000000018,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 74561,
+        "p50_us": 1614,
+        "p95_us": 10289,
+        "p99_us": 16794
+      },
+      "operations": 3200,
+      "operations_per_second": 2757.439269554338,
+      "pool_size": 2,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 24271,
+        "p50_us": 1483,
+        "p95_us": 10086,
+        "p99_us": 16578
+      },
+      "rss_kib": 61360,
+      "synchronous": "NORMAL",
+      "transaction": {
+        "max_us": 8219,
+        "p50_us": 454,
+        "p95_us": 1355,
+        "p99_us": 3641
+      },
+      "wal_bytes": 6105872,
+      "workload": "mixed",
+      "write_latency": {
+        "max_us": 74561,
+        "p50_us": 1985,
+        "p95_us": 11060,
+        "p99_us": 19046
+      },
+      "write_wait": {
+        "max_us": 73915,
+        "p50_us": 3,
+        "p95_us": 1569,
+        "p99_us": 4585
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 22770,
+        "p50_us": 2,
+        "p95_us": 3953,
+        "p99_us": 7352
+      },
+      "checkout_over_100us": 801,
+      "checkpoint": [
+        0,
+        28,
+        28
+      ],
+      "checkpoint_us": 480,
+      "cpu_seconds": 2.020000000000003,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 24749,
+        "p50_us": 740,
+        "p95_us": 4987,
+        "p99_us": 8805
+      },
+      "operations": 3200,
+      "operations_per_second": 5566.67682875119,
+      "pool_size": 4,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 21390,
+        "p50_us": 728,
+        "p95_us": 4719,
+        "p99_us": 8623
+      },
+      "rss_kib": 77856,
+      "synchronous": "NORMAL",
+      "transaction": {
+        "max_us": 13756,
+        "p50_us": 757,
+        "p95_us": 1207,
+        "p99_us": 8760
+      },
+      "wal_bytes": 14139872,
+      "workload": "read_heavy",
+      "write_latency": {
+        "max_us": 24749,
+        "p50_us": 936,
+        "p95_us": 6460,
+        "p99_us": 24520
+      },
+      "write_wait": {
+        "max_us": 23910,
+        "p50_us": 3,
+        "p95_us": 1610,
+        "p99_us": 12093
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 16041,
+        "p50_us": 483,
+        "p95_us": 6751,
+        "p99_us": 10607
+      },
+      "checkout_over_100us": 1609,
+      "checkpoint": [
+        0,
+        518,
+        518
+      ],
+      "checkpoint_us": 1912,
+      "cpu_seconds": 1.759999999999998,
+      "database_bytes": 15200256,
+      "failures": 0,
+      "latency": {
+        "max_us": 701059,
+        "p50_us": 1744,
+        "p95_us": 8915,
+        "p99_us": 26124
+      },
+      "operations": 3200,
+      "operations_per_second": 1900.1210288027173,
+      "pool_size": 4,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 17763,
+        "p50_us": 1684,
+        "p95_us": 7322,
+        "p99_us": 10997
+      },
+      "rss_kib": 88512,
+      "synchronous": "NORMAL",
+      "transaction": {
+        "max_us": 9543,
+        "p50_us": 451,
+        "p95_us": 762,
+        "p99_us": 4284
+      },
+      "wal_bytes": 5166512,
+      "workload": "write_burst",
+      "write_latency": {
+        "max_us": 701059,
+        "p50_us": 1782,
+        "p95_us": 9683,
+        "p99_us": 49594
+      },
+      "write_wait": {
+        "max_us": 700476,
+        "p50_us": 3,
+        "p95_us": 1595,
+        "p99_us": 47076
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 17908,
+        "p50_us": 3,
+        "p95_us": 5550,
+        "p99_us": 9382
+      },
+      "checkout_over_100us": 1187,
+      "checkpoint": [
+        0,
+        168,
+        168
+      ],
+      "checkpoint_us": 1090,
+      "cpu_seconds": 1.980000000000004,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 288672,
+        "p50_us": 936,
+        "p95_us": 7323,
+        "p99_us": 13750
+      },
+      "operations": 3200,
+      "operations_per_second": 3214.506934787404,
+      "pool_size": 4,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 19506,
+        "p50_us": 871,
+        "p95_us": 6484,
+        "p99_us": 10402
+      },
+      "rss_kib": 66528,
+      "synchronous": "NORMAL",
+      "transaction": {
+        "max_us": 8444,
+        "p50_us": 510,
+        "p95_us": 1701,
+        "p99_us": 3942
+      },
+      "wal_bytes": 10506032,
+      "workload": "mixed",
+      "write_latency": {
+        "max_us": 288672,
+        "p50_us": 1825,
+        "p95_us": 12554,
+        "p99_us": 39675
+      },
+      "write_wait": {
+        "max_us": 288069,
+        "p50_us": 4,
+        "p95_us": 11325,
+        "p99_us": 39170
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 57,
+        "p50_us": 2,
+        "p95_us": 3,
+        "p99_us": 4
+      },
+      "checkout_over_100us": 0,
+      "checkpoint": [
+        0,
+        3460,
+        3460
+      ],
+      "checkpoint_us": 10,
+      "cpu_seconds": 3.4499999999999957,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 71663,
+        "p50_us": 830,
+        "p95_us": 3695,
+        "p99_us": 6625
+      },
+      "operations": 3200,
+      "operations_per_second": 5361.656659955514,
+      "pool_size": 8,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 13099,
+        "p50_us": 804,
+        "p95_us": 3502,
+        "p99_us": 4826
+      },
+      "rss_kib": 78752,
+      "synchronous": "NORMAL",
+      "transaction": {
+        "max_us": 13503,
+        "p50_us": 1682,
+        "p95_us": 2988,
+        "p99_us": 10885
+      },
+      "wal_bytes": 14255232,
+      "workload": "read_heavy",
+      "write_latency": {
+        "max_us": 71663,
+        "p50_us": 2504,
+        "p95_us": 12581,
+        "p99_us": 51802
+      },
+      "write_wait": {
+        "max_us": 70904,
+        "p50_us": 54,
+        "p95_us": 11657,
+        "p99_us": 49694
+      }
+    },
+    {
+      "busy_errors": 1,
+      "checkout": {
+        "max_us": 58,
+        "p50_us": 2,
+        "p95_us": 3,
+        "p99_us": 6
+      },
+      "checkout_over_100us": 0,
+      "checkpoint": [
+        0,
+        325,
+        325
+      ],
+      "checkpoint_us": 1830,
+      "cpu_seconds": 1.7700000000000031,
+      "database_bytes": 15204352,
+      "failures": 1,
+      "latency": {
+        "max_us": 1080606,
+        "p50_us": 458,
+        "p95_us": 5017,
+        "p99_us": 72699
+      },
+      "operations": 3200,
+      "operations_per_second": 1925.477142821244,
+      "pool_size": 8,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 6859,
+        "p50_us": 431,
+        "p95_us": 1759,
+        "p99_us": 2040
+      },
+      "rss_kib": 102960,
+      "synchronous": "NORMAL",
+      "transaction": {
+        "max_us": 9169,
+        "p50_us": 451,
+        "p95_us": 976,
+        "p99_us": 3970
+      },
+      "wal_bytes": 5928712,
+      "workload": "write_burst",
+      "write_latency": {
+        "max_us": 1080606,
+        "p50_us": 461,
+        "p95_us": 7942,
+        "p99_us": 105466
+      },
+      "write_wait": {
+        "max_us": 1080400,
+        "p50_us": 3,
+        "p95_us": 4609,
+        "p99_us": 104964
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 31,
+        "p50_us": 2,
+        "p95_us": 3,
+        "p99_us": 4
+      },
+      "checkout_over_100us": 0,
+      "checkpoint": [
+        0,
+        330,
+        330
+      ],
+      "checkpoint_us": 2882,
+      "cpu_seconds": 2.039999999999999,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 386547,
+        "p50_us": 559,
+        "p95_us": 4659,
+        "p99_us": 27480
+      },
+      "operations": 3200,
+      "operations_per_second": 3463.3115342656574,
+      "pool_size": 8,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 13194,
+        "p50_us": 430,
+        "p95_us": 1795,
+        "p99_us": 2007
+      },
+      "rss_kib": 86224,
+      "synchronous": "NORMAL",
+      "transaction": {
+        "max_us": 9862,
+        "p50_us": 545,
+        "p95_us": 1528,
+        "p99_us": 3629
+      },
+      "wal_bytes": 11408312,
+      "workload": "mixed",
+      "write_latency": {
+        "max_us": 386547,
+        "p50_us": 765,
+        "p95_us": 25215,
+        "p99_us": 108468
+      },
+      "write_wait": {
+        "max_us": 386003,
+        "p50_us": 44,
+        "p95_us": 24639,
+        "p99_us": 107800
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 33,
+        "p50_us": 2,
+        "p95_us": 3,
+        "p99_us": 4
+      },
+      "checkout_over_100us": 0,
+      "checkpoint": [
+        0,
+        26,
+        26
+      ],
+      "checkpoint_us": 587,
+      "cpu_seconds": 3.4399999999999977,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 81566,
+        "p50_us": 829,
+        "p95_us": 3801,
+        "p99_us": 7255
+      },
+      "operations": 3200,
+      "operations_per_second": 5208.924322422961,
+      "pool_size": 12,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 13570,
+        "p50_us": 806,
+        "p95_us": 3506,
+        "p99_us": 4667
+      },
+      "rss_kib": 107728,
+      "synchronous": "NORMAL",
+      "transaction": {
+        "max_us": 10012,
+        "p50_us": 1839,
+        "p95_us": 4424,
+        "p99_us": 7194
+      },
+      "wal_bytes": 14148112,
+      "workload": "read_heavy",
+      "write_latency": {
+        "max_us": 81566,
+        "p50_us": 2777,
+        "p95_us": 16184,
+        "p99_us": 51479
+      },
+      "write_wait": {
+        "max_us": 80043,
+        "p50_us": 104,
+        "p95_us": 12198,
+        "p99_us": 48423
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 22,
+        "p50_us": 2,
+        "p95_us": 3,
+        "p99_us": 6
+      },
+      "checkout_over_100us": 0,
+      "checkpoint": [
+        0,
+        570,
+        570
+      ],
+      "checkpoint_us": 2417,
+      "cpu_seconds": 1.7600000000000051,
+      "database_bytes": 15200256,
+      "failures": 0,
+      "latency": {
+        "max_us": 610550,
+        "p50_us": 457,
+        "p95_us": 4547,
+        "p99_us": 49485
+      },
+      "operations": 3200,
+      "operations_per_second": 1902.9916784695365,
+      "pool_size": 12,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 7921,
+        "p50_us": 435,
+        "p95_us": 1779,
+        "p99_us": 2276
+      },
+      "rss_kib": 127328,
+      "synchronous": "NORMAL",
+      "transaction": {
+        "max_us": 9147,
+        "p50_us": 450,
+        "p95_us": 898,
+        "p99_us": 4307
+      },
+      "wal_bytes": 5846312,
+      "workload": "write_burst",
+      "write_latency": {
+        "max_us": 610550,
+        "p50_us": 459,
+        "p95_us": 5257,
+        "p99_us": 76745
+      },
+      "write_wait": {
+        "max_us": 609884,
+        "p50_us": 3,
+        "p95_us": 4570,
+        "p99_us": 76135
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 29,
+        "p50_us": 2,
+        "p95_us": 3,
+        "p99_us": 4
+      },
+      "checkout_over_100us": 0,
+      "checkpoint": [
+        0,
+        109,
+        109
+      ],
+      "checkpoint_us": 881,
+      "cpu_seconds": 2.030000000000001,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 291727,
+        "p50_us": 562,
+        "p95_us": 4887,
+        "p99_us": 27227
+      },
+      "operations": 3200,
+      "operations_per_second": 3344.4141752781616,
+      "pool_size": 12,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 11975,
+        "p50_us": 428,
+        "p95_us": 1807,
+        "p99_us": 2050
+      },
+      "rss_kib": 73968,
+      "synchronous": "NORMAL",
+      "transaction": {
+        "max_us": 10487,
+        "p50_us": 551,
+        "p95_us": 1518,
+        "p99_us": 3783
+      },
+      "wal_bytes": 12640192,
+      "workload": "mixed",
+      "write_latency": {
+        "max_us": 291727,
+        "p50_us": 793,
+        "p95_us": 23091,
+        "p99_us": 101922
+      },
+      "write_wait": {
+        "max_us": 291145,
+        "p50_us": 46,
+        "p95_us": 22423,
+        "p99_us": 101489
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 33,
+        "p50_us": 2,
+        "p95_us": 3,
+        "p99_us": 4
+      },
+      "checkout_over_100us": 0,
+      "checkpoint": [
+        0,
+        3458,
+        3458
+      ],
+      "checkpoint_us": 11,
+      "cpu_seconds": 3.5600000000000023,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 61147,
+        "p50_us": 861,
+        "p95_us": 3802,
+        "p99_us": 6652
+      },
+      "operations": 3200,
+      "operations_per_second": 5304.8888112960485,
+      "pool_size": 16,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 14500,
+        "p50_us": 830,
+        "p95_us": 3603,
+        "p99_us": 4744
+      },
+      "rss_kib": 96272,
+      "synchronous": "NORMAL",
+      "transaction": {
+        "max_us": 12877,
+        "p50_us": 1702,
+        "p95_us": 3406,
+        "p99_us": 11156
+      },
+      "wal_bytes": 14246992,
+      "workload": "read_heavy",
+      "write_latency": {
+        "max_us": 61147,
+        "p50_us": 2612,
+        "p95_us": 14092,
+        "p99_us": 46223
+      },
+      "write_wait": {
+        "max_us": 48266,
+        "p50_us": 107,
+        "p95_us": 12214,
+        "p99_us": 44066
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 42,
+        "p50_us": 2,
+        "p95_us": 3,
+        "p99_us": 5
+      },
+      "checkout_over_100us": 0,
+      "checkpoint": [
+        0,
+        150,
+        150
+      ],
+      "checkpoint_us": 965,
+      "cpu_seconds": 1.7199999999999989,
+      "database_bytes": 15200256,
+      "failures": 0,
+      "latency": {
+        "max_us": 1112467,
+        "p50_us": 456,
+        "p95_us": 4957,
+        "p99_us": 49303
+      },
+      "operations": 3200,
+      "operations_per_second": 1919.5566304072916,
+      "pool_size": 16,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 6593,
+        "p50_us": 434,
+        "p95_us": 1739,
+        "p99_us": 2184
+      },
+      "rss_kib": 110064,
+      "synchronous": "NORMAL",
+      "transaction": {
+        "max_us": 8473,
+        "p50_us": 448,
+        "p95_us": 835,
+        "p99_us": 4021
+      },
+      "wal_bytes": 5578512,
+      "workload": "write_burst",
+      "write_latency": {
+        "max_us": 1112467,
+        "p50_us": 459,
+        "p95_us": 5195,
+        "p99_us": 90894
+      },
+      "write_wait": {
+        "max_us": 1111916,
+        "p50_us": 3,
+        "p95_us": 4571,
+        "p99_us": 90383
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 29,
+        "p50_us": 2,
+        "p95_us": 3,
+        "p99_us": 4
+      },
+      "checkout_over_100us": 0,
+      "checkpoint": [
+        0,
+        414,
+        414
+      ],
+      "checkpoint_us": 2139,
+      "cpu_seconds": 2.030000000000001,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 283508,
+        "p50_us": 618,
+        "p95_us": 4979,
+        "p99_us": 27026
+      },
+      "operations": 3200,
+      "operations_per_second": 3486.4579908467167,
+      "pool_size": 16,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 12515,
+        "p50_us": 427,
+        "p95_us": 1796,
+        "p99_us": 2033
+      },
+      "rss_kib": 85104,
+      "synchronous": "NORMAL",
+      "transaction": {
+        "max_us": 8696,
+        "p50_us": 570,
+        "p95_us": 1410,
+        "p99_us": 3296
+      },
+      "wal_bytes": 11853272,
+      "workload": "mixed",
+      "write_latency": {
+        "max_us": 283508,
+        "p50_us": 849,
+        "p95_us": 25972,
+        "p99_us": 129948
+      },
+      "write_wait": {
+        "max_us": 283079,
+        "p50_us": 54,
+        "p95_us": 25075,
+        "p99_us": 129436
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 35149,
+        "p50_us": 3,
+        "p95_us": 8272,
+        "p99_us": 14254
+      },
+      "checkout_over_100us": 1166,
+      "checkpoint": [
+        0,
+        722,
+        722
+      ],
+      "checkpoint_us": 2737,
+      "cpu_seconds": 1.789999999999992,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 35871,
+        "p50_us": 732,
+        "p95_us": 8979,
+        "p99_us": 15365
+      },
+      "operations": 3200,
+      "operations_per_second": 3416.955152715621,
+      "pool_size": 2,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 35871,
+        "p50_us": 732,
+        "p95_us": 8861,
+        "p99_us": 15047
+      },
+      "rss_kib": 76704,
+      "synchronous": "FULL",
+      "transaction": {
+        "max_us": 10082,
+        "p50_us": 601,
+        "p95_us": 1215,
+        "p99_us": 5977
+      },
+      "wal_bytes": 6641472,
+      "workload": "read_heavy",
+      "write_latency": {
+        "max_us": 22813,
+        "p50_us": 748,
+        "p95_us": 11023,
+        "p99_us": 19223
+      },
+      "write_wait": {
+        "max_us": 9320,
+        "p50_us": 3,
+        "p95_us": 1565,
+        "p99_us": 4621
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 40935,
+        "p50_us": 2847,
+        "p95_us": 11373,
+        "p99_us": 17688
+      },
+      "checkout_over_100us": 1995,
+      "checkpoint": [
+        0,
+        920,
+        920
+      ],
+      "checkpoint_us": 2673,
+      "cpu_seconds": 1.9100000000000108,
+      "database_bytes": 15204352,
+      "failures": 0,
+      "latency": {
+        "max_us": 278449,
+        "p50_us": 3463,
+        "p95_us": 12971,
+        "p99_us": 21816
+      },
+      "operations": 3200,
+      "operations_per_second": 1605.6341703035953,
+      "pool_size": 2,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 41232,
+        "p50_us": 3492,
+        "p95_us": 12971,
+        "p99_us": 20249
+      },
+      "rss_kib": 78688,
+      "synchronous": "FULL",
+      "transaction": {
+        "max_us": 9026,
+        "p50_us": 520,
+        "p95_us": 792,
+        "p99_us": 3783
+      },
+      "wal_bytes": 4754512,
+      "workload": "write_burst",
+      "write_latency": {
+        "max_us": 278449,
+        "p50_us": 3439,
+        "p95_us": 12971,
+        "p99_us": 24596
+      },
+      "write_wait": {
+        "max_us": 273109,
+        "p50_us": 3,
+        "p95_us": 24,
+        "p99_us": 12111
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 36738,
+        "p50_us": 3,
+        "p95_us": 9192,
+        "p99_us": 16757
+      },
+      "checkout_over_100us": 1372,
+      "checkpoint": [
+        0,
+        992,
+        992
+      ],
+      "checkpoint_us": 2936,
+      "cpu_seconds": 1.8400000000000034,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 49481,
+        "p50_us": 1567,
+        "p95_us": 10033,
+        "p99_us": 17866
+      },
+      "operations": 3200,
+      "operations_per_second": 2733.9587904838154,
+      "pool_size": 2,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 37083,
+        "p50_us": 1510,
+        "p95_us": 9608,
+        "p99_us": 17091
+      },
+      "rss_kib": 73456,
+      "synchronous": "FULL",
+      "transaction": {
+        "max_us": 9113,
+        "p50_us": 497,
+        "p95_us": 787,
+        "p99_us": 3621
+      },
+      "wal_bytes": 5582632,
+      "workload": "mixed",
+      "write_latency": {
+        "max_us": 49481,
+        "p50_us": 2008,
+        "p95_us": 10656,
+        "p99_us": 20085
+      },
+      "write_wait": {
+        "max_us": 48950,
+        "p50_us": 3,
+        "p95_us": 1592,
+        "p99_us": 4585
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 21648,
+        "p50_us": 2,
+        "p95_us": 4062,
+        "p99_us": 7876
+      },
+      "checkout_over_100us": 784,
+      "checkpoint": [
+        0,
+        785,
+        785
+      ],
+      "checkpoint_us": 2717,
+      "cpu_seconds": 2.0,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 25794,
+        "p50_us": 743,
+        "p95_us": 5024,
+        "p99_us": 9152
+      },
+      "operations": 3200,
+      "operations_per_second": 5727.091132113926,
+      "pool_size": 4,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 22022,
+        "p50_us": 735,
+        "p95_us": 4870,
+        "p99_us": 8949
+      },
+      "rss_kib": 68512,
+      "synchronous": "FULL",
+      "transaction": {
+        "max_us": 9351,
+        "p50_us": 706,
+        "p95_us": 1257,
+        "p99_us": 6909
+      },
+      "wal_bytes": 11021032,
+      "workload": "read_heavy",
+      "write_latency": {
+        "max_us": 25794,
+        "p50_us": 945,
+        "p95_us": 7490,
+        "p99_us": 12064
+      },
+      "write_wait": {
+        "max_us": 25223,
+        "p50_us": 3,
+        "p95_us": 1598,
+        "p99_us": 9872
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 19272,
+        "p50_us": 609,
+        "p95_us": 6176,
+        "p99_us": 10195
+      },
+      "checkout_over_100us": 1616,
+      "checkpoint": [
+        0,
+        24,
+        24
+      ],
+      "checkpoint_us": 414,
+      "cpu_seconds": 1.740000000000009,
+      "database_bytes": 15216640,
+      "failures": 0,
+      "latency": {
+        "max_us": 593160,
+        "p50_us": 1792,
+        "p95_us": 8843,
+        "p99_us": 46751
+      },
+      "operations": 3200,
+      "operations_per_second": 1853.5860124330882,
+      "pool_size": 4,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 15461,
+        "p50_us": 1714,
+        "p95_us": 6888,
+        "p99_us": 11052
+      },
+      "rss_kib": 86896,
+      "synchronous": "FULL",
+      "transaction": {
+        "max_us": 11236,
+        "p50_us": 479,
+        "p95_us": 733,
+        "p99_us": 3343
+      },
+      "wal_bytes": 5384872,
+      "workload": "write_burst",
+      "write_latency": {
+        "max_us": 593160,
+        "p50_us": 1852,
+        "p95_us": 10413,
+        "p99_us": 66414
+      },
+      "write_wait": {
+        "max_us": 592456,
+        "p50_us": 3,
+        "p95_us": 4554,
+        "p99_us": 65826
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 24922,
+        "p50_us": 3,
+        "p95_us": 5396,
+        "p99_us": 9175
+      },
+      "checkout_over_100us": 1072,
+      "checkpoint": [
+        0,
+        20,
+        20
+      ],
+      "checkpoint_us": 316,
+      "cpu_seconds": 1.8700000000000045,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 823226,
+        "p50_us": 785,
+        "p95_us": 6968,
+        "p99_us": 12556
+      },
+      "operations": 3200,
+      "operations_per_second": 2995.898195009067,
+      "pool_size": 4,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 25499,
+        "p50_us": 750,
+        "p95_us": 6097,
+        "p99_us": 10488
+      },
+      "rss_kib": 80160,
+      "synchronous": "FULL",
+      "transaction": {
+        "max_us": 8408,
+        "p50_us": 506,
+        "p95_us": 1126,
+        "p99_us": 3581
+      },
+      "wal_bytes": 9331832,
+      "workload": "mixed",
+      "write_latency": {
+        "max_us": 823226,
+        "p50_us": 1530,
+        "p95_us": 9598,
+        "p99_us": 27161
+      },
+      "write_wait": {
+        "max_us": 822049,
+        "p50_us": 3,
+        "p95_us": 4569,
+        "p99_us": 26619
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 104,
+        "p50_us": 2,
+        "p95_us": 3,
+        "p99_us": 4
+      },
+      "checkout_over_100us": 1,
+      "checkpoint": [
+        0,
+        3463,
+        3463
+      ],
+      "checkpoint_us": 3261,
+      "cpu_seconds": 3.3499999999999943,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 115560,
+        "p50_us": 817,
+        "p95_us": 3451,
+        "p99_us": 6692
+      },
+      "operations": 3200,
+      "operations_per_second": 5545.922403880066,
+      "pool_size": 8,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 13345,
+        "p50_us": 794,
+        "p95_us": 3307,
+        "p99_us": 4066
+      },
+      "rss_kib": 86832,
+      "synchronous": "FULL",
+      "transaction": {
+        "max_us": 11415,
+        "p50_us": 1570,
+        "p95_us": 3424,
+        "p99_us": 10332
+      },
+      "wal_bytes": 14267592,
+      "workload": "read_heavy",
+      "write_latency": {
+        "max_us": 115560,
+        "p50_us": 2128,
+        "p95_us": 13494,
+        "p99_us": 81868
+      },
+      "write_wait": {
+        "max_us": 114729,
+        "p50_us": 53,
+        "p95_us": 12164,
+        "p99_us": 79781
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 50,
+        "p50_us": 3,
+        "p95_us": 4,
+        "p99_us": 7
+      },
+      "checkout_over_100us": 0,
+      "checkpoint": [
+        0,
+        736,
+        736
+      ],
+      "checkpoint_us": 2191,
+      "cpu_seconds": 1.7800000000000011,
+      "database_bytes": 15200256,
+      "failures": 0,
+      "latency": {
+        "max_us": 1047420,
+        "p50_us": 493,
+        "p95_us": 3270,
+        "p99_us": 45375
+      },
+      "operations": 3200,
+      "operations_per_second": 1793.6255385757938,
+      "pool_size": 8,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 12327,
+        "p50_us": 443,
+        "p95_us": 1745,
+        "p99_us": 1944
+      },
+      "rss_kib": 87056,
+      "synchronous": "FULL",
+      "transaction": {
+        "max_us": 11604,
+        "p50_us": 488,
+        "p95_us": 779,
+        "p99_us": 3601
+      },
+      "wal_bytes": 5022312,
+      "workload": "write_burst",
+      "write_latency": {
+        "max_us": 1047420,
+        "p50_us": 498,
+        "p95_us": 5120,
+        "p99_us": 50213
+      },
+      "write_wait": {
+        "max_us": 1046725,
+        "p50_us": 3,
+        "p95_us": 4556,
+        "p99_us": 49627
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 313,
+        "p50_us": 3,
+        "p95_us": 5,
+        "p99_us": 16
+      },
+      "checkout_over_100us": 1,
+      "checkpoint": [
+        0,
+        872,
+        872
+      ],
+      "checkpoint_us": 3147,
+      "cpu_seconds": 2.280000000000001,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 512019,
+        "p50_us": 654,
+        "p95_us": 5431,
+        "p99_us": 28246
+      },
+      "operations": 3200,
+      "operations_per_second": 2625.7450687022424,
+      "pool_size": 8,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 12706,
+        "p50_us": 481,
+        "p95_us": 2002,
+        "p99_us": 5266
+      },
+      "rss_kib": 77872,
+      "synchronous": "FULL",
+      "transaction": {
+        "max_us": 15399,
+        "p50_us": 635,
+        "p95_us": 2151,
+        "p99_us": 6716
+      },
+      "wal_bytes": 9817992,
+      "workload": "mixed",
+      "write_latency": {
+        "max_us": 512019,
+        "p50_us": 942,
+        "p95_us": 26716,
+        "p99_us": 135339
+      },
+      "write_wait": {
+        "max_us": 511445,
+        "p50_us": 66,
+        "p95_us": 25976,
+        "p99_us": 134703
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 53,
+        "p50_us": 3,
+        "p95_us": 4,
+        "p99_us": 14
+      },
+      "checkout_over_100us": 0,
+      "checkpoint": [
+        0,
+        49,
+        49
+      ],
+      "checkpoint_us": 890,
+      "cpu_seconds": 3.579999999999984,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 107255,
+        "p50_us": 922,
+        "p95_us": 4158,
+        "p99_us": 7918
+      },
+      "operations": 3200,
+      "operations_per_second": 4734.7854328407675,
+      "pool_size": 12,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 14414,
+        "p50_us": 870,
+        "p95_us": 3864,
+        "p99_us": 5094
+      },
+      "rss_kib": 81344,
+      "synchronous": "FULL",
+      "transaction": {
+        "max_us": 11154,
+        "p50_us": 1916,
+        "p95_us": 4434,
+        "p99_us": 9905
+      },
+      "wal_bytes": 14065712,
+      "workload": "read_heavy",
+      "write_latency": {
+        "max_us": 107255,
+        "p50_us": 2688,
+        "p95_us": 27281,
+        "p99_us": 100857
+      },
+      "write_wait": {
+        "max_us": 105378,
+        "p50_us": 75,
+        "p95_us": 25124,
+        "p99_us": 99106
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 25,
+        "p50_us": 3,
+        "p95_us": 5,
+        "p99_us": 11
+      },
+      "checkout_over_100us": 0,
+      "checkpoint": [
+        0,
+        21,
+        21
+      ],
+      "checkpoint_us": 623,
+      "cpu_seconds": 2.0500000000000114,
+      "database_bytes": 15192064,
+      "failures": 0,
+      "latency": {
+        "max_us": 946846,
+        "p50_us": 578,
+        "p95_us": 5205,
+        "p99_us": 105659
+      },
+      "operations": 3200,
+      "operations_per_second": 1563.5547444085446,
+      "pool_size": 12,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 7275,
+        "p50_us": 507,
+        "p95_us": 1998,
+        "p99_us": 2412
+      },
+      "rss_kib": 81456,
+      "synchronous": "FULL",
+      "transaction": {
+        "max_us": 9513,
+        "p50_us": 565,
+        "p95_us": 1241,
+        "p99_us": 4189
+      },
+      "wal_bytes": 5228312,
+      "workload": "write_burst",
+      "write_latency": {
+        "max_us": 946846,
+        "p50_us": 583,
+        "p95_us": 11987,
+        "p99_us": 137035
+      },
+      "write_wait": {
+        "max_us": 946021,
+        "p50_us": 3,
+        "p95_us": 11276,
+        "p99_us": 136408
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 63,
+        "p50_us": 3,
+        "p95_us": 4,
+        "p99_us": 8
+      },
+      "checkout_over_100us": 0,
+      "checkpoint": [
+        0,
+        599,
+        599
+      ],
+      "checkpoint_us": 2425,
+      "cpu_seconds": 2.1499999999999773,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 602536,
+        "p50_us": 616,
+        "p95_us": 5143,
+        "p99_us": 27726
+      },
+      "operations": 3200,
+      "operations_per_second": 2825.104200459125,
+      "pool_size": 12,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 12409,
+        "p50_us": 466,
+        "p95_us": 1911,
+        "p99_us": 2337
+      },
+      "rss_kib": 73056,
+      "synchronous": "FULL",
+      "transaction": {
+        "max_us": 8758,
+        "p50_us": 619,
+        "p95_us": 1508,
+        "p99_us": 3671
+      },
+      "wal_bytes": 12961552,
+      "workload": "mixed",
+      "write_latency": {
+        "max_us": 602536,
+        "p50_us": 887,
+        "p95_us": 26186,
+        "p99_us": 107093
+      },
+      "write_wait": {
+        "max_us": 601905,
+        "p50_us": 62,
+        "p95_us": 25603,
+        "p99_us": 106435
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 105,
+        "p50_us": 2,
+        "p95_us": 4,
+        "p99_us": 18
+      },
+      "checkout_over_100us": 1,
+      "checkpoint": [
+        0,
+        412,
+        412
+      ],
+      "checkpoint_us": 2239,
+      "cpu_seconds": 3.4599999999999795,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 103559,
+        "p50_us": 849,
+        "p95_us": 3977,
+        "p99_us": 8875
+      },
+      "operations": 3200,
+      "operations_per_second": 4862.84867194843,
+      "pool_size": 16,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 14364,
+        "p50_us": 822,
+        "p95_us": 3652,
+        "p99_us": 5231
+      },
+      "rss_kib": 88704,
+      "synchronous": "FULL",
+      "transaction": {
+        "max_us": 11824,
+        "p50_us": 1625,
+        "p95_us": 4550,
+        "p99_us": 8829
+      },
+      "wal_bytes": 12557792,
+      "workload": "read_heavy",
+      "write_latency": {
+        "max_us": 103559,
+        "p50_us": 2566,
+        "p95_us": 26969,
+        "p99_us": 77162
+      },
+      "write_wait": {
+        "max_us": 101640,
+        "p50_us": 73,
+        "p95_us": 23178,
+        "p99_us": 75214
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 25,
+        "p50_us": 3,
+        "p95_us": 4,
+        "p99_us": 10
+      },
+      "checkout_over_100us": 0,
+      "checkpoint": [
+        0,
+        994,
+        994
+      ],
+      "checkpoint_us": 3263,
+      "cpu_seconds": 1.9799999999999898,
+      "database_bytes": 15200256,
+      "failures": 0,
+      "latency": {
+        "max_us": 817040,
+        "p50_us": 540,
+        "p95_us": 5154,
+        "p99_us": 75740
+      },
+      "operations": 3200,
+      "operations_per_second": 1649.081758063573,
+      "pool_size": 16,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 7651,
+        "p50_us": 476,
+        "p95_us": 1931,
+        "p99_us": 2405
+      },
+      "rss_kib": 88816,
+      "synchronous": "FULL",
+      "transaction": {
+        "max_us": 11961,
+        "p50_us": 533,
+        "p95_us": 957,
+        "p99_us": 3969
+      },
+      "wal_bytes": 5562032,
+      "workload": "write_burst",
+      "write_latency": {
+        "max_us": 817040,
+        "p50_us": 544,
+        "p95_us": 5899,
+        "p99_us": 108367
+      },
+      "write_wait": {
+        "max_us": 815895,
+        "p50_us": 3,
+        "p95_us": 4622,
+        "p99_us": 107852
+      }
+    },
+    {
+      "busy_errors": 0,
+      "checkout": {
+        "max_us": 70,
+        "p50_us": 3,
+        "p95_us": 4,
+        "p99_us": 9
+      },
+      "checkout_over_100us": 0,
+      "checkpoint": [
+        0,
+        977,
+        977
+      ],
+      "checkpoint_us": 2798,
+      "cpu_seconds": 2.1999999999999886,
+      "database_bytes": 14753792,
+      "failures": 0,
+      "latency": {
+        "max_us": 499719,
+        "p50_us": 638,
+        "p95_us": 4392,
+        "p99_us": 27164
+      },
+      "operations": 3200,
+      "operations_per_second": 2934.8208382261573,
+      "pool_size": 16,
+      "pool_timeouts": 0,
+      "read_latency": {
+        "max_us": 11853,
+        "p50_us": 476,
+        "p95_us": 1952,
+        "p99_us": 2273
+      },
+      "rss_kib": 69872,
+      "synchronous": "FULL",
+      "transaction": {
+        "max_us": 9114,
+        "p50_us": 624,
+        "p95_us": 1352,
+        "p99_us": 4747
+      },
+      "wal_bytes": 9455432,
+      "workload": "mixed",
+      "write_latency": {
+        "max_us": 499719,
+        "p50_us": 851,
+        "p95_us": 25858,
+        "p99_us": 105171
+      },
+      "write_wait": {
+        "max_us": 499093,
+        "p50_us": 67,
+        "p95_us": 25340,
+        "p99_us": 104568
+      }
+    }
+  ],
+  "query_plans": [
+    {
+      "details": [
+        "MATERIALIZE page",
+        "SEARCH t USING INDEX idx_threads_board_sticky_bumped (board_id=?)",
+        "SEARCH op EXISTS USING COVERING INDEX idx_posts_one_op_per_thread (thread_id=?)",
+        "USE TEMP B-TREE FOR LAST TERM OF ORDER BY",
+        "SCAN t",
+        "SEARCH op USING INDEX idx_posts_one_op_per_thread (thread_id=?)",
+        "CORRELATED SCALAR SUBQUERY 3",
+        "SEARCH fp USING INDEX idx_posts_thread_live (thread_id=?)",
+        "CORRELATED SCALAR SUBQUERY 4",
+        "SEARCH fp USING COVERING INDEX idx_posts_thread (thread_id=?)"
+      ],
+      "name": "board_index"
+    },
+    {
+      "details": [
+        "MATERIALIZE page",
+        "SEARCH t USING INDEX idx_threads_board_sticky_bumped (board_id=?)",
+        "SEARCH op EXISTS USING COVERING INDEX idx_posts_one_op_per_thread (thread_id=?)",
+        "USE TEMP B-TREE FOR LAST TERM OF ORDER BY",
+        "SCAN t",
+        "SEARCH op USING INDEX idx_posts_one_op_per_thread (thread_id=?)",
+        "CORRELATED SCALAR SUBQUERY 3",
+        "SEARCH fp USING INDEX idx_posts_thread_live (thread_id=?)",
+        "CORRELATED SCALAR SUBQUERY 4",
+        "SEARCH fp USING COVERING INDEX idx_posts_thread (thread_id=?)"
+      ],
+      "name": "catalog"
+    },
+    {
+      "details": [
+        "SEARCH posts USING INDEX idx_posts_thread (thread_id=?)"
+      ],
+      "name": "thread_loading"
+    },
+    {
+      "details": [
+        "SEARCH posts USING COVERING INDEX idx_posts_board (board_id=?)",
+        "USE TEMP B-TREE FOR LAST TERM OF ORDER BY"
+      ],
+      "name": "latest_post"
+    },
+    {
+      "details": [
+        "SEARCH threads USING INTEGER PRIMARY KEY (rowid=?)",
+        "SCALAR SUBQUERY 1",
+        "SEARCH boards USING INTEGER PRIMARY KEY (rowid=?)"
+      ],
+      "name": "thread_bump"
+    },
+    {
+      "details": [
+        "SCAN CONSTANT ROW",
+        "SCALAR SUBQUERY 1",
+        "SCAN posts USING COVERING INDEX idx_posts_board",
+        "SCALAR SUBQUERY 2",
+        "SCAN threads USING COVERING INDEX idx_threads_archived",
+        "SCALAR SUBQUERY 3",
+        "SEARCH reports USING COVERING INDEX idx_reports_status (status=?)"
+      ],
+      "name": "admin_overview"
+    },
+    {
+      "details": [
+        "SEARCH reports USING COVERING INDEX idx_reports_open_unique (post_id=? AND reporter_hash=?)"
+      ],
+      "name": "report_lookup"
+    },
+    {
+      "details": [
+        "SEARCH posts USING INDEX idx_posts_board (board_id=?)",
+        "USE TEMP B-TREE FOR ORDER BY"
+      ],
+      "name": "backup_board_inventory"
+    },
+    {
+      "details": [
+        "SEARCH posts USING INDEX idx_posts_thread_live (thread_id=? AND id>?)"
+      ],
+      "name": "live_poll"
+    },
+    {
+      "details": [
+        "SEARCH posts USING COVERING INDEX idx_posts_board_ip_created (board_id=? AND ip_hash=?)"
+      ],
+      "name": "cooldown"
+    },
+    {
+      "details": [
+        "SEARCH threads USING INDEX idx_threads_archived (board_id=? AND archived=?)",
+        "USE TEMP B-TREE FOR ORDER BY"
+      ],
+      "name": "latest_thread"
+    },
+    {
+      "details": [
+        "SEARCH threads USING INDEX idx_threads_archived (board_id=? AND archived=?)"
+      ],
+      "name": "prune"
+    },
+    {
+      "details": [
+        "SCAN posts_fts VIRTUAL TABLE INDEX 0:M1",
+        "SEARCH p USING INTEGER PRIMARY KEY (rowid=?)",
+        "USE TEMP B-TREE FOR ORDER BY"
+      ],
+      "name": "search_selective"
+    },
+    {
+      "details": [
+        "SEARCH reports USING INDEX idx_reports_status (status=?)"
+      ],
+      "name": "reports"
+    },
+    {
+      "details": [
+        "SEARCH bans USING INDEX idx_bans_ip (ip_hash=?)"
+      ],
+      "name": "bans"
+    },
+    {
+      "details": [
+        "SEARCH background_jobs USING INDEX idx_jobs_pending (status=?)"
+      ],
+      "name": "job_claim"
+    },
+    {
+      "details": [
+        "MULTI-INDEX OR",
+        "INDEX 1",
+        "SEARCH posts USING INDEX idx_posts_file_path (file_path=?)",
+        "INDEX 2",
+        "SEARCH posts USING INDEX idx_posts_thumb_path (thumb_path=?)",
+        "INDEX 3",
+        "SEARCH posts USING INDEX idx_posts_audio_file_path (audio_file_path=?)"
+      ],
+      "name": "file_refs"
+    },
+    {
+      "details": [
+        "SEARCH file_hashes USING INDEX sqlite_autoindex_file_hashes_1 (sha256=?)"
+      ],
+      "name": "dedup"
+    },
+    {
+      "details": [
+        "SCAN mod_log USING INDEX idx_mod_log_created"
+      ],
+      "name": "mod_log"
+    }
+  ],
+  "sqlite_version": "3.51.3",
+  "workers": 8
+}

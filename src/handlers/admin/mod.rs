@@ -15,6 +15,8 @@
 
 mod accounts;
 pub(in crate::server) mod auth;
+/// Explicit administrator settings restarts.
+pub(in crate::server) mod restart;
 /// Administrator-only software update handlers.
 pub(in crate::server) mod updates;
 pub(in crate::server) use accounts::*;
@@ -281,9 +283,9 @@ pub(super) fn ensure_admin_csrf(jar: CookieJar, secure: bool) -> Result<(CookieJ
         .map(str::to_owned);
     let mut jar = jar;
     let raw = raw.unwrap_or_else(|| {
-        let raw = new_csrf_token();
-        jar = std::mem::take(&mut jar).add(admin_csrf_cookie(raw.clone(), secure));
-        raw
+        let generated_token = new_csrf_token();
+        jar = std::mem::take(&mut jar).add(admin_csrf_cookie(generated_token.clone(), secure));
+        generated_token
     });
     let session_id = jar
         .get(SESSION_COOKIE)
@@ -614,8 +616,7 @@ struct AdminPanelSnapshot {
     media_auto_prune_enabled: bool,
     media_max_active_content_size_bytes: u64,
     ffmpeg_available: bool,
-    ffprobe_available: bool,
-    ffmpeg_webp_available: bool,
+    ffmpeg_av1: crate::media::ffmpeg::Av1Capabilities,
     ffmpeg_vp9_available: bool,
     ffmpeg_vp9_encoder_available: bool,
     ffmpeg_opus_available: bool,
@@ -814,8 +815,7 @@ struct MaintenanceDomainData {
     media_auto_prune_enabled: bool,
     media_max_active_content_size_bytes: u64,
     ffmpeg_available: bool,
-    ffprobe_available: bool,
-    ffmpeg_webp_available: bool,
+    ffmpeg_av1: crate::media::ffmpeg::Av1Capabilities,
     ffmpeg_vp9_available: bool,
     ffmpeg_vp9_encoder_available: bool,
     ffmpeg_opus_available: bool,
@@ -1134,15 +1134,23 @@ fn fmt_epoch(timestamp: i64) -> String {
 
 fn db_integrity_status(status: &crate::middleware::DbMaintenanceJobStatus) -> String {
     match status {
-        crate::middleware::DbMaintenanceJobStatus::Finished { report, .. } => {
+        crate::middleware::DbMaintenanceJobStatus::Finished { report, job_id: _ } => {
             if report.after.as_ref().unwrap_or(&report.before).ok() {
                 "passed at last check".to_owned()
             } else {
                 "failed at last check".to_owned()
             }
         }
-        crate::middleware::DbMaintenanceJobStatus::Running { .. } => "check running".to_owned(),
-        crate::middleware::DbMaintenanceJobStatus::Failed { .. } => "last check failed".to_owned(),
+        crate::middleware::DbMaintenanceJobStatus::Running {
+            job_id: _,
+            started_at: _,
+            phase: _,
+        } => "check running".to_owned(),
+        crate::middleware::DbMaintenanceJobStatus::Failed {
+            job_id: _,
+            finished_at: _,
+            message: _,
+        } => "last check failed".to_owned(),
         crate::middleware::DbMaintenanceJobStatus::Idle => "not checked".to_owned(),
     }
 }
@@ -1197,16 +1205,16 @@ fn safe_dir_size(root: &Path) -> Option<u64> {
         };
         for entry in entries.flatten() {
             let entry_path = entry.path();
-            let Ok(metadata) = std::fs::symlink_metadata(&entry_path) else {
+            let Ok(entry_metadata) = std::fs::symlink_metadata(&entry_path) else {
                 continue;
             };
-            if metadata.file_type().is_symlink() {
+            if entry_metadata.file_type().is_symlink() {
                 continue;
             }
-            if metadata.is_dir() {
+            if entry_metadata.is_dir() {
                 pending.push_back(entry_path);
-            } else if metadata.is_file() {
-                total = total.saturating_add(metadata.len());
+            } else if entry_metadata.is_file() {
+                total = total.saturating_add(entry_metadata.len());
             }
         }
     }
@@ -1306,8 +1314,7 @@ fn load_maintenance_domain_data(
         media_auto_prune_enabled: db::get_media_auto_prune_enabled(conn),
         media_max_active_content_size_bytes: db::get_media_max_active_content_size_bytes(conn),
         ffmpeg_available: state.ffmpeg_available,
-        ffprobe_available: state.ffprobe_available,
-        ffmpeg_webp_available: state.ffmpeg_webp_available,
+        ffmpeg_av1: state.ffmpeg_av1.clone(),
         ffmpeg_vp9_available: state.ffmpeg_vp9_available,
         ffmpeg_vp9_encoder_available: state.ffmpeg_vp9_encoder_available,
         ffmpeg_opus_available: state.ffmpeg_opus_available,
@@ -1386,8 +1393,7 @@ fn load_admin_panel_snapshot(
             media_max_active_content_size_bytes: maintenance_domain
                 .media_max_active_content_size_bytes,
             ffmpeg_available: maintenance_domain.ffmpeg_available,
-            ffprobe_available: maintenance_domain.ffprobe_available,
-            ffmpeg_webp_available: maintenance_domain.ffmpeg_webp_available,
+            ffmpeg_av1: maintenance_domain.ffmpeg_av1,
             ffmpeg_vp9_available: maintenance_domain.ffmpeg_vp9_available,
             ffmpeg_vp9_encoder_available: maintenance_domain.ffmpeg_vp9_encoder_available,
             ffmpeg_opus_available: maintenance_domain.ffmpeg_opus_available,
@@ -1664,17 +1670,16 @@ fn dashboard_dependency_status(
     ffmpeg_required: bool,
 ) -> (String, String, crate::templates::AdminDashboardState) {
     let ffmpeg = detection_word(maintenance.ffmpeg_available);
-    let ffprobe = detection_word(maintenance.ffprobe_available);
-    let state = if maintenance.ffmpeg_available && maintenance.ffprobe_available {
+    let state = if maintenance.ffmpeg_vp9_available {
         crate::templates::AdminDashboardState::Ok
-    } else if ffmpeg_required {
+    } else if ffmpeg_required && !maintenance.ffmpeg_available {
         crate::templates::AdminDashboardState::ActionNeeded
     } else {
         crate::templates::AdminDashboardState::Informational
     };
-    let status = if maintenance.ffmpeg_available && maintenance.ffprobe_available {
+    let status = if maintenance.ffmpeg_vp9_available {
         "ready"
-    } else if ffmpeg_required {
+    } else if ffmpeg_required && !maintenance.ffmpeg_available {
         "required tool missing"
     } else {
         "limited"
@@ -1682,10 +1687,11 @@ fn dashboard_dependency_status(
     (
         status.to_owned(),
         format!(
-            "ffmpeg {ffmpeg}; ffprobe {ffprobe}; WebP {}; VP9 {}; Opus {}.",
-            detection_word(maintenance.ffmpeg_webp_available),
+            "WebP/images built in (Rust); ffmpeg video {ffmpeg}; VP9 {}; Opus {}; AV1 decoding {}; AV1 encoding {} (output policy: VP9 + Opus).",
             detection_word(maintenance.ffmpeg_vp9_encoder_available),
-            detection_word(maintenance.ffmpeg_opus_available)
+            detection_word(maintenance.ffmpeg_opus_available),
+            detection_word(!maintenance.ffmpeg_av1.decoders.is_empty()),
+            detection_word(!maintenance.ffmpeg_av1.encoders.is_empty())
         ),
         state,
     )
@@ -1827,7 +1833,7 @@ fn render_runtime_workspaces(snapshot: &AdminPanelSnapshot, csrf_token: &str) ->
         .iter()
         .map(|section| {
             let fields = crate::config::admin::runtime::section_snapshot(*section)
-                .map_err(|_| "unavailable".to_owned());
+                .map_err(|snapshot_error| { tracing::warn!(error = %snapshot_error, "operator settings snapshot unavailable"); "unavailable".to_owned() });
             crate::templates::admin::render_runtime_settings(*section, &fields, csrf_token)
         })
         .collect();
@@ -1836,7 +1842,10 @@ fn render_runtime_workspaces(snapshot: &AdminPanelSnapshot, csrf_token: &str) ->
         "{runtime_html}{}{}{application_html}",
         crate::templates::admin::render_accounts(&snapshot.accounts, csrf_token),
         crate::templates::admin::render_management(
-            &crate::config::admin::management::snapshot().map_err(|_| "unavailable".to_owned()),
+            &crate::config::admin::management::snapshot().map_err(|snapshot_error| {
+                tracing::warn!(error = %snapshot_error, "operator settings snapshot unavailable");
+                "unavailable".to_owned()
+            }),
             csrf_token
         )
     )
@@ -1856,8 +1865,10 @@ fn render_admin_panel_from_snapshot(
         is_error: *is_error,
         message,
     });
-    let network_fields =
-        crate::config::admin::network_snapshot().map_err(|_| "unavailable".to_owned());
+    let network_fields = crate::config::admin::network_snapshot().map_err(|snapshot_error| {
+        tracing::warn!(error = %snapshot_error, "operator settings snapshot unavailable");
+        "unavailable".to_owned()
+    });
     let view = crate::templates::AdminPanelViewModel {
         network_html: crate::templates::admin::render_network_settings(&network_fields, csrf_token),
         runtime_html: render_runtime_workspaces(snapshot, csrf_token),
@@ -1916,16 +1927,8 @@ fn render_admin_panel_from_snapshot(
                 } else {
                     crate::templates::AdminDetectionStatus::Missing
                 },
-                ffprobe: if snapshot.ffprobe_available {
-                    crate::templates::AdminDetectionStatus::Detected
-                } else {
-                    crate::templates::AdminDetectionStatus::Missing
-                },
-                webp_encoder: if snapshot.ffmpeg_webp_available {
-                    crate::templates::AdminDetectionStatus::Detected
-                } else {
-                    crate::templates::AdminDetectionStatus::Missing
-                },
+                av1_decoder: detection_status(!snapshot.ffmpeg_av1.decoders.is_empty()),
+                av1_encoder: detection_status(!snapshot.ffmpeg_av1.encoders.is_empty()),
                 vp9_pipeline: if snapshot.ffmpeg_vp9_available {
                     crate::templates::AdminDetectionStatus::Detected
                 } else {
@@ -2003,10 +2006,10 @@ fn build_site_health_view<'a>(
         tor_detail: &snapshot.dashboard.tor_detail,
         dependency_summary: crate::templates::AdminSiteHealthDependencySummary {
             ffmpeg: detection_status(snapshot.ffmpeg_available),
-            ffprobe: detection_status(snapshot.ffprobe_available),
-            webp: detection_status(snapshot.ffmpeg_webp_available),
             vp9: detection_status(snapshot.ffmpeg_vp9_encoder_available),
             opus: detection_status(snapshot.ffmpeg_opus_available),
+            av1_decoder: detection_status(!snapshot.ffmpeg_av1.decoders.is_empty()),
+            av1_encoder: detection_status(!snapshot.ffmpeg_av1.encoders.is_empty()),
         },
         running_jobs: snapshot.site_health.running_jobs,
         queued_jobs: snapshot.site_health.queued_jobs,
@@ -2048,8 +2051,10 @@ fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&st
          Database schema: {schema}\n\
          OS: {os}-{arch}\n\
          SQLite: {sqlite}\n\
-         ffmpeg: {ffmpeg}\n\
-         ffprobe: {ffprobe}\n\
+         WebP/images: built in (Rust), including animation\n\
+         ffmpeg video: {ffmpeg}\n\
+         WebM conversion (VP9 + Opus): {webm}\n\
+         AV1 decoding: {av1_decoding}; AV1 encoding: {av1_encoding}\n\
          Tor enabled: {tor_enabled} ({tor_detail})\n\
          TLS enabled: {tls_enabled}\n\
          Reverse proxy: {reverse_proxy}\n\
@@ -2063,7 +2068,9 @@ fn build_diagnostics_text(snapshot: &AdminPanelSnapshot, tor_address: Option<&st
         arch = std::env::consts::ARCH,
         sqlite = rusqlite::version(),
         ffmpeg = detection_word(snapshot.ffmpeg_available),
-        ffprobe = detection_word(snapshot.ffprobe_available),
+        webm = detection_word(snapshot.ffmpeg_vp9_available),
+        av1_decoding = detection_word(!snapshot.ffmpeg_av1.decoders.is_empty()),
+        av1_encoding = detection_word(!snapshot.ffmpeg_av1.encoders.is_empty()),
         warnings = indent_diagnostics_block(&snapshot.site_health.recent_warnings),
     )
 }
@@ -2132,8 +2139,11 @@ pub(in crate::server) async fn admin_panel(
     } else {
         None
     };
-    updates::authorize(&state, &jar).await?;
+    updates::authorize(&state, &jar)
+        .await
+        .map(|_completed_value| ())?;
     let update_status = updates::snapshot().await;
+    let restart_view = restart::snapshot(Some(&update_status)).await;
     let auto_full_backup_settings = state.auto_full_backup_settings.snapshot();
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
@@ -2144,7 +2154,8 @@ pub(in crate::server) async fn admin_panel(
             // Auth check inside blocking task
             let sid = session_id.ok_or_else(|| AppError::Forbidden("Not logged in.".into()))?;
             db::get_session(&conn, &sid)?
-                .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))?;
+                .ok_or_else(|| AppError::Forbidden("Session expired or invalid.".into()))
+                .map(|_completed_value| ())?;
 
             let (snapshot, tor_address) = load_admin_panel_snapshot(
                 &conn,
@@ -2166,7 +2177,8 @@ pub(in crate::server) async fn admin_panel(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    let html = html.replace("<!-- software-updates -->", &crate::templates::admin::render_software_updates(&update_status, &csrf, crate::updates::managed(), crate::updates::container_managed()))
+    let html = html.replace("<!-- settings-restart -->", &crate::templates::admin::render_restart(&restart_view, &csrf))
+        .replace("<!-- software-updates -->", &crate::templates::admin::render_software_updates(&update_status, &csrf, crate::updates::managed(), crate::updates::container_managed()))
         .replace("<!-- update-backups -->", &crate::templates::admin::render_update_backups(&update_status))
         .replace("<!-- update-notification -->", if update_status.available_release().is_some() { r#" <span class="admin-state-pill admin-state-pill-informational">Update available</span>"# } else { "" });
     Ok((jar, Html(html)))
@@ -2182,7 +2194,7 @@ pub(in crate::server) async fn admin_site_health_jobs(
         let state = state.clone();
         move || -> Result<SiteHealthJobsSnapshot> {
             let conn = state.db.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             Ok(load_site_health_jobs_snapshot(&conn, &state))
         }
     })
@@ -2271,7 +2283,7 @@ pub(in crate::server) async fn admin_live_log(
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
 
             let logs_dir = crate::config::logs_dir();
 
@@ -2364,7 +2376,8 @@ fn admin_bootstrap_now_secs() -> u64 {
 pub(super) fn create_admin_session_bootstrap(session_id: &str) -> String {
     let token = crate::utils::crypto::new_session_id();
     let expires_at = admin_bootstrap_now_secs().saturating_add(ADMIN_BOOTSTRAP_TTL_SECS);
-    ADMIN_SESSION_BOOTSTRAPS.insert(token.clone(), (session_id.to_owned(), expires_at));
+    let _previous_value =
+        ADMIN_SESSION_BOOTSTRAPS.insert(token.clone(), (session_id.to_owned(), expires_at));
     token
 }
 
@@ -2453,7 +2466,10 @@ fn build_application_state(snapshot: &AdminPanelSnapshot) -> String {
             &live,
             snapshot.saved_ffmpeg_timeout.as_deref(),
         )
-        .map_err(|_| "unavailable".to_owned()),
+        .map_err(|snapshot_error| {
+            tracing::warn!(error = %snapshot_error, "operator settings snapshot unavailable");
+            "unavailable".to_owned()
+        }),
     )
 }
 
@@ -2473,6 +2489,7 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::middleware::SecureCookieContext;
+    use crate::test_support::admin_signed_csrf;
     use anyhow::{bail, ensure, Context as _};
     use axum::{
         body::to_bytes,
@@ -2498,7 +2515,7 @@ mod tests {
                     cookie_header.push_str(raw);
                 }
                 let mut headers = HeaderMap::new();
-                headers.insert(header::COOKIE, HeaderValue::from_str(&cookie_header)?);
+                drop(headers.insert(header::COOKIE, HeaderValue::from_str(&cookie_header)?));
                 let (jar, token) = ensure_admin_csrf(CookieJar::from_headers(&headers), secure)?;
                 let raw = jar.get("csrf_token").context("CSRF cookie is missing")?;
                 ensure!(!raw.value().is_empty(), "CSRF cookie must not be empty");
@@ -2576,7 +2593,8 @@ mod tests {
              VALUES (?1, 'active', ?2, ?2, 0)",
             rusqlite::params![board_id, now],
         )
-        .context("insert active thread")?;
+        .context("insert active thread")
+        .map(|_completed_value| ())?;
         let active_thread_id = conn.last_insert_rowid();
         conn.execute(
             "INSERT INTO posts
@@ -2589,7 +2607,8 @@ mod tests {
               7, 'audio/ogg', ?3, 'delete-active', 1)",
             rusqlite::params![active_thread_id, board_id, now],
         )
-        .context("insert active post")?;
+        .context("insert active post")
+        .map(|_completed_value| ())?;
         let active_post_id = conn.last_insert_rowid();
 
         conn.execute(
@@ -2597,7 +2616,8 @@ mod tests {
              VALUES (?1, 'archived', ?2, ?2, 1)",
             rusqlite::params![board_id, now - (8 * 24 * 60 * 60)],
         )
-        .context("insert archived thread")?;
+        .context("insert archived thread")
+        .map(|_completed_value| ())?;
         let archived_thread_id = conn.last_insert_rowid();
         conn.execute(
             "INSERT INTO posts
@@ -2608,14 +2628,16 @@ mod tests {
               1000, 'dash/video-thumb.webp', 'video/webm', 'video', ?3, 'delete-archived', 1)",
             rusqlite::params![archived_thread_id, board_id, now - (8 * 24 * 60 * 60)],
         )
-        .context("insert archived post")?;
+        .context("insert archived post")
+        .map(|_completed_value| ())?;
 
         conn.execute(
             "INSERT INTO reports (post_id, thread_id, board_id, reason, reporter_hash, created_at)
              VALUES (?1, ?2, ?3, 'needs review', 'reporter', ?4)",
             rusqlite::params![active_post_id, active_thread_id, board_id, now],
         )
-        .context("insert report")?;
+        .context("insert report")
+        .map(|_completed_value| ())?;
 
         let activity = load_dashboard_activity_snapshot(&conn, 1);
 
@@ -2755,7 +2777,7 @@ mod tests {
         assert_eq!(state, crate::templates::AdminDashboardState::Failure);
     }
 
-    fn maintenance_with_media_tools(ffmpeg: bool, ffprobe: bool) -> MaintenanceDomainData {
+    fn maintenance_with_media_tools(ffmpeg: bool) -> MaintenanceDomainData {
         MaintenanceDomainData {
             db_size_bytes: 0,
             db_size_warning: false,
@@ -2763,8 +2785,7 @@ mod tests {
             media_auto_prune_enabled: false,
             media_max_active_content_size_bytes: 0,
             ffmpeg_available: ffmpeg,
-            ffprobe_available: ffprobe,
-            ffmpeg_webp_available: false,
+            ffmpeg_av1: crate::media::ffmpeg::Av1Capabilities::default(),
             ffmpeg_vp9_available: false,
             ffmpeg_vp9_encoder_available: false,
             ffmpeg_opus_available: false,
@@ -2774,7 +2795,10 @@ mod tests {
 
     #[test]
     fn dashboard_optional_media_tools_are_informational_not_warning() {
-        let maintenance = maintenance_with_media_tools(false, false);
+        let maintenance = maintenance_with_media_tools(false);
+        let detail = dashboard_dependency_status(&maintenance, false).1;
+        assert!(detail.contains("WebP/images built in (Rust)"));
+        assert!(detail.contains("AV1 decoding missing; AV1 encoding missing"));
 
         assert_eq!(
             dashboard_dependency_status(&maintenance, false).2,
@@ -2784,6 +2808,15 @@ mod tests {
             dashboard_dependency_status(&maintenance, true).2,
             crate::templates::AdminDashboardState::ActionNeeded,
         );
+    }
+
+    #[test]
+    fn admin_av1_status_distinguishes_decoding_from_encoding() {
+        let mut maintenance = maintenance_with_media_tools(true);
+        maintenance.ffmpeg_av1.decoders.push("libdav1d".to_owned());
+        let detail = dashboard_dependency_status(&maintenance, false).1;
+        assert!(detail.contains("AV1 decoding found; AV1 encoding missing"));
+        assert!(detail.contains("output policy: VP9 + Opus"));
     }
 
     #[test]
@@ -2813,7 +2846,7 @@ mod tests {
     fn same_origin_headers(host: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         if let Ok(host) = HeaderValue::from_str(host) {
-            headers.insert(header::HOST, host);
+            drop(headers.insert(header::HOST, host));
         }
         headers
     }
@@ -2845,44 +2878,44 @@ mod tests {
     #[test]
     fn same_origin_request_accepts_loopback_aliases_with_matching_port() {
         let mut headers = same_origin_headers("127.0.0.1:8080");
-        headers.insert(
+        drop(headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("http://localhost:8080"),
-        );
+        ));
         assert!(require_same_origin_request(&headers, None).is_ok());
 
-        let mut headers = same_origin_headers("[::1]:8080");
-        headers.insert(
+        let mut ipv6_headers = same_origin_headers("[::1]:8080");
+        drop(ipv6_headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("http://127.0.0.1:8080"),
-        );
-        assert!(require_same_origin_request(&headers, None).is_ok());
+        ));
+        assert!(require_same_origin_request(&ipv6_headers, None).is_ok());
     }
 
     #[test]
     fn same_origin_request_accepts_ipv6_loopback_bracket_format() {
         let mut headers = same_origin_headers("[::1]:8080");
-        headers.insert(
+        drop(headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("http://[::1]:8080"),
-        );
+        ));
         assert!(require_same_origin_request(&headers, None).is_ok());
     }
 
     #[test]
     fn same_origin_request_accepts_referer_when_origin_is_missing() {
         let mut headers = same_origin_headers("localhost:8080");
-        headers.insert(
+        drop(headers.insert(
             header::REFERER,
             HeaderValue::from_static("http://127.0.0.1:8080/admin"),
-        );
+        ));
         assert!(require_same_origin_request(&headers, None).is_ok());
     }
 
     #[test]
     fn same_origin_request_accepts_valid_onion_http_origin() {
         let mut headers = same_origin_headers(TEST_ONION_HOST);
-        headers.insert(header::ORIGIN, HeaderValue::from_static(TEST_ONION_ORIGIN));
+        drop(headers.insert(header::ORIGIN, HeaderValue::from_static(TEST_ONION_ORIGIN)));
 
         assert!(require_same_origin_request(&headers, None).is_ok());
     }
@@ -2890,13 +2923,13 @@ mod tests {
     #[test]
     fn same_origin_request_accepts_valid_onion_http_referer() {
         let mut headers = same_origin_headers(TEST_ONION_HOST);
-        headers.insert(
+        drop(headers.insert(
             header::REFERER,
             HeaderValue::from_static(concat!(
                 "http://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion",
                 "/admin/panel"
             )),
-        );
+        ));
 
         assert!(require_same_origin_request(&headers, None).is_ok());
     }
@@ -2904,12 +2937,12 @@ mod tests {
     #[test]
     fn same_origin_request_rejects_spoofed_onion_origin() {
         let mut headers = same_origin_headers(TEST_ONION_HOST);
-        headers.insert(
+        drop(headers.insert(
             header::ORIGIN,
             HeaderValue::from_static(
                 "http://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbm2dqd.onion",
             ),
-        );
+        ));
 
         assert!(require_same_origin_request(&headers, None).is_err());
     }
@@ -2917,7 +2950,7 @@ mod tests {
     #[test]
     fn same_origin_request_keeps_onion_http_when_tls_uses_default_https_port() {
         let mut headers = same_origin_headers(TEST_ONION_HOST);
-        headers.insert(header::ORIGIN, HeaderValue::from_static(TEST_ONION_ORIGIN));
+        drop(headers.insert(header::ORIGIN, HeaderValue::from_static(TEST_ONION_ORIGIN)));
 
         assert_eq!(
             request_scheme_for_same_origin_with_config(
@@ -2953,14 +2986,14 @@ mod tests {
     #[test]
     fn same_origin_request_accepts_missing_origin_and_referer_with_same_origin_fetch_metadata() {
         let mut headers = same_origin_headers("demo.serveo.net");
-        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        drop(headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin")));
         assert!(require_same_origin_request(&headers, None).is_ok());
     }
 
     #[test]
     fn same_origin_request_rejects_missing_origin_and_referer_with_cross_site_fetch_metadata() {
         let mut headers = same_origin_headers("demo.serveo.net");
-        headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+        drop(headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site")));
         assert!(require_same_origin_request(&headers, None).is_err());
     }
 
@@ -2979,41 +3012,41 @@ mod tests {
     #[test]
     fn same_origin_or_valid_csrf_rejects_cross_origin_post_with_valid_csrf() {
         let mut headers = same_origin_headers("demo.serveo.net");
-        headers.insert(
+        drop(headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("https://evil.test"),
-        );
+        ));
         assert!(require_same_origin_or_valid_csrf(&headers, None, true).is_err());
     }
 
     #[test]
     fn same_origin_request_accepts_null_origin_with_same_origin_referer_on_https_tunnel() {
         let mut headers = same_origin_headers("demo.serveo.net");
-        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
-        headers.insert(
+        drop(headers.insert(header::ORIGIN, HeaderValue::from_static("null")));
+        drop(headers.insert(
             header::REFERER,
             HeaderValue::from_static("https://demo.serveo.net/admin"),
-        );
+        ));
         assert!(require_same_origin_request(&headers, None).is_ok());
     }
 
     #[test]
     fn same_origin_request_accepts_same_host_https_origin_on_https_tunnel() {
         let mut headers = same_origin_headers("rustchan.serveousercontent.com");
-        headers.insert(
+        drop(headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("https://rustchan.serveousercontent.com"),
-        );
+        ));
         assert!(require_same_origin_request(&headers, None).is_ok());
     }
 
     #[test]
     fn admin_post_csrf_accepts_scoped_token_on_https_tunnel_host() {
         let mut headers = same_origin_headers("rustchan.serveousercontent.com");
-        headers.insert(
+        drop(headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("https://rustchan.serveousercontent.com"),
-        );
+        ));
         let token = crate::utils::crypto::make_scoped_csrf_form_token(
             "csrf123",
             &crate::config::CONFIG.cookie_secret,
@@ -3035,31 +3068,31 @@ mod tests {
     #[test]
     fn same_origin_request_rejects_null_origin_for_non_loopback_targets() {
         let mut headers = same_origin_headers("192.168.1.20:8080");
-        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        drop(headers.insert(header::ORIGIN, HeaderValue::from_static("null")));
         assert!(require_same_origin_request(&headers, None).is_err());
 
-        let mut headers = same_origin_headers("board-admin-exampleonion123.onion");
-        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
-        assert!(require_same_origin_request(&headers, None).is_err());
+        let mut onion_headers = same_origin_headers("board-admin-exampleonion123.onion");
+        drop(onion_headers.insert(header::ORIGIN, HeaderValue::from_static("null")));
+        assert!(require_same_origin_request(&onion_headers, None).is_err());
     }
 
     #[test]
     fn same_origin_request_rejects_default_https_origin_with_explicit_http_port() {
         let mut headers = same_origin_headers("example.test:8080");
-        headers.insert(
+        drop(headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("https://example.test"),
-        );
+        ));
         assert!(require_same_origin_request(&headers, None).is_err());
     }
 
     #[test]
     fn same_origin_request_rejects_port_mismatch_even_for_loopback_aliases() {
         let mut headers = same_origin_headers("localhost:8080");
-        headers.insert(
+        drop(headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("http://127.0.0.1:3000"),
-        );
+        ));
         assert!(require_same_origin_request(&headers, None).is_err());
     }
 
@@ -3104,43 +3137,43 @@ mod tests {
     #[test]
     fn same_origin_request_rejects_userinfo_bypass_shapes() {
         let mut headers = same_origin_headers("127.0.0.1:8080");
-        headers.insert(
+        drop(headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("http://127.0.0.1@evil.com:8080"),
-        );
+        ));
         assert!(require_same_origin_request(&headers, None).is_err());
 
-        let mut headers = same_origin_headers("127.0.0.1:8080");
-        headers.insert(
+        let mut userinfo_headers = same_origin_headers("127.0.0.1:8080");
+        drop(userinfo_headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("http://evil.com@127.0.0.1:8080"),
-        );
-        assert!(require_same_origin_request(&headers, None).is_err());
+        ));
+        assert!(require_same_origin_request(&userinfo_headers, None).is_err());
     }
 
     #[test]
     fn same_origin_request_rejects_non_loopback_null_origin_lookalikes() {
         let mut headers = same_origin_headers("localhost.evil.com:8080");
-        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        drop(headers.insert(header::ORIGIN, HeaderValue::from_static("null")));
         assert!(require_same_origin_request(&headers, None).is_err());
 
-        let mut headers = same_origin_headers("192.168.1.20:8080");
-        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
-        assert!(require_same_origin_request(&headers, None).is_err());
+        let mut lan_headers = same_origin_headers("192.168.1.20:8080");
+        drop(lan_headers.insert(header::ORIGIN, HeaderValue::from_static("null")));
+        assert!(require_same_origin_request(&lan_headers, None).is_err());
 
-        let mut headers = same_origin_headers("examplehiddenservice.onion");
-        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
-        assert!(require_same_origin_request(&headers, None).is_err());
+        let mut onion_headers = same_origin_headers("examplehiddenservice.onion");
+        drop(onion_headers.insert(header::ORIGIN, HeaderValue::from_static("null")));
+        assert!(require_same_origin_request(&onion_headers, None).is_err());
     }
 
     #[test]
     fn https_host_port_marks_request_secure() -> anyhow::Result<()> {
         let mut headers = HeaderMap::new();
         let host = format!("example.test:{}", crate::config::CONFIG.tls.port);
-        headers.insert(
+        drop(headers.insert(
             header::HOST,
             HeaderValue::from_str(&host).context("build HTTPS host header")?,
-        );
+        ));
         ensure!(host_header_uses_https_port_with_config(
             &headers,
             crate::config::CONFIG.tls.port
@@ -3151,7 +3184,7 @@ mod tests {
     #[test]
     fn http_host_port_does_not_mark_request_secure() {
         let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, HeaderValue::from_static("example.test:8080"));
+        drop(headers.insert(header::HOST, HeaderValue::from_static("example.test:8080")));
         assert!(!host_header_uses_https_port_with_config(
             &headers,
             crate::config::CONFIG.tls.port
@@ -3161,33 +3194,33 @@ mod tests {
     #[test]
     fn https_origin_marks_tunneled_request_secure() {
         let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, HeaderValue::from_static("demo.serveo.net"));
-        headers.insert(
+        drop(headers.insert(header::HOST, HeaderValue::from_static("demo.serveo.net")));
+        drop(headers.insert(
             header::REFERER,
             HeaderValue::from_static("https://demo.serveo.net/admin"),
-        );
+        ));
         assert!(request_origin_uses_https(&headers));
     }
 
     #[test]
     fn mismatched_https_origin_does_not_mark_request_secure() {
         let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, HeaderValue::from_static("demo.serveo.net"));
-        headers.insert(
+        drop(headers.insert(header::HOST, HeaderValue::from_static("demo.serveo.net")));
+        drop(headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("https://evil.example"),
-        );
+        ));
         assert!(!request_origin_uses_https(&headers));
     }
 
     #[test]
     fn secure_cookie_decision_ignores_spoofed_https_origin_on_plain_http() {
         let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, HeaderValue::from_static("localhost:8080"));
-        headers.insert(
+        drop(headers.insert(header::HOST, HeaderValue::from_static("localhost:8080")));
+        drop(headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("https://localhost:8080"),
-        );
+        ));
         let context = SecureCookieContext::new(
             Some(std::net::SocketAddr::from(([127, 0, 0, 1], 41_000))),
             false,
@@ -3203,10 +3236,10 @@ mod tests {
     {
         let mut headers = HeaderMap::new();
         let host = format!("example.test:{}", crate::config::CONFIG.tls.port);
-        headers.insert(
+        drop(headers.insert(
             header::HOST,
             HeaderValue::from_str(&host).context("build HTTPS-port host header")?,
-        );
+        ));
         let context = SecureCookieContext::new(
             Some(std::net::SocketAddr::from(([127, 0, 0, 1], 41_000))),
             false,
@@ -3221,7 +3254,7 @@ mod tests {
     #[test]
     fn secure_cookie_decision_keeps_onion_plain_http_cookie_insecure() {
         let mut headers = same_origin_headers(TEST_ONION_HOST);
-        headers.insert(header::ORIGIN, HeaderValue::from_static(TEST_ONION_ORIGIN));
+        drop(headers.insert(header::ORIGIN, HeaderValue::from_static(TEST_ONION_ORIGIN)));
         let context = SecureCookieContext::new(
             Some(std::net::SocketAddr::from(([127, 0, 0, 1], 41_000))),
             false,
@@ -3235,10 +3268,10 @@ mod tests {
     #[test]
     fn secure_cookie_decision_marks_direct_onion_https_cookie_secure() {
         let mut headers = same_origin_headers(TEST_ONION_HOST);
-        headers.insert(
+        drop(headers.insert(
             header::ORIGIN,
             HeaderValue::from_static(TEST_ONION_HTTPS_ORIGIN),
-        );
+        ));
         let context = SecureCookieContext::new(
             Some(std::net::SocketAddr::from(([127, 0, 0, 1], 41_000))),
             true,
@@ -3252,8 +3285,8 @@ mod tests {
     #[test]
     fn secure_cookie_decision_requires_trusted_proxy_for_forwarded_proto() {
         let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, HeaderValue::from_static("localhost:8080"));
-        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        drop(headers.insert(header::HOST, HeaderValue::from_static("localhost:8080")));
+        drop(headers.insert("x-forwarded-proto", HeaderValue::from_static("https")));
         let trusted = SecureCookieContext::new(
             Some(std::net::SocketAddr::from(([127, 0, 0, 1], 41_000))),
             false,
@@ -3374,18 +3407,10 @@ mod tests {
             &conn,
             "session123",
             admin_id,
-            chrono::Utc::now().timestamp() + 3600,
+            chrono::Utc::now().timestamp().saturating_add(3600),
         )
         .context("create admin session")?;
         Ok(())
-    }
-
-    fn admin_signed_csrf() -> String {
-        crate::utils::crypto::make_scoped_csrf_form_token(
-            "csrf123",
-            &crate::config::CONFIG.cookie_secret,
-            "session123",
-        )
     }
 
     #[tokio::test]
@@ -3430,7 +3455,8 @@ mod tests {
                 "INSERT INTO threads (board_id, subject) VALUES (?1, 'job thread')",
                 rusqlite::params![board_id],
             )
-            .context("insert job thread")?;
+            .context("insert job thread")
+            .map(|_completed_value| ())?;
             let thread_id = conn.last_insert_rowid();
             conn.execute(
                 "INSERT INTO posts
@@ -3438,7 +3464,8 @@ mod tests {
                  VALUES (?1, ?2, 'job body', 'job body', 'delete-token', 1)",
                 rusqlite::params![thread_id, board_id],
             )
-            .context("insert job post")?;
+            .context("insert job post")
+            .map(|_completed_value| ())?;
             let post_id = conn.last_insert_rowid();
             expected_post_id = post_id;
             expected_post_url = format!("/test/thread/{thread_id}#p{post_id}");
@@ -3447,7 +3474,7 @@ mod tests {
                 "d": {
                     "post_id": post_id,
                     "ip_hash": "hash",
-                    "body_len": 8
+                    "body_len": 8_i32
                 }
             })
             .to_string();
@@ -3462,7 +3489,8 @@ mod tests {
                     "failed reading /Users/example/private.txt with token=abc123 ".repeat(8)
                 ],
             )
-            .context("insert background jobs")?;
+            .context("insert background jobs")
+            .map(|_completed_value| ())?;
         }
         let response = admin_site_health_jobs(
             State(state),
@@ -3507,7 +3535,7 @@ mod tests {
             .and_then(|jobs| jobs.first())
             .context("site-health payload omitted failed job detail")?;
         ensure!(failed_job["name"] == "Spam check");
-        ensure!(failed_job["attempts"] == 3);
+        ensure!(failed_job["attempts"] == 3_i32);
         ensure!(failed_job["post_id"] == expected_post_id);
         ensure!(failed_job["post_url"] == expected_post_url);
         let error = failed_job["error"]
@@ -3534,7 +3562,8 @@ mod tests {
                  ('video_transcode', '{}', 'failed', 3, 'ffmpeg failed', unixepoch())",
                 [],
             )
-            .context("insert failed job")?;
+            .context("insert failed job")
+            .map(|_completed_value| ())?;
             ensure!(
                 crate::db::background_job_summary(&conn)
                     .context("load summary before dismiss")?
@@ -3543,7 +3572,7 @@ mod tests {
             );
         }
         let mut headers = same_origin_headers("localhost");
-        headers.insert(header::ORIGIN, HeaderValue::from_static("http://localhost"));
+        drop(headers.insert(header::ORIGIN, HeaderValue::from_static("http://localhost")));
         let response = dismiss_failed_site_health_jobs(
             State(state.clone()),
             CookieJar::new()

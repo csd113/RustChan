@@ -91,7 +91,7 @@ static RE_DICE: LazyLock<Regex> =
 #[must_use]
 pub fn escape_html(s: &str) -> String {
     // Pre-allocate with a small headroom for the most common entities.
-    let mut out = String::with_capacity(s.len() + s.len() / 8);
+    let mut out = String::with_capacity(s.len().checked_add(s.len() / 8).unwrap_or(s.len()));
     for ch in s.chars() {
         match ch {
             '&' => out.push_str("&amp;"),
@@ -133,8 +133,6 @@ const MAX_BODY_BYTES: usize = 32 * 1024; // 32 KiB
 /// control whether the collapsible wrapper is emitted at all.
 #[must_use]
 pub fn render_post_body(escaped: &str, collapse_greentext: bool) -> String {
-    use std::fmt::Write as _;
-
     // Hard length guard before touching any regex. Must be enforced here
     // (not only at the HTTP layer) because the sanitizer is also called
     // from background workers and tests.
@@ -147,7 +145,7 @@ pub fn render_post_body(escaped: &str, collapse_greentext: bool) -> String {
     // Dice tags are resolved first — rolls are seeded from OsRng at post creation
     // time and stored in body_html, making them immutable for all future readers.
     let escaped = apply_dice(escaped, &RE_DICE);
-    let mut html = String::with_capacity(escaped.len() * 2);
+    let mut html = String::with_capacity(escaped.len().checked_mul(2).unwrap_or(escaped.len()));
     let mut lines = escaped.lines().peekable();
 
     while let Some(line) = lines.next() {
@@ -165,21 +163,19 @@ pub fn render_post_body(escaped: &str, collapse_greentext: bool) -> String {
             // quote lines plainly so no collapse UI exists at all.
             if collapse_greentext && group.len() >= 3 {
                 let count = group.len();
-                let _ = write!(html, "<details open class=\"greentext-block\"><summary class=\"quote\">&gt; {count} lines</summary>");
+                crate::templates::append_html(&mut html, format_args!("<details open class=\"greentext-block\"><summary class=\"quote\">&gt; {count} lines</summary>"));
                 for ql in &group {
-                    let _ = write!(
-                        html,
-                        "<span class=\"quote\">{}</span><br>",
-                        render_inline(ql)
+                    crate::templates::append_html(
+                        &mut html,
+                        format_args!("<span class=\"quote\">{}</span><br>", render_inline(ql)),
                     );
                 }
                 html.push_str("</details>");
             } else {
                 for ql in &group {
-                    let _ = write!(
-                        html,
-                        "<span class=\"quote\">{}</span><br>",
-                        render_inline(ql)
+                    crate::templates::append_html(
+                        &mut html,
+                        format_args!("<span class=\"quote\">{}</span><br>", render_inline(ql)),
                     );
                 }
             }
@@ -191,7 +187,7 @@ pub fn render_post_body(escaped: &str, collapse_greentext: bool) -> String {
 
     // Remove trailing <br>
     if html.ends_with("<br>") {
-        html.truncate(html.len() - 4);
+        html.truncate(html.len().saturating_sub(4));
     }
 
     html
@@ -344,11 +340,11 @@ pub fn sanitize_filename(name: &str) -> String {
     const MAX_FILE_NAME_CHARS: usize = 100;
     let name = name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'], "_");
     if let Some((stem, extension)) = name.rsplit_once('.') {
-        let suffix_chars = extension.chars().count() + 1;
+        let suffix_chars = extension.chars().count().saturating_add(1);
         if !stem.is_empty() && !extension.is_empty() && suffix_chars < MAX_FILE_NAME_CHARS {
             let prefix: String = stem
                 .chars()
-                .take(MAX_FILE_NAME_CHARS - suffix_chars)
+                .take(MAX_FILE_NAME_CHARS.saturating_sub(suffix_chars))
                 .collect();
             return format!("{prefix}.{extension}");
         }
@@ -839,7 +835,7 @@ mod tests {
     #[test]
     fn test_long_greentext_chain_collapsible() {
         // 100 consecutive greentext lines should produce exactly one <details> block
-        let raw = (0..100)
+        let raw = (0_i32..100_i32)
             .map(|i| format!(">line {i}"))
             .collect::<Vec<_>>()
             .join("\n");

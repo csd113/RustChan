@@ -98,6 +98,28 @@ impl Phase {
     }
 }
 
+/// Operation sharing the updater's lock, journal and recovery admission.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Operation {
+    /// Signed software installation with complete persistent-state rollback.
+    #[default]
+    Update,
+    /// Configuration-only restart; database/media must never be rolled back.
+    SettingsRestart,
+}
+
+impl Operation {
+    /// Retain wire compatibility with earlier update-only status schemas.
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "Serde skip_serializing_if callbacks require a shared reference"
+    )]
+    const fn is_update(&self) -> bool {
+        matches!(self, Self::Update)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 /// Verified updater-owned pre-upgrade snapshot metadata exposed to administrators.
@@ -133,6 +155,12 @@ pub struct BackupInfo {
 #[serde(deny_unknown_fields)]
 /// Durable administrator-only discovery, transaction and retained snapshot state.
 pub struct Status {
+    /// Kind of transaction; old update journals default to software installation.
+    #[serde(default, skip_serializing_if = "Operation::is_update")]
+    pub operation: Operation,
+    /// Process identity whose single settings restart was accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_instance: Option<uuid::Uuid>,
     /// Durable installation or recovery phase.
     pub phase: Phase,
     /// Currently selected immutable version.
@@ -250,6 +278,10 @@ pub(super) mod native {
         fn start(&self) -> anyhow::Result<()>;
         /// Bound readiness and require the expected running application version.
         fn health(&self, version: &str, schema: &str) -> anyhow::Result<()>;
+        /// Verify replacement identity in addition to database/listener readiness.
+        fn health_instance(&self, version: &str, _previous: Uuid) -> anyhow::Result<()> {
+            self.health(version, crate::db::baseline_schema_version())
+        }
     }
 
     /// Publish exact bytes via same-filesystem rename after file and directory fsync.
@@ -258,7 +290,7 @@ pub(super) mod native {
         let mut staged = tempfile::NamedTempFile::new_in(parent)?;
         staged.write_all(bytes)?;
         staged.as_file().sync_all()?;
-        staged.persist(path).map_err(|error| error.error)?;
+        drop(staged.persist(path).map_err(|error| error.error)?);
         sync_dir(parent)
     }
     /// Persist directory-entry changes across reboot.
@@ -360,7 +392,7 @@ pub(super) mod native {
                 self.config.settings_path == self.config.data_dir.join("settings.toml"),
                 "managed configuration must be data/settings.toml"
             );
-            self.current_version()?;
+            self.current_version().map(|_operation_summary| ())?;
             Ok(())
         }
         /// Validate the relative active link and immutable executable ownership.
@@ -422,20 +454,20 @@ pub(super) mod native {
             let bytes = read_limited(&path, 512 * 1024)?;
             let status: Status = serde_json::from_slice(&bytes)?;
             for value in [&status.job, &status.approval].into_iter().flatten() {
-                Uuid::parse_str(value)?;
+                Uuid::parse_str(value).map(|_validated_value| ())?;
             }
             for value in [&status.previous_version, &status.target_version]
                 .into_iter()
                 .flatten()
             {
-                release::stable_version(value)?;
+                release::stable_version(value).map(|_validated_value| ())?;
             }
             for backup in status.backup.iter().chain(&status.backups) {
-                Uuid::parse_str(&backup.id)?;
-                release::stable_version(&backup.previous_version)?;
-                release::stable_version(&backup.target_version)?;
-                release::stable_version(&backup.previous_schema)?;
-                release::stable_version(&backup.target_schema)?;
+                Uuid::parse_str(&backup.id).map(|_validated_value| ())?;
+                release::stable_version(&backup.previous_version).map(|_validated_value| ())?;
+                release::stable_version(&backup.target_version).map(|_validated_value| ())?;
+                release::stable_version(&backup.previous_schema).map(|_validated_value| ())?;
+                release::stable_version(&backup.target_schema).map(|_validated_value| ())?;
             }
             Ok(status)
         }
@@ -525,7 +557,7 @@ pub(super) mod native {
                     && administrator > 0,
                 "update approval is stale, consumed, or conflicting"
             );
-            Uuid::parse_str(approval)?;
+            Uuid::parse_str(approval).map(|_validated_value| ())?;
             let issued = chrono::DateTime::parse_from_rfc3339(
                 status
                     .checked_at
@@ -553,6 +585,8 @@ pub(super) mod native {
             );
             status.previous_version = Some(current);
             status.target_version = Some(manifest.version.clone());
+            status.operation = super::Operation::Update;
+            status.restart_instance = None;
             status.administrator = Some(administrator);
             status.job = Some(Uuid::new_v4().to_string());
             status.approval = None;
@@ -581,10 +615,14 @@ pub(super) mod native {
             service: &impl Service,
             source: &impl ArtifactSource,
         ) -> anyhow::Result<()> {
+            let settings = crate::config::admin::settings_lease(&self.config.settings_path);
             let coordination = self.coordination_lock();
-            let outcome = match &coordination {
-                Ok(_) => self.install_inner(status, manifest, service, source),
-                Err(error) => Err(anyhow::anyhow!("backup coordination failed: {error}")),
+            let outcome = match (&settings, &coordination) {
+                (Ok(_), Ok(_)) => self.install_inner(status, manifest, service, source),
+                (Err(error), _) => Err(anyhow::anyhow!(
+                    "configuration coordination failed: {error}"
+                )),
+                (_, Err(error)) => Err(anyhow::anyhow!("backup coordination failed: {error}")),
             };
             if let Err(error) = outcome {
                 tracing::error!(error = %error, "update failed");
@@ -710,13 +748,18 @@ pub(super) mod native {
                 verify_database(&self.config.data_dir.join("chan.db"))? == manifest.schema,
                 "installed database schema mismatch"
             );
-            snapshot::estimated_bytes(&self.config.data_dir)?;
+            snapshot::estimated_bytes(&self.config.data_dir).map(|_operation_summary| ())?;
             status.installed.clone_from(&manifest.version);
             self.save(
                 status,
                 Phase::Succeeded,
                 "RustChan updated successfully after health verification.",
             )?;
+            let store = self.restart_store();
+            if store.directory.join("running.json").try_exists()? {
+                let running = store.running()?;
+                store.observe(running.instance, &running.digest, true)?;
+            }
             self.retain_terminal(status);
             Ok(())
         }
@@ -772,7 +815,7 @@ pub(super) mod native {
                         > required_space.saturating_add(64 * 1024 * 1024),
                     "insufficient free disk space for a safe update"
                 );
-                tempfile::NamedTempFile::new_in(path)?;
+                drop(tempfile::NamedTempFile::new_in(path)?);
             }
             Ok(())
         }
@@ -797,12 +840,13 @@ pub(super) mod native {
             conn.execute(
                 "VACUUM INTO ?",
                 [db_path.to_str().context("invalid backup path")?],
-            )?;
+            )
+            .map(|_affected_rows| ())?;
             drop(conn);
             let schema = verify_database(&db_path)?;
             let settings = read_limited(&self.config.settings_path, 4 * 1024 * 1024)?;
             let text = std::str::from_utf8(&settings)
-                .map_err(|_| anyhow::anyhow!("configuration backup is not valid UTF-8"))?;
+                .context("configuration backup is not valid UTF-8")?;
             crate::config::validate_update_settings(text, &self.config.data_dir)?;
             atomic_write(&stage.path().join("settings.toml"), &settings)?;
             File::open(&db_path)?.sync_all()?;
@@ -822,9 +866,11 @@ pub(super) mod native {
                 target_version: manifest.version.clone(),
                 previous_schema: schema,
                 target_schema: manifest.schema.clone(),
-                size: fs::metadata(&db_path)?.len()
-                    + u64::try_from(settings.len())?
-                    + persistent_bytes,
+                size: fs::metadata(&db_path)?
+                    .len()
+                    .checked_add(u64::try_from(settings.len())?)
+                    .and_then(|bytes| bytes.checked_add(persistent_bytes))
+                    .context("backup size overflow")?,
                 database_sha256: hash_file(&db_path)?,
                 configuration_sha256: release::digest(&settings),
                 verified: true,
@@ -883,7 +929,7 @@ pub(super) mod native {
                 .backup
                 .as_ref()
                 .context("missing verified rollback backup")?;
-            Uuid::parse_str(&backup.id)?;
+            Uuid::parse_str(&backup.id).map(|_validated_value| ())?;
             let directory = self.config.state_dir.join("backups").join(&backup.id);
             no_symlink_ancestors(&directory)?;
             let database = directory.join("database.sqlite3");
@@ -918,7 +964,7 @@ pub(super) mod native {
             let live = self.config.data_dir.join("chan.db");
             let mut stage =
                 tempfile::NamedTempFile::new_in(live.parent().context("missing db parent")?)?;
-            std::io::copy(&mut File::open(database)?, &mut stage)?;
+            std::io::copy(&mut File::open(database)?, &mut stage).map(|_bytes_copied| ())?;
             stage.as_file().sync_all()?;
             #[cfg(unix)]
             {
@@ -930,7 +976,7 @@ pub(super) mod native {
             let owner = fs::metadata(&self.config.data_dir)?;
             std::os::unix::fs::chown(stage.path(), Some(owner.uid()), Some(owner.gid()))?;
             stage.as_file().sync_all()?;
-            stage.persist(&live).map_err(|e| e.error)?;
+            drop(stage.persist(&live).map_err(|e| e.error)?);
             sync_dir(live.parent().context("missing db parent")?)?;
             atomic_write(
                 &self.config.settings_path,
@@ -1007,6 +1053,10 @@ pub(super) mod native {
         pub(in crate::updates) fn recover(&self, service: &impl Service) -> anyhow::Result<()> {
             let _lock = self.lock()?;
             let mut status = self.status()?;
+            if status.operation == super::Operation::SettingsRestart && status.phase.active() {
+                let _settings = crate::config::admin::settings_lease(&self.config.settings_path)?;
+                return self.recover_settings_restart(&mut status, service);
+            }
             self.reconcile_backups(&mut status)?;
             if !status.phase.active() {
                 self.retain_terminal(&mut status);
@@ -1083,9 +1133,10 @@ pub(super) mod native {
                 if status.backups.iter().any(|backup| backup == &info) {
                     continue;
                 }
-                release::stable_version(&info.previous_version)?;
-                release::stable_version(&info.target_version)?;
-                chrono::DateTime::parse_from_rfc3339(&info.created_at)?;
+                release::stable_version(&info.previous_version).map(|_validated_value| ())?;
+                release::stable_version(&info.target_version).map(|_validated_value| ())?;
+                chrono::DateTime::parse_from_rfc3339(&info.created_at)
+                    .map(|_validated_value| ())?;
                 anyhow::ensure!(
                     hash_file(&entry.path().join("database.sqlite3"))? == info.database_sha256
                         && hash_file(&entry.path().join("settings.toml"))?
@@ -1147,7 +1198,7 @@ pub(super) mod native {
                 .map(|b| b.id.clone())
                 .collect();
             for id in &remove {
-                Uuid::parse_str(id)?;
+                Uuid::parse_str(id).map(|_validated_value| ())?;
                 let path = self.config.state_dir.join("backups").join(id);
                 no_symlink_ancestors(&path)?;
                 fs::remove_dir_all(path)?;
@@ -1213,7 +1264,14 @@ pub(super) mod native {
     fn read_limited(path: &Path, limit: u64) -> anyhow::Result<Vec<u8>> {
         plain(path, false)?;
         let mut bytes = Vec::new();
-        File::open(path)?.take(limit + 1).read_to_end(&mut bytes)?;
+        File::open(path)?
+            .take(
+                limit
+                    .checked_add(1)
+                    .context("managed file byte limit overflow")?,
+            )
+            .read_to_end(&mut bytes)
+            .map(|_bytes_read| ())?;
         anyhow::ensure!(
             u64::try_from(bytes.len())? <= limit,
             "managed file exceeds size limit"
@@ -1246,7 +1304,7 @@ pub(super) mod native {
         let count: i64 =
             conn.query_row("SELECT COUNT(*) FROM schema_version", [], |row| row.get(0))?;
         anyhow::ensure!(count == 1, "invalid database schema metadata");
-        release::stable_version(&schema)?;
+        release::stable_version(&schema).map(|_validated_value| ())?;
         Ok(schema)
     }
 
@@ -1356,7 +1414,12 @@ pub(super) mod native {
                     .get_mut(..count)
                     .ok_or_else(|| std::io::Error::other("invalid expanded read count"))?,
             )?;
-            self.remaining -= u64::try_from(read).map_err(std::io::Error::other)?;
+            self.remaining = self
+                .remaining
+                .checked_sub(u64::try_from(read).map_err(std::io::Error::other)?)
+                .ok_or_else(|| {
+                    std::io::Error::other("expanded reader exceeded the requested byte count")
+                })?;
             Ok(read)
         }
     }
@@ -1373,13 +1436,13 @@ pub(super) mod native {
             inner: decoder,
             remaining: manifest.executable_size.saturating_add(64 * 1024),
         });
-        let mut count = 0;
+        let mut seen_executable = false;
         for entry in archive.entries()?.raw(true) {
             let mut entry = entry?;
             anyhow::ensure!(
                 entry.header().entry_type().is_file()
                     && entry.path_bytes().as_ref() == b"rustchan-cli"
-                    && count == 0
+                    && !seen_executable
                     && entry.size() == manifest.executable_size,
                 "unexpected release archive layout or traversal attempt"
             );
@@ -1387,20 +1450,20 @@ pub(super) mod native {
                 .write(true)
                 .create_new(true)
                 .open(destination.join("rustchan-cli"))?;
-            std::io::copy(&mut entry, &mut executable)?;
+            std::io::copy(&mut entry, &mut executable).map(|_bytes_copied| ())?;
             executable.sync_all()?;
-            count += 1;
+            seen_executable = true;
         }
         let mut remainder = archive.into_inner();
         let mut padding = [0u8; 16 * 1024];
         loop {
-            let count = remainder.read(&mut padding)?;
-            if count == 0 {
+            let checked_count = remainder.read(&mut padding)?;
+            if checked_count == 0 {
                 break;
             }
             anyhow::ensure!(
                 padding
-                    .get(..count)
+                    .get(..checked_count)
                     .context("invalid archive padding length")?
                     .iter()
                     .all(|byte| *byte == 0),
@@ -1408,7 +1471,7 @@ pub(super) mod native {
             );
         }
         anyhow::ensure!(
-            count == 1
+            seen_executable
                 && hash_file(&destination.join("rustchan-cli"))? == manifest.executable_sha256,
             "release executable verification failed"
         );

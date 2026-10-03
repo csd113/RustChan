@@ -142,8 +142,6 @@ ffmpeg_timeout_secs = 600
 # Optional explicit ffmpeg binary path. Leave unset to use PATH lookup.
 # ffmpeg_path = "/usr/local/bin/ffmpeg"
 
-# Optional explicit ffprobe binary path. Leave unset to use PATH lookup.
-# ffprobe_path = "/usr/local/bin/ffprobe"
 
 # Automatically prune oldest full-size post media when active stored post media
 # exceeds the configured byte cap. Thumbnails are kept when possible so old

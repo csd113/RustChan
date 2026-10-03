@@ -145,7 +145,7 @@ pub(super) fn render_tasks(
     .render(regions.get(1).copied().unwrap_or(area), frame.buffer_mut());
     let body = regions.get(2).copied().unwrap_or(area);
     let columns = Layout::horizontal([Constraint::Percentage(64), Constraint::Percentage(36)])
-        .spacing(1)
+        .spacing(1_i32)
         .split(body);
     let table_area = if body.width >= 110 {
         columns.first().copied().unwrap_or(body)
@@ -318,14 +318,14 @@ pub(super) fn render_system(
                 fmt_bytes(stats.mem_bytes)
             }
         ),
+        "WebP/images: built in (Rust), including animation".to_owned(),
         format!(
-            "FFmpeg: {}",
+            "FFmpeg video: {}",
             snapshot.ffmpeg.map_or_else(
                 || "Unknown · awaiting snapshot".to_owned(),
-                |(available, webp, vp9)| format!(
-                    "{} · WebP {} · WebM VP9/Opus {}",
+                |(available, vp9)| format!(
+                    "{} · WebM VP9/Opus {}",
                     availability(available),
-                    availability(webp),
                     availability(vp9)
                 )
             )

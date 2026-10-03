@@ -30,10 +30,6 @@ pub struct UploadedFile {
 
 /// Inputs and board policy used while validating and storing an upload.
 #[derive(Debug)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "the booleans are independent upload-policy and media-capability flags"
-)]
 pub struct SaveUploadOptions<'a> {
     /// Client-supplied filename before sanitization.
     pub original_filename: &'a str,
@@ -51,12 +47,8 @@ pub struct SaveUploadOptions<'a> {
     pub max_audio_size: usize,
     /// Maximum accepted PDF size in bytes.
     pub max_pdf_size: usize,
-    /// Whether `ffmpeg` media conversion is available.
+    /// Whether the retained `FFmpeg` video backend is available.
     pub ffmpeg_available: bool,
-    /// Whether `ffprobe` stream validation is available.
-    pub ffprobe_available: bool,
-    /// Whether the installed `ffmpeg` supports WebP output.
-    pub ffmpeg_webp_available: bool,
     /// Whether otherwise-unrecognized files may be stored as downloads.
     pub allow_any_files: bool,
 }
@@ -82,11 +74,10 @@ struct UploadPlan {
 ///
 /// # Errors
 /// Returns an error if MIME sniffing fails and arbitrary file uploads are not
-/// allowed, or if `ffprobe` probing fails in a way that must be surfaced.
+/// allowed, or if container inspection fails in a way that must be surfaced.
 pub fn classify_upload_mime(
     input_path: &Path,
     sniff_bytes: &[u8],
-    ffprobe_available: bool,
     allow_any_files: bool,
 ) -> Result<String> {
     let detected = match detect_mime_type(sniff_bytes) {
@@ -95,7 +86,10 @@ pub fn classify_upload_mime(
         Err(error) => return Err(error),
     };
 
-    refine_probe_mime(input_path, &detected, ffprobe_available)
+    if detected == "audio/aac" {
+        validate_adts_aac_structure(input_path)?;
+    }
+    refine_probe_mime(input_path, &detected)
 }
 
 /// Save and process a primary upload from an already-streamed temporary file.
@@ -147,10 +141,6 @@ pub(crate) fn save_validated_upload_from_path(
 /// # Errors
 /// Returns an error if the audio MIME check fails, the file exceeds the board
 /// limit, disk-space checks fail, or the file cannot be persisted.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the arguments mirror independent upload metadata and board limits at the handler boundary"
-)]
 pub fn save_audio_with_image_thumb_from_path(
     input_path: &Path,
     sniff_bytes: &[u8],
@@ -159,13 +149,12 @@ pub fn save_audio_with_image_thumb_from_path(
     boards_dir: &str,
     board_short: &str,
     max_audio_size: usize,
-    ffprobe_available: bool,
 ) -> Result<UploadedFile> {
     if original_size == 0 {
         return Err(anyhow::anyhow!("Audio file is empty."));
     }
 
-    let mime_type = classify_upload_mime(input_path, sniff_bytes, ffprobe_available, false)?;
+    let mime_type = classify_upload_mime(input_path, sniff_bytes, false)?;
     let media_type = crate::models::MediaType::from_mime(&mime_type);
     if !matches!(media_type, crate::models::MediaType::Audio) {
         return Err(anyhow::anyhow!(
@@ -178,12 +167,7 @@ pub fn save_audio_with_image_thumb_from_path(
             format_upload_limit(max_audio_size)
         ));
     }
-    validate_av_stream_kind(
-        input_path,
-        &mime_type,
-        crate::models::MediaType::Audio,
-        ffprobe_available,
-    )?;
+    validate_av_stream_kind(input_path, &mime_type, crate::models::MediaType::Audio)?;
 
     let file_id = Uuid::new_v4().simple().to_string();
     let ext = mime_to_ext(&mime_type);
@@ -199,12 +183,17 @@ pub fn save_audio_with_image_thumb_from_path(
         Path::new(boards_dir),
         &file_path_abs,
     )
-    .context("Upload destination failed safety validation")?;
+    .context("Upload destination failed safety validation")
+    .map(|_completed_value| ())?;
     let tmp = tempfile::NamedTempFile::new_in(&dest_dir)
         .context("Failed to create temp file for audio upload")?;
-    std::fs::copy(input_path, tmp.path()).context("Failed to copy audio upload to temp file")?;
-    tmp.persist(&file_path_abs)
-        .context("Failed to atomically rename audio temp file")?;
+    std::fs::copy(input_path, tmp.path())
+        .context("Failed to copy audio upload to temp file")
+        .map(|_completed_value| ())?;
+    drop(
+        tmp.persist(&file_path_abs)
+            .context("Failed to atomically rename audio temp file")?,
+    );
 
     Ok(UploadedFile {
         file_path: format!("{board_short}/{filename}"),
@@ -305,12 +294,14 @@ fn prepare_processor_input(
             Err(error) => {
                 tracing::warn!("JPEG EXIF strip failed ({error}); using original bytes");
                 std::fs::copy(input_path, tmp.path())
-                    .context("Failed to copy original JPEG into processor temp file")?;
+                    .context("Failed to copy original JPEG into processor temp file")
+                    .map(|_completed_value| ())?;
             }
         }
     } else {
         std::fs::copy(input_path, tmp.path())
-            .context("Failed to copy upload into processor temp file")?;
+            .context("Failed to copy upload into processor temp file")
+            .map(|_completed_value| ())?;
     }
 
     Ok(tmp)
@@ -326,6 +317,9 @@ fn build_upload_plan(
     original_size: usize,
     options: &SaveUploadOptions<'_>,
 ) -> Result<UploadPlan> {
+    let video_needs_conversion = validated.media_type != crate::models::MediaType::Video
+        || !options.ffmpeg_available
+        || crate::media::probe::inspect_video(&validated.input_path)?.needs_webm_conversion();
     let dest_dir = PathBuf::from(options.boards_dir).join(options.board_short);
     let thumbs_dir = dest_dir.join("thumbs");
     std::fs::create_dir_all(&dest_dir).context("Failed to create board directory")?;
@@ -337,7 +331,8 @@ fn build_upload_plan(
             .context("Upload thumbnail directory failed safety validation")?;
     }
     check_disk_space(&dest_dir, original_size)?;
-    let processing_pending = options.ffmpeg_available
+    let processing_pending = video_needs_conversion
+        && (validated.media_type == crate::models::MediaType::Audio || options.ffmpeg_available)
         && matches!(
             validated.media_type,
             crate::models::MediaType::Video | crate::models::MediaType::Audio
@@ -422,12 +417,7 @@ fn validate_upload(
     original_size: usize,
     options: &SaveUploadOptions<'_>,
 ) -> Result<ValidatedUpload> {
-    let mime_type = classify_upload_mime(
-        input_path,
-        sniff_bytes,
-        options.ffprobe_available,
-        options.allow_any_files,
-    )?;
+    let mime_type = classify_upload_mime(input_path, sniff_bytes, options.allow_any_files)?;
     if mime_type == "image/svg+xml" {
         anyhow::bail!(
             "File type not allowed. SVG files are not accepted because they can contain executable JavaScript."
@@ -458,12 +448,7 @@ fn validate_upload(
         if mime_type == "audio/aac" {
             validate_adts_aac_structure(input_path)?;
         }
-        validate_av_stream_kind(
-            input_path,
-            &mime_type,
-            media_type,
-            options.ffprobe_available,
-        )?;
+        validate_av_stream_kind(input_path, &mime_type, media_type)?;
     }
 
     let jpeg_orientation = if mime_type == "image/jpeg" {
@@ -498,12 +483,17 @@ fn save_generic_upload(
         Path::new(options.boards_dir),
         &file_path_abs,
     )
-    .context("Generic upload destination failed safety validation")?;
+    .context("Generic upload destination failed safety validation")
+    .map(|_completed_value| ())?;
     let tmp = tempfile::NamedTempFile::new_in(&plan.dest_dir)
         .context("Failed to create temp file for generic upload")?;
-    std::fs::copy(input_path, tmp.path()).context("Failed to copy generic upload to temp file")?;
-    tmp.persist(&file_path_abs)
-        .context("Failed to atomically rename generic upload temp file")?;
+    std::fs::copy(input_path, tmp.path())
+        .context("Failed to copy generic upload to temp file")
+        .map(|_completed_value| ())?;
+    drop(
+        tmp.persist(&file_path_abs)
+            .context("Failed to atomically rename generic upload temp file")?,
+    );
 
     let persisted_mime = if plan.mime_type == AMBIGUOUS_WEBM_MIME {
         super::fallback_download_mime_type()
@@ -534,10 +524,7 @@ fn save_processed_upload(
     file_id: &str,
 ) -> Result<UploadedFile> {
     let processor_input = prepare_processor_input(input_path, &plan.dest_dir, &plan.mime_type)?;
-    let processor = crate::media::MediaProcessor::new_with_ffmpeg_caps(
-        options.ffmpeg_available,
-        options.ffmpeg_webp_available,
-    );
+    let processor = crate::media::MediaProcessor::new_with_ffmpeg(options.ffmpeg_available);
     let processed = processor
         .process_upload(
             processor_input.path(),
@@ -702,6 +689,10 @@ const fn media_label(media_type: crate::models::MediaType) -> &'static str {
 /// Returns an error if the file cannot be read, has invalid structure, exceeds
 /// the decoded pixel limit, or cannot be decoded as its declared format.
 fn validate_decodable_image(input_path: &Path, mime_type: &str) -> Result<()> {
+    if matches!(mime_type, "image/heic" | "image/heif") {
+        crate::media::heif::decode(input_path).map(|_completed_value| ())?;
+        return Ok(());
+    }
     let Some(format) = mime_to_image_format(mime_type) else {
         return Ok(());
     };
@@ -722,11 +713,14 @@ fn validate_decodable_image(input_path: &Path, mime_type: &str) -> Result<()> {
     })?;
     validate_untrusted_image_dimensions(width, height)?;
 
-    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(&data), format);
-    reader.limits(crate::media::untrusted_image_decode_limits());
-    reader.decode().with_context(|| {
-        format!("File appears to be {mime_type}, but the image data could not be decoded.")
-    })?;
+    let mut decoder = image::ImageReader::with_format(std::io::Cursor::new(&data), format);
+    decoder.limits(crate::media::untrusted_image_decode_limits());
+    decoder
+        .decode()
+        .with_context(|| {
+            format!("File appears to be {mime_type}, but the image data could not be decoded.")
+        })
+        .map(|_completed_value| ())?;
     Ok(())
 }
 
@@ -765,7 +759,8 @@ fn validate_pdf_structure(input_path: &Path) -> Result<()> {
     let tail_len = usize::try_from(tail_len_u64).context("PDF tail length overflows usize")?;
     let tail_start = file_len.saturating_sub(tail_len_u64);
     file.seek(SeekFrom::Start(tail_start))
-        .with_context(|| format!("Seek to PDF trailer window in {}", input_path.display()))?;
+        .with_context(|| format!("Seek to PDF trailer window in {}", input_path.display()))
+        .map(|_completed_value| ())?;
     let mut tail = vec![0u8; tail_len];
     file.read_exact(&mut tail)
         .with_context(|| format!("Read PDF trailer window from {}", input_path.display()))?;
@@ -783,7 +778,7 @@ fn validate_png_structure(data: &[u8]) -> Result<()> {
     const MALFORMED_PNG_ERROR: &str =
         "File appears to be image/png, but its image header is malformed or incomplete.";
     const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
-    if data.len() < PNG_SIGNATURE.len() + 12 {
+    if data.len() < PNG_SIGNATURE.len().saturating_add(12) {
         anyhow::bail!(MALFORMED_PNG_ERROR);
     }
     if data.get(..PNG_SIGNATURE.len()) != Some(PNG_SIGNATURE.as_slice()) {
@@ -793,20 +788,29 @@ fn validate_png_structure(data: &[u8]) -> Result<()> {
     let mut offset = PNG_SIGNATURE.len();
     let mut saw_ihdr = false;
 
-    while offset + 12 <= data.len() {
+    while offset.checked_add(12).is_some_and(|end| end <= data.len()) {
+        let length_end = offset
+            .checked_add(4)
+            .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+        let chunk_data_start = offset
+            .checked_add(8)
+            .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
         let length_bytes: [u8; 4] = data
-            .get(offset..offset + 4)
+            .get(offset..length_end)
             .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?
             .try_into()
             .map_err(|error| anyhow::anyhow!("{MALFORMED_PNG_ERROR}: {error}"))?;
         let length = usize::try_from(u32::from_be_bytes(length_bytes))
             .context("PNG chunk length overflows usize")?;
         let chunk_type = data
-            .get(offset + 4..offset + 8)
+            .get(length_end..chunk_data_start)
             .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
-        let chunk_data_start = offset + 8;
-        let chunk_data_end = chunk_data_start.saturating_add(length);
-        let crc_end = chunk_data_end.saturating_add(4);
+        let chunk_data_end = chunk_data_start
+            .checked_add(length)
+            .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+        let crc_end = chunk_data_end
+            .checked_add(4)
+            .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
         if crc_end > data.len() {
             anyhow::bail!(MALFORMED_PNG_ERROR);
         }
@@ -815,13 +819,16 @@ fn validate_png_structure(data: &[u8]) -> Result<()> {
             if chunk_type != b"IHDR" || length != 13 {
                 anyhow::bail!(MALFORMED_PNG_ERROR);
             }
-            let width_bytes: [u8; 4] = data
-                .get(chunk_data_start..chunk_data_start + 4)
+            let chunk_data = data
+                .get(chunk_data_start..chunk_data_end)
+                .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+            let width_bytes: [u8; 4] = chunk_data
+                .get(..4)
                 .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?
                 .try_into()
                 .map_err(|error| anyhow::anyhow!("{MALFORMED_PNG_ERROR}: {error}"))?;
-            let height_bytes: [u8; 4] = data
-                .get(chunk_data_start + 4..chunk_data_start + 8)
+            let height_bytes: [u8; 4] = chunk_data
+                .get(4..8)
                 .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?
                 .try_into()
                 .map_err(|error| anyhow::anyhow!("{MALFORMED_PNG_ERROR}: {error}"))?;
@@ -854,19 +861,26 @@ fn mime_to_image_format(mime_type: &str) -> Option<image::ImageFormat> {
     }
 }
 
+/// Preserve uncovered audio containers without adding a standalone `FFprobe` dependency.
+fn inspect_upload_stream_kind(input_path: &Path) -> Result<crate::media::probe::StreamKind> {
+    match crate::media::probe::probe_stream_kind(input_path) {
+        Err(error) if crate::media::audio::is_unsupported(&error) => {
+            crate::media::ffmpeg::probe_uncovered_audio(input_path)
+        }
+        result => result,
+    }
+}
+
 /// Refines a sniffed audio/video MIME type using validated stream metadata.
 ///
 /// # Errors
-/// Returns an error when required `ffprobe` validation fails or the detected
+/// Returns an error when container validation fails or the detected
 /// stream kind conflicts with the container policy.
-fn refine_probe_mime(input_path: &Path, detected: &str, ffprobe_available: bool) -> Result<String> {
+fn refine_probe_mime(input_path: &Path, detected: &str) -> Result<String> {
     if detected == "video/webm" {
-        return Ok(refine_webm_mime(
-            input_path,
-            ffprobe_available,
-            || crate::media::ffmpeg::probe_stream_kind(input_path),
-            || crate::media::ffmpeg::probe_stream_kind_with_ffmpeg(input_path),
-        ));
+        return Ok(refine_webm_mime(input_path, || {
+            inspect_upload_stream_kind(input_path)
+        }));
     }
 
     let media_type = crate::models::MediaType::from_mime(detected);
@@ -878,40 +892,33 @@ fn refine_probe_mime(input_path: &Path, detected: &str, ffprobe_available: bool)
         return Ok(detected.to_owned());
     }
 
-    if !ffprobe_available {
-        if is_matroska_mime(detected) {
-            anyhow::bail!(
-                "File appears to be Matroska/MKV, but ffprobe is required to validate MKV uploads."
-            );
-        }
-        return Ok(detected.to_owned());
-    }
-
-    let stream_kind = crate::media::ffmpeg::probe_stream_kind(input_path).with_context(|| {
-        format!("File appears to be {detected}, but ffprobe could not validate its streams")
+    let stream_kind = inspect_upload_stream_kind(input_path).with_context(|| {
+        format!(
+            "File appears to be {detected}, but media inspection could not validate its streams"
+        )
     })?;
 
     match (media_type, stream_kind) {
-        (crate::models::MediaType::Audio, crate::media::ffmpeg::StreamKind::AudioOnly) => {
+        (crate::models::MediaType::Audio, crate::media::probe::StreamKind::AudioOnly) => {
             canonical_audio_mime(input_path, detected)
         }
-        (crate::models::MediaType::Video, crate::media::ffmpeg::StreamKind::Video) => {
+        (crate::models::MediaType::Video, crate::media::probe::StreamKind::Video) => {
             Ok(canonical_video_mime(detected).to_owned())
         }
-        (crate::models::MediaType::Video, crate::media::ffmpeg::StreamKind::AudioOnly)
+        (crate::models::MediaType::Video, crate::media::probe::StreamKind::AudioOnly)
             if detected == "video/mp4" || detected == "video/webm" =>
         {
             canonical_audio_mime(input_path, detected)
         }
-        (crate::models::MediaType::Video, crate::media::ffmpeg::StreamKind::AudioOnly)
+        (crate::models::MediaType::Video, crate::media::probe::StreamKind::AudioOnly)
             if is_matroska_mime(detected) =>
         {
             anyhow::bail!("Matroska/MKV uploads must contain a video stream.")
         }
-        (crate::models::MediaType::Video, crate::media::ffmpeg::StreamKind::AudioOnly) => {
+        (crate::models::MediaType::Video, crate::media::probe::StreamKind::AudioOnly) => {
             anyhow::bail!("File appears to be {detected}, but contains only audio streams.")
         }
-        (crate::models::MediaType::Audio, crate::media::ffmpeg::StreamKind::Video) => {
+        (crate::models::MediaType::Audio, crate::media::probe::StreamKind::Video) => {
             anyhow::bail!("File appears to be {detected}, but contains a video stream.")
         }
         (
@@ -923,39 +930,17 @@ fn refine_probe_mime(input_path: &Path, detected: &str, ffprobe_available: bool)
     }
 }
 
-/// Refines `WebM` with `FFprobe`, falls back to `FFmpeg`, and selects a neutral
-/// download classification when neither configured tool establishes its kind.
+/// Classify `WebM` tracks, retaining neutral downloads when inspection is ambiguous.
 fn refine_webm_mime(
     input_path: &Path,
-    ffprobe_available: bool,
-    ffprobe: impl FnOnce() -> Result<crate::media::ffmpeg::StreamKind>,
-    ffmpeg: impl FnOnce() -> Result<crate::media::ffmpeg::StreamKind>,
+    inspect: impl FnOnce() -> Result<crate::media::probe::StreamKind>,
 ) -> String {
-    if ffprobe_available {
-        match ffprobe() {
-            Ok(crate::media::ffmpeg::StreamKind::Video) => return "video/webm".to_owned(),
-            Ok(crate::media::ffmpeg::StreamKind::AudioOnly) => {
-                return "audio/webm".to_owned();
-            }
-            Err(error) => {
-                tracing::warn!(
-                    path = %input_path.display(),
-                    error = %error,
-                    "ffprobe could not inspect WebM; trying bounded ffmpeg fallback"
-                );
-            }
-        }
-    }
-
-    match ffmpeg() {
-        Ok(crate::media::ffmpeg::StreamKind::Video) => "video/webm".to_owned(),
-        Ok(crate::media::ffmpeg::StreamKind::AudioOnly) => "audio/webm".to_owned(),
+    match inspect() {
+        Ok(crate::media::probe::StreamKind::Video) => "video/webm".to_owned(),
+        Ok(crate::media::probe::StreamKind::AudioOnly) => "audio/webm".to_owned(),
         Err(error) => {
-            tracing::warn!(
-                path = %input_path.display(),
-                error = %error,
-                "WebM stream kind is ambiguous; storing as a neutral download"
-            );
+            tracing::warn!(path = %input_path.display(), error = %error,
+                "WebM stream kind is ambiguous; storing as a neutral download");
             AMBIGUOUS_WEBM_MIME.to_owned()
         }
     }
@@ -964,11 +949,13 @@ fn refine_webm_mime(
 /// Resolves an audio MIME type from its probed codec and container.
 ///
 /// # Errors
-/// Returns an error if `ffprobe` cannot identify the audio codec.
+/// Returns an error if container inspection cannot identify the audio codec.
 fn canonical_audio_mime(input_path: &Path, detected: &str) -> Result<String> {
-    let codec = crate::media::ffmpeg::probe_audio_codec(input_path).with_context(|| {
-        format!("File appears to be {detected}, but ffprobe could not identify its audio codec")
-    })?;
+    let codec = match crate::media::probe::probe_audio_codec(input_path) {
+        Ok(codec) => codec,
+        Err(error) if crate::media::audio::is_unsupported(&error) => return Ok(canonical_audio_mime_variant(detected).to_owned()),
+        Err(error) => return Err(error).with_context(|| format!("File appears to be {detected}, but media inspection could not identify its audio codec")),
+    };
     let mime = match codec.as_str() {
         "flac" => "audio/flac",
         "mp3" | "mp2" | "mp1" => "audio/mpeg",
@@ -1028,18 +1015,15 @@ fn validate_av_stream_kind(
     input_path: &Path,
     mime_type: &str,
     media_type: crate::models::MediaType,
-    ffprobe_available: bool,
 ) -> Result<()> {
-    if !ffprobe_available {
-        return Ok(());
-    }
-
-    let stream_kind = crate::media::ffmpeg::probe_stream_kind(input_path).with_context(|| {
-        format!("File appears to be {mime_type}, but ffprobe could not validate its streams")
+    let stream_kind = inspect_upload_stream_kind(input_path).with_context(|| {
+        format!(
+            "File appears to be {mime_type}, but media inspection could not validate its streams"
+        )
     })?;
     let expected_stream_kind = match media_type {
-        crate::models::MediaType::Audio => crate::media::ffmpeg::StreamKind::AudioOnly,
-        crate::models::MediaType::Video => crate::media::ffmpeg::StreamKind::Video,
+        crate::models::MediaType::Audio => crate::media::probe::StreamKind::AudioOnly,
+        crate::models::MediaType::Video => crate::media::probe::StreamKind::Video,
         crate::models::MediaType::Image
         | crate::models::MediaType::Pdf
         | crate::models::MediaType::Other => return Ok(()),
@@ -1058,74 +1042,87 @@ fn validate_av_stream_kind(
 /// # Errors
 /// Returns an error if the file cannot be read or its ADTS framing is invalid.
 fn validate_adts_aac_structure(input_path: &Path) -> Result<()> {
-    let data = std::fs::read(input_path)
+    let mut file = std::fs::File::open(input_path)
         .with_context(|| format!("Failed to read {} for AAC validation", input_path.display()))?;
-    validate_adts_aac_bytes(&data)
+    let metadata = file.metadata()?;
+    anyhow::ensure!(metadata.is_file(), "AAC source is not a regular file");
+    validate_adts_aac_reader(&mut file, metadata.len())
 }
 
 /// Validates that bytes contain one or more complete ADTS AAC frames.
 ///
 /// # Errors
 /// Returns an error for malformed headers or incomplete frame sequences.
+#[cfg(test)]
 fn validate_adts_aac_bytes(data: &[u8]) -> Result<()> {
+    validate_adts_aac_reader(&mut std::io::Cursor::new(data), u64::try_from(data.len())?)
+}
+
+/// Validate framing with fixed-size reads, skipping encoded payloads.
+fn validate_adts_aac_reader(
+    reader: &mut (impl std::io::Read + std::io::Seek),
+    length: u64,
+) -> Result<()> {
     const MALFORMED_AAC_ERROR: &str =
         "File appears to be audio/aac, but its ADTS stream is malformed or incomplete.";
     const ADTS_HEADER_BYTES: usize = 7;
-    const ADTS_HEADER_BYTES_WITH_CRC: usize = 9;
+    const ADTS_HEADER_BYTES_WITH_CRC: u64 = 9;
 
-    if data.len() < ADTS_HEADER_BYTES {
+    if length < 7 {
         anyhow::bail!(MALFORMED_AAC_ERROR);
     }
 
-    let mut offset = 0usize;
-    let mut frames = 0usize;
-    while offset < data.len() {
-        let remaining = data.len().saturating_sub(offset);
-        if remaining < ADTS_HEADER_BYTES {
+    let started = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(crate::config::ffmpeg_timeout_secs());
+    let mut offset = 0_u64;
+    while offset < length {
+        anyhow::ensure!(started.elapsed() < timeout, "AAC validation timed out");
+        let remaining = length
+            .checked_sub(offset)
+            .ok_or_else(|| anyhow::anyhow!(MALFORMED_AAC_ERROR))?;
+        if remaining < 7 {
             anyhow::bail!(MALFORMED_AAC_ERROR);
         }
-        let frame = data
-            .get(offset..)
-            .ok_or_else(|| anyhow::anyhow!(MALFORMED_AAC_ERROR))?;
-        let header: &[u8; ADTS_HEADER_BYTES] = frame
-            .get(..ADTS_HEADER_BYTES)
-            .and_then(|header| header.try_into().ok())
-            .ok_or_else(|| anyhow::anyhow!(MALFORMED_AAC_ERROR))?;
-        let [b0, b1, b2, b3, b4, b5, _b6] = *header;
+        let mut header = [0; ADTS_HEADER_BYTES];
+        reader
+            .read_exact(&mut header)
+            .context(MALFORMED_AAC_ERROR)?;
+        let [b0, b1, b2, b3, b4, b5, _b6] = header;
         if b0 != 0xFF || (b1 & 0xF0) != 0xF0 {
             anyhow::bail!(MALFORMED_AAC_ERROR);
         }
-        let layer = (b1 & 0x06) >> 1;
+        let layer = (b1 & 0x06) >> 1_i32;
         if layer != 0 {
             anyhow::bail!(MALFORMED_AAC_ERROR);
         }
         let protection_absent = (b1 & 0x01) != 0;
-        let profile = (b2 & 0xC0) >> 6;
-        let sampling_frequency_index = (b2 & 0x3C) >> 2;
-        let channel_configuration = ((b2 & 0x01) << 2) | ((b3 & 0xC0) >> 6);
-        if profile == 3 || sampling_frequency_index == 15 || channel_configuration > 7 {
+        let profile = (b2 & 0xC0) >> 6_i32;
+        let sampling_frequency_index = (b2 & 0x3C) >> 2_i32;
+        let channel_configuration = ((b2 & 0x01) << 2_i32) | ((b3 & 0xC0) >> 6_i32);
+        if profile == 3 || sampling_frequency_index > 12 || channel_configuration > 7 {
             anyhow::bail!(MALFORMED_AAC_ERROR);
         }
 
         let header_len = if protection_absent {
-            ADTS_HEADER_BYTES
+            7
         } else {
             ADTS_HEADER_BYTES_WITH_CRC
         };
-        let frame_len = ((usize::from(b3 & 0x03)) << 11)
-            | (usize::from(b4) << 3)
-            | (usize::from(b5 & 0xE0) >> 5);
+        let frame_len = ((u64::from(b3 & 0x03)) << 11_i32)
+            | (u64::from(b4) << 3_i32)
+            | (u64::from(b5 & 0xE0) >> 5_i32);
         if frame_len < header_len || frame_len > remaining {
             anyhow::bail!(MALFORMED_AAC_ERROR);
         }
 
-        frames = frames.saturating_add(1);
-        offset = offset.saturating_add(frame_len);
+        offset = offset
+            .checked_add(frame_len)
+            .ok_or_else(|| anyhow::anyhow!(MALFORMED_AAC_ERROR))?;
+        reader
+            .seek(std::io::SeekFrom::Start(offset))
+            .map(|_completed_value| ())?;
     }
 
-    if frames == 0 {
-        anyhow::bail!(MALFORMED_AAC_ERROR);
-    }
     Ok(())
 }
 
@@ -1194,9 +1191,11 @@ fn write_image_atomic(
                 tmp.path().display()
             )
         })?;
-    tmp.persist(output_path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("failed to atomically replace {}", output_path.display()))?;
+    drop(
+        tmp.persist(output_path)
+            .map_err(|error| error.error)
+            .with_context(|| format!("failed to atomically replace {}", output_path.display()))?,
+    );
     Ok(())
 }
 
@@ -1230,13 +1229,13 @@ fn mime_to_ext(mime: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        delete_file_checked, refine_webm_mime, save_audio_with_image_thumb_from_path,
-        save_upload_from_path, validate_adts_aac_bytes, validate_untrusted_image_dimensions,
-        SaveUploadOptions, AMBIGUOUS_WEBM_MIME,
+        delete_file_checked, save_audio_with_image_thumb_from_path, save_upload_from_path,
+        validate_adts_aac_bytes, validate_untrusted_image_dimensions, SaveUploadOptions,
+        AMBIGUOUS_WEBM_MIME,
     };
+    use crate::test_support::valid_pdf;
     use anyhow::{Context as _, Result};
     use std::path::Path;
-    use std::process::{Command, Stdio};
 
     /// Encodes a minimal valid PNG fixture.
     fn one_pixel_png() -> Result<Vec<u8>> {
@@ -1277,10 +1276,39 @@ mod tests {
             max_audio_size: 1024 * 1024,
             max_pdf_size: 1024 * 1024,
             ffmpeg_available: false,
-            ffprobe_available: false,
-            ffmpeg_webp_available: false,
             allow_any_files: false,
         })
+    }
+
+    #[test]
+    fn video_upload_plans_use_container_codec_policy_without_extension_assumptions() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
+        let input = dir.path().join("misleading.jpg");
+        for (name, mime, pending) in [
+            ("av1.webm", "video/webm", true),
+            ("av1.mkv", "video/x-matroska", true),
+            ("av1.mp4", "video/mp4", true),
+            ("vp8.webm", "video/webm", false),
+            ("video.webm", "video/webm", false),
+            ("video.mp4", "video/mp4", true),
+        ] {
+            let bytes = std::fs::read(root.join(name))?;
+            std::fs::write(&input, &bytes)?;
+            for ffmpeg in [true, false] {
+                let mut options = test_upload_options(dir.path(), "misleading.jpg")?;
+                options.ffmpeg_available = ffmpeg;
+                let validated =
+                    super::validate_upload_for_storage(&input, &bytes, bytes.len(), &options)?;
+                let plan = super::build_upload_plan(validated, bytes.len(), &options)?;
+                anyhow::ensure!(plan.mime_type == mime, "wrong MIME for {name}");
+                anyhow::ensure!(
+                    plan.processing_pending == (pending && ffmpeg),
+                    "wrong processing decision for {name}"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Creates upload options that permit arbitrary downloadable files.
@@ -1292,20 +1320,6 @@ mod tests {
             allow_any_files: true,
             ..test_upload_options(root, original_filename)?
         })
-    }
-
-    /// Returns a minimal structurally valid PDF fixture.
-    fn valid_pdf() -> &'static [u8] {
-        b"%PDF-1.4
-1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
-2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
-3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents 4 0 R >> endobj
-4 0 obj << /Length 0 >> stream
-
-endstream endobj
-trailer << /Root 1 0 R >>
-%%EOF
-"
     }
 
     #[test]
@@ -1394,9 +1408,9 @@ trailer << /Root 1 0 R >>
             0xFF,
             0xF1,
             0x50,
-            0x80 | u8::try_from((size >> 11) & 0x03).context("frame length high bits")?,
-            u8::try_from((size >> 3) & 0xFF).context("frame length middle bits")?,
-            u8::try_from((size & 0x07) << 5).context("frame length low bits")? | 0x1F,
+            0x80 | u8::try_from((size >> 11_i32) & 0x03).context("frame length high bits")?,
+            u8::try_from((size >> 3_i32) & 0xFF).context("frame length middle bits")?,
+            u8::try_from((size & 0x07) << 5_i32).context("frame length low bits")? | 0x1F,
             0xFC,
         ];
         let mut bytes = Vec::with_capacity(size);
@@ -1427,306 +1441,64 @@ trailer << /Root 1 0 R >>
         validate_adts_aac_bytes(&aac)
     }
 
-    /// Reports whether the configured `ffmpeg` executable can run.
-    fn ffmpeg_available() -> bool {
-        Command::new(&crate::config::CONFIG.ffmpeg_path)
-            .arg("-version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    }
-
-    /// Reports whether the configured `ffprobe` executable can run.
-    fn ffprobe_available() -> bool {
-        Command::new(&crate::config::CONFIG.ffprobe_path)
-            .arg("-version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    }
-
-    /// Asks `ffmpeg` to generate a fixture, returning none when unsupported.
-    fn generate_ffmpeg_fixture(output: &Path, args: &[&str]) -> Option<Vec<u8>> {
-        let mut command = Command::new(&crate::config::CONFIG.ffmpeg_path);
-        command
-            .arg("-hide_banner")
-            .arg("-loglevel")
-            .arg("error")
-            .arg("-y")
-            .args(args)
-            .arg(output)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if !command.status().ok()?.success() {
-            return None;
-        }
-        std::fs::read(output).ok()
-    }
-
-    /// An audio container/codec fixture generated by `ffmpeg`.
-    #[derive(Debug)]
-    struct AudioFixtureCase<'a> {
-        /// Filename used to select the generated container.
-        file_name: &'a str,
-        /// Canonical MIME type expected after probing.
-        expected_mime: &'a str,
-        /// `ffmpeg` arguments that synthesize the fixture.
-        args: &'a [&'a str],
-    }
-
-    /// Common audio formats expected to pass upload validation.
-    const AUDIO_FIXTURE_CASES: &[AudioFixtureCase<'static>] = &[
-        AudioFixtureCase {
-            file_name: "tiny.flac",
-            expected_mime: "audio/flac",
-            args: &[
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:duration=0.05",
-                "-c:a",
-                "flac",
-            ],
-        },
-        AudioFixtureCase {
-            file_name: "tiny.mp3",
-            expected_mime: "audio/mpeg",
-            args: &[
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:duration=0.05",
-                "-c:a",
-                "libmp3lame",
-                "-b:a",
-                "64k",
-            ],
-        },
-        AudioFixtureCase {
-            file_name: "tiny.wav",
-            expected_mime: "audio/wav",
-            args: &[
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:duration=0.05",
-                "-c:a",
-                "pcm_s16le",
-            ],
-        },
-        AudioFixtureCase {
-            file_name: "tiny.ogg",
-            expected_mime: "audio/ogg",
-            args: &[
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:duration=0.05",
-                "-c:a",
-                "libvorbis",
-            ],
-        },
-        AudioFixtureCase {
-            file_name: "tiny.oga",
-            expected_mime: "audio/ogg",
-            args: &[
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:duration=0.05",
-                "-c:a",
-                "libvorbis",
-            ],
-        },
-        AudioFixtureCase {
-            file_name: "tiny.opus",
-            expected_mime: "audio/opus",
-            args: &[
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:duration=0.05",
-                "-c:a",
-                "libopus",
-                "-b:a",
-                "32k",
-            ],
-        },
-        AudioFixtureCase {
-            file_name: "tiny.m4a",
-            expected_mime: "audio/mp4",
-            args: &[
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:duration=0.05",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "64k",
-            ],
-        },
-        AudioFixtureCase {
-            file_name: "tiny-isom.mp4",
-            expected_mime: "audio/mp4",
-            args: &[
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:duration=0.05",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "64k",
-                "-f",
-                "mp4",
-            ],
-        },
-        AudioFixtureCase {
-            file_name: "tiny.aac",
-            expected_mime: "audio/aac",
-            args: &[
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:duration=0.05",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "64k",
-                "-f",
-                "adts",
-            ],
-        },
-        AudioFixtureCase {
-            file_name: "tiny-audio.webm",
-            expected_mime: "audio/webm",
-            args: &[
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:duration=0.05",
-                "-c:a",
-                "libopus",
-                "-b:a",
-                "32k",
-                "-f",
-                "webm",
-            ],
-        },
-    ];
-
     #[test]
-    #[expect(
-        clippy::print_stderr,
-        reason = "test skip diagnostics must remain visible when optional ffmpeg fixtures are unavailable"
-    )]
-    fn valid_audio_uploads_accept_common_formats_with_ffprobe() -> Result<()> {
-        if !ffmpeg_available() || !ffprobe_available() {
-            eprintln!("skipping ffmpeg audio fixture test; ffmpeg/ffprobe unavailable");
-            return Ok(());
+    fn valid_audio_uploads_accept_common_formats_without_external_tools() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
+        for (name, mime) in [
+            ("tone.wav", "audio/wav"),
+            ("tone.mp3", "audio/mpeg"),
+            ("tone.flac", "audio/flac"),
+            ("tone.ogg", "audio/ogg"),
+            ("tone.opus", "audio/opus"),
+            ("tone.aac", "audio/aac"),
+            ("tone.m4a", "audio/mp4"),
+            ("audio.webm", "audio/webm"),
+        ] {
+            let tempdir = tempfile::tempdir()?;
+            let bytes = std::fs::read(root.join(name))?;
+            let input = tempdir.path().join("misleading.bin");
+            std::fs::write(&input, &bytes)?;
+            let uploaded = save_upload_from_path(
+                &input,
+                sniff(&bytes),
+                bytes.len(),
+                &test_upload_options(tempdir.path(), name)?,
+            )?;
+            anyhow::ensure!(uploaded.mime_type == mime, "wrong audio MIME for {name}");
+            anyhow::ensure!(
+                uploaded.processing_pending,
+                "audio should queue a Rust waveform without FFmpeg"
+            );
+            anyhow::ensure!(
+                tempdir.path().join(uploaded.file_path).exists(),
+                "audio missing"
+            );
         }
-
-        let tempdir = tempfile::tempdir()?;
-        let mut checked = 0usize;
-        for case in AUDIO_FIXTURE_CASES {
-            let input_path = tempdir.path().join(case.file_name);
-            let Some(bytes) = generate_ffmpeg_fixture(&input_path, case.args) else {
-                eprintln!(
-                    "skipping audio fixture {}; ffmpeg could not generate it",
-                    case.file_name
-                );
-                continue;
-            };
-            let mut options = test_upload_options(tempdir.path(), case.file_name)?;
-            options.ffprobe_available = true;
-
-            let uploaded = save_upload_from_path(&input_path, sniff(&bytes), bytes.len(), &options)
-                .with_context(|| format!("{} should upload", case.file_name))?;
-
-            anyhow::ensure!(
-                uploaded.mime_type == case.expected_mime,
-                "{} received MIME {}; expected {}",
-                case.file_name,
-                uploaded.mime_type,
-                case.expected_mime
-            );
-            anyhow::ensure!(
-                uploaded.media_type == crate::models::MediaType::Audio,
-                "{} was not categorized as audio",
-                case.file_name
-            );
-            anyhow::ensure!(
-                tempdir.path().join(&uploaded.file_path).exists(),
-                "{} was not persisted",
-                case.file_name
-            );
-            checked = checked.saturating_add(1);
-        }
-
-        anyhow::ensure!(
-            checked >= 8,
-            "expected most audio fixtures to be generated; only generated {checked}"
-        );
         Ok(())
     }
 
     #[test]
-    #[expect(
-        clippy::print_stderr,
-        reason = "test skip diagnostics must remain visible when optional ffmpeg fixtures are unavailable"
-    )]
     fn valid_mkv_uploads_save_as_video_with_probe() -> Result<()> {
-        if !ffmpeg_available() || !ffprobe_available() {
-            eprintln!("skipping MKV fixture test; ffmpeg/ffprobe unavailable");
-            return Ok(());
-        }
-
         let tempdir = tempfile::tempdir()?;
-        let input_path = tempdir.path().join("tiny.mkv");
-        let bytes = generate_ffmpeg_fixture(
-            &input_path,
-            &[
-                "-f",
-                "lavfi",
-                "-i",
-                "color=c=black:s=16x16:d=0.1",
-                "-an",
-                "-c:v",
-                "mpeg4",
-                "-f",
-                "matroska",
-            ],
-        )
-        .context("generate MKV fixture")?;
-        let mut options = test_upload_options(tempdir.path(), "browser-octet-stream.bin")?;
-        options.ffprobe_available = true;
-
-        let uploaded = save_upload_from_path(&input_path, sniff(&bytes), bytes.len(), &options)?;
-
+        let bytes = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/video.mkv"),
+        )?;
+        let input = tempdir.path().join("misleading.bin");
+        std::fs::write(&input, &bytes)?;
+        let uploaded = save_upload_from_path(
+            &input,
+            sniff(&bytes),
+            bytes.len(),
+            &test_upload_options(tempdir.path(), "browser.bin")?,
+        )?;
+        anyhow::ensure!(uploaded.mime_type == "video/x-matroska", "MKV MIME changed");
         anyhow::ensure!(
-            uploaded.mime_type == "video/x-matroska",
-            "valid MKV upload received the wrong MIME type"
+            tempdir.path().join(uploaded.file_path).exists(),
+            "MKV missing"
         );
         anyhow::ensure!(
-            uploaded.media_type == crate::models::MediaType::Video,
-            "valid MKV upload was not categorized as video"
-        );
-        anyhow::ensure!(
-            Path::new(&uploaded.file_path)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("mkv")),
-            "valid MKV upload did not receive an MKV extension"
-        );
-        anyhow::ensure!(
-            tempdir.path().join(&uploaded.file_path).exists(),
-            "valid MKV upload was not persisted"
-        );
-        anyhow::ensure!(
-            tempdir.path().join(&uploaded.thumb_path).exists(),
-            "valid MKV thumbnail was not persisted"
+            tempdir.path().join(uploaded.thumb_path).exists(),
+            "MKV thumbnail missing"
         );
         Ok(())
     }
@@ -1737,8 +1509,7 @@ trailer << /Root 1 0 R >>
         let input_path = tempdir.path().join("fake.mkv");
         let fake_mkv = b"\x1a\x45\xdf\xa3\xa3\x42\x86\x81\x01\x42\xf7\x81\x01\x42\xf2\x81\x04\x42\xf3\x81\x08\x42\x82\x88matroska\x42\x87\x81\x04not real media";
         std::fs::write(&input_path, fake_mkv)?;
-        let mut options = test_upload_options(tempdir.path(), "fake.mkv")?;
-        options.ffprobe_available = true;
+        let options = test_upload_options(tempdir.path(), "fake.mkv")?;
 
         let error = save_upload_from_path(&input_path, sniff(fake_mkv), fake_mkv.len(), &options)
             .err()
@@ -1747,7 +1518,7 @@ trailer << /Root 1 0 R >>
         anyhow::ensure!(
             error
                 .to_string()
-                .contains("ffprobe could not validate its streams"),
+                .contains("media inspection could not validate its streams"),
             "fake MKV error omitted the failed stream validation"
         );
         anyhow::ensure!(
@@ -1812,7 +1583,7 @@ trailer << /Root 1 0 R >>
     }
 
     #[test]
-    fn webm_classification_skips_ffprobe_when_startup_marked_it_unavailable() -> Result<()> {
+    fn uninspectable_webm_classification_is_neutral_without_external_tools() -> Result<()> {
         let tempdir = tempfile::tempdir()?;
         let input = tempfile::Builder::new()
             .suffix(".webm")
@@ -1820,7 +1591,7 @@ trailer << /Root 1 0 R >>
         let webm = valid_webm_header();
         std::fs::write(input.path(), webm)?;
 
-        let mime = super::classify_upload_mime(input.path(), webm, false, false)?;
+        let mime = super::classify_upload_mime(input.path(), webm, false)?;
 
         anyhow::ensure!(
             mime == AMBIGUOUS_WEBM_MIME,
@@ -1849,102 +1620,6 @@ trailer << /Root 1 0 R >>
     }
 
     #[test]
-    fn missing_ffprobe_uses_ffmpeg_stream_kind_for_webm() {
-        let input = Path::new("fixture.webm");
-        let missing_probe = || anyhow::bail!("ffprobe executable is missing");
-
-        let audio = refine_webm_mime(input, false, missing_probe, || {
-            Ok(crate::media::ffmpeg::StreamKind::AudioOnly)
-        });
-        let video = refine_webm_mime(
-            input,
-            false,
-            || anyhow::bail!("ffprobe executable is missing"),
-            || Ok(crate::media::ffmpeg::StreamKind::Video),
-        );
-
-        assert_eq!(audio, "audio/webm");
-        assert_eq!(video, "video/webm");
-    }
-
-    #[test]
-    fn failing_ffprobe_never_defaults_webm_to_video() {
-        let input = Path::new("fixture.webm");
-        let audio = refine_webm_mime(
-            input,
-            true,
-            || anyhow::bail!("ffprobe exited with status 1"),
-            || Ok(crate::media::ffmpeg::StreamKind::AudioOnly),
-        );
-        let ambiguous = refine_webm_mime(
-            input,
-            true,
-            || anyhow::bail!("ffprobe exited with status 1"),
-            || anyhow::bail!("ffmpeg stream fallback also failed"),
-        );
-
-        assert_eq!(audio, "audio/webm");
-        assert_eq!(ambiguous, AMBIGUOUS_WEBM_MIME);
-    }
-
-    #[test]
-    #[expect(
-        clippy::print_stderr,
-        reason = "test skip diagnostics must remain visible when optional ffmpeg fixtures are unavailable"
-    )]
-    fn ffmpeg_fallback_distinguishes_audio_only_and_av_webm() -> Result<()> {
-        if !ffmpeg_available() {
-            eprintln!("skipping WebM fallback fixtures; ffmpeg unavailable");
-            return Ok(());
-        }
-        let tempdir = tempfile::tempdir()?;
-        let audio_path = tempdir.path().join("audio.webm");
-        let audio = generate_ffmpeg_fixture(
-            &audio_path,
-            &[
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:duration=0.05",
-                "-c:a",
-                "libopus",
-                "-f",
-                "webm",
-            ],
-        )
-        .context("generate audio-only WebM")?;
-        let video_path = tempdir.path().join("av.webm");
-        let av = generate_ffmpeg_fixture(
-            &video_path,
-            &[
-                "-f",
-                "lavfi",
-                "-i",
-                "color=c=black:s=16x16:d=0.1",
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:duration=0.1",
-                "-c:v",
-                "libvpx-vp9",
-                "-c:a",
-                "libopus",
-                "-shortest",
-                "-f",
-                "webm",
-            ],
-        )
-        .context("generate A/V WebM")?;
-
-        let audio_mime = super::classify_upload_mime(&audio_path, sniff(&audio), false, false)?;
-        let video_mime = super::classify_upload_mime(&video_path, sniff(&av), false, false)?;
-
-        anyhow::ensure!(audio_mime == "audio/webm");
-        anyhow::ensure!(video_mime == "video/webm");
-        Ok(())
-    }
-
-    #[test]
     fn combo_flac_audio_is_saved_losslessly_without_pending_processing() -> Result<()> {
         let tempdir = tempfile::tempdir()?;
         let board_dir = tempdir.path().join("test");
@@ -1953,7 +1628,10 @@ trailer << /Root 1 0 R >>
         let input = tempfile::Builder::new()
             .suffix(".flac")
             .tempfile_in(tempdir.path())?;
-        let flac_bytes = b"fLaC\x00\x00\x00\x22test flac bytes";
+        let flac_data = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/tone.flac"),
+        )?;
+        let flac_bytes = flac_data.as_slice();
         std::fs::write(input.path(), flac_bytes)?;
 
         let uploaded = save_audio_with_image_thumb_from_path(
@@ -1967,7 +1645,6 @@ trailer << /Root 1 0 R >>
                 .context("test root is not valid UTF-8")?,
             "test",
             1024 * 1024,
-            false,
         )?;
 
         anyhow::ensure!(
@@ -2125,7 +1802,10 @@ trailer << /Root 1 0 R >>
         let input = tempfile::Builder::new()
             .suffix(".mp4")
             .tempfile_in(tempdir.path())?;
-        let mp4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2mp41";
+        let mp4_data = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/video.mp4"),
+        )?;
+        let mp4 = mp4_data.as_slice();
         std::fs::write(input.path(), mp4)?;
 
         let uploaded = save_upload_from_path(
@@ -2177,7 +1857,7 @@ trailer << /Root 1 0 R >>
         )?;
 
         anyhow::ensure!(
-            uploaded.mime_type == "image/png",
+            matches!(uploaded.mime_type.as_str(), "image/png" | "image/webp"),
             "decodable PNG received the wrong MIME type"
         );
         anyhow::ensure!(

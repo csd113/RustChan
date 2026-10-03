@@ -182,7 +182,7 @@ test.describe('phase 3 media viewer runtime behavior', () => {
 
     const original = await page.request.get(`${app.baseURL}${originalHref}`);
     expect(original.status()).toBe(200);
-    expect(original.headers()['content-type']).toContain('image/png');
+    expect(original.headers()['content-type']).toContain(originalHref.endsWith('.webp') ? 'image/webp' : 'image/png');
   });
 });
 
@@ -237,15 +237,16 @@ test.describe('phase 3 downloads, range requests, and media headers', () => {
     const genericHref = await firstFileHref(page);
 
     await expectContentHeaders(page, app, imageHref, {
-      type: 'image/png',
+      type: imageHref.endsWith('.webp') ? 'image/webp' : 'image/png',
       disposition: false,
     });
     await expectContentHeaders(page, app, videoHref, {
       type: 'video/mp4',
       disposition: false,
+      videoTranscode: true,
     });
     await expectContentHeaders(page, app, audioHref, {
-      type: 'audio/ogg',
+      type: audioHref.endsWith('.opus') ? 'audio/opus' : 'audio/ogg',
       disposition: false,
     });
     const pdf = await expectContentHeaders(page, app, pdfHref, {
@@ -327,11 +328,15 @@ async function expectContentHeaders(
   page: Page,
   app: RustChanServer,
   href: string,
-  options: { type: string; disposition: boolean },
+  options: { type: string; disposition: boolean; videoTranscode?: boolean },
 ) {
   const response = await page.request.get(`${app.baseURL}${href}`);
   expect(response.status(), href).toBe(200);
-  expect(response.headers()['content-type']).toContain(options.type);
+  // A completed worker redirects the originally rendered MP4 URL to WebM.
+  const expectedType = options.videoTranscode && new URL(response.url()).pathname.endsWith('.webm')
+    ? 'video/webm'
+    : options.type;
+  expect(response.headers()['content-type']).toContain(expectedType);
   expect(response.headers()['x-content-type-options']).toBe('nosniff');
   expect(response.headers()['cache-control']).toBeTruthy();
   if (options.disposition) {

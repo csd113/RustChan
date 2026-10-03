@@ -284,7 +284,7 @@ impl DbMaintenanceJobs {
             DbMaintenanceJobStatus::Running {
                 job_id: current_job_id,
                 started_at,
-                ..
+                phase: _,
             } if *current_job_id == job_id => {
                 *status = DbMaintenanceJobStatus::Running {
                     job_id,
@@ -294,9 +294,20 @@ impl DbMaintenanceJobs {
                 true
             }
             DbMaintenanceJobStatus::Idle
-            | DbMaintenanceJobStatus::Running { .. }
-            | DbMaintenanceJobStatus::Finished { .. }
-            | DbMaintenanceJobStatus::Failed { .. } => false,
+            | DbMaintenanceJobStatus::Running {
+                job_id: _,
+                started_at: _,
+                phase: _,
+            }
+            | DbMaintenanceJobStatus::Finished {
+                job_id: _,
+                report: _,
+            }
+            | DbMaintenanceJobStatus::Failed {
+                job_id: _,
+                finished_at: _,
+                message: _,
+            } => false,
         }
     }
 
@@ -307,7 +318,8 @@ impl DbMaintenanceJobs {
         match &*status {
             DbMaintenanceJobStatus::Running {
                 job_id: current_job_id,
-                ..
+                started_at: _,
+                phase: _,
             } if *current_job_id == job_id => {
                 *status = DbMaintenanceJobStatus::Finished {
                     job_id,
@@ -316,9 +328,20 @@ impl DbMaintenanceJobs {
                 true
             }
             DbMaintenanceJobStatus::Idle
-            | DbMaintenanceJobStatus::Running { .. }
-            | DbMaintenanceJobStatus::Finished { .. }
-            | DbMaintenanceJobStatus::Failed { .. } => false,
+            | DbMaintenanceJobStatus::Running {
+                job_id: _,
+                started_at: _,
+                phase: _,
+            }
+            | DbMaintenanceJobStatus::Finished {
+                job_id: _,
+                report: _,
+            }
+            | DbMaintenanceJobStatus::Failed {
+                job_id: _,
+                finished_at: _,
+                message: _,
+            } => false,
         }
     }
 
@@ -329,7 +352,8 @@ impl DbMaintenanceJobs {
         match &*status {
             DbMaintenanceJobStatus::Running {
                 job_id: current_job_id,
-                ..
+                started_at: _,
+                phase: _,
             } if *current_job_id == job_id => {
                 *status = DbMaintenanceJobStatus::Failed {
                     job_id,
@@ -339,9 +363,20 @@ impl DbMaintenanceJobs {
                 true
             }
             DbMaintenanceJobStatus::Idle
-            | DbMaintenanceJobStatus::Running { .. }
-            | DbMaintenanceJobStatus::Finished { .. }
-            | DbMaintenanceJobStatus::Failed { .. } => false,
+            | DbMaintenanceJobStatus::Running {
+                job_id: _,
+                started_at: _,
+                phase: _,
+            }
+            | DbMaintenanceJobStatus::Finished {
+                job_id: _,
+                report: _,
+            }
+            | DbMaintenanceJobStatus::Failed {
+                job_id: _,
+                finished_at: _,
+                message: _,
+            } => false,
         }
     }
 
@@ -364,9 +399,17 @@ impl DbMaintenanceJobStatus {
     pub const fn job_id(&self) -> Option<u64> {
         match self {
             Self::Idle => None,
-            Self::Running { job_id, .. }
-            | Self::Finished { job_id, .. }
-            | Self::Failed { job_id, .. } => Some(*job_id),
+            Self::Running {
+                job_id,
+                started_at: _,
+                phase: _,
+            }
+            | Self::Finished { job_id, report: _ }
+            | Self::Failed {
+                job_id,
+                finished_at: _,
+                message: _,
+            } => Some(*job_id),
         }
     }
 }
@@ -391,16 +434,20 @@ impl Drop for MaintenanceGuard {
     clippy::struct_excessive_bools,
     reason = "independent runtime capability flags are shared across handlers and workers"
 )]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the public runtime services remain available to embedders; the internal upload gate is restricted to trusted request handling"
+)]
 /// Shared runtime services and capability state used by request handlers.
 pub struct AppState {
+    /// Admit normal HTTP work only after initialization and supervisor observation.
+    pub runtime_ready: Arc<AtomicBool>,
     /// Database connection pool.
     pub db: crate::db::DbPool,
     /// Whether the `FFmpeg` executable is available.
     pub ffmpeg_available: bool,
-    /// Whether the `FFprobe` executable is available.
-    pub ffprobe_available: bool,
-    /// Whether `FFmpeg` supports `WebP` output.
-    pub ffmpeg_webp_available: bool,
+    /// Independent AV1 decoder and encoder capabilities.
+    pub ffmpeg_av1: crate::media::ffmpeg::Av1Capabilities,
     /// Whether `FFmpeg` supports `VP9` output.
     pub ffmpeg_vp9_available: bool,
     /// Whether a usable `VP9` encoder is available.
@@ -545,7 +592,7 @@ mod tests {
         assert!(
             matches!(
                 first_status,
-                DbMaintenanceJobStatus::Running { job_id, .. } if job_id == first_job_id
+                DbMaintenanceJobStatus::Running { job_id, started_at: _, phase: _ } if job_id == first_job_id
             ),
             "the first running state should retain its assigned identifier"
         );
@@ -559,7 +606,7 @@ mod tests {
         assert!(
             matches!(
                 jobs.snapshot(),
-                DbMaintenanceJobStatus::Finished { job_id, .. } if job_id == first_job_id
+                DbMaintenanceJobStatus::Finished { job_id, report: _ } if job_id == first_job_id
             ),
             "the finished state should retain the first job identifier"
         );
@@ -576,7 +623,7 @@ mod tests {
         assert!(
             matches!(
                 jobs.snapshot(),
-                DbMaintenanceJobStatus::Failed { job_id, .. } if job_id == second_job_id
+                DbMaintenanceJobStatus::Failed { job_id, finished_at: _, message: _ } if job_id == second_job_id
             ),
             "the failed state should retain the second job identifier"
         );
@@ -600,7 +647,7 @@ mod tests {
                 DbMaintenanceJobStatus::Running {
                     job_id,
                     phase: DbMaintenanceJobPhase::Starting,
-                    ..
+                    started_at: _
                 } if job_id == second_job_id
             ),
             "a stale phase update should leave the newer job at its starting phase"
@@ -616,7 +663,7 @@ mod tests {
                 DbMaintenanceJobStatus::Running {
                     job_id,
                     phase: DbMaintenanceJobPhase::Repair,
-                    ..
+                    started_at: _
                 } if job_id == second_job_id
             ),
             "the matching phase update should preserve the job identity"
@@ -643,7 +690,7 @@ mod tests {
         assert!(
             matches!(
                 jobs.snapshot(),
-                DbMaintenanceJobStatus::Running { job_id, .. } if job_id == second_job_id
+                DbMaintenanceJobStatus::Running { job_id, started_at: _, phase: _ } if job_id == second_job_id
             ),
             "a stale completion should leave the newer job running"
         );
@@ -655,7 +702,7 @@ mod tests {
         assert!(
             matches!(
                 jobs.snapshot(),
-                DbMaintenanceJobStatus::Finished { job_id, .. } if job_id == second_job_id
+                DbMaintenanceJobStatus::Finished { job_id, report: _ } if job_id == second_job_id
             ),
             "the matching completion should retain the active job identifier"
         );
@@ -676,7 +723,7 @@ mod tests {
         assert!(
             matches!(
                 jobs.snapshot(),
-                DbMaintenanceJobStatus::Running { job_id, .. } if job_id == second_job_id
+                DbMaintenanceJobStatus::Running { job_id, started_at: _, phase: _ } if job_id == second_job_id
             ),
             "a stale failure should leave the newer job running"
         );
@@ -691,7 +738,7 @@ mod tests {
                 DbMaintenanceJobStatus::Failed {
                     job_id,
                     message,
-                    ..
+                    finished_at: _
                 } if job_id == second_job_id && message == "current failure"
             ),
             "the matching failure should preserve its job identifier and message"
@@ -714,7 +761,7 @@ mod tests {
                 DbMaintenanceJobStatus::Running {
                     job_id,
                     phase: DbMaintenanceJobPhase::Starting,
-                    ..
+                    started_at: _
                 } if job_id == second_job_id
             ),
             "the newer job should remain running after a stale failure"
