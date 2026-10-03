@@ -25,7 +25,10 @@ const MAX_U24: u32 = 0x00ff_ffff;
 pub(crate) fn validate_dimensions(width: u32, height: u32) -> Result<()> {
     ensure!(width > 0 && height > 0, "image has an empty canvas");
     ensure!(
-        u64::from(width) * u64::from(height) <= super::MAX_UNTRUSTED_IMAGE_PIXELS,
+        u64::from(width)
+            .checked_mul(u64::from(height))
+            .context("image area overflow")?
+            <= super::MAX_UNTRUSTED_IMAGE_PIXELS,
         "image dimensions {width}x{height} exceed the safety limit"
     );
     Ok(())
@@ -121,7 +124,7 @@ pub(crate) fn image_to_webp(input: &Path, output: &Path, bounds: Option<(u32, u3
         }
         _ => write_still(input, bounds, temporary.as_file_mut())?,
     }
-    temporary.persist(output).context("publish WebP image")?;
+    drop(temporary.persist(output).context("publish WebP image")?);
     Ok(())
 }
 
@@ -181,10 +184,10 @@ fn gif_loops(input: &Path, budget: &AnimationBudget) -> Result<u16> {
     ));
     let mut decoder = options.read_info(BufReader::new(File::open(input)?))?;
     validate_dimensions(u32::from(decoder.width()), u32::from(decoder.height()))?;
-    let mut count = 0;
+    let mut count = 0_usize;
     while decoder.next_frame_info()?.is_some() {
         budget.check(count)?;
-        count += 1;
+        count = count.checked_add(1).context("GIF frame count overflow")?;
     }
     ensure!(count > 0, "GIF contains no frames");
     match decoder.repeat() {
@@ -231,7 +234,7 @@ fn encode_animation(
     ensure!(dimensions.is_some(), "animation contains no frames");
     let end = output.stream_position()?;
     let riff_size = u32::try_from(end.checked_sub(8).context("invalid RIFF size")?)?;
-    output.seek(SeekFrom::Start(4))?;
+    let _position = output.seek(SeekFrom::Start(4))?;
     output.write_all(&riff_size.to_le_bytes())?;
     Ok(())
 }
@@ -246,8 +249,16 @@ fn write_animation_header(
     output.write_all(b"RIFF\0\0\0\0WEBPVP8X")?;
     output.write_all(&10_u32.to_le_bytes())?;
     output.write_all(&[0x12, 0, 0, 0])?;
-    write_u24(output, width - 1)?;
-    write_u24(output, height - 1)?;
+    write_u24(
+        output,
+        width.checked_sub(1).context("WebP canvas width is empty")?,
+    )?;
+    write_u24(
+        output,
+        height
+            .checked_sub(1)
+            .context("WebP canvas height is empty")?,
+    )?;
     output.write_all(b"ANIM")?;
     output.write_all(&6_u32.to_le_bytes())?;
     output.write_all(&[0; 4])?;
@@ -288,12 +299,24 @@ fn write_animation_frame(output: &mut File, pixels: &RgbaImage, duration: u32) -
             .to_le_bytes(),
     )?;
     output.write_all(&[0; 6])?;
-    write_u24(output, pixels.width() - 1)?;
-    write_u24(output, pixels.height() - 1)?;
+    write_u24(
+        output,
+        pixels
+            .width()
+            .checked_sub(1)
+            .context("WebP frame width is empty")?,
+    )?;
+    write_u24(
+        output,
+        pixels
+            .height()
+            .checked_sub(1)
+            .context("WebP frame height is empty")?,
+    )?;
     write_u24(output, duration)?;
     output.write_all(&[2])?;
-    encoded.seek(SeekFrom::Start(12))?;
-    std::io::copy(&mut encoded.take(u64::from(payload_size)), output)?;
+    let _position = encoded.seek(SeekFrom::Start(12))?;
+    let _bytes_copied = std::io::copy(&mut encoded.take(u64::from(payload_size)), output)?;
     Ok(())
 }
 

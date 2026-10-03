@@ -217,14 +217,14 @@ pub(in crate::server) async fn catalog(
             .status(StatusCode::NOT_MODIFIED)
             .body(axum::body::Body::empty())
             .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-        resp.headers_mut().insert(
+        drop(resp.headers_mut().insert(
             "etag",
             HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("\"0\"")),
-        );
-        resp.headers_mut().insert(
+        ));
+        drop(resp.headers_mut().insert(
             header::CACHE_CONTROL,
             HeaderValue::from_static(activity_html_cache_control(activity_markers_enabled)),
-        );
+        ));
         crate::cache::insert_vary_cookie(resp.headers_mut());
         return Ok((jar, resp).into_response());
     }
@@ -255,12 +255,12 @@ pub(in crate::server) async fn catalog(
     );
     let mut resp = Html(html).into_response();
     if let Ok(v) = HeaderValue::from_str(&etag) {
-        resp.headers_mut().insert("etag", v);
+        drop(resp.headers_mut().insert("etag", v));
     }
-    resp.headers_mut().insert(
+    drop(resp.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(activity_html_cache_control(activity_markers_enabled)),
-    );
+    ));
     crate::cache::insert_vary_cookie(resp.headers_mut());
     Ok((jar, resp).into_response())
 }

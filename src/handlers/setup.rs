@@ -13,7 +13,6 @@ use axum::{
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::{Deserialize, Serialize};
-use std::fmt::Write as _;
 
 /// Setup CSRF scope used by this handler.
 const SETUP_CSRF_SCOPE: &str = "first-run-setup";
@@ -696,9 +695,11 @@ pub(in crate::server) async fn setup_finish(
         move || -> Result<()> {
             let mut conn = pool.get()?;
             let tx = conn.transaction()?;
-            db::ensure_setup_available(&tx).map_err(|_setup_state_error| {
-                AppError::NotFound("Setup wizard is not available.".into())
-            })?;
+            db::ensure_setup_available(&tx)
+                .map_err(|_setup_state_error| {
+                    AppError::NotFound("Setup wizard is not available.".into())
+                })
+                .map(|_completed_value| ())?;
             if db::admin_count(&tx)? == 0 {
                 let username = parsed.admin_username.as_deref().ok_or_else(|| {
                     AppError::BadRequest("Initial admin username is required.".into())
@@ -711,7 +712,7 @@ pub(in crate::server) async fn setup_finish(
                     })?;
                     crypto::hash_password(password)?
                 };
-                db::create_admin(&tx, username, &password_hash)?;
+                db::create_admin(&tx, username, &password_hash).map(|_completed_value| ())?;
             }
             if db::board_slug_exists(&tx, &parsed.board_slug)? {
                 return Err(AppError::Conflict(format!(
@@ -741,9 +742,9 @@ pub(in crate::server) async fn setup_finish(
                  access_password_hash = ''
                  WHERE id = ?17",
                 rusqlite::params![
-                    if parsed.allow_posting { 150 } else { 0 },
-                    150,
-                    500,
+                    if parsed.allow_posting { 150_i32 } else { 0_i32 },
+                    150_i32,
+                    500_i32,
                     parsed.image_limit_bytes,
                     parsed.video_limit_bytes,
                     parsed.audio_limit_bytes,
@@ -759,7 +760,8 @@ pub(in crate::server) async fn setup_finish(
                     parsed.board_visibility,
                     board_id,
                 ],
-            )?;
+            )
+            .map(|_completed_value| ())?;
             db::set_site_setting(&tx, "site_name", &parsed.site_name)?;
             db::set_site_setting(&tx, "site_subtitle", &parsed.site_subtitle)?;
             db::set_site_setting(&tx, "default_theme", &parsed.default_theme)?;
@@ -918,7 +920,8 @@ pub(in crate::server) async fn admin_close_setup(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            crate::handlers::admin::require_admin_session_sid(&conn, session_id.as_deref())?;
+            crate::handlers::admin::require_admin_session_sid(&conn, session_id.as_deref())
+                .map(|_completed_value| ())?;
             db::close_reopened_setup(&conn)?;
             Ok(())
         }
@@ -1020,10 +1023,12 @@ fn setup_form_page(
         alerts.push_str(r#"<div class="setup-alert" role="status"><strong>Admin setup session.</strong> Setup was reopened by an administrator. Existing credentials will not be replaced.</div>"#);
     }
     if let Some(warning) = transport_warning {
-        let _ = write!(
-            alerts,
-            r#"<div class="setup-alert setup-alert-warn">{}</div>"#,
-            escape_html(warning)
+        templates::append_html(
+            &mut alerts,
+            format_args!(
+                r#"<div class="setup-alert setup-alert-warn">{}</div>"#,
+                escape_html(warning)
+            ),
         );
     }
     if !errors.is_empty() {
@@ -1031,7 +1036,7 @@ fn setup_form_page(
             r#"<div class="setup-validation" role="alert" tabindex="-1"><h2>Check the highlighted setup details</h2><p>Nothing was saved. Correct the following items and review again.</p><ul>"#,
         );
         for error in errors {
-            let _ = write!(alerts, "<li>{}</li>", escape_html(error));
+            templates::append_html(&mut alerts, format_args!("<li>{}</li>", escape_html(error)));
         }
         alerts.push_str("</ul></div>");
     }
@@ -1242,10 +1247,10 @@ fn setup_review_page(
         admin = admin_line,
         slug = escape_html(&parsed.board_slug),
         board = escape_html(&parsed.board_name),
-        image = parsed.image_limit_bytes / i64::try_from(MIB).unwrap_or(1),
-        video = parsed.video_limit_bytes / i64::try_from(MIB).unwrap_or(1),
-        audio = parsed.audio_limit_bytes / i64::try_from(MIB).unwrap_or(1),
-        pdf = parsed.pdf_limit_bytes / i64::try_from(MIB).unwrap_or(1),
+        image = parsed.image_limit_bytes / 1_048_576_i64,
+        video = parsed.video_limit_bytes / 1_048_576_i64,
+        audio = parsed.audio_limit_bytes / 1_048_576_i64,
+        pdf = parsed.pdf_limit_bytes / 1_048_576_i64,
         tor = if parsed.enable_tor {
             "enabled"
         } else {
@@ -1297,17 +1302,19 @@ fn preset_options(selected: &str) -> String {
             SetupPreset::Private => "Restricted board visibility and conservative access.",
             SetupPreset::Local => "Loopback-focused defaults for local evaluation.",
         };
-        let _ = write!(
-            out,
-            r#"<div class="setup-preset"><label><input type="radio" name="preset" value="{value}"{checked}> <span>{label}</span></label><p>{description}</p><a href="/setup?preset={value}">load defaults</a></div>"#,
-            value = preset.as_str(),
-            checked = if selected == preset.as_str() {
-                " checked"
-            } else {
-                ""
-            },
-            label = preset.label(),
-            description = description,
+        templates::append_html(
+            &mut out,
+            format_args!(
+                r#"<div class="setup-preset"><label><input type="radio" name="preset" value="{value}"{checked}> <span>{label}</span></label><p>{description}</p><a href="/setup?preset={value}">load defaults</a></div>"#,
+                value = preset.as_str(),
+                checked = if selected == preset.as_str() {
+                    " checked"
+                } else {
+                    ""
+                },
+                label = preset.label(),
+                description = description,
+            ),
         );
     }
     out
@@ -1320,10 +1327,12 @@ fn visibility_options(selected: &str) -> String {
         ("view_password", "Require password to view"),
         ("post_password", "Require password to post"),
     ] {
-        let _ = write!(
-            out,
-            r#"<option value="{value}"{selected_attr}>{label}</option>"#,
-            selected_attr = if selected == value { " selected" } else { "" },
+        templates::append_html(
+            &mut out,
+            format_args!(
+                r#"<option value="{value}"{selected_attr}>{label}</option>"#,
+                selected_attr = if selected == value { " selected" } else { "" },
+            ),
         );
     }
     out
@@ -1443,7 +1452,7 @@ mod tests {
     use anyhow::{bail, ensure, Context as _, Result as AnyResult};
     use axum::{
         body::{to_bytes, Body},
-        http::{header, Request, StatusCode},
+        http::Request,
         routing::{get, post},
         Router,
     };
@@ -1592,7 +1601,9 @@ mod tests {
         let state = crate::test_support::app_state();
         {
             let conn = state.db.get().context("get database connection")?;
-            db::create_admin(&conn, "admin", "hash").context("create admin fixture")?;
+            db::create_admin(&conn, "admin", "hash")
+                .context("create admin fixture")
+                .map(|_completed_value| ())?;
         }
         let app = Router::new()
             .route("/setup", get(setup_get))
@@ -1611,11 +1622,12 @@ mod tests {
             .context("serve setup request")?;
 
         ensure!(response.status() == StatusCode::NOT_FOUND);
-        let body = to_bytes(response.into_body(), usize::MAX)
+        let response_body = to_bytes(response.into_body(), usize::MAX)
             .await
             .context("read setup response body")?;
-        let body = String::from_utf8(body.to_vec()).context("decode setup response body")?;
-        ensure!(body.contains("Setup wizard is not available"));
+        let response_body =
+            String::from_utf8(response_body.to_vec()).context("decode setup response body")?;
+        ensure!(response_body.contains("Setup wizard is not available"));
         Ok(())
     }
 
@@ -1713,13 +1725,14 @@ mod tests {
             .context("serve setup review request")?;
 
         ensure!(response.status() == StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
+        let review_body = to_bytes(response.into_body(), usize::MAX)
             .await
             .context("read setup review response")?;
-        let body = String::from_utf8(body.to_vec()).context("decode setup review response")?;
-        ensure!(body.contains(r#"data-active-theme="blue-sky""#));
-        ensure!(body.contains(r#"data-theme="blue-sky""#));
-        ensure!(body.contains(r#"name="default_theme" value="blue-sky""#));
+        let review_body =
+            String::from_utf8(review_body.to_vec()).context("decode setup review response")?;
+        ensure!(review_body.contains(r#"data-active-theme="blue-sky""#));
+        ensure!(review_body.contains(r#"data-theme="blue-sky""#));
+        ensure!(review_body.contains(r#"name="default_theme" value="blue-sky""#));
         Ok(())
     }
 
@@ -1768,7 +1781,8 @@ mod tests {
         {
             let conn = state.db.get().context("get database connection")?;
             db::create_board(&conn, "b", "Existing", "", false)
-                .context("create conflicting board fixture")?;
+                .context("create conflicting board fixture")
+                .map(|_completed_value| ())?;
         }
         let app = Router::new()
             .route("/setup/finish", post(setup_finish))

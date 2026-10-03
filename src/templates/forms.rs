@@ -6,7 +6,6 @@
 use crate::config::CONFIG;
 use crate::models::Board;
 use crate::utils::sanitize::escape_html;
-use std::fmt::Write as _;
 
 /// User-entered fields preserved when a post form must be rendered again.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -48,7 +47,7 @@ pub fn post_error_recovery_body(message: &str, prefill: Option<&PostFormState>) 
             let mut options = String::new();
             for (index, option) in poll.options.iter().enumerate() {
                 // Writing formatted text to a String cannot fail.
-                let _ = write!(options, "<p>Option {}: {}</p>", index + 1, escape_html(option));
+                crate::templates::append_html(&mut options, format_args!( "<p>Option {}: {}</p>", index.saturating_add(1), escape_html(option)));
             }
             format!("<p>Poll: {}</p>{options}<p>Duration: {} {}</p>",
                 escape_html(&poll.question), escape_html(&poll.duration_value), escape_html(&poll.duration_unit))
@@ -141,7 +140,7 @@ fn render_captcha_row(board_short: &str, reply_suffix: &str, refresh_href: &str)
             (path, Some(fragment))
         });
     let query_separator = if refresh_path.contains('?') { '&' } else { '?' };
-    let refresh_href = format!(
+    let refreshed_href = format!(
         "{refresh_path}{query_separator}captcha_refresh={captcha_id}{}",
         fragment.map_or_else(String::new, |value| format!("#{value}"))
     );
@@ -151,7 +150,7 @@ fn render_captcha_row(board_short: &str, reply_suffix: &str, refresh_href: &str)
           <label class="post-form-mobile-label" for="{answer_id}">Captcha</label>
           <div class="captcha-challenge">
             <img class="captcha-image" src="{image_src}" alt="CAPTCHA challenge image" width="220" height="120">
-            <a class="form-field-help captcha-refresh-link" href="{refresh_href}">new challenge</a>
+            <a class="form-field-help captcha-refresh-link" href="{refreshed_href}">new challenge</a>
           </div>
           <input type="hidden" name="captcha_id" value="{captcha_id}">
           <input type="text" id="{answer_id}" name="captcha_answer" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="16" required>
@@ -163,7 +162,7 @@ fn render_captcha_row(board_short: &str, reply_suffix: &str, refresh_href: &str)
         answer_id = escape_html(&answer_id),
         image_src = escape_html(&image_src),
         captcha_id = escape_html(&captcha_id),
-        refresh_href = escape_html(&refresh_href),
+        refreshed_href = escape_html(&refreshed_href),
     )
 }
 
@@ -321,12 +320,13 @@ fn render_poll_creator(poll: Option<&PollFormState>) -> String {
         .map(|number| {
             render_poll_option_row(
                 number,
-                poll.and_then(|state| state.options.get(number - 1))
+                poll.and_then(|state| state.options.get(number.saturating_sub(1)))
                     .map_or("", String::as_str),
             )
         })
         .collect();
-    let extra_poll_option_rows: String = (visible_option_count + 1..=POLL_OPTION_MAX_COUNT)
+    let extra_poll_option_rows: String = (visible_option_count.saturating_add(1)
+        ..=POLL_OPTION_MAX_COUNT)
         .map(|number| render_poll_option_row(number, ""))
         .collect();
     let poll_question = poll.map_or("", |state| state.question.as_str());

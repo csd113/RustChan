@@ -121,8 +121,10 @@ pub(super) fn load_board_page_data(
             // The preview map is consumed here, so move each list out instead
             // of cloning every preview post.
             let preview_posts = previews.remove(&thread.id).unwrap_or_default();
-            let omitted =
-                (thread.reply_count - i64::try_from(preview_posts.len()).unwrap_or(0)).max(0);
+            let omitted = thread
+                .reply_count
+                .saturating_sub(i64::try_from(preview_posts.len()).unwrap_or(0))
+                .max(0);
             ThreadSummary {
                 thread,
                 preview_posts,
@@ -309,7 +311,7 @@ mod tests {
             audio_file_name: None,
             audio_file_size: None,
             audio_mime_type: None,
-            created_at: 100 + id,
+            created_at: 100_i64.saturating_add(id),
             deletion_token: "token".into(),
             is_op: id == 1,
             edited_at: None,
@@ -343,7 +345,7 @@ mod tests {
                     vote_count: vote_counts[1],
                 },
             ],
-            total_votes: vote_counts[0] + vote_counts[1],
+            total_votes: vote_counts[0].saturating_add(vote_counts[1]),
             user_voted_option,
             is_expired: false,
         }

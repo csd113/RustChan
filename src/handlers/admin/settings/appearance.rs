@@ -30,7 +30,7 @@ pub(in crate::server) async fn clear_board_favicon_override(
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let board_short: String = conn.query_row(
                 "SELECT short_name FROM boards WHERE id = ?1",
                 rusqlite::params![form.board_id],
@@ -92,7 +92,7 @@ pub(in crate::server) async fn update_site_favicon(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             crate::favicon::write_favicon_set(
                 crate::favicon::FaviconScope::Global,
                 &favicon_bytes,
@@ -162,7 +162,7 @@ pub(in crate::server) async fn update_board_favicon(
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let board_short: String = conn.query_row(
                 "SELECT short_name FROM boards WHERE id = ?1",
                 rusqlite::params![board_id],

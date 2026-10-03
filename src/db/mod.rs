@@ -224,7 +224,8 @@ pub fn paths_safe_to_delete(
                     "DELETE FROM file_hashes WHERE file_path = ?1",
                     params![file_path],
                 )
-                .context("Delete stale file_hashes row failed")?;
+                .context("Delete stale file_hashes row failed")
+                .map(|_affected_rows| ())?;
             }
         }
     }

@@ -2,7 +2,6 @@
 
 use super::{escape_html, AdminDashboardState, AdminPanelDashboardView, AdminPanelViewModel};
 use std::cmp::Reverse;
-use std::fmt::Write as _;
 
 /// One operational signal displayed by the Control Center.
 #[derive(Clone, Copy)]
@@ -225,9 +224,10 @@ fn render_attention(signals: &DashboardSignals<'_>) -> String {
 
     let mut rows = String::new();
     for signal in &alerts {
-        let _ = write!(
-            rows,
-            r#"<li class="admin-control-attention-item admin-control-attention-item-{state}" data-dashboard-alert="{key}">
+        crate::templates::append_html(
+            &mut rows,
+            format_args!(
+                r#"<li class="admin-control-attention-item admin-control-attention-item-{state}" data-dashboard-alert="{key}">
   <div class="admin-control-attention-copy">
     <span>{label}</span>
     <strong>{value}</strong>
@@ -236,13 +236,14 @@ fn render_attention(signals: &DashboardSignals<'_>) -> String {
   {pill}
   {action}
 </li>"#,
-            state = state_class(signal.state),
-            key = escape_html(signal.key),
-            label = escape_html(signal.label),
-            value = escape_html(signal.value),
-            detail = escape_html(signal.detail),
-            pill = render_state_pill(signal.state, state_label(signal.state)),
-            action = section_action_link(signal.open_section, signal.anchor, signal.action),
+                state = state_class(signal.state),
+                key = escape_html(signal.key),
+                label = escape_html(signal.label),
+                value = escape_html(signal.value),
+                detail = escape_html(signal.detail),
+                pill = render_state_pill(signal.state, state_label(signal.state)),
+                action = section_action_link(signal.open_section, signal.anchor, signal.action),
+            ),
         );
     }
     format!(
@@ -482,17 +483,19 @@ fn render_task_group(
 fn render_status_rows(signals: &[DashboardSignal<'_>]) -> String {
     let mut rows = String::new();
     for signal in signals {
-        let _ = write!(
-            rows,
-            r#"<li class="admin-control-status-item admin-control-status-item-{state}" data-dashboard-status="{key}" data-dashboard-state="{state}">
+        crate::templates::append_html(
+            &mut rows,
+            format_args!(
+                r#"<li class="admin-control-status-item admin-control-status-item-{state}" data-dashboard-status="{key}" data-dashboard-state="{state}">
   <span class="admin-control-status-copy"><span>{label}</span><strong>{value}</strong></span>
   {pill}
 </li>"#,
-            state = state_class(signal.state),
-            key = escape_html(signal.key),
-            label = escape_html(signal.label),
-            value = escape_html(signal.value),
-            pill = render_state_pill(signal.state, state_label(signal.state)),
+                state = state_class(signal.state),
+                key = escape_html(signal.key),
+                label = escape_html(signal.label),
+                value = escape_html(signal.value),
+                pill = render_state_pill(signal.state, state_label(signal.state)),
+            ),
         );
     }
     format!(r#"<ul class="admin-control-status-list">{rows}</ul>"#)
@@ -505,11 +508,13 @@ fn render_fact_rows(facts: &[(&str, &str)]) -> String {
     }
     let mut rows = String::new();
     for (label, value) in facts {
-        let _ = write!(
-            rows,
-            r"<div><dt>{label}</dt><dd>{value}</dd></div>",
-            label = escape_html(label),
-            value = escape_html(value),
+        crate::templates::append_html(
+            &mut rows,
+            format_args!(
+                r"<div><dt>{label}</dt><dd>{value}</dd></div>",
+                label = escape_html(label),
+                value = escape_html(value),
+            ),
         );
     }
     format!(r#"<dl class="admin-control-facts">{rows}</dl>"#)
@@ -530,11 +535,13 @@ fn render_system_details(view: &AdminPanelViewModel<'_>, signals: &DashboardSign
     ];
     let mut detail_rows = String::new();
     for signal in details {
-        let _ = write!(
-            detail_rows,
-            r"<div><dt>{label}</dt><dd>{detail}</dd></div>",
-            label = escape_html(signal.label),
-            detail = escape_html(signal.detail),
+        crate::templates::append_html(
+            &mut detail_rows,
+            format_args!(
+                r"<div><dt>{label}</dt><dd>{detail}</dd></div>",
+                label = escape_html(signal.label),
+                detail = escape_html(signal.detail),
+            ),
         );
     }
     let technical_facts = render_fact_rows(&[

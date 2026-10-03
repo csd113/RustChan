@@ -217,10 +217,10 @@ impl OperatorSnapshot {
                     ))
                 },
             )?;
-        let mut statement = transaction.prepare_cached(
+        let mut moderation_statement = transaction.prepare_cached(
             "SELECT created_at, action, target_type, target_id FROM mod_log ORDER BY id DESC LIMIT 8"
         )?;
-        let moderation = statement
+        let moderation = moderation_statement
             .query_map([], |row| {
                 Ok(format!(
                     "{} · {} · {} #{}",
@@ -231,7 +231,7 @@ impl OperatorSnapshot {
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(statement);
+        drop(moderation_statement);
         transaction.commit()?;
         Ok(Self {
             jobs: Some(jobs),
@@ -327,7 +327,7 @@ fn maintenance_task(status: DbMaintenanceJobStatus) -> Option<TaskRow> {
         DbMaintenanceJobStatus::Failed {
             job_id,
             finished_at,
-            ..
+            message: _,
         } => (
             job_id,
             TaskState::Failed,
@@ -401,7 +401,7 @@ mod tests {
             r#"{"t":"SpamCheck","d":{"post_id":42,"ip_hash":"PRIVATE_HASH","body_len":10}}"#;
         let id = crate::db::enqueue_job(&connection, "spam_check", payload)?;
         for state in ["pending", "running", "done", "failed"] {
-            connection.execute(
+            let _changed_rows = connection.execute(
                 "UPDATE background_jobs SET status = ?1 WHERE id = ?2",
                 rusqlite::params![state, id],
             )?;
@@ -425,7 +425,7 @@ mod tests {
         let pool = crate::db::init_test_pool()?;
         let connection = pool.get()?;
         for id in 1..=100_i64 {
-            connection.execute("INSERT INTO background_jobs (job_type, payload, status, created_at, updated_at) VALUES ('spam_check', '{}', 'done', ?1, ?1)", [id])?;
+            let _changed_rows = connection.execute("INSERT INTO background_jobs (job_type, payload, status, created_at, updated_at) VALUES ('spam_check', '{}', 'done', ?1, ?1)", [id])?;
         }
         let snapshot = OperatorSnapshot::read(&pool)?;
         anyhow::ensure!(
@@ -439,7 +439,7 @@ mod tests {
                 .is_some_and(|task| task.id == "job:100"),
             "newest terminal job must appear first"
         );
-        connection.execute("DROP TABLE mod_log", [])?;
+        let _changed_rows = connection.execute("DROP TABLE mod_log", [])?;
         anyhow::ensure!(
             OperatorSnapshot::read(&pool).is_err(),
             "query failure must not become a healthy empty snapshot"
@@ -479,10 +479,10 @@ mod tests {
                 .mark_failed(job_id, "fixture failure".to_owned()),
             "matching job should transition"
         );
-        let mut snapshot = OperatorSnapshot::default();
-        snapshot.attach_runtime(&app);
+        let mut failure_snapshot = OperatorSnapshot::default();
+        failure_snapshot.attach_runtime(&app);
         anyhow::ensure!(
-            snapshot
+            failure_snapshot
                 .tasks
                 .iter()
                 .any(|task| task.state == TaskState::Failed),

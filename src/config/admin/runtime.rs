@@ -81,7 +81,14 @@ impl RuntimeSection {
     pub const fn route_key(self) -> &'static str {
         match self {
             Self::Maintenance => "maintenance",
-            _ => self.key(),
+            Self::Tor
+            | Self::Media
+            | Self::System
+            | Self::Https
+            | Self::Access
+            | Self::Display
+            | Self::Logging
+            | Self::Timeouts => self.key(),
         }
     }
 }
@@ -163,7 +170,8 @@ pub(super) fn validate_section(section: RuntimeSection, config: &Config) -> anyh
         config
             .tor_service_nickname
             .parse::<tor_hsservice::HsNickname>()
-            .context("invalid Tor service nickname")?;
+            .context("invalid Tor service nickname")
+            .map(|_validated_value| ())?;
     }
     if section == RuntimeSection::Media {
         // Existing operator overrides may name an unavailable optional PATH tool.
@@ -347,7 +355,7 @@ mod tests {
                 RuntimeSection::Logging => ("log_filter", "warn"),
                 RuntimeSection::Timeouts => ("read_timeout_secs", "45"),
             };
-            form.insert(key.to_owned(), replacement.to_owned());
+            let _previous_value = form.insert(key.to_owned(), replacement.to_owned());
             let updates = parse_settings_form(section.definitions(), &form)?;
             save_root_at(
                 &path,
@@ -410,7 +418,7 @@ mod tests {
             (RuntimeSection::System, "db_pool_size", "0"),
         ] {
             let mut form = form_for(section)?;
-            form.insert(key.to_owned(), invalid.to_owned());
+            let _previous_value = form.insert(key.to_owned(), invalid.to_owned());
             let result = parse_settings_form(section.definitions(), &form).and_then(|updates| {
                 save_root_at(
                     &path,

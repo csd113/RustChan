@@ -29,6 +29,10 @@ impl TrafficSample {
 
 /// Fixed-capacity history collected only while the interactive console runs.
 #[derive(Clone, Debug, Default)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "preserve the existing sample snapshot API while keeping the observation baseline private so rate collection retains monotonic interval bookkeeping"
+)]
 pub struct TrafficHistory {
     /// Oldest-to-newest measured intervals.
     pub samples: VecDeque<TrafficSample>,
@@ -48,7 +52,7 @@ impl TrafficHistory {
             return;
         }
         if self.samples.len() == HISTORY_CAPACITY {
-            self.samples.pop_front();
+            let _evicted_sample = self.samples.pop_front();
         }
         self.samples.push_back(TrafficSample {
             requests: requests.saturating_sub(previous_count),
@@ -104,7 +108,7 @@ mod tests {
         );
         assert_eq!(
             history.rates(),
-            (2.0, 2.0),
+            (2.0_f64, 2.0_f64),
             "rates must use measured elapsed time"
         );
         history.observe(start + Duration::from_secs(2010), 0);

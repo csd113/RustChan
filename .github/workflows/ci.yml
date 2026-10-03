@@ -50,8 +50,16 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      - name: Check all targets and features
+        run: cargo check --locked --workspace --all-targets --all-features
+
       - name: Run Clippy
-        run: cargo clippy --locked --workspace --all-targets --all-features
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build documentation
+        run: cargo doc --locked --workspace --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
 
       - name: Enforce locked dependency policy
         run: cargo deny --locked check

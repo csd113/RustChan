@@ -65,6 +65,10 @@ pub enum NoticeSeverity {
 
 /// Feedback shown beneath the main navigation.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "preserve the existing feedback presentation API while keeping creation time private so callers cannot bypass notice expiry bookkeeping"
+)]
 pub struct Notice {
     /// Visual and semantic severity.
     pub severity: NoticeSeverity,
@@ -280,7 +284,7 @@ impl ConsoleState {
             Screen::Boards => Some(&mut self.board_filter),
             Screen::Tasks => Some(&mut self.task_filter),
             Screen::Logs => Some(&mut self.log_filter),
-            _ => None,
+            Screen::Dashboard | Screen::System | Screen::Configuration | Screen::Help => None,
         }
     }
 
@@ -300,7 +304,7 @@ impl ConsoleState {
                 format!("Route: /{short}/"), "Manage board policies and moderation in the authenticated /admin interface.".to_owned(),
                 "C creates a board; D selects a thread for confirmed deletion.".to_owned(),
             ])),
-            _ => None,
+            Screen::Dashboard | Screen::System | Screen::Configuration | Screen::Help => None,
         };
         if let Some((title, lines)) = detail {
             self.dialog = Some(Dialog::Inspect {
@@ -326,9 +330,14 @@ impl ConsoleState {
             .position(|screen| *screen == self.screen)
             .unwrap_or(0);
         let next = if backward {
-            (index + screens.len() - 1) % screens.len()
+            index
+                .checked_sub(1)
+                .unwrap_or_else(|| screens.len().saturating_sub(1))
         } else {
-            (index + 1) % screens.len()
+            index
+                .saturating_add(1)
+                .checked_rem(screens.len())
+                .unwrap_or(0)
         };
         if let Some(screen) = screens.get(next) {
             self.screen = *screen;
@@ -356,7 +365,18 @@ impl ConsoleState {
         self.dialog = None;
         match result {
             Ok(message) => {
-                if matches!(request, OperationRequest::CreateBoard { .. }) {
+                if matches!(
+                    request,
+                    OperationRequest::CreateBoard {
+                        short: _,
+                        name: _,
+                        description: _,
+                        nsfw: _,
+                        allow_images: _,
+                        allow_video: _,
+                        allow_audio: _
+                    }
+                ) {
                     self.screen = Screen::Boards;
                 }
                 self.set_notice(NoticeSeverity::Success, message);
@@ -457,7 +477,52 @@ impl ConsoleState {
             KeyEvent::RepeatCharacter(character) => {
                 self.handle_screen_key(&KeyEvent::Character(*character), board_count);
             }
-            _ => self.handle_screen_key(key, board_count),
+            KeyEvent::Character(_)
+            | KeyEvent::Paste(_)
+            | KeyEvent::Backspace
+            | KeyEvent::Delete
+            | KeyEvent::Up
+            | KeyEvent::Down
+            | KeyEvent::Left
+            | KeyEvent::Right
+            | KeyEvent::PageUp
+            | KeyEvent::PageDown
+            | KeyEvent::Home
+            | KeyEvent::End
+            | KeyEvent::ClearLine
+            | KeyEvent::Submit
+            | KeyEvent::ForceQuit
+            | KeyEvent::Resize => self.handle_screen_key(key, board_count),
+        }
+        ConsoleAction::None
+    }
+
+    /// Confirm or dismiss shutdown without interpreting held keys as consent.
+    fn handle_quit_confirmation(&mut self, key: &KeyEvent) -> ConsoleAction {
+        match key {
+            KeyEvent::Enter | KeyEvent::Character('y' | 'Y') => {
+                return ConsoleAction::Shutdown { forced: false };
+            }
+            KeyEvent::Escape | KeyEvent::Character('n' | 'N' | 'q' | 'Q') => {}
+            KeyEvent::Character(_)
+            | KeyEvent::RepeatCharacter(_)
+            | KeyEvent::Paste(_)
+            | KeyEvent::Tab
+            | KeyEvent::BackTab
+            | KeyEvent::Backspace
+            | KeyEvent::Delete
+            | KeyEvent::Up
+            | KeyEvent::Down
+            | KeyEvent::Left
+            | KeyEvent::Right
+            | KeyEvent::PageUp
+            | KeyEvent::PageDown
+            | KeyEvent::Home
+            | KeyEvent::End
+            | KeyEvent::ClearLine
+            | KeyEvent::Submit
+            | KeyEvent::ForceQuit
+            | KeyEvent::Resize => self.dialog = Some(Dialog::ConfirmQuit),
         }
         ConsoleAction::None
     }
@@ -465,7 +530,11 @@ impl ConsoleState {
     /// Handle an input event while a modal is active.
     fn handle_dialog(&mut self, mut dialog: Dialog, key: &KeyEvent) -> ConsoleAction {
         match &mut dialog {
-            Dialog::Inspect { scroll, .. } => {
+            Dialog::Inspect {
+                scroll,
+                title: _,
+                lines: _,
+            } => {
                 match key {
                     KeyEvent::Escape | KeyEvent::Character('q') => return ConsoleAction::None,
                     KeyEvent::Up | KeyEvent::Character('k') => *scroll = scroll.saturating_sub(1),
@@ -473,17 +542,25 @@ impl ConsoleState {
                     KeyEvent::PageUp => *scroll = scroll.saturating_sub(5),
                     KeyEvent::PageDown => *scroll = scroll.saturating_add(5),
                     KeyEvent::Home => *scroll = 0,
-                    _ => {}
+                    KeyEvent::Character(_)
+                    | KeyEvent::RepeatCharacter(_)
+                    | KeyEvent::Paste(_)
+                    | KeyEvent::Enter
+                    | KeyEvent::Tab
+                    | KeyEvent::BackTab
+                    | KeyEvent::Backspace
+                    | KeyEvent::Delete
+                    | KeyEvent::Left
+                    | KeyEvent::Right
+                    | KeyEvent::End
+                    | KeyEvent::ClearLine
+                    | KeyEvent::Submit
+                    | KeyEvent::ForceQuit
+                    | KeyEvent::Resize => {}
                 }
                 self.dialog = Some(dialog);
             }
-            Dialog::ConfirmQuit => match key {
-                KeyEvent::Enter | KeyEvent::Character('y' | 'Y') => {
-                    return ConsoleAction::Shutdown { forced: false };
-                }
-                KeyEvent::Escape | KeyEvent::Character('n' | 'N' | 'q' | 'Q') => {}
-                _ => self.dialog = Some(dialog),
-            },
+            Dialog::ConfirmQuit => return self.handle_quit_confirmation(key),
             Dialog::ConfirmDelete { thread_id } => match key {
                 KeyEvent::Character('y' | 'Y') => {
                     let request = OperationRequest::DeleteThread {
@@ -495,9 +572,28 @@ impl ConsoleState {
                     return ConsoleAction::Submit(request);
                 }
                 KeyEvent::Escape | KeyEvent::Character('n' | 'N') => {}
-                _ => self.dialog = Some(dialog),
+                KeyEvent::Character(_)
+                | KeyEvent::RepeatCharacter(_)
+                | KeyEvent::Paste(_)
+                | KeyEvent::Enter
+                | KeyEvent::Tab
+                | KeyEvent::BackTab
+                | KeyEvent::Backspace
+                | KeyEvent::Delete
+                | KeyEvent::Up
+                | KeyEvent::Down
+                | KeyEvent::Left
+                | KeyEvent::Right
+                | KeyEvent::PageUp
+                | KeyEvent::PageDown
+                | KeyEvent::Home
+                | KeyEvent::End
+                | KeyEvent::ClearLine
+                | KeyEvent::Submit
+                | KeyEvent::ForceQuit
+                | KeyEvent::Resize => self.dialog = Some(dialog),
             },
-            Dialog::Progress { .. } => self.dialog = Some(dialog),
+            Dialog::Progress { label: _ } => self.dialog = Some(dialog),
             Dialog::Form(form) => {
                 if matches!(key, KeyEvent::Escape) {
                     return ConsoleAction::None;
@@ -540,7 +636,64 @@ impl ConsoleState {
                 self.tasks.selected_short = None;
                 self.tasks.selected = (count > 0).then_some(count.saturating_sub(1));
             }
-            _ => {}
+            KeyEvent::Character(_)
+            | KeyEvent::RepeatCharacter(_)
+            | KeyEvent::Paste(_)
+            | KeyEvent::Enter
+            | KeyEvent::Tab
+            | KeyEvent::BackTab
+            | KeyEvent::Backspace
+            | KeyEvent::Delete
+            | KeyEvent::Left
+            | KeyEvent::Right
+            | KeyEvent::Escape
+            | KeyEvent::ClearLine
+            | KeyEvent::Submit
+            | KeyEvent::ForceQuit
+            | KeyEvent::Resize => {}
+        }
+    }
+
+    /// Move board-table selection while preserving its bounds and identity.
+    fn handle_boards_key(&mut self, key: &KeyEvent, board_count: usize) {
+        match key {
+            KeyEvent::Up | KeyEvent::Character('k' | 'K') => {
+                self.boards.move_by(-1, board_count);
+            }
+            KeyEvent::Down | KeyEvent::Character('j' | 'J') => {
+                self.boards.move_by(1, board_count);
+            }
+            KeyEvent::PageUp => self.boards.page_by(-1, board_count),
+            KeyEvent::PageDown => self.boards.page_by(1, board_count),
+            KeyEvent::Home => {
+                self.boards.selected_short = None;
+                self.boards.reconcile(board_count);
+                if board_count > 0 {
+                    self.boards.selected = Some(0);
+                }
+            }
+            KeyEvent::End => {
+                self.boards.selected_short = None;
+                self.boards.reconcile(board_count);
+                if board_count > 0 {
+                    self.boards.selected = Some(board_count.saturating_sub(1));
+                }
+            }
+            KeyEvent::Character(_)
+            | KeyEvent::RepeatCharacter(_)
+            | KeyEvent::Paste(_)
+            | KeyEvent::Enter
+            | KeyEvent::Tab
+            | KeyEvent::BackTab
+            | KeyEvent::Backspace
+            | KeyEvent::Delete
+            | KeyEvent::Left
+            | KeyEvent::Right
+            | KeyEvent::Escape
+            | KeyEvent::ClearLine
+            | KeyEvent::Submit
+            | KeyEvent::ForceQuit
+            | KeyEvent::Resize => {}
         }
     }
 
@@ -548,31 +701,7 @@ impl ConsoleState {
     fn handle_screen_key(&mut self, key: &KeyEvent, board_count: usize) {
         match self.screen {
             Screen::Tasks => self.handle_tasks_key(key),
-            Screen::Boards => match key {
-                KeyEvent::Up | KeyEvent::Character('k' | 'K') => {
-                    self.boards.move_by(-1, board_count);
-                }
-                KeyEvent::Down | KeyEvent::Character('j' | 'J') => {
-                    self.boards.move_by(1, board_count);
-                }
-                KeyEvent::PageUp => self.boards.page_by(-1, board_count),
-                KeyEvent::PageDown => self.boards.page_by(1, board_count),
-                KeyEvent::Home => {
-                    self.boards.selected_short = None;
-                    self.boards.reconcile(board_count);
-                    if board_count > 0 {
-                        self.boards.selected = Some(0);
-                    }
-                }
-                KeyEvent::End => {
-                    self.boards.selected_short = None;
-                    self.boards.reconcile(board_count);
-                    if board_count > 0 {
-                        self.boards.selected = Some(board_count.saturating_sub(1));
-                    }
-                }
-                _ => {}
-            },
+            Screen::Boards => self.handle_boards_key(key, board_count),
             Screen::Logs => match key {
                 KeyEvent::Up | KeyEvent::Character('k' | 'K') => {
                     self.logs.rows_from_bottom = self.logs.rows_from_bottom.saturating_add(1);
@@ -606,7 +735,19 @@ impl ConsoleState {
                     self.logs.rows_from_bottom = 0;
                     self.logs.follow = true;
                 }
-                _ => {}
+                KeyEvent::Character(_)
+                | KeyEvent::RepeatCharacter(_)
+                | KeyEvent::Paste(_)
+                | KeyEvent::Enter
+                | KeyEvent::Tab
+                | KeyEvent::BackTab
+                | KeyEvent::Backspace
+                | KeyEvent::Delete
+                | KeyEvent::Escape
+                | KeyEvent::ClearLine
+                | KeyEvent::Submit
+                | KeyEvent::ForceQuit
+                | KeyEvent::Resize => {}
             },
             Screen::Dashboard | Screen::Help | Screen::System | Screen::Configuration => {
                 let offset = if self.screen == Screen::Help {
@@ -627,7 +768,21 @@ impl ConsoleState {
                     KeyEvent::PageDown => *offset = offset.saturating_add(10),
                     KeyEvent::Home => *offset = 0,
                     KeyEvent::End => *offset = u16::MAX,
-                    _ => {}
+                    KeyEvent::Character(_)
+                    | KeyEvent::RepeatCharacter(_)
+                    | KeyEvent::Paste(_)
+                    | KeyEvent::Enter
+                    | KeyEvent::Tab
+                    | KeyEvent::BackTab
+                    | KeyEvent::Backspace
+                    | KeyEvent::Delete
+                    | KeyEvent::Left
+                    | KeyEvent::Right
+                    | KeyEvent::Escape
+                    | KeyEvent::ClearLine
+                    | KeyEvent::Submit
+                    | KeyEvent::ForceQuit
+                    | KeyEvent::Resize => {}
                 }
             }
         }
@@ -702,9 +857,20 @@ impl OperationRequest {
     /// Return the present-tense progress label.
     const fn progress_label(&self) -> &'static str {
         match self {
-            Self::CreateBoard { .. } => "Creating board…",
-            Self::CreateAdmin { .. } => "Securing administrator credentials…",
-            Self::DeleteThread { .. } => "Deleting thread and attached files…",
+            Self::CreateBoard {
+                short: _,
+                name: _,
+                description: _,
+                nsfw: _,
+                allow_images: _,
+                allow_video: _,
+                allow_audio: _,
+            } => "Creating board…",
+            Self::CreateAdmin {
+                username: _,
+                password: _,
+            } => "Securing administrator credentials…",
+            Self::DeleteThread { thread_id: _ } => "Deleting thread and attached files…",
         }
     }
 
@@ -713,7 +879,19 @@ impl OperationRequest {
     pub const fn refreshes_stats(&self) -> bool {
         matches!(
             self,
-            Self::CreateBoard { .. } | Self::DeleteThread { .. } | Self::CreateAdmin { .. }
+            Self::CreateBoard {
+                short: _,
+                name: _,
+                description: _,
+                nsfw: _,
+                allow_images: _,
+                allow_video: _,
+                allow_audio: _
+            } | Self::DeleteThread { thread_id: _ }
+                | Self::CreateAdmin {
+                    username: _,
+                    password: _
+                }
         )
     }
 }
@@ -739,7 +917,10 @@ impl fmt::Debug for OperationRequest {
                 .field("allow_video", allow_video)
                 .field("allow_audio", allow_audio)
                 .finish(),
-            Self::CreateAdmin { username, .. } => formatter
+            Self::CreateAdmin {
+                username,
+                password: _,
+            } => formatter
                 .debug_struct("CreateAdmin")
                 .field("username", username)
                 .field("password", &"<redacted>")

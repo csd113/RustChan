@@ -79,15 +79,15 @@ pub fn canonical_parent_for_new_child(root: &Path, path: &Path) -> Result<PathBu
     let root = root
         .canonicalize()
         .with_context(|| format!("Canonicalize runtime root {}", root.display()))?;
-    let parent = root.join(relative_parent);
-    reject_symlink_components(&parent)?;
-    let parent = parent
+    let rooted_parent = root.join(relative_parent);
+    reject_symlink_components(&rooted_parent)?;
+    let canonical_parent = rooted_parent
         .canonicalize()
-        .with_context(|| format!("Canonicalize runtime parent {}", parent.display()))?;
-    if !parent.starts_with(&root) {
+        .with_context(|| format!("Canonicalize runtime parent {}", rooted_parent.display()))?;
+    if !canonical_parent.starts_with(&root) {
         anyhow::bail!("Runtime destination escapes its configured root.");
     }
-    Ok(parent)
+    Ok(canonical_parent)
 }
 
 /// Reject any existing symlink component in a path without following it.

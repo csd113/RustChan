@@ -49,6 +49,10 @@ pub enum ApplicationMode {
 
 /// Definition shared by rendering, input validation and coverage checks.
 #[derive(Debug)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "renderers inspect metadata, while the config-only getter remains encapsulated"
+)]
 pub struct SettingDefinition {
     /// Whether this control uses live state or immutable process initialization.
     pub application: ApplicationMode,
@@ -125,8 +129,8 @@ fn snapshot_from(
     active: &Config,
     definitions: &'static [SettingDefinition],
 ) -> anyhow::Result<Vec<SettingField>> {
-    let raw: toml::Value = toml::from_str(content)
-        .map_err(|_| anyhow::anyhow!("settings.toml is invalid; repair it before saving"))?;
+    let raw: toml::Value =
+        toml::from_str(content).context("settings.toml is invalid; repair it before saving")?;
     let saved = resolve_file(content, &Environment::Values(&BTreeMap::new()))?;
     let next = resolve_file(content, &Environment::Process)?;
     Ok(definitions
@@ -314,7 +318,11 @@ pub(super) fn environment_override_is_valid(
         InputKind::OptionalText if definition.key == "log_filter" => {
             tracing_subscriber::EnvFilter::try_new(value).is_ok()
         }
-        _ => true,
+        InputKind::Boolean
+        | InputKind::List
+        | InputKind::Address
+        | InputKind::Text
+        | InputKind::OptionalText => true,
     }
 }
 
@@ -335,10 +343,10 @@ fn setting_source(definition: &SettingDefinition, active: &Config) -> String {
 /// Resolve file configuration without filesystem validation or secret exposure.
 pub(crate) fn resolve_file(content: &str, environment: &Environment<'_>) -> anyhow::Result<Config> {
     let mut settings: SettingsFile = super::parse_settings_file_str(content)
-        .map_err(|_| anyhow::anyhow!("settings.toml is invalid; repair it before saving"))?;
+        .context("settings.toml is invalid; repair it before saving")?;
     // A preview does not use secrets. Avoid generating a fallback secret for a
     // manually authored file that omitted it; startup remains authoritative.
-    settings.cookie_secret.get_or_insert_with(|| "0".repeat(64));
+    let _initialized_secret = settings.cookie_secret.get_or_insert_with(|| "0".repeat(64));
     Ok(Config::from_settings(settings, environment))
 }
 
@@ -398,7 +406,8 @@ fn parse_settings_form(
                         if field.key == "trusted_proxy_cidrs" {
                             entry
                                 .parse::<ipnet::IpNet>()
-                                .with_context(|| format!("invalid trusted proxy CIDR: {entry}"))?;
+                                .with_context(|| format!("invalid trusted proxy CIDR: {entry}"))
+                                .map(|_validated_value| ())?;
                         } else {
                             ensure!(valid_public_host(entry), "invalid public hostname: {entry}");
                         }
@@ -425,7 +434,8 @@ fn parse_settings_form(
                 }
                 InputKind::Policy => {
                     text.parse::<RateLimitPolicy>()
-                        .map_err(anyhow::Error::msg)?;
+                        .map_err(anyhow::Error::msg)
+                        .map(|_validated_value| ())?;
                     Some(toml::Value::String(text.to_owned()))
                 }
             };
@@ -499,7 +509,8 @@ fn validate_network(config: &Config) -> anyhow::Result<()> {
     );
     for cidr in &config.trusted_proxy_cidrs {
         cidr.parse::<ipnet::IpNet>()
-            .context("invalid trusted proxy CIDR")?;
+            .context("invalid trusted proxy CIDR")
+            .map(|_validated_value| ())?;
     }
     for host in &config.public_hosts {
         ensure!(valid_public_host(host), "invalid public hostname: {host}");
@@ -597,10 +608,9 @@ pub(super) fn rewrite_root_settings(
     if updates.keys().any(|key| key.contains('.')) {
         return certificates::rewrite_tls(content, updates);
     }
-    let spans: BTreeMap<String, toml::Spanned<toml::Value>> = toml::from_str(content)
-        .map_err(|_| anyhow::anyhow!("settings.toml is invalid; no changes saved"))?;
-    let mut expected: toml::Value =
-        toml::from_str(content).map_err(|_| anyhow::anyhow!("invalid settings.toml"))?;
+    let spans: BTreeMap<String, toml::Spanned<toml::Value>> =
+        toml::from_str(content).context("settings.toml is invalid; no changes saved")?;
+    let mut expected: toml::Value = toml::from_str(content).context("invalid settings.toml")?;
     let table = expected
         .as_table_mut()
         .context("settings root must be a table")?;
@@ -608,9 +618,9 @@ pub(super) fn rewrite_root_settings(
     let mut missing = String::new();
     for (key, value) in updates {
         if let Some(value) = value {
-            table.insert(key.clone(), value.clone());
+            let _previous_value = table.insert(key.clone(), value.clone());
         } else {
-            table.remove(key);
+            let _previous_value = table.remove(key);
         }
         if let Some(span) = spans.get(key) {
             let range = span.span();
@@ -620,7 +630,9 @@ pub(super) fn rewrite_root_settings(
                 }
             } else {
                 let prefix = content.get(..range.start).context("invalid TOML span")?;
-                let start = prefix.rfind('\n').map_or(0, |offset| offset + 1);
+                let start = prefix
+                    .rfind('\n')
+                    .map_or(0, |offset| offset.saturating_add(1));
                 edits.push((start..range.end, String::new()));
             }
         } else if let Some(value) = value {
@@ -628,12 +640,13 @@ pub(super) fn rewrite_root_settings(
         }
     }
     if !missing.is_empty() {
-        let mut offset = 0;
+        // Split lines partition content, so these offsets remain bounded by its byte length.
+        let mut offset = 0_usize;
         let first_table = content
             .split_inclusive('\n')
             .find_map(|line| {
                 let start = offset;
-                offset += line.len();
+                offset = offset.saturating_add(line.len());
                 let within_value = spans
                     .values()
                     .any(|v| !v.get_ref().is_table() && v.span().contains(&start));
@@ -659,7 +672,7 @@ pub(super) fn rewrite_root_settings(
         output.replace_range(range, &replacement);
     }
     let actual: toml::Value = toml::from_str(&output)
-        .map_err(|_| anyhow::anyhow!("settings rewrite failed verification; no changes saved"))?;
+        .context("settings rewrite failed verification; no changes saved")?;
     ensure!(
         actual == expected,
         "settings rewrite changed unrelated values; no changes saved"
@@ -705,10 +718,12 @@ pub(crate) fn atomic_replace(path: &Path, content: &str) -> anyhow::Result<()> {
             Err(error) => return Err(error.into()),
         }
     }
-    temporary
-        .persist(path)
-        .map_err(|e| e.error)
-        .context("atomically replace settings.toml")?;
+    drop(
+        temporary
+            .persist(path)
+            .map_err(|e| e.error)
+            .context("atomically replace settings.toml")?,
+    );
     #[cfg(unix)]
     std::fs::File::open(parent)?.sync_all()?;
     Ok(())
@@ -779,7 +794,8 @@ mod tests {
             "CREATE TABLE sample(value TEXT); INSERT INTO sample VALUES ('original');",
         )?;
         let tx = database.transaction()?;
-        tx.execute("UPDATE sample SET value='pending'", [])?;
+        tx.execute("UPDATE sample SET value='pending'", [])
+            .map(|_affected_rows| ())?;
         let changes = BTreeMap::from([("port".to_owned(), Some(toml::Value::Integer(9000)))]);
         let result = super::save_root_and_commit_at(&path, &changes, move || {
             drop(tx);
@@ -838,20 +854,20 @@ mod tests {
             ("rate_limit_policy", "none"),
         ] {
             let mut invalid = form.clone();
-            invalid.insert(key.to_owned(), input.to_owned());
+            drop(invalid.insert(key.to_owned(), input.to_owned()));
             ensure!(
                 parse_network_form(&invalid).is_err(),
                 "must reject {key}={input}"
             );
         }
         let mut invalid = form.clone();
-        invalid.insert("cookie_secret".to_owned(), "replacement".to_owned());
+        drop(invalid.insert("cookie_secret".to_owned(), "replacement".to_owned()));
         ensure!(
             parse_network_form(&invalid).is_err(),
             "network form must not accept secret rotation"
         );
         let mut missing = form;
-        missing.remove("trusted_proxy_cidrs");
+        drop(missing.remove("trusted_proxy_cidrs"));
         ensure!(
             parse_network_form(&missing).is_err(),
             "partial form must not save"
@@ -992,7 +1008,7 @@ mod tests {
         let before = "# preserved\nport = 8080\nrate_limit_gets = 60\nenable_tor_support = false\n[tls]\nenabled = true\nport = 8443\n";
         std::fs::write(&path, before)?;
         let mut form = valid_form()?;
-        form.insert("port".to_owned(), "8443".to_owned());
+        drop(form.insert("port".to_owned(), "8443".to_owned()));
         let invalid = parse_network_form(&form)?;
         let empty = BTreeMap::new();
         ensure!(
@@ -1003,8 +1019,8 @@ mod tests {
             std::fs::read_to_string(&path)? == before,
             "failure must leave original bytes intact"
         );
-        form.insert("port".to_owned(), "9000".to_owned());
-        form.insert("rate_limit_gets".to_owned(), "120".to_owned());
+        drop(form.insert("port".to_owned(), "9000".to_owned()));
+        drop(form.insert("rate_limit_gets".to_owned(), "120".to_owned()));
         let valid = parse_network_form(&form)?;
         let active = resolve_file(before, &Environment::Values(&empty))?;
         save_network_at(&path, &valid, &Environment::Values(&empty))?;
@@ -1168,11 +1184,11 @@ pub(crate) fn settings_lease(path: &Path) -> anyhow::Result<std::fs::File> {
         }
     }
     let mut options = std::fs::File::options();
-    options.read(true).write(true).create(true).truncate(false);
+    let _access_options = options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options
+        let _platform_options = options
             .mode(0o600)
             .custom_flags(i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits())?);
     }

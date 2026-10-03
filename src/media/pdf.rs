@@ -47,7 +47,7 @@ pub(crate) fn render(input: &Path, output: &Path, max_dim: u32) -> Result<()> {
         "PDF preview exceeds source budget"
     );
     let mut bytes = Vec::new();
-    source.take(MAX_PREVIEW_BYTES + 1).read_to_end(&mut bytes)?;
+    let _bytes_read = source.take(MAX_PREVIEW_BYTES + 1).read_to_end(&mut bytes)?;
     let source_length = preflight(&bytes)?;
     let pdf = Pdf::new(bytes).map_err(|error| anyhow::anyhow!("PDF parse failed: {error:?}"))?;
     ensure!(
@@ -70,7 +70,10 @@ pub(crate) fn render(input: &Path, output: &Path, max_dim: u32) -> Result<()> {
     let pixel_height = (height * scale).round().clamp(1.0, f32::from(max_dim)) as u16;
     super::images::validate_dimensions(u32::from(pixel_width), u32::from(pixel_height))?;
     ensure!(
-        source_length * u64::from(pixel_width) * u64::from(pixel_height) <= MAX_PREVIEW_WORK,
+        source_length
+            .checked_mul(u64::from(pixel_width))
+            .and_then(|work| work.checked_mul(u64::from(pixel_height)))
+            .is_some_and(|work| work <= MAX_PREVIEW_WORK),
         "PDF preview exceeds raster work budget"
     );
     let warning = Arc::new(AtomicBool::new(false));
@@ -108,7 +111,7 @@ pub(crate) fn render(input: &Path, output: &Path, max_dim: u32) -> Result<()> {
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     image::DynamicImage::ImageRgba8(image)
         .write_to(temporary.as_file_mut(), image::ImageFormat::WebP)?;
-    temporary.persist(output).context("publish PDF preview")?;
+    drop(temporary.persist(output).context("publish PDF preview")?);
     Ok(())
 }
 
@@ -169,7 +172,7 @@ fn preflight_syntax(bytes: &[u8]) -> Result<()> {
         for value in token.split(|byte| b"/[]<>(){}%".contains(byte)) {
             if let Ok(number) = std::str::from_utf8(value).unwrap_or("").parse::<f64>() {
                 ensure!(
-                    number.is_finite() && number.abs() <= 1_000_000.0,
+                    number.is_finite() && number.abs() <= 1_000_000.0_f64,
                     "PDF numeric value exceeds safety budget"
                 );
             }
@@ -262,7 +265,7 @@ fn preflight_page_tree(bytes: &[u8]) -> Result<u64> {
             "duplicate PDF objects require placeholder preview"
         );
     }
-    let mut leaves = 0;
+    let mut leaves = 0_usize;
     for dict in objects.values() {
         if !dict.contains_key(b"Kids") {
             continue;
@@ -271,7 +274,7 @@ fn preflight_page_tree(bytes: &[u8]) -> Result<u64> {
             anyhow::bail!("indirect PDF page lists require placeholder preview");
         };
         for kid in kids.raw_iter() {
-            leaves += 1;
+            leaves = leaves.checked_add(1).context("PDF page count overflow")?;
             ensure!(leaves <= MAX_PREVIEW_OBJECTS, "PDF page budget exceeded");
             let reference = kid
                 .as_obj_ref()
@@ -304,7 +307,13 @@ fn preflight_stream(dict: &Dict<'_>, stream: &[u8], expanded_bytes: &mut u64) ->
             .context("PDF expanded content exceeds source budget")?;
         let mut inflater = flate2::bufread::ZlibDecoder::new(stream);
         let mut buffer = Vec::new();
-        (&mut inflater).take(limit + 1).read_to_end(&mut buffer)?;
+        let _bytes_read = (&mut inflater)
+            .take(
+                limit
+                    .checked_add(1)
+                    .context("PDF expanded content limit overflow")?,
+            )
+            .read_to_end(&mut buffer)?;
         ensure!(
             u64::try_from(buffer.len())? <= limit,
             "PDF expanded content exceeds source budget"
@@ -343,7 +352,7 @@ fn preflight_content(program: &[u8]) -> Result<()> {
             reader.peek_byte(),
             Some(b'/' | b'.' | b'+' | b'-' | b'0'..=b'9' | b'[' | b'<' | b'(')
         ) {
-            reader
+            let _operand = reader
                 .read_without_context::<Object<'_>>()
                 .context("invalid PDF content operand")?;
         } else {
@@ -437,7 +446,7 @@ mod tests {
             ensure!(preflight(bytes).is_err(), "hostile PDF passed preflight");
         }
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
-        preflight(&std::fs::read(root.join("simple.pdf"))?)?;
+        let _expanded_bytes = preflight(&std::fs::read(root.join("simple.pdf"))?)?;
         Ok(())
     }
     #[test]

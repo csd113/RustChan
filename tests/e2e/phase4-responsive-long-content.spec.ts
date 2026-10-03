@@ -107,7 +107,7 @@ test.describe('phase 4 responsive and long-content stress', () => {
     await expectNoHorizontalOverflow(page, 'long thread');
     await expect(page.locator('.post')).toHaveCount(15);
     await expect(page.locator('.file-info a').first()).toContainText(/very-long-upload-fil/);
-    await expect(page.locator('.file-info a').first()).toHaveAttribute('href', /\.png$/);
+    await expect(page.locator('.file-info a').first()).toHaveAttribute('href', /\.webp$/);
     await expectNoCoveredCenters(page.locator('.thread-nav a:visible, .thread-nav button:visible, .post-controls button:visible'), 'long thread controls');
 
     const longReason = `phase4 reason ${longToken} ${'policy '.repeat(40)}`;

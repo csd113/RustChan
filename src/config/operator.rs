@@ -2,7 +2,7 @@
 
 use super::Environment;
 use crate::config::admin::{InputKind, SettingDefinition};
-use anyhow::ensure;
+use anyhow::{ensure, Context as _};
 
 /// Additional policies consumed by authentication, paging and request boundaries.
 #[derive(Debug, Clone)]
@@ -157,7 +157,8 @@ impl OperatorSettings {
         if let Some(filter) = &self.log_filter {
             ensure!(filter.len() <= 1024, "log filter is too long");
             tracing_subscriber::EnvFilter::try_new(filter)
-                .map_err(|_| anyhow::anyhow!("invalid tracing filter"))?;
+                .context("invalid tracing filter")
+                .map(|_validated_value| ())?;
         }
         Ok(())
     }

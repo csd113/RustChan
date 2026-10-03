@@ -34,14 +34,16 @@ pub(super) fn check_disk_space(_dir: &Path, _needed_bytes: usize) -> Result<()> 
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     //! Tests for filesystem-capacity conversion and query failure behavior.
 
+    #[cfg(unix)]
     use super::{available_bytes_from_blocks, check_disk_space};
 
     /// Converts available filesystem blocks using the reported fragment size.
     #[test]
+    #[cfg(unix)]
     fn converts_available_blocks_to_bytes() {
         assert_eq!(
             available_bytes_from_blocks(750, 1024),
@@ -52,6 +54,7 @@ mod tests {
 
     /// Saturates instead of wrapping an unrepresentable filesystem capacity.
     #[test]
+    #[cfg(unix)]
     fn saturates_unrepresentable_available_capacity() {
         assert_eq!(
             available_bytes_from_blocks(u64::MAX, 2),
@@ -62,6 +65,7 @@ mod tests {
 
     /// Preserves fail-open behavior when filesystem metadata cannot be queried.
     #[test]
+    #[cfg(unix)]
     fn query_failure_skips_the_preflight() -> anyhow::Result<()> {
         let temp_dir = tempfile::tempdir()?;
         let missing_dir = temp_dir.path().join("missing");

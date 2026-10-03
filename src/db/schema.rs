@@ -1026,7 +1026,7 @@ fn themes_table_is_legacy_repairable(expected: &TableShape, actual: &TableShape)
     }
 
     let mut actual_indexes = actual.indexes.clone();
-    actual_indexes.remove(LEGACY_THEME_SORT_INDEX);
+    let _previous_value = actual_indexes.remove(LEGACY_THEME_SORT_INDEX);
     actual_indexes == expected.indexes
 }
 
@@ -1339,12 +1339,14 @@ fn restore_autoincrement_sequence(
         .with_context(|| format!("Read rebuilt {table} maximum id failed"))?;
     let sequence = prior_sequence.max(current_max);
     conn.execute("DELETE FROM sqlite_sequence WHERE name = ?1", [table])
-        .with_context(|| format!("Clear rebuilt {table} AUTOINCREMENT sequence failed"))?;
+        .with_context(|| format!("Clear rebuilt {table} AUTOINCREMENT sequence failed"))
+        .map(|_affected_rows| ())?;
     conn.execute(
         "INSERT INTO sqlite_sequence (name, seq) VALUES (?1, ?2)",
         rusqlite::params![table, sequence],
     )
-    .with_context(|| format!("Restore rebuilt {table} AUTOINCREMENT sequence failed"))?;
+    .with_context(|| format!("Restore rebuilt {table} AUTOINCREMENT sequence failed"))
+    .map(|_affected_rows| ())?;
     Ok(())
 }
 
@@ -1642,7 +1644,8 @@ fn schema_version_metadata_issues(conn: &rusqlite::Connection) -> Result<Vec<Str
 /// schema version is not the release baseline.
 pub(super) fn verify_database_ready(conn: &rusqlite::Connection) -> Result<()> {
     conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
-        .context("Database did not answer a readiness query")?;
+        .context("Database did not answer a readiness query")
+        .map(|_readiness_value| ())?;
     let version: String = conn
         .query_row(
             "SELECT CAST(version AS TEXT) FROM schema_version",
@@ -1684,7 +1687,7 @@ fn schema_shape(conn: &rusqlite::Connection) -> Result<SchemaShape> {
     let mut tables = BTreeMap::new();
     for (name, object) in &objects {
         if object.kind == "table" {
-            tables.insert(name.clone(), table_shape(conn, name)?);
+            let _previous_value = tables.insert(name.clone(), table_shape(conn, name)?);
         }
     }
     Ok(SchemaShape { objects, tables })
@@ -1720,7 +1723,7 @@ fn schema_objects(conn: &rusqlite::Connection) -> Result<BTreeMap<String, Schema
     let mut objects = BTreeMap::new();
     for row in rows {
         let (name, object) = row.context("Read schema object failed")?;
-        objects.insert(name, object);
+        let _previous_value = objects.insert(name, object);
     }
     Ok(objects)
 }
@@ -1774,7 +1777,7 @@ fn table_columns(
     let mut columns = BTreeMap::new();
     for row in rows {
         let (name, column) = row.with_context(|| format!("Read column for {table} failed"))?;
-        columns.insert(name, column);
+        let _previous_value = columns.insert(name, column);
     }
     Ok(columns)
 }
@@ -1806,7 +1809,8 @@ fn table_foreign_keys(
 
     let mut foreign_keys = BTreeSet::new();
     for row in rows {
-        foreign_keys.insert(row.with_context(|| format!("Read foreign key for {table} failed"))?);
+        let _inserted = foreign_keys
+            .insert(row.with_context(|| format!("Read foreign key for {table} failed"))?);
     }
     Ok(foreign_keys)
 }
@@ -1840,7 +1844,7 @@ fn table_indexes(conn: &rusqlite::Connection, table: &str) -> Result<BTreeMap<St
         } else {
             schema_sql_for_object(conn, "index", &name)?
         };
-        indexes.insert(
+        let _previous_value = indexes.insert(
             name.clone(),
             IndexShape {
                 unique,
@@ -2080,9 +2084,9 @@ fn schema_sql_tokens(sql: &str) -> Vec<String> {
     let mut current = String::new();
     let mut chars = sql.chars().peekable();
 
-    let flush_current = |current: &mut String, tokens: &mut Vec<String>| {
-        if !current.is_empty() {
-            tokens.push(std::mem::take(current));
+    let flush_current = |fragment: &mut String, output: &mut Vec<String>| {
+        if !fragment.is_empty() {
+            output.push(std::mem::take(fragment));
         }
     };
 
@@ -2160,28 +2164,36 @@ fn check_constraints_from_tokens(tokens: &[String]) -> BTreeSet<String> {
     while let Some(token) = tokens.get(index) {
         let next_index = index.saturating_add(1);
         if token != "check" || tokens.get(next_index).map(String::as_str) != Some("(") {
-            index += 1;
+            index = next_index;
             continue;
         }
 
         let start = next_index;
-        let mut depth = 0_i64;
+        let mut depth = 0_usize;
         let mut end = start;
         while let Some(expression_token) = tokens.get(end) {
             match expression_token.as_str() {
-                "(" => depth += 1,
+                "(" => {
+                    let Some(next_depth) = depth.checked_add(1) else {
+                        break;
+                    };
+                    depth = next_depth;
+                }
                 ")" => {
-                    depth -= 1;
+                    let Some(next_depth) = depth.checked_sub(1) else {
+                        break;
+                    };
+                    depth = next_depth;
                     if depth == 0 {
                         if let Some(expression) = tokens.get(start..=end) {
-                            constraints.insert(expression.join(" "));
+                            let _inserted = constraints.insert(expression.join(" "));
                         }
                         break;
                     }
                 }
                 _ => {}
             }
-            end += 1;
+            end = end.saturating_add(1);
         }
         index = end.saturating_add(1);
     }
@@ -2251,7 +2263,8 @@ mod tests {
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
             [version],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         Ok(())
     }
 
@@ -2419,22 +2432,25 @@ mod tests {
 
         let results = std::thread::scope(|scope| {
             let mut handles = Vec::new();
-            for _ in 0..2 {
+            for _ in 0_i32..2_i32 {
                 let path = database_path.clone();
                 let barrier = std::sync::Arc::clone(&barrier);
                 handles.push(scope.spawn(move || -> Result<()> {
                     let conn = rusqlite::Connection::open(path)?;
                     conn.busy_timeout(std::time::Duration::from_secs(5))?;
-                    barrier.wait();
+                    let _barrier_state = barrier.wait();
                     install_or_migrate_schema(&conn)
                 }));
             }
             handles
                 .into_iter()
                 .map(|handle| {
-                    handle
-                        .join()
-                        .map_err(|_| anyhow::anyhow!("schema installer thread panicked"))?
+                    handle.join().map_err(|panic_payload| {
+                        anyhow::anyhow!(
+                            "schema installer thread panicked: {}",
+                            crate::media::process::panic_message(panic_payload.as_ref())
+                        )
+                    })?
                 })
                 .collect::<Result<Vec<_>>>()
         })?;
@@ -2464,11 +2480,13 @@ mod tests {
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
             [baseline_schema_version()],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         conn.execute(
             "INSERT INTO boards (id, short_name, name) VALUES (1, 'b', 'Random')",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
 
         normalize_database_schema_version(&conn)?;
 
@@ -2629,7 +2647,8 @@ mod tests {
              )
              VALUES (1, 'b', 'Random', 0, 1, 0, 1, 'override', 'public')",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         rebuild_boards_with_historical_v41_shape(&conn)?;
         conn.execute_batch(
             "CREATE INDEX idx_themes_enabled_sort
@@ -2752,7 +2771,8 @@ mod tests {
     fn unknown_schema_object_fails_closed() -> Result<()> {
         let conn = rusqlite::Connection::open_in_memory()?;
         install_or_migrate_schema(&conn)?;
-        conn.execute("CREATE TABLE operator_notes (body TEXT)", [])?;
+        conn.execute("CREATE TABLE operator_notes (body TEXT)", [])
+            .map(|_affected_rows| ())?;
 
         let error = normalize_database_schema_version(&conn)
             .err()
@@ -2778,7 +2798,8 @@ mod tests {
         conn.execute(
             "INSERT INTO boards (short_name, name) VALUES ('fresh', 'Fresh Board')",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
 
         let flags: (i64, i64, i64, i64, i64) = conn
             .query_row(
@@ -2850,17 +2871,20 @@ mod tests {
         conn.execute(
             "INSERT INTO boards (id, short_name, name) VALUES (1, 'b', 'Random')",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         conn.execute(
             "INSERT INTO threads (id, board_id, subject) VALUES (10, 1, 'thread')",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         conn.execute(
             "INSERT INTO posts
              (id, thread_id, board_id, body, body_html, deletion_token, is_op)
              VALUES (100, 10, 1, 'body', 'body', 'token', 1)",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
 
         for sql in [
             "UPDATE boards SET nsfw = 2 WHERE id = 1",
@@ -2911,7 +2935,8 @@ mod tests {
             "INSERT INTO background_jobs (id, job_type, payload)
              VALUES (1, 'spam_check', '{}')",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         assert_sql_rejected(
             &conn,
             "UPDATE background_jobs SET status = 'stuck' WHERE id = 1",
@@ -3086,7 +3111,8 @@ mod tests {
             "INSERT INTO boards (id, short_name, name, max_threads)
              VALUES (1, 'b', 'Random', 0)",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
 
         let error = normalize_database_schema_version(&conn)
             .err()
@@ -3122,7 +3148,8 @@ mod tests {
         conn.execute(
             "INSERT INTO boards (id, short_name, name) VALUES (1, 'b', 'Random')",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         let access_trigger: String = conn.query_row(
             "SELECT sql FROM sqlite_schema
              WHERE type = 'trigger' AND name = 'boards_access_mode_update'",
@@ -3133,7 +3160,8 @@ mod tests {
         conn.execute(
             "UPDATE boards SET access_mode = 'unknown_mode' WHERE id = 1",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         conn.execute_batch(&access_trigger)?;
         conn.execute_batch(
             "CREATE TABLE schema_version (version TEXT NOT NULL PRIMARY KEY);
@@ -3197,7 +3225,8 @@ mod tests {
             next_id == 501,
             "a rebuild must not reuse an AUTOINCREMENT id issued before deletion"
         );
-        conn.execute("DELETE FROM boards WHERE id = 1", [])?;
+        conn.execute("DELETE FROM boards WHERE id = 1", [])
+            .map(|_affected_rows| ())?;
         let child_count =
             conn.query_row("SELECT COUNT(*) FROM threads WHERE id = 10", [], |row| {
                 row.get::<_, i64>(0)

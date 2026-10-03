@@ -51,12 +51,14 @@ pub(super) fn resolve_tor_hidden_service_keys_availability(
         return Err(AppError::BadRequest(unavailable_message.to_owned()));
     };
 
-    std::fs::read_dir(&dir).map_err(|error| {
-        AppError::BadRequest(format!(
+    std::fs::read_dir(&dir)
+        .map_err(|error| {
+            AppError::BadRequest(format!(
             "{unavailable_message} The configured identity directory {} could not be read: {error}",
             dir.display()
         ))
-    })?;
+        })
+        .map(|_completed_value| ())?;
 
     Ok(TorHiddenServiceKeysAvailability::Available(dir))
 }
@@ -130,9 +132,13 @@ pub(super) fn log_backup_progress(progress: &BackupProgress) {
         return;
     }
 
-    let percent = done.saturating_mul(100) / total.max(1);
+    let Some(percent) = done.saturating_mul(100).checked_div(total) else {
+        return;
+    };
     let prev_done = done.saturating_sub(1);
-    let prev_percent = prev_done.saturating_mul(100) / total.max(1);
+    let Some(prev_percent) = prev_done.saturating_mul(100).checked_div(total) else {
+        return;
+    };
     let should_log = total <= 50
         || done == 1
         || done == total
@@ -215,8 +221,8 @@ fn remap_numeric_references(body: &str, prefix: &str, pairs: &[(String, String)]
                     break;
                 }
                 Some(rel) => {
-                    let abs = pos + rel;
-                    let after = abs + needle.len();
+                    let abs = pos.saturating_add(rel);
+                    let after = abs.saturating_add(needle.len());
                     let next_is_digit = bytes.get(after).is_some_and(u8::is_ascii_digit);
                     let Some(before_match) = remaining.get(..rel) else {
                         break;
@@ -345,9 +351,9 @@ pub(super) fn read_limited_bytes<R: std::io::Read>(
     label: &str,
 ) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    copy_limited(reader, &mut bytes, max_bytes).map_err(|error| {
-        AppError::BadRequest(format!("{label} exceeds safe size limit: {error}"))
-    })?;
+    copy_limited(reader, &mut bytes, max_bytes)
+        .map_err(|error| AppError::BadRequest(format!("{label} exceeds safe size limit: {error}")))
+        .map(|_completed_value| ())?;
     Ok(bytes)
 }
 
@@ -401,7 +407,8 @@ pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(
             RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
             "Restored uploads",
         )
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Write {}: {e}", target.display())))?;
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Write {}: {e}", target.display())))
+        .map(|_completed_value| ())?;
     }
     Ok(())
 }
@@ -427,7 +434,10 @@ pub(super) fn validate_restore_safe_entry_name(name: &str) -> Result<()> {
     for component in Path::new(name).components() {
         match component {
             std::path::Component::Normal(_) => {}
-            _ => {
+            std::path::Component::Prefix(_)
+            | std::path::Component::RootDir
+            | std::path::Component::CurDir
+            | std::path::Component::ParentDir => {
                 return Err(AppError::BadRequest(format!(
                     "Backup contains suspicious path '{name}'"
                 )));
@@ -655,7 +665,7 @@ mod tests {
             zip.write_all(bytes)
                 .with_context(|| format!("write ZIP entry {name}"))?;
         }
-        zip.finish().context("finish ZIP archive")?;
+        drop(zip.finish().context("finish ZIP archive")?);
         Ok(())
     }
 
@@ -664,7 +674,8 @@ mod tests {
         let db_path = temp_dir.path().join("partial.sqlite3");
         let conn = rusqlite::Connection::open(&db_path).context("open SQLite database")?;
         conn.execute("CREATE TABLE boards (id INTEGER PRIMARY KEY)", [])
-            .context("create partial boards table")?;
+            .context("create partial boards table")
+            .map(|_completed_value| ())?;
         drop(conn);
         std::fs::read(db_path).context("read partial SQLite database")
     }
@@ -717,7 +728,7 @@ mod tests {
             zip.start_file("uploads/../../escape.txt", options)
                 .context("start suspicious ZIP entry")?;
             std::io::Write::write_all(&mut zip, b"bad").context("write suspicious ZIP entry")?;
-            zip.finish().context("finish ZIP archive")?;
+            drop(zip.finish().context("finish ZIP archive")?);
         }
 
         let file = std::fs::File::open(&zip_path).context("open ZIP file")?;
@@ -767,7 +778,7 @@ mod tests {
             zip.start_file("uploads/test/ok.txt", options)
                 .context("start valid ZIP entry")?;
             std::io::Write::write_all(&mut zip, b"ok").context("write valid ZIP entry")?;
-            zip.finish().context("finish ZIP archive")?;
+            drop(zip.finish().context("finish ZIP archive")?);
         }
 
         let file = std::fs::File::open(&zip_path).context("open ZIP file")?;
@@ -922,7 +933,7 @@ mod tests {
         let zip_path = temp_dir.path().join("legacy-full.zip");
         let db_bytes = super::super::storage::database_snapshot_fixture()?;
         let manifest = json!({
-            "version": 2,
+            "version": 2_i32,
             "generated_at": 1_700_000_000_i64,
             "rustchan_version": "1.1.3",
             "db_bytes": u64::try_from(db_bytes.len()).context("convert database size")?,
@@ -985,30 +996,30 @@ mod tests {
         let temp_dir = tempfile::tempdir().context("create temporary directory")?;
         let zip_path = temp_dir.path().join("board.zip");
         let manifest = json!({
-            "version": 1,
+            "version": 1_i32,
             "board": {
-                "id": 1,
+                "id": 1_i32,
                 "short_name": "b",
                 "name": "Random",
                 "description": "",
                 "nsfw": false,
-                "max_threads": 100,
-                "max_archived_threads": 150,
-                "bump_limit": 300,
+                "max_threads": 100_i32,
+                "max_archived_threads": 150_i32,
+                "bump_limit": 300_i32,
                 "allow_images": true,
                 "allow_video": true,
                 "allow_audio": true,
                 "allow_any_files": false,
                 "allow_tripcodes": true,
-                "edit_window_secs": 300,
+                "edit_window_secs": 300_i32,
                 "allow_editing": true,
                 "allow_archive": true,
                 "allow_video_embeds": true,
                 "allow_captcha": false,
                 "show_poster_ids": false,
                 "collapse_greentext": true,
-                "post_cooldown_secs": 0,
-                "created_at": 1_700_000_000
+                "post_cooldown_secs": 0_i32,
+                "created_at": 1_700_000_000_i32
             },
             "threads": [],
             "posts": [],

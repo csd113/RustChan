@@ -8,11 +8,11 @@ use tracing::error;
 #[derive(Debug, Error)]
 /// Error returned by application operations and HTTP handlers.
 pub enum AppError {
-    /// 404 — board or thread not found
+    /// 404 — board or thread not found.
     #[error("Not found: {0}")]
     NotFound(String),
 
-    /// 400 — bad input from user
+    /// 400 — bad input from user.
     #[error("Bad request: {0}")]
     BadRequest(String),
 
@@ -30,19 +30,19 @@ pub enum AppError {
         csrf_token: String,
     },
 
-    /// 413 — upload body too large
+    /// 413 — upload body too large.
     #[error("Upload too large: {0}")]
     UploadTooLarge(String),
 
-    /// 415 — MIME type not accepted
+    /// 415 — MIME type not accepted.
     #[error("Invalid media type: {0}")]
     InvalidMediaType(String),
 
-    /// 409 — resource already exists or snapshot already imported
+    /// 409 — resource already exists or snapshot already imported.
     #[error("Conflict: {0}")]
     Conflict(String),
 
-    /// 503 — database write contention; client should retry
+    /// 503 — database write contention; client should retry.
     #[error("Database busy — please retry")]
     DbBusy,
 
@@ -202,7 +202,7 @@ impl IntoResponse for AppError {
         )
             .into_response();
         if retry_after {
-            response
+            let _previous_value = response
                 .headers_mut()
                 .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
         }

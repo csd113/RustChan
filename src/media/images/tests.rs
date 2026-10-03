@@ -28,7 +28,7 @@ fn gif_fixture(path: &Path, repeat: gif::Repeat) -> Result<()> {
             ..Default::default()
         })?;
     }
-    encoder.into_inner()?;
+    let _writer = encoder.into_inner()?;
     Ok(())
 }
 
@@ -56,10 +56,13 @@ fn gif_webp_preserves_partial_updates_disposal_delays_and_loops() -> Result<()> 
         ensure!(loops == expected_loops, "loop count changed");
         let actual = decoder.into_frames().collect_frames()?;
         ensure!(actual.len() == 4, "frame count changed");
-        for (actual, expected) in actual.iter().zip(&expected) {
-            ensure!(actual.delay() == expected.delay(), "frame delay changed");
+        for (actual_frame, expected_frame) in actual.iter().zip(&expected) {
             ensure!(
-                actual.buffer() == expected.buffer(),
+                actual_frame.delay() == expected_frame.delay(),
+                "frame delay changed"
+            );
+            ensure!(
+                actual_frame.buffer() == expected_frame.buffer(),
                 "composited pixels changed"
             );
         }
@@ -213,7 +216,7 @@ fn static_formats_encode_to_decodable_metadata_free_webp() -> Result<()> {
         let expected = decode_still(&input)?.into_rgba8();
         let actual = decode_still(&output)?.into_rgba8();
         let thumbnail = dir.path().join(format!("thumb-{ext}.webp"));
-        super::super::thumbnail::generate_thumbnail(
+        let _thumbnail_path = super::super::thumbnail::generate_thumbnail(
             &input,
             &format!("image/{ext}"),
             &thumbnail,
@@ -268,7 +271,8 @@ fn jpeg_exif_rotation_survives_conversion_and_thumbnailing_without_tools() -> Re
         "JPEG EXIF rotation was lost"
     );
     let thumbnail = dir.path().join("thumb.webp");
-    super::super::thumbnail::generate_thumbnail(&input, "image/jpeg", &thumbnail, 6, false)?;
+    let _thumbnail_path =
+        super::super::thumbnail::generate_thumbnail(&input, "image/jpeg", &thumbnail, 6, false)?;
     ensure!(
         image::open(thumbnail)?.into_rgba8().dimensions() == (3, 6),
         "oriented thumbnail dimensions changed"
@@ -307,7 +311,8 @@ fn large_valid_image_and_truncated_formats_preserve_atomic_output() -> Result<()
     let pixels =
         DynamicImage::ImageRgba8(RgbaImage::from_pixel(4096, 2048, Rgba([42, 73, 101, 128])));
     pixels.save_with_format(&input, ImageFormat::Png)?;
-    super::super::thumbnail::generate_thumbnail(&input, "image/png", &output, 256, false)?;
+    let _thumbnail_path =
+        super::super::thumbnail::generate_thumbnail(&input, "image/png", &output, 256, false)?;
     let image = decode_still(&output)?.into_rgba8();
     ensure!(
         image.dimensions() == (256, 128),
@@ -324,8 +329,8 @@ fn large_valid_image_and_truncated_formats_preserve_atomic_output() -> Result<()
         ImageFormat::Tiff,
         ImageFormat::WebP,
     ] {
-        let image = DynamicImage::ImageRgb8(image::RgbImage::new(32, 16));
-        image.save_with_format(&input, format)?;
+        let fixture_image = DynamicImage::ImageRgb8(image::RgbImage::new(32, 16));
+        fixture_image.save_with_format(&input, format)?;
         let bytes = std::fs::read(&input)?;
         std::fs::write(&input, bytes.get(..12).context("fixture too short")?)?;
         std::fs::write(&output, b"previous thumbnail")?;
@@ -346,7 +351,7 @@ fn animation_output_budget_fails_before_writing_the_next_frame() -> Result<()> {
     let mut output = tempfile::tempfile()?;
     let length = super::super::UNTRUSTED_IMAGE_DECODER_MAX_ALLOC_BYTES - 1;
     output.set_len(length)?;
-    output.seek(SeekFrom::End(0))?;
+    let _position = output.seek(SeekFrom::End(0))?;
     let pixels = RgbaImage::from_pixel(4, 3, Rgba([1, 2, 3, 255]));
     ensure!(
         write_animation_frame(&mut output, &pixels, 100).is_err(),

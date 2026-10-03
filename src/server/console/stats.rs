@@ -303,16 +303,17 @@ mod tests {
         drop(connection);
         let snapshot = read_database_stats(&pool)?;
         assert_eq!(snapshot.boards, 1, "healthy board count must be retained");
-        let connection = pool.get()?;
-        connection.execute("UPDATE boards SET short_name = NULL", [])?;
-        drop(connection);
+        let malformed_connection = pool.get()?;
+        let _changed_rows =
+            malformed_connection.execute("UPDATE boards SET short_name = NULL", [])?;
+        drop(malformed_connection);
         assert!(
             read_database_stats(&pool).is_err(),
             "a malformed board row must fail the whole snapshot"
         );
-        let connection = pool.get()?;
-        connection.execute("DROP TABLE posts", [])?;
-        drop(connection);
+        let incomplete_connection = pool.get()?;
+        let _dropped_table_rows = incomplete_connection.execute("DROP TABLE posts", [])?;
+        drop(incomplete_connection);
         assert!(
             read_database_stats(&pool).is_err(),
             "SQL errors must not turn into healthy zero counts"

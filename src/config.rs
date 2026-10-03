@@ -185,9 +185,9 @@ pub fn configure_port_override(port: Option<u16>) -> anyhow::Result<()> {
         return Ok(());
     };
     anyhow::ensure!(port != 0, "--port must not be zero");
-    CLI_PORT_OVERRIDE
-        .set(port)
-        .map_err(|_| anyhow::anyhow!("launcher port was already configured"))
+    CLI_PORT_OVERRIDE.set(port).map_err(|rejected_port| {
+        anyhow::anyhow!("launcher port {rejected_port} was already configured")
+    })
 }
 
 /// Configure an explicit runtime data directory before configuration is loaded.
@@ -201,9 +201,12 @@ pub fn configure_data_dir(path: Option<&Path>) -> anyhow::Result<()> {
         return Ok(());
     };
     let resolved = resolve_data_dir_override(path)?;
-    DATA_DIR_OVERRIDE
-        .set(resolved)
-        .map_err(|_| anyhow::anyhow!("runtime data directory was already configured"))
+    DATA_DIR_OVERRIDE.set(resolved).map_err(|rejected_path| {
+        anyhow::anyhow!(
+            "runtime data directory {} was already configured",
+            rejected_path.display()
+        )
+    })
 }
 
 #[must_use]
@@ -911,6 +914,10 @@ pub fn describe_timeout_secs(timeout_secs: u64) -> String {
     reason = "runtime configuration intentionally models independent operator-controlled feature switches"
 )]
 /// Fully resolved runtime configuration.
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "settings remain public, while startup provenance is maintained only inside the crate"
+)]
 pub struct Config {
     /// Authentication, public paging and request-deadline policies.
     pub operator: operator::OperatorSettings,
@@ -1295,7 +1302,7 @@ impl Config {
         // CHAN_BIND's port. Resolve that before validation and state display.
         let bind_addr = cli_port.map_or_else(
             || bind_addr.clone(),
-            |port| format_bind_addr(bind_host_for_family(&bind_addr), port),
+            |override_port| format_bind_addr(bind_host_for_family(&bind_addr), override_port),
         );
         let tor_only = environment.boolean("CHAN_TOR_ONLY", s.tor_only.unwrap_or(false));
         let enable_tor_support =
@@ -1628,21 +1635,23 @@ impl Config {
             }
         }
         for cidr in &self.trusted_proxy_cidrs {
-            cidr.parse::<ipnet::IpNet>().map_err(|error| {
-                anyhow::anyhow!(
+            cidr.parse::<ipnet::IpNet>()
+                .map_err(|error| {
+                    anyhow::anyhow!(
                     "CONFIG ERROR: trusted_proxy_cidrs entry '{cidr}' is not valid CIDR: {error}"
                 )
-            })?;
+                })
+                .map(|_validated_value| ())?;
         }
         for host in &self.public_hosts {
             normalize_public_host(host).ok_or_else(|| {
                 anyhow::anyhow!(
                     "CONFIG ERROR: public_hosts entry '{host}' must be a bare hostname or IP literal."
                 )
-            })?;
+            }).map(|_operation_summary| ())?;
         }
         if let Some(path) = &self.backup_directory {
-            prepare_backup_directory(path, self)?;
+            prepare_backup_directory(path, self).map(|_validated_path| ())?;
         }
         // Verify the upload directory is writable.
         let upload_path = Path::new(&self.upload_dir);
@@ -1690,7 +1699,7 @@ impl Config {
                  ACME validation requires public HTTPS reachability, but tor_only binds RustChan to loopback."
             );
         }
-        validate_ffmpeg_timeout_secs(self.ffmpeg_timeout_secs)?;
+        validate_ffmpeg_timeout_secs(self.ffmpeg_timeout_secs).map(|_operation_summary| ())?;
         Ok(())
     }
 
@@ -1740,7 +1749,7 @@ fn rewrite_settings_file_lines(
             let trimmed = line.trim_start();
             for (key, value) in updates {
                 if trimmed.starts_with(key) && line.contains('=') {
-                    seen_keys.insert(*key);
+                    let _inserted = seen_keys.insert(*key);
                     return format!("{key} = {value}");
                 }
             }
@@ -1777,7 +1786,7 @@ fn rewrite_settings_file_lines(
         if next_line.is_some_and(|line| !line.trim().is_empty()) {
             insertion_block.push(String::new());
         }
-        updated_lines.splice(insert_idx..insert_idx, insertion_block);
+        drop(updated_lines.splice(insert_idx..insert_idx, insertion_block));
     }
 
     let mut out = updated_lines.join("\n");
@@ -1798,20 +1807,20 @@ fn update_settings_file_entries_result(
 /// Persist a complete file update and compensate it if a prepared DB commit fails.
 fn update_settings_file_entries_with_commit(
     updates: &[(&str, String)],
-    insert_missing_before: Option<&str>,
+    _insert_missing_before: Option<&str>,
     commit: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let _guard = admin::SETTINGS_WRITE_LOCK.lock();
-    let _ = insert_missing_before; // Legacy anchors remain API-compatible; root insertion is structural.
+    // Legacy anchors remain API-compatible; root insertion is structural.
     let parsed = updates
         .iter()
         .map(|(key, value)| {
             let document: toml::Value = toml::from_str(&format!("value = {value}"))?;
-            let value = document
+            let parsed_value = document
                 .get("value")
                 .cloned()
                 .context("missing settings value")?;
-            Ok(((*key).to_owned(), Some(value)))
+            Ok(((*key).to_owned(), Some(parsed_value)))
         })
         .collect::<anyhow::Result<std::collections::BTreeMap<_, _>>>()?;
     admin::save_root_and_commit_at(&settings_file_path(), &parsed, commit)
@@ -2084,7 +2093,8 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) -> anyhow::Resu
         if h == &current_hash {
             return Ok(()); // Secret unchanged — nothing to do.
         }
-        tx.execute("DELETE FROM admin_sessions", [])?;
+        tx.execute("DELETE FROM admin_sessions", [])
+            .map(|_affected_rows| ())?;
         tracing::warn!(
             "SECURITY WARNING: cookie_secret has changed since the last run. \
              All IP-based bans are now invalid because all IP hashes have changed. \
@@ -2098,7 +2108,8 @@ pub fn check_cookie_secret_rotation(conn: &rusqlite::Connection) -> anyhow::Resu
         "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         rusqlite::params![KEY, current_hash],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     tx.commit()?;
     Ok(())
 }

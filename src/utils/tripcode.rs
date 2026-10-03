@@ -56,7 +56,7 @@ fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
     let mut end = max_bytes;
     // Walk backwards until we land on a char boundary.
     while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
+        end = end.saturating_sub(1);
     }
     s.get(..end).unwrap_or_default()
 }
@@ -89,9 +89,9 @@ fn compute_tripcode(password: &str) -> String {
 /// Converts one six-bit value into the RFC 4648 base64url alphabet.
 fn base64url_char(value: u8) -> char {
     match value {
-        0..=25 => char::from(b'A' + value),
-        26..=51 => char::from(b'a' + (value - 26)),
-        52..=61 => char::from(b'0' + (value - 52)),
+        0..=25 => char::from(b'A'.saturating_add(value)),
+        26..=51 => char::from(b'a'.saturating_add(value.saturating_sub(26))),
+        52..=61 => char::from(b'0'.saturating_add(value.saturating_sub(52))),
         62 => '-',
         _ => '_',
     }
@@ -101,7 +101,11 @@ fn base64url_char(value: u8) -> char {
 fn base64url_encode(input: &[u8]) -> String {
     // Upper-bound allocation: ⌈len/3⌉ × 4 (exact for padded; at most 2 chars
     // over for unpadded, which is fine).
-    let capacity = input.len().div_ceil(3) * 4;
+    let capacity = input
+        .len()
+        .div_ceil(3)
+        .checked_mul(4)
+        .unwrap_or(input.len());
     let mut output = String::with_capacity(capacity);
 
     let (chunks, remainder) = input.as_chunks::<3>();

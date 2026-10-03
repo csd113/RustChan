@@ -125,7 +125,10 @@ impl VideoInfo {
         let (width, height) = self.dimensions.context("output has no video dimensions")?;
         ensure!(width > 0 && height > 0, "output has zero video dimensions");
         ensure!(
-            u64::from(width) * u64::from(height) <= super::MAX_UNTRUSTED_IMAGE_PIXELS,
+            u64::from(width)
+                .checked_mul(u64::from(height))
+                .context("video frame area overflow")?
+                <= super::MAX_UNTRUSTED_IMAGE_PIXELS,
             "output video dimensions exceed the media pixel budget"
         );
         if let Some(duration) = self.duration {
@@ -146,7 +149,7 @@ pub(crate) fn inspect_video(path: &Path) -> Result<VideoInfo> {
     use symphonia::core::formats::well_known::{FORMAT_ID_ISOMP4, FORMAT_ID_MKV};
     let format = open_format(path)?;
     let mut header = Vec::with_capacity(512);
-    File::open(path)?.take(512).read_to_end(&mut header)?;
+    let _bytes_read = File::open(path)?.take(512).read_to_end(&mut header)?;
     let container = match format.format_info().format {
         FORMAT_ID_MKV => match crate::utils::files::video_container_mime(&header)? {
             "video/webm" => VideoContainer::Webm,
@@ -304,7 +307,8 @@ impl std::io::Read for ContainerSource {
                 .get_mut(..allowed)
                 .ok_or_else(|| std::io::Error::other("invalid container read buffer"))?,
         )?;
-        self.window
+        let _previous_count = self
+            .window
             .bytes
             .fetch_add(u64::try_from(count).unwrap_or(u64::MAX), Ordering::Relaxed);
         self.read_bytes = self
@@ -481,7 +485,7 @@ pub fn inspect(path: &Path) -> Result<MediaInfo> {
                 }
             }
             Some(CodecParameters::Audio(params)) => {
-                audio_codec.get_or_insert_with(|| audio_codec_name(params.codec));
+                let _entry = audio_codec.get_or_insert_with(|| audio_codec_name(params.codec));
             }
             _ => {}
         }
@@ -562,7 +566,7 @@ fn video_track_codec(
         );
         Ok(())
     })
-    .map(|codec| codec.unwrap_or("unknown"))
+    .map(|declared_codec| declared_codec.unwrap_or("unknown"))
 }
 
 /// Normalize common video codec declarations used by the upload/transcode paths.
@@ -641,7 +645,7 @@ mod tests {
             ("video.mkv", VideoContainer::Matroska, "h264", true),
             ("video.mp4", VideoContainer::Mp4, "h264", true),
         ] {
-            std::fs::copy(root.join(name), &disguised)?;
+            let _bytes_copied = std::fs::copy(root.join(name), &disguised)?;
             let info = inspect_video(&disguised).with_context(|| format!("inspect {name}"))?;
             ensure!(
                 info.container == container,
@@ -758,7 +762,7 @@ mod tests {
             "video.mp4",
             "audio.webm",
         ] {
-            std::fs::copy(root.join(name), &output)?;
+            let _bytes_copied = std::fs::copy(root.join(name), &output)?;
             ensure!(
                 validate_webm_output_file(&output).is_err(),
                 "invalid output {name} accepted"
@@ -771,7 +775,7 @@ mod tests {
                 "partial output accepted"
             );
         }
-        std::fs::copy(root.join("video.webm"), &output)?;
+        let _bytes_copied = std::fs::copy(root.join("video.webm"), &output)?;
         validate_webm_output_file(&output)?;
         Ok(())
     }
@@ -806,7 +810,7 @@ mod tests {
             window.bytes.load(Ordering::Relaxed) == MAX_PACKET_READ_BYTES,
             "read limit overshot"
         );
-        let mut source = ContainerSource {
+        let mut cancelled_source = ContainerSource {
             file: tempfile::tempfile()?,
             length: 0,
             started: Instant::now(),
@@ -818,17 +822,17 @@ mod tests {
         cancel.cancel();
         let mut byte = [0];
         ensure!(
-            source.read(&mut byte).is_err(),
+            cancelled_source.read(&mut byte).is_err(),
             "cancelled parser read continued"
         );
-        source.cancel = None;
-        source.timeout = Duration::ZERO;
-        let error = source
+        cancelled_source.cancel = None;
+        cancelled_source.timeout = Duration::ZERO;
+        let deadline_error = cancelled_source
             .read(&mut byte)
             .err()
             .context("expired parser read continued")?;
         ensure!(
-            error.kind() == std::io::ErrorKind::TimedOut,
+            deadline_error.kind() == std::io::ErrorKind::TimedOut,
             "wrong deadline error"
         );
         Ok(())
@@ -967,7 +971,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
         let dir = tempfile::tempdir()?;
         let misleading = dir.path().join("image.jpg");
-        std::fs::copy(root.join("audio.webm"), &misleading)?;
+        let _bytes_copied = std::fs::copy(root.join("audio.webm"), &misleading)?;
         ensure!(
             inspect(&misleading)?.kind == StreamKind::AudioOnly,
             "extension overrode content"

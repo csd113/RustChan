@@ -58,7 +58,7 @@ pub fn manage_account(
                 super::get_admin_by_username(&tx, username)?.is_none(),
                 "username already exists"
             );
-            super::create_admin(&tx, username, &hash)?;
+            super::create_admin(&tx, username, &hash).map(|_created_id| ())?;
         }
         AccountAction::Password => {
             let target =
@@ -67,7 +67,8 @@ pub fn manage_account(
             tx.execute(
                 "DELETE FROM admin_sessions WHERE admin_id = ?1",
                 [target.id],
-            )?;
+            )
+            .map(|_affected_rows| ())?;
         }
     }
     tx.commit()?;
@@ -123,9 +124,10 @@ mod tests {
             super::super::get_session(&conn, "actor-session")?.is_some(),
             "other sessions must survive"
         );
-        let target = super::super::get_admin_by_username(&conn, "target")?.context("target")?;
+        let updated_target =
+            super::super::get_admin_by_username(&conn, "target")?.context("target")?;
         ensure!(
-            crate::utils::crypto::verify_password("Replacement123", &target.password_hash)?,
+            crate::utils::crypto::verify_password("Replacement123", &updated_target.password_hash)?,
             "stored password must match"
         );
         ensure!(

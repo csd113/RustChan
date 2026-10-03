@@ -153,7 +153,10 @@ fn thread_unread_counts(
         .iter()
         .filter_map(|thread| {
             let marker = markers.get(&thread.id)?;
-            let unread = (thread.reply_count - marker.seen_reply_count).max(0);
+            let unread = thread
+                .reply_count
+                .saturating_sub(marker.seen_reply_count)
+                .max(0);
             (unread > 0).then_some((thread.id, unread))
         })
         .collect()
@@ -169,10 +172,10 @@ fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> Result<Respon
         serde_json::to_vec(payload).map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
     let mut response = Response::new(axum::body::Body::from(body));
     *response.status_mut() = status;
-    response.headers_mut().insert(
+    drop(response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json; charset=utf-8"),
-    );
+    ));
     Ok(response)
 }
 
@@ -182,15 +185,19 @@ fn xhr_json_error_response(
     message: &str,
 ) -> Result<Response> {
     let mut response = json_response(response_status, &XhrErrorPayload { error: message })?;
-    response.headers_mut().insert(
-        "x-rustchan-error-status",
-        HeaderValue::from_str(error_status.as_str())
-            .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?,
+    drop(
+        response.headers_mut().insert(
+            "x-rustchan-error-status",
+            HeaderValue::from_str(error_status.as_str())
+                .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?,
+        ),
     );
     if error_status == StatusCode::SERVICE_UNAVAILABLE {
-        response
-            .headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+        drop(
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("1")),
+        );
     }
     Ok(response)
 }
@@ -210,10 +217,12 @@ pub(super) fn xhr_handled_error_response(status: StatusCode, message: &str) -> R
 pub(super) fn xhr_redirect_response(target: &str) -> Result<Response> {
     let mut response = Response::new(axum::body::Body::empty());
     *response.status_mut() = StatusCode::NO_CONTENT;
-    response.headers_mut().insert(
-        X_RUSTCHAN_REDIRECT_HEADER,
-        HeaderValue::from_str(target)
-            .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?,
+    drop(
+        response.headers_mut().insert(
+            X_RUSTCHAN_REDIRECT_HEADER,
+            HeaderValue::from_str(target)
+                .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?,
+        ),
     );
     Ok(response)
 }
@@ -233,9 +242,10 @@ pub(super) fn xhr_post_error_response(error: AppError) -> Result<Response> {
             xhr_handled_error_response(StatusCode::UNPROCESSABLE_ENTITY, &message)
         }
         AppError::Forbidden(message) => xhr_handled_error_response(StatusCode::FORBIDDEN, &message),
-        AppError::BannedUser { reason, .. } => {
-            xhr_redirect_response(&banned_page_redirect_url(&reason))
-        }
+        AppError::BannedUser {
+            reason,
+            csrf_token: _,
+        } => xhr_redirect_response(&banned_page_redirect_url(&reason)),
         AppError::UploadTooLarge(message) => {
             xhr_handled_error_response(StatusCode::PAYLOAD_TOO_LARGE, &message)
         }
@@ -271,7 +281,16 @@ pub(super) fn handled_post_error_status(
         AppError::BadRequest(message) => Ok((StatusCode::UNPROCESSABLE_ENTITY, message)),
         AppError::UploadTooLarge(message) => Ok((StatusCode::PAYLOAD_TOO_LARGE, message)),
         AppError::InvalidMediaType(message) => Ok((StatusCode::UNSUPPORTED_MEDIA_TYPE, message)),
-        other => Err(other),
+        other @ (AppError::NotFound(_)
+        | AppError::Forbidden(_)
+        | AppError::BannedUser {
+            reason: _,
+            csrf_token: _,
+        }
+        | AppError::Conflict(_)
+        | AppError::DbBusy
+        | AppError::Internal(_)
+        | AppError::Tls(_)) => Err(other),
     }
 }
 
@@ -604,7 +623,7 @@ fn board_unlock_retry_after_secs(attempt_key: &str) -> Option<u64> {
     let (count, window_start) = *BOARD_UNLOCK_FAILS.get(attempt_key)?;
     let elapsed = now_secs.saturating_sub(window_start);
     if elapsed > board_password_fail_window_secs() {
-        BOARD_UNLOCK_FAILS.remove(attempt_key);
+        let _previous_value = BOARD_UNLOCK_FAILS.remove(attempt_key);
         return None;
     }
     if count < board_password_fail_limit() {
@@ -630,7 +649,7 @@ fn record_board_unlock_failure(attempt_key: &str) {
 }
 
 fn clear_board_unlock_failures(attempt_key: &str) {
-    BOARD_UNLOCK_FAILS.remove(attempt_key);
+    let _previous_value = BOARD_UNLOCK_FAILS.remove(attempt_key);
 }
 
 fn board_unlock_rate_limit_message(retry_after_secs: u64) -> String {
@@ -671,13 +690,13 @@ fn board_access_page_response(
 ) -> Response {
     let mut resp = Html(html).into_response();
     *resp.status_mut() = status;
-    resp.headers_mut().insert(
+    drop(resp.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE),
-    );
+    ));
     if let Some(retry_after_secs) = retry_after_secs {
         if let Ok(retry_after) = HeaderValue::from_str(&retry_after_secs.to_string()) {
-            resp.headers_mut().insert(header::RETRY_AFTER, retry_after);
+            drop(resp.headers_mut().insert(header::RETRY_AFTER, retry_after));
         }
     }
     (jar, resp).into_response()
@@ -743,7 +762,7 @@ fn split_catalog_threads(
     for thread in threads {
         if let Some(pref) = prefs.get(&thread.id) {
             if pref.pinned {
-                pinned_ids.insert(thread.id);
+                let _completed_value = pinned_ids.insert(thread.id);
             }
             if pref.hidden {
                 hidden.push(thread);

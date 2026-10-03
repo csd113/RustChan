@@ -2,7 +2,6 @@
 
 use crate::updates::{Discovery, Status};
 use crate::utils::sanitize::escape_html;
-use std::fmt::Write as _;
 
 /// Render native update status or a clear deployment-managed check-only workflow.
 pub(super) fn render(status: &Status, csrf: &str, managed: bool, container: bool) -> String {
@@ -35,11 +34,13 @@ pub(super) fn render(status: &Status, csrf: &str, managed: bool, container: bool
                     .available_release()
                     .is_some_and(|release| release.compatible)
         }) {
-            let _ = write!(
-                controls,
-                r#"<form method="POST" action="/admin/updates/install" id="admin-update-install" class="admin-settings-group"><h3>Install verified update</h3><p>A verified backup is mandatory. RustChan will briefly restart. Failed upgrades restore the previous software, database, configuration and persistent files.</p><input type="hidden" name="_csrf" value="{}"><input type="hidden" name="approval" value="{}"><label for="update-current-password">Your current password</label><input type="password" name="current_password" id="update-current-password" required maxlength="1024" autocomplete="current-password"><label for="update-confirmation">Type INSTALL to confirm the restart</label><input type="text" name="confirmation" id="update-confirmation" required pattern="INSTALL" maxlength="7" autocomplete="off"><p class="admin-meta-note">Approval expires after 10 minutes and can be used once.</p><button type="submit">Install update</button></form>"#,
-                escape_html(csrf),
-                escape_html(approval)
+            crate::templates::append_html(
+                &mut controls,
+                format_args!(
+                    r#"<form method="POST" action="/admin/updates/install" id="admin-update-install" class="admin-settings-group"><h3>Install verified update</h3><p>A verified backup is mandatory. RustChan will briefly restart. Failed upgrades restore the previous software, database, configuration and persistent files.</p><input type="hidden" name="_csrf" value="{}"><input type="hidden" name="approval" value="{}"><label for="update-current-password">Your current password</label><input type="password" name="current_password" id="update-current-password" required maxlength="1024" autocomplete="current-password"><label for="update-confirmation">Type INSTALL to confirm the restart</label><input type="text" name="confirmation" id="update-confirmation" required pattern="INSTALL" maxlength="7" autocomplete="off"><p class="admin-meta-note">Approval expires after 10 minutes and can be used once.</p><button type="submit">Install update</button></form>"#,
+                    escape_html(csrf),
+                    escape_html(approval)
+                ),
             );
         }
     } else {
@@ -48,7 +49,10 @@ pub(super) fn render(status: &Status, csrf: &str, managed: bool, container: bool
         } else {
             "Installation is deployment-managed on this system. Install the official release using your deployment tools. Native self-updates require the supported Linux updater service."
         };
-        let _ = write!(controls, "<p class=\"admin-copy\">{note}</p>");
+        crate::templates::append_html(
+            &mut controls,
+            format_args!("<p class=\"admin-copy\">{note}</p>"),
+        );
     }
     format!(
         r#"<section class="admin-section admin-settings-section" id="software-updates" aria-labelledby="software-updates-title" data-update-active="{progress}"><h2 id="software-updates-title">Software Updates</h2><p class="admin-copy">Stable releases from the official RustChan repository. Update checks and installation details are visible only to administrators.</p><dl class="admin-control-detail-list"><dt>Running version</dt><dd>{}</dd><dt>Latest stable version</dt><dd>{latest}</dd><dt>Last check</dt><dd>{}</dd><dt>Verification</dt><dd>{verification}</dd><dt>Previous result / current progress</dt><dd id="admin-update-message" role="status" aria-live="polite">{}</dd></dl><div class="admin-settings-grid">{controls}</div><p class="admin-meta-note">If the server restarts, reconnect to <a href="/admin/panel?open=software-updates#software-updates">Software Updates</a> to see the persisted result. JavaScript reconnects automatically while an installation is active.</p>{}</section>"#,
@@ -78,18 +82,20 @@ fn backup_summary(status: &Status) -> String {
     }
     let mut rows = String::new();
     for backup in status.backups.iter().take(20) {
-        let _ = write!(
-            rows,
-            "<tr><td>{}</td><td>{} → {}</td><td>{}</td><td>{}</td></tr>",
-            escape_html(&backup.created_at),
-            escape_html(&backup.previous_version),
-            escape_html(&backup.target_version),
-            backup.size,
-            if backup.verified {
-                "Verified pre-upgrade backup"
-            } else {
-                "Verification failed"
-            }
+        crate::templates::append_html(
+            &mut rows,
+            format_args!(
+                "<tr><td>{}</td><td>{} → {}</td><td>{}</td><td>{}</td></tr>",
+                escape_html(&backup.created_at),
+                escape_html(&backup.previous_version),
+                escape_html(&backup.target_version),
+                backup.size,
+                if backup.verified {
+                    "Verified pre-upgrade backup"
+                } else {
+                    "Verification failed"
+                }
+            ),
         );
     }
     format!("<div class=\"admin-table-wrap\" tabindex=\"0\" role=\"region\" aria-label=\"Pre-upgrade snapshots\"><table class=\"admin-table\"><thead><tr><th>Created</th><th>Upgrade</th><th>Bytes</th><th>Verification</th></tr></thead><tbody>{rows}</tbody></table></div>")

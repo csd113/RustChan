@@ -69,11 +69,11 @@ mod linux {
             "updater configuration must be a root-owned non-writable regular file"
         );
         let config: Config = toml::from_str(&fs::read_to_string(config_path)?)
-            .map_err(|_| anyhow::anyhow!("invalid updater configuration"))?;
+            .context("invalid updater configuration")?;
         super::super::transaction::native::protected_ancestors(&config.public_key, config.web_uid)?;
-        let metadata = fs::symlink_metadata(&config.public_key)?;
+        let key_metadata = fs::symlink_metadata(&config.public_key)?;
         anyhow::ensure!(
-            metadata.is_file() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0,
+            key_metadata.is_file() && key_metadata.uid() == 0 && key_metadata.mode() & 0o022 == 0,
             "release trust key must be root owned and non-writable"
         );
         let key_text = fs::read_to_string(&config.public_key)?;
@@ -157,7 +157,8 @@ mod linux {
         let admission = Arc::new(Admission::default());
         let recovery_admission = Arc::clone(&admission);
         let recovery_engine = Arc::clone(&engine);
-        tokio::task::spawn_blocking(move || {
+        // The daemon serves IPC while this detached recovery task records its own failures.
+        drop(tokio::task::spawn_blocking(move || {
             let service = SystemService {
                 port: recovery_engine.config.health_port,
                 admission: Arc::clone(&recovery_admission),
@@ -168,7 +169,7 @@ mod linux {
             } else {
                 recovery_admission.recovered.store(true, Ordering::Release);
             }
-        });
+        }));
         let slots = Arc::new(tokio::sync::Semaphore::new(16));
         loop {
             let (mut socket, _) = listener.accept().await?;
@@ -180,7 +181,8 @@ mod linux {
             };
             let engine = Arc::clone(&engine);
             let admission = Arc::clone(&admission);
-            tokio::spawn(async move {
+            // The permit bounds detached IPC tasks; each task reports its own failure below.
+            drop(tokio::spawn(async move {
                 let _permit = permit;
                 let result = async {
                     let mut bytes = Vec::new();
@@ -188,7 +190,8 @@ mod linux {
                         Duration::from_secs(5),
                         (&mut socket).take(4097).read_to_end(&mut bytes),
                     )
-                    .await??;
+                    .await?
+                    .map(|_bytes_read| ())?;
                     anyhow::ensure!(bytes.len() <= 4096, "updater request exceeds limit");
                     let request: Request = serde_json::from_slice(&bytes)?;
                     let reply =
@@ -202,7 +205,7 @@ mod linux {
                 if let Err(error) = result {
                     tracing::warn!(error = %error, "updater IPC request rejected");
                 }
-            });
+            }));
         }
     }
 
@@ -339,13 +342,13 @@ mod linux {
                 let _activity = activity;
                 let _update_lock = update_lock;
                 let _settings_lock = settings_lock;
-                let service = SystemService {
+                let worker_service = SystemService {
                     port: worker_engine.config.health_port,
                     admission: Arc::clone(&worker_admission),
                 };
                 // Let the acknowledgment and no-JS redirect finish before service stop.
                 std::thread::sleep(Duration::from_secs(1));
-                let result = worker_engine.restart_settings(&mut worker_status, &service);
+                let result = worker_engine.restart_settings(&mut worker_status, &worker_service);
                 if let Err(error) = result {
                     worker_admission.recovered.store(false, Ordering::Release);
                     tracing::error!(%error, "settings restart journal failure; recovery required");
@@ -408,7 +411,9 @@ mod linux {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?;
-        let deadline = Instant::now() + Duration::from_secs(90);
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(90))
+            .context("service control deadline overflow")?;
         loop {
             if let Some(status) = child.try_wait()? {
                 anyhow::ensure!(status.success(), "RustChan service control failed");
@@ -416,7 +421,7 @@ mod linux {
             }
             if Instant::now() >= deadline {
                 child.kill()?;
-                child.wait()?;
+                child.wait().map(|_exit_status| ())?;
                 anyhow::bail!("RustChan service control timed out");
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -474,7 +479,9 @@ mod linux {
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(2))
                 .build()?;
-            let deadline = Instant::now() + Duration::from_secs(60);
+            let deadline = Instant::now()
+                .checked_add(Duration::from_secs(60))
+                .context("health check deadline overflow")?;
             while Instant::now() < deadline {
                 let checked = (|| {
                     use std::io::Read as _;
@@ -488,7 +495,10 @@ mod linux {
                         .and_then(|value| value.to_str().ok())
                         .and_then(|value| uuid::Uuid::parse_str(value).ok());
                     let mut bytes = Vec::new();
-                    response.take(4097).read_to_end(&mut bytes)?;
+                    response
+                        .take(4097)
+                        .read_to_end(&mut bytes)
+                        .map(|_bytes_read| ())?;
                     anyhow::ensure!(bytes.len() <= 4096, "readiness response exceeds limit");
                     let health: ReadyHealth = serde_json::from_slice(&bytes)?;
                     anyhow::ensure!(

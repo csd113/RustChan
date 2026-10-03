@@ -47,7 +47,8 @@ pub fn insert_pending_fs_op(
         "INSERT INTO pending_fs_ops (id, kind, payload_json) VALUES (?1, ?2, ?3)",
         rusqlite::params![op.id, op.kind, op.payload_json],
     )
-    .context("Insert pending_fs_op failed")?;
+    .context("Insert pending_fs_op failed")
+    .map(|_affected_rows| ())?;
     Ok(())
 }
 
@@ -60,7 +61,8 @@ pub fn delete_pending_fs_op(conn: &rusqlite::Connection, id: &str) -> Result<()>
         "DELETE FROM pending_fs_ops WHERE id = ?1",
         rusqlite::params![id],
     )
-    .with_context(|| format!("Delete pending_fs_op {id} failed"))?;
+    .with_context(|| format!("Delete pending_fs_op {id} failed"))
+    .map(|_affected_rows| ())?;
     Ok(())
 }
 

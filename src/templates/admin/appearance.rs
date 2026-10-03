@@ -8,7 +8,6 @@ use crate::theme_builder::{
     builder_defaults_for_preset, parse_builder_config, ThemeBuilderConfig, ThemeDensity,
     ThemeFontFamily, BUILDER_PRESETS,
 };
-use std::fmt::Write as _;
 
 /// Renders the general site-identity settings section.
 pub(super) fn render_site_settings(view: &AdminPanelViewModel<'_>) -> String {
@@ -148,16 +147,18 @@ pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
 fn render_enabled_theme_options(view: &AdminPanelViewModel<'_>) -> String {
     let mut enabled_theme_options = String::new();
     for theme in view.appearance.themes.iter().filter(|theme| theme.enabled) {
-        let _ = write!(
-            enabled_theme_options,
-            r#"<option value="{slug}"{selected}>{label}</option>"#,
-            slug = escape_html(&theme.slug),
-            selected = if theme.slug == view.appearance.default_theme {
-                " selected"
-            } else {
-                ""
-            },
-            label = escape_html(&theme.display_name)
+        crate::templates::append_html(
+            &mut enabled_theme_options,
+            format_args!(
+                r#"<option value="{slug}"{selected}>{label}</option>"#,
+                slug = escape_html(&theme.slug),
+                selected = if theme.slug == view.appearance.default_theme {
+                    " selected"
+                } else {
+                    ""
+                },
+                label = escape_html(&theme.display_name)
+            ),
         );
     }
     enabled_theme_options
@@ -192,16 +193,18 @@ fn render_board_appearance_cards(view: &AdminPanelViewModel<'_>) -> String {
 fn render_preset_options(selected_slug: &str) -> String {
     let mut out = String::new();
     for preset in BUILDER_PRESETS {
-        let _ = write!(
-            out,
-            r#"<option value="{slug}"{selected}>{label}</option>"#,
-            slug = escape_html(preset.slug),
-            selected = if preset.slug == selected_slug {
-                " selected"
-            } else {
-                ""
-            },
-            label = escape_html(preset.label),
+        crate::templates::append_html(
+            &mut out,
+            format_args!(
+                r#"<option value="{slug}"{selected}>{label}</option>"#,
+                slug = escape_html(preset.slug),
+                selected = if preset.slug == selected_slug {
+                    " selected"
+                } else {
+                    ""
+                },
+                label = escape_html(preset.label),
+            ),
         );
     }
     out
@@ -565,18 +568,20 @@ fn render_builder_preview(config: &ThemeBuilderConfig, slug: &str) -> String {
         ("success", &config.success_color),
         ("danger", &config.danger_color),
     ] {
-        let _ = write!(preview_style, "--theme-preview-{property}:{value};");
+        crate::templates::append_html(
+            &mut preview_style,
+            format_args!("--theme-preview-{property}:{value};"),
+        );
     }
     let (gap, padding) = match config.density {
         ThemeDensity::Compact => ("0.35rem", "0.45rem"),
         ThemeDensity::Cozy => ("0.55rem", "0.75rem"),
     };
-    let _ = write!(
-        preview_style,
+    crate::templates::append_html(&mut preview_style, format_args!(
         "--theme-preview-radius:{}px;--theme-preview-font:{};--theme-preview-gap:{gap};--theme-preview-pad:{padding};",
         config.border_radius_px,
         config.font_family.css_stack(),
-    );
+    ));
     format!(
         r##"<section class="theme-builder-preview-card">
   <div class="admin-card-header">

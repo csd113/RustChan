@@ -56,7 +56,10 @@ pub(super) fn render_label_rows(
     label_width: u16,
 ) {
     let table_rows = rows.into_iter().map(|(label, value)| {
-        let wrapped = wrap_styled_line(&value, area.width.saturating_sub(label_width + 1));
+        let wrapped = wrap_styled_line(
+            &value,
+            area.width.saturating_sub(label_width.saturating_add(1)),
+        );
         let height = u16::try_from(wrapped.len()).unwrap_or(u16::MAX).max(1);
         Row::new(vec![
             Cell::from(label).style(Style::default().fg(MUTED)),
@@ -329,7 +332,7 @@ pub(super) fn format_number_signed_compact(number: i64) -> String {
 pub(super) fn spinner_frame(tick: u8) -> &'static str {
     const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
     FRAMES
-        .get(usize::from(tick) % FRAMES.len())
+        .get(usize::from(tick).checked_rem(FRAMES.len()).unwrap_or(0))
         .copied()
         .unwrap_or("|")
 }
@@ -339,7 +342,7 @@ pub(super) fn spinner_frame(tick: u8) -> &'static str {
 pub(super) fn spinner_frame(tick: u8) -> &'static str {
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     FRAMES
-        .get(usize::from(tick) % FRAMES.len())
+        .get(usize::from(tick).checked_rem(FRAMES.len()).unwrap_or(0))
         .copied()
         .unwrap_or("⠋")
 }
@@ -360,40 +363,40 @@ pub(super) fn wrap_lines(lines: &[String], width: u16) -> Vec<String> {
 fn wrap_styled_line(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
     let width = usize::from(width).max(1);
     let mut words = Vec::new();
-    let mut word = Vec::new();
+    let mut pending_word = Vec::new();
     for grapheme in line.styled_graphemes(Style::default()) {
         if grapheme.symbol.chars().all(char::is_whitespace) {
-            if !word.is_empty() {
-                words.push(std::mem::take(&mut word));
+            if !pending_word.is_empty() {
+                words.push(std::mem::take(&mut pending_word));
             }
         } else {
-            word.push(Span::styled(grapheme.symbol.to_owned(), grapheme.style));
+            pending_word.push(Span::styled(grapheme.symbol.to_owned(), grapheme.style));
         }
     }
-    if !word.is_empty() {
-        words.push(word);
+    if !pending_word.is_empty() {
+        words.push(pending_word);
     }
     let mut lines = Vec::new();
     let mut spans = Vec::new();
-    let mut columns = 0;
+    let mut columns = 0_usize;
     for word in words {
         let word_width: usize = word.iter().map(Span::width).sum();
-        if columns > 0 && columns + 1 + word_width > width {
+        if columns > 0 && columns.saturating_add(1).saturating_add(word_width) > width {
             lines.push(Line::from(std::mem::take(&mut spans)));
             columns = 0;
         }
         if columns > 0 {
             spans.push(Span::raw(" "));
-            columns += 1;
+            columns = columns.saturating_add(1);
         }
         for span in word {
             let size = span.width();
-            if columns + size > width && !spans.is_empty() {
+            if columns.saturating_add(size) > width && !spans.is_empty() {
                 lines.push(Line::from(std::mem::take(&mut spans)));
                 columns = 0;
             }
             spans.push(span);
-            columns += size;
+            columns = columns.saturating_add(size);
         }
     }
     lines.push(Line::from(spans));
@@ -408,7 +411,9 @@ pub(super) fn label_rows_height(
 ) -> u16 {
     let height: usize = rows
         .iter()
-        .map(|(_, value)| wrap_styled_line(value, width.saturating_sub(label_width + 1)).len())
+        .map(|(_, value)| {
+            wrap_styled_line(value, width.saturating_sub(label_width.saturating_add(1))).len()
+        })
         .sum();
     u16::try_from(height).unwrap_or(u16::MAX).saturating_add(2)
 }

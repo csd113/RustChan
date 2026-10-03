@@ -17,7 +17,8 @@ fn cleanup_if_default(conn: &rusqlite::Connection, user_hash: &str, thread_id: i
         "DELETE FROM user_thread_preferences
          WHERE user_hash = ?1 AND thread_id = ?2 AND pinned = 0 AND hidden = 0",
         params![user_hash, thread_id],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     Ok(())
 }
 
@@ -38,7 +39,8 @@ pub fn set_thread_hidden(
             hidden = excluded.hidden,
             updated_at = unixepoch()",
         params![user_hash, thread_id, i32::from(hidden)],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     cleanup_if_default(conn, user_hash, thread_id)?;
     Ok(())
 }
@@ -60,7 +62,8 @@ pub fn set_thread_pinned(
             pinned = excluded.pinned,
             updated_at = unixepoch()",
         params![user_hash, thread_id, i32::from(pinned)],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     cleanup_if_default(conn, user_hash, thread_id)?;
     Ok(())
 }
@@ -81,8 +84,8 @@ pub fn get_thread_preference(
         params![user_hash, thread_id],
         |row| {
             Ok(UserThreadPreference {
-                pinned: row.get::<_, i32>(0)? != 0,
-                hidden: row.get::<_, i32>(1)? != 0,
+                pinned: row.get::<_, i32>(0)? != 0_i32,
+                hidden: row.get::<_, i32>(1)? != 0_i32,
             })
         },
     )
@@ -112,8 +115,8 @@ pub fn get_preferences_for_board(
         Ok((
             row.get::<_, i64>(0)?,
             UserThreadPreference {
-                pinned: row.get::<_, i32>(1)? != 0,
-                hidden: row.get::<_, i32>(2)? != 0,
+                pinned: row.get::<_, i32>(1)? != 0_i32,
+                hidden: row.get::<_, i32>(2)? != 0_i32,
             },
         ))
     })?;
@@ -121,7 +124,7 @@ pub fn get_preferences_for_board(
     let mut prefs = HashMap::new();
     for row in rows {
         let (thread_id, pref) = row?;
-        prefs.insert(thread_id, pref);
+        let _previous_value = prefs.insert(thread_id, pref);
     }
     Ok(prefs)
 }
@@ -181,7 +184,7 @@ mod tests {
             let pinned_barrier = Arc::clone(&barrier);
             let pinned = scope.spawn(move || -> Result<()> {
                 let conn = pinned_pool.get()?;
-                pinned_barrier.wait();
+                let _barrier_state = pinned_barrier.wait();
                 set_thread_pinned(&conn, "viewer", thread_id, true)
             });
 
@@ -189,16 +192,22 @@ mod tests {
             let hidden_barrier = Arc::clone(&barrier);
             let hidden = scope.spawn(move || -> Result<()> {
                 let conn = hidden_pool.get()?;
-                hidden_barrier.wait();
+                let _barrier_state = hidden_barrier.wait();
                 set_thread_hidden(&conn, "viewer", thread_id, true)
             });
 
-            pinned
-                .join()
-                .map_err(|_| anyhow::anyhow!("pinned preference thread panicked"))??;
-            hidden
-                .join()
-                .map_err(|_| anyhow::anyhow!("hidden preference thread panicked"))??;
+            pinned.join().map_err(|panic_payload| {
+                anyhow::anyhow!(
+                    "pinned preference thread panicked: {}",
+                    crate::media::process::panic_message(panic_payload.as_ref())
+                )
+            })??;
+            hidden.join().map_err(|panic_payload| {
+                anyhow::anyhow!(
+                    "hidden preference thread panicked: {}",
+                    crate::media::process::panic_message(panic_payload.as_ref())
+                )
+            })??;
             Result::<()>::Ok(())
         })?;
 

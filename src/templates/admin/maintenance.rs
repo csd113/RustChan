@@ -1,7 +1,6 @@
 //! Media-pipeline and database-maintenance sections of the admin panel.
 
 use super::{escape_html, format_file_size, AdminPanelViewModel};
-use std::fmt::Write as _;
 
 /// Pre-rendered values interpolated into the maintenance section.
 struct MaintenanceSectionView<'a> {
@@ -69,10 +68,12 @@ old boards to prevent query performance degradation.
     } else {
         let mut addresses = String::new();
         if let Some(addr) = view.tor_address {
-            let _ = write!(
-                addresses,
-                r#"<p class="admin-copy">Onion address: <a href="http://{addr}" target="_blank" rel="noreferrer">{addr}</a></p>"#,
-                addr = escape_html(addr)
+            crate::templates::append_html(
+                &mut addresses,
+                format_args!(
+                    r#"<p class="admin-copy">Onion address: <a href="http://{addr}" target="_blank" rel="noreferrer">{addr}</a></p>"#,
+                    addr = escape_html(addr)
+                ),
             );
         }
         addresses
@@ -201,23 +202,25 @@ fn render_media_detection_cards(view: &AdminPanelViewModel<'_>) -> String {
             &pdf_detail,
         ),
     ] {
-        let _ = write!(
-            cards,
-            r#"<article class="admin-detection-card">
+        crate::templates::append_html(
+            &mut cards,
+            format_args!(
+                r#"<article class="admin-detection-card">
   <div class="admin-detection-card-header">
     <h3>{label}</h3>
     <span class="admin-detection-pill {pill_class}">{status}</span>
   </div>
   <p>{detail}</p>
 </article>"#,
-            label = escape_html(label),
-            pill_class = if ok {
-                "admin-detection-pill-ok"
-            } else {
-                "admin-detection-pill-missing"
-            },
-            status = if ok { "detected" } else { "missing" },
-            detail = escape_html(detail),
+                label = escape_html(label),
+                pill_class = if ok {
+                    "admin-detection-pill-ok"
+                } else {
+                    "admin-detection-pill-missing"
+                },
+                status = if ok { "detected" } else { "missing" },
+                detail = escape_html(detail),
+            ),
         );
     }
     cards

@@ -160,7 +160,7 @@ fn safe_relative_path(relative_path: &str, context: &str) -> Result<PathBuf> {
 /// Validate the shape of a managed board upload path.
 fn validate_managed_upload_path(relative_path: &str, thumbnail: bool) -> Result<PathBuf> {
     let rel = safe_relative_path(relative_path, "Upload finalize")
-        .map_err(|_| anyhow::anyhow!("Upload finalize artifact path contains unsafe components"))?;
+        .context("Upload finalize artifact path contains unsafe components")?;
     let components = rel
         .iter()
         .map(|component| component.to_str())
@@ -197,7 +197,7 @@ pub(crate) fn validate_upload_finalize_payload(
         validated_restore_path(upload_dir).context("Upload finalize managed root is invalid")?;
     let pending_root = upload_root.join(".pending");
     let stage_dir = validated_restore_path(Path::new(&payload.stage_dir))
-        .map_err(|_| anyhow::anyhow!("Upload finalize stage path is invalid"))?;
+        .context("Upload finalize stage path is invalid")?;
     if stage_dir == pending_root || !stage_dir.starts_with(&pending_root) {
         anyhow::bail!("Upload finalize stage is outside the managed pending root");
     }
@@ -228,10 +228,10 @@ pub(crate) fn validate_upload_finalize_payload(
     }
 
     if let Some(file_path) = payload.primary_file_path.as_deref() {
-        validate_managed_upload_path(file_path, false)?;
+        validate_managed_upload_path(file_path, false).map(|_validated_path| ())?;
     }
     if let Some(thumb_path) = payload.primary_thumb_path.as_deref() {
-        validate_managed_upload_path(thumb_path, true)?;
+        validate_managed_upload_path(thumb_path, true).map(|_validated_path| ())?;
         let file_path = payload.primary_file_path.as_deref().ok_or_else(|| {
             anyhow::anyhow!("Upload finalize thumbnail metadata has no primary file")
         })?;
@@ -346,7 +346,8 @@ fn artifact_is_installed(
         anyhow::bail!("Upload finalize {category} target is not a regular file");
     }
     crate::utils::fs_security::canonical_parent_for_new_child(upload_dir, path)
-        .with_context(|| format!("Validate {category} target parent"))?;
+        .with_context(|| format!("Validate {category} target parent"))
+        .map(|_validated_path| ())?;
     crate::utils::fs_security::assert_regular_file_no_symlink(path)
         .with_context(|| format!("Validate {category} target"))?;
     digest.map_or(Ok(true), |expected| {
@@ -383,12 +384,14 @@ fn move_required_stage_file(
         }
     } else {
         crate::utils::fs_security::existing_regular_file_child(stage_dir, relative_path)
-            .context("Validate legacy staged required upload artifact")?;
+            .context("Validate legacy staged required upload artifact")
+            .map(|_validated_path| ())?;
     }
 
     ensure_parent_dir(&target)?;
     crate::utils::fs_security::canonical_parent_for_new_child(upload_dir, &target)
-        .context("Validate required upload target parent")?;
+        .context("Validate required upload target parent")
+        .map(|_validated_path| ())?;
     if artifact_is_installed(upload_dir, &target, digest, "required")? {
         std::fs::remove_file(&source)
             .with_context(|| "Remove already-finalized staged required upload artifact")?;
@@ -428,12 +431,14 @@ fn move_optional_stage_file(
         }
     } else {
         crate::utils::fs_security::existing_regular_file_child(stage_dir, relative_path)
-            .context("Validate legacy staged optional upload artifact")?;
+            .context("Validate legacy staged optional upload artifact")
+            .map(|_validated_path| ())?;
     }
 
     ensure_parent_dir(&target)?;
     crate::utils::fs_security::canonical_parent_for_new_child(upload_dir, &target)
-        .context("Validate optional upload target parent")?;
+        .context("Validate optional upload target parent")
+        .map(|_validated_path| ())?;
     if artifact_is_installed(upload_dir, &target, digest, "optional")? {
         std::fs::remove_file(&source)
             .context("Remove already-finalized staged optional upload artifact")?;
@@ -1166,12 +1171,14 @@ fn commit_upload_finalize_metadata(
                 "UPDATE posts SET thumb_path = NULL WHERE thumb_path = ?1",
                 [thumb_path],
             )
-            .context("Clear stale post thumbnail paths")?;
+            .context("Clear stale post thumbnail paths")
+            .map(|_affected_rows| ())?;
             conn.execute(
                 "UPDATE file_hashes SET thumb_path = '' WHERE thumb_path = ?1",
                 [thumb_path],
             )
-            .context("Clear stale deduplication thumbnail paths")?;
+            .context("Clear stale deduplication thumbnail paths")
+            .map(|_affected_rows| ())?;
         }
 
         if let (Some(hash), Some(file_path), Some(mime_type)) = (
@@ -1452,8 +1459,8 @@ fn referenced_banner_paths(
             );
             continue;
         };
-        referenced.insert(webp.clone());
-        referenced.insert(webp.with_extension("gif"));
+        let _webp_inserted = referenced.insert(webp.clone());
+        let _gif_inserted = referenced.insert(webp.with_extension("gif"));
     }
     Ok(referenced)
 }
@@ -1616,7 +1623,7 @@ fn apply_pending_fs_op(
     if op.kind == UPLOAD_FINALIZE_KIND {
         let payload: UploadFinalizePayload = serde_json::from_str(&op.payload_json)
             .with_context(|| format!("Parse upload_finalize payload for {}", op.id))?;
-        referenced_upload_stage_dirs.insert(payload.stage_dir.clone());
+        let _inserted = referenced_upload_stage_dirs.insert(payload.stage_dir.clone());
         return finalize_upload_payload_with_pool(pool, upload_dir, Some(&op.id), &payload);
     }
     let conn = pool
@@ -1661,7 +1668,8 @@ fn apply_pending_fs_op(
                     .with_context(|| format!("Parse original_prune payload for {}", op.id))?;
             crate::media::prune::finalize_original_prune_payload(
                 &conn, upload_dir, &op.id, &payload,
-            )?;
+            )
+            .map(|_operation_summary| ())?;
         }
         other => anyhow::bail!("Unknown pending_fs_op kind {other:?} for {}", op.id),
     }
@@ -1985,7 +1993,8 @@ mod tests {
         thumb_path: Option<&str>,
     ) -> Result<i64> {
         crate::db::create_board(conn, "tech", "Technology", "", false)
-            .context("Create upload recovery board")?;
+            .context("Create upload recovery board")
+            .map(|_created_id| ())?;
         let board_id: i64 = conn.query_row(
             "SELECT id FROM boards WHERE short_name = 'tech'",
             [],
@@ -2016,7 +2025,7 @@ mod tests {
     ) -> Result<UploadFinalizePayload> {
         let mut artifact_sha256 = std::collections::BTreeMap::new();
         for path in required.iter().copied().chain(optional) {
-            artifact_sha256.insert(
+            let _previous_value = artifact_sha256.insert(
                 path.to_owned(),
                 super::upload_artifact_sha256(&stage_dir.join(path), "test")?,
             );
@@ -2066,8 +2075,8 @@ mod tests {
             upload_dir.to_str().context("UTF-8 upload root")?,
         )?;
 
-        let conn = pool.get()?;
-        let state: (Option<String>, i64, String) = conn.query_row(
+        let recovered_conn = pool.get()?;
+        let state: (Option<String>, i64, String) = recovered_conn.query_row(
             "SELECT p.thumb_path,
                     (SELECT COUNT(*) FROM pending_fs_ops),
                     (SELECT thumb_path FROM file_hashes WHERE sha256 = 'no-thumb-hash')
@@ -2131,7 +2140,8 @@ mod tests {
                 serde_json::to_string(&first_payload)?,
                 serde_json::to_string(&later_payload)?
             ],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         drop(conn);
 
         crate::pending_fs::reconcile_pending_fs_ops(
@@ -2143,20 +2153,20 @@ mod tests {
             upload_dir.to_str().context("UTF-8 upload root")?,
         )?;
 
-        let conn = pool.get()?;
-        let thumb_path: Option<String> = conn.query_row(
+        let recovered_conn = pool.get()?;
+        let thumb_path: Option<String> = recovered_conn.query_row(
             "SELECT thumb_path FROM posts WHERE id = ?1",
             [post_id],
             |row| row.get(0),
         )?;
-        let hash_thumb: String = conn.query_row(
+        let hash_thumb: String = recovered_conn.query_row(
             "SELECT thumb_path FROM file_hashes WHERE sha256 = 'lost-thumb-hash'",
             [],
             |row| row.get(0),
         )?;
         assert!(thumb_path.is_none());
         assert_eq!(hash_thumb, "");
-        assert!(crate::db::list_pending_fs_ops(&conn)?.is_empty());
+        assert!(crate::db::list_pending_fs_ops(&recovered_conn)?.is_empty());
         assert!(upload_dir.join("tech/original.png").is_file());
         assert!(upload_dir.join("tech/later.png").is_file());
         Ok(())
@@ -2223,8 +2233,8 @@ mod tests {
             first.is_err(),
             "injected metadata repair should fail closed"
         );
-        let conn = pool.get()?;
-        let state: (Option<String>, String, i64) = conn.query_row(
+        let retry_conn = pool.get()?;
+        let state: (Option<String>, String, i64) = retry_conn.query_row(
             "SELECT p.thumb_path,
                     (SELECT thumb_path FROM file_hashes
                      WHERE sha256 = 'repair-retry-hash'),
@@ -2242,15 +2252,15 @@ mod tests {
             )
         );
         assert!(upload_dir.join("tech/original.png").is_file());
-        conn.execute_batch("DROP TRIGGER fail_thumbnail_hash_repair")?;
-        drop(conn);
+        retry_conn.execute_batch("DROP TRIGGER fail_thumbnail_hash_repair")?;
+        drop(retry_conn);
 
         crate::pending_fs::reconcile_pending_fs_ops(
             &pool,
             upload_dir.to_str().context("UTF-8 upload root")?,
         )?;
-        let conn = pool.get()?;
-        let final_state: (Option<String>, String, i64) = conn.query_row(
+        let recovered_conn = pool.get()?;
+        let final_state: (Option<String>, String, i64) = recovered_conn.query_row(
             "SELECT p.thumb_path,
                     (SELECT thumb_path FROM file_hashes
                      WHERE sha256 = 'repair-retry-hash'),
@@ -2314,29 +2324,29 @@ mod tests {
         )?;
         drop(conn);
 
-        for _ in 0..2 {
+        for _ in 0_i32..2_i32 {
             crate::pending_fs::reconcile_pending_fs_ops(
                 &pool,
                 upload_dir.to_str().context("UTF-8 upload root")?,
             )?;
         }
 
-        let conn = pool.get()?;
-        let thumb_path: Option<String> = conn.query_row(
+        let recovered_conn = pool.get()?;
+        let thumb_path: Option<String> = recovered_conn.query_row(
             "SELECT thumb_path FROM posts WHERE id = ?1",
             [post_id],
             |row| row.get(0),
         )?;
         assert!(thumb_path.is_none());
         assert_eq!(
-            conn.query_row(
+            recovered_conn.query_row(
                 "SELECT thumb_path FROM file_hashes WHERE sha256 = 'legacy-hash'",
                 [],
                 |row| row.get::<_, String>(0)
             )?,
             ""
         );
-        assert!(crate::db::list_pending_fs_ops(&conn)?.is_empty());
+        assert!(crate::db::list_pending_fs_ops(&recovered_conn)?.is_empty());
         assert_eq!(
             std::fs::read(upload_dir.join("tech/original.png"))?,
             b"original"
@@ -2372,7 +2382,7 @@ mod tests {
         let valid_payload = upload_payload(&valid_stage, &["tech/valid.png"], None, "valid-hash")?;
         let pool = init_test_pool()?;
         let conn = pool.get()?;
-        seed_upload_post(&conn, "tech/missing.png", None)?;
+        seed_upload_post(&conn, "tech/missing.png", None).map(|_created_id| ())?;
         conn.execute(
             "INSERT INTO pending_fs_ops (id, kind, payload_json, created_at)
              VALUES ('missing-required', 'upload_finalize', ?1, 1),
@@ -2381,7 +2391,8 @@ mod tests {
                 serde_json::to_string(&missing_payload)?,
                 serde_json::to_string(&valid_payload)?
             ],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         drop(conn);
 
         let result = crate::pending_fs::reconcile_pending_fs_ops(
@@ -2392,8 +2403,8 @@ mod tests {
             result.is_err(),
             "missing required original must remain fail-closed"
         );
-        let conn = pool.get()?;
-        let pending = crate::db::list_pending_fs_ops(&conn)?;
+        let recovered_conn = pool.get()?;
+        let pending = crate::db::list_pending_fs_ops(&recovered_conn)?;
         assert_eq!(pending.len(), 1);
         assert_eq!(
             pending.first().map(|operation| operation.id.as_str()),
@@ -3076,22 +3087,23 @@ mod tests {
             "validation failure must preserve the staged upload tree"
         );
 
-        let mut payload = full_restore_payload_for_live(&upload_live)?;
-        let mut malicious_swap = tor_swap_for_live(&tor_live)?;
-        malicious_swap.previous = outside
+        let mut validated_payload = full_restore_payload_for_live(&upload_live)?;
+        let mut outside_swap = tor_swap_for_live(&tor_live)?;
+        outside_swap.previous = outside
             .join(".keys.restore-old.0123456789abcdef0123456789abcdef")
             .display()
             .to_string();
-        payload.additional_swaps.push(malicious_swap);
-        let error = finalize_full_restore_payload(&payload, &upload_live, Some(&tor_live))
-            .err()
-            .context("Outside previous path was unexpectedly accepted")?;
+        validated_payload.additional_swaps.push(outside_swap);
+        let rejection_error =
+            finalize_full_restore_payload(&validated_payload, &upload_live, Some(&tor_live))
+                .err()
+                .context("Outside previous path was unexpectedly accepted")?;
 
         assert!(
-            error
+            rejection_error
                 .to_string()
                 .contains("outside the expected restore backup area"),
-            "rejection should identify the backup-area constraint: {error}"
+            "rejection should identify the backup-area constraint: {rejection_error}"
         );
         Ok(())
     }
@@ -3139,9 +3151,9 @@ mod tests {
             !error.to_string().is_empty(),
             "reconciliation rejection should include an error message"
         );
-        let conn = pool.get().context("Get test database connection")?;
+        let recovered_conn = pool.get().context("Get test database connection")?;
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM pending_fs_ops", [], |row| row
+            recovered_conn.query_row("SELECT COUNT(*) FROM pending_fs_ops", [], |row| row
                 .get::<_, i64>(0))?,
             1,
             "failed reconciliation should retain the pending operation"
@@ -3179,10 +3191,10 @@ mod tests {
             "live": payload.live,
             "previous": payload.previous,
         });
-        let payload: FullRestoreSwapPayload =
+        let validated_payload: FullRestoreSwapPayload =
             serde_json::from_value(legacy_json).context("Deserialize legacy restore payload")?;
 
-        finalize_full_restore_payload(&payload, &upload_live, None)
+        finalize_full_restore_payload(&validated_payload, &upload_live, None)
             .context("Finalize legacy full-restore payload")?;
 
         assert_eq!(
@@ -3287,9 +3299,9 @@ mod tests {
             "new-banner",
             "banner swap should publish staged content"
         );
-        let conn = pool.get().context("Get test database connection")?;
+        let recovered_conn = pool.get().context("Get test database connection")?;
         assert!(
-            crate::db::list_pending_fs_ops(&conn)
+            crate::db::list_pending_fs_ops(&recovered_conn)
                 .context("List pending operations")?
                 .is_empty(),
             "successful recovery should clear every pending operation"

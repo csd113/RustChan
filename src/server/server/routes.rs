@@ -501,7 +501,10 @@ mod tests {
             writer
                 .write_all(br#"{"version":1,"board":{"short_name":"b","name":"Random","description":"","nsfw":false,"thread_limit":100,"reply_limit":300,"bump_limit":300,"max_threads_per_ip":0,"require_thread_title":false,"enable_flags":false,"text_only":false,"forced_anon":false,"sage_without_cap":false,"max_file_size":0,"max_webm_size":0,"max_comment_chars":2000,"max_replies_per_thread":300,"max_subject_chars":100,"cooldown_seconds":0,"thread_cooldown_seconds":0,"show_thread_stats":false,"archive_threads":false,"public_logs":false,"allow_post_deletion":true,"allow_thread_deletion":true,"allow_media_uploads":true,"allow_polls":true,"default_name":"Anonymous","id":0},"threads":[],"posts":[],"polls":[],"file_hashes":[]}"#)
                 .context("write board.json archive entry")?;
-            writer.finish().context("finish board backup archive")?;
+            writer
+                .finish()
+                .context("finish board backup archive")
+                .map(|_completed_value| ())?;
         }
         Ok(cursor.into_inner())
     }
@@ -517,7 +520,7 @@ mod tests {
             &conn,
             "session123",
             admin_id,
-            chrono::Utc::now().timestamp() + 3600,
+            chrono::Utc::now().timestamp().saturating_add(3600),
         )
         .context("create administrator session")?;
         Ok(())
@@ -575,7 +578,8 @@ mod tests {
         let state = crate::test_support::app_state();
         let conn = state.db.get().context("get database connection")?;
         crate::db::create_board(&conn, "test", "Test", "", false)
-            .context("create multipart envelope test board")?;
+            .context("create multipart envelope test board")
+            .map(|_completed_value| ())?;
         drop(conn);
         let app = public_routes().with_state(state);
         let boundary = "rustchan-envelope-test";
@@ -812,7 +816,7 @@ mod tests {
                 "UPDATE boards SET access_mode = 'view_password', access_password_hash = ?1 WHERE id = ?2",
                 rusqlite::params![original_hash, board_id],
             )
-            .context("seed board access")?;
+            .context("seed board access").map(|_completed_value| ())?;
         }
 
         let response = post_board_settings(
@@ -855,7 +859,7 @@ mod tests {
                 "UPDATE boards SET access_mode = 'view_password', access_password_hash = ?1 WHERE id = ?2",
                 rusqlite::params![original_hash, board_id],
             )
-            .context("seed board access")?;
+            .context("seed board access").map(|_completed_value| ())?;
         }
 
         let response = post_board_settings(
@@ -904,7 +908,8 @@ mod tests {
                 "UPDATE boards SET access_password_hash = ?1 WHERE id = ?2",
                 rusqlite::params![original_hash, board_id],
             )
-            .context("seed board access")?;
+            .context("seed board access")
+            .map(|_completed_value| ())?;
         }
 
         let response = post_board_settings(
@@ -947,7 +952,7 @@ mod tests {
                 "UPDATE boards SET access_mode = 'view_password', access_password_hash = ?1 WHERE id = ?2",
                 rusqlite::params![original_hash, board_id],
             )
-            .context("seed board access")?;
+            .context("seed board access").map(|_completed_value| ())?;
         }
 
         let response = post_board_settings(
@@ -1013,10 +1018,11 @@ mod tests {
             StatusCode::PAYLOAD_TOO_LARGE,
             "large backup should bypass the global media upload limit"
         );
-        let body = to_bytes(response.into_body(), usize::MAX).await?;
-        let body = String::from_utf8(body.to_vec()).context("decode restore response body")?;
+        let response_bytes = to_bytes(response.into_body(), usize::MAX).await?;
+        let response_body =
+            String::from_utf8(response_bytes.to_vec()).context("decode restore response body")?;
         assert!(
-            body.contains("Board restore"),
+            response_body.contains("Board restore"),
             "restore response should identify the board restore flow"
         );
         Ok(())
@@ -1070,12 +1076,14 @@ mod tests {
                 .context("hash administrator password")?;
             let admin_id = crate::db::create_admin(&conn, "admin", &password_hash)
                 .context("create administrator")?;
-            crate::db::create_board(&conn, "b", "Random", "", false).context("create board")?;
+            crate::db::create_board(&conn, "b", "Random", "", false)
+                .context("create board")
+                .map(|_completed_value| ())?;
             crate::db::create_session(
                 &conn,
                 "session123",
                 admin_id,
-                chrono::Utc::now().timestamp() + 3600,
+                chrono::Utc::now().timestamp().saturating_add(3600),
             )
             .context("create administrator session")?;
         }
@@ -1131,22 +1139,23 @@ mod tests {
             "refresh should explain that the archive is a board backup"
         );
 
-        let body = to_bytes(response.into_body(), usize::MAX).await?;
-        let body = String::from_utf8(body.to_vec()).context("decode restore error body")?;
+        let response_bytes = to_bytes(response.into_body(), usize::MAX).await?;
+        let response_body =
+            String::from_utf8(response_bytes.to_vec()).context("decode restore error body")?;
         assert!(
-            body.contains("Restore failed."),
+            response_body.contains("Restore failed."),
             "response body should report the restore failure"
         );
         assert!(
-            body.contains("/admin/panel?restore_error="),
+            response_body.contains("/admin/panel?restore_error="),
             "response body should carry the panel redirect"
         );
         assert!(
-            body.contains("open=full-backup-restore"),
+            response_body.contains("open=full-backup-restore"),
             "response body should reopen the full restore panel"
         );
         assert!(
-            body.contains("#full-backup-restore"),
+            response_body.contains("#full-backup-restore"),
             "response body should target the full restore section"
         );
         Ok(())

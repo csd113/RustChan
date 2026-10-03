@@ -210,10 +210,10 @@ pub(in crate::server) async fn index(
     ))
     .into_response();
     let activity_markers_enabled = homepage_thread_badges_enabled || homepage_reply_badges_enabled;
-    response.headers_mut().insert(
+    drop(response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(activity_html_cache_control(activity_markers_enabled)),
-    );
+    ));
     crate::cache::insert_vary_cookie(response.headers_mut());
     Ok((jar, response).into_response())
 }
@@ -334,7 +334,11 @@ pub(in crate::server) async fn board_index(
             .iter()
             .filter_map(|summary| {
                 let marker = thread_activity_markers.get(&summary.thread.id)?;
-                let unread = (summary.thread.reply_count - marker.seen_reply_count).max(0);
+                let unread = summary
+                    .thread
+                    .reply_count
+                    .saturating_sub(marker.seen_reply_count)
+                    .max(0);
                 (unread > 0).then_some((summary.thread.id, unread))
             })
             .collect::<HashMap<_, _>>()
@@ -412,14 +416,14 @@ pub(in crate::server) async fn board_index(
             .status(StatusCode::NOT_MODIFIED)
             .body(axum::body::Body::empty())
             .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-        resp.headers_mut().insert(
+        drop(resp.headers_mut().insert(
             "etag",
             HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("\"0\"")),
-        );
-        resp.headers_mut().insert(
+        ));
+        drop(resp.headers_mut().insert(
             header::CACHE_CONTROL,
             HeaderValue::from_static(activity_html_cache_control(activity_markers_enabled)),
-        );
+        ));
         crate::cache::insert_vary_cookie(resp.headers_mut());
         return Ok((jar, resp).into_response());
     }
@@ -449,12 +453,12 @@ pub(in crate::server) async fn board_index(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
     let mut resp = Html(html).into_response();
     if let Ok(v) = HeaderValue::from_str(&etag) {
-        resp.headers_mut().insert("etag", v);
+        drop(resp.headers_mut().insert("etag", v));
     }
-    resp.headers_mut().insert(
+    drop(resp.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(activity_html_cache_control(activity_markers_enabled)),
-    );
+    ));
     crate::cache::insert_vary_cookie(resp.headers_mut());
     Ok((jar, resp).into_response())
 }

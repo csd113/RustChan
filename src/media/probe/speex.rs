@@ -83,7 +83,7 @@ pub(super) fn inspect(
             .try_into()?;
         if !streams.contains_key(&serial) {
             ensure!(
-                streams.values().all(|stream| stream.ended)
+                streams.values().all(|logical_stream| logical_stream.ended)
                     || streams.values().all(LogicalStream::permits_bos),
                 "Speex BOS pages are not grouped at a chain boundary"
             );
@@ -96,7 +96,7 @@ pub(super) fn inspect(
                 "mixed-codec Speex container is not validated"
             );
             let extra_headers = validate_identification(&page)?;
-            streams.insert(
+            let _previous_entry = streams.insert(
                 serial,
                 LogicalStream {
                     extra_headers,
@@ -127,7 +127,7 @@ pub(super) fn inspect(
         }
         if remaining == 0 {
             ensure!(
-                streams.values().all(|stream| stream.ended),
+                streams.values().all(|logical_stream| logical_stream.ended),
                 "incomplete Speex container"
             );
             break;
@@ -242,11 +242,17 @@ impl Page {
         let mut lacing = vec![0; segments];
         file.read_exact(&mut lacing)?;
         let size = lacing.iter().map(|size| usize::from(*size)).sum::<usize>();
-        let total = 27 + u64::try_from(segments)? + u64::try_from(size)?;
+        let payload_size = u64::try_from(size)?;
+        let total = u64::try_from(segments)?
+            .checked_add(27)
+            .and_then(|header_size| header_size.checked_add(payload_size))
+            .context("Ogg page size overflow")?;
         ensure!(total <= *remaining, "truncated Ogg payload");
         let mut body = vec![0; size];
         file.read_exact(&mut body)?;
-        *remaining -= total;
+        *remaining = remaining
+            .checked_sub(total)
+            .context("Ogg page exceeds remaining file")?;
         Ok(Self {
             header,
             lacing,
@@ -284,9 +290,9 @@ impl Page {
                 .chain(&self.lacing)
                 .chain(&self.body)
                 .fold(0_u32, |mut crc, byte| {
-                    crc ^= u32::from(*byte) << 24;
-                    for _ in 0..8 {
-                        crc = (crc << 1)
+                    crc ^= u32::from(*byte) << 24_i32;
+                    for _ in 0_i32..8_i32 {
+                        crc = (crc << 1_i32)
                             ^ if crc & 0x8000_0000 != 0 {
                                 0x04c1_1db7
                             } else {
@@ -309,26 +315,31 @@ fn validate_identification(page: &Page) -> Result<u32> {
     let field = |offset: usize| -> Result<i32> {
         Ok(i32::from_le_bytes(
             page.body
-                .get(offset..offset + 4)
+                .get(
+                    offset
+                        ..offset
+                            .checked_add(4)
+                            .context("Speex field offset overflow")?,
+                )
                 .context("truncated Speex identification")?
                 .try_into()?,
         ))
     };
     let mode = field(40)?;
-    ensure!((0..=2).contains(&mode), "invalid Speex mode");
+    ensure!((0_i32..=2_i32).contains(&mode), "invalid Speex mode");
     let shift = u32::try_from(mode)?;
     ensure!(
-        field(28)? == 1
-            && field(32)? == 80
+        field(28)? == 1_i32
+            && field(32)? == 80_i32
             && field(36)? == 8000_i32.checked_shl(shift).context("Speex rate overflow")?
-            && (1..=4).contains(&field(44)?)
-            && (1..=2).contains(&field(48)?)
+            && (1_i32..=4_i32).contains(&field(44)?)
+            && (1_i32..=2_i32).contains(&field(48)?)
             && field(56)? == 160_i32.checked_shl(shift).context("Speex frame overflow")?
-            && (0..=1).contains(&field(60)?)
-            && (1..=64).contains(&field(64)?)
-            && (0..=8).contains(&field(68)?)
-            && field(72)? == 0
-            && field(76)? == 0,
+            && (0_i32..=1_i32).contains(&field(60)?)
+            && (1_i32..=64_i32).contains(&field(64)?)
+            && (0_i32..=8_i32).contains(&field(68)?)
+            && field(72)? == 0_i32
+            && field(76)? == 0_i32,
         "invalid Speex identification metadata"
     );
     Ok(u32::try_from(field(68)?)?)

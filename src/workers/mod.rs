@@ -24,10 +24,10 @@ use tracing::{debug, error, warn};
 /// Builds an `FFmpeg` command using the configured executable path.
 fn ffmpeg_command() -> TokioCommand {
     let mut command = TokioCommand::new(&CONFIG.ffmpeg_path);
-    command.stdin(Stdio::null());
+    let _stdin_configuration = command.stdin(Stdio::null());
     #[cfg(unix)]
     {
-        command.process_group(0);
+        let _process_group_configuration = command.process_group(0);
     }
     command
 }
@@ -168,7 +168,7 @@ pub enum Job {
     VideoTranscode {
         /// Database identifier of the post owning the upload.
         post_id: i64,
-        /// Path relative to `CONFIG.upload_dir`, e.g. "b/abc123.mp4"
+        /// Path relative to `CONFIG.upload_dir`, e.g. "b/abc123.mp4".
         file_path: String,
         /// Short name of the board containing the post.
         board_short: String,
@@ -177,7 +177,7 @@ pub enum Job {
     AudioWaveform {
         /// Database identifier of the post owning the upload.
         post_id: i64,
-        /// Path relative to `CONFIG.upload_dir`
+        /// Path relative to `CONFIG.upload_dir`.
         file_path: String,
         /// Short name of the board containing the post.
         board_short: String,
@@ -203,10 +203,22 @@ impl Job {
     #[must_use]
     pub const fn type_str(&self) -> &'static str {
         match self {
-            Self::VideoTranscode { .. } => "video_transcode",
-            Self::AudioWaveform { .. } => "audio_waveform",
-            Self::ThreadPrune { .. } => "thread_prune",
-            Self::SpamCheck { .. } => "spam_check",
+            Self::VideoTranscode {
+                post_id: _,
+                file_path: _,
+                board_short: _,
+            } => "video_transcode",
+            Self::AudioWaveform {
+                post_id: _,
+                file_path: _,
+                board_short: _,
+            } => "audio_waveform",
+            Self::ThreadPrune { board_id: _ } => "thread_prune",
+            Self::SpamCheck {
+                post_id: _,
+                ip_hash: _,
+                body_len: _,
+            } => "spam_check",
         }
     }
 
@@ -223,7 +235,12 @@ impl Job {
                 file_path,
                 board_short,
             } => Some((*post_id, file_path.as_str(), board_short.as_str())),
-            Self::ThreadPrune { .. } | Self::SpamCheck { .. } => None,
+            Self::ThreadPrune { board_id: _ }
+            | Self::SpamCheck {
+                post_id: _,
+                ip_hash: _,
+                body_len: _,
+            } => None,
         }
     }
 }
@@ -261,6 +278,10 @@ fn log_thread_prune_schedule(board_id: i64, schedule: crate::db::ThreadPruneSche
 /// Cheaply-cloneable handle to the shared job queue.
 /// Clone this into every handler that needs to enqueue work.
 #[derive(Clone, Debug)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "public operational handles preserve the queue API; accounting counters stay private to preserve invariants"
+)]
 pub struct JobQueue {
     /// Database pool used to persist and claim background jobs.
     pub pool: DbPool,
@@ -335,7 +356,7 @@ impl JobQueue {
                 .context("Get DB connection for required board prune intent failed")?;
             let schedule = crate::db::persist_thread_prune_intent(&conn, *board_id)?;
             if schedule.inserted {
-                self.pending_jobs.fetch_add(1, Ordering::Relaxed);
+                let _previous_count = self.pending_jobs.fetch_add(1, Ordering::Relaxed);
             }
             log_thread_prune_schedule(*board_id, schedule);
             self.notify.notify_one();
@@ -349,7 +370,7 @@ impl JobQueue {
             let conn = match self.pool.get() {
                 Ok(conn) => conn,
                 Err(error) => {
-                    self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
+                    let _previous_count = self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
                     return Err(error.into());
                 }
             };
@@ -360,12 +381,12 @@ impl JobQueue {
                     Ok(EnqueueOutcome::Enqueued(id))
                 }
                 Err(error) => {
-                    self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
+                    let _previous_count = self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
                     Err(error)
                 }
             }
         } else {
-            self.dropped_jobs.fetch_add(1, Ordering::Relaxed);
+            let _previous_count = self.dropped_jobs.fetch_add(1, Ordering::Relaxed);
             Ok(EnqueueOutcome::DroppedAtCapacity)
         }
     }
@@ -397,7 +418,7 @@ impl JobQueue {
             if let Some(job_id) = active {
                 return Ok(EnqueueOutcome::Enqueued(job_id));
             }
-            self.dropped_jobs.fetch_add(1, Ordering::Relaxed);
+            let _previous_count = self.dropped_jobs.fetch_add(1, Ordering::Relaxed);
             return Ok(EnqueueOutcome::DroppedAtCapacity);
         }
 
@@ -419,7 +440,7 @@ impl JobQueue {
                 Ok(EnqueueOutcome::Enqueued(schedule.job_id))
             }
             Err(error) => {
-                self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
+                let _previous_count = self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
                 error!(
                     target: "workers",
                     post_id,
@@ -472,7 +493,7 @@ impl JobQueue {
     /// Atomically reserves capacity for a job before it is persisted.
     fn reserve_pending_slot(&self, job_type: &str) -> bool {
         if CONFIG.job_queue_capacity == 0 {
-            self.pending_jobs.fetch_add(1, Ordering::Relaxed);
+            let _previous_count = self.pending_jobs.fetch_add(1, Ordering::Relaxed);
             return true;
         }
 
@@ -508,17 +529,17 @@ impl JobQueue {
     /// Saturating queue-accounting decrement used after claims and coalescing.
     fn decrement_pending_by(&self, count: usize) {
         let count = u64::try_from(count).unwrap_or(u64::MAX);
-        self.pending_jobs
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
-                Some(pending.saturating_sub(count))
-            })
-            .ok();
+        let _previous_count =
+            self.pending_jobs
+                .update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
+                    pending.saturating_sub(count)
+                });
     }
 
     /// Restores the pending-job gauge when a failed job is scheduled to retry.
     fn mark_job_failure_state(&self, failure_state: crate::db::JobFailureState) {
         if failure_state == crate::db::JobFailureState::Retrying {
-            self.pending_jobs.fetch_add(1, Ordering::Relaxed);
+            let _previous_count = self.pending_jobs.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -535,7 +556,7 @@ impl JobQueue {
 ///
 /// Typical shutdown sequence:
 ///   `queue.cancel.cancel()`;
-///   `for h in handles { h.await.ok(); }`
+///   `for h in handles { h.await.ok(); }`.
 ///
 /// Workers are pure async Tokio tasks — they do not consume OS threads at rest.
 pub fn start_worker_pool(
@@ -741,7 +762,7 @@ fn recover_job_after_completion_error_once(
                 // The external work has already succeeded (or was proven stale).
                 // Re-queueing it could repeat a non-idempotent mutation, so retain
                 // the attempt count and force a safe terminal state.
-                conn.execute(
+                let _failed_jobs = conn.execute(
                     "UPDATE background_jobs
                      SET status = 'failed',
                          last_error = ?2,
@@ -751,7 +772,7 @@ fn recover_job_after_completion_error_once(
                 )?;
                 if matches!(completion, JobCompletion::Done) {
                     if let Some(identity) = media_identity {
-                        conn.execute(
+                        let _completed_posts = conn.execute(
                             "UPDATE posts
                              SET media_processing_state = '', media_processing_error = NULL
                              WHERE id = ?1 AND file_path = ?2
@@ -899,7 +920,12 @@ async fn persist_job_completion(
     let mut consecutive_errors = 0_u32;
     let mut shutdown_deadline = cancel
         .is_cancelled()
-        .then(|| tokio::time::Instant::now() + COMPLETION_SHUTDOWN_GRACE);
+        .then(|| {
+            tokio::time::Instant::now()
+                .checked_add(COMPLETION_SHUTDOWN_GRACE)
+                .context("completion shutdown deadline overflow")
+        })
+        .transpose()?;
     loop {
         let attempt_pool = pool.clone();
         let attempt_completion = completion.clone();
@@ -954,7 +980,7 @@ async fn persist_job_completion(
                 () = sleep(delay) => {}
                 () = cancel.cancelled() => {
                     shutdown_deadline =
-                        Some(tokio::time::Instant::now() + COMPLETION_SHUTDOWN_GRACE);
+                        Some(tokio::time::Instant::now().checked_add(COMPLETION_SHUTDOWN_GRACE).context("completion shutdown deadline overflow")?);
                 }
             }
         }
@@ -1016,9 +1042,9 @@ async fn worker_loop(
                                 queue.mark_job_failure_state(failure_state);
                             }
                             Ok(None) => {}
-                            Err(error) => {
+                            Err(completion_error) => {
                                 error!(
-                                    "Worker {id}: could not resolve broken job #{job_id}: {error}"
+                                    "Worker {id}: could not resolve broken job #{job_id}: {completion_error}"
                                 );
                                 return;
                             }
@@ -1123,7 +1149,7 @@ fn backoff_duration(consecutive_errors: u32) -> Duration {
     let jitter = u64::from(crate::utils::crypto::os_random_u32_or_exit(
         "computing worker retry jitter",
     )) % JITTER_MAX_MS;
-    Duration::from_millis(base + jitter)
+    Duration::from_millis(base.saturating_add(jitter))
 }
 
 // Job dispatch
@@ -1160,7 +1186,7 @@ async fn handle_job(
                 );
                 return Ok(JobExecution::Stale);
             }
-            active_video_jobs.fetch_add(1, Ordering::Relaxed);
+            let _active_before_start = active_video_jobs.fetch_add(1, Ordering::Relaxed);
             let result = transcode_video(
                 job_id,
                 post_id,
@@ -1172,8 +1198,8 @@ async fn handle_job(
                 cancel,
             )
             .await;
-            active_video_jobs.fetch_sub(1, Ordering::Relaxed);
-            in_progress.remove(&file_path);
+            let _active_before_completion = active_video_jobs.fetch_sub(1, Ordering::Relaxed);
+            let _removed_entry = in_progress.remove(&file_path);
             result
         }
 
@@ -1201,7 +1227,7 @@ async fn handle_job(
                 cancel,
             )
             .await;
-            in_progress.remove(&file_path);
+            let _removed_entry = in_progress.remove(&file_path);
             result
         }
 
@@ -1250,7 +1276,12 @@ fn media_job_identity(job: &Job) -> Option<MediaJobIdentity> {
             job_type: "audio_waveform",
             expected_source: file_path.clone(),
         }),
-        Job::ThreadPrune { .. } | Job::SpamCheck { .. } => None,
+        Job::ThreadPrune { board_id: _ }
+        | Job::SpamCheck {
+            post_id: _,
+            ip_hash: _,
+            body_len: _,
+        } => None,
     }
 }
 
@@ -1310,7 +1341,7 @@ async fn transcode_video(
     };
 
     let mut command = ffmpeg_command();
-    command.args(&args);
+    let _configured_command = command.args(&args);
     run_video_transcode(command, post_id, timeout_secs, cancel).await?;
 
     // File persistence and database updates are blocking.
@@ -1331,7 +1362,7 @@ async fn run_video_transcode(
     timeout_secs: u64,
     cancel: CancellationToken,
 ) -> Result<()> {
-    command
+    let _configured_command = command
         .stderr(Stdio::piped())
         .stdout(Stdio::null())
         .kill_on_drop(true);
@@ -1427,8 +1458,9 @@ fn transcode_video_prepare(
     let webm_name = transcoded_webm_name(&stem, &ext);
     let webm_abs = board_dir.join(&webm_name);
     let webm_rel = format!("{board_short}/{webm_name}");
-    crate::utils::fs_security::canonical_parent_for_new_child(&upload_root, &webm_abs)
-        .context("Transcode destination failed safety validation")?;
+    let _validated_path =
+        crate::utils::fs_security::canonical_parent_for_new_child(&upload_root, &webm_abs)
+            .context("Transcode destination failed safety validation")?;
 
     // temp file in the same directory for POSIX-atomic rename.
     let tmp = tempfile::Builder::new()
@@ -1458,7 +1490,7 @@ fn validated_board_media_dir(upload_root: &std::path::Path, board_short: &str) -
     let board_component = single_normal_component(board_short)
         .ok_or_else(|| anyhow::anyhow!("Transcode board name contains unsafe path components"))?;
     let board_dir = upload_root.join(board_component);
-    crate::utils::fs_security::canonical_child_of(upload_root, &board_dir)
+    let _validated_path = crate::utils::fs_security::canonical_child_of(upload_root, &board_dir)
         .context("Transcode board directory failed safety validation")?;
     crate::utils::fs_security::assert_dir_no_symlink(&board_dir)
         .context("Transcode board directory is not safe")?;
@@ -1672,8 +1704,11 @@ fn install_deterministic_output(
         );
         return Ok(false);
     }
-    tmp.persist_noclobber(destination)
-        .map_err(|error| anyhow::anyhow!("Failed to atomically install media output: {error}"))?;
+    drop(
+        tmp.persist_noclobber(destination).map_err(|error| {
+            anyhow::anyhow!("Failed to atomically install media output: {error}")
+        })?,
+    );
     crate::utils::fs_security::assert_regular_file_no_symlink(destination)
         .context("Installed deterministic media output is unsafe")?;
     Ok(true)
@@ -1801,12 +1836,12 @@ async fn render_waveform_with_compatibility(
 ) -> Result<bool> {
     let started = std::time::Instant::now();
     let source = src_path.to_path_buf();
-    let output = output_path.to_path_buf();
+    let decoder_output_path = output_path.to_path_buf();
     let decoder_cancel = cancel.clone();
     let rendered = tokio::task::spawn_blocking(move || {
         crate::media::audio::render_waveform(
             &source,
-            &output,
+            &decoder_output_path,
             CONFIG.thumb_size,
             (CONFIG.thumb_size / 2).max(1),
             &decoder_cancel,
@@ -1848,7 +1883,7 @@ async fn render_waveform_with_compatibility(
             CONFIG.thumb_size,
             CONFIG.thumb_size / 2
         );
-        command
+        let _configured_command = command
             .args(["-loglevel", "error", "-i"])
             .arg(src_path)
             .args(["-filter_complex", &filter, "-frames:v", "1", "-y"])
@@ -2442,7 +2477,7 @@ pub(crate) fn normalize_legacy_thread_prune_jobs(pool: &DbPool, limit: usize) ->
     for (job_id, payload) in jobs {
         match serde_json::from_str::<Job>(&payload) {
             Ok(Job::ThreadPrune { board_id }) => {
-                board_ids.insert(board_id);
+                let _previous_entry = board_ids.insert(board_id);
             }
             Ok(_) => {
                 error!(target: "workers", job_id, "thread_prune row contained another job type");
@@ -2594,7 +2629,7 @@ pub fn reconcile_media_job_states(
             let job = match parsed {
                 Ok(job) if job.type_str() == stored_type => job,
                 Ok(_) | Err(_) => {
-                    conn.execute(
+                    let _rows_affected = conn.execute(
                         "UPDATE background_jobs
                          SET status = 'failed',
                              last_error = 'malformed legacy media job payload',
@@ -2651,7 +2686,7 @@ pub fn reconcile_media_job_states(
                 continue;
             }
 
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "UPDATE background_jobs
                  SET status = 'done',
                      last_error = ?2,
@@ -2709,7 +2744,7 @@ pub fn reconcile_media_job_states(
 
         for (post_id, source, current_thumb) in posts {
             let Some(source) = source else {
-                conn.execute(
+                let _rows_affected = conn.execute(
                     "UPDATE posts SET media_processing_state = ?1,
                          media_processing_error = 'pending media post has no source'
                      WHERE id = ?2 AND media_processing_state = ?3",
@@ -2779,7 +2814,7 @@ pub fn reconcile_media_job_states(
                     Job::VideoTranscode {
                         file_path,
                         board_short,
-                        ..
+                        post_id: _,
                     } => {
                         let expected_output_path =
                             deterministic_video_output_path(&file_path, &board_short);
@@ -2799,7 +2834,7 @@ pub fn reconcile_media_job_states(
                     Job::AudioWaveform {
                         file_path,
                         board_short,
-                        ..
+                        post_id: _,
                     } => {
                         let expected_thumb_path =
                             deterministic_waveform_output_path(&file_path, &board_short);
@@ -2813,10 +2848,15 @@ pub fn reconcile_media_job_states(
                             None
                         }
                     }
-                    Job::ThreadPrune { .. } | Job::SpamCheck { .. } => None,
+                    Job::ThreadPrune { board_id: _ }
+                    | Job::SpamCheck {
+                        post_id: _,
+                        ip_hash: _,
+                        body_len: _,
+                    } => None,
                 };
-                if let Some((status, error)) = disposition {
-                    terminal = Some((status.to_owned(), error));
+                if let Some((terminal_status, terminal_error)) = disposition {
+                    terminal = Some((terminal_status.to_owned(), terminal_error));
                     break;
                 }
             }
@@ -2831,7 +2871,7 @@ pub fn reconcile_media_job_states(
                     Some("pending media state has no durable compatible job".to_owned()),
                 ),
             };
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "UPDATE posts SET media_processing_state = ?1, media_processing_error = ?2
                  WHERE id = ?3 AND file_path = ?4 AND media_processing_state = ?5",
                 rusqlite::params![
@@ -2869,14 +2909,13 @@ pub fn reconcile_media_job_states(
 
 // SpamCheck
 /// Records lightweight abuse signals for later operational review.
-fn run_spam_check(post_id: i64, ip_hash: &str, body_len: usize) {
+fn run_spam_check(post_id: i64, _ip_hash: &str, body_len: usize) {
     if body_len > 3500 {
         debug!(
             "SpamCheck: post {} body_len={} exceeds 3500 chars (flagged for review)",
             post_id, body_len
         );
     }
-    let _ = ip_hash;
 }
 
 // Thumbnail / waveform cache eviction
@@ -2893,6 +2932,30 @@ pub struct ThumbCacheEvictionReport {
     pub removed_bytes: u64,
 }
 
+/// Sum cache bytes before filesystem mutation, rejecting unrepresentable totals.
+fn thumbnail_cache_bytes(mut sizes: impl Iterator<Item = u64>) -> Result<u64> {
+    sizes.try_fold(0_u64, |total, size| {
+        total
+            .checked_add(size)
+            .context("thumbnail cache size overflow")
+    })
+}
+
+/// Load every live thumbnail reference before considering cache eviction.
+fn referenced_thumbnail_paths(
+    conn: &rusqlite::Connection,
+) -> Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT thumb_path
+         FROM posts
+         WHERE thumb_path IS NOT NULL AND TRIM(thumb_path) != ''",
+    )?;
+    let referenced = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(referenced)
+}
+
 /// Walk every board's `thumbs/` subdirectory and evict unreferenced files.
 ///
 /// Only files inside `{upload_dir}/{board}/thumbs/` are considered — original
@@ -2907,14 +2970,7 @@ pub fn evict_thumb_cache(
     upload_dir: &str,
     max_bytes: u64,
 ) -> Result<ThumbCacheEvictionReport> {
-    let mut reference_stmt = conn.prepare(
-        "SELECT DISTINCT thumb_path
-         FROM posts
-         WHERE thumb_path IS NOT NULL AND TRIM(thumb_path) != ''",
-    )?;
-    let referenced: std::collections::HashSet<String> = reference_stmt
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let referenced = referenced_thumbnail_paths(conn)?;
 
     // Collect (mtime_secs, path, size) for every file inside any thumbs/ dir.
     let mut files: Vec<(u64, PathBuf, u64, bool)> = Vec::new();
@@ -2969,11 +3025,8 @@ pub fn evict_thumb_cache(
         }
     }
 
-    // Dereference `sz` explicitly and annotate the sum type for
-    // clarity.  `Iterator<Item = &u64>` implements `Sum<&u64>` in std so this
-    // compiled before, but the explicit form is more readable and avoids the
-    // implicit coercion.
-    let total: u64 = files.iter().map(|(_, _, size, _)| *size).sum::<u64>();
+    // Validate the entire byte total before removing any cache file.
+    let total = thumbnail_cache_bytes(files.iter().map(|(_, _, size, _)| *size))?;
     let mut report = ThumbCacheEvictionReport {
         total_before_bytes: total,
         total_after_bytes: total,
@@ -2999,9 +3052,13 @@ pub fn evict_thumb_cache(
         match std::fs::remove_file(path) {
             Ok(()) => {
                 remaining = remaining.saturating_sub(*size);
-                deleted += 1;
+                deleted = deleted
+                    .checked_add(1)
+                    .context("thumbnail eviction count overflow")?;
                 // Dereference `size` for clarity.
-                deleted_bytes += *size;
+                deleted_bytes = deleted_bytes
+                    .checked_add(*size)
+                    .context("thumbnail eviction size overflow")?;
             }
             Err(e) => {
                 warn!("evict_thumb_cache: failed to delete {:?}: {}", path, e);
@@ -3019,6 +3076,19 @@ pub fn evict_thumb_cache(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn thumbnail_cache_size_overflow_is_rejected_before_eviction() -> anyhow::Result<()> {
+        anyhow::ensure!(
+            super::thumbnail_cache_bytes([0, 4, 8].into_iter())? == 12,
+            "ordinary cache total changed"
+        );
+        anyhow::ensure!(
+            super::thumbnail_cache_bytes([u64::MAX, 1].into_iter()).is_err(),
+            "overflowing cache total was accepted"
+        );
+        Ok(())
+    }
+
     use super::{
         media_job_identity, normalize_legacy_thread_prune_jobs, persist_job_completion,
         persist_job_completion_once, persist_transcoded_webm, prune_threads,
@@ -3052,17 +3122,17 @@ mod tests {
         state: &str,
     ) -> anyhow::Result<i64> {
         let conn = pool.get().context("get media fixture connection")?;
-        conn.execute(
+        let _inserted_boards = conn.execute(
             "INSERT INTO boards (short_name, name, description) VALUES (?1, ?1, '')",
             rusqlite::params![board],
         )?;
         let board_id = conn.last_insert_rowid();
-        conn.execute(
+        let _inserted_threads = conn.execute(
             "INSERT INTO threads (board_id, subject) VALUES (?1, 'media')",
             rusqlite::params![board_id],
         )?;
         let thread_id = conn.last_insert_rowid();
-        conn.execute(
+        let _inserted_posts = conn.execute(
             "INSERT INTO posts
              (thread_id, board_id, name, body, body_html, deletion_token, is_op,
               file_path, file_size, mime_type, media_type, media_processing_state)
@@ -3094,7 +3164,7 @@ mod tests {
     ) -> anyhow::Result<i64> {
         let conn = pool.get().context("get retention fixture connection")?;
         let board_id = crate::db::create_board(&conn, short, short, "", false)?;
-        conn.execute(
+        let _rows_affected = conn.execute(
             "UPDATE boards
              SET max_threads = ?2, max_archived_threads = ?3, allow_archive = ?4
              WHERE id = ?1",
@@ -3116,14 +3186,14 @@ mod tests {
     ) -> anyhow::Result<()> {
         let conn = pool.get().context("get thread fixture connection")?;
         for ordinal in 0..live {
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "INSERT INTO threads (board_id, subject, bumped_at)
                  VALUES (?1, 'live', ?2)",
                 rusqlite::params![board_id, i64::try_from(ordinal).unwrap_or(i64::MAX)],
             )?;
         }
         for ordinal in 0..archived {
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "INSERT INTO threads (board_id, subject, bumped_at, archived, locked)
                  VALUES (?1, 'archived', ?2, 1, 1)",
                 rusqlite::params![board_id, i64::try_from(ordinal).unwrap_or(i64::MAX)],
@@ -3329,7 +3399,7 @@ mod tests {
         };
         {
             let conn = pool.get()?;
-            claim_job(&queue, &conn, job_id);
+            let _claimed_job = claim_job(&queue, &conn, job_id);
             conn.execute_batch("BEGIN IMMEDIATE")?;
             let finish = crate::db::finish_video_media_job_in_tx(
                 &conn,
@@ -3382,11 +3452,11 @@ mod tests {
         let identity = media_job_identity(&job).context("media identity")?;
         {
             let conn = pool.get()?;
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "DELETE FROM posts WHERE id = ?1",
                 rusqlite::params![post_id],
             )?;
-            claim_job(&queue, &conn, job_id);
+            let _claimed_job = claim_job(&queue, &conn, job_id);
         }
         let state = persist_job_completion_once(
             &pool,
@@ -3453,10 +3523,10 @@ mod tests {
             EnqueueOutcome::DroppedAtCapacity => bail!("retry fixture dropped"),
         };
         let identity = media_job_identity(&job).context("media identity")?;
-        for attempt in 1..=3 {
+        for attempt in 1_i32..=3_i32 {
             {
                 let conn = pool.get()?;
-                claim_job(&queue, &conn, job_id);
+                let _claimed_job = claim_job(&queue, &conn, job_id);
             }
             let failure = persist_job_completion_once(
                 &pool,
@@ -3472,7 +3542,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
             ensure!(source == "retry/video.mp4");
-            if attempt < 3 {
+            if attempt < 3_i32 {
                 ensure!(failure == Some(crate::db::JobFailureState::Retrying));
                 ensure!(job_status == "pending");
                 ensure!(post_state == crate::db::MEDIA_PROCESSING_PENDING);
@@ -3485,14 +3555,19 @@ mod tests {
         }
 
         let replacement_id = match queue.enqueue(&job)? {
-            EnqueueOutcome::Enqueued(job_id) => job_id,
+            EnqueueOutcome::Enqueued(enqueued_id) => enqueued_id,
             EnqueueOutcome::DroppedAtCapacity => bail!("rescheduled fixture dropped"),
         };
         {
             let conn = pool.get()?;
-            claim_job(&queue, &conn, replacement_id);
+            let _claimed_job = claim_job(&queue, &conn, replacement_id);
         }
-        persist_job_completion_once(&pool, replacement_id, Some(&identity), &JobCompletion::Done)?;
+        let _completion_state = persist_job_completion_once(
+            &pool,
+            replacement_id,
+            Some(&identity),
+            &JobCompletion::Done,
+        )?;
         let conn = pool.get()?;
         let state: String = conn.query_row(
             "SELECT media_processing_state FROM posts WHERE id = ?1",
@@ -3524,11 +3599,11 @@ mod tests {
             };
             {
                 let conn = pool.get()?;
-                claim_job(&queue, &conn, old_job_id);
+                let _claimed_job = claim_job(&queue, &conn, old_job_id);
                 if board == "newsrc" {
                     conn.execute_batch("BEGIN IMMEDIATE")?;
                 }
-                conn.execute(
+                let _rows_affected = conn.execute(
                     "UPDATE posts SET file_path = ?2, media_processing_state = ?3 WHERE id = ?1",
                     rusqlite::params![post_id, format!("{board}/new.mp4"), replacement_state],
                 )?;
@@ -3538,7 +3613,7 @@ mod tests {
                         file_path: "newsrc/new.mp4".to_owned(),
                         board_short: "newsrc".to_owned(),
                     };
-                    crate::db::enqueue_job(
+                    let _job_id = crate::db::enqueue_job(
                         &conn,
                         newer.type_str(),
                         &serde_json::to_string(&newer)?,
@@ -3586,7 +3661,7 @@ mod tests {
                 rusqlite::params![post_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "INSERT INTO posts
                  (thread_id, board_id, name, body, body_html, deletion_token,
                   file_path, file_size, mime_type, media_type)
@@ -3606,7 +3681,7 @@ mod tests {
             EnqueueOutcome::DroppedAtCapacity => bail!("shared-source fixture dropped"),
         };
         let conn = pool.get()?;
-        claim_job(&queue, &conn, job_id);
+        let _claimed_job = claim_job(&queue, &conn, job_id);
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let finish = crate::db::finish_video_media_job_in_tx(
             &conn,
@@ -3655,7 +3730,7 @@ mod tests {
         };
         {
             let conn = pool.get()?;
-            claim_job(&queue, &conn, job_id);
+            let _claimed_job = claim_job(&queue, &conn, job_id);
             conn.execute_batch("BEGIN IMMEDIATE")?;
             let finish = crate::db::finish_video_media_job_in_tx(
                 &conn,
@@ -3697,8 +3772,9 @@ mod tests {
         let pool = crate::db::init_test_pool().expect("test pool");
         let board_id = seed_retention_board(&pool, "coalesce", 1, 10, true).expect("seed board");
         let conn = pool.get().expect("database connection");
-        for _ in 0..100 {
-            crate::db::persist_thread_prune_intent(&conn, board_id).expect("coalesce prune intent");
+        for _ in 0_i32..100_i32 {
+            let _schedule = crate::db::persist_thread_prune_intent(&conn, board_id)
+                .expect("coalesce prune intent");
         }
         assert_eq!(
             active_prune_count(&conn, board_id).expect("count intents"),
@@ -3732,8 +3808,8 @@ mod tests {
         seed_threads(&pool, board_id, 3, 0)?;
         {
             let conn = pool.get()?;
-            crate::db::persist_thread_prune_intent(&conn, board_id)?;
-            conn.execute(
+            let _schedule = crate::db::persist_thread_prune_intent(&conn, board_id)?;
+            let _rows_affected = conn.execute(
                 "UPDATE boards SET max_threads = 3, allow_archive = 0 WHERE id = ?1",
                 rusqlite::params![board_id],
             )?;
@@ -3747,7 +3823,7 @@ mod tests {
                 live == 3,
                 "increased current limit must preserve all threads"
             );
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "UPDATE boards SET max_threads = 1 WHERE id = ?1",
                 rusqlite::params![board_id],
             )?;
@@ -3765,8 +3841,8 @@ mod tests {
         seed_threads(&pool, board_id, 0, 3)?;
         {
             let conn = pool.get()?;
-            crate::db::persist_thread_prune_intent(&conn, board_id)?;
-            conn.execute(
+            let _schedule = crate::db::persist_thread_prune_intent(&conn, board_id)?;
+            let _rows_affected = conn.execute(
                 "UPDATE boards SET max_archived_threads = 3 WHERE id = ?1",
                 rusqlite::params![board_id],
             )?;
@@ -3776,7 +3852,7 @@ mod tests {
         {
             let conn = pool.get()?;
             ensure!(crate::db::count_archived_threads_for_board(&conn, board_id)? == 3);
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "UPDATE boards SET max_archived_threads = 1 WHERE id = ?1",
                 rusqlite::params![board_id],
             )?;
@@ -3801,7 +3877,7 @@ mod tests {
                 |row| row.get(0),
             )?;
             conn.execute_batch("DROP TRIGGER boards_domain_update")?;
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "UPDATE boards SET max_threads = 0 WHERE id = ?1",
                 rusqlite::params![board_id],
             )?;
@@ -3853,22 +3929,22 @@ mod tests {
             "d": {
                 "board_id": board_id,
                 "board_short": "legacy",
-                "max_threads": 1,
-                "max_archived_threads": 10,
+                "max_threads": 1_i32,
+                "max_archived_threads": 10_i32,
                 "allow_archive": false
             }
         })
         .to_string();
-        for _ in 0..3 {
-            crate::db::enqueue_job(&conn, "thread_prune", &legacy_payload)?;
+        for _ in 0_i32..3_i32 {
+            let _job_id = crate::db::enqueue_job(&conn, "thread_prune", &legacy_payload)?;
         }
         let missing_payload = serde_json::json!({
             "t": "ThreadPrune",
             "d": {
-                "board_id": 999_999,
+                "board_id": 999_999_i32,
                 "board_short": "gone",
-                "max_threads": 1,
-                "max_archived_threads": 1,
+                "max_threads": 1_i32,
+                "max_archived_threads": 1_i32,
                 "allow_archive": false
             }
         })
@@ -3878,9 +3954,9 @@ mod tests {
 
         normalize_legacy_thread_prune_jobs(&pool, 128)?;
 
-        let conn = pool.get()?;
-        ensure!(active_prune_count(&conn, board_id)? == 1);
-        let missing_status: String = conn.query_row(
+        let verification_conn = pool.get()?;
+        ensure!(active_prune_count(&verification_conn, board_id)? == 1);
+        let missing_status: String = verification_conn.query_row(
             "SELECT status FROM background_jobs WHERE id = ?1",
             rusqlite::params![missing_job_id],
             |row| row.get(0),
@@ -3897,7 +3973,7 @@ mod tests {
     fn media_reconciliation_repairs_legacy_matrix_and_reaches_fixed_point() -> anyhow::Result<()> {
         fn insert_job(conn: &rusqlite::Connection, job: &Job, status: &str) -> anyhow::Result<i64> {
             let id = crate::db::enqueue_job(conn, job.type_str(), &serde_json::to_string(job)?)?;
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "UPDATE background_jobs SET status = ?2 WHERE id = ?1",
                 rusqlite::params![id, status],
             )?;
@@ -3943,7 +4019,7 @@ mod tests {
             crate::db::MEDIA_PROCESSING_PENDING,
         )?;
         let conn = pool.get()?;
-        insert_job(
+        let _completed_job_id = insert_job(
             &conn,
             &Job::VideoTranscode {
                 post_id: completed,
@@ -3995,7 +4071,7 @@ mod tests {
             },
             "pending",
         )?;
-        crate::db::enqueue_job(&conn, "video_transcode", "{malformed")?;
+        let _malformed_job_id = crate::db::enqueue_job(&conn, "video_transcode", "{malformed")?;
         let valid_job = insert_job(
             &conn,
             &Job::VideoTranscode {
@@ -4011,7 +4087,7 @@ mod tests {
         ensure!(first.jobs_resolved >= 6);
         ensure!(first.posts_repaired >= 3);
         ensure!(first.malformed_jobs == 1);
-        let conn = pool.get()?;
+        let verification_conn = pool.get()?;
         for job_id in [
             normal_job,
             missing_job,
@@ -4019,7 +4095,7 @@ mod tests {
             resolved_duplicate,
             changed_job,
         ] {
-            let status: String = conn.query_row(
+            let status: String = verification_conn.query_row(
                 "SELECT status FROM background_jobs WHERE id = ?1",
                 rusqlite::params![job_id],
                 |row| row.get(0),
@@ -4027,26 +4103,26 @@ mod tests {
             ensure!(status == "done");
         }
         for job_id in [kept_duplicate, valid_job] {
-            let status: String = conn.query_row(
+            let status: String = verification_conn.query_row(
                 "SELECT status FROM background_jobs WHERE id = ?1",
                 rusqlite::params![job_id],
                 |row| row.get(0),
             )?;
             ensure!(status == "pending");
         }
-        let no_job_state: String = conn.query_row(
+        let no_job_state: String = verification_conn.query_row(
             "SELECT media_processing_state FROM posts WHERE id = ?1",
             rusqlite::params![no_job],
             |row| row.get(0),
         )?;
-        let completed_state: String = conn.query_row(
+        let completed_state: String = verification_conn.query_row(
             "SELECT media_processing_state FROM posts WHERE id = ?1",
             rusqlite::params![completed],
             |row| row.get(0),
         )?;
         ensure!(no_job_state == crate::db::MEDIA_PROCESSING_FAILED);
         ensure!(completed_state.is_empty());
-        drop(conn);
+        drop(verification_conn);
 
         let second = reconcile_media_job_states(&pool, 0, 0, 128)?;
         ensure!(second.jobs_resolved == 0);
@@ -4109,7 +4185,7 @@ mod tests {
         let job_id = enqueue_spam_job(&queue).expect("enqueue spam-check fixture");
         let conn = pool.get().expect("db connection");
 
-        claim_job(&queue, &conn, job_id);
+        let _claimed_job = claim_job(&queue, &conn, job_id);
         assert_eq!(
             crate::db::pending_job_count(&conn).expect("pending jobs"),
             0
@@ -4140,8 +4216,8 @@ mod tests {
         let conn = pool.get().expect("db connection");
         let mut saw_permanent_failure = false;
 
-        for _ in 0..8 {
-            claim_job(&queue, &conn, job_id);
+        for _ in 0_i32..8_i32 {
+            let _claimed_job = claim_job(&queue, &conn, job_id);
             let failure_state =
                 crate::db::fail_job(&conn, job_id, "persistent failure").expect("fail job");
             queue.mark_job_failure_state(failure_state);
@@ -4175,7 +4251,7 @@ mod tests {
         let job_id = enqueue_spam_job(&queue).expect("enqueue spam-check fixture");
         {
             let conn = pool.get().expect("claim connection");
-            claim_job(&queue, &conn, job_id);
+            let _claimed_job = claim_job(&queue, &conn, job_id);
         }
 
         let held_connection = pool.get().expect("exhaust pool");
@@ -4228,7 +4304,7 @@ mod tests {
         let job_id = enqueue_spam_job(&queue).expect("enqueue spam-check fixture");
         {
             let conn = pool.get().expect("claim connection");
-            claim_job(&queue, &conn, job_id);
+            let _claimed_job = claim_job(&queue, &conn, job_id);
         }
 
         let held_connection = pool.get().expect("exhaust pool");
@@ -4268,12 +4344,13 @@ mod tests {
         let job_id = enqueue_spam_job(&queue).expect("enqueue spam-check fixture");
         {
             let conn = pool.get().expect("claim connection");
-            claim_job(&queue, &conn, job_id);
-            conn.execute(
-                "DELETE FROM background_jobs WHERE id = ?1",
-                rusqlite::params![job_id],
-            )
-            .expect("delete claimed job");
+            let _claimed_job = claim_job(&queue, &conn, job_id);
+            let _rows_affected = conn
+                .execute(
+                    "DELETE FROM background_jobs WHERE id = ?1",
+                    rusqlite::params![job_id],
+                )
+                .expect("delete claimed job");
         }
 
         let result = tokio::time::timeout(
@@ -4303,28 +4380,31 @@ mod tests {
         let queue = JobQueue::new(pool.clone());
         let post_id = {
             let conn = pool.get().context("get seed connection")?;
-            conn.execute(
-                "INSERT INTO boards (short_name, name, description)
+            let _inserted_boards = conn
+                .execute(
+                    "INSERT INTO boards (short_name, name, description)
                  VALUES ('finished', 'Finished', '')",
-                [],
-            )
-            .context("insert terminal-state board")?;
+                    [],
+                )
+                .context("insert terminal-state board")?;
             let board_id = conn.last_insert_rowid();
-            conn.execute(
-                "INSERT INTO threads (board_id, subject) VALUES (?1, 'finished thread')",
-                rusqlite::params![board_id],
-            )
-            .context("insert terminal-state thread")?;
+            let _inserted_threads = conn
+                .execute(
+                    "INSERT INTO threads (board_id, subject) VALUES (?1, 'finished thread')",
+                    rusqlite::params![board_id],
+                )
+                .context("insert terminal-state thread")?;
             let thread_id = conn.last_insert_rowid();
-            conn.execute(
-                "INSERT INTO posts
+            let _inserted_posts = conn
+                .execute(
+                    "INSERT INTO posts
                  (thread_id, board_id, name, body, body_html, deletion_token,
                   is_op, file_path, media_processing_state)
                  VALUES (?1, ?2, 'anon', 'body', 'body', 'token', 1,
                          'finished/final.webm', ?3)",
-                rusqlite::params![thread_id, board_id, ""],
-            )
-            .context("insert terminal-state media post")?;
+                    rusqlite::params![thread_id, board_id, ""],
+                )
+                .context("insert terminal-state media post")?;
             conn.last_insert_rowid()
         };
         let job = Job::VideoTranscode {
@@ -4338,12 +4418,13 @@ mod tests {
         };
         {
             let conn = pool.get().context("get claim connection")?;
-            conn.execute(
-                "UPDATE background_jobs SET attempts = 2 WHERE id = ?1",
-                rusqlite::params![job_id],
-            )
-            .context("place job at final claimable attempt")?;
-            claim_job(&queue, &conn, job_id);
+            let _rows_affected = conn
+                .execute(
+                    "UPDATE background_jobs SET attempts = 2 WHERE id = ?1",
+                    rusqlite::params![job_id],
+                )
+                .context("place job at final claimable attempt")?;
+            let _claimed_job = claim_job(&queue, &conn, job_id);
             conn.execute_batch(
                 "CREATE TRIGGER reject_done_completion
                  BEFORE UPDATE OF status ON background_jobs
@@ -4422,7 +4503,7 @@ mod tests {
         let job_id = enqueue_spam_job(&queue).expect("enqueue spam-check fixture");
         {
             let conn = pool.get().expect("claim connection");
-            claim_job(&queue, &conn, job_id);
+            let _claimed_job = claim_job(&queue, &conn, job_id);
             conn.execute_batch(
                 "CREATE TRIGGER reject_original_job_failure
                  BEFORE UPDATE OF status ON background_jobs
@@ -4472,28 +4553,31 @@ mod tests {
         let queue = JobQueue::new(pool.clone());
         let post_id = {
             let conn = pool.get().context("get seed connection")?;
-            conn.execute(
-                "INSERT INTO boards (short_name, name, description)
+            let _inserted_boards = conn
+                .execute(
+                    "INSERT INTO boards (short_name, name, description)
                  VALUES ('media', 'Media', '')",
-                [],
-            )
-            .context("insert media board")?;
+                    [],
+                )
+                .context("insert media board")?;
             let board_id = conn.last_insert_rowid();
-            conn.execute(
-                "INSERT INTO threads (board_id, subject) VALUES (?1, 'media thread')",
-                rusqlite::params![board_id],
-            )
-            .context("insert media thread")?;
+            let _inserted_threads = conn
+                .execute(
+                    "INSERT INTO threads (board_id, subject) VALUES (?1, 'media thread')",
+                    rusqlite::params![board_id],
+                )
+                .context("insert media thread")?;
             let thread_id = conn.last_insert_rowid();
-            conn.execute(
-                "INSERT INTO posts
+            let _inserted_posts = conn
+                .execute(
+                    "INSERT INTO posts
                  (thread_id, board_id, name, body, body_html, deletion_token,
                   is_op, file_path, media_processing_state)
                  VALUES (?1, ?2, 'anon', 'body', 'body', 'token', 1,
                          'media/new.mp4', ?3)",
-                rusqlite::params![thread_id, board_id, crate::db::MEDIA_PROCESSING_PENDING],
-            )
-            .context("insert media post")?;
+                    rusqlite::params![thread_id, board_id, crate::db::MEDIA_PROCESSING_PENDING],
+                )
+                .context("insert media post")?;
             conn.last_insert_rowid()
         };
         let job = Job::VideoTranscode {
@@ -4508,12 +4592,13 @@ mod tests {
         };
         {
             let conn = pool.get().context("get claim connection")?;
-            claim_job(&queue, &conn, job_id);
+            let _claimed_job = claim_job(&queue, &conn, job_id);
         }
 
         let identity = media_job_identity(&job).context("media job identity")?;
-        persist_job_completion_once(&pool, job_id, Some(&identity), &JobCompletion::Stale)
-            .context("persist stale completion")?;
+        let _completion_state =
+            persist_job_completion_once(&pool, job_id, Some(&identity), &JobCompletion::Stale)
+                .context("persist stale completion")?;
 
         let conn = pool.get().context("get verification connection")?;
         let (job_status, media_state): (String, String) = conn
@@ -4589,7 +4674,7 @@ mod tests {
         let tmp_path = tmp.path().to_path_buf();
         let pool = crate::db::init_test_pool().expect("test pool");
 
-        transcode_video_finalise(
+        let _execution = transcode_video_finalise(
             998,
             999,
             "b/video.mp4",
@@ -4636,8 +4721,8 @@ mod tests {
                 .tempfile_in(dir.path())?;
             let temporary_path = tmp.path().to_owned();
             let mut command = TokioCommand::new("/bin/sh");
-            command.process_group(0);
-            command
+            let _configured_command = command
+                .process_group(0)
                 .args(["-c", script, "video-fixture"])
                 .arg(tmp.path());
             // The same process gate used by production must reject promotion.
@@ -4675,7 +4760,7 @@ mod tests {
                 .suffix(".webm")
                 .tempfile_in(dir.path())?;
             let temporary_path = tmp.path().to_owned();
-            std::fs::copy(root.join(name), tmp.path())?;
+            let _bytes_copied = std::fs::copy(root.join(name), tmp.path())?;
             let result = transcode_video_finalise(
                 1,
                 1,
@@ -4691,9 +4776,9 @@ mod tests {
                 !temporary_path.exists() && !destination.exists(),
                 "invalid output leaked"
             );
-            let conn = pool.get()?;
+            let verification_conn = pool.get()?;
             anyhow::ensure!(
-                file_hash_count(&conn, "b/converted.webm") == 0,
+                file_hash_count(&verification_conn, "b/converted.webm") == 0,
                 "invalid output persisted"
             );
         }
@@ -4745,9 +4830,13 @@ mod tests {
         unix_fs::symlink(&outside_dir, board_dir.join("thumbs")).expect("symlink thumbs dir");
 
         let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("test connection");
-        super::evict_thumb_cache(&conn, upload_root.to_str().expect("utf8 upload root"), 0)
-            .expect("evict thumbnail cache");
+        let verification_conn = pool.get().expect("test connection");
+        let _eviction_report = super::evict_thumb_cache(
+            &verification_conn,
+            upload_root.to_str().expect("utf8 upload root"),
+            0,
+        )
+        .expect("evict thumbnail cache");
 
         assert_eq!(
             std::fs::read(&outside_file).expect("read outside"),
@@ -4775,9 +4864,13 @@ mod tests {
         unix_fs::symlink(&outside_board, upload_root.join("b")).expect("symlink board dir");
 
         let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("test connection");
-        super::evict_thumb_cache(&conn, upload_root.to_str().expect("utf8 upload root"), 0)
-            .expect("evict thumbnail cache");
+        let verification_conn = pool.get().expect("test connection");
+        let _eviction_report = super::evict_thumb_cache(
+            &verification_conn,
+            upload_root.to_str().expect("utf8 upload root"),
+            0,
+        )
+        .expect("evict thumbnail cache");
 
         assert_eq!(
             std::fs::read(&outside_file).expect("read outside"),
@@ -4803,9 +4896,13 @@ mod tests {
         unix_fs::symlink(&outside_file, thumbs_dir.join("thumb.webp")).expect("symlink thumb file");
 
         let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("test connection");
-        super::evict_thumb_cache(&conn, upload_root.to_str().expect("utf8 upload root"), 0)
-            .expect("evict thumbnail cache");
+        let verification_conn = pool.get().expect("test connection");
+        let _eviction_report = super::evict_thumb_cache(
+            &verification_conn,
+            upload_root.to_str().expect("utf8 upload root"),
+            0,
+        )
+        .expect("evict thumbnail cache");
 
         assert_eq!(
             std::fs::read(&outside_file).expect("read outside"),
@@ -4838,10 +4935,10 @@ mod tests {
         }
 
         let pool = crate::db::init_test_pool().expect("test pool");
-        let conn = pool.get().expect("test connection");
-        let board_id =
-            crate::db::create_board(&conn, "b", "Random", "", false).expect("create board");
-        let thread_id: i64 = conn
+        let verification_conn = pool.get().expect("test connection");
+        let board_id = crate::db::create_board(&verification_conn, "b", "Random", "", false)
+            .expect("create board");
+        let thread_id: i64 = verification_conn
             .query_row(
                 "INSERT INTO threads (board_id, subject) VALUES (?1, 'thread') RETURNING id",
                 [board_id],
@@ -4849,16 +4946,17 @@ mod tests {
             )
             .expect("create thread");
         let fixtures = [
-            (101, "normal.webp", ""),
-            (102, "pending.webp", crate::db::MEDIA_PROCESSING_PENDING),
-            (103, "failed.webp", crate::db::MEDIA_PROCESSING_FAILED),
-            (104, "pruned.webp", crate::db::MEDIA_ORIGINAL_PRUNED),
-            (105, "shared.webp", ""),
-            (106, "shared.webp", crate::db::MEDIA_ORIGINAL_PRUNED),
+            (101_i32, "normal.webp", ""),
+            (102_i32, "pending.webp", crate::db::MEDIA_PROCESSING_PENDING),
+            (103_i32, "failed.webp", crate::db::MEDIA_PROCESSING_FAILED),
+            (104_i32, "pruned.webp", crate::db::MEDIA_ORIGINAL_PRUNED),
+            (105_i32, "shared.webp", ""),
+            (106_i32, "shared.webp", crate::db::MEDIA_ORIGINAL_PRUNED),
         ];
         for (post_id, thumb_name, state) in fixtures {
-            conn.execute(
-                "INSERT INTO posts (
+            let _rows_affected = verification_conn
+                .execute(
+                    "INSERT INTO posts (
                     id, thread_id, board_id, name, body, body_html, file_path,
                     file_name, file_size, thumb_path, mime_type, deletion_token,
                     is_op, media_type, media_processing_state, created_at
@@ -4866,21 +4964,22 @@ mod tests {
                     ?1, ?2, ?3, 'anon', 'body', 'body', ?4, 'file.webp', 4,
                     ?5, 'image/webp', ?6, 0, 'image', ?7, ?1
                  )",
-                rusqlite::params![
-                    post_id,
-                    thread_id,
-                    board_id,
-                    format!("b/file-{post_id}.webp"),
-                    format!("b/thumbs/{thumb_name}"),
-                    format!("token-{post_id}"),
-                    state,
-                ],
-            )
-            .expect("insert media post");
+                    rusqlite::params![
+                        post_id,
+                        thread_id,
+                        board_id,
+                        format!("b/file-{post_id}.webp"),
+                        format!("b/thumbs/{thumb_name}"),
+                        format!("token-{post_id}"),
+                        state,
+                    ],
+                )
+                .expect("insert media post");
         }
 
         let upload_dir = upload_root.to_str().expect("UTF-8 upload root");
-        let first = super::evict_thumb_cache(&conn, upload_dir, 0).expect("first eviction");
+        let first =
+            super::evict_thumb_cache(&verification_conn, upload_dir, 0).expect("first eviction");
         assert_eq!(first.total_before_bytes, 24);
         assert_eq!(first.total_after_bytes, 20);
         assert_eq!(first.removed_files, 1);
@@ -4892,7 +4991,8 @@ mod tests {
             );
         }
 
-        let second = super::evict_thumb_cache(&conn, upload_dir, 0).expect("second eviction");
+        let second =
+            super::evict_thumb_cache(&verification_conn, upload_dir, 0).expect("second eviction");
         assert_eq!(second.total_before_bytes, 20);
         assert_eq!(second.total_after_bytes, 20);
         assert_eq!(second.removed_files, 0, "fixed point is idempotent");
@@ -4933,9 +5033,9 @@ mod tests {
 
         assert!(crate::db::is_stale_media_target_error(&error));
         assert!(!png_abs.exists());
-        let conn = pool.get().expect("db connection");
-        assert_eq!(file_hash_count(&conn, "b/audio.mp3"), 0);
-        assert_eq!(file_hash_count(&conn, "b/thumbs/audio.png"), 0);
+        let verification_conn = pool.get().expect("db connection");
+        assert_eq!(file_hash_count(&verification_conn, "b/audio.mp3"), 0);
+        assert_eq!(file_hash_count(&verification_conn, "b/thumbs/audio.png"), 0);
     }
 
     #[test]
@@ -4957,19 +5057,19 @@ mod tests {
             .context("write temporary waveform")?;
         let pool = crate::db::init_test_pool().context("create test pool")?;
         let post_id = {
-            let conn = pool.get().context("get seed connection")?;
-            conn.execute(
+            let verification_conn = pool.get().context("get seed connection")?;
+            let _inserted_boards = verification_conn.execute(
                 "INSERT INTO boards (short_name, name, description)
                  VALUES ('b', 'B', '')",
                 [],
             )?;
-            let board_id = conn.last_insert_rowid();
-            conn.execute(
+            let board_id = verification_conn.last_insert_rowid();
+            let _inserted_threads = verification_conn.execute(
                 "INSERT INTO threads (board_id, subject) VALUES (?1, 'audio')",
                 rusqlite::params![board_id],
             )?;
-            let thread_id = conn.last_insert_rowid();
-            conn.execute(
+            let thread_id = verification_conn.last_insert_rowid();
+            let _inserted_posts = verification_conn.execute(
                 "INSERT INTO posts
                  (thread_id, board_id, name, body, body_html, deletion_token, is_op,
                   file_path, file_size, thumb_path, mime_type, media_type)
@@ -4977,10 +5077,10 @@ mod tests {
                          'b/audio.mp3', 12, 'b/thumbs/audio.svg', 'audio/mpeg', 'audio')",
                 rusqlite::params![thread_id, board_id],
             )?;
-            let post_id = conn.last_insert_rowid();
+            let post_id = verification_conn.last_insert_rowid();
             let audio_hash = super::sha256_file_hex(&src)?;
             crate::db::record_file_hash(
-                &conn,
+                &verification_conn,
                 &audio_hash,
                 "b/audio.mp3",
                 "b/thumbs/audio.svg",
@@ -5000,10 +5100,10 @@ mod tests {
             EnqueueOutcome::DroppedAtCapacity => bail!("waveform fixture dropped at capacity"),
         };
         {
-            let conn = pool.get()?;
-            claim_job(&queue, &conn, job_id);
+            let verification_conn = pool.get()?;
+            let _claimed_job = claim_job(&queue, &verification_conn, job_id);
         }
-        waveform_finalise(
+        let _execution = waveform_finalise(
             job_id,
             post_id,
             &png_abs,
@@ -5020,8 +5120,8 @@ mod tests {
             !svg_abs.exists(),
             "obsolete SVG placeholder was not removed"
         );
-        let conn = pool.get().context("get verification connection")?;
-        let thumb_path: String = conn.query_row(
+        let verification_conn = pool.get().context("get verification connection")?;
+        let thumb_path: String = verification_conn.query_row(
             "SELECT thumb_path FROM posts WHERE id = ?1",
             rusqlite::params![post_id],
             |row| row.get(0),

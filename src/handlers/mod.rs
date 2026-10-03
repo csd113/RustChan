@@ -615,7 +615,10 @@ async fn discard_rejected_upload_field(
     budget: &mut PublicMultipartBudget,
     initial_excess_bytes: usize,
 ) -> bool {
-    let deadline = tokio::time::Instant::now() + REJECTED_UPLOAD_DISCARD_TIMEOUT;
+    let Some(deadline) = tokio::time::Instant::now().checked_add(REJECTED_UPLOAD_DISCARD_TIMEOUT)
+    else {
+        return false;
+    };
     budget.rejected_upload = Some(RejectedUploadRecovery {
         bytes_seen: initial_excess_bytes,
         deadline,
@@ -749,7 +752,7 @@ async fn read_upload_field(
     let submitted_filename = field.file_name().map(str::to_owned);
     let fname = submitted_filename
         .as_deref()
-        .filter(|name| !name.is_empty())
+        .filter(|filename| !filename.is_empty())
         .unwrap_or(default_name)
         .to_owned();
     let upload = stream_field_to_temp_file(
@@ -764,7 +767,7 @@ async fn read_upload_field(
     if upload.size_bytes == 0 {
         if submitted_filename
             .as_deref()
-            .is_some_and(|name| !name.is_empty())
+            .is_some_and(|filename| !filename.is_empty())
         {
             return Err(AppError::BadRequest("Uploaded file is empty.".into()));
         }
@@ -798,7 +801,7 @@ pub(crate) struct PostFormData {
     // Poll fields are used only when creating a new thread.
     pub poll_question: String,
     pub poll_options: Vec<String>,
-    /// Duration in seconds (parsed from value + unit)
+    /// Duration in seconds (parsed from value + unit).
     pub poll_duration_secs: Option<i64>,
     /// Sage — when true the reply must not bump the thread.
     pub sage: bool,
@@ -832,7 +835,7 @@ pub(crate) fn native_post_error_response(
         false,
         "/",
     );
-    response
+    let _previous_value = response
         .extensions_mut()
         .insert(crate::error::ErrorPage::Content {
             title: "Posting error".into(),
@@ -937,7 +940,9 @@ async fn recover_rejected_post_tail(
                     capture_post_draft(&name, &value, draft)?;
                 }
                 "file" | "audio_file" | "image_file" => {
-                    draft.had_attachments |= field.file_name().is_some_and(|name| !name.is_empty());
+                    draft.had_attachments |= field
+                        .file_name()
+                        .is_some_and(|filename| !filename.is_empty());
                     loop {
                         let next_chunk = field.chunk().await.map_err(|error| {
                             multipart_read_error("rejected upload tail", &error)
@@ -1109,7 +1114,9 @@ pub(crate) async fn parse_post_multipart(
                         "Duplicate upload field 'file'.".into(),
                     ));
                 }
-                draft.had_attachments |= field.file_name().is_some_and(|name| !name.is_empty());
+                draft.had_attachments |= field
+                    .file_name()
+                    .is_some_and(|filename| !filename.is_empty());
                 let upload_result = read_upload_field(
                     field,
                     max_image_size
@@ -1134,7 +1141,9 @@ pub(crate) async fn parse_post_multipart(
                         "Duplicate upload field 'audio_file'.".into(),
                     ));
                 }
-                draft.had_attachments |= field.file_name().is_some_and(|name| !name.is_empty());
+                draft.had_attachments |= field
+                    .file_name()
+                    .is_some_and(|filename| !filename.is_empty());
                 let upload_result = read_upload_field(
                     field,
                     max_audio_size,
@@ -1156,7 +1165,9 @@ pub(crate) async fn parse_post_multipart(
                         "Duplicate upload field 'image_file'.".into(),
                     ));
                 }
-                draft.had_attachments |= field.file_name().is_some_and(|name| !name.is_empty());
+                draft.had_attachments |= field
+                    .file_name()
+                    .is_some_and(|filename| !filename.is_empty());
                 let upload_result = read_upload_field(
                     field,
                     max_image_size,
@@ -1230,7 +1241,7 @@ pub(crate) async fn parse_post_multipart(
 ///   • "Insufficient disk space" → 413 `UploadTooLarge`
 ///   • "File type not allowed"   → 415 `InvalidMediaType`
 ///   • "Not an audio file"       → 415 `InvalidMediaType`
-///   • anything else             → 400 `BadRequest`
+///   • anything else             → 400 `BadRequest`.
 pub(crate) fn classify_upload_error(e: &anyhow::Error) -> AppError {
     let msg = e.to_string();
     // Compare lower-cased so minor wording changes in save_upload don't silently
@@ -1770,19 +1781,23 @@ mod tests {
         );
         ensure!(budget.bytes_seen == 2048);
 
-        let (boundary, body) =
+        let (response_boundary, resolved_body) =
             multipart_body_with_files(&[], &[("file", "oversized.png", &[1; 2048], "image/png")]);
-        let mut multipart = multipart_from_bytes(&boundary, body).await?;
-        let mut field = multipart
+        let mut resolved_multipart =
+            multipart_from_bytes(&response_boundary, resolved_body).await?;
+        let mut resolved_field = resolved_multipart
             .next_field()
             .await?
             .context("missing upload field")?;
-        let mut budget = super::PublicMultipartBudget {
+        let mut resolved_budget = super::PublicMultipartBudget {
             fields_seen: 0,
             bytes_seen: super::PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES,
             ..super::PublicMultipartBudget::default()
         };
-        ensure!(!super::discard_rejected_upload_field(&mut field, &mut budget, 0).await);
+        ensure!(
+            !super::discard_rejected_upload_field(&mut resolved_field, &mut resolved_budget, 0)
+                .await
+        );
         Ok(())
     }
 
@@ -2049,7 +2064,8 @@ mod tests {
             )",
             [],
         )
-        .context("create file_hashes table")?;
+        .context("create file_hashes table")
+        .map(|_completed_value| ())?;
         Ok(())
     }
 
@@ -2099,7 +2115,8 @@ mod tests {
                 draft: &mut crate::templates::forms::PostFormState::default(),
             },
         )
-        .await?;
+        .await
+        .map(|_completed_value| ())?;
         Ok("ok")
     }
 
@@ -2191,7 +2208,8 @@ mod tests {
                 draft: &mut crate::templates::forms::PostFormState::default(),
             },
         )
-        .await?;
+        .await
+        .map(|_completed_value| ())?;
         Ok("ok")
     }
 
@@ -2408,26 +2426,26 @@ mod tests {
         ensure!(response.status() == StatusCode::OK);
 
         let over_pdf = vec![b'p'; 2_049];
-        let (boundary, body) = multipart_body_with_files(
+        let (response_boundary, resolved_body) = multipart_body_with_files(
             &[("_csrf", "csrf123"), ("body", "pdf")],
             &[("file", "over.pdf", &over_pdf, "application/pdf")],
         );
-        let response = router
+        let resolved_response = router
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/parse")
                     .header(
                         header::CONTENT_TYPE,
-                        format!("multipart/form-data; boundary={boundary}"),
+                        format!("multipart/form-data; boundary={response_boundary}"),
                     )
-                    .body(Body::from(body))
+                    .body(Body::from(resolved_body))
                     .context("build over-limit PDF multipart request")?,
             )
             .await
             .context("receive over-limit PDF multipart response")?;
 
-        ensure!(response.status() == StatusCode::PAYLOAD_TOO_LARGE);
+        ensure!(resolved_response.status() == StatusCode::PAYLOAD_TOO_LARGE);
         Ok(())
     }
 
@@ -2466,9 +2484,9 @@ mod tests {
         }
         ensure!(budget.note_field().is_err());
 
-        let mut budget = super::PublicMultipartBudget::default();
-        budget.note_chunk(super::PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES)?;
-        ensure!(budget.note_chunk(1).is_err());
+        let mut resolved_budget = super::PublicMultipartBudget::default();
+        resolved_budget.note_chunk(super::PUBLIC_MULTIPART_AGGREGATE_MAX_BYTES)?;
+        ensure!(resolved_budget.note_chunk(1).is_err());
         Ok(())
     }
 
@@ -2487,7 +2505,7 @@ mod tests {
             None,
             Some(other),
             &board,
-            |hash| Ok(crate::db::find_file_by_hash(&conn, hash)?),
+            |candidate_hash| Ok(crate::db::find_file_by_hash(&conn, candidate_hash)?),
             boards_dir
                 .path()
                 .to_str()
@@ -2549,7 +2567,7 @@ mod tests {
         let result = super::process_primary_upload(
             Some(upload),
             &board,
-            |hash| Ok(crate::db::find_file_by_hash(&conn, hash)?),
+            |candidate_hash| Ok(crate::db::find_file_by_hash(&conn, candidate_hash)?),
             uploads_dir
                 .path()
                 .to_str()
@@ -2614,7 +2632,7 @@ mod tests {
         let (uploaded, primary_hash) = super::process_primary_upload(
             Some(temp_upload("doc.pdf", pdf)?),
             &board,
-            |hash| Ok(crate::db::find_file_by_hash(&conn, hash)?),
+            |candidate_hash| Ok(crate::db::find_file_by_hash(&conn, candidate_hash)?),
             uploads_dir
                 .path()
                 .to_str()
@@ -2654,7 +2672,7 @@ mod tests {
         let result = super::process_primary_upload(
             Some(temp_upload("doc.pdf", valid_pdf())?),
             &board,
-            |hash| Ok(crate::db::find_file_by_hash(&conn, hash)?),
+            |candidate_hash| Ok(crate::db::find_file_by_hash(&conn, candidate_hash)?),
             uploads_dir
                 .path()
                 .to_str()
@@ -2696,7 +2714,7 @@ mod tests {
         let result = super::process_primary_upload(
             Some(temp_upload("doc.pdf", valid_pdf())?),
             &board,
-            |hash| Ok(crate::db::find_file_by_hash(&conn, hash)?),
+            |candidate_hash| Ok(crate::db::find_file_by_hash(&conn, candidate_hash)?),
             uploads_dir
                 .path()
                 .to_str()
@@ -2734,7 +2752,7 @@ mod tests {
         let result = super::process_primary_upload(
             Some(temp_upload("not-really.pdf", b"plain text")?),
             &board,
-            |hash| Ok(crate::db::find_file_by_hash(&conn, hash)?),
+            |candidate_hash| Ok(crate::db::find_file_by_hash(&conn, candidate_hash)?),
             uploads_dir
                 .path()
                 .to_str()
@@ -2776,7 +2794,7 @@ mod tests {
         let (uploaded, _) = super::process_primary_upload(
             Some(temp_upload("doc.pdf", valid_pdf())?),
             &board,
-            |hash| Ok(crate::db::find_file_by_hash(&conn, hash)?),
+            |candidate_hash| Ok(crate::db::find_file_by_hash(&conn, candidate_hash)?),
             uploads_dir
                 .path()
                 .to_str()

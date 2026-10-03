@@ -397,7 +397,7 @@ pub(in crate::server) async fn create_theme(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let slug = db::sanitize_theme_slug(&form.slug);
             if slug.is_empty() {
                 return Err(AppError::BadRequest("Theme slug is required.".into()));
@@ -434,7 +434,18 @@ pub(in crate::server) async fn create_theme(
                     .into_response(),
             )
         }
-        other => Err(other),
+        other @ (AppError::NotFound(_)
+        | AppError::Forbidden(_)
+        | AppError::BannedUser {
+            reason: _,
+            csrf_token: _,
+        }
+        | AppError::UploadTooLarge(_)
+        | AppError::InvalidMediaType(_)
+        | AppError::Conflict(_)
+        | AppError::DbBusy
+        | AppError::Internal(_)
+        | AppError::Tls(_)) => Err(other),
     })
 }
 
@@ -451,7 +462,7 @@ pub(in crate::server) async fn update_theme(
         let pool = state.db.clone();
         move || -> Result<()> {
             let mut conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let existing_slug = db::sanitize_theme_slug(&form.existing_slug);
             let theme = db::get_theme(&conn, &existing_slug)?
                 .ok_or_else(|| AppError::BadRequest("Theme not found.".into()))?;
@@ -507,7 +518,18 @@ pub(in crate::server) async fn update_theme(
                     .into_response(),
             )
         }
-        other => Err(other),
+        other @ (AppError::NotFound(_)
+        | AppError::Forbidden(_)
+        | AppError::BannedUser {
+            reason: _,
+            csrf_token: _,
+        }
+        | AppError::UploadTooLarge(_)
+        | AppError::InvalidMediaType(_)
+        | AppError::Conflict(_)
+        | AppError::DbBusy
+        | AppError::Internal(_)
+        | AppError::Tls(_)) => Err(other),
     })
 }
 
@@ -531,7 +553,7 @@ pub(in crate::server) async fn delete_theme(
         let pool = state.db.clone();
         move || -> Result<()> {
             let mut conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let slug = db::sanitize_theme_slug(&form.slug);
             db::delete_custom_theme(&mut conn, &slug)?;
             db::sync_live_theme_state(&conn)?;

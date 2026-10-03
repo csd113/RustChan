@@ -684,7 +684,7 @@ fn parse_managed_path(
     let components = path
         .components()
         .map(|component| match component {
-            Component::Normal(value) => value.to_str(),
+            Component::Normal(component_value) => component_value.to_str(),
             Component::CurDir
             | Component::ParentDir
             | Component::RootDir
@@ -869,7 +869,7 @@ fn media_job_key(job_type: &str, parsed: &ParsedJob) -> Option<MediaJobKey> {
         board,
         source,
         output,
-        ..
+        category: _,
     } = parsed
     else {
         return None;
@@ -1122,13 +1122,13 @@ fn collect_boards(
         let folded = board.to_ascii_lowercase();
         if let Some(other) = casefold.insert(folded.clone(), board.clone()) {
             if other != board {
-                model.case_conflict_boards.insert(other.clone());
-                model.case_conflict_boards.insert(board.clone());
+                let _other_conflict_inserted = model.case_conflict_boards.insert(other.clone());
+                let _board_conflict_inserted = model.case_conflict_boards.insert(board.clone());
                 model.global_ambiguity = true;
             }
         }
-        model.boards_by_id.insert(board_id, board.clone());
-        model.boards.insert(board);
+        let _previous_board_name = model.boards_by_id.insert(board_id, board.clone());
+        let _board_inserted = model.boards.insert(board);
     }
     Ok(())
 }
@@ -1172,7 +1172,7 @@ fn collect_posts(
         if model.boards_by_id.get(&board_id) != Some(&board) {
             model.global_ambiguity = true;
         }
-        model.posts.insert(
+        let _previous_entry = model.posts.insert(
             post_id,
             PostMediaState {
                 board: board.clone(),
@@ -1291,7 +1291,7 @@ fn collect_hashes(
             mark_cross_board_or_malformed(model, &file_path, None, owner, MediaCategory::Original);
             continue;
         };
-        digests_by_path
+        let _previous_entry = digests_by_path
             .entry(file.relative.clone())
             .or_default()
             .insert(digest.clone());
@@ -1686,7 +1686,7 @@ fn collect_intent(
                 .ok_or_else(|| {
                     unsafe_intent_path("board-restore intent has no trusted board target")
                 })?;
-            model.scheduled_boards.insert(board.to_owned());
+            let _previous_entry = model.scheduled_boards.insert(board.to_owned());
             model.global_ambiguity = true;
             model.findings.push(AuditFinding {
                 classification: AuditClassification::LifecycleInProgress,
@@ -1720,7 +1720,7 @@ fn collect_delete_intent(
                 "delete-files intent contains an unsafe board directory",
             ));
         }
-        model.scheduled_boards.insert(board.clone());
+        let _previous_entry = model.scheduled_boards.insert(board.clone());
     }
     Ok(())
 }
@@ -1826,7 +1826,9 @@ fn collect_upload_intent(
     }
     let stage_relative = normalized_stage
         .strip_prefix(&root)
-        .map_err(|_| unsafe_intent_path("upload-finalize stage is outside upload root"))?
+        .map_err(|error| {
+            unsafe_intent_path("upload-finalize stage is outside upload root").context(error)
+        })?
         .to_str()
         .context("upload-finalize stage is non-UTF-8")?;
     if payload.relative_paths.is_empty() {
@@ -2445,7 +2447,7 @@ impl<'a> InventoryWalker<'a> {
                     InventoryEntryKind::UnsafePath,
                 );
             } else if metadata.is_dir()
-                && board_utf8.is_some_and(|board| self.model.boards.contains(board))
+                && board_utf8.is_some_and(|board_name| self.model.boards.contains(board_name))
             {
                 self.walk_pending_board(&path, board_utf8.unwrap_or_default());
             } else {
@@ -2723,9 +2725,9 @@ fn audit_inventory(
         let category = path_category_from_claims(model, relative, entry.category);
         let required_claims = model.required_claims(relative).collect::<Vec<_>>();
         if let Some(claim) = required_claims.first() {
-            let classification = if required_claims
+            let reference_classification = if required_claims
                 .iter()
-                .any(|claim| claim.role == ReferenceRole::Temporary)
+                .any(|required_claim| required_claim.role == ReferenceRole::Temporary)
             {
                 AuditClassification::LifecycleInProgress
             } else {
@@ -2745,7 +2747,7 @@ fn audit_inventory(
                 model,
                 report,
                 &claimed_entry,
-                classification,
+                reference_classification,
                 identity.size,
                 example_limit,
             );
@@ -3202,7 +3204,7 @@ fn repair_orphan(
         let identity_changed =
             current.as_ref().map(|(_, identity)| identity) != Some(&candidate.identity);
         let digest_changed = match current.as_ref() {
-            Some((path, _)) => sha256_regular_file(path)? != expected_digest,
+            Some((current_path, _)) => sha256_regular_file(current_path)? != expected_digest,
             None => true,
         };
         if acquired_reference || identity_changed || digest_changed {
@@ -3302,7 +3304,7 @@ fn repair_obsolete_job(
             board,
             source,
             output,
-            ..
+            category: _,
         } = parse_job(&job_type, &payload)?
         else {
             return Ok(RepairAttempt::Conflict);
@@ -3434,7 +3436,13 @@ fn path_has_lifecycle_claim(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (job_type, payload) in jobs {
         match parse_job(&job_type, &payload) {
-            Ok(ParsedJob::Media { source, output, .. }) if source == path || output == path => {
+            Ok(ParsedJob::Media {
+                source,
+                output,
+                post_id: _,
+                board: _,
+                category: _,
+            }) if source == path || output == path => {
                 return Ok(true);
             }
             Ok(_) => {}
@@ -3623,30 +3631,38 @@ pub fn reconcile_managed_media(
 }
 
 fn update_metrics(report: &AuditReport) {
-    FILES_SCANNED_TOTAL.fetch_add(report.paths_examined, Ordering::Relaxed);
-    REFERENCES_SCANNED_TOTAL.fetch_add(report.references_examined, Ordering::Relaxed);
+    let _previous_files_scanned_total =
+        FILES_SCANNED_TOTAL.fetch_add(report.paths_examined, Ordering::Relaxed);
+    let _previous_references_scanned_total =
+        REFERENCES_SCANNED_TOTAL.fetch_add(report.references_examined, Ordering::Relaxed);
     let missing = report
         .counts
         .iter()
         .filter(|(classification, _)| classification.is_missing())
         .fold(0_u64, |sum, (_, count)| sum.saturating_add(*count));
-    MISSING_REFERENCES_TOTAL.fetch_add(missing, Ordering::Relaxed);
+    let _previous_missing_references_total =
+        MISSING_REFERENCES_TOTAL.fetch_add(missing, Ordering::Relaxed);
     let orphan_bytes = report
         .bytes_by_classification
         .get(&AuditClassification::SafeOrphanCandidate)
         .copied()
         .unwrap_or_default();
-    SAFE_ORPHAN_BYTES_TOTAL.fetch_add(orphan_bytes, Ordering::Relaxed);
+    let _previous_safe_orphan_bytes_total =
+        SAFE_ORPHAN_BYTES_TOTAL.fetch_add(orphan_bytes, Ordering::Relaxed);
     let ambiguous = report
         .counts
         .get(&AuditClassification::AmbiguousOrphan)
         .copied()
         .unwrap_or_default();
-    AMBIGUOUS_FILES_TOTAL.fetch_add(ambiguous, Ordering::Relaxed);
-    REPAIRS_TOTAL.fetch_add(report.repairs.completed(), Ordering::Relaxed);
-    REPAIR_CONFLICTS_TOTAL.fetch_add(report.repairs.revalidation_conflicts, Ordering::Relaxed);
+    let _previous_ambiguous_files_total =
+        AMBIGUOUS_FILES_TOTAL.fetch_add(ambiguous, Ordering::Relaxed);
+    let _previous_repairs_total =
+        REPAIRS_TOTAL.fetch_add(report.repairs.completed(), Ordering::Relaxed);
+    let _previous_repair_conflicts_total =
+        REPAIR_CONFLICTS_TOTAL.fetch_add(report.repairs.revalidation_conflicts, Ordering::Relaxed);
     if report.incomplete {
-        INCOMPLETE_SCANS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        let _previous_incomplete_scans_total =
+            INCOMPLETE_SCANS_TOTAL.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -3730,13 +3746,13 @@ mod tests {
             std::fs::create_dir_all(root.path().join("b/thumbs"))?;
             let pool = crate::db::init_test_pool()?;
             let conn = pool.get()?;
-            conn.execute(
+            let _inserted_boards = conn.execute(
                 "INSERT INTO boards (short_name, name, description)
                  VALUES ('b', 'Board', '')",
                 [],
             )?;
             let board_id = conn.last_insert_rowid();
-            conn.execute(
+            let _inserted_threads = conn.execute(
                 "INSERT INTO threads (board_id, subject) VALUES (?1, 'thread')",
                 [board_id],
             )?;
@@ -3771,7 +3787,7 @@ mod tests {
             state: &str,
         ) -> Result<i64> {
             let conn = self.pool.get()?;
-            conn.execute(
+            let _rows_affected = conn.execute(
                 "INSERT INTO posts
                  (thread_id, board_id, name, body, body_html, deletion_token,
                   file_path, thumb_path, mime_type, media_processing_state)
@@ -3782,7 +3798,7 @@ mod tests {
         }
 
         fn hash(&self, digest: &str, file: &str, thumb: &str, mime: &str) -> Result<()> {
-            self.pool.get()?.execute(
+            let _rows_affected = self.pool.get()?.execute(
                 "INSERT INTO file_hashes (sha256, file_path, thumb_path, mime_type)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![digest, file, thumb, mime],
@@ -3791,7 +3807,7 @@ mod tests {
         }
 
         fn job(&self, job_type: &str, payload: &serde_json::Value, status: &str) -> Result<()> {
-            self.pool.get()?.execute(
+            let _rows_affected = self.pool.get()?.execute(
                 "INSERT INTO background_jobs (job_type, payload, status) VALUES (?1, ?2, ?3)",
                 params![job_type, payload.to_string(), status],
             )?;
@@ -3799,7 +3815,7 @@ mod tests {
         }
 
         fn intent(&self, id: &str, kind: &str, payload_json: &str) -> Result<()> {
-            self.pool.get()?.execute(
+            let _rows_affected = self.pool.get()?.execute(
                 "INSERT INTO pending_fs_ops (id, kind, payload_json) VALUES (?1, ?2, ?3)",
                 params![id, kind, payload_json],
             )?;
@@ -3871,8 +3887,8 @@ mod tests {
             "b/thumbs/shared.webp",
             "image/webp",
         )?;
-        for _ in 0..2 {
-            fixture.post(
+        for _ in 0_i32..2_i32 {
+            let _post_id = fixture.post(
                 Some("b/shared.webp"),
                 Some("b/thumbs/shared.webp"),
                 Some("image/webp"),
@@ -3881,7 +3897,7 @@ mod tests {
         }
 
         fixture.write("b/thumbs/pruned.webp", b"retained")?;
-        fixture.post(
+        let _post_id = fixture.post(
             Some("b/pruned.webp"),
             Some("b/thumbs/pruned.webp"),
             Some("image/webp"),
@@ -4003,7 +4019,7 @@ mod tests {
                 AuditClassification::SafeOrphanCandidate
             ) == 0
         );
-        fixture
+        let _removed_first_post = fixture
             .pool
             .get()?
             .execute("DELETE FROM posts WHERE id = ?1", [first_post])?;
@@ -4013,7 +4029,7 @@ mod tests {
                 AuditClassification::SafeOrphanCandidate
             ) == 0
         );
-        fixture
+        let _removed_second_post = fixture
             .pool
             .get()?
             .execute("DELETE FROM posts WHERE id = ?1", [second_post])?;
@@ -4023,7 +4039,7 @@ mod tests {
                 AuditClassification::SafeOrphanCandidate
             ) == 0
         );
-        fixture.pool.get()?.execute(
+        let _removed_shared_hashes = fixture.pool.get()?.execute(
             "DELETE FROM file_hashes WHERE sha256 = ?1",
             [&shared_digest],
         )?;
@@ -4080,7 +4096,7 @@ mod tests {
         let fixture = Fixture::new()?;
         fixture.write("b/race.webp", b"race")?;
         let audited = candidate(&fixture, "b/race.webp")?;
-        fixture.post(Some("b/race.webp"), None, Some("image/webp"), "")?;
+        let _post_id = fixture.post(Some("b/race.webp"), None, Some("image/webp"), "")?;
 
         let conn = fixture.pool.get()?;
         let attempt = repair_orphan(&conn, fixture.root.path(), &audited)?;
@@ -4110,8 +4126,11 @@ mod tests {
         let attempt = repair_orphan(&conn, fixture.root.path(), &audited)?;
         ensure!(attempt == RepairAttempt::Conflict);
         ensure!(fixture.pending_ops()?.is_empty());
-        let conn = fixture.pool.get()?;
-        ensure!(direct_post_reference_exists(&conn, "b/trigger-race.webp")?);
+        let verification_conn = fixture.pool.get()?;
+        ensure!(direct_post_reference_exists(
+            &verification_conn,
+            "b/trigger-race.webp"
+        )?);
         ensure!(fixture.root.path().join("b/trigger-race.webp").exists());
         Ok(())
     }
@@ -4119,20 +4138,20 @@ mod tests {
     #[test]
     fn missing_media_and_pruned_thumbnail_receive_conservative_classifications() -> Result<()> {
         let fixture = Fixture::new()?;
-        fixture.post(
+        let _missing_image_post = fixture.post(
             Some("b/missing.webp"),
             Some("b/thumbs/missing.webp"),
             Some("image/webp"),
             "",
         )?;
         fixture.write("b/thumbs/pruned.webp", b"retained")?;
-        fixture.post(
+        let _pruned_image_post = fixture.post(
             Some("b/pruned.webp"),
             Some("b/thumbs/pruned.webp"),
             Some("image/webp"),
             crate::db::MEDIA_ORIGINAL_PRUNED,
         )?;
-        fixture.post(
+        let _audio_post = fixture.post(
             Some("b/audio.mp3"),
             Some("b/thumbs/audio.png"),
             Some("audio/mpeg"),
@@ -4152,7 +4171,7 @@ mod tests {
                 "board_short": "b"
             }
         });
-        fixture.pool.get()?.execute(
+        let _rows_affected = fixture.pool.get()?.execute(
             "INSERT INTO background_jobs (job_type, payload, status)
              VALUES ('video_transcode', ?1, 'pending')",
             [video_job.to_string()],
@@ -4175,7 +4194,7 @@ mod tests {
         fixture.hash(&digest(b"missing"), "b/missing.webp", "", "image/webp")?;
         fixture.write("b/shared.webp", b"shared")?;
         fixture.hash(&digest(b"shared"), "b/shared.webp", "", "image/webp")?;
-        fixture.post(Some("b/shared.webp"), None, Some("image/webp"), "")?;
+        let _post_id = fixture.post(Some("b/shared.webp"), None, Some("image/webp"), "")?;
 
         let report = fixture.audit(ReconcileMode::Repair, limits())?;
         ensure!(report.repairs.stale_hash_rows_removed == 1);
@@ -4200,7 +4219,7 @@ mod tests {
     fn conflicting_and_cross_board_hash_metadata_remains_quarantined() -> Result<()> {
         let fixture = Fixture::new()?;
         std::fs::create_dir_all(fixture.root.path().join("c/thumbs"))?;
-        fixture.pool.get()?.execute(
+        let _rows_affected = fixture.pool.get()?.execute(
             "INSERT INTO boards (short_name, name, description) VALUES ('c', 'Other', '')",
             [],
         )?;
@@ -4272,7 +4291,7 @@ mod tests {
     fn malformed_intent_makes_apparent_orphan_ambiguous() -> Result<()> {
         let fixture = Fixture::new()?;
         fixture.write("b/orphan.webp", b"orphan")?;
-        fixture.pool.get()?.execute(
+        let _rows_affected = fixture.pool.get()?.execute(
             "INSERT INTO pending_fs_ops (id, kind, payload_json)
              VALUES ('bad', 'delete_files', '{not-json')",
             [],
@@ -4295,7 +4314,7 @@ mod tests {
             paths: vec!["/tmp/outside-rustchan".to_owned()],
             dirs: Vec::new(),
         };
-        fixture.pool.get()?.execute(
+        let _rows_affected = fixture.pool.get()?.execute(
             "INSERT INTO pending_fs_ops (id, kind, payload_json)
              VALUES ('external', 'delete_files', ?1)",
             [serde_json::to_string(&payload)?],
@@ -4323,17 +4342,17 @@ mod tests {
         })
         .to_string();
         let conn = fixture.pool.get()?;
-        conn.execute(
+        let _inserted_completed_jobs = conn.execute(
             "INSERT INTO background_jobs (job_type, payload, status)
              VALUES ('video_transcode', ?1, 'done')",
             [&job],
         )?;
-        conn.execute(
+        let _inserted_pending_jobs = conn.execute(
             "INSERT INTO background_jobs (job_type, payload, status)
              VALUES ('video_transcode', ?1, 'pending')",
             [&job],
         )?;
-        conn.execute(
+        let _inserted_malformed_jobs = conn.execute(
             "INSERT INTO background_jobs (job_type, payload, status)
              VALUES ('video_transcode', '{bad-json', 'failed')",
             [],
@@ -4360,7 +4379,7 @@ mod tests {
     fn incomplete_reference_snapshot_preserves_every_apparent_orphan() -> Result<()> {
         let fixture = Fixture::new()?;
         fixture.write("b/orphan.webp", b"orphan")?;
-        fixture.post(None, None, None, "")?;
+        let _post_id = fixture.post(None, None, None, "")?;
         let limited = ReconcileLimits {
             database_rows_per_pass: 1,
             ..limits()
@@ -4391,7 +4410,7 @@ mod tests {
             primary_thumb_path: None,
             primary_mime_type: None,
         };
-        fixture.pool.get()?.execute(
+        let _inserted_staged_intents = fixture.pool.get()?.execute(
             "INSERT INTO pending_fs_ops (id, kind, payload_json)
              VALUES ('finalize', 'upload_finalize', ?1)",
             [serde_json::to_string(&payload)?],
@@ -4416,7 +4435,7 @@ mod tests {
             primary_thumb_path: None,
             primary_mime_type: None,
         };
-        fixture.pool.get()?.execute(
+        let _inserted_installed_intents = fixture.pool.get()?.execute(
             "INSERT INTO pending_fs_ops (id, kind, payload_json)
              VALUES ('installed', 'upload_finalize', ?1)",
             [serde_json::to_string(&installed_payload)?],
@@ -4437,7 +4456,7 @@ mod tests {
             primary_thumb_path: None,
             primary_mime_type: None,
         };
-        fixture.pool.get()?.execute(
+        let _inserted_lost_intents = fixture.pool.get()?.execute(
             "INSERT INTO pending_fs_ops (id, kind, payload_json)
              VALUES ('lost', 'upload_finalize', ?1)",
             [serde_json::to_string(&lost_payload)?],
@@ -4466,12 +4485,12 @@ mod tests {
     fn cleanup_intent_that_conflicts_with_post_is_report_only() -> Result<()> {
         let fixture = Fixture::new()?;
         fixture.write("b/active.webp", b"active")?;
-        fixture.post(Some("b/active.webp"), None, Some("image/webp"), "")?;
+        let _post_id = fixture.post(Some("b/active.webp"), None, Some("image/webp"), "")?;
         let payload = serde_json::to_string(&crate::pending_fs::DeleteFilesPayload {
             paths: vec!["b/active.webp".to_owned()],
             dirs: Vec::new(),
         })?;
-        fixture.pool.get()?.execute(
+        let _rows_affected = fixture.pool.get()?.execute(
             "INSERT INTO pending_fs_ops (id, kind, payload_json)
              VALUES ('conflict', 'delete_files', ?1)",
             [payload],
@@ -4505,7 +4524,7 @@ mod tests {
             "t": "AudioWaveform",
             "d": {"post_id": post_id, "file_path": "b/audio.mp3", "board_short": "b"}
         });
-        fixture.pool.get()?.execute(
+        let _rows_affected = fixture.pool.get()?.execute(
             "INSERT INTO background_jobs (job_type, payload, status)
              VALUES ('audio_waveform', ?1, 'pending')",
             [job.to_string()],
@@ -4531,16 +4550,16 @@ mod tests {
             paths: vec!["b/already-gone.webp".to_owned()],
             dirs: Vec::new(),
         })?;
-        fixture.pool.get()?.execute(
+        let _inserted_completed_intents = fixture.pool.get()?.execute(
             "INSERT INTO pending_fs_ops (id, kind, payload_json)
              VALUES ('complete', 'delete_files', ?1)",
             [payload],
         )?;
         let job = serde_json::json!({
             "t": "VideoTranscode",
-            "d": {"post_id": 9999, "file_path": "b/gone.mp4", "board_short": "b"}
+            "d": {"post_id": 9_999_i32, "file_path": "b/gone.mp4", "board_short": "b"}
         });
-        fixture.pool.get()?.execute(
+        let _inserted_completed_jobs = fixture.pool.get()?.execute(
             "INSERT INTO background_jobs (job_type, payload, status)
              VALUES ('video_transcode', ?1, 'done')",
             [job.to_string()],
@@ -4571,7 +4590,7 @@ mod tests {
         fixture.intent("complete", crate::pending_fs::DELETE_FILES_KIND, &payload)?;
         let job = serde_json::json!({
             "t": "VideoTranscode",
-            "d": {"post_id": 9999, "file_path": "b/gone.mp4", "board_short": "b"}
+            "d": {"post_id": 9_999_i32, "file_path": "b/gone.mp4", "board_short": "b"}
         });
         fixture.job("video_transcode", &job, "done")?;
         fixture.hash(&digest(b"missing"), "b/missing.webp", "", "image/webp")?;

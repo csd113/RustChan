@@ -30,12 +30,12 @@ pub(in crate::server) fn create_full_backup_to_server(
     storage_mode: BackupStorageMode,
     split_zip_part_size: u64,
 ) -> Result<String> {
-    let conn = pool.get()?;
+    let auth_conn = pool.get()?;
     let automated = session_id.is_none();
     if let Some(session_id) = session_id {
-        require_admin_session_sid(&conn, Some(session_id))?;
+        require_admin_session_sid(&auth_conn, Some(session_id)).map(|_completed_value| ())?;
     }
-    drop(conn);
+    drop(auth_conn);
     let uploads_base = Path::new(&CONFIG.upload_dir);
     let global_favicon_dir = crate::favicon::global_backup_source_dir();
     let mut tor_hidden_service_keys_dir = if include_tor_hidden_service_keys {
@@ -89,7 +89,7 @@ pub(in crate::server) fn create_full_backup_to_server(
     } else {
         0
     };
-    let include_tor_hidden_service_keys = tor_hidden_service_keys_dir.is_some();
+    let tor_hidden_service_keys_included = tor_hidden_service_keys_dir.is_some();
     let file_count = count_files_in_dir(uploads_base)
         .saturating_add(favicon_file_count)
         .saturating_add(banner_file_count)
@@ -108,17 +108,18 @@ pub(in crate::server) fn create_full_backup_to_server(
         .to_str()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Backup DB path non-UTF-8")))?
         .replace('\'', "''");
-    let conn = pool.get()?;
+    let snapshot_conn = pool.get()?;
     if let Some(session_id) = session_id {
-        require_admin_session_sid(&conn, Some(session_id))?;
+        require_admin_session_sid(&snapshot_conn, Some(session_id)).map(|_completed_value| ())?;
     }
-    conn.execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
+    snapshot_conn
+        .execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
         .map_err(|error| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {error}")))?;
-    drop(conn);
+    drop(snapshot_conn);
     restrict_backup_file(&db_snapshot_path)?;
     // Export metadata from the same committed snapshot shipped in the backup;
     // file copying and hashing no longer occupy a live pooled connection.
-    let conn = rusqlite::Connection::open_with_flags(
+    let export_conn = rusqlite::Connection::open_with_flags(
         &db_snapshot_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
@@ -138,7 +139,7 @@ pub(in crate::server) fn create_full_backup_to_server(
         db_snapshot_sha.clone(),
     );
 
-    let boards = collect_backup_board_summaries(&conn)?;
+    let boards = collect_backup_board_summaries(&export_conn)?;
     let settings_path = crate::config::data_dir().join("settings.toml");
     if settings_path.is_file() {
         let destination = config_dir.join("settings.toml");
@@ -162,7 +163,7 @@ pub(in crate::server) fn create_full_backup_to_server(
 
     for board in &boards {
         validate_board_short_name(&board.short_name)?;
-        let board_manifest = build_board_backup_manifest(&conn, &board.short_name)?;
+        let board_manifest = build_board_backup_manifest(&export_conn, &board.short_name)?;
         write_board_exports(&root_dir, &board_manifest, &mut files)?;
     }
 
@@ -252,7 +253,7 @@ pub(in crate::server) fn create_full_backup_to_server(
             settings: settings_path.is_file(),
             uploads: true,
             thumbnails: true,
-            tor_keys: include_tor_hidden_service_keys,
+            tor_keys: tor_hidden_service_keys_included,
             board_exports: true,
             file_inventory: true,
         },
@@ -260,8 +261,8 @@ pub(in crate::server) fn create_full_backup_to_server(
             path: "db/rustchan.sqlite3".to_owned(),
             size: db_snapshot_size,
             sha256: db_snapshot_sha,
-            integrity_check: Some(snapshot_db_health_output(&conn, "integrity_check")),
-            foreign_key_check: Some(snapshot_db_health_output(&conn, "foreign_key_check")),
+            integrity_check: Some(snapshot_db_health_output(&export_conn, "integrity_check")),
+            foreign_key_check: Some(snapshot_db_health_output(&export_conn, "foreign_key_check")),
         }),
         files,
         parts: Vec::new(),
@@ -270,7 +271,7 @@ pub(in crate::server) fn create_full_backup_to_server(
     if storage_mode == BackupStorageMode::SplitZip {
         materialize_split_zip_parts(&root_dir, &mut manifest, split_zip_part_size)?;
     }
-    drop(conn);
+    drop(export_conn);
 
     let backup_ref = finalize_saved_backup(&root_dir, manifest)?;
     invalidate_backup_list_cache(&full_backup_dir(), BackupListKind::Full);
@@ -302,7 +303,7 @@ pub(in crate::server) fn create_full_backup_to_server(
         path = %root_dir.display(),
         bytes = size,
         automated = session_id.is_none(),
-        includes_tor_hidden_service_keys = include_tor_hidden_service_keys,
+        includes_tor_hidden_service_keys = tor_hidden_service_keys_included,
         "Backup v4 full backup created"
     );
     progress
@@ -340,12 +341,13 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
         .to_str()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Backup DB path non-UTF-8")))?
         .replace('\'', "''");
-    let conn = pool.get()?;
-    conn.execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
+    let snapshot_conn = pool.get()?;
+    snapshot_conn
+        .execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
         .map_err(|error| AppError::Internal(anyhow::anyhow!("VACUUM INTO: {error}")))?;
-    drop(conn);
+    drop(snapshot_conn);
     restrict_backup_file(&db_snapshot_path)?;
-    let conn = rusqlite::Connection::open_with_flags(
+    let export_conn = rusqlite::Connection::open_with_flags(
         &db_snapshot_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
@@ -380,8 +382,8 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
         );
     }
 
-    let pre_integrity = snapshot_db_health_output(&conn, "integrity_check");
-    let pre_foreign_key = snapshot_db_health_output(&conn, "foreign_key_check");
+    let pre_integrity = snapshot_db_health_output(&export_conn, "integrity_check");
+    let pre_foreign_key = snapshot_db_health_output(&export_conn, "foreign_key_check");
 
     let repair_request_path = maintenance_dir.join("repair-request.json");
     let repair_request = serde_json::json!({
@@ -428,7 +430,7 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
     );
 
     let schema_dump = {
-        let mut statement = conn
+        let mut statement = export_conn
             .prepare(
                 "SELECT sql FROM sqlite_schema
                  WHERE sql IS NOT NULL
@@ -460,7 +462,7 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
         storage::sha256_hex_for_bytes(schema_dump.as_bytes()),
     );
 
-    let pending_fs_ops = db::list_pending_fs_ops(&conn)
+    let pending_fs_ops = db::list_pending_fs_ops(&export_conn)
         .map_err(|error| AppError::Internal(anyhow::anyhow!("List pending_fs_ops: {error}")))?;
     if !pending_fs_ops.is_empty() {
         let pending_fs_path = maintenance_dir.join("pending-fs-ops.json");
@@ -773,7 +775,8 @@ pub(in crate::server) async fn create_full_backup(
                 include_tor_hidden_service_keys,
                 storage_mode,
                 split_zip_part_size,
-            )?;
+            )
+            .map(|_completed_value| ())?;
             Ok(())
         }
     })
@@ -832,7 +835,7 @@ pub(in crate::server) async fn create_board_backup(
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
             log_backup_phase(crate::middleware::backup_phase::SNAPSHOT_DB);
             let manifest = build_board_backup_manifest(&conn, &board_short)?;
@@ -1348,8 +1351,8 @@ where
     zip.write_all(manifest_json)
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Write manifest: {error}")))?;
     if let Some(progress) = progress {
-        progress.files_done.fetch_add(1, Ordering::Relaxed);
-        progress.bytes_done.fetch_add(
+        let _files_before_manifest = progress.files_done.fetch_add(1, Ordering::Relaxed);
+        let _bytes_before_manifest = progress.bytes_done.fetch_add(
             u64::try_from(manifest_json.len()).unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
@@ -1509,11 +1512,16 @@ fn materialize_split_zip_parts(
     let parts_dir = root_dir.join(storage::PARTS_DIR_NAME);
     ensure_backup_dir(&parts_dir)?;
     let planned_parts = plan_split_zip_parts(&manifest.files, target_part_size);
-    let total_parts = u32::try_from(planned_parts.len()).unwrap_or(u32::MAX);
+    let total_parts = u32::try_from(planned_parts.len()).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("split part count exceeds u32: {error}"))
+    })?;
     let mut part_infos = Vec::with_capacity(planned_parts.len());
 
     for (part_offset, planned) in planned_parts.iter().enumerate() {
-        let part_index = u32::try_from(part_offset + 1).unwrap_or(u32::MAX);
+        let part_index = u32::try_from(part_offset)
+            .ok()
+            .and_then(|part| part.checked_add(1))
+            .ok_or_else(|| AppError::Internal(anyhow::anyhow!("split part index overflows")))?;
         let part_filename = format!("parts/part-{part_index:04}.zip");
         let part_path = root_dir.join(&part_filename);
         let tmp_path = root_dir.join(format!("{part_filename}.tmp"));
@@ -1545,12 +1553,14 @@ fn materialize_split_zip_parts(
                 let mut source = std::fs::File::open(&source_path).map_err(|error| {
                     AppError::Internal(anyhow::anyhow!("Open {}: {error}", source_path.display()))
                 })?;
-                std::io::copy(&mut source, &mut zip).map_err(|error| {
-                    AppError::Internal(anyhow::anyhow!(
-                        "Copy {} into split ZIP: {error}",
-                        source_path.display()
-                    ))
-                })?;
+                std::io::copy(&mut source, &mut zip)
+                    .map_err(|error| {
+                        AppError::Internal(anyhow::anyhow!(
+                            "Copy {} into split ZIP: {error}",
+                            source_path.display()
+                        ))
+                    })
+                    .map(|_completed_value| ())?;
             }
             let writer = zip.finish().map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Finalize {}: {error}", tmp_path.display()))
@@ -1709,8 +1719,8 @@ where
                 sha256,
             );
             if let Some(progress) = progress {
-                progress.files_done.fetch_add(1, Ordering::Relaxed);
-                progress.bytes_done.fetch_add(size, Ordering::Relaxed);
+                let _files_before_upload = progress.files_done.fetch_add(1, Ordering::Relaxed);
+                let _bytes_before_upload = progress.bytes_done.fetch_add(size, Ordering::Relaxed);
                 log_backup_progress(progress);
             }
         }
@@ -1930,7 +1940,7 @@ mod tests {
         std::fs::write(&source, "cookie_secret = \"secret\"")
             .context("write source settings file")?;
 
-        copy_regular_file_to_backup(&source, &destination)?;
+        copy_regular_file_to_backup(&source, &destination).map(|_completed_value| ())?;
 
         let destination_mode = std::fs::metadata(&destination)
             .context("read destination metadata")?
@@ -1969,7 +1979,8 @@ mod tests {
         let pool = crate::db::init_test_pool().context("create test pool")?;
         let conn = pool.get().context("get test database connection")?;
         crate::db::create_board(&conn, "tech", "Technology", "", false)
-            .context("create test board")?;
+            .context("create test board")
+            .map(|_completed_value| ())?;
 
         let db_path = temp_dir.path().join("snapshot.db");
         let db_path_str = db_path
@@ -2029,7 +2040,7 @@ mod tests {
             )
             .context("add Tor keys to backup ZIP")?;
         }
-        zip.finish().context("finish backup ZIP")?;
+        drop(zip.finish().context("finish backup ZIP")?);
         Ok(())
     }
 
@@ -2038,7 +2049,8 @@ mod tests {
         let pool = crate::db::init_test_pool().context("create test pool")?;
         let conn = pool.get().context("get test database connection")?;
         crate::db::create_board(&conn, "tech", "Technology", "", false)
-            .context("create test board")?;
+            .context("create test board")
+            .map(|_completed_value| ())?;
 
         let manifest = build_full_backup_manifest(&conn, 1024, 5, 1, 2, false, 0)?;
 
@@ -2155,7 +2167,8 @@ mod tests {
         let pool = crate::db::init_test_pool().context("create test pool")?;
         let conn = pool.get().context("get test database connection")?;
         crate::db::create_board(&conn, "tech", "Technology", "", false)
-            .context("create test board")?;
+            .context("create test board")
+            .map(|_completed_value| ())?;
         let invariant_trigger: String = conn
             .query_row(
                 "SELECT sql FROM sqlite_schema
@@ -2170,7 +2183,8 @@ mod tests {
             "UPDATE boards SET short_name = '../escape' WHERE short_name = 'tech'",
             [],
         )
-        .context("corrupt stored board short name")?;
+        .context("corrupt stored board short name")
+        .map(|_completed_value| ())?;
         conn.execute_batch(&invariant_trigger)
             .context("restore board domain trigger")?;
 
@@ -2250,7 +2264,18 @@ mod tests {
             crate::error::AppError::BadRequest(message) => {
                 ensure!(message.contains("Tor hidden service keys were requested"));
             }
-            other => bail!("expected BadRequest, got {other:?}"),
+            other @ (crate::error::AppError::NotFound(_)
+            | crate::error::AppError::Forbidden(_)
+            | crate::error::AppError::BannedUser {
+                reason: _,
+                csrf_token: _,
+            }
+            | crate::error::AppError::UploadTooLarge(_)
+            | crate::error::AppError::InvalidMediaType(_)
+            | crate::error::AppError::Conflict(_)
+            | crate::error::AppError::DbBusy
+            | crate::error::AppError::Internal(_)
+            | crate::error::AppError::Tls(_)) => bail!("expected BadRequest, got {other:?}"),
         }
         Ok(())
     }
@@ -2282,7 +2307,18 @@ mod tests {
             crate::error::AppError::BadRequest(message) => {
                 ensure!(message.contains("Tor hidden service key backups are not available"));
             }
-            other => bail!("expected BadRequest, got {other:?}"),
+            other @ (crate::error::AppError::NotFound(_)
+            | crate::error::AppError::Forbidden(_)
+            | crate::error::AppError::BannedUser {
+                reason: _,
+                csrf_token: _,
+            }
+            | crate::error::AppError::UploadTooLarge(_)
+            | crate::error::AppError::InvalidMediaType(_)
+            | crate::error::AppError::Conflict(_)
+            | crate::error::AppError::DbBusy
+            | crate::error::AppError::Internal(_)
+            | crate::error::AppError::Tls(_)) => bail!("expected BadRequest, got {other:?}"),
         }
         Ok(())
     }
@@ -2304,7 +2340,18 @@ mod tests {
                 ensure!(message.contains("could not be read"));
                 ensure!(message.contains(&missing.display().to_string()));
             }
-            other => bail!("expected BadRequest, got {other:?}"),
+            other @ (crate::error::AppError::NotFound(_)
+            | crate::error::AppError::Forbidden(_)
+            | crate::error::AppError::BannedUser {
+                reason: _,
+                csrf_token: _,
+            }
+            | crate::error::AppError::UploadTooLarge(_)
+            | crate::error::AppError::InvalidMediaType(_)
+            | crate::error::AppError::Conflict(_)
+            | crate::error::AppError::DbBusy
+            | crate::error::AppError::Internal(_)
+            | crate::error::AppError::Tls(_)) => bail!("expected BadRequest, got {other:?}"),
         }
         Ok(())
     }

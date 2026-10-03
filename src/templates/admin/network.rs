@@ -1,7 +1,5 @@
 //! Dedicated Network & Security forms with honest startup configuration state.
 
-use std::fmt::Write as _;
-
 use crate::config::admin::{InputKind, SettingField};
 use crate::utils::sanitize::escape_html;
 
@@ -135,7 +133,7 @@ fn render_control_groups(fields: &[SettingField], section: &str) -> String {
             .filter(|f| keys.contains(&f.definition.key))
             .map(render_field)
             .collect::<String>();
-        let _ = write!(output, "<fieldset class=\"admin-settings-group\"><legend>{label}</legend><div class=\"admin-settings-grid\">{controls}</div></fieldset>");
+        crate::templates::append_html(&mut output, format_args!( "<fieldset class=\"admin-settings-group\"><legend>{label}</legend><div class=\"admin-settings-grid\">{controls}</div></fieldset>"));
     }
     output
 }

@@ -145,7 +145,7 @@ pub(super) fn render_tasks(
     .render(regions.get(1).copied().unwrap_or(area), frame.buffer_mut());
     let body = regions.get(2).copied().unwrap_or(area);
     let columns = Layout::horizontal([Constraint::Percentage(64), Constraint::Percentage(36)])
-        .spacing(1)
+        .spacing(1_i32)
         .split(body);
     let table_area = if body.width >= 110 {
         columns.first().copied().unwrap_or(body)

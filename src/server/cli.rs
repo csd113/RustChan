@@ -15,11 +15,11 @@ use clap::{Parser, Subcommand};
 )]
 /// Top-level command-line arguments.
 pub struct Cli {
-    /// Absolute directory for config, database, uploads, logs, and backups
+    /// Absolute directory for config, database, uploads, logs, and backups.
     #[arg(long, global = true, value_name = "PATH")]
     pub data_dir: Option<std::path::PathBuf>,
 
-    /// TCP port to bind the main forum server
+    /// TCP port to bind the main forum server.
     #[arg(long, short = 'p', global = true)]
     pub port: Option<u16>,
 
@@ -72,16 +72,16 @@ pub enum AdminAction {
         #[arg(long)]
         /// Whether the board contains not-safe-for-work material.
         nsfw: bool,
-        /// Disable image uploads on this board (default: images allowed)
+        /// Disable image uploads on this board (default: images allowed).
         #[arg(long = "no-images")]
         no_images: bool,
-        /// Disable video uploads on this board (default: video allowed)
+        /// Disable video uploads on this board (default: video allowed).
         #[arg(long = "no-videos")]
         no_videos: bool,
-        /// Enable audio uploads on this board (default: audio disabled)
+        /// Enable audio uploads on this board (default: audio disabled).
         #[arg(long = "audio", conflicts_with = "no_audio")]
         audio: bool,
-        /// Compatibility flag; audio uploads are already disabled by default
+        /// Compatibility flag; audio uploads are already disabled by default.
         #[arg(long = "no-audio")]
         no_audio: bool,
     },
@@ -227,7 +227,8 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
         } => {
             crypto::validate_password(&new_password)?;
             db::get_admin_by_username(&conn, &username)?
-                .ok_or_else(|| anyhow::anyhow!("Admin '{username}' not found."))?;
+                .ok_or_else(|| anyhow::anyhow!("Admin '{username}' not found."))
+                .map(|_completed_value| ())?;
             let hash = crypto::hash_password(&new_password)?;
             db::update_admin_password(&conn, &username, &hash)?;
             writeln!(
@@ -313,12 +314,14 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                 stdout.flush()?;
             }
             let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
+            std::io::stdin()
+                .read_line(&mut input)
+                .map(|_completed_value| ())?;
             if input.trim() != "yes" {
                 writeln!(std::io::stdout().lock(), "Aborted.")?;
                 return Ok(());
             }
-            db::delete_board(&conn, board.id)?;
+            db::delete_board(&conn, board.id).map(|_completed_value| ())?;
             writeln!(std::io::stdout().lock(), "✓ Board /{short}/ deleted.")?;
         }
         AdminAction::ListBoards => {
@@ -354,9 +357,11 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
             reason,
             hours,
         } => {
-            let expires = hours
-                .filter(|&h| h > 0)
-                .map(|h| chrono::Utc::now().timestamp() + h.min(87_600).saturating_mul(3600));
+            let expires = hours.filter(|&h| h > 0).map(|h| {
+                chrono::Utc::now()
+                    .timestamp()
+                    .saturating_add(h.min(87_600).saturating_mul(3600))
+            });
             let id = db::add_ban(&conn, &ip_hash, &reason, expires)?;
             let exp_str = expires
                 .and_then(|ts| chrono::Local.timestamp_opt(ts, 0).single())
@@ -478,9 +483,17 @@ mod tests {
         ]);
 
         let Some(Command::Admin {
-            action: AdminAction::CreateBoard {
-                audio, no_audio, ..
-            },
+            action:
+                AdminAction::CreateBoard {
+                    audio,
+                    no_audio,
+                    short: _,
+                    name: _,
+                    description: _,
+                    nsfw: _,
+                    no_images: _,
+                    no_videos: _,
+                },
         }) = cli.command
         else {
             anyhow::bail!("arguments should parse as create-board");
@@ -507,7 +520,17 @@ mod tests {
         ]);
 
         let Some(Command::Admin {
-            action: AdminAction::CreateBoard { audio, .. },
+            action:
+                AdminAction::CreateBoard {
+                    audio,
+                    short: _,
+                    name: _,
+                    description: _,
+                    nsfw: _,
+                    no_images: _,
+                    no_videos: _,
+                    no_audio: _,
+                },
         }) = cli.command
         else {
             anyhow::bail!("arguments should parse as create-board");

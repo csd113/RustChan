@@ -4,7 +4,6 @@ use crate::error::{AppError, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -291,7 +290,8 @@ pub(super) fn build_backup_id(_scope: BackupScope, scope_label: &str) -> String 
 pub(super) fn create_backup_root(backup_id: &str) -> Result<PathBuf> {
     if let Some(path) = &crate::config::CONFIG.backup_directory {
         crate::config::prepare_backup_directory(path, &crate::config::CONFIG)
-            .map_err(|error| AppError::BadRequest(format!("{error:#}")))?;
+            .map_err(|error| AppError::BadRequest(format!("{error:#}")))
+            .map(|_completed_value| ())?;
     }
     let root = backups_root_dir().join(backup_id);
     crate::config::ensure_private_dir(&root).map_err(|error| {
@@ -510,35 +510,50 @@ pub(super) fn build_readme(
     has_tor_keys: bool,
 ) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "RustChan Backup v4");
-    let _ = writeln!(out);
-    let _ = writeln!(out, "Backup ID: {}", manifest.backup_id);
-    let _ = writeln!(out, "Scope: {}", manifest.scope.slug());
-    let _ = writeln!(out, "Mode: {}", metadata.storage_mode.display_name());
-    let _ = writeln!(out, "Archive container: {}", manifest.archive_container);
-    let _ = writeln!(
-        out,
-        "Tor keys included: {}",
-        if has_tor_keys { "yes" } else { "no" }
+    crate::templates::append_html(&mut out, format_args!("RustChan Backup v4\n"));
+    crate::templates::append_html(&mut out, format_args!("\n"));
+    crate::templates::append_html(
+        &mut out,
+        format_args!("Backup ID: {}\n", manifest.backup_id),
     );
-    let _ = writeln!(out);
-    let _ = writeln!(out, "Important files:");
-    let _ = writeln!(out, "- {BACKUP_METADATA_FILE_NAME}");
-    let _ = writeln!(out, "- {MANIFEST_FILE_NAME}");
-    let _ = writeln!(out, "- {CHECKSUMS_FILE_NAME}");
+    crate::templates::append_html(&mut out, format_args!("Scope: {}\n", manifest.scope.slug()));
+    crate::templates::append_html(
+        &mut out,
+        format_args!("Mode: {}\n", metadata.storage_mode.display_name()),
+    );
+    crate::templates::append_html(
+        &mut out,
+        format_args!("Archive container: {}\n", manifest.archive_container),
+    );
+    crate::templates::append_html(
+        &mut out,
+        format_args!(
+            "Tor keys included: {}\n",
+            if has_tor_keys { "yes" } else { "no" }
+        ),
+    );
+    crate::templates::append_html(&mut out, format_args!("\n"));
+    crate::templates::append_html(&mut out, format_args!("Important files:\n"));
+    crate::templates::append_html(&mut out, format_args!("- {BACKUP_METADATA_FILE_NAME}\n"));
+    crate::templates::append_html(&mut out, format_args!("- {MANIFEST_FILE_NAME}\n"));
+    crate::templates::append_html(&mut out, format_args!("- {CHECKSUMS_FILE_NAME}\n"));
     if metadata.storage_mode == BackupStorageMode::SplitZip {
-        let _ = writeln!(out, "- {PARTS_DIR_NAME}/");
+        crate::templates::append_html(&mut out, format_args!("- {PARTS_DIR_NAME}/\n"));
     }
     if has_tor_keys {
-        let _ = writeln!(out, "- tor-keys/");
+        crate::templates::append_html(&mut out, format_args!("- tor-keys/\n"));
     }
-    let _ = writeln!(out);
-    let _ = writeln!(out, "Keep all files in this backup folder together.");
-    let _ = writeln!(out, "Do not mix ZIP parts from different backups.");
-    let _ = writeln!(
-        out,
-        "Use RustChan restore for safe programmatic restore. Standard ZIP tools are useful only for manual inspection and emergency extraction."
+    crate::templates::append_html(&mut out, format_args!("\n"));
+    crate::templates::append_html(
+        &mut out,
+        format_args!("Keep all files in this backup folder together.\n"),
     );
+    crate::templates::append_html(
+        &mut out,
+        format_args!("Do not mix ZIP parts from different backups.\n"),
+    );
+    crate::templates::append_html(&mut out, format_args!("Use RustChan restore for safe programmatic restore. Standard ZIP tools are useful only for manual inspection and emergency extraction.\n"
+    ));
     out
 }
 
@@ -555,7 +570,7 @@ pub(super) fn write_root_checksums(root_dir: &Path, extra_paths: &[&Path]) -> Re
             continue;
         }
         let sha256 = sha256_hex_for_file(&path)?;
-        let _ = writeln!(lines, "{sha256}  {name}");
+        crate::templates::append_html(&mut lines, format_args!("{sha256}  {name}\n"));
     }
     for path in extra_paths {
         if !path.is_file() {
@@ -563,7 +578,10 @@ pub(super) fn write_root_checksums(root_dir: &Path, extra_paths: &[&Path]) -> Re
         }
         let sha256 = sha256_hex_for_file(path)?;
         let rel = path.strip_prefix(root_dir).unwrap_or(path);
-        let _ = writeln!(lines, "{}  {}", sha256, rel.to_string_lossy());
+        crate::templates::append_html(
+            &mut lines,
+            format_args!("{}  {}\n", sha256, rel.to_string_lossy()),
+        );
     }
     write_text(&root_dir.join(CHECKSUMS_FILE_NAME), &lines)
 }
@@ -967,9 +985,9 @@ pub(super) fn copy_verified_file_to_writer<W: Write>(
             let mut source = std::fs::File::open(path).map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Open {}: {error}", path.display()))
             })?;
-            std::io::copy(&mut source, writer).map_err(|error| {
-                AppError::Internal(anyhow::anyhow!("Copy verified file: {error}"))
-            })?;
+            std::io::copy(&mut source, writer)
+                .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy verified file: {error}")))
+                .map(|_completed_value| ())?;
         }
         VerifiedFileSource::ZipEntry {
             part_path,
@@ -987,11 +1005,13 @@ pub(super) fn copy_verified_file_to_writer<W: Write>(
                     "Verified Backup v4 ZIP entry '{entry_path}' is no longer readable: {error}"
                 ))
             })?;
-            std::io::copy(&mut entry, writer).map_err(|error| {
-                AppError::Internal(anyhow::anyhow!(
-                    "Copy verified Backup v4 ZIP entry '{entry_path}': {error}"
-                ))
-            })?;
+            std::io::copy(&mut entry, writer)
+                .map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!(
+                        "Copy verified Backup v4 ZIP entry '{entry_path}': {error}"
+                    ))
+                })
+                .map(|_completed_value| ())?;
         }
     }
     Ok(())
@@ -1116,7 +1136,7 @@ fn verify_split_part_path(root_dir: &Path, filename: &str) -> Result<PathBuf> {
             "Backup v4 split part path '{filename}' must be an immediate file under parts/."
         )));
     }
-    parse_split_part_index(filename)?;
+    parse_split_part_index(filename).map(|_completed_value| ())?;
     resolve_declared_file(root_dir, filename, "Backup v4 split ZIP part")
 }
 
@@ -1245,8 +1265,8 @@ fn verify_split_zip_files(
                 part.filename
             )));
         }
-        allowed_files.insert(part.filename.clone());
-        part_paths.insert(part.filename.clone(), part_path);
+        let _completed_value = allowed_files.insert(part.filename.clone());
+        let _previous_value = part_paths.insert(part.filename.clone(), part_path);
     }
     for expected_index in 1..=expected_total {
         if !part_indexes.contains(&expected_index) {
@@ -1303,7 +1323,7 @@ fn verify_split_zip_files(
             entry.size,
             &entry.sha256,
         )?;
-        verified_files.insert(entry.logical_path.clone(), verified);
+        let _previous_value = verified_files.insert(entry.logical_path.clone(), verified);
     }
 
     let mut sorted_part_paths: Vec<_> = part_paths.iter().collect();
@@ -1362,7 +1382,8 @@ fn verify_split_zip_files(
                     entry_path: entry_name,
                 },
             )?;
-            verified_files.insert(manifest_entry.logical_path.clone(), verified);
+            let _previous_value =
+                verified_files.insert(manifest_entry.logical_path.clone(), verified);
         }
         let mut expected_entry_names: Vec<_> = expected_entries.keys().collect();
         expected_entry_names.sort();
@@ -1540,7 +1561,7 @@ pub(super) fn verify_saved_backup(
                     entry.size,
                     &entry.sha256,
                 )?;
-                verified_files.insert(entry.logical_path.clone(), verified);
+                let _previous_value = verified_files.insert(entry.logical_path.clone(), verified);
             }
             (verified_files, HashSet::new())
         };
@@ -1626,7 +1647,7 @@ pub(super) fn verify_saved_backup(
     allowed_files.extend(split_part_allowed_files);
     if let Some(snapshot) = &db_snapshot {
         if verified_file_is_root_stored(&snapshot.file) {
-            allowed_files.insert(snapshot.file.logical_path.clone());
+            let _completed_value = allowed_files.insert(snapshot.file.logical_path.clone());
         }
     }
 
@@ -1648,7 +1669,7 @@ pub(super) fn verify_saved_backup(
     sorted_verified_files.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
     for verified in sorted_verified_files {
         if verified_file_is_root_stored(verified) {
-            allowed_files.insert(verified.logical_path.clone());
+            let _completed_value = allowed_files.insert(verified.logical_path.clone());
         }
         if let Some(board_short) = verified.board.as_deref() {
             if !included_boards.contains_key(board_short) {
@@ -1783,7 +1804,7 @@ pub(super) fn verify_saved_backup(
             ))
         })?;
         validate_board_json_identity(&board_json_file, board_short, &board_summary.name)?;
-        boards.insert(
+        let _previous_value = boards.insert(
             board_short.clone(),
             VerifiedBoard {
                 board_json: board_json_file,
@@ -1918,7 +1939,9 @@ pub(super) fn write_saved_backup_fixture(
         .and_then(|name| name.to_str())
         .context("saved-backup fixture root has no UTF-8 backup ID")?
         .to_owned();
-    let created_at = completed_at - 60;
+    let created_at = completed_at
+        .checked_sub(60)
+        .context("backup fixture creation timestamp underflows")?;
     let mut manifest_files = Vec::new();
     let includes_database = db_snapshot.is_some();
     let db_snapshot_info = db_snapshot.as_deref().map(|bytes| DatabaseSnapshotInfo {
@@ -2142,7 +2165,12 @@ mod tests {
 
         let total_parts = u32::try_from(groups.len()).context("split part count exceeds u32")?;
         for (offset, (file_indexes, oversized)) in groups.iter().enumerate() {
-            let part_index = u32::try_from(offset + 1).context("split part index exceeds u32")?;
+            let part_index = u32::try_from(
+                offset
+                    .checked_add(1)
+                    .context("split part index overflows")?,
+            )
+            .context("split part index exceeds u32")?;
             let part_filename = format!("parts/part-{part_index:04}.zip");
             let part_path = root.join(&part_filename);
             let file = std::fs::File::create(&part_path)
@@ -2161,9 +2189,11 @@ mod tests {
                 .context("start split-part ZIP entry")?;
                 let mut source = std::fs::File::open(&source_path)
                     .with_context(|| format!("open fixture file {}", source_path.display()))?;
-                std::io::copy(&mut source, &mut zip).context("copy split-part ZIP entry")?;
+                std::io::copy(&mut source, &mut zip)
+                    .context("copy split-part ZIP entry")
+                    .map(|_completed_value| ())?;
             }
-            zip.finish().context("finish split-part ZIP")?;
+            drop(zip.finish().context("finish split-part ZIP")?);
             for file_index in file_indexes {
                 let entry = manifest
                     .files
@@ -2233,7 +2263,8 @@ mod tests {
             let mut bytes = Vec::new();
             zip_entry
                 .read_to_end(&mut bytes)
-                .context("read split-part ZIP entry contents")?;
+                .context("read split-part ZIP entry contents")
+                .map(|_completed_value| ())?;
             if name == entry_path {
                 bytes = replacement.to_vec();
             }
@@ -2249,7 +2280,7 @@ mod tests {
             zip.write_all(&bytes)
                 .context("write rewritten split-part entry")?;
         }
-        zip.finish().context("finish rewritten split part")?;
+        drop(zip.finish().context("finish rewritten split part")?);
 
         let part = manifest
             .parts
@@ -2273,7 +2304,8 @@ mod tests {
             board_file_fixtures(),
             Some(database_snapshot_fixture()?),
             1_715_000_000_i64,
-        )?;
+        )
+        .map(|_completed_value| ())?;
 
         let verified = verify_saved_backup(&root, &[BackupScope::FullSite])?;
         ensure!(verified.completed_at == 1_715_000_000_i64);
@@ -2397,7 +2429,8 @@ mod tests {
             board_file_fixtures(),
             Some(database_snapshot_fixture()?),
             1_715_000_100_i64,
-        )?;
+        )
+        .map(|_completed_value| ())?;
         std::fs::write(root.join("boards/tech/media/src/example.txt"), b"other")
             .context("tamper fixture file")?;
 
@@ -2419,7 +2452,8 @@ mod tests {
             board_file_fixtures(),
             Some(database_snapshot_fixture()?),
             1_715_000_200_i64,
-        )?;
+        )
+        .map(|_completed_value| ())?;
         std::fs::remove_file(root.join("boards/tech/media/src/example.txt"))
             .context("remove declared fixture file")?;
 
@@ -2440,8 +2474,9 @@ mod tests {
             board_file_fixtures(),
             Some(database_snapshot_fixture()?),
             1_715_000_250_i64,
-        )?;
-        convert_fixture_to_split(&root, 16)?;
+        )
+        .map(|_completed_value| ())?;
+        convert_fixture_to_split(&root, 16).map(|_completed_value| ())?;
 
         let verified = verify_saved_backup(&root, &[BackupScope::FullSite])?;
         ensure!(verified.metadata.storage_mode == BackupStorageMode::SplitZip);
@@ -2513,7 +2548,7 @@ mod tests {
     #[test]
     fn verify_saved_backup_rejects_zip_backed_file_duplicate_at_root() -> TestResult<()> {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_duplicate-root")?;
-        convert_fixture_to_split(&root, 16)?;
+        convert_fixture_to_split(&root, 16).map(|_completed_value| ())?;
         let duplicate = root.join("boards/tech/media/src/example.txt");
         let duplicate_parent = duplicate
             .parent()
@@ -2643,7 +2678,7 @@ mod tests {
     fn verify_saved_backup_rejects_non_contiguous_split_part_index() -> TestResult<()> {
         let (_dir, root, _manifest) = saved_full_fixture("2026-05-06_full-site_part-gap")?;
         let mut manifest = convert_fixture_to_split(&root, 16)?;
-        manifest.parts.remove(0);
+        let _completed_value = manifest.parts.remove(0);
         let new_total = u32::try_from(manifest.parts.len()).context("part count exceeds u32")?;
         for part in &mut manifest.parts {
             part.total_parts = new_total;
@@ -2676,7 +2711,9 @@ mod tests {
             .first_mut()
             .context("fixture manifest has no mutable split part")?
             .filename = replacement_filename.clone();
-        std::fs::copy(original, root.join(replacement_filename)).context("copy split part")?;
+        std::fs::copy(original, root.join(replacement_filename))
+            .context("copy split part")
+            .map(|_completed_value| ())?;
         rewrite_manifest(&root, &manifest)?;
 
         let error = verify_saved_backup(&root, &[BackupScope::FullSite])
@@ -2721,7 +2758,7 @@ mod tests {
             .context("start undeclared ZIP entry")?;
         zip.write_all(b"extra")
             .context("write undeclared ZIP entry")?;
-        zip.finish().context("finish split part")?;
+        drop(zip.finish().context("finish split part")?);
         let first_part = manifest
             .parts
             .first_mut()
@@ -2756,7 +2793,7 @@ mod tests {
         zip.start_file("../escape.txt", zip::write::SimpleFileOptions::default())
             .context("start unsafe ZIP entry")?;
         zip.write_all(b"escape").context("write unsafe ZIP entry")?;
-        zip.finish().context("finish split part")?;
+        drop(zip.finish().context("finish split part")?);
         let first_part = manifest
             .parts
             .first_mut()

@@ -62,6 +62,69 @@ fn create_pre_repair_backup(
     )
 }
 
+/// Run repair under the caller's maintenance guard, retaining stale-job diagnostics.
+fn run_db_repair_job(
+    pool: &db::DbPool,
+    progress: &std::sync::Arc<crate::middleware::BackupProgress>,
+    jobs: &crate::middleware::DbMaintenanceJobs,
+    job_id: u64,
+) {
+    if !jobs.mark_phase(job_id, crate::middleware::DbMaintenanceJobPhase::Backup) {
+        tracing::debug!(target: "admin", job_id, "Ignored backup phase update for stale database repair job");
+    }
+    let backup_result = create_pre_repair_backup(pool, progress, job_id);
+
+    let conn = match pool.get() {
+        Ok(conn) => conn,
+        Err(error) => {
+            if !jobs.mark_failed(
+                job_id,
+                format!("Could not open database connection after pre-repair backup: {error}"),
+            ) {
+                tracing::debug!(target: "admin", job_id, %error, "Ignored failure update for stale database repair job");
+            }
+            return;
+        }
+    };
+
+    if !jobs.mark_phase(job_id, crate::middleware::DbMaintenanceJobPhase::Repair) {
+        tracing::debug!(target: "admin", job_id, "Ignored repair phase update for stale database repair job");
+    }
+    let report = match backup_result {
+        Ok(backup_id) => db::attempt_db_repair(
+            &conn,
+            Some(db::DbRepairBackup {
+                backup_id: backup_id.clone(),
+                backup_type: "DB + config".to_owned(),
+                backup_path: crate::config::backups_dir()
+                    .join(&backup_id)
+                    .display()
+                    .to_string(),
+                verified: true,
+            }),
+        ),
+        Err(error) => {
+            let backup_error = error.to_string();
+            db::db_repair_aborted_for_backup_failure(&conn, &backup_error)
+        }
+    };
+    tracing::info!(
+        target: "admin",
+        before_ok = report.before.ok(),
+        after_ok = report.after.as_ref().map(db::DbHealthSnapshot::ok),
+        steps = report.repair_steps.len(),
+        backup = report
+            .repair_backup
+            .as_ref()
+            .map(|backup| backup.backup_id.as_str()),
+        backup_error = report.repair_backup_error.as_deref(),
+        "Admin ran database repair attempt"
+    );
+    if !jobs.mark_finished(job_id, report) {
+        tracing::debug!(target: "admin", job_id, "Ignored completion update for stale database repair job");
+    }
+}
+
 fn parse_ffmpeg_timeout_secs_input(input: Option<&str>) -> Result<u64> {
     let raw = input
         .map(str::trim)
@@ -155,7 +218,7 @@ pub(in crate::server) async fn update_media_settings(
         let pool = state.db.clone();
         move || -> Result<()> {
             let mut conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let tx = conn.transaction().map_err(anyhow::Error::from)?;
             db::set_media_prune_settings(&tx, prune_enabled, prune_max_bytes)?;
             db::set_site_setting(&tx, "ffmpeg_timeout_secs", &timeout_secs.to_string())?;
@@ -207,7 +270,7 @@ pub(in crate::server) async fn admin_vacuum(
         let csrf_clone = csrf.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
 
             let size_before = db::get_db_size_bytes(&conn).unwrap_or(0);
 
@@ -259,7 +322,7 @@ pub(in crate::server) async fn admin_db_check(
         let csrf_clone = csrf.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
 
             let report = db::check_db_health(&conn);
             tracing::info!(
@@ -303,7 +366,7 @@ pub(in crate::server) async fn admin_db_repair(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             Ok(())
         }
     })
@@ -318,67 +381,22 @@ pub(in crate::server) async fn admin_db_repair(
     let pool = state.db.clone();
     let db_maintenance_jobs = state.db_maintenance_jobs.clone();
 
-    tokio::spawn(async move {
+    drop(tokio::spawn(async move {
         let job_status = db_maintenance_jobs.clone();
         let join_result = tokio::task::spawn_blocking(move || {
             let _maintenance_guard = maintenance_guard;
-            let _ = db_maintenance_jobs
-                .mark_phase(job_id, crate::middleware::DbMaintenanceJobPhase::Backup);
-            let backup_result = create_pre_repair_backup(&pool, &progress, job_id);
-
-            let conn = match pool.get() {
-                Ok(conn) => conn,
-                Err(error) => {
-                    let _ = db_maintenance_jobs.mark_failed(
-                        job_id,
-                        format!(
-                            "Could not open database connection after pre-repair backup: {error}"
-                        ),
-                    );
-                    return;
-                }
-            };
-
-            let _ = db_maintenance_jobs
-                .mark_phase(job_id, crate::middleware::DbMaintenanceJobPhase::Repair);
-            let report = match backup_result {
-                Ok(backup_id) => db::attempt_db_repair(
-                    &conn,
-                    Some(db::DbRepairBackup {
-                        backup_id: backup_id.clone(),
-                        backup_type: "DB + config".to_owned(),
-                        backup_path: crate::config::backups_dir()
-                            .join(&backup_id)
-                            .display()
-                            .to_string(),
-                        verified: true,
-                    }),
-                ),
-                Err(error) => {
-                    let backup_error = error.to_string();
-                    db::db_repair_aborted_for_backup_failure(&conn, &backup_error)
-                }
-            };
-            tracing::info!(
-                target: "admin",
-                before_ok = report.before.ok(),
-                after_ok = report.after.as_ref().map(db::DbHealthSnapshot::ok),
-                steps = report.repair_steps.len(),
-                backup = report
-                    .repair_backup
-                    .as_ref()
-                    .map(|backup| backup.backup_id.as_str()),
-                backup_error = report.repair_backup_error.as_deref(),
-                "Admin ran database repair attempt"
-            );
-            let _ = db_maintenance_jobs.mark_finished(job_id, report);
+            run_db_repair_job(&pool, &progress, &db_maintenance_jobs, job_id);
         })
         .await;
 
         if let Err(error) = join_result {
-            let _ = job_status.mark_failed(job_id, format!("Database repair task failed: {error}"));
+            let failure_recorded =
+                job_status.mark_failed(job_id, format!("Database repair task failed: {error}"));
+            if !failure_recorded {
+                tracing::debug!(target: "admin", job_id, %error, "Ignored task failure update for stale database repair job");
+            }
         }
-    });
+    }));
 
     Ok(render_db_repair_entry_response(
         &jar,
@@ -398,7 +416,7 @@ pub(in crate::server) async fn admin_db_repair_progress_json(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             Ok(())
         }
     })
@@ -454,7 +472,7 @@ fn db_repair_progress_payload(
         crate::middleware::DbMaintenanceJobStatus::Running {
             job_id,
             phase: crate::middleware::DbMaintenanceJobPhase::Starting,
-            ..
+            started_at: _,
         } => serde_json::json!({
             "state": "running",
             "job_id": job_id,
@@ -465,7 +483,7 @@ fn db_repair_progress_payload(
         crate::middleware::DbMaintenanceJobStatus::Running {
             job_id,
             phase: crate::middleware::DbMaintenanceJobPhase::Backup,
-            ..
+            started_at: _,
         } => {
             let backup_percent =
                 backup_percent(backup_phase, backup_files_done, backup_files_total);
@@ -481,7 +499,7 @@ fn db_repair_progress_payload(
         crate::middleware::DbMaintenanceJobStatus::Running {
             job_id,
             phase: crate::middleware::DbMaintenanceJobPhase::Repair,
-            ..
+            started_at: _,
         } => serde_json::json!({
             "state": "running",
             "job_id": job_id,
@@ -489,16 +507,20 @@ fn db_repair_progress_payload(
             "percent": 82,
             "done": false,
         }),
-        crate::middleware::DbMaintenanceJobStatus::Finished { job_id, .. } => serde_json::json!({
-            "state": "finished",
-            "job_id": job_id,
-            "label": "Maintenance rebuild complete. Opening report...",
-            "percent": 100,
-            "done": true,
-            "redirect_url": db_repair_status_url(Some(job_id)),
-        }),
+        crate::middleware::DbMaintenanceJobStatus::Finished { job_id, report: _ } => {
+            serde_json::json!({
+                "state": "finished",
+                "job_id": job_id,
+                "label": "Maintenance rebuild complete. Opening report...",
+                "percent": 100,
+                "done": true,
+                "redirect_url": db_repair_status_url(Some(job_id)),
+            })
+        }
         crate::middleware::DbMaintenanceJobStatus::Failed {
-            job_id, message, ..
+            job_id,
+            message,
+            finished_at: _,
         } => serde_json::json!({
             "state": "failed",
             "job_id": job_id,
@@ -517,7 +539,7 @@ fn backup_percent(phase: u64, files_done: u64, files_total: u64) -> u64 {
         crate::middleware::backup_phase::COMPRESS => files_done
             .saturating_mul(30)
             .checked_div(files_total)
-            .map_or(55, |percent| 55 + percent),
+            .map_or(55, |percent| 55_u64.saturating_add(percent)),
         crate::middleware::backup_phase::DONE => 78,
         _ => 10,
     }
@@ -564,7 +586,7 @@ pub(in crate::server) async fn admin_db_repair_status(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref())?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             Ok(())
         }
     })
@@ -605,7 +627,7 @@ fn render_db_repair_running_response(
     )
         .into_response();
     if let Ok(refresh) = HeaderValue::from_str(&refresh) {
-        response.headers_mut().insert(header::REFRESH, refresh);
+        let _previous_value = response.headers_mut().insert(header::REFRESH, refresh);
     }
     response
 }
@@ -618,11 +640,20 @@ fn render_db_repair_entry_response(
     let current_theme = crate::handlers::board::current_theme_from_jar(jar);
     match status {
         crate::middleware::DbMaintenanceJobStatus::Running {
-            job_id, started_at, ..
+            job_id,
+            started_at,
+            phase: _,
         } => render_db_repair_running_response(jar, csrf, *job_id, *started_at),
         crate::middleware::DbMaintenanceJobStatus::Idle
-        | crate::middleware::DbMaintenanceJobStatus::Finished { .. }
-        | crate::middleware::DbMaintenanceJobStatus::Failed { .. } => (
+        | crate::middleware::DbMaintenanceJobStatus::Finished {
+            job_id: _,
+            report: _,
+        }
+        | crate::middleware::DbMaintenanceJobStatus::Failed {
+            job_id: _,
+            finished_at: _,
+            message: _,
+        } => (
             jar.clone(),
             Html(crate::templates::admin_db_repair_idle_page(
                 csrf,
@@ -665,7 +696,9 @@ fn render_db_repair_status_response(
         )
             .into_response(),
         crate::middleware::DbMaintenanceJobStatus::Running {
-            job_id, started_at, ..
+            job_id,
+            started_at,
+            phase: _,
         } => render_db_repair_running_response(jar, csrf, *job_id, *started_at),
         crate::middleware::DbMaintenanceJobStatus::Finished { job_id, report } => (
             jar.clone(),
@@ -726,7 +759,7 @@ mod tests {
             &conn,
             "session123",
             admin_id,
-            chrono::Utc::now().timestamp() + 3600,
+            chrono::Utc::now().timestamp().saturating_add(3600),
         )
         .context("create admin session")?;
         Ok(())
@@ -782,7 +815,8 @@ mod tests {
             None,
             None,
         )
-        .context("create repair-test thread")?;
+        .context("create repair-test thread")
+        .map(|_completed_value| ())?;
 
         conn.execute_batch(&format!(
             "PRAGMA foreign_keys=OFF; BEGIN; DELETE FROM boards WHERE short_name='{board_short}'; COMMIT; PRAGMA foreign_keys=ON;"
@@ -849,7 +883,7 @@ mod tests {
     }
 
     async fn wait_for_repair_result(router: &Router) -> anyhow::Result<String> {
-        for _ in 0..100 {
+        for _ in 0_i32..100_i32 {
             let body = repair_status_body(router).await?;
             if !body.contains("maintenance rebuild running") {
                 return Ok(body);
@@ -995,9 +1029,9 @@ media_max_active_content_size_bytes = 0
         }
 
         {
-            let mut failure = PRE_REPAIR_BACKUP_FAILURE
-                .lock()
-                .map_err(|_| anyhow::anyhow!("backup failure mutex was poisoned"))?;
+            let mut failure = PRE_REPAIR_BACKUP_FAILURE.lock().map_err(|poison_error| {
+                anyhow::anyhow!("backup failure mutex was poisoned: {poison_error}")
+            })?;
             *failure = Some("simulated pre-repair backup failure".to_owned());
         }
 
@@ -1044,9 +1078,9 @@ media_max_active_content_size_bytes = 0
         let body = wait_for_repair_result(&router).await?;
 
         {
-            let mut failure = PRE_REPAIR_BACKUP_FAILURE
-                .lock()
-                .map_err(|_| anyhow::anyhow!("backup failure mutex was poisoned"))?;
+            let mut failure = PRE_REPAIR_BACKUP_FAILURE.lock().map_err(|poison_error| {
+                anyhow::anyhow!("backup failure mutex was poisoned: {poison_error}")
+            })?;
             *failure = None;
         }
 

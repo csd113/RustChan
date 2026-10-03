@@ -49,7 +49,7 @@ pub struct PollInsert<'a> {
 ///   1  `t.board_id`     5  t.locked       9  `op.file_path`  13 op.id (`op_id`)
 ///   2  t.subject      6  t.sticky       10 `op.thumb_path` 14 t.archived
 ///   3  `t.created_at`   7  `t.reply_count`  11 op.name       15 `image_count`
-///   16 `last_post_at`
+///   16 `last_post_at`.
 fn map_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
     Ok(Thread {
         id: row.get(0)?,
@@ -402,7 +402,8 @@ pub(crate) fn create_thread_submission(
         }
         if filesystem.schedule_thread_prune {
             super::posts::persist_thread_prune_intent_in_tx(conn, board_id)
-                .context("Persist required board prune intent failed")?;
+                .context("Persist required board prune intent failed")
+                .map(|_operation_summary| ())?;
         }
 
         Ok(PostCreationOutcome::Created((thread_id, post_id, poll_id)))
@@ -480,7 +481,12 @@ pub(crate) fn create_reply_submission(
                  FROM threads
                  WHERE id = ?1 AND board_id = ?2",
                 params![post.thread_id, post.board_id],
-                |row| Ok((row.get::<_, i32>(0)? != 0, row.get::<_, i32>(1)? != 0)),
+                |row| {
+                    Ok((
+                        row.get::<_, i32>(0)? != 0_i32,
+                        row.get::<_, i32>(1)? != 0_i32,
+                    ))
+                },
             )
             .optional()?;
         let Some((locked, archived)) = flags else {
@@ -756,7 +762,8 @@ pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64)
         let sql =
             format!("UPDATE threads SET archived = 1, locked = 1 WHERE id IN ({placeholders})");
         conn.execute(&sql, rusqlite::params_from_iter(&ids))
-            .context("Failed to bulk archive threads")?;
+            .context("Failed to bulk archive threads")
+            .map(|_affected_rows| ())?;
 
         Ok(count)
     })();
@@ -835,7 +842,8 @@ pub fn prune_old_threads(
             .join(", ");
         let sql = format!("DELETE FROM threads WHERE id IN ({placeholders})");
         conn.execute(&sql, rusqlite::params_from_iter(&ids))
-            .context("Failed to bulk delete pruned threads")?;
+            .context("Failed to bulk delete pruned threads")
+            .map(|_affected_rows| ())?;
 
         // Determine safe paths INSIDE the transaction so the check sees the
         // post-delete state before any concurrent writer can insert new references.
@@ -912,7 +920,8 @@ pub fn prune_old_archived_threads(
             .join(", ");
         let sql = format!("DELETE FROM threads WHERE id IN ({placeholders})");
         conn.execute(&sql, rusqlite::params_from_iter(&ids))
-            .context("Failed to bulk delete archived threads")?;
+            .context("Failed to bulk delete archived threads")
+            .map(|_affected_rows| ())?;
 
         let safe = super::paths_safe_to_delete(conn, candidates)?;
         let pending_fs_op = super::build_delete_files_pending_op(&safe)?;
@@ -1101,11 +1110,13 @@ mod tests {
         conn.execute(
             "UPDATE threads SET created_at = 100, bumped_at = 100 WHERE id = ?1",
             params![thread_id],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         conn.execute(
             "UPDATE posts SET created_at = 100 WHERE thread_id = ?1",
             params![thread_id],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         let thread = super::get_thread(&conn, thread_id)?.context("opening thread should exist")?;
         anyhow::ensure!(
             thread.last_post_at == 100 && thread.image_count == 0,
@@ -1125,16 +1136,17 @@ mod tests {
             false,
             None,
         )?;
-        for (post_id, timestamp) in [(image_id, 200), (audio_id, 300), (text_id, 400)] {
+        for (post_id, timestamp) in [(image_id, 200_i32), (audio_id, 300_i32), (text_id, 400_i32)] {
             conn.execute(
                 "UPDATE posts SET created_at = ?1 WHERE id = ?2",
                 params![timestamp, post_id],
-            )?;
+            )
+            .map(|_affected_rows| ())?;
         }
-        let thread =
+        let replied_thread =
             super::get_thread(&conn, thread_id)?.context("thread should exist after replies")?;
         anyhow::ensure!(
-            thread.last_post_at == 400 && thread.bumped_at == 100 && thread.image_count == 1,
+            replied_thread.last_post_at == 400 && replied_thread.bumped_at == 100 && replied_thread.image_count == 1,
             "sage text replies update last-post time while bump time and image counts remain correct"
         );
         let active = super::get_threads_for_board(&conn, board_id, 20, 0)?;
@@ -1147,7 +1159,8 @@ mod tests {
         conn.execute(
             "UPDATE threads SET archived = 1 WHERE id = ?1",
             params![thread_id],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         let archived = super::get_archived_threads_for_board(&conn, board_id, 20, 0)?;
         anyhow::ensure!(
             archived.len() == 1,
@@ -1219,7 +1232,8 @@ mod tests {
              SET file_path = 'b/file.webp', media_processing_state = ?1
              WHERE id = ?2",
             params![crate::db::MEDIA_ORIGINAL_PRUNE_PENDING, post_id],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
 
         assert!(validate_deduplicated_paths(&conn, &["b/file.webp"]).is_err());
         assert!(crate::db::find_file_by_hash(&conn, "hash")?.is_none());
@@ -1234,8 +1248,8 @@ mod tests {
     fn prune_old_threads_commits_even_when_no_files_are_safe() -> Result<()> {
         let conn = test_conn()?;
         let board_id = create_board(&conn, "prune", "Prune", "", false)?;
-        create_plain_thread(&conn, board_id, "old thread")?;
-        create_plain_thread(&conn, board_id, "new thread")?;
+        create_plain_thread(&conn, board_id, "old thread").map(|_created_id| ())?;
+        create_plain_thread(&conn, board_id, "new thread").map(|_created_id| ())?;
         let board = get_board_by_short(&conn, "prune")?.context("prune board should exist")?;
         assert_eq!(
             count_threads_for_board(&conn, board.id)?,
@@ -1273,7 +1287,8 @@ mod tests {
         conn.execute(
             "UPDATE threads SET archived = 1 WHERE id IN (?1, ?2)",
             params![first, second],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
 
         let deleted = prune_old_archived_threads(&conn, board_id, 1)?;
         assert!(
@@ -1335,7 +1350,7 @@ mod tests {
             deletion_token: "token".to_owned(),
             is_op: false,
         };
-        create_reply_with_thread_update(&conn, &reply, "", false, None)?;
+        create_reply_with_thread_update(&conn, &reply, "", false, None).map(|_created_id| ())?;
 
         let deleted = delete_thread(&conn, thread_id)?;
         assert!(
@@ -1391,7 +1406,8 @@ mod tests {
         conn.execute(
             "UPDATE threads SET locked = 1 WHERE id = ?1",
             params![thread_id],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         let reply = plain_reply(board_id, thread_id);
         let pending_op = pending_upload_op("locked-reply-upload");
 
@@ -1438,7 +1454,8 @@ mod tests {
         conn.execute(
             "UPDATE threads SET archived = 1 WHERE id = ?1",
             params![thread_id],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         let reply = plain_reply(board_id, thread_id);
         let pending_op = pending_upload_op("archived-reply-upload");
 
@@ -1527,7 +1544,7 @@ mod tests {
             deletion_token: "token".to_owned(),
             is_op: false,
         };
-        create_reply_with_thread_update(&conn, &reply, "", false, None)?;
+        create_reply_with_thread_update(&conn, &reply, "", false, None).map(|_created_id| ())?;
 
         let deleted = delete_thread(&conn, thread_id)?;
         assert!(
@@ -1555,28 +1572,30 @@ mod tests {
     fn paged_thread_aggregates_match_the_unbounded_baseline() -> Result<()> {
         let conn = test_conn()?;
         let board = create_board(&conn, "page", "Page", "", false)?;
-        for number in 0..35 {
+        for number in 0_i32..35_i32 {
             let thread = create_plain_thread(&conn, board, &format!("thread {number}"))?;
             conn.execute(
                 "UPDATE threads SET bumped_at=?1, sticky=?2, archived=?3 WHERE id=?4",
                 params![
-                    1_700_000_000 + number / 7,
-                    i64::from(number % 11 == 0),
-                    i64::from(number % 5 == 0),
+                    1_700_000_000_i32 + number / 7_i32,
+                    i64::from(number % 11_i32 == 0_i32),
+                    i64::from(number % 5_i32 == 0_i32),
                     thread
                 ],
-            )?;
-            for reply in 0..number % 7 {
+            )
+            .map(|_affected_rows| ())?;
+            for reply in 0_i32..number % 7_i32 {
                 conn.execute("INSERT INTO posts(thread_id,board_id,body,body_html,deletion_token,file_path,created_at)
                               VALUES(?1,?2,'reply','reply','delete',?3,?4)",
-                    params![thread,board,(reply%2==0).then(|| format!("page/file-{number}-{reply}")),1_700_000_100+reply])?;
+                    params![thread,board,(reply%2_i32==0_i32).then(|| format!("page/file-{number}-{reply}")),1_700_000_100_i32+reply]).map(|_affected_rows| ())?;
             }
         }
         // A missing OP must be excluded before pagination, matching the old JOIN.
         conn.execute(
             "INSERT INTO threads(board_id,bumped_at,sticky) VALUES(?1,1900000000,1)",
             [board],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         for archived in [false, true] {
             let order = if archived {
                 "t.bumped_at DESC"
@@ -1620,7 +1639,8 @@ mod tests {
         let pool = crate::db::init_test_pool()?;
         let conn = pool.get()?;
         let board = create_board(&conn, "bump", "Bump", "", false)?;
-        conn.execute("UPDATE boards SET bump_limit=1 WHERE id=?1", [board])?;
+        conn.execute("UPDATE boards SET bump_limit=1 WHERE id=?1", [board])
+            .map(|_affected_rows| ())?;
         let thread = create_plain_thread(&conn, board, "target")?;
         let op = crate::db::get_posts_for_thread(&conn, thread)?
             .into_iter()
@@ -1652,35 +1672,38 @@ mod tests {
         drop(conn);
         let barrier = std::sync::Barrier::new(2);
         std::thread::scope(|scope| -> Result<()> {
-            let handles:Vec<_>=(0..2).map(|number| {
+            let handles:Vec<_>=(0_i32..2_i32).map(|number| {
                 let pool=&pool; let post=&post; let barrier=&barrier;
                 scope.spawn(move || -> Result<()> {
-                    barrier.wait();
-                    let conn=pool.get()?;
-                    super::create_reply_submission(&conn,post,&format!("bump-{number}"),true,
-                        PostFilesystemCommit::new_with_validation(None,&[],false,|conn:&Connection| {
+                    let _barrier_state = barrier.wait();
+                    let worker_conn=pool.get()?;
+                    super::create_reply_submission(&worker_conn,post,&format!("bump-{number}"),true,
+                        PostFilesystemCommit::new_with_validation(None,&[],false,|validation_conn:&Connection| {
                             // Give the second serialized reply a distinguishable previous
                             // timestamp; no sleep or wall-clock assumption is required.
-                            conn.execute("UPDATE threads SET bumped_at=42 WHERE id=?1 AND reply_count=1",[thread])?;
+                            validation_conn.execute("UPDATE threads SET bumped_at=42 WHERE id=?1 AND reply_count=1",[thread]).map(|_affected_rows| ())?;
                             Ok(())
-                        }))?;
+                        })).map(|_operation_summary| ())?;
                     Ok(())
                 })
             }).collect();
             for handle in handles {
-                handle
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("reply worker panicked"))??;
+                handle.join().map_err(|panic_payload| {
+                    anyhow::anyhow!(
+                        "reply worker panicked: {}",
+                        crate::media::process::panic_message(panic_payload.as_ref())
+                    )
+                })??;
             }
             Ok(())
         })?;
-        let conn = pool.get()?;
-        let state = crate::db::get_thread(&conn, thread)?.context("thread")?;
+        let recovered_conn = pool.get()?;
+        let state = crate::db::get_thread(&recovered_conn, thread)?.context("thread")?;
         anyhow::ensure!(
             state.reply_count == 2 && state.bumped_at == 42,
             "concurrent replies exceeded the bump limit"
         );
-        crate::db::verify_database_schema(&conn)?;
+        crate::db::verify_database_schema(&recovered_conn)?;
         Ok(())
     }
 }

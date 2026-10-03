@@ -84,7 +84,8 @@ pub(in crate::server) async fn file_report(
             }
             // Use the DB's thread_id for the redirect — not the user-submitted value.
             let authoritative_thread_id = post.thread_id;
-            let _ = db::file_report(&conn, post_id, &reason, &ip_hash)?;
+            // The report ID does not affect the authoritative thread redirect.
+            db::file_report(&conn, post_id, &reason, &ip_hash).map(|_report_id| ())?;
             Ok(authoritative_thread_id)
         }
     })

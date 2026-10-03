@@ -46,7 +46,10 @@ pub(super) fn admin_xhr_error_response(error: &AppError) -> Response {
         AppError::NotFound(message) => Some((StatusCode::NOT_FOUND, message.clone())),
         AppError::BadRequest(message) => Some((StatusCode::BAD_REQUEST, message.clone())),
         AppError::Forbidden(message) => Some((StatusCode::FORBIDDEN, message.clone())),
-        AppError::BannedUser { reason, .. } => Some((
+        AppError::BannedUser {
+            reason,
+            csrf_token: _,
+        } => Some((
             StatusCode::FORBIDDEN,
             format!("You are banned. Reason: {reason}"),
         )),
@@ -77,7 +80,17 @@ pub(super) fn admin_xhr_error_response(error: &AppError) -> Response {
     let (status, message) = match error {
         AppError::Internal(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
         AppError::Tls(message) => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
-        _ => (
+        AppError::NotFound(_)
+        | AppError::BadRequest(_)
+        | AppError::Forbidden(_)
+        | AppError::BannedUser {
+            reason: _,
+            csrf_token: _,
+        }
+        | AppError::UploadTooLarge(_)
+        | AppError::InvalidMediaType(_)
+        | AppError::Conflict(_)
+        | AppError::DbBusy => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Unexpected admin restore error.".to_owned(),
         ),
@@ -111,16 +124,18 @@ pub(super) fn redirect_page_response(target: &str, message: &str) -> Response {
     );
 
     let mut resp = Response::new(axum::body::Body::from(body));
-    resp.extensions_mut().insert(content);
+    drop(resp.extensions_mut().insert(content));
     *resp.status_mut() = StatusCode::OK;
-    resp.headers_mut().insert(
+    drop(resp.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/html; charset=utf-8"),
-    );
-    resp.headers_mut().insert(
-        header::HeaderName::from_static("refresh"),
-        HeaderValue::from_str(&format!("0; url={target}"))
-            .unwrap_or_else(|_| HeaderValue::from_static("0; url=/admin/panel")),
+    ));
+    drop(
+        resp.headers_mut().insert(
+            header::HeaderName::from_static("refresh"),
+            HeaderValue::from_str(&format!("0; url={target}"))
+                .unwrap_or_else(|_| HeaderValue::from_static("0; url=/admin/panel")),
+        ),
     );
     resp
 }
@@ -345,7 +360,8 @@ pub(super) async fn restore_auth_preflight(
         let session_id_for_task = session_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id_for_task.as_deref())?;
+            require_admin_session_sid(&conn, session_id_for_task.as_deref())
+                .map(|_completed_value| ())?;
             Ok(())
         })
         .await
@@ -639,7 +655,9 @@ mod tests {
     async fn parse_full_restore_upload(
         mut multipart: Multipart,
     ) -> crate::error::Result<&'static str> {
-        stream_restore_upload_to_tempfile(RestoreKind::Full, &mut multipart).await?;
+        stream_restore_upload_to_tempfile(RestoreKind::Full, &mut multipart)
+            .await
+            .map(|_completed_value| ())?;
         Ok("ok")
     }
 

@@ -1,7 +1,5 @@
 //! Server-rendered settings search, including no-JavaScript operation.
 
-use std::fmt::Write as _;
-
 use crate::config::admin::{application, runtime, NETWORK_SETTINGS};
 use crate::utils::sanitize::escape_html;
 
@@ -31,7 +29,7 @@ pub(super) fn render(query: Option<&str>) -> String {
                     "Application state",
                     application::SETTINGS,
                 )));
-        let mut count = 0;
+        let mut count = 0_usize;
         for (section, label, definitions) in sections {
             for definition in definitions {
                 let haystack = format!(
@@ -40,17 +38,19 @@ pub(super) fn render(query: Option<&str>) -> String {
                 )
                 .to_lowercase();
                 if terms.iter().all(|term| haystack.contains(term)) {
-                    count += 1;
-                    let _ = write!(
-                        results,
-                        "<li><a href=\"/admin/panel?open={section}#{}\">{} — {}</a></li>",
-                        if section == "configuration-state" {
-                            format!("application-{}", definition.key)
-                        } else {
-                            format!("setting-{}", definition.key)
-                        },
-                        escape_html(label),
-                        escape_html(definition.label)
+                    count = count.saturating_add(1);
+                    crate::templates::append_html(
+                        &mut results,
+                        format_args!(
+                            "<li><a href=\"/admin/panel?open={section}#{}\">{} — {}</a></li>",
+                            if section == "configuration-state" {
+                                format!("application-{}", definition.key)
+                            } else {
+                                format!("setting-{}", definition.key)
+                            },
+                            escape_html(label),
+                            escape_html(definition.label)
+                        ),
                     );
                 }
             }
@@ -67,7 +67,7 @@ pub(super) fn render(query: Option<&str>) -> String {
             ("moderation", "Moderation", "moderation reports appeals bans filters words IP"),
         ] {
             let haystack = synonyms.to_lowercase();
-            if terms.iter().all(|term| haystack.contains(term)) { count += 1; let _ = write!(results, "<li><a href=\"/admin/panel?open={section}#{section}\">{label}</a></li>"); }
+            if terms.iter().all(|term| haystack.contains(term)) { count = count.saturating_add(1); crate::templates::append_html(&mut results, format_args!( "<li><a href=\"/admin/panel?open={section}#{section}\">{label}</a></li>")); }
         }
         if count == 0 {
             results.push_str("<li>No matching runtime settings. Try proxy, Serveo, slow down or upload limit.</li>");

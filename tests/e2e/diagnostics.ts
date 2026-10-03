@@ -332,7 +332,8 @@ function matchesExpectation(expectation: ErrorExpectation, value: DiagnosticReco
         && matchesStringOrRegExp(value.path, expectation.path);
     case 'console-error':
       return value.kind === 'console-error'
-        && matchesStringOrRegExp(value.detail, expectation.pattern);
+        && matchesStringOrRegExp(value.detail, expectation.pattern)
+        && matchesStringOrRegExp(value.url, expectation.url);
     case 'page-error':
       return value.kind === 'page-error'
         && matchesStringOrRegExp(value.detail, expectation.pattern);

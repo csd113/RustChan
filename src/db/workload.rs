@@ -158,8 +158,17 @@ fn pool(path: &Path, size: u32, synchronous: &'static str) -> Result<super::DbPo
 
 /// Run production read helpers, covering board/catalog/thread/polling/FTS/admin.
 fn read(conn: &Connection, operation: u32) -> Result<()> {
-    let thread = i64::from(operation % 800 + 1);
-    let board = (thread - 1) % 8 + 1;
+    let thread = i64::from(
+        (operation % 800)
+            .checked_add(1)
+            .context("workload thread index overflow")?,
+    );
+    let board = thread
+        .checked_sub(1)
+        .context("invalid workload thread index")?
+        .rem_euclid(8)
+        .checked_add(1)
+        .context("workload board index overflow")?;
     match operation % 7 {
         0 => drop(super::get_threads_for_board(conn, board, 10, 0)?),
         1 => drop(super::get_threads_for_board(conn, board, 100, 0)?),
@@ -171,7 +180,10 @@ fn read(conn: &Connection, operation: u32) -> Result<()> {
             conn,
             board,
             thread,
-            thread * 50 - 5,
+            thread
+                .checked_mul(50)
+                .and_then(|value| value.checked_sub(5))
+                .context("workload post ID overflow")?,
             100,
         )?),
         4 => drop(super::search_posts(conn, board, "needle", 20, 0)?),
@@ -180,7 +192,13 @@ fn read(conn: &Connection, operation: u32) -> Result<()> {
             drop(super::get_poll_for_thread(conn, thread, "fixture-voter")?);
             drop(super::find_file_by_hash(
                 conn,
-                &format!("{:064x}", operation * 4 + 4),
+                &format!(
+                    "{:064x}",
+                    operation
+                        .checked_mul(4)
+                        .and_then(|value| value.checked_add(4))
+                        .context("workload hash index overflow")?
+                ),
             )?);
         }
     }
@@ -189,18 +207,33 @@ fn read(conn: &Connection, operation: u32) -> Result<()> {
 
 /// Run a short post transaction with FTS, counters and submission-token work.
 fn write(conn: &Connection, worker: u32, operation: u32) -> Result<()> {
-    let thread = i64::from((operation * WORKERS + worker) % 799 + 1);
-    let board = (thread - 1) % 8 + 1;
+    let index = operation
+        .checked_mul(WORKERS)
+        .and_then(|value| value.checked_add(worker))
+        .context("workload operation index overflow")?;
+    let thread = i64::from(
+        (index % 799)
+            .checked_add(1)
+            .context("workload thread index overflow")?,
+    );
+    let board = thread
+        .checked_sub(1)
+        .context("invalid workload thread index")?
+        .rem_euclid(8)
+        .checked_add(1)
+        .context("workload board index overflow")?;
     conn.execute(
         "INSERT INTO posts(thread_id,board_id,body,body_html,ip_hash,deletion_token)
          VALUES(?1,?2,'workload reply','workload reply',?3,'workload-delete')",
         params![thread, board, format!("workload-{worker}")],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     let post_id = conn.last_insert_rowid();
     conn.execute(
         "UPDATE threads SET reply_count=reply_count+1,bumped_at=unixepoch() WHERE id=?1",
         [thread],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     super::record_post_submission(
         conn,
         &format!("workload-{worker}-{operation}"),
@@ -211,7 +244,7 @@ fn write(conn: &Connection, worker: u32, operation: u32) -> Result<()> {
         false,
     )?;
     if operation.is_multiple_of(17) {
-        super::enqueue_job(conn, "spam_check", "{}")?;
+        super::enqueue_job(conn, "spam_check", "{}").map(|_created_id| ())?;
         if let Some((job, _)) = super::claim_next_job(conn)? {
             super::complete_job(conn, job)?;
         }
@@ -221,14 +254,16 @@ fn write(conn: &Connection, worker: u32, operation: u32) -> Result<()> {
             "INSERT OR IGNORE INTO poll_votes(poll_id,option_id,ip_hash)
                       SELECT poll_id,id,?1 FROM poll_options WHERE position=0 LIMIT 1",
             [format!("workload-{worker}-{operation}")],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
     }
     if operation.is_multiple_of(41) {
         conn.execute(
             "DELETE FROM background_jobs WHERE id IN
                       (SELECT id FROM background_jobs WHERE status='done' LIMIT 4)",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
     }
     Ok(())
 }
@@ -242,7 +277,15 @@ fn sample(pool: &super::DbPool, worker: u32, operation: u32, write_percent: u32)
     let mut write_wait_us = 0;
     let mut transaction_us = 0;
     let result = acquired.map_err(anyhow::Error::from).and_then(|conn| {
-        if (operation * 37 + worker * 13) % 100 >= write_percent {
+        let mix_index = operation
+            .checked_mul(37)
+            .and_then(|value| {
+                worker
+                    .checked_mul(13)
+                    .and_then(|worker_offset| value.checked_add(worker_offset))
+            })
+            .context("workload mix index overflow")?;
+        if mix_index % 100 >= write_percent {
             return read(&conn, operation);
         }
         let wait = Instant::now();
@@ -280,8 +323,15 @@ fn latencies(values: impl Iterator<Item = u128>) -> Latencies {
     let mut values: Vec<_> = values.collect();
     values.sort_unstable();
     let percentile = |percent: usize| {
-        values
-            .get((values.len() * percent).div_ceil(100).saturating_sub(1))
+        u128::try_from(values.len())
+            .ok()
+            .and_then(|length| {
+                u128::try_from(percent)
+                    .ok()
+                    .and_then(|percent| length.checked_mul(percent))
+            })
+            .and_then(|rank| usize::try_from(rank.div_ceil(100).saturating_sub(1)).ok())
+            .and_then(|index| values.get(index))
             .copied()
             .unwrap_or(0)
     };
@@ -327,7 +377,8 @@ fn verify_stress_state(conn: &Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO posts_fts(posts_fts,rank) VALUES('integrity-check',1)",
         [],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     super::verify_database_schema(conn)?;
     let incorrect_counts: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM threads t WHERE t.reply_count !=
@@ -354,7 +405,7 @@ fn measure(path: &Path, size: u32, sync: &'static str, mix: (&str, u32)) -> Resu
                 let pool = &pool;
                 let barrier = Arc::clone(&barrier);
                 scope.spawn(move || {
-                    barrier.wait();
+                    let _barrier_state = barrier.wait();
                     (0..OPERATIONS)
                         .map(|operation| sample(pool, worker, operation, mix.1))
                         .collect::<Vec<_>>()
@@ -363,11 +414,12 @@ fn measure(path: &Path, size: u32, sync: &'static str, mix: (&str, u32)) -> Resu
             .collect();
         let mut samples = Vec::new();
         for handle in handles {
-            samples.extend(
-                handle
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("workload worker panicked"))?,
-            );
+            samples.extend(handle.join().map_err(|panic_payload| {
+                anyhow::anyhow!(
+                    "workload worker panicked: {}",
+                    crate::media::process::panic_message(panic_payload.as_ref())
+                )
+            })?);
         }
         Ok(samples)
     })?;
@@ -389,7 +441,12 @@ fn measure(path: &Path, size: u32, sync: &'static str, mix: (&str, u32)) -> Resu
         synchronous: sync.to_owned(),
         workload: mix.0.to_owned(),
         operations: WORKERS * OPERATIONS,
-        operations_per_second: f64::from(WORKERS * OPERATIONS - failures) / elapsed.as_secs_f64(),
+        operations_per_second: f64::from(
+            WORKERS
+                .checked_mul(OPERATIONS)
+                .and_then(|count| count.checked_sub(failures))
+                .context("workload successful operation count overflow")?,
+        ) / elapsed.as_secs_f64(),
         latency: latencies(samples.iter().map(|s| s.elapsed_us)),
         read_latency: latencies(
             samples
@@ -531,13 +588,13 @@ fn benchmark() -> Result<()> {
                 let path = directory
                     .path()
                     .join(format!("{sync}-{size}-{}.sqlite3", mix.0));
-                std::fs::copy(&seed_path, &path)?;
+                std::fs::copy(&seed_path, &path).map(|_bytes_copied| ())?;
                 measurements.push(measure(&path, size, sync, mix)?);
                 std::fs::write(
                     &output,
                     serde_json::to_vec_pretty(&serde_json::json!({
                         "sqlite_version":rusqlite::version(),"workers":WORKERS,
-                        "fixture":{"boards":8,"threads":800,"posts":40000},
+                        "fixture":{"boards":8_i32,"threads":800_i32,"posts":40_000_i32},
                         "query_plans":query_plans,"measurements":measurements,
                         "limitations":"SQL/database workload; media CPU and HTTP excluded; RSS sampled at case end; ps optional; process-kill is not power loss"
                     }))?,
@@ -549,7 +606,7 @@ fn benchmark() -> Result<()> {
         output,
         serde_json::to_vec_pretty(&serde_json::json!({
             "sqlite_version": rusqlite::version(), "workers":WORKERS,
-            "fixture":{"boards":8,"threads":800,"posts":40000},
+            "fixture":{"boards":8_i32,"threads":800_i32,"posts":40_000_i32},
             "query_plans":query_plans, "measurements":measurements,
             "limitations":"SQL/database workload; media CPU and HTTP excluded; RSS sampled at case end; ps optional; process-kill is not power loss"
         }))?,
@@ -608,11 +665,13 @@ fn crash_writer_child() -> Result<()> {
             "INSERT INTO posts(thread_id,board_id,body,body_html,deletion_token)
              VALUES(1,1,'crash reply','crash reply','delete')",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         conn.execute(
             "UPDATE threads SET reply_count=reply_count+1 WHERE id=1",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         if number == 100 {
             std::fs::write(path.with_extension("ready"), b"open transaction")?;
             // Give the parent a deterministic open transaction to interrupt.
@@ -652,7 +711,7 @@ fn abrupt_writer_termination_recovers_wal_fts_jobs_and_fs_intents() -> Result<()
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         child.0.kill()?;
-        child.0.wait()?;
+        child.0.wait().map(|_exit_status| ())?;
         let pool = pool(&path, 2, synchronous)?;
         let conn = pool.get()?;
         super::schema::install_or_migrate_schema(&conn)?;
@@ -660,7 +719,8 @@ fn abrupt_writer_termination_recovers_wal_fts_jobs_and_fs_intents() -> Result<()
         conn.execute(
             "INSERT INTO posts_fts(posts_fts,rank) VALUES('integrity-check',1)",
             [],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         let (replies, count): (i64, i64) = conn.query_row(
             "SELECT (SELECT COUNT(*) FROM posts WHERE is_op=0),reply_count FROM threads WHERE id=1",
             [],
@@ -674,7 +734,7 @@ fn abrupt_writer_termination_recovers_wal_fts_jobs_and_fs_intents() -> Result<()
             conn.is_autocommit(),
             "restart inherited an active transaction"
         );
-        super::recover_interrupted_background_jobs(&conn)?;
+        super::recover_interrupted_background_jobs(&conn).map(|_operation_summary| ())?;
         let status: String =
             conn.query_row("SELECT status FROM background_jobs WHERE id=1", [], |r| {
                 r.get(0)
@@ -690,13 +750,13 @@ fn abrupt_writer_termination_recovers_wal_fts_jobs_and_fs_intents() -> Result<()
             !uploads.join("crash/src/remove.txt").exists(),
             "durable filesystem intent did not replay"
         );
-        let conn = pool.get()?;
+        let recovered_conn = pool.get()?;
         ensure!(
-            super::list_pending_fs_ops(&conn)?.is_empty(),
+            super::list_pending_fs_ops(&recovered_conn)?.is_empty(),
             "filesystem intent was not completed"
         );
-        conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK")?;
-        super::verify_database_schema(&conn)?;
+        recovered_conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK")?;
+        super::verify_database_schema(&recovered_conn)?;
     }
     Ok(())
 }
@@ -706,7 +766,7 @@ fn timed_query(conn: &Connection, sql: &str) -> Result<(Latencies, Vec<i64>)> {
     let mut timings = Vec::new();
     let mut ids = Vec::new();
     let mut statement = conn.prepare_cached(sql)?;
-    for _ in 0..25 {
+    for _ in 0_i32..25_i32 {
         let started = Instant::now();
         ids = statement
             .query_map([], |r| r.get::<_, i64>(0))?
@@ -801,10 +861,10 @@ fn query_profile() -> Result<()> {
     conn.execute_batch("CREATE INDEX idx_posts_thread_live ON posts(thread_id,id);
                         CREATE INDEX idx_posts_board_ip_created ON posts(board_id,ip_hash,created_at DESC);")?;
     let size_after = super::get_db_size_bytes(&conn)?;
-    for ((name, sql), ((before_time, _), before_plan)) in queries.into_iter().zip(before) {
-        let (after_time, _) = timed_query(&conn, sql)?;
+    for ((name, sql), ((baseline_time, _), before_plan)) in queries.into_iter().zip(before) {
+        let (indexed_time, _) = timed_query(&conn, sql)?;
         evidence.push(
-            serde_json::json!({"query":name,"before":before_time,"after":after_time,
+            serde_json::json!({"query":name,"before":baseline_time,"after":indexed_time,
             "before_plan":before_plan,"after_plan":explain(&conn,sql)?}),
         );
     }
@@ -826,7 +886,7 @@ fn profile_search(conn: &Connection) -> Result<Vec<serde_json::Value>> {
             WHERE p.board_id=1 AND posts_fts MATCH '\"{term}\"*' ORDER BY p.created_at DESC,p.id DESC LIMIT 20");
         let (before_time, ids) = timed_query(conn, &before)?;
         let mut times = Vec::new();
-        for _ in 0..25 {
+        for _ in 0_i32..25_i32 {
             let started = Instant::now();
             let posts = super::search_posts(conn, 1, term, 20, 0)?;
             times.push(started.elapsed().as_micros());
@@ -846,7 +906,11 @@ fn profile_search(conn: &Connection) -> Result<Vec<serde_json::Value>> {
 /// Measure representative write cost before and after candidate indexes.
 fn profile_writes(conn: &Connection, first: u32) -> Result<Latencies> {
     let mut timings = Vec::new();
-    for operation in first..first + 100 {
+    for operation in first
+        ..first
+            .checked_add(100)
+            .context("workload profile range overflow")?
+    {
         let started = Instant::now();
         conn.execute_batch("BEGIN IMMEDIATE")?;
         write(conn, 0, operation)?;

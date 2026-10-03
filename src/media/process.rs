@@ -16,7 +16,7 @@ pub(crate) fn configure_std_command(command: &mut Command) -> &mut Command {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
-        command.process_group(0);
+        let _configured_command = command.process_group(0);
     }
     command
 }
@@ -29,7 +29,7 @@ pub(crate) fn run_std_command_with_timeout(
     spawn_context: impl FnOnce() -> String,
     io_context: impl Fn() -> String,
 ) -> Result<Output> {
-    configure_std_command(command);
+    let _configured_command = configure_std_command(command);
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -52,12 +52,12 @@ pub(crate) fn run_std_command_with_timeout(
     loop {
         if let Some(status) = child.try_wait()? {
             process_group.terminate_remaining();
-            let stdout = join_pipe_reader(stdout_reader).with_context(&io_context)?;
-            let stderr = join_pipe_reader(stderr_reader).with_context(&io_context)?;
+            let stdout_bytes = join_pipe_reader(stdout_reader).with_context(&io_context)?;
+            let stderr_bytes = join_pipe_reader(stderr_reader).with_context(&io_context)?;
             return Ok(Output {
                 status,
-                stdout,
-                stderr,
+                stdout: stdout_bytes,
+                stderr: stderr_bytes,
             });
         }
         if started.elapsed() >= timeout {
@@ -98,9 +98,21 @@ fn read_pipe(mut pipe: impl std::io::Read) -> std::io::Result<Vec<u8>> {
 fn join_pipe_reader(
     reader: std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
 ) -> std::io::Result<Vec<u8>> {
-    reader
-        .join()
-        .map_err(|_| std::io::Error::other("media output reader panicked"))?
+    reader.join().map_err(|panic| {
+        std::io::Error::other(format!(
+            "media output reader panicked: {}",
+            panic_message(panic.as_ref())
+        ))
+    })?
+}
+
+/// Recover a thread panic message while preserving ordinary string payloads.
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
 }
 
 /// Owns the process-group cleanup obligation for one spawned command.
@@ -135,17 +147,44 @@ impl Drop for ProcessGroupGuard {
 #[cfg(unix)]
 /// Terminates the Unix process group whose leader has `pid`.
 fn terminate_process_group(pid: u32) -> std::io::Result<()> {
+    terminate_process_group_using(pid, std::path::Path::new("/bin/kill"))
+}
+
+#[cfg(unix)]
+/// Uses the external kill program, falling back to the shell only if it is absent.
+fn terminate_process_group_using(pid: u32, kill_program: &std::path::Path) -> std::io::Result<()> {
     let group = format!("-{pid}");
-    let status = Command::new("/bin/kill")
+    match Command::new(kill_program)
         // GNU kill requires `--` before a negative process-group identifier;
         // BSD kill accepts the same portable form.
         .args(["-KILL", "--", &group])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()?;
+        .status()
+    {
+        Ok(_status) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Minimal Unix images can provide only the POSIX shell builtin.
+            // The script is constant; the derived numeric group is a separate
+            // positional argument and is never interpolated into shell code.
+            let _status = Command::new("/bin/sh")
+                // The builtin needs no environment; imported shell functions
+                // or startup hooks must not replace the intended command.
+                .env_clear()
+                .args([
+                    "-c",
+                    "kill -s KILL -- \"$1\"",
+                    "rustchan-process-group",
+                    &group,
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?;
+        }
+        Err(error) => return Err(error),
+    }
     // A nonzero result normally means the group already exited between wait
     // and cleanup. Direct-child termination remains the portable fallback.
-    let _ = status;
     Ok(())
 }
 
@@ -155,12 +194,17 @@ fn terminate_process_group(_pid: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
-    use super::{run_std_command_with_timeout, MEDIA_SUBPROCESS_OUTPUT_LIMIT_BYTES};
+    use super::{
+        configure_std_command, run_std_command_with_timeout, terminate_process_group_using,
+        ProcessGroupGuard, MEDIA_SUBPROCESS_OUTPUT_LIMIT_BYTES,
+    };
     use crate::workers::{wait_for_ffmpeg_output, AsyncWaitOutcome};
     use anyhow::{Context as _, Result};
     use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::process::ExitStatusExt as _;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
@@ -182,7 +226,9 @@ wait \"$child\"\n";
     }
 
     fn read_wrapper_pids(pid_file: &Path) -> Result<(i32, i32)> {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(2))
+            .context("process test deadline overflow")?;
         loop {
             if let Ok(contents) = std::fs::read_to_string(pid_file) {
                 let mut parts = contents.split_whitespace();
@@ -213,7 +259,9 @@ wait \"$child\"\n";
     }
 
     fn assert_processes_gone(parent: i32, child: i32) -> Result<()> {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(2))
+            .context("process test deadline overflow")?;
         while (process_exists(parent) || process_exists(child)) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -228,11 +276,94 @@ wait \"$child\"\n";
         Ok(())
     }
 
+    /// A missing kill executable still terminates the group under hostile shell inheritance.
+    #[test]
+    fn missing_kill_executable_terminates_parent_and_descendant() -> Result<()> {
+        const CHILD_MARKER: &str = "RUSTCHAN_PROCESS_FALLBACK_ENVIRONMENT_TEST_CHILD";
+        if std::env::var_os(CHILD_MARKER).as_deref() != Some(std::ffi::OsStr::new("1")) {
+            let (_, test_module) = module_path!()
+                .split_once("::")
+                .context("fallback test module omitted its crate prefix")?;
+            let test_filter =
+                format!("{test_module}::missing_kill_executable_terminates_parent_and_descendant");
+            // Only the child receives the exported function; the parent test
+            // runner and every concurrently executing test keep their environment.
+            let output = std::process::Command::new(
+                std::env::current_exe().context("locate fallback regression test binary")?,
+            )
+            .args(["--exact", &test_filter, "--nocapture", "--format=pretty"])
+            .env(CHILD_MARKER, "1")
+            .env("BASH_FUNC_kill%%", "() { return 0; }")
+            .output()
+            .context("run fallback regression with an exported shell function")?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::ensure!(
+                stdout.lines().any(|line| line.trim() == "running 1 test"),
+                "child must run exactly the fallback regression; stdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+            anyhow::ensure!(
+                output.status.success()
+                    && stdout.lines().any(|line| {
+                        line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")
+                    }),
+                "fallback child failed with {}: stdout:\n{stdout}\nstderr:\n{stderr}",
+                output.status
+            );
+            return Ok(());
+        }
+        let (temp_dir, wrapper, pid_file) = process_wrapper()?;
+        let missing_kill = temp_dir.path().join("missing-kill");
+        let mut command = std::process::Command::new("/bin/sh");
+        let _configured_command = command.args([wrapper.as_os_str(), pid_file.as_os_str()]);
+        let _configured_group = configure_std_command(&mut command);
+        let mut child = command.spawn().context("spawn shell-fallback wrapper")?;
+        let mut process_group = ProcessGroupGuard::new(Some(child.id()));
+
+        let result = (|| -> Result<()> {
+            let (parent, descendant) = read_wrapper_pids(&pid_file)?;
+            anyhow::ensure!(
+                parent == i32::try_from(child.id()).context("wrapper PID exceeds i32")?,
+                "wrapper parent must be the owned process-group leader"
+            );
+            anyhow::ensure!(
+                process_exists(parent) && process_exists(descendant),
+                "the parent and descendant must be alive before fallback termination"
+            );
+            anyhow::ensure!(
+                !missing_kill.exists(),
+                "fixture kill executable must be absent"
+            );
+            terminate_process_group_using(child.id(), &missing_kill)?;
+            let deadline = Instant::now()
+                .checked_add(Duration::from_secs(2))
+                .context("shell-fallback exit deadline overflow")?;
+            let status = loop {
+                if let Some(status) = child.try_wait().context("reap shell-fallback wrapper")? {
+                    break status;
+                }
+                anyhow::ensure!(
+                    Instant::now() < deadline,
+                    "shell-fallback wrapper did not exit"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            anyhow::ensure!(status.signal() == Some(9_i32), "fallback must send SIGKILL");
+            assert_processes_gone(parent, descendant)
+        })();
+
+        // Always terminate and reap this test's owned fixture on an error too.
+        process_group.terminate_remaining();
+        drop(child.kill());
+        drop(child.wait());
+        result
+    }
+
     #[test]
     fn blocking_timeout_kills_parent_and_descendant() -> Result<()> {
         let (_temp_dir, wrapper, pid_file) = process_wrapper()?;
         let mut command = std::process::Command::new("/bin/sh");
-        command.args([wrapper.as_os_str(), pid_file.as_os_str()]);
+        let _configured_command = command.args([wrapper.as_os_str(), pid_file.as_os_str()]);
 
         let error = run_std_command_with_timeout(
             &mut command,
@@ -243,16 +374,16 @@ wait \"$child\"\n";
         )
         .err()
         .context("wrapper unexpectedly completed")?;
-        let (parent, child) = read_wrapper_pids(&pid_file)?;
+        let (parent, descendant) = read_wrapper_pids(&pid_file)?;
 
         anyhow::ensure!(error.to_string().contains("timed out"));
-        assert_processes_gone(parent, child)
+        assert_processes_gone(parent, descendant)
     }
 
     #[test]
     fn blocking_subprocess_output_is_retained_within_limit() -> Result<()> {
         let mut command = std::process::Command::new("/bin/sh");
-        command.args(["-c", "printf '%131072s' ''"]);
+        let _configured_command = command.args(["-c", "printf '%131072s' ''"]);
 
         let output = run_std_command_with_timeout(
             &mut command,
@@ -272,30 +403,30 @@ wait \"$child\"\n";
     async fn async_timeout_kills_parent_and_descendant() -> Result<()> {
         let (_temp_dir, wrapper, pid_file) = process_wrapper()?;
         let mut command = tokio::process::Command::new("/bin/sh");
-        command
+        let _configured_command = command
             .args([wrapper.as_os_str(), pid_file.as_os_str()])
-            .kill_on_drop(true);
-        command.process_group(0);
+            .kill_on_drop(true)
+            .process_group(0);
         let child = command.spawn().context("spawn async test wrapper")?;
 
         let outcome =
             wait_for_ffmpeg_output(child, Duration::from_millis(100), CancellationToken::new())
                 .await?;
-        let (parent, child) = read_wrapper_pids(&pid_file)?;
+        let (parent, descendant) = read_wrapper_pids(&pid_file)?;
 
         anyhow::ensure!(matches!(outcome, AsyncWaitOutcome::TimedOut));
-        assert_processes_gone(parent, child)
+        assert_processes_gone(parent, descendant)
     }
 
     #[tokio::test]
     async fn async_subprocess_output_is_retained_within_limit() -> Result<()> {
         let mut command = tokio::process::Command::new("/bin/sh");
-        command
+        let _configured_command = command
             .args(["-c", "printf '%131072s' '' >&2"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        command.process_group(0);
+            .kill_on_drop(true)
+            .process_group(0);
         let child = command
             .spawn()
             .context("spawn verbose async test wrapper")?;
@@ -316,45 +447,46 @@ wait \"$child\"\n";
     async fn cancellation_kills_parent_and_descendant() -> Result<()> {
         let (_temp_dir, wrapper, pid_file) = process_wrapper()?;
         let mut command = tokio::process::Command::new("/bin/sh");
-        command
+        let _configured_command = command
             .args([wrapper.as_os_str(), pid_file.as_os_str()])
-            .kill_on_drop(true);
-        command.process_group(0);
+            .kill_on_drop(true)
+            .process_group(0);
         let child = command.spawn().context("spawn cancellable test wrapper")?;
         let cancel = CancellationToken::new();
         let cancel_trigger = cancel.clone();
-        tokio::spawn(async move {
+        let cancel_task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
             cancel_trigger.cancel();
         });
 
         let outcome = wait_for_ffmpeg_output(child, Duration::from_secs(10), cancel).await?;
-        let (parent, child) = read_wrapper_pids(&pid_file)?;
+        cancel_task.await.context("join cancellation trigger")?;
+        let (parent, descendant) = read_wrapper_pids(&pid_file)?;
 
         anyhow::ensure!(matches!(outcome, AsyncWaitOutcome::Cancelled));
-        assert_processes_gone(parent, child)
+        assert_processes_gone(parent, descendant)
     }
 
     #[tokio::test]
     async fn repeated_timeouts_do_not_accumulate_descendants() -> Result<()> {
         let (_temp_dir, wrapper, _) = process_wrapper()?;
 
-        for attempt in 1..=3 {
+        for attempt in 1_i32..=3_i32 {
             let pid_file = wrapper.with_file_name(format!("pids-{attempt}.txt"));
             let mut command = tokio::process::Command::new("/bin/sh");
-            command
+            let _configured_command = command
                 .args([wrapper.as_os_str(), pid_file.as_os_str()])
-                .kill_on_drop(true);
-            command.process_group(0);
+                .kill_on_drop(true)
+                .process_group(0);
             let child = command.spawn().context("spawn retry test wrapper")?;
 
             let outcome =
                 wait_for_ffmpeg_output(child, Duration::from_millis(100), CancellationToken::new())
                     .await?;
-            let (parent, child) = read_wrapper_pids(&pid_file)?;
+            let (parent, descendant) = read_wrapper_pids(&pid_file)?;
 
             anyhow::ensure!(matches!(outcome, AsyncWaitOutcome::TimedOut));
-            assert_processes_gone(parent, child)?;
+            assert_processes_gone(parent, descendant)?;
         }
         Ok(())
     }

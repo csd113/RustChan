@@ -1,5 +1,6 @@
 //! Fixed settings restart coordination. The web process never launches a replacement.
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -58,11 +59,11 @@ impl Store {
         crate::utils::fs_security::reject_symlink_components(path)?;
         crate::utils::fs_security::assert_regular_file_no_symlink(path)?;
         let mut options = fs::File::options();
-        options.read(true);
+        let _read_options = options.read(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt as _;
-            options.custom_flags(i32::try_from(
+            let _platform_options = options.custom_flags(i32::try_from(
                 (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits(),
             )?);
         }
@@ -78,7 +79,13 @@ impl Store {
             );
         }
         let mut bytes = Vec::new();
-        file.take(limit + 1).read_to_end(&mut bytes)?;
+        file.take(
+            limit
+                .checked_add(1)
+                .context("restart byte limit overflow")?,
+        )
+        .read_to_end(&mut bytes)
+        .map(|_bytes_read| ())?;
         anyhow::ensure!(
             u64::try_from(bytes.len())? <= limit,
             "restart payload exceeds limit"
@@ -200,9 +207,10 @@ pub fn prepare_startup() -> anyhow::Result<()> {
     }
     if settings.try_exists()? {
         let bytes = Store::read(&settings, MAX_SETTINGS)?;
-        STARTUP_SETTINGS
-            .set(bytes)
-            .map_err(|_| anyhow::anyhow!("startup settings already captured"))?;
+        STARTUP_SETTINGS.set(bytes).map_err(|rejected_settings| {
+            drop(rejected_settings); // Never expose settings secrets in diagnostics.
+            anyhow::anyhow!("startup settings already captured")
+        })?;
     }
     Ok(())
 }
@@ -253,7 +261,16 @@ fn prepare_container_trial(
             )?;
             anyhow::bail!("configuration recovery requires operator intervention")
         }
-        _ => Ok(()),
+        Phase::Idle
+        | Phase::Downloading
+        | Phase::Verifying
+        | Phase::BackingUp
+        | Phase::Activating
+        | Phase::Staged
+        | Phase::ResumingPrevious
+        | Phase::Succeeded
+        | Phase::RolledBack
+        | Phase::Failed => Ok(()),
     }
 }
 
@@ -328,7 +345,9 @@ async fn verify_container_health() -> anyhow::Result<()> {
         .timeout(std::time::Duration::from_secs(2))
         .build()?;
     let port = crate::config::CONFIG.port;
-    let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+    let deadline = tokio::time::Instant::now()
+        .checked_add(STARTUP_TIMEOUT)
+        .context("startup deadline overflow")?;
     while tokio::time::Instant::now() < deadline {
         let checked = async {
             let mut response = client
@@ -406,7 +425,8 @@ pub fn request_container(administrator: i64) -> anyhow::Result<()> {
         "candidate.sha256",
         configuration_digest(&candidate).as_bytes(),
     )?;
-    Store::read(&store.directory.join("known-good.toml"), MAX_SETTINGS)?;
+    Store::read(&store.directory.join("known-good.toml"), MAX_SETTINGS)
+        .map(|_operation_summary| ())?;
     status.operation = crate::updates::Operation::SettingsRestart;
     status.job = Some(Uuid::new_v4().to_string());
     status.administrator = Some(administrator);
@@ -438,6 +458,28 @@ pub struct View {
 /// Container startup/recovery tests against fixed disposable paths, never real restarts.
 mod tests {
     use super::*;
+
+    /// Reject impossible over-read limits without panicking on addition.
+    #[test]
+    fn bounded_restart_read_rejects_limit_overflow() -> anyhow::Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let payload = temporary.path().canonicalize()?.join("payload");
+        fs::write(&payload, b"bounded content")?;
+        let overflow_error = Store::read(&payload, u64::MAX)
+            .err()
+            .context("overflowed read limit was accepted")?;
+        anyhow::ensure!(
+            overflow_error
+                .to_string()
+                .contains("restart byte limit overflow"),
+            "read limit must be rejected by the checked byte bound: {overflow_error:#}"
+        );
+        anyhow::ensure!(
+            Store::read(&payload, 15)? == b"bounded content",
+            "valid bounded reads must preserve bytes"
+        );
+        Ok(())
+    }
 
     /// Build private payloads for one disposable configuration restart.
     fn fixture() -> anyhow::Result<(tempfile::TempDir, Store, crate::updates::Status)> {

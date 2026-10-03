@@ -38,7 +38,9 @@ pub(super) fn estimated_bytes(data: &Path) -> anyhow::Result<u64> {
     let mut count = 0_usize;
     let mut bytes = 0_u64;
     while let Some(path) = pending.pop() {
-        count += 1;
+        count = count
+            .checked_add(1)
+            .context("persistent entry count overflow")?;
         anyhow::ensure!(
             count <= 1_000_000 && path.strip_prefix(data)?.components().count() <= 32,
             "persistent backup exceeds safety limits"
@@ -123,7 +125,7 @@ fn copy_tree(
         fs::create_dir_all(&target)?;
         (0, String::new())
     } else {
-        fs::copy(source, &target)?;
+        fs::copy(source, &target).map(|_bytes_copied| ())?;
         fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
         fs::File::open(&target)?.sync_all()?;
         (meta.len(), hash(&target)?)
@@ -193,7 +195,7 @@ fn verify(backup: &Path, entries: &[Entry]) -> anyhow::Result<()> {
 
 /// Verify immutable inventory and every payload before restoring any database/configuration.
 pub(super) fn verify_saved(backup: &Path, expected_hash: &str) -> anyhow::Result<()> {
-    load(backup, expected_hash)?;
+    load(backup, expected_hash).map(|_operation_summary| ())?;
     Ok(())
 }
 
@@ -234,7 +236,8 @@ pub(super) fn restore(backup: &Path, data: &Path, expected_hash: &str) -> anyhow
             if entry.directory {
                 fs::create_dir_all(&target)?;
             } else {
-                fs::copy(backup.join("persistent").join(&entry.path), &target)?;
+                fs::copy(backup.join("persistent").join(&entry.path), &target)
+                    .map(|_bytes_copied| ())?;
                 fs::File::open(&target)?.sync_all()?;
             }
         }
@@ -275,20 +278,27 @@ pub(super) fn restore(backup: &Path, data: &Path, expected_hash: &str) -> anyhow
 fn reject_links(path: &Path) -> anyhow::Result<()> {
     let mut pending = vec![(path.to_path_buf(), 0_usize)];
     let mut count = 0_usize;
-    while let Some((path, depth)) = pending.pop() {
-        count += 1;
+    while let Some((entry_path, depth)) = pending.pop() {
+        count = count
+            .checked_add(1)
+            .context("persistent entry count overflow")?;
         anyhow::ensure!(
             depth <= 32 && count <= 1_000_000,
             "persistent tree exceeds safety limits"
         );
-        let meta = fs::symlink_metadata(&path)?;
+        let meta = fs::symlink_metadata(&entry_path)?;
         anyhow::ensure!(
             meta.is_dir() || meta.is_file(),
             "unsafe live persistent entry"
         );
         if meta.is_dir() {
-            for entry in fs::read_dir(path)? {
-                pending.push((entry?.path(), depth + 1));
+            for entry in fs::read_dir(entry_path)? {
+                pending.push((
+                    entry?.path(),
+                    depth
+                        .checked_add(1)
+                        .context("persistent tree depth overflow")?,
+                ));
             }
         }
     }

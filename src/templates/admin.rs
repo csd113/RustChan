@@ -6,7 +6,6 @@ use crate::models::{
 };
 use crate::utils::{files::format_file_size, sanitize::escape_html};
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
 
 use super::{base_layout, fmt_ts, fmt_ts_short, render_pagination, urlencoding_simple};
 
@@ -457,12 +456,14 @@ fn banner_target_type_options(selected: BannerTargetType) -> String {
     ];
     let mut out = String::new();
     for (value, label) in options {
-        let _ = write!(
-            out,
-            r#"<option value="{value}"{selected}>{label}</option>"#,
-            value = value.as_str(),
-            selected = if value == selected { " selected" } else { "" },
-            label = label,
+        crate::templates::append_html(
+            &mut out,
+            format_args!(
+                r#"<option value="{value}"{selected}>{label}</option>"#,
+                value = value.as_str(),
+                selected = if value == selected { " selected" } else { "" },
+                label = label,
+            ),
         );
     }
     out
@@ -483,36 +484,42 @@ fn banner_preview_html(asset: &BannerAsset, alt: &str) -> String {
 fn banner_board_options(boards: &[Board], selected_value: &str) -> String {
     let trimmed_selected = selected_value.trim().trim_matches('/');
     let mut out = String::new();
-    let _ = write!(
-        out,
-        r#"<option value=""{}>Choose a board</option>"#,
-        if trimmed_selected.is_empty() {
-            " selected"
-        } else {
-            ""
-        }
+    crate::templates::append_html(
+        &mut out,
+        format_args!(
+            r#"<option value=""{}>Choose a board</option>"#,
+            if trimmed_selected.is_empty() {
+                " selected"
+            } else {
+                ""
+            }
+        ),
     );
     let board_exists = boards
         .iter()
         .any(|board| board.short_name == trimmed_selected);
     if !trimmed_selected.is_empty() && !board_exists {
-        let _ = write!(
-            out,
-            r#"<option value="{value}" selected>Missing board (/{value}/)</option>"#,
-            value = escape_html(trimmed_selected),
+        crate::templates::append_html(
+            &mut out,
+            format_args!(
+                r#"<option value="{value}" selected>Missing board (/{value}/)</option>"#,
+                value = escape_html(trimmed_selected),
+            ),
         );
     }
     for board in boards {
-        let _ = write!(
-            out,
-            r#"<option value="{short}"{selected}>/{short}/ — {name}</option>"#,
-            short = escape_html(&board.short_name),
-            selected = if board.short_name == trimmed_selected {
-                " selected"
-            } else {
-                ""
-            },
-            name = escape_html(&board.name),
+        crate::templates::append_html(
+            &mut out,
+            format_args!(
+                r#"<option value="{short}"{selected}>/{short}/ — {name}</option>"#,
+                short = escape_html(&board.short_name),
+                selected = if board.short_name == trimmed_selected {
+                    " selected"
+                } else {
+                    ""
+                },
+                name = escape_html(&board.name),
+            ),
         );
     }
     out
@@ -838,8 +845,9 @@ fn render_board_settings_card(
         .checked_sub(1)
         .and_then(|prev| boards.get(prev))
         .is_some_and(|prev| prev.nsfw == board.nsfw);
-    let next_same_group = boards
-        .get(index + 1)
+    let next_same_group = index
+        .checked_add(1)
+        .and_then(|next| boards.get(next))
         .is_some_and(|next| next.nsfw == board.nsfw);
     let any_files_toggle = if crate::config::CONFIG.enable_any_file_uploads_feature {
         format!(
@@ -1089,16 +1097,18 @@ fn render_board_appearance_card(
 ) -> String {
     let mut board_theme_options = String::new();
     for theme in themes.iter().filter(|theme| theme.enabled) {
-        let _ = write!(
-            board_theme_options,
-            r#"<option value="{slug}"{selected}>{label}</option>"#,
-            slug = escape_html(&theme.slug),
-            selected = if theme.slug == board.default_theme {
-                " selected"
-            } else {
-                ""
-            },
-            label = escape_html(&theme.display_name)
+        crate::templates::append_html(
+            &mut board_theme_options,
+            format_args!(
+                r#"<option value="{slug}"{selected}>{label}</option>"#,
+                slug = escape_html(&theme.slug),
+                selected = if theme.slug == board.default_theme {
+                    " selected"
+                } else {
+                    ""
+                },
+                label = escape_html(&theme.display_name)
+            ),
         );
     }
     let appearance_section = format!("board-appearance-{}", board.short_name);
@@ -1230,9 +1240,10 @@ pub fn mod_log_page(
         } else {
             format!(r#"<a href="/{s}">{s}</a>"#, s = escape_html(&e.board_short))
         };
-        let _ = write!(
-            rows,
-            r#"<tr>
+        crate::templates::append_html(
+            &mut rows,
+            format_args!(
+                r#"<tr>
 <td style="white-space:nowrap;font-size:0.78rem">{time}</td>
 <td class="admin-log-user">{admin}</td>
 <td><code>{action}</code></td>
@@ -1240,12 +1251,13 @@ pub fn mod_log_page(
 <td>{board}</td>
 <td><details class="admin-log-detail"><summary>View detail</summary><p>{detail}</p></details></td>
 </tr>"#,
-            time = escape_html(&fmt_ts(e.created_at)),
-            admin = escape_html(&e.admin_name),
-            action = escape_html(&e.action),
-            target = escape_html(&target),
-            board = board_link,
-            detail = escape_html(&e.detail)
+                time = escape_html(&fmt_ts(e.created_at)),
+                admin = escape_html(&e.admin_name),
+                action = escape_html(&e.action),
+                target = escape_html(&target),
+                board = board_link,
+                detail = escape_html(&e.detail)
+            ),
         );
     }
 
@@ -1415,10 +1427,9 @@ pub fn admin_db_health_result_page(
             .push_str(r#"<li class="admin-muted-list-item">No repairs were run.</li>"#);
     } else {
         for line in &report.repair_summary {
-            let _ = write!(
-                repair_summary_html,
-                r"<li>{line}</li>",
-                line = escape_html(line)
+            crate::templates::append_html(
+                &mut repair_summary_html,
+                format_args!(r"<li>{line}</li>", line = escape_html(line)),
             );
         }
     }
@@ -1429,10 +1440,9 @@ pub fn admin_db_health_result_page(
             .push_str(r#"<li class="admin-muted-list-item">No maintenance steps were run.</li>"#);
     } else {
         for step in &report.repair_steps {
-            let _ = write!(
-                repair_steps_html,
-                r"<li>{step}</li>",
-                step = escape_html(step)
+            crate::templates::append_html(
+                &mut repair_steps_html,
+                format_args!(r"<li>{step}</li>", step = escape_html(step)),
             );
         }
     }
@@ -1763,7 +1773,7 @@ pub fn admin_ip_history_page(
     for (post, _) in posts_with_boards {
         let name = post.name.trim();
         if !name.is_empty() && name != "Anonymous" {
-            seen_names.insert(name.to_owned());
+            let _was_new_name = seen_names.insert(name.to_owned());
         }
 
         if let Some(tripcode) = post
@@ -1772,7 +1782,7 @@ pub fn admin_ip_history_page(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            seen_tripcodes.insert(tripcode.to_owned());
+            let _was_new_tripcode = seen_tripcodes.insert(tripcode.to_owned());
         }
     }
 
@@ -1837,9 +1847,12 @@ pub fn admin_ip_history_page(
             pid = post.id,
             board = escape_html(board_short),
         );
-        let report_form = post.ip_hash.as_deref().map_or_else(String::new, |ip_hash| {
-            format!(
-                r#"<button type="button" class="admin-toolbar-btn" data-action="open-report"
+        let report_form = post
+            .ip_hash
+            .as_deref()
+            .map_or_else(String::new, |post_ip_hash| {
+                format!(
+                    r#"<button type="button" class="admin-toolbar-btn" data-action="open-report"
         data-pid="{pid}" data-tid="{tid}" data-board="{board}" data-csrf="{csrf}"
         data-report-action="/admin/ip/report" data-report-ip-hash="{ip_hash}"
         data-report-title="Report Hashed IP Post"
@@ -1855,17 +1868,18 @@ pub fn admin_ip_history_page(
   <label>Report reason<input type="text" name="reason" required maxlength="512"></label>
   <button type="submit" class="admin-toolbar-btn">report</button>
 </form></noscript>"#,
-                csrf = escape_html(csrf_token),
-                pid = post.id,
-                tid = post.thread_id,
-                board = escape_html(board_short),
-                ip_hash = escape_html(ip_hash),
-            )
-        });
+                    csrf = escape_html(csrf_token),
+                    pid = post.id,
+                    tid = post.thread_id,
+                    board = escape_html(board_short),
+                    ip_hash = escape_html(post_ip_hash),
+                )
+            });
 
-        let _ = write!(
-            rows,
-            r#"<tr>
+        crate::templates::append_html(
+            &mut rows,
+            format_args!(
+                r#"<tr>
 <td style="white-space:nowrap;font-size:0.8rem">{time}</td>
 <td>{link}{op}</td>
 <td style="font-size:0.8rem">{name}</td>
@@ -1875,15 +1889,16 @@ pub fn admin_ip_history_page(
 <td>{report}</td>
 <td>{del}</td>
 </tr>"#,
-            time = fmt_ts_short(post.created_at),
-            link = thread_link,
-            op = op_badge,
-            name = name_html,
-            tripcode = tripcode_html,
-            media = media_badge,
-            body = body_preview,
-            report = report_form,
-            del = del_form
+                time = fmt_ts_short(post.created_at),
+                link = thread_link,
+                op = op_badge,
+                name = name_html,
+                tripcode = tripcode_html,
+                media = media_badge,
+                body = body_preview,
+                report = report_form,
+                del = del_form
+            ),
         );
     }
 
@@ -1924,7 +1939,10 @@ pub fn admin_ip_history_page(
     let mut pag_base = format!("/admin/ip/{}", escape_html(ip_hash));
     if let Some(return_to) = return_to.filter(|value| !value.is_empty()) {
         let sep = if pag_base.contains('?') { "&" } else { "?" };
-        let _ = write!(pag_base, "{sep}return_to={}", urlencoding_simple(return_to));
+        crate::templates::append_html(
+            &mut pag_base,
+            format_args!("{sep}return_to={}", urlencoding_simple(return_to)),
+        );
     }
     let pag_html = render_pagination(pagination, &pag_base);
 

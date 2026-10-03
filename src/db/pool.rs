@@ -104,7 +104,7 @@ pub fn first_run_check(pool: &DbPool) -> Result<()> {
     if board_count == 0 {
         tracing::info!(
             target: "startup",
-            boards = 0,
+            boards = 0_i32,
             admins = admin_count,
             "No boards found — create boards via admin panel or: rustchan-cli admin create-board"
         );
@@ -146,7 +146,7 @@ mod tests {
     impl Drop for ReleaseInitializers {
         fn drop(&mut self) {
             *self.0.released.lock() = true;
-            self.0.wake.notify_all();
+            let _waiting_threads = self.0.wake.notify_all();
         }
     }
 
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn every_pool_connection_enforces_wal_full_and_foreign_keys() -> Result<()> {
         let pool = super::init_test_pool()?;
-        let connections = (0..4)
+        let connections = (0_i32..4_i32)
             .map(|_| pool.get())
             .collect::<std::result::Result<Vec<_>, _>>()?;
         for conn in connections {
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn exhausted_pool_returns_a_bounded_retryable_error() -> Result<()> {
         let pool = super::init_test_pool()?;
-        let held = (0..4)
+        let held = (0_i32..4_i32)
             .map(|_| pool.get())
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let started = std::time::Instant::now();
@@ -267,10 +267,12 @@ mod tests {
         let pool = super::init_test_pool()?;
         let writer = pool.get()?;
         writer.execute_batch("BEGIN IMMEDIATE")?;
-        writer.execute(
-            "INSERT INTO site_settings(key,value) VALUES('uncommitted','value')",
-            [],
-        )?;
+        writer
+            .execute(
+                "INSERT INTO site_settings(key,value) VALUES('uncommitted','value')",
+                [],
+            )
+            .map(|_affected_rows| ())?;
         let reader = pool.get()?;
         let visible: i64 = reader.query_row(
             "SELECT COUNT(*) FROM site_settings WHERE key='uncommitted'",
@@ -302,10 +304,12 @@ mod tests {
             reader.is_autocommit(),
             "busy failure left a transaction active"
         );
-        reader.execute(
-            "INSERT INTO site_settings(key,value) VALUES('recovered','value')",
-            [],
-        )?;
+        reader
+            .execute(
+                "INSERT INTO site_settings(key,value) VALUES('recovered','value')",
+                [],
+            )
+            .map(|_affected_rows| ())?;
         Ok(())
     }
 
@@ -313,10 +317,10 @@ mod tests {
     fn active_read_snapshot_bounds_checkpoint_and_wal_backup_stays_complete() -> Result<()> {
         let pool = super::init_test_pool()?;
         let writer = pool.get()?;
-        crate::db::create_board(&writer, "wal", "WAL", "", false)?;
+        crate::db::create_board(&writer, "wal", "WAL", "", false).map(|_created_id| ())?;
         let reader = pool.get()?;
         reader.execute_batch("BEGIN; SELECT COUNT(*) FROM boards;")?;
-        crate::db::create_board(&writer, "next", "Next", "", false)?;
+        crate::db::create_board(&writer, "next", "Next", "", false).map(|_created_id| ())?;
         let (log, checkpointed, busy) = crate::db::run_wal_checkpoint(&writer)?;
         anyhow::ensure!(
             busy == 1 && checkpointed < log,
@@ -324,19 +328,24 @@ mod tests {
         );
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("backup.sqlite3");
-        writer.execute(
-            "VACUUM INTO ?1",
-            [path
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("backup path"))?],
-        )?;
+        writer
+            .execute(
+                "VACUUM INTO ?1",
+                [path
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("backup path"))?],
+            )
+            .map(|_affected_rows| ())?;
         let snapshot = rusqlite::Connection::open(&path)?;
         let boards: i64 = snapshot.query_row("SELECT COUNT(*) FROM boards", [], |r| r.get(0))?;
         anyhow::ensure!(boards == 2, "WAL snapshot missed a committed board");
         crate::db::verify_database_schema(&snapshot)?;
         reader.execute_batch("ROLLBACK")?;
-        let (_, _, busy) = crate::db::run_wal_checkpoint(&writer)?;
-        anyhow::ensure!(busy == 0, "checkpoint did not recover after reader release");
+        let (_, _, recovered_busy) = crate::db::run_wal_checkpoint(&writer)?;
+        anyhow::ensure!(
+            recovered_busy == 0,
+            "checkpoint did not recover after reader release"
+        );
         Ok(())
     }
 }

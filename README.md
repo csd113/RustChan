@@ -211,13 +211,23 @@ As a site owner, keep settings, secrets, databases, backups, TLS keys, and Tor i
 
 RustChan is written in Rust using Axum, Tokio, bundled SQLite, server-rendered templates, Rustls, and Arti. Docker is optional for development.
 
-Run the Rust checks before submitting changes:
+Use Rust 1.99.0 and run the Rust checks before submitting changes:
 
 ```bash
 cargo fmt --all --check
-cargo clippy --locked --workspace --all-targets --all-features
+cargo check --locked --workspace --all-targets --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 ```
+
+The workspace lint tables in `Cargo.toml` enforce the Rust and Clippy policy for
+every RustChan target. They deny the main Clippy groups (`all`, `pedantic`,
+`nursery`, and `cargo`) and explicit checks for panic paths, unchecked arithmetic
+and indexing, conversions, ignored results, documentation, and resource safety.
+Unsafe Rust is forbidden. New workspace packages must inherit this policy with
+`[lints] workspace = true`. The patched upstream AAC dependency under `vendor/`
+is excluded from the workspace and retains its upstream lint configuration.
 
 Browser tests run locally; their harness and npm files are tracked, but GitHub Actions does not run browser checks. Keep browser reports and temporary screenshots out of commits; the demonstration screenshots in `docs/screenshots/` are published documentation. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance.
 

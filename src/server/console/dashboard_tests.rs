@@ -221,7 +221,7 @@ fn every_screen_and_dialog_survives_resizing_and_masks_secrets() -> anyhow::Resu
                 (120, 40),
             ] {
                 terminal.backend_mut().resize(width, height);
-                terminal.draw(|frame| {
+                let _completed_frame = terminal.draw(|frame| {
                     render(
                         frame,
                         &mut app,
@@ -300,7 +300,7 @@ fn form_scroll_uses_only_the_focused_field_and_whole_wide_glyphs() -> anyhow::Re
     field.value = FieldValue::Text("界界界界x".to_owned());
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(28, 3))?;
     let mut cursor = None;
-    terminal.draw(|frame| {
+    let _completed_frame = terminal.draw(|frame| {
         cursor = render_form_field(frame, Rect::new(0, 0, 28, 1), field, true, 5);
     })?;
     let cursor = cursor.ok_or_else(|| anyhow::anyhow!("missing focused cursor"))?;
@@ -314,8 +314,8 @@ fn form_scroll_uses_only_the_focused_field_and_whole_wide_glyphs() -> anyhow::Re
         "cursor must follow the last glyph after horizontal scrolling"
     );
     field.value = FieldValue::Text("abcdef".to_owned());
-    terminal.draw(|frame| {
-        render_form_field(frame, Rect::new(0, 0, 25, 1), field, false, 80);
+    let _unfocused_frame = terminal.draw(|frame| {
+        let _unfocused_cursor = render_form_field(frame, Rect::new(0, 0, 25, 1), field, false, 80);
     })?;
     assert!(
         buffer_text(terminal.backend().buffer()).contains("abcd"),
@@ -338,11 +338,14 @@ fn log_scroll_clamps_to_retained_content() -> anyhow::Result<()> {
     app.logs.rows_from_bottom = usize::MAX;
     app.logs.horizontal_offset = u16::MAX;
     let logs = LogSnapshot {
-        lines: (0..20).map(|index| format!("entry-{index:02}")).collect(),
+        lines: (0_i32..20_i32)
+            .map(|index| format!("entry-{index:02}"))
+            .collect(),
         ..LogSnapshot::default()
     };
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))?;
-    terminal.draw(|frame| render(frame, &mut app, &ChanStats::default(), &logs))?;
+    let _completed_frame =
+        terminal.draw(|frame| render(frame, &mut app, &ChanStats::default(), &logs))?;
     assert_eq!(
         app.logs.rows_from_bottom,
         logs.lines.len() - app.logs.visible_rows,
@@ -356,8 +359,13 @@ fn log_scroll_clamps_to_retained_content() -> anyhow::Result<()> {
         buffer_text(terminal.backend().buffer()).contains("entry-00"),
         "oldest retained content must remain visible"
     );
-    app.handle_key(&super::super::input::KeyEvent::Down, 0, (80, 24));
-    terminal.draw(|frame| render(frame, &mut app, &ChanStats::default(), &logs))?;
+    anyhow::ensure!(
+        app.handle_key(&super::super::input::KeyEvent::Down, 0, (80, 24))
+            == super::super::state::ConsoleAction::None,
+        "navigation and editing must not request server-side work"
+    );
+    let _scrolled_frame =
+        terminal.draw(|frame| render(frame, &mut app, &ChanStats::default(), &logs))?;
     assert!(
         buffer_text(terminal.backend().buffer()).contains("entry-01"),
         "one Down press must move after excessive upward scrolling"
@@ -417,7 +425,11 @@ fn narrow_form_preserves_the_full_validation_rule_and_actions() -> anyhow::Resul
         ))),
         ..ConsoleState::default()
     };
-    app.handle_key(&super::super::input::KeyEvent::Submit, 0, (44, 14));
+    anyhow::ensure!(
+        app.handle_key(&super::super::input::KeyEvent::Submit, 0, (44, 14))
+            == super::super::state::ConsoleAction::None,
+        "navigation and editing must not request server-side work"
+    );
     let buffer = render_to_buffer(
         Rect::new(0, 0, 44, 14),
         &app,
@@ -447,7 +459,7 @@ fn populated_tasks_empty_filters_errors_and_details_render_at_all_sizes() -> any
         failed: 1,
         recent_completed: 3,
     });
-    for index in 0..100 {
+    for index in 0_i32..100_i32 {
         stats.operator.tasks.push(super::super::telemetry::TaskRow {
             id: format!("job:{index}"),
             kind: "Video transcode".to_owned(),
@@ -475,38 +487,42 @@ fn populated_tasks_empty_filters_errors_and_details_render_at_all_sizes() -> any
             buffer_text(&buffer).contains("RUNNING"),
             "populated task state disappeared at {width}x{height}"
         );
-        app.handle_key(&super::super::input::KeyEvent::Enter, 0, (width, height));
-        let buffer = render_to_buffer(
+        anyhow::ensure!(
+            app.handle_key(&super::super::input::KeyEvent::Enter, 0, (width, height))
+                == super::super::state::ConsoleAction::None,
+            "navigation and editing must not request server-side work"
+        );
+        let detail_buffer = render_to_buffer(
             Rect::new(0, 0, width, height),
             &app,
             &stats,
             &LogSnapshot::default(),
         )?;
         anyhow::ensure!(
-            buffer_text(&buffer).contains("State: RUNNING"),
+            buffer_text(&detail_buffer).contains("State: RUNNING"),
             "task detail did not render state"
         );
         app.dialog = None;
         app.task_filter.query = "no-match".to_owned();
-        let buffer = render_to_buffer(
+        let empty_buffer = render_to_buffer(
             Rect::new(0, 0, width, height),
             &app,
             &stats,
             &LogSnapshot::default(),
         )?;
         anyhow::ensure!(
-            buffer_text(&buffer).contains("NO TASKS"),
+            buffer_text(&empty_buffer).contains("NO TASKS"),
             "empty filter must be explained"
         );
         stats.operator.error = Some("Reading tasks failed; R retries".to_owned());
-        let buffer = render_to_buffer(
+        let failure_buffer = render_to_buffer(
             Rect::new(0, 0, width, height),
             &app,
             &stats,
             &LogSnapshot::default(),
         )?;
         anyhow::ensure!(
-            buffer_text(&buffer).contains("UNAVAILABLE"),
+            buffer_text(&failure_buffer).contains("UNAVAILABLE"),
             "failed data must be explicit"
         );
         stats.operator.error = None;

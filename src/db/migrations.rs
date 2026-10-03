@@ -57,7 +57,8 @@ pub(super) fn stamp_schema_version_in_transaction(conn: &rusqlite::Connection) -
         "INSERT INTO schema_version (version) VALUES (?1)",
         rusqlite::params![BASELINE_SCHEMA_VERSION],
     )
-    .with_context(|| format!("Failed to set schema_version to {BASELINE_SCHEMA_VERSION}"))?;
+    .with_context(|| format!("Failed to set schema_version to {BASELINE_SCHEMA_VERSION}"))
+    .map(|_affected_rows| ())?;
     Ok(())
 }
 

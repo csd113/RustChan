@@ -27,7 +27,8 @@ impl r2d2::HandleEvent for PostingPoolProbe {
         }
     }
     fn handle_timeout(&self, _event: r2d2::event::TimeoutEvent) {
-        self.timeouts
+        let _previous_count = self
+            .timeouts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -37,7 +38,13 @@ fn posting_latencies(mut values: Vec<u128>) -> serde_json::Value {
     values.sort_unstable();
     let percentile = |percent: usize| {
         values
-            .get((values.len() * percent).div_ceil(100).saturating_sub(1))
+            .get(
+                values
+                    .len()
+                    .saturating_mul(percent)
+                    .div_ceil(100)
+                    .saturating_sub(1),
+            )
             .copied()
             .unwrap_or(0)
     };
@@ -76,7 +83,8 @@ fn media_posting_case(size: u32, synchronous: &'static str) -> Result<serde_json
         .event_handler(Box::new(probe.clone()))
         .build(manager)?;
     state.job_queue = std::sync::Arc::new(crate::workers::JobQueue::new(state.db.clone()));
-    crate::db::create_board(&*state.db.get()?, TEST_BOARD, "Test", "", false)?;
+    crate::db::create_board(&*state.db.get()?, TEST_BOARD, "Test", "", false)
+        .map(|_completed_value| ())?;
     let mut commands = Vec::new();
     for number in 0_u8..8 {
         let pixels = image::RgbImage::from_fn(768, 768, |x, y| {
@@ -99,7 +107,7 @@ fn media_posting_case(size: u32, synchronous: &'static str) -> Result<serde_json
         commands.push(command);
     }
     let mut result = run_media_posting_case(&state, commands, &probe, size)?;
-    result
+    let _previous_value = result
         .as_object_mut()
         .context("media benchmark object")?
         .insert("synchronous".into(), serde_json::json!(synchronous));
@@ -121,7 +129,7 @@ fn run_media_posting_case(
     std::thread::scope(|scope| -> Result<()> {
         let mut handles = Vec::new();
         let mut commands = commands.into_iter();
-        for _ in 0..2 {
+        for _ in 0_i32..2_i32 {
             let batch: Vec<_> = commands.by_ref().take(4).collect();
             let barrier = &barrier;
             let remaining = &remaining;
@@ -130,21 +138,23 @@ fn run_media_posting_case(
                 std::thread::Builder::new()
                     .name("db-post-benchmark".into())
                     .spawn_scoped(scope, move || -> Result<()> {
-                        barrier.wait();
+                        let _completed_value = barrier.wait();
                         let result = (|| -> Result<()> {
                             for command in batch {
-                                let started = std::time::Instant::now();
-                                benchmark_submit(&state.db, &state.job_queue, command)?;
-                                post_times.lock().push(started.elapsed().as_micros());
+                                let post_started = std::time::Instant::now();
+                                benchmark_submit(&state.db, &state.job_queue, command)
+                                    .map(|_posted_identity| ())?;
+                                post_times.lock().push(post_started.elapsed().as_micros());
                             }
                             Ok(())
                         })();
-                        remaining.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        let _previous_count =
+                            remaining.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         result
                     })?,
             );
         }
-        for _ in 0..4 {
+        for _ in 0_i32..4_i32 {
             let barrier = &barrier;
             let remaining = &remaining;
             let reads = &reads;
@@ -152,11 +162,12 @@ fn run_media_posting_case(
                 std::thread::Builder::new()
                     .name("db-read-benchmark".into())
                     .spawn_scoped(scope, move || -> Result<()> {
-                        barrier.wait();
+                        let _completed_value = barrier.wait();
                         while remaining.load(std::sync::atomic::Ordering::Relaxed) > 0 {
                             if let Ok(conn) = state.db.get() {
                                 crate::db::database_ready_probe(&conn)?;
-                                reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let _previous_count =
+                                    reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                             std::thread::sleep(std::time::Duration::from_millis(2));
                         }
@@ -165,9 +176,12 @@ fn run_media_posting_case(
             );
         }
         for handle in handles {
-            handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("media benchmark worker panicked"))??;
+            handle.join().map_err(|panic_payload| {
+                anyhow::anyhow!(
+                    "media benchmark worker panicked: {}",
+                    crate::media::process::panic_message(panic_payload.as_ref())
+                )
+            })??;
         }
         Ok(())
     })?;

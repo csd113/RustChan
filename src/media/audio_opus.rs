@@ -39,7 +39,7 @@ impl Decoder {
 
     /// Validate metadata without allocating codec reconstruction state during probing.
     pub(super) fn validate(header: &[u8], channels: usize) -> Result<()> {
-        Self::layout(header, channels)?;
+        let _validated_layout = Self::layout(header, channels)?;
         Ok(())
     }
 
@@ -48,7 +48,7 @@ impl Decoder {
         ensure!((1..=255).contains(&channels), "invalid Opus channel count");
         ensure!(header.get(..8) == Some(b"OpusHead"), "invalid Opus header");
         ensure!(
-            header.get(8).is_some_and(|version| version >> 4 == 0),
+            header.get(8).is_some_and(|version| version >> 4_i32 == 0),
             "unsupported Opus header version"
         );
         ensure!(
@@ -63,23 +63,32 @@ impl Decoder {
             );
             (
                 1,
-                channels - 1,
+                channels
+                    .checked_sub(1)
+                    .context("invalid Opus single-stream channels")?,
                 if channels == 1 { vec![0] } else { vec![0, 1] },
             )
         } else {
             let streams = usize::from(*header.get(19).context("truncated Opus stream count")?);
             let coupled = usize::from(*header.get(20).context("truncated Opus coupled count")?);
             let mapping = header
-                .get(21..21 + channels)
+                .get(
+                    21..21_usize
+                        .checked_add(channels)
+                        .context("Opus channel map size overflow")?,
+                )
                 .context("truncated Opus channel map")?;
+            let coded_channels = streams
+                .checked_add(coupled)
+                .context("Opus coded channel count overflow")?;
             ensure!(
-                streams > 0 && coupled <= streams && streams + coupled <= 255,
+                streams > 0 && coupled <= streams && coded_channels <= 255,
                 "invalid Opus stream mapping"
             );
             ensure!(
                 mapping
                     .iter()
-                    .all(|slot| *slot == 255 || usize::from(*slot) < streams + coupled),
+                    .all(|slot| *slot == 255 || usize::from(*slot) < coded_channels),
                 "invalid Opus channel mapping"
             );
             if !matches!(family, 1 | 2 | 255) {
@@ -119,8 +128,13 @@ impl Decoder {
         for (index, decoder) in self.streams.iter_mut().enumerate() {
             check()?;
             let stream_channels = if index < self.coupled { 2 } else { 1 };
-            self.pcm.resize(MAX_PACKET_SAMPLES * stream_channels, 0.0);
-            let encoded = if index + 1 == count {
+            self.pcm.resize(
+                MAX_PACKET_SAMPLES
+                    .checked_mul(stream_channels)
+                    .context("Opus PCM buffer overflow")?,
+                0.0,
+            );
+            let encoded = if index.checked_add(1) == Some(count) {
                 remaining
             } else {
                 let consumed = normalize_self_delimited(remaining, &mut self.packet)?;
@@ -139,13 +153,23 @@ impl Decoder {
             }
             frames = Some(decoded);
             let base = if index < self.coupled {
-                index * 2
+                index
+                    .checked_mul(2)
+                    .context("Opus coupled channel offset overflow")?
             } else {
-                index + self.coupled
+                index
+                    .checked_add(self.coupled)
+                    .context("Opus channel offset overflow")?
             };
+            let end = base
+                .checked_add(stream_channels)
+                .context("Opus stream channel range overflow")?;
             for (channel, mapped) in self.mapping.iter().copied().enumerate() {
                 let mapped = usize::from(mapped);
-                if mapped >= base && mapped < base + stream_channels {
+                if mapped >= base && mapped < end {
+                    let stream_channel = mapped
+                        .checked_sub(base)
+                        .context("invalid Opus channel offset")?;
                     for (target, source) in output
                         .chunks_exact_mut(channels)
                         .take(decoded)
@@ -154,14 +178,18 @@ impl Decoder {
                         *target
                             .get_mut(channel)
                             .context("Opus output channel is missing")? = *source
-                            .get(mapped - base)
+                            .get(stream_channel)
                             .context("Opus coded channel is missing")?;
                     }
                 }
             }
         }
         let frames = frames.context("Opus packet has no streams")?;
-        output.truncate(frames * channels);
+        output.truncate(
+            frames
+                .checked_mul(channels)
+                .context("Opus output buffer overflow")?,
+        );
         Ok(frames)
     }
 }
@@ -207,7 +235,7 @@ fn normalize_self_delimited(data: &[u8], output: &mut Vec<u8>) -> Result<usize> 
         }
     };
     let samples_per_frame = if toc & 128 != 0 {
-        120 << ((toc >> 3) & 3)
+        120 << ((toc >> 3_i32) & 3)
     } else if toc & 0x60 == 0x60 {
         if toc & 8 != 0 {
             960
@@ -216,11 +244,13 @@ fn normalize_self_delimited(data: &[u8], output: &mut Vec<u8>) -> Result<usize> 
         }
     } else {
         *[480, 960, 1920, 2880]
-            .get(usize::from((toc >> 3) & 3))
+            .get(usize::from((toc >> 3_i32) & 3))
             .context("invalid Opus TOC")?
     };
     ensure!(
-        count * samples_per_frame <= MAX_PACKET_SAMPLES,
+        count
+            .checked_mul(samples_per_frame)
+            .is_some_and(|samples| samples <= MAX_PACKET_SAMPLES),
         "Opus packet exceeds duration limit"
     );
     let extra_start = cursor;
@@ -251,7 +281,9 @@ fn normalize_self_delimited(data: &[u8], output: &mut Vec<u8>) -> Result<usize> 
 /// Read one bounded length byte.
 fn read_byte(data: &[u8], cursor: &mut usize) -> Result<u8> {
     let value = *data.get(*cursor).context("truncated Opus packet header")?;
-    *cursor += 1;
+    *cursor = cursor
+        .checked_add(1)
+        .context("Opus packet cursor overflow")?;
     Ok(value)
 }
 
@@ -261,7 +293,10 @@ fn read_size(data: &[u8], cursor: &mut usize) -> Result<usize> {
     Ok(if first < 252 {
         usize::from(first)
     } else {
-        usize::from(first) + 4 * usize::from(read_byte(data, cursor)?)
+        usize::from(read_byte(data, cursor)?)
+            .checked_mul(4)
+            .and_then(|high| high.checked_add(usize::from(first)))
+            .context("Opus frame size overflow")?
     })
 }
 
@@ -333,7 +368,7 @@ mod tests {
             let mut actual = Vec::new();
             for packet in reader.packets() {
                 let packet = packet?;
-                decoder.decode(&packet.data, &mut output, || Ok(()))?;
+                let _decoded_frames = decoder.decode(&packet.data, &mut output, || Ok(()))?;
                 actual.extend(
                     trim.keep(&packet, &output)
                         .iter()

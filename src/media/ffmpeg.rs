@@ -140,7 +140,7 @@ fn capabilities_from_lists(
 #[must_use]
 pub fn detect_ffmpeg() -> bool {
     let mut command = ffmpeg_command();
-    command.arg("-version");
+    let _configured_command = command.arg("-version");
     run_command_with_timeout(&mut command, &crate::config::CONFIG.ffmpeg_path, "ffmpeg")
         .is_ok_and(|output| output.status.success())
 }
@@ -197,7 +197,7 @@ pub(crate) fn probe_uncovered_audio(path: &Path) -> Result<super::probe::StreamK
 /// Ask `FFmpeg` to map one stream without decoding any frames.
 fn mapped_stream_exists(path: &str, selector: &str, frames: &str) -> Result<bool> {
     let mut command = ffmpeg_command();
-    command.args([
+    let _configured_command = command.args([
         "-v", "error", "-i", path, "-map", selector, frames, "0", "-f", "null", "-",
     ]);
     let output = run_command_with_timeout(
@@ -243,9 +243,11 @@ pub fn ffmpeg_thumbnail(input: &Path, output: &Path, max_dim: u32) -> Result<()>
     ])
     .context("video frame extraction failed")?;
     super::thumbnail::image_crate_thumbnail(frame.path(), "image/png", thumbnail.path(), max_dim)?;
-    thumbnail
-        .persist(output)
-        .context("persist Rust-encoded video thumbnail")?;
+    drop(
+        thumbnail
+            .persist(output)
+            .context("persist Rust-encoded video thumbnail")?,
+    );
     Ok(())
 }
 
@@ -440,7 +442,7 @@ fn run_command_with_timeout(
 fn output_stdout_with_timeout(program: &str, args: &[&str]) -> Option<String> {
     let timeout = Duration::from_secs(10);
     let mut command = Command::new(program);
-    command.args(args);
+    let _configured_command = command.args(args);
     crate::media::process::run_std_command_with_timeout(
         &mut command,
         timeout,
@@ -561,7 +563,7 @@ mod tests {
         let arg_index = paired_arg_index(args, flag, value)
             .with_context(|| format!("missing ffmpeg arg pair {flag} {value}: {args:?}"))?;
         assert!(
-            arg_index > input_index + 1,
+            Some(arg_index) > input_index.checked_add(1),
             "{flag} {value} must be an output option after the input argument: {args:?}",
         );
         Ok(arg_index)
@@ -646,10 +648,11 @@ mod tests {
         // compatibility pixel formats. VP9 transcode is the path that combines
         // a forced yuv420p profile-0 output with potentially inherited source
         // color metadata, so it owns the explicit BT.709 normalization contract.
-        output_arg_index(&args, "-pix_fmt", VP9_COMPAT_PIXEL_FORMAT)?;
-        output_arg_index(&args, "-colorspace", VP9_COMPAT_COLOR_SPACE)?;
-        output_arg_index(&args, "-color_primaries", VP9_COMPAT_COLOR_SPACE)?;
-        output_arg_index(&args, "-color_trc", VP9_COMPAT_COLOR_SPACE)?;
+        let _pixel_format_index = output_arg_index(&args, "-pix_fmt", VP9_COMPAT_PIXEL_FORMAT)?;
+        let _color_space_index = output_arg_index(&args, "-colorspace", VP9_COMPAT_COLOR_SPACE)?;
+        let _color_primaries_index =
+            output_arg_index(&args, "-color_primaries", VP9_COMPAT_COLOR_SPACE)?;
+        let _color_transfer_index = output_arg_index(&args, "-color_trc", VP9_COMPAT_COLOR_SPACE)?;
         Ok(())
     }
 }

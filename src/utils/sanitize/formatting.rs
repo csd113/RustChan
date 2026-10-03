@@ -113,7 +113,9 @@ fn roll_dice(count: u32, sides: u32) -> (Vec<u32>, u32) {
     let mut rolls = Vec::new();
     let mut sum = 0u32;
     for _ in 0..count {
-        let roll = (crate::utils::crypto::os_random_u32_or_exit("rolling dice markup") % sides) + 1;
+        let roll = crate::utils::crypto::os_random_u32_or_exit("rolling dice markup")
+            .rem_euclid(sides)
+            .saturating_add(1);
         rolls.push(roll);
         sum = sum.saturating_add(roll);
     }
@@ -209,7 +211,7 @@ pub(super) fn apply_emoji(text: &str) -> String {
             out.push_str(&replace_emoji_shortcodes(after_tag));
             return out;
         };
-        let Some((tag, after_tag)) = after_tag.split_at_checked(end + 1) else {
+        let Some((tag, after_tag)) = after_tag.split_at_checked(end.saturating_add(1)) else {
             out.push_str(&replace_emoji_shortcodes(after_tag));
             return out;
         };

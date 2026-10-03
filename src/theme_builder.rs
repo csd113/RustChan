@@ -524,7 +524,12 @@ pub(crate) fn input_color_scheme(color: &str) -> &'static str {
     let Ok(rgb) = u32::from_str_radix(color.strip_prefix('#').unwrap_or(""), 16) else {
         return "dark";
     };
-    let brightness = ((rgb >> 16) & 255) * 299 + ((rgb >> 8) & 255) * 587 + (rgb & 255) * 114;
+    // Each channel is masked to eight bits, so the weighted sum is at most
+    // 255_000 and none of these saturating operations can change its value.
+    let brightness = ((rgb >> 16_i32) & 255)
+        .saturating_mul(299)
+        .saturating_add(((rgb >> 8_i32) & 255).saturating_mul(587))
+        .saturating_add((rgb & 255).saturating_mul(114));
     if brightness >= 128_000 {
         "light"
     } else {

@@ -28,13 +28,14 @@ pub(in crate::server) async fn serve_captcha_image(
         )?;
 
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
-    headers.insert(
+    let _previous_value =
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    drop(headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-store, no-cache, max-age=0"),
-    );
-    headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
-    headers.insert(header::EXPIRES, HeaderValue::from_static("0"));
+    ));
+    drop(headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache")));
+    drop(headers.insert(header::EXPIRES, HeaderValue::from_static("0")));
 
     Ok((StatusCode::OK, headers, png).into_response())
 }

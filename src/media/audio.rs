@@ -53,7 +53,9 @@ impl PacketDecoder {
         if params.codec != CODEC_ID_OPUS {
             if let Some(frames) = params.max_frames_per_packet {
                 ensure!(
-                    u128::from(frames) * u128::try_from(channels)?
+                    u128::from(frames)
+                        .checked_mul(u128::try_from(channels)?)
+                        .context("audio sample budget overflow")?
                         <= u128::try_from(MAX_PACKET_SAMPLES)?,
                     "audio packet exceeds sample budget"
                 );
@@ -94,7 +96,7 @@ impl PacketDecoder {
                 pcm.copy_to_slice_interleaved(samples.as_mut_slice());
             }
             Self::Opus(decoder) => {
-                decoder.decode(&packet.data, samples, || budget.check())?;
+                let _decoded_frames = decoder.decode(&packet.data, samples, || budget.check())?;
             }
         }
         ensure!(
@@ -153,7 +155,7 @@ fn visit_discrete_opus(
         if !reader.read_packet_into(&mut packet)? {
             break;
         }
-        decoder.decode(&packet.data, &mut samples, || budget.check())?;
+        let _decoded_frames = decoder.decode(&packet.data, &mut samples, || budget.check())?;
         ensure!(
             samples.iter().all(|sample| sample.is_finite()),
             "non-finite Opus PCM"
@@ -215,17 +217,25 @@ impl OpusPresentation {
         channels: usize,
     ) -> Result<&'a [f32]> {
         let to_frames = |duration: symphonia::core::units::Duration| -> Result<usize> {
-            let numerator =
-                u128::from(duration.get()) * u128::from(self.time_base.numer.get()) * 48_000;
+            let numerator = u128::from(duration.get())
+                .checked_mul(u128::from(self.time_base.numer.get()))
+                .and_then(|numerator| numerator.checked_mul(48_000))
+                .context("Opus timestamp conversion overflow")?;
             let denominator = u128::from(self.time_base.denom.get());
             Ok(usize::try_from(
-                (numerator + denominator / 2) / denominator,
+                numerator
+                    .checked_add(denominator / 2)
+                    .and_then(|rounded| rounded.checked_div(denominator))
+                    .context("invalid Opus timestamp denominator or overflow")?,
             )?)
         };
         // Ogg supplies exact trimming; Matroska can round delay to milliseconds.
-        let start = to_frames(packet.trim_start)?
-            .max(self.delay)
-            .min(samples.len() / channels);
+        let start = to_frames(packet.trim_start)?.max(self.delay).min(
+            samples
+                .len()
+                .checked_div(channels)
+                .context("Opus has no channels")?,
+        );
         self.delay = self.delay.saturating_sub(start);
         let end = to_frames(packet.trim_end)?;
         let first = start.checked_mul(channels).context("Opus trim overflow")?;
@@ -452,8 +462,8 @@ fn visit_samples(
         // Mean absolute channel amplitude avoids cancelling out-of-phase stereo.
         for frame in presentation.chunks_exact(channels) {
             let amplitude = frame_amplitude(frame, gain)?;
-            let emitted = if let Some(presentation) = &mut movie_presentation {
-                presentation.frame(amplitude, &mut visit, || budget.check())?
+            let emitted = if let Some(movie_timeline) = &mut movie_presentation {
+                movie_timeline.frame(amplitude, &mut visit, || budget.check())?
             } else {
                 visit(amplitude)?;
                 1
@@ -498,8 +508,13 @@ pub fn render_waveform(
     let mut peaks = vec![0.0_f32; usize::try_from(width)?];
     let mut position = 0_u64;
     let actual = visit_samples(input, &budget, |amplitude| {
-        let bucket = u128::from(position) * u128::from(width) / u128::from(total);
-        let index = usize::try_from(bucket.min(u128::from(width - 1)))?;
+        let bucket = u128::from(position)
+            .checked_mul(u128::from(width))
+            .and_then(|scaled| scaled.checked_div(u128::from(total)))
+            .context("invalid waveform sample range")?;
+        let index = usize::try_from(bucket.min(u128::from(
+            width.checked_sub(1).context("waveform width is empty")?,
+        )))?;
         let peak = peaks
             .get_mut(index)
             .context("waveform bucket out of range")?;
@@ -532,7 +547,11 @@ fn render_peaks(peaks: &[f32], width: u32, height: u32) -> Result<RgbaImage> {
     for (column, peak) in peaks.iter().enumerate() {
         let radius = (peak.clamp(0.0, 1.0) * radius_scale).round() as u32;
         let x = u32::try_from(column)?;
-        for y in middle.saturating_sub(radius)..=middle.saturating_add(radius).min(height - 1) {
+        for y in middle.saturating_sub(radius)
+            ..=middle
+                .saturating_add(radius)
+                .min(height.checked_sub(1).context("waveform height is empty")?)
+        {
             image.put_pixel(x, y, Rgba([0x88, 0x88, 0x88, 255]));
         }
     }
@@ -652,14 +671,29 @@ mod tests {
             .context("PCM length")?;
         let mut file = std::fs::File::create(path)?;
         file.write_all(b"RIFF")?;
-        file.write_all(&(data_len + 36).to_le_bytes())?;
+        file.write_all(
+            &data_len
+                .checked_add(36)
+                .context("PCM RIFF length overflow")?
+                .to_le_bytes(),
+        )?;
         file.write_all(b"WAVEfmt ")?;
         file.write_all(&16_u32.to_le_bytes())?;
         file.write_all(&1_u16.to_le_bytes())?;
         file.write_all(&channels.to_le_bytes())?;
         file.write_all(&8000_u32.to_le_bytes())?;
-        file.write_all(&(8000 * u32::from(channels) * 2).to_le_bytes())?;
-        file.write_all(&(channels * 2).to_le_bytes())?;
+        file.write_all(
+            &u32::from(channels)
+                .checked_mul(16_000)
+                .context("PCM byte rate overflow")?
+                .to_le_bytes(),
+        )?;
+        file.write_all(
+            &channels
+                .checked_mul(2)
+                .context("PCM block size overflow")?
+                .to_le_bytes(),
+        )?;
         file.write_all(&16_u16.to_le_bytes())?;
         file.write_all(b"data")?;
         file.write_all(&data_len.to_le_bytes())?;
@@ -668,7 +702,12 @@ mod tests {
             for channel in 0..channels {
                 let sample = if silence {
                     0_i16
-                } else if (frame + u32::from(channel)) % 2 == 0 {
+                } else if frame
+                    .checked_add(u32::from(channel))
+                    .context("PCM frame position overflow")?
+                    % 2
+                    == 0
+                {
                     16_000_i16
                 } else {
                     -16_000_i16
@@ -890,11 +929,11 @@ mod tests {
             .context("truncated SBR configuration was accepted")?;
         ensure!(!is_unsupported(&error), "truncated SBR selected fallback");
         for bytes in [&[0x28][..], &[0x00, 0x90], &[0x17, 0x10]] {
-            let error = aac_needs_compatibility(bytes)
+            let invalid_config_error = aac_needs_compatibility(bytes)
                 .err()
                 .context("invalid AAC config accepted")?;
             ensure!(
-                !is_unsupported(&error),
+                !is_unsupported(&invalid_config_error),
                 "invalid AAC config selected fallback"
             );
         }
@@ -951,13 +990,13 @@ mod tests {
                 .context("AAC fixture truncation outside packet")?
                 .to_vec()
                 .into_boxed_slice();
-            let error = PacketDecoder::new(&params, channels)?
+            let truncated_packet_error = PacketDecoder::new(&params, channels)?
                 .decode(&truncated, channels, &mut Vec::new(), &budget)
                 .err()
                 .context("truncated AAC raw-data block was accepted")?;
             ensure!(
-                !is_unsupported(&error),
-                "truncated SBR payload selected compatibility: {error:#}"
+                !is_unsupported(&truncated_packet_error),
+                "truncated SBR payload selected compatibility: {truncated_packet_error:#}"
             );
         }
         Ok(())

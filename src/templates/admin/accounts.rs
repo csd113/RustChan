@@ -1,7 +1,5 @@
 //! Secret-free administrator list and dedicated credential workflows.
 
-use std::fmt::Write as _;
-
 use crate::utils::sanitize::escape_html;
 
 /// Render full-privilege account management with mandatory reauthentication.
@@ -11,11 +9,14 @@ pub(super) fn render(users: &[(i64, String, i64)], csrf: &str) -> String {
     for (id, name, created) in users {
         let name = escape_html(name);
         let created = escape_html(&crate::templates::fmt_ts(*created));
-        let _ = write!(
-            rows,
-            "<tr><td>{id}</td><td>{name}</td><td>{created}</td></tr>"
+        crate::templates::append_html(
+            &mut rows,
+            format_args!("<tr><td>{id}</td><td>{name}</td><td>{created}</td></tr>"),
         );
-        let _ = write!(choices, "<option value=\"{name}\">{name}</option>");
+        crate::templates::append_html(
+            &mut choices,
+            format_args!("<option value=\"{name}\">{name}</option>"),
+        );
     }
     format!(r#"<section class="admin-section admin-settings-section admin-task" id="accounts" aria-labelledby="accounts-title"><h2 id="accounts-title">Accounts</h2><p>All administrators have full site privileges. Existing passwords and hashes are never displayed. Every change requires your current password; failed checks share the administrator login lockout.</p><div class="admin-table-wrap" tabindex="0" role="region" aria-label="Administrator accounts"><table class="admin-table"><thead><tr><th>ID</th><th>Username</th><th>Created</th></tr></thead><tbody>{rows}</tbody></table></div><div class="admin-settings-grid">{}{}</div></section>"#,
     form("create", "Create administrator", "<label for=\"account-create-name\">New username</label><input type=\"text\" name=\"username\" id=\"account-create-name\" required maxlength=\"64\" autocomplete=\"off\">", csrf),

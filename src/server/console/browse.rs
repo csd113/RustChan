@@ -37,7 +37,7 @@ impl ViewFilter {
                 );
             }
             KeyEvent::Backspace => {
-                self.query.pop();
+                let _removed_character = self.query.pop();
             }
             KeyEvent::ClearLine => self.query.clear(),
             KeyEvent::Enter => self.editing = false,
@@ -45,7 +45,22 @@ impl ViewFilter {
                 self.query.clear();
                 self.editing = false;
             }
-            _ => {}
+            KeyEvent::Character(_)
+            | KeyEvent::RepeatCharacter(_)
+            | KeyEvent::Tab
+            | KeyEvent::BackTab
+            | KeyEvent::Delete
+            | KeyEvent::Up
+            | KeyEvent::Down
+            | KeyEvent::Left
+            | KeyEvent::Right
+            | KeyEvent::PageUp
+            | KeyEvent::PageDown
+            | KeyEvent::Home
+            | KeyEvent::End
+            | KeyEvent::Submit
+            | KeyEvent::ForceQuit
+            | KeyEvent::Resize => {}
         }
     }
 
@@ -183,16 +198,16 @@ mod tests {
             vec![("aa".to_owned(), 0, 5), ("ab".to_owned(), 0, 5)],
             "search and sorting must compose"
         );
-        let filter = ViewFilter {
+        let severity_filter = ViewFilter {
             mode: 2,
             ..ViewFilter::default()
         };
         assert!(
-            filter.log_matches("2026 ERROR workers failure"),
+            severity_filter.log_matches("2026 ERROR workers failure"),
             "error filter must include errors"
         );
         assert!(
-            !filter.log_matches("2026 INFO workers ERROR count=0"),
+            !severity_filter.log_matches("2026 INFO workers ERROR count=0"),
             "message content is not the log level"
         );
     }

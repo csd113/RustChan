@@ -197,31 +197,36 @@ warnings = { level = "deny", priority = -3 }
 future_incompatible = { level = "deny", priority = -2 }
 rust_2018_idioms = { level = "deny", priority = -2 }
 rust_2024_compatibility = { level = "deny", priority = -2 }
+nonstandard_style = { level = "deny", priority = -2 }
+let_underscore = { level = "deny", priority = -2 }
 unused = { level = "deny", priority = -2 }
 
 unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
+raw_borrows_via_references = "deny"
 missing_docs = "deny"
 missing_debug_implementations = "deny"
 non_ascii_idents = "deny"
 unreachable_pub = "deny"
+unused_crate_dependencies = "deny"
+unused_results = "deny"
+macro_use_extern_crate = "deny"
+redundant_imports = "deny"
+redundant_lifetimes = "deny"
+single_use_lifetimes = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unit_bindings = "deny"
+unused_import_braces = "deny"
 unused_lifetimes = "deny"
 unused_qualifications = "deny"
 let_underscore_drop = "deny"
 
-# This rustc lint can report false positives for dependencies shared across
-# library, binary, example, test, benchmark, and feature-specific targets.
-# Keep it visible, but do not force fake imports or dependency distortions.
-unused_crate_dependencies = "warn"
-
 [workspace.lints.clippy]
 all = { level = "deny", priority = -3 }
 pedantic = { level = "deny", priority = -2 }
+nursery = { level = "deny", priority = -2 }
 cargo = { level = "deny", priority = -2 }
-
-# This can represent unavoidable transitive version splits, especially in
-# a dependency graph as large as Arti's. Audit every report without making
-# unavoidable upstream duplication a hard failure.
-multiple_crate_versions = "warn"
 
 # Panic-driven control flow.
 unwrap_used = "deny"
@@ -243,6 +248,9 @@ print_stderr = "deny"
 undocumented_unsafe_blocks = "deny"
 multiple_unsafe_ops_per_block = "deny"
 missing_safety_doc = "deny"
+unnecessary_safety_comment = "deny"
+unnecessary_safety_doc = "deny"
+default_union_representation = "deny"
 
 # Suppressions must be narrow, intentional, and documented.
 allow_attributes = "deny"
@@ -250,6 +258,7 @@ allow_attributes_without_reason = "deny"
 
 # Numeric conversions must be explicit and reviewed.
 as_conversions = "deny"
+arithmetic_side_effects = "deny"
 cast_lossless = "deny"
 cast_possible_truncation = "deny"
 cast_possible_wrap = "deny"
@@ -259,16 +268,26 @@ cast_sign_loss = "deny"
 char_lit_as_u8 = "deny"
 fn_to_numeric_cast_any = "deny"
 lossy_float_literal = "deny"
+default_numeric_fallback = "deny"
+suspicious_xor_used_as_pow = "deny"
+precedence_bits = "deny"
 
 # Avoid unchecked indexing and UTF-8 string slicing.
 indexing_slicing = "deny"
 string_slice = "deny"
+
+# Ignored values and error mappings must preserve their meaning.
+let_underscore_must_use = "deny"
+let_underscore_untyped = "deny"
+map_err_ignore = "deny"
 
 # Ownership and resource-management restrictions.
 clone_on_ref_ptr = "deny"
 mem_forget = "deny"
 rc_buffer = "deny"
 rc_mutex = "deny"
+string_add = "deny"
+str_to_string = "deny"
 
 # Documentation, testing, and maintainability.
 missing_docs_in_private_items = "deny"
@@ -276,6 +295,17 @@ missing_assert_message = "deny"
 large_include_file = "deny"
 verbose_file_reads = "deny"
 wildcard_dependencies = "deny"
+mixed_read_write_in_expression = "deny"
+shadow_unrelated = "deny"
+wildcard_enum_match_arm = "deny"
+partial_pub_fields = "deny"
+redundant_type_annotations = "deny"
+rest_pattern_accessible_field = "deny"
+unnecessary_rest_pattern = "deny"
+doc_include_without_cfg = "deny"
+doc_paragraphs_missing_punctuation = "deny"
+tests_outside_test_module = "deny"
+host_endian_bytes = "deny"
 
 # Reject detected in-band SBR instead of publishing AAC-LC-only HE-AAC audio.
 [patch.crates-io]

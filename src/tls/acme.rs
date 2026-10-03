@@ -113,7 +113,10 @@ pub(super) fn build_acme_acceptor(
     // Spawn the event loop. This task must stay alive for the lifetime of
     // the server process — it drives ACME challenge responses and renewals.
     let env_label = if cfg.staging { "staging" } else { "production" };
-    tokio::spawn(run_acme_event_loop(state, env_label.to_owned()));
+    drop(tokio::spawn(run_acme_event_loop(
+        state,
+        env_label.to_owned(),
+    )));
 
     Ok((acme_acceptor, server_cfg))
 }

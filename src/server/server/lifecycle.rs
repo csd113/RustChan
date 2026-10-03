@@ -30,15 +30,15 @@ pub(super) async fn track_requests(
     {
         return recovery_unavailable();
     }
-    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-    IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+    let _previous_request_count = REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+    let _previous_in_flight_count = IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
     let _in_flight_guard = ScopedDecrement(&IN_FLIGHT);
 
     let req_id = uuid::Uuid::new_v4().to_string();
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
     let mut req = req;
-    req.extensions_mut().insert(req_id.clone());
+    let _previous_request_id = req.extensions_mut().insert(req_id.clone());
     let span = tracing::info_span!(
         "request",
         req_id = %req_id,
@@ -53,7 +53,7 @@ pub(super) async fn track_requests(
         h.update(real_ip.as_bytes());
         let ip_hash = hex::encode(h.finalize());
         if ACTIVE_IPS.len() < 10_000 {
-            ACTIVE_IPS.insert(ip_hash, Instant::now());
+            let _previous_ip_activity = ACTIVE_IPS.insert(ip_hash, Instant::now());
         }
     }
 
@@ -64,13 +64,13 @@ pub(super) async fn track_requests(
         .is_some_and(|ct| ct.contains("multipart/form-data"));
 
     let _upload_guard = is_upload.then(|| {
-        ACTIVE_UPLOADS.fetch_add(1, Ordering::Relaxed);
+        let _previous_upload_count = ACTIVE_UPLOADS.fetch_add(1, Ordering::Relaxed);
         ScopedDecrement(&ACTIVE_UPLOADS)
     });
 
     let mut response = next.run(req).instrument(span).await;
     if let Ok(value) = axum::http::HeaderValue::from_str(&req_id) {
-        response.headers_mut().insert(REQUEST_ID_HEADER, value);
+        let _previous_request_header = response.headers_mut().insert(REQUEST_ID_HEADER, value);
     }
     response
 }
@@ -89,7 +89,7 @@ pub(super) async fn shutdown_signal() {
     let terminate = async {
         match signal::unix::signal(signal::unix::SignalKind::terminate()) {
             Ok(mut sig) => {
-                sig.recv().await;
+                let _previous_value = sig.recv().await;
             }
             Err(e) => {
                 tracing::error!("Failed to register SIGTERM handler: {e}");
@@ -172,11 +172,11 @@ mod shutdown_tests {
             "running instance should admit HTTP work"
         );
         state.job_queue.cancel.cancel();
-        let response = app
+        let unavailable_response = app
             .oneshot(Request::builder().uri("/").body(Body::empty())?)
             .await?;
         anyhow::ensure!(
-            response.status() == StatusCode::SERVICE_UNAVAILABLE,
+            unavailable_response.status() == StatusCode::SERVICE_UNAVAILABLE,
             "shutdown must stop new work"
         );
         Ok(())

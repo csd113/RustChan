@@ -81,10 +81,12 @@ pub(in crate::server) async fn update_site_settings(
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
-            let mut conn = pool.get()?;
-            let tx = conn.transaction().map_err(anyhow::Error::from)?;
+            let mut pooled_connection = pool.get()?;
+            let tx = pooled_connection
+                .transaction()
+                .map_err(anyhow::Error::from)?;
             let conn = &tx;
-            require_admin_session_sid(conn, session_id.as_deref())?;
+            require_admin_session_sid(conn, session_id.as_deref()).map(|_completed_value| ())?;
             let homepage_new_thread_badges_enabled = resolved_checkbox_setting(
                 form.homepage_new_thread_badges_enabled.as_deref(),
                 db::get_homepage_new_thread_badges_enabled(conn),

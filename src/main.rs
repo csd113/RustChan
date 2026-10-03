@@ -155,7 +155,7 @@ fn main() -> anyhow::Result<()> {
             "{}",
             serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"), "target": updates::platform_target(),
-                "schema": db::baseline_schema_version(), "minimum_schema": "1.5.0", "updater_protocol": 1
+                "schema": db::baseline_schema_version(), "minimum_schema": "1.5.0", "updater_protocol": 1_u32
             })
         )?;
         return Ok(());

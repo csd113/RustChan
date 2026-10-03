@@ -193,10 +193,10 @@ mod tests {
         let existing = temp.path().join("existing");
         std::fs::create_dir(&existing)?;
         std::fs::write(existing.join("operator-file"), "keep")?;
-        let result = prepare_and_persist(&existing, &config, |_| {
+        let preserve_existing_result = prepare_and_persist(&existing, &config, |_| {
             anyhow::bail!("injected persistence failure")
         });
-        ensure!(result.is_err());
+        ensure!(preserve_existing_result.is_err());
         ensure!(std::fs::read_to_string(existing.join("operator-file"))? == "keep");
         ensure!(
             std::fs::read_dir(&existing)?.count() == 1,

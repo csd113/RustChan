@@ -62,7 +62,7 @@ fn dim_area(buffer: &mut Buffer, area: Rect) {
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             if let Some(cell) = buffer.cell_mut((x, y)) {
-                cell.set_style(cell.style().add_modifier(Modifier::DIM));
+                let _styled_cell = cell.set_style(cell.style().add_modifier(Modifier::DIM));
             }
         }
     }
@@ -124,7 +124,7 @@ fn render_form_dialog(frame: &mut Frame<'_>, area: Rect, form: &FormState) {
     let expanded_error = form.error.is_some() && area.width < 64;
     let desired_height = u16::try_from(form.fields.len())
         .unwrap_or(u16::MAX)
-        .saturating_add(9 + u16::from(expanded_error))
+        .saturating_add(9_u16.saturating_add(u16::from(expanded_error)))
         .min(area.height.saturating_sub(2));
     let popup = centered_rect(
         area,
@@ -285,7 +285,8 @@ pub(super) fn render_form_field(
             let mut visible = String::new();
             for grapheme in line.styled_graphemes(Style::default()) {
                 if horizontal_scroll < desired_scroll {
-                    horizontal_scroll += Span::raw(grapheme.symbol).width();
+                    horizontal_scroll =
+                        horizontal_scroll.saturating_add(Span::raw(grapheme.symbol).width());
                 } else {
                     visible.push_str(grapheme.symbol);
                 }

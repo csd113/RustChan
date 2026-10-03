@@ -77,6 +77,10 @@ pub enum FieldValue {
 
 /// One reusable form field.
 #[derive(Clone, PartialEq, Eq)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "preserve the existing editable field API while keeping the validated text limit private so callers cannot relax it"
+)]
 pub struct FormField {
     /// Stable field identifier.
     pub id: FormFieldId,
@@ -308,7 +312,10 @@ impl FormState {
                 .checked_sub(1)
                 .unwrap_or_else(|| count.saturating_sub(1))
         } else {
-            self.focused.saturating_add(1) % count
+            self.focused
+                .saturating_add(1)
+                .checked_rem(count)
+                .unwrap_or(0)
         };
         self.cursor = self
             .focused_field()
@@ -359,7 +366,7 @@ impl FormState {
         for character in content
             .chars()
             .filter(|character| !character.is_control())
-            .take(remaining + 1)
+            .take(remaining.saturating_add(1))
         {
             self.insert_char(character);
         }
@@ -380,7 +387,7 @@ impl FormState {
         let Some((byte_index, _)) = value.char_indices().nth(target) else {
             return;
         };
-        value.remove(byte_index);
+        let _removed_character = value.remove(byte_index);
         self.cursor = target;
         self.error = None;
     }
@@ -396,7 +403,7 @@ impl FormState {
         let Some((byte_index, _)) = value.char_indices().nth(self.cursor) else {
             return;
         };
-        value.remove(byte_index);
+        let _removed_character = value.remove(byte_index);
         self.error = None;
     }
 
@@ -499,9 +506,10 @@ impl FormState {
             }
             FormKind::DeleteThread => {
                 let raw = self.text(FormFieldId::ThreadId)?.trim();
-                let thread_id = raw
-                    .parse::<i64>()
-                    .map_err(|_| "Thread ID must be a positive whole number.".to_owned())?;
+                let thread_id = raw.parse::<i64>().map_err(|error| {
+                    tracing::debug!(%error, "Console thread ID was not a valid integer");
+                    "Thread ID must be a positive whole number.".to_owned()
+                })?;
                 if thread_id <= 0 {
                     return Err("Thread ID must be a positive whole number.".to_owned());
                 }

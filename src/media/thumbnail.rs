@@ -153,7 +153,7 @@ pub fn generate_thumbnail(
             drop(std::fs::remove_file(output_path));
             drop(std::fs::remove_file(&placeholder_path));
             match pdf_first_page_thumbnail(input_path, output_path, max_dim) {
-                Ok(PdfThumbnailOutcome::Rendered { .. }) => Ok(output_path.to_path_buf()),
+                Ok(PdfThumbnailOutcome::Rendered { renderer: _ }) => Ok(output_path.to_path_buf()),
                 Ok(PdfThumbnailOutcome::Placeholder) => Ok(placeholder_path),
                 Err(error) => {
                     drop(std::fs::remove_file(output_path));
@@ -316,8 +316,10 @@ fn render_pdf(input_path: &Path, output_path: &Path, max_dim: u32) -> Result<()>
 
 /// Scale one dimension proportionally using widened integer arithmetic.
 fn scaled_dimension(side: u32, max_dimension: u32, denominator: u32) -> u32 {
-    let scaled =
-        u64::from(side).saturating_mul(u64::from(max_dimension)) / u64::from(denominator.max(1));
+    let scaled = u64::from(side)
+        .saturating_mul(u64::from(max_dimension))
+        .checked_div(u64::from(denominator.max(1)))
+        .unwrap_or_else(|| u64::from(max_dimension));
     u32::try_from(scaled).unwrap_or(max_dimension)
 }
 
@@ -461,7 +463,12 @@ mod tests {
             generate_thumbnail(&input, "application/pdf", &output, 100, false)
         })
         .join()
-        .map_err(|_| anyhow::anyhow!("PDF preview test thread panicked"))??;
+        .map_err(|panic| {
+            anyhow::anyhow!(
+                "PDF preview test thread panicked: {}",
+                super::super::process::panic_message(panic.as_ref())
+            )
+        })??;
         anyhow::ensure!(
             generated.extension().is_some_and(|ext| ext == "webp"),
             "another thread inherited PDF failure injection"

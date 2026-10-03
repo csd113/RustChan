@@ -21,7 +21,7 @@ pub(crate) fn decode(input: &Path) -> Result<image::DynamicImage> {
         "HEIC input exceeds memory safety limit"
     );
     let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes)?;
+    let _bytes_read = file.take(limit + 1).read_to_end(&mut bytes)?;
     ensure!(
         u64::try_from(bytes.len())? <= limit,
         "HEIC input grew beyond safety limit"
@@ -73,7 +73,11 @@ fn preflight_item(context: &Context<'_>, item: u32) -> Result<u64> {
                 for nal in &array.nals {
                     let (width, height) = sps_dimensions(nal)?;
                     super::images::validate_dimensions(width, height)?;
-                    largest = largest.max(u64::from(width) * u64::from(height));
+                    largest = largest.max(
+                        u64::from(width)
+                            .checked_mul(u64::from(height))
+                            .context("HEIC tile area overflow")?,
+                    );
                 }
             }
         }
@@ -124,7 +128,12 @@ fn sps_dimensions(nal: &[u8]) -> Result<(u32, u32)> {
         sublayers.push((bits.read(1)? != 0, bits.read(1)? != 0));
     }
     if layers > 0 {
-        bits.skip((8 - layers) * 2)?;
+        bits.skip(
+            8_usize
+                .checked_sub(layers)
+                .and_then(|remaining| remaining.checked_mul(2))
+                .context("invalid HEIC sublayer count")?,
+        )?;
     }
     for (profile, level) in sublayers {
         if profile {
@@ -161,8 +170,18 @@ impl Bits<'_> {
                 .data
                 .get(self.position / 8)
                 .context("truncated HEIC sequence bits")?;
-            value = (value << 1) | u32::from((byte >> (7 - self.position % 8)) & 1);
-            self.position += 1;
+            value = (value << 1_i32)
+                | u32::from(
+                    (byte
+                        >> (7_usize
+                            .checked_sub(self.position % 8)
+                            .context("invalid HEIC bit offset")?))
+                        & 1,
+                );
+            self.position = self
+                .position
+                .checked_add(1)
+                .context("HEIC bit offset overflow")?;
         }
         Ok(value)
     }
@@ -182,12 +201,18 @@ impl Bits<'_> {
 
     /// Read a bounded unsigned Exp-Golomb metadata integer.
     fn unsigned_exp_golomb(&mut self) -> Result<u32> {
-        let mut zeroes = 0;
+        let mut zeroes = 0_usize;
         while self.read(1)? == 0 {
-            zeroes += 1;
+            zeroes = zeroes
+                .checked_add(1)
+                .context("HEIC sequence prefix overflow")?;
             ensure!(zeroes < 32, "HEIC sequence integer overflows");
         }
-        Ok((1_u32 << zeroes) - 1 + self.read(zeroes)?)
+        let suffix = self.read(zeroes)?;
+        (1_u32 << zeroes)
+            .checked_sub(1)
+            .and_then(|prefix| prefix.checked_add(suffix))
+            .context("HEIC sequence integer overflows")
     }
 }
 
@@ -217,7 +242,7 @@ mod tests {
                 "HEIC conversion changed pixels for {name}"
             );
             let thumbnail = outputs.path().join(format!("{name}-thumb.webp"));
-            super::super::thumbnail::generate_thumbnail(
+            let _thumbnail_path = super::super::thumbnail::generate_thumbnail(
                 &root.join(name),
                 "image/heic",
                 &thumbnail,
@@ -248,7 +273,7 @@ mod tests {
         );
         let dir = tempfile::tempdir()?;
         let heif = dir.path().join("image.heif");
-        std::fs::copy(root.join("photo.heic"), &heif)?;
+        let _bytes_copied = std::fs::copy(root.join("photo.heic"), &heif)?;
         ensure!(
             decode(&heif)?.width() == 2048,
             "HEIF extension lost support"

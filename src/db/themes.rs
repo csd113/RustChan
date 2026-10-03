@@ -119,7 +119,7 @@ pub fn upsert_builtin_themes(conn: &rusqlite::Connection) -> Result<()> {
                 theme.sort_order,
             ],
         )
-        .context("Failed to upsert built-in theme")?;
+        .context("Failed to upsert built-in theme").map(|_affected_rows| ())?;
     }
     Ok(())
 }
@@ -155,7 +155,7 @@ pub fn create_custom_theme(
             custom_css,
         ],
     )
-    .context("Failed to create custom theme")?;
+    .context("Failed to create custom theme").map(|_affected_rows| ())?;
     Ok(())
 }
 
@@ -223,13 +223,15 @@ pub fn update_theme(
             "UPDATE boards SET default_theme = ?1 WHERE lower(default_theme) = lower(?2)",
             params![new_slug, existing_slug],
         )
-        .context("Failed to update board theme references")?;
+        .context("Failed to update board theme references")
+        .map(|_affected_rows| ())?;
         tx.execute(
             "UPDATE site_settings SET value = ?1
              WHERE key = 'default_theme' AND lower(value) = lower(?2)",
             params![new_slug, existing_slug],
         )
-        .context("Failed to update site default theme reference")?;
+        .context("Failed to update site default theme reference")
+        .map(|_affected_rows| ())?;
     }
     tx.commit()?;
     Ok(())
@@ -266,12 +268,14 @@ pub fn delete_custom_theme(conn: &mut rusqlite::Connection, slug: &str) -> Resul
     tx.execute(
         "UPDATE boards SET default_theme = '' WHERE lower(default_theme) = lower(?1)",
         params![slug],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     tx.execute(
         "UPDATE site_settings SET value = ?2
          WHERE key = 'default_theme' AND lower(value) = lower(?1)",
         params![slug, crate::theme::HARD_DEFAULT_THEME],
-    )?;
+    )
+    .map(|_affected_rows| ())?;
     tx.commit()?;
     Ok(())
 }
@@ -547,7 +551,8 @@ mod tests {
         let pool = crate::db::init_test_pool()?;
         let mut conn = pool.get()?;
         let board_short = "thmup";
-        crate::db::boards::create_board(&conn, board_short, "Theme Update", "", false)?;
+        crate::db::boards::create_board(&conn, board_short, "Theme Update", "", false)
+            .map(|_created_id| ())?;
         super::create_custom_theme(
             &conn,
             "guided-forest",
@@ -560,7 +565,8 @@ mod tests {
         conn.execute(
             "UPDATE boards SET default_theme = 'guided-forest' WHERE short_name = ?1",
             params![board_short],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         crate::db::set_site_setting(&conn, "default_theme", "guided-forest")?;
 
         super::update_theme(
@@ -600,7 +606,8 @@ mod tests {
         let pool = crate::db::init_test_pool()?;
         let mut conn = pool.get()?;
         let board_short = "thmdel";
-        crate::db::boards::create_board(&conn, board_short, "Theme Delete", "", false)?;
+        crate::db::boards::create_board(&conn, board_short, "Theme Delete", "", false)
+            .map(|_created_id| ())?;
         super::create_custom_theme(
             &conn,
             "guided-forest",
@@ -613,7 +620,8 @@ mod tests {
         conn.execute(
             "UPDATE boards SET default_theme = 'guided-forest' WHERE short_name = ?1",
             params![board_short],
-        )?;
+        )
+        .map(|_affected_rows| ())?;
         crate::db::set_site_setting(&conn, "default_theme", "guided-forest")?;
 
         super::delete_custom_theme(&mut conn, "guided-forest")?;

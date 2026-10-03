@@ -91,7 +91,7 @@ const test = base.extend<{ runtime: Runtime }>({
 test.describe('upload regressions (ignored by default)', () => {
   test.skip(process.env[RUN_ENV] !== '1', `set ${RUN_ENV}=1 to run this opt-in upload suite`);
 
-  test('posting UI accepts audio/MKV variants and keeps textarea resize disabled', async ({ page, runtime }, testInfo) => {
+  test('posting UI accepts audio/MKV variants and keeps textarea resize disabled', async ({ page, runtime, browserName }, testInfo) => {
     test.skip(!toolAvailable(process.env.RUSTCHAN_E2E_FFMPEG_PATH ?? 'ffmpeg'), 'ffmpeg is required');
     test.setTimeout(180_000);
 
@@ -160,9 +160,9 @@ test.describe('upload regressions (ignored by default)', () => {
       });
     }
 
-    await expectUiUploadError(page, runtime, mediaBoard, fixtures.fakeMkv, /matroska|validate|streams/i);
-    await expectUiUploadError(page, runtime, noAudioBoard, fixtures.flac, /audio uploads are disabled/i);
-    await expectUiUploadError(page, runtime, noVideoBoard, fixtures.mkv, /video uploads are disabled/i);
+    await expectUiUploadError(page, runtime, mediaBoard, fixtures.fakeMkv, /matroska|validate|streams/i, browserName);
+    await expectUiUploadError(page, runtime, noAudioBoard, fixtures.flac, /audio uploads are disabled/i, browserName);
+    await expectUiUploadError(page, runtime, noVideoBoard, fixtures.mkv, /video uploads are disabled/i, browserName);
     await expectRequestUploadError(page, runtime, mediaBoard, fixtures.overLimitAudio, /too large|maximum audio upload size/i);
     await expectRequestUploadError(page, runtime, mediaBoard, fixtures.overLimitMkv, /too large|maximum video upload size/i);
   });
@@ -175,6 +175,9 @@ async function postUiThread(page: Page, runtime: Runtime, board: string, file: F
   await form.locator('input[name="subject"]').fill(`upload ${Date.now()}`);
   await form.locator('textarea[name="body"]').fill(`upload ${file.name}`);
   await setFile(form.locator('input[type="file"]').first(), file);
+  if (file.kind === 'audio' || file.kind === 'video') {
+    declareNativeControlRender(runtime);
+  }
   const [response] = await Promise.all([
     page.waitForResponse((candidate) => candidate.request().method() === 'POST' && new URL(candidate.url()).pathname === `/${board}`),
     form.getByRole('button', { name: /post thread/i }).click(),
@@ -186,7 +189,32 @@ async function postUiThread(page: Page, runtime: Runtime, board: string, file: F
   await verifyRenderedUpload(page, runtime, file.kind);
 }
 
-async function expectUiUploadError(page: Page, runtime: Runtime, board: string, file: FilePayload, pattern: RegExp): Promise<void> {
+function declareNativeControlRender(runtime: Runtime): void {
+  const testInfo = test.info();
+  if (runtime.mode !== 'local'
+      || process.platform !== 'darwin'
+      || testInfo.project.name !== 'mobile-webkit'
+      || testInfo.project.use.deviceScaleFactor !== 3) return;
+  const origin = new URL(runtime.baseURL);
+  if (origin.protocol !== 'http:' || origin.hostname !== '127.0.0.1') return;
+  // This macOS WebKit bundle lacks the @3x PNG placards requested by the
+  // iPhone profile's native media controls. Register exactly one control
+  // set per accepted audio/video thread render, never for rejected uploads.
+  // Empty source URLs distinguish native messages from application errors.
+  for (const [icon, perRender] of [
+    ['invalid-placard', 1], ['pip-placard', 2], ['airplay-placard', 1],
+  ] as const) {
+    expectConsoleError({
+      pattern: new RegExp(`^Button failed to load, iconName = ${icon}, layoutTraits = \\[MacOSLayoutTraits Inline\\], src = blob:http://127\\.0\\.0\\.1:${origin.port}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`),
+      url: /^$/,
+      times: perRender,
+      optional: true,
+      reason: 'macOS WebKit native media controls lack DPR3 PNG placard assets',
+    });
+  }
+}
+
+async function expectUiUploadError(page: Page, runtime: Runtime, board: string, file: FilePayload, pattern: RegExp, browserName: 'chromium' | 'firefox' | 'webkit'): Promise<void> {
   await page.goto(`${runtime.baseURL}/${board}`);
   await revealPostForm(page);
   const form = page.locator(`form[action="/${board}"]`).first();
@@ -195,7 +223,9 @@ async function expectUiUploadError(page: Page, runtime: Runtime, board: string, 
   await setFile(form.locator('input[type="file"]').first(), file);
   expectHttpError({ method: 'POST', path: `/${board}`, status: 422, reason: `intentional rejection of ${file.name}` });
   if (javaScriptEnabledFor(test.info())) {
-    expectConsoleError({ pattern: /^Failed to load resource: the server responded with a status of 422 \(Unprocessable Entity\)$/, reason: `browser reports the intentional upload rejection for ${file.name}` });
+    // Firefox can report the rejected XHR solely through the required HTTP
+    // response event; Chromium and WebKit also emit this exact console error.
+    expectConsoleError({ pattern: /^Failed to load resource: the server responded with a status of 422 \(Unprocessable Entity\)$/, optional: browserName === 'firefox', reason: `browser reports the intentional upload rejection for ${file.name}` });
   }
   const [response] = await Promise.all([
     page.waitForResponse((candidate) => candidate.request().method() === 'POST' && new URL(candidate.url()).pathname === `/${board}`),

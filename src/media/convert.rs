@@ -208,7 +208,7 @@ fn copy_as_is_with_mime(
     final_mime: &'static str,
 ) -> Result<ConversionResult> {
     let output = output_dir.join(format!("{file_stem}.{ext}"));
-    std::fs::copy(input, &output)
+    let _bytes_copied = std::fs::copy(input, &output)
         .with_context(|| format!("failed to copy upload to {}", output.display()))?;
     let final_size = file_size(&output)?;
     Ok(ConversionResult {

@@ -24,6 +24,17 @@ pub use admin::*;
 pub use board::*;
 pub use thread::*;
 
+/// Appends formatted HTML without allocating an intermediate string.
+///
+/// The `String` sink is infallible; an error indicates that a supplied `Display`
+/// implementation rejected formatting. Report that failure instead of silently
+/// discarding the result, while preserving the already rendered page fragment.
+pub(crate) fn append_html(html: &mut String, arguments: std::fmt::Arguments<'_>) {
+    if let Err(error) = html.write_fmt(arguments) {
+        tracing::error!(%error, "HTML formatting failed");
+    }
+}
+
 /// Selects the default page used by links to a board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreferredBoardView {
@@ -138,7 +149,9 @@ static STATIC_ASSET_VERSION: LazyLock<String> = LazyLock::new(compute_static_ass
 pub fn set_live_boards(boards: Vec<Board>) {
     *LIVE_BOARDS.write() = Arc::new(boards);
     // Thread-page ETags include this version so navigation changes invalidate them.
-    LIVE_BOARDS_VERSION.fetch_add(1, Ordering::Relaxed);
+    // The previous version is irrelevant; fetch_add intentionally wraps this
+    // cache invalidation counter after every representable version is used.
+    let _previous_version = LIVE_BOARDS_VERSION.fetch_add(1, Ordering::Relaxed);
     rebuild_live_board_nav();
 }
 
@@ -211,7 +224,7 @@ pub fn set_live_site_subtitle(subtitle: &str) {
 /// Pass an empty string to clear the admin override and fall back to the hard default.
 pub fn set_live_default_theme(theme: &str) {
     *LIVE_DEFAULT_THEME.write() = Arc::from(theme);
-    LIVE_THEME_VERSION.fetch_add(1, Ordering::Relaxed);
+    let _previous_version = LIVE_THEME_VERSION.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Read the current live default theme slug.
@@ -222,7 +235,7 @@ pub fn live_default_theme() -> Arc<str> {
 /// Replaces the in-memory theme snapshot.
 pub fn set_live_themes(themes: Vec<Theme>) {
     *LIVE_THEMES.write() = Arc::new(themes);
-    LIVE_THEME_VERSION.fetch_add(1, Ordering::Relaxed);
+    let _previous_version = LIVE_THEME_VERSION.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Returns a shared snapshot of the live themes.
@@ -373,9 +386,9 @@ fn mobile_board_group_html(
     for board in boards {
         let short = escape_html(&board.short_name);
         let href = board_href(&board.short_name, preferences);
-        let _ = write!(
-            items,
-            r#"<a class="mobile-board-link" href="{href}">/{short}/</a>"#,
+        append_html(
+            &mut items,
+            format_args!(r#"<a class="mobile-board-link" href="{href}">/{short}/</a>"#),
         );
     }
     format!(
@@ -588,7 +601,7 @@ pub const fn thread_autoupdate_script() -> &'static str {
 pub fn fmt_ts(ts: i64) -> String {
     match Local.timestamp_opt(ts, 0) {
         chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-        _ => "unknown".to_owned(),
+        chrono::LocalResult::None | chrono::LocalResult::Ambiguous(_, _) => "unknown".to_owned(),
     }
 }
 
@@ -597,7 +610,7 @@ pub fn fmt_ts(ts: i64) -> String {
 pub fn fmt_ts_short(ts: i64) -> String {
     match Local.timestamp_opt(ts, 0) {
         chrono::LocalResult::Single(dt) => dt.format("%m/%d/%y(%a)%H:%M:%S").to_string(),
-        _ => "?".to_owned(),
+        chrono::LocalResult::None | chrono::LocalResult::Ambiguous(_, _) => "?".to_owned(),
     }
 }
 
@@ -631,22 +644,29 @@ pub fn render_pagination(p: &Pagination, base_url: &str) -> String {
     let mut html = String::from(r#"<div class="pagination">"#);
 
     if p.has_prev() {
-        let _ = write!(
-            html,
-            r#"<a href="{}{sep}page={}">[prev]</a> "#,
-            safe_base,
-            p.page.saturating_sub(1),
-            sep = sep
+        append_html(
+            &mut html,
+            format_args!(
+                r#"<a href="{}{sep}page={}">[prev]</a> "#,
+                safe_base,
+                p.page.saturating_sub(1),
+                sep = sep
+            ),
         );
     }
-    let _ = write!(html, "page {} / {}", p.page, p.total_pages());
+    append_html(
+        &mut html,
+        format_args!("page {} / {}", p.page, p.total_pages()),
+    );
     if p.has_next() {
-        let _ = write!(
-            html,
-            r#" <a href="{}{sep}page={}">[next]</a>"#,
-            safe_base,
-            p.page.saturating_add(1),
-            sep = sep
+        append_html(
+            &mut html,
+            format_args!(
+                r#" <a href="{}{sep}page={}">[next]</a>"#,
+                safe_base,
+                p.page.saturating_add(1),
+                sep = sep
+            ),
         );
     }
 
@@ -803,23 +823,27 @@ pub fn base_layout_with_preferences(
         } else {
             ""
         };
-        let _ = write!(
-            theme_select_options,
-            r#"<option value="{slug}"{selected}>{label}</option>"#,
-            slug = escape_html(&theme.slug),
-            selected = selected_attr,
-            label = escape_html(&theme.display_name),
+        append_html(
+            &mut theme_select_options,
+            format_args!(
+                r#"<option value="{slug}"{selected}>{label}</option>"#,
+                slug = escape_html(&theme.slug),
+                selected = selected_attr,
+                label = escape_html(&theme.display_name),
+            ),
         );
-        let _ = write!(
-            theme_noscript_buttons,
-            r#"<button type="submit" name="theme" value="{slug}" aria-pressed="{selected}">{label}</button>"#,
-            slug = escape_html(&theme.slug),
-            selected = if theme.slug == active_theme {
-                "true"
-            } else {
-                "false"
-            },
-            label = escape_html(&theme.display_name),
+        append_html(
+            &mut theme_noscript_buttons,
+            format_args!(
+                r#"<button type="submit" name="theme" value="{slug}" aria-pressed="{selected}">{label}</button>"#,
+                slug = escape_html(&theme.slug),
+                selected = if theme.slug == active_theme {
+                    "true"
+                } else {
+                    "false"
+                },
+                label = escape_html(&theme.display_name),
+            ),
         );
     }
     let theme_select_disabled = if theme_select_options.is_empty() {

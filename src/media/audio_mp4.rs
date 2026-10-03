@@ -51,7 +51,10 @@ impl Presentation {
             emitted = emitted
                 .checked_add(*count)
                 .context("MP4 presentation length overflow")?;
-            self.next += 1;
+            self.next = self
+                .next
+                .checked_add(1)
+                .context("MP4 edit cursor overflow")?;
         }
         Ok(emitted)
     }
@@ -77,7 +80,10 @@ impl Presentation {
                 .context("MP4 frame position overflow")?
                 >= *end
             {
-                self.next += 1;
+                self.next = self
+                    .next
+                    .checked_add(1)
+                    .context("MP4 edit cursor overflow")?;
             }
         }
         self.position = self
@@ -137,7 +143,7 @@ impl<F: FnMut() -> Result<()>> Reader<F> {
                 .is_some_and(|end| end <= atom.end),
             "truncated MP4 timing field"
         );
-        self.file.seek(SeekFrom::Start(start))?;
+        let _position = self.file.seek(SeekFrom::Start(start))?;
         let mut bytes = [0; N];
         self.file.read_exact(&mut bytes)?;
         Ok(bytes)
@@ -150,10 +156,16 @@ impl<F: FnMut() -> Result<()>> Reader<F> {
         while cursor < end {
             (self.check)()?;
             ensure!(
-                self.boxes < MAX_BOXES && end - cursor >= 8,
+                self.boxes < MAX_BOXES
+                    && end
+                        .checked_sub(cursor)
+                        .is_some_and(|remaining| remaining >= 8),
                 "MP4 timing box budget or extent invalid"
             );
-            self.boxes += 1;
+            self.boxes = self
+                .boxes
+                .checked_add(1)
+                .context("MP4 box count overflow")?;
             let outer = Atom {
                 kind: [0; 4],
                 body: cursor,
@@ -162,7 +174,11 @@ impl<F: FnMut() -> Result<()>> Reader<F> {
             let size = u32::from_be_bytes(self.field::<4>(outer, 0)?);
             let kind = self.field::<4>(outer, 4)?;
             let (size, header) = match size {
-                0 => (end - cursor, 8),
+                0 => (
+                    end.checked_sub(cursor)
+                        .context("invalid MP4 box boundary")?,
+                    8,
+                ),
                 1 => (u64::from_be_bytes(self.field::<8>(outer, 8)?), 16),
                 size => (u64::from(size), 8),
             };
@@ -175,12 +191,52 @@ impl<F: FnMut() -> Result<()>> Reader<F> {
             );
             atoms.push(Atom {
                 kind,
-                body: cursor + header,
+                body: cursor
+                    .checked_add(header)
+                    .context("MP4 box header overflow")?,
                 end: next,
             });
             cursor = next;
         }
         Ok(atoms)
+    }
+
+    /// Decode one bounded edit, validating media time before rate compatibility.
+    fn edit_entry(&mut self, elst: Atom, offset: u64, version: u8) -> Result<(u64, i64, bool)> {
+        let (duration, start, rate_offset) = if version == 0 {
+            (
+                u64::from(u32::from_be_bytes(self.field::<4>(elst, offset)?)),
+                i64::from(i32::from_be_bytes(
+                    self.field::<4>(
+                        elst,
+                        offset
+                            .checked_add(4)
+                            .context("MP4 edit field offset overflow")?,
+                    )?,
+                )),
+                offset
+                    .checked_add(8)
+                    .context("MP4 edit field offset overflow")?,
+            )
+        } else {
+            (
+                u64::from_be_bytes(self.field::<8>(elst, offset)?),
+                i64::from_be_bytes(
+                    self.field::<8>(
+                        elst,
+                        offset
+                            .checked_add(8)
+                            .context("MP4 edit field offset overflow")?,
+                    )?,
+                ),
+                offset
+                    .checked_add(16)
+                    .context("MP4 edit field offset overflow")?,
+            )
+        };
+        ensure!(start >= -1, "invalid MP4 edit media time");
+        let non_unit_rate = self.field::<4>(elst, rate_offset)? != [0, 1, 0, 0];
+        Ok((duration, start, non_unit_rate))
     }
 
     /// Validate full-box version and select its 32/64-bit timestamp fields.
@@ -270,7 +326,10 @@ pub(in crate::media) fn declared_video_codec(
         _ => return Ok(None),
     };
     ensure!(
-        entry.end - entry.body >= 78,
+        entry
+            .end
+            .checked_sub(entry.body)
+            .is_some_and(|size| size >= 78),
         "truncated MP4 visual sample entry"
     );
     Ok(Some(codec))
@@ -280,8 +339,20 @@ pub(in crate::media) fn declared_video_codec(
 fn frames(units: u64, scale: u32, rate: u32) -> Result<u64> {
     ensure!(scale > 0 && rate > 0, "invalid MP4 timing scale");
     Ok(u64::try_from(
-        (u128::from(units) * u128::from(rate) + u128::from(scale) / 2) / u128::from(scale),
+        u128::from(units)
+            .checked_mul(u128::from(rate))
+            .and_then(|numerator| numerator.checked_add(u128::from(scale) / 2))
+            .and_then(|rounded| rounded.checked_div(u128::from(scale)))
+            .context("MP4 sample frame conversion overflow")?,
     )?)
+}
+
+/// Compute the checked byte offset of an edit-table entry after its header.
+fn edit_offset(index: u64, size: u64) -> Result<u64> {
+    index
+        .checked_mul(size)
+        .and_then(|bytes| bytes.checked_add(8))
+        .context("MP4 edit table offset overflow")
 }
 
 /// Valid but unimplemented temporal operations retain an explicit compatibility path.
@@ -343,7 +414,7 @@ pub(super) fn read(
     ensure!(count <= MAX_EDITS, "MP4 edit budget exceeded");
     let size = if version == 0 { 12 } else { 20 };
     ensure!(
-        elst.end - elst.body == 8 + u64::try_from(count)? * size,
+        elst.end.checked_sub(elst.body) == Some(edit_offset(u64::try_from(count)?, size)?),
         "invalid MP4 edit table size"
     );
     let mut edits = Vec::with_capacity(count);
@@ -351,36 +422,25 @@ pub(super) fn read(
     let mut previous_end = 0_u64;
     let mut compatibility = false;
     for index in 0..count {
-        let offset = 8 + u64::try_from(index)? * size;
-        let (duration, start, rate_offset) = if version == 0 {
-            (
-                u64::from(u32::from_be_bytes(reader.field::<4>(elst, offset)?)),
-                i64::from(i32::from_be_bytes(reader.field::<4>(elst, offset + 4)?)),
-                offset + 8,
-            )
-        } else {
-            (
-                u64::from_be_bytes(reader.field::<8>(elst, offset)?),
-                i64::from_be_bytes(reader.field::<8>(elst, offset + 8)?),
-                offset + 16,
-            )
-        };
-        ensure!(start >= -1, "invalid MP4 edit media time");
-        compatibility |= reader.field::<4>(elst, rate_offset)? != [0, 1, 0, 0];
+        let offset = edit_offset(u64::try_from(index)?, size)?;
+        let (duration, start, non_unit_rate) = reader.edit_entry(elst, offset, version)?;
+        compatibility |= non_unit_rate;
         let old_end = frames(movie_end, movie_scale, rate)?;
         movie_end = movie_end
             .checked_add(duration)
             .context("MP4 movie duration overflow")?;
-        let duration = frames(movie_end, movie_scale, rate)? - old_end;
-        if duration == 0 {
+        let duration_frames = frames(movie_end, movie_scale, rate)?
+            .checked_sub(old_end)
+            .context("MP4 edit frame range is reversed")?;
+        if duration_frames == 0 {
             continue;
         }
         if start == -1 {
-            edits.push(Edit::Silence(duration));
+            edits.push(Edit::Silence(duration_frames));
         } else {
             let start = frames(u64::try_from(start)?, media_scale, rate)?;
             let end = start
-                .checked_add(duration)
+                .checked_add(duration_frames)
                 .context("MP4 media duration overflow")?;
             compatibility |= start < previous_end;
             previous_end = end;
@@ -499,7 +559,7 @@ mod tests {
             next: 0,
             position: 0,
         };
-        missing.frame(0.5, &mut |_| Ok(()), || Ok(()))?;
+        let _decoded_frames = missing.frame(0.5, &mut |_| Ok(()), || Ok(()))?;
         ensure!(
             missing.finish(&mut |_| Ok(()), || Ok(())).is_err(),
             "missing media was invented"

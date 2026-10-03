@@ -77,7 +77,7 @@ pub(super) async fn healthz() -> impl IntoResponse {
 pub(super) async fn readyz(State(state): State<AppState>) -> Response {
     let mut response = readyz_response(state, CONFIG.public_readiness_details).await;
     if let Ok(value) = axum::http::HeaderValue::from_str(&crate::restart::INSTANCE.to_string()) {
-        response.headers_mut().insert("x-rustchan-instance", value);
+        let _previous_value = response.headers_mut().insert("x-rustchan-instance", value);
     }
     response
 }
@@ -233,11 +233,12 @@ async fn metrics_response(state: AppState) -> Response {
         move || -> (i64, i64, bool, i64, bool, i64) {
             let full_backups = list_backup_files(&full_backup_dir(), BackupListKind::Full);
             let full_backup_count = i64::try_from(full_backups.len()).unwrap_or(i64::MAX);
-            let latest_full_backup_verified =
-                full_backups.first().is_some_and(|backup| backup.verified);
+            let latest_full_backup_verified = full_backups
+                .first()
+                .is_some_and(|backup_file| backup_file.verified);
             let latest_full_backup_age_seconds = full_backups
                 .first()
-                .and_then(|backup| backup.modified_epoch)
+                .and_then(|backup_file| backup_file.modified_epoch)
                 .map_or(-1, |ts| {
                     chrono::Utc::now().timestamp().saturating_sub(ts).max(0)
                 });

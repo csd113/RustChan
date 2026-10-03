@@ -120,14 +120,21 @@ pub(crate) async fn request_to(
             }),
             async {
                 let mut socket = tokio::net::UnixStream::connect(socket_path).await?;
-                let data = serde_json::to_vec(request)?;
-                anyhow::ensure!(data.len() < 4096, "updater request is too large");
-                socket.write_all(&data).await?;
+                let request_bytes = serde_json::to_vec(request)?;
+                anyhow::ensure!(request_bytes.len() < 4096, "updater request is too large");
+                socket.write_all(&request_bytes).await?;
                 socket.shutdown().await?;
-                let mut data = Vec::new();
-                socket.take(512 * 1024 + 1).read_to_end(&mut data).await?;
-                anyhow::ensure!(data.len() <= 512 * 1024, "updater response is too large");
-                serde_json::from_slice(&data).map_err(Into::into)
+                let mut checked_data = Vec::new();
+                socket
+                    .take(512 * 1024 + 1)
+                    .read_to_end(&mut checked_data)
+                    .await
+                    .map(|_bytes_read| ())?;
+                anyhow::ensure!(
+                    checked_data.len() <= 512 * 1024,
+                    "updater response is too large"
+                );
+                serde_json::from_slice(&checked_data).map_err(Into::into)
             },
         )
         .await?
@@ -158,7 +165,7 @@ pub async fn await_startup() -> anyhow::Result<()> {
     if !managed() {
         return Ok(());
     }
-    for _ in 0..120 {
+    for _ in 0_i32..120_i32 {
         if request(&Request::Ready {
             version: VERSION.to_owned(),
         })
@@ -172,7 +179,8 @@ pub async fn await_startup() -> anyhow::Result<()> {
     anyhow::bail!("updater recovery has not authorized application startup")
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 /// Fail-closed IPC admission and protocol boundary tests.
 mod tests {
     use super::*;
@@ -193,7 +201,7 @@ mod tests {
             "arbitrary commands must be rejected"
         );
         for extra in ["command", "arguments", "service", "executable", "path"] {
-            let value = serde_json::json!({"operation":"restart", "instance": uuid::Uuid::new_v4(), "administrator":1, extra: "anything"});
+            let value = serde_json::json!({"operation":"restart", "instance": uuid::Uuid::new_v4(), "administrator":1_i32, extra: "anything"});
             anyhow::ensure!(
                 serde_json::from_value::<Request>(value).is_err(),
                 "restart must reject arbitrary {extra}"

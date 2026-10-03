@@ -69,7 +69,10 @@ pub(super) async fn snapshot() -> Status {
             .ok()
             .and_then(|file| {
                 let mut bytes = Vec::new();
-                file.take(512 * 1024 + 1).read_to_end(&mut bytes).ok()?;
+                file.take(512 * 1024 + 1)
+                    .read_to_end(&mut bytes)
+                    .ok()
+                    .map(|_completed_value| ())?;
                 (bytes.len() <= 512 * 1024).then_some(bytes)
             })
             .and_then(|bytes| serde_json::from_slice::<Status>(&bytes).ok());
@@ -87,7 +90,7 @@ pub(in crate::server) async fn status(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Response> {
-    authorize(&state, &jar).await?;
+    authorize(&state, &jar).await.map(|_completed_value| ())?;
     Ok(Json(snapshot().await).into_response())
 }
 
@@ -100,7 +103,7 @@ pub(in crate::server) async fn check(
     Form(form): Form<CheckForm>,
 ) -> Result<Response> {
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
-    authorize(&state, &jar).await?;
+    authorize(&state, &jar).await.map(|_completed_value| ())?;
     let _guard = state.maintenance_gate.try_begin("Software update check")?;
     let outcome = if updates::managed() {
         updates::request(&Request::Check).await.and_then(|reply| {
@@ -170,7 +173,7 @@ pub(in crate::server) async fn install(
         if password.len() > 1024
             || !crate::utils::crypto::verify_password(&password, &user.password_hash)?
         {
-            super::auth::record_login_fail(&key);
+            let _failure_count = super::auth::record_login_fail(&key);
             return Err(AppError::Forbidden(
                 "Current password did not verify. No update started.".to_owned(),
             ));
@@ -191,7 +194,7 @@ pub(in crate::server) async fn install(
     })
     .await;
     let acknowledged = outcome.is_ok();
-    tokio::spawn(async move {
+    drop(tokio::spawn(async move {
         let _guard = guard;
         loop {
             if updates::request(&Request::Status)
@@ -202,7 +205,7 @@ pub(in crate::server) async fn install(
             }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
-    });
+    }));
     let reply = outcome.map_err(|_error| {
         AppError::BadRequest(
             "Updater unavailable; reload Software Updates to check the persisted result."

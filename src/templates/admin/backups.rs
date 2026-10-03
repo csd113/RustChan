@@ -1,7 +1,6 @@
 //! Full-site and per-board backup sections of the admin panel.
 
 use super::{escape_html, format_file_size, render_board_backup_card, AdminPanelViewModel};
-use std::fmt::Write as _;
 
 /// Renders the complete backups tab of the admin panel.
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
@@ -88,11 +87,13 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
         };
         let mut board_options = String::new();
         for board in &bf.boards {
-            let _ = write!(
-                board_options,
-                r#"<option value="{short}">/{short}/ — {name}</option>"#,
-                short = escape_html(&board.short_name),
-                name = escape_html(&board.name)
+            crate::templates::append_html(
+                &mut board_options,
+                format_args!(
+                    r#"<option value="{short}">/{short}/ — {name}</option>"#,
+                    short = escape_html(&board.short_name),
+                    name = escape_html(&board.name)
+                ),
             );
         }
         let board_picker = if bf.boards.is_empty() {
@@ -131,11 +132,13 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
         } else {
             let mut links = String::new();
             for part in &bf.part_filenames {
-                let _ = write!(
-                    links,
-                    r#"<li><a href="/admin/backup/download/full/{backup_ref}?part={part}">{part}</a></li>"#,
-                    backup_ref = escape_html(&bf.backup_ref),
-                    part = escape_html(part)
+                crate::templates::append_html(
+                    &mut links,
+                    format_args!(
+                        r#"<li><a href="/admin/backup/download/full/{backup_ref}?part={part}">{part}</a></li>"#,
+                        backup_ref = escape_html(&bf.backup_ref),
+                        part = escape_html(part)
+                    ),
                 );
             }
             format!(
@@ -182,9 +185,10 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
                 fname = bf.filename
             )
         };
-        let _ = write!(
-            full_backup_rows,
-            r#"<tr>
+        crate::templates::append_html(
+            &mut full_backup_rows,
+            format_args!(
+                r#"<tr>
 <td class="backup-filename-cell">
   <div class="backup-filename">{backup_id}</div>
   <div class="backup-submeta">{scope} · {mode} · {part_summary}</div>
@@ -241,25 +245,26 @@ fn render_full_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
   </div>
 </td>
 </tr>"#,
-            backup_id = escape_html(&bf.backup_id),
-            backup_ref = escape_html(&bf.backup_ref),
-            scope = escape_html(&bf.scope),
-            mode = escape_html(&bf.mode),
-            part_summary = escape_html(&part_summary),
-            part_downloads = part_downloads,
-            indexed_boards_summary = escape_html(&indexed_boards_summary),
-            tor_backup_summary = escape_html(tor_backup_summary),
-            size = size_fmt,
-            modified = escape_html(&bf.modified),
-            status = status_html,
-            csrf = escape_html(view.csrf_token),
-            download_link = download_link,
-            restore_tor_keys_option = restore_tor_keys_option,
-            restore_confirm = escape_html(&restore_confirm),
-            manifest_path = escape_html(&bf.manifest_path),
-            server_path = escape_html(&bf.server_path),
-            board_picker = board_picker,
-            board_help = escape_html(board_help),
+                backup_id = escape_html(&bf.backup_id),
+                backup_ref = escape_html(&bf.backup_ref),
+                scope = escape_html(&bf.scope),
+                mode = escape_html(&bf.mode),
+                part_summary = escape_html(&part_summary),
+                part_downloads = part_downloads,
+                indexed_boards_summary = escape_html(&indexed_boards_summary),
+                tor_backup_summary = escape_html(tor_backup_summary),
+                size = size_fmt,
+                modified = escape_html(&bf.modified),
+                status = status_html,
+                csrf = escape_html(view.csrf_token),
+                download_link = download_link,
+                restore_tor_keys_option = restore_tor_keys_option,
+                restore_confirm = escape_html(&restore_confirm),
+                manifest_path = escape_html(&bf.manifest_path),
+                server_path = escape_html(&bf.server_path),
+                board_picker = board_picker,
+                board_help = escape_html(board_help),
+            ),
         );
     }
     full_backup_rows
@@ -376,9 +381,10 @@ fn render_board_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
         } else {
             String::new()
         };
-        let _ = write!(
-            board_backup_rows,
-            r#"<tr>
+        crate::templates::append_html(
+            &mut board_backup_rows,
+            format_args!(
+                r#"<tr>
 <td class="backup-filename-cell">
   <div class="backup-filename">{backup_id}</div>
   <div class="backup-submeta">{mode}</div>
@@ -416,17 +422,18 @@ fn render_board_backup_rows(view: &AdminPanelViewModel<'_>) -> String {
   </div>
 </td>
 </tr>"#,
-            backup_id = escape_html(&bf.backup_id),
-            backup_ref = escape_html(&bf.backup_ref),
-            scope = escape_html(&bf.scope),
-            mode = escape_html(&bf.mode),
-            size = size_fmt,
-            modified = escape_html(&bf.modified),
-            status = status_html,
-            csrf = escape_html(view.csrf_token),
-            download_link = download_link,
-            manifest_path = escape_html(&bf.manifest_path),
-            server_path = escape_html(&bf.server_path),
+                backup_id = escape_html(&bf.backup_id),
+                backup_ref = escape_html(&bf.backup_ref),
+                scope = escape_html(&bf.scope),
+                mode = escape_html(&bf.mode),
+                size = size_fmt,
+                modified = escape_html(&bf.modified),
+                status = status_html,
+                csrf = escape_html(view.csrf_token),
+                download_link = download_link,
+                manifest_path = escape_html(&bf.manifest_path),
+                server_path = escape_html(&bf.server_path),
+            ),
         );
     }
     board_backup_rows
@@ -441,9 +448,9 @@ fn split_zip_part_size_options(selected_gib: u64) -> String {
         } else {
             ""
         };
-        let _ = write!(
-            options,
-            r#"<option value="{value}"{selected}>{value} GiB</option>"#
+        crate::templates::append_html(
+            &mut options,
+            format_args!(r#"<option value="{value}"{selected}>{value} GiB</option>"#),
         );
     }
     options

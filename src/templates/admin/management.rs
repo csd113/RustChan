@@ -1,7 +1,5 @@
 //! Actionable offline relocation and secret rotation without exposing material.
 
-use std::fmt::Write as _;
-
 use crate::config::admin::management::ManagementState;
 use crate::utils::sanitize::escape_html;
 
@@ -34,7 +32,7 @@ pub(super) fn render(state: &Result<ManagementState, String>, csrf: &str) -> Str
             s.uploads_source.as_str(),
         ),
     ] {
-        let _ = write!(paths, "<tr><th scope=\"row\">{label}</th><td><code>{}</code></td><td><code>{}</code></td><td><code>{}</code></td><td>{source}<br>Restart required for changes; paths alone do not migrate data.</td></tr>", escape_html(active), escape_html(saved), escape_html(next), source = escape_html(source));
+        crate::templates::append_html(&mut paths, format_args!( "<tr><th scope=\"row\">{label}</th><td><code>{}</code></td><td><code>{}</code></td><td><code>{}</code></td><td>{source}<br>Restart required for changes; paths alone do not migrate data.</td></tr>", escape_html(active), escape_html(saved), escape_html(next), source = escape_html(source)));
     }
     let saved_secret = if s.secret_saved {
         "configured material withheld"

@@ -83,7 +83,7 @@ fn probe_tool(program: &str) -> bool {
 /// Probes an external tool with explicit arguments and a bounded timeout.
 fn probe_tool_with_args(program: &str, args: &[&str]) -> bool {
     let mut command = Command::new(program);
-    command
+    let _configured = command
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -263,7 +263,7 @@ pub fn tor_stream_token_identity(
 struct TokenGuard(SocketAddr);
 impl Drop for TokenGuard {
     fn drop(&mut self) {
-        TOR_STREAM_TOKENS.remove(&self.0);
+        let _previous_value = TOR_STREAM_TOKENS.remove(&self.0);
     }
 }
 
@@ -300,7 +300,7 @@ pub fn detect_tor(
         loop {
             tracing::info!(
                 target: "rustchan::detect",
-                attempt = attempt + 1,
+                attempt = attempt.saturating_add(1),
                 "Starting Tor"
             );
             let run_start = Instant::now();
@@ -375,12 +375,12 @@ async fn run_arti(
 
     let cache_dir = crate::config::runtime_tor_cache_dir();
     let state_dir = crate::config::runtime_tor_state_dir();
-    let key_dir = crate::config::runtime_tor_hidden_service_keys_dir();
+    let service_key_dir = crate::config::runtime_tor_hidden_service_keys_dir();
     tracing::info!(
         target: "rustchan::detect",
         cache_dir  = %cache_dir.display(),
         state_dir  = %state_dir.display(),
-        key_dir    = %key_dir.display(),
+        key_dir    = %service_key_dir.display(),
         "Tor: bootstrapping — first run downloads ~2 MB of directory data"
     );
 
@@ -403,11 +403,11 @@ async fn run_arti(
     tracing::info!(target: "rustchan::detect", "Tor: connected to the Tor network");
 
     // Configurable nicknames distinguish instances that share Arti state.
-    let key_dir = crate::config::runtime_tor_hidden_service_keys_dir();
+    let onion_key_dir = crate::config::runtime_tor_hidden_service_keys_dir();
     tracing::info!(
         target: "rustchan::detect",
         nickname = %crate::config::CONFIG.tor_service_nickname,
-        key_dir = %key_dir.display(),
+        key_dir = %onion_key_dir.display(),
         "Tor: launching onion service"
     );
     let svc_config = OnionServiceConfigBuilder::default()
@@ -529,7 +529,7 @@ fn spawn_tor_stream_proxy(
     permit: tokio::sync::OwnedSemaphorePermit,
     local_addr: Arc<str>,
 ) {
-    tokio::spawn(async move {
+    drop(tokio::spawn(async move {
         let result = proxy_tor_stream(stream_req, &local_addr).await;
         drop(permit);
         if let Err(e) = result {
@@ -550,7 +550,7 @@ fn spawn_tor_stream_proxy(
                 );
             }
         }
-    });
+    }));
 }
 
 // Connection proxy
@@ -580,10 +580,12 @@ async fn proxy_tor_stream(
         Arc::from(format!("tor:{}", hex::encode(bytes)).as_str())
     };
     // _guard removes the map entry when this task ends (connection closed or error).
-    TOR_STREAM_TOKENS.insert(local_peer, Arc::clone(&token));
+    let _previous_value = TOR_STREAM_TOKENS.insert(local_peer, Arc::clone(&token));
     let _guard = TokenGuard(local_peer);
 
-    tokio::io::copy_bidirectional(&mut tor_stream, &mut local).await?;
+    tokio::io::copy_bidirectional(&mut tor_stream, &mut local)
+        .await
+        .map(|_completed_value| ())?;
     Ok(())
 }
 
@@ -593,7 +595,7 @@ async fn proxy_tor_stream(
 /// [`HsId`] does not implement `std::fmt::Display` in arti-client.
 /// Encoded manually using `HsId: AsRef<[u8; 32]>`.
 ///
-/// Format: `base32( pubkey || sha3_256(".onion checksum" || pubkey || version)[..2] || version )`
+/// Format: `base32( pubkey || sha3_256(".onion checksum" || pubkey || version)[..2] || version )`.
 fn hsid_to_onion_address(hsid: HsId) -> String {
     use sha3::{Digest as _, Sha3_256};
 

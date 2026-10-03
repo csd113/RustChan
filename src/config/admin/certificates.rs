@@ -161,7 +161,8 @@ fn validate_pair(cert_path: &Path, key_path: &Path) -> anyhow::Result<()> {
         .context("TLS protocol configuration")?
         .with_no_client_auth()
         .with_single_cert(certificates, key)
-        .context("certificate and key do not form a usable pair")?;
+        .context("certificate and key do not form a usable pair")
+        .map(|_validated_value| ())?;
     Ok(())
 }
 
@@ -175,7 +176,9 @@ fn read_material(path: &Path) -> anyhow::Result<Vec<u8>> {
         "certificate/key must be a regular file no larger than 1 MiB"
     );
     let mut bytes = Vec::new();
-    file.take(1_048_577).read_to_end(&mut bytes)?;
+    file.take(1_048_577)
+        .read_to_end(&mut bytes)
+        .map(|_bytes_read| ())?;
     ensure!(
         bytes.len() <= 1_048_576,
         "certificate/key grew beyond 1 MiB"
@@ -198,7 +201,7 @@ pub(super) fn rewrite_tls(
             matches!(table, "tls" | "tls.acme" | "tls.manual_cert"),
             "unknown TLS table"
         );
-        groups
+        let _previous_value = groups
             .entry(table)
             .or_default()
             .insert(key.to_owned(), value.clone());
@@ -212,11 +215,13 @@ pub(super) fn rewrite_tls(
 /// Locate real headers by parsing them; ignore header-like lines in scalar values.
 fn table_range(content: &str, table: &str) -> anyhow::Result<Option<std::ops::Range<usize>>> {
     let spans: BTreeMap<String, toml::Spanned<toml::Value>> = toml::from_str(content)?;
-    let mut offset = 0;
+    let mut offset = 0_usize;
     let mut found = None;
     for line in content.split_inclusive('\n') {
         let start = offset;
-        offset += line.len();
+        offset = offset
+            .checked_add(line.len())
+            .context("TLS table offset overflow")?;
         if !line.trim_start().starts_with('[')
             || spans
                 .values()
@@ -262,14 +267,14 @@ fn rewrite_table(
     }
     for (key, value) in updates {
         if let Some(value) = value {
-            target.insert(key.clone(), value.clone());
+            let _previous_value = target.insert(key.clone(), value.clone());
         } else {
-            target.remove(key);
+            let _previous_value = target.remove(key);
         }
     }
     let remove_manual = table == "tls.manual_cert" && target.is_empty();
     if remove_manual {
-        expected
+        let _previous_value = expected
             .get_mut("tls")
             .and_then(toml::Value::as_table_mut)
             .context("missing TLS")?
@@ -278,7 +283,9 @@ fn rewrite_table(
     let mut output = content.to_owned();
     if let Some(range) = table_range(content, table)? {
         let section = content.get(range.clone()).context("invalid TLS range")?;
-        let header_end = section.find('\n').map_or(section.len(), |p| p + 1);
+        let header_end = section
+            .find('\n')
+            .map_or(section.len(), |p| p.saturating_add(1));
         let body = section.get(header_end..).context("invalid TLS header")?;
         // Parsing the isolated body ensures no nested/inline table gets silently overwritten.
         let parsed: BTreeMap<String, toml::Spanned<toml::Value>> =
@@ -363,7 +370,7 @@ mod tests {
     fn tls_roundtrip_preserves_comments_and_clears_optional_sources() -> anyhow::Result<()> {
         let before = "# keep root\nport = 3000\n[tls] # listener\nenabled = false # keep inline\n[tls.acme]\nstaging = true # test CA\ndomains = [\n 'example.test', # keep note\n]\n[unrelated]\nvalue = 42\n";
         let mut form = form(before)?;
-        form.insert("tls.port".into(), "9443".into());
+        let _previous_value = form.insert("tls.port".into(), "9443".into());
         let updates = super::super::parse_settings_form(SETTINGS, &form)?;
         let after = rewrite_tls(before, &updates)?;
         for comment in [
@@ -401,7 +408,7 @@ mod tests {
             ("tls.acme.cache_dir", "../outside"),
         ] {
             let mut form = form(before)?;
-            form.insert(key.into(), value.into());
+            let _previous_value = form.insert(key.into(), value.into());
             let updates = super::super::parse_settings_form(SETTINGS, &form)?;
             ensure!(
                 super::super::save_root_at(

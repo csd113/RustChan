@@ -72,8 +72,10 @@ Rust checks are:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --locked --workspace --all-targets --all-features
+cargo check --locked --workspace --all-targets --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 ```
 
 Use the Playwright harness under `tests/e2e/` for public UI, admin UI, media,

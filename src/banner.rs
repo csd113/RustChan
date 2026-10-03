@@ -250,7 +250,10 @@ pub fn validate_banner_restore_entry_name(name: &str) -> Result<String> {
         .next()
         .and_then(|component| match component {
             Component::Normal(value) => value.to_str(),
-            _ => None,
+            Component::Prefix(_)
+            | Component::RootDir
+            | Component::CurDir
+            | Component::ParentDir => None,
         })
         .ok_or_else(|| anyhow::anyhow!("Banner restore entry name is not valid UTF-8."))?;
     if scope != "global" && scope != "home" {
@@ -260,7 +263,10 @@ pub fn validate_banner_restore_entry_name(name: &str) -> Result<String> {
         .next()
         .and_then(|component| match component {
             Component::Normal(value) => value.to_str(),
-            _ => None,
+            Component::Prefix(_)
+            | Component::RootDir
+            | Component::CurDir
+            | Component::ParentDir => None,
         })
         .ok_or_else(|| anyhow::anyhow!("Banner restore entry name is not valid UTF-8."))?;
     let extension = Path::new(file_name)
@@ -540,11 +546,16 @@ pub fn choose_active_banner(
         );
     }
     if settings.rotation_interval_minutes > 0 {
-        let bucket = chrono::Utc::now().timestamp()
-            / settings
-                .rotation_interval_minutes
-                .saturating_mul(60)
-                .max(60);
+        let interval_seconds = settings
+            .rotation_interval_minutes
+            .saturating_mul(60)
+            .max(60);
+        let Some(bucket) = chrono::Utc::now().timestamp().checked_div(interval_seconds) else {
+            // The positive interval rules out both division by zero and the
+            // signed MIN / -1 overflow; retain an explicit fail-closed guard.
+            tracing::error!(interval_seconds, "Invalid banner rotation interval");
+            return (None, "invalid-rotation".to_owned(), false);
+        };
         let len = i64::try_from(candidates.len()).unwrap_or(1);
         let index = usize::try_from(bucket.rem_euclid(len)).unwrap_or(0);
         let asset = candidates.get(index).cloned();
@@ -557,7 +568,7 @@ pub fn choose_active_banner(
 
     let nonce = uuid::Uuid::new_v4().as_u128();
     let len = u128::try_from(candidates.len()).unwrap_or(1);
-    let index = usize::try_from(nonce % len).unwrap_or(0);
+    let index = usize::try_from(nonce.rem_euclid(len)).unwrap_or(0);
     let asset = candidates.get(index).cloned();
     let fragment = asset.as_ref().map_or_else(
         || "none".to_owned(),
@@ -897,7 +908,7 @@ fn count_gif_frames(bytes: &[u8]) -> usize {
     let mut frame_markers = 0usize;
     for window in bytes.windows(2) {
         if window == [0x21, 0xF9] {
-            frame_markers += 1;
+            frame_markers = frame_markers.saturating_add(1);
         }
     }
     frame_markers.max(1)
@@ -910,10 +921,10 @@ fn is_animated_webp(bytes: &[u8]) -> bool {
     }
     let mut offset = 12usize;
     while offset.saturating_add(8) <= bytes.len() {
-        let Some(chunk_type) = bytes.get(offset..offset + 4) else {
+        let Some(chunk_type) = bytes.get(offset..offset.saturating_add(4)) else {
             return false;
         };
-        let Some(size_bytes) = bytes.get(offset + 4..offset + 8) else {
+        let Some(size_bytes) = bytes.get(offset.saturating_add(4)..offset.saturating_add(8)) else {
             return false;
         };
         let Ok(size_bytes) = <[u8; 4]>::try_from(size_bytes) else {

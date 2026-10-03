@@ -183,12 +183,17 @@ pub fn save_audio_with_image_thumb_from_path(
         Path::new(boards_dir),
         &file_path_abs,
     )
-    .context("Upload destination failed safety validation")?;
+    .context("Upload destination failed safety validation")
+    .map(|_completed_value| ())?;
     let tmp = tempfile::NamedTempFile::new_in(&dest_dir)
         .context("Failed to create temp file for audio upload")?;
-    std::fs::copy(input_path, tmp.path()).context("Failed to copy audio upload to temp file")?;
-    tmp.persist(&file_path_abs)
-        .context("Failed to atomically rename audio temp file")?;
+    std::fs::copy(input_path, tmp.path())
+        .context("Failed to copy audio upload to temp file")
+        .map(|_completed_value| ())?;
+    drop(
+        tmp.persist(&file_path_abs)
+            .context("Failed to atomically rename audio temp file")?,
+    );
 
     Ok(UploadedFile {
         file_path: format!("{board_short}/{filename}"),
@@ -289,12 +294,14 @@ fn prepare_processor_input(
             Err(error) => {
                 tracing::warn!("JPEG EXIF strip failed ({error}); using original bytes");
                 std::fs::copy(input_path, tmp.path())
-                    .context("Failed to copy original JPEG into processor temp file")?;
+                    .context("Failed to copy original JPEG into processor temp file")
+                    .map(|_completed_value| ())?;
             }
         }
     } else {
         std::fs::copy(input_path, tmp.path())
-            .context("Failed to copy upload into processor temp file")?;
+            .context("Failed to copy upload into processor temp file")
+            .map(|_completed_value| ())?;
     }
 
     Ok(tmp)
@@ -476,12 +483,17 @@ fn save_generic_upload(
         Path::new(options.boards_dir),
         &file_path_abs,
     )
-    .context("Generic upload destination failed safety validation")?;
+    .context("Generic upload destination failed safety validation")
+    .map(|_completed_value| ())?;
     let tmp = tempfile::NamedTempFile::new_in(&plan.dest_dir)
         .context("Failed to create temp file for generic upload")?;
-    std::fs::copy(input_path, tmp.path()).context("Failed to copy generic upload to temp file")?;
-    tmp.persist(&file_path_abs)
-        .context("Failed to atomically rename generic upload temp file")?;
+    std::fs::copy(input_path, tmp.path())
+        .context("Failed to copy generic upload to temp file")
+        .map(|_completed_value| ())?;
+    drop(
+        tmp.persist(&file_path_abs)
+            .context("Failed to atomically rename generic upload temp file")?,
+    );
 
     let persisted_mime = if plan.mime_type == AMBIGUOUS_WEBM_MIME {
         super::fallback_download_mime_type()
@@ -678,7 +690,7 @@ const fn media_label(media_type: crate::models::MediaType) -> &'static str {
 /// the decoded pixel limit, or cannot be decoded as its declared format.
 fn validate_decodable_image(input_path: &Path, mime_type: &str) -> Result<()> {
     if matches!(mime_type, "image/heic" | "image/heif") {
-        crate::media::heif::decode(input_path)?;
+        crate::media::heif::decode(input_path).map(|_completed_value| ())?;
         return Ok(());
     }
     let Some(format) = mime_to_image_format(mime_type) else {
@@ -701,11 +713,14 @@ fn validate_decodable_image(input_path: &Path, mime_type: &str) -> Result<()> {
     })?;
     validate_untrusted_image_dimensions(width, height)?;
 
-    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(&data), format);
-    reader.limits(crate::media::untrusted_image_decode_limits());
-    reader.decode().with_context(|| {
-        format!("File appears to be {mime_type}, but the image data could not be decoded.")
-    })?;
+    let mut decoder = image::ImageReader::with_format(std::io::Cursor::new(&data), format);
+    decoder.limits(crate::media::untrusted_image_decode_limits());
+    decoder
+        .decode()
+        .with_context(|| {
+            format!("File appears to be {mime_type}, but the image data could not be decoded.")
+        })
+        .map(|_completed_value| ())?;
     Ok(())
 }
 
@@ -744,7 +759,8 @@ fn validate_pdf_structure(input_path: &Path) -> Result<()> {
     let tail_len = usize::try_from(tail_len_u64).context("PDF tail length overflows usize")?;
     let tail_start = file_len.saturating_sub(tail_len_u64);
     file.seek(SeekFrom::Start(tail_start))
-        .with_context(|| format!("Seek to PDF trailer window in {}", input_path.display()))?;
+        .with_context(|| format!("Seek to PDF trailer window in {}", input_path.display()))
+        .map(|_completed_value| ())?;
     let mut tail = vec![0u8; tail_len];
     file.read_exact(&mut tail)
         .with_context(|| format!("Read PDF trailer window from {}", input_path.display()))?;
@@ -762,7 +778,7 @@ fn validate_png_structure(data: &[u8]) -> Result<()> {
     const MALFORMED_PNG_ERROR: &str =
         "File appears to be image/png, but its image header is malformed or incomplete.";
     const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
-    if data.len() < PNG_SIGNATURE.len() + 12 {
+    if data.len() < PNG_SIGNATURE.len().saturating_add(12) {
         anyhow::bail!(MALFORMED_PNG_ERROR);
     }
     if data.get(..PNG_SIGNATURE.len()) != Some(PNG_SIGNATURE.as_slice()) {
@@ -772,20 +788,29 @@ fn validate_png_structure(data: &[u8]) -> Result<()> {
     let mut offset = PNG_SIGNATURE.len();
     let mut saw_ihdr = false;
 
-    while offset + 12 <= data.len() {
+    while offset.checked_add(12).is_some_and(|end| end <= data.len()) {
+        let length_end = offset
+            .checked_add(4)
+            .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+        let chunk_data_start = offset
+            .checked_add(8)
+            .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
         let length_bytes: [u8; 4] = data
-            .get(offset..offset + 4)
+            .get(offset..length_end)
             .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?
             .try_into()
             .map_err(|error| anyhow::anyhow!("{MALFORMED_PNG_ERROR}: {error}"))?;
         let length = usize::try_from(u32::from_be_bytes(length_bytes))
             .context("PNG chunk length overflows usize")?;
         let chunk_type = data
-            .get(offset + 4..offset + 8)
+            .get(length_end..chunk_data_start)
             .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
-        let chunk_data_start = offset + 8;
-        let chunk_data_end = chunk_data_start.saturating_add(length);
-        let crc_end = chunk_data_end.saturating_add(4);
+        let chunk_data_end = chunk_data_start
+            .checked_add(length)
+            .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+        let crc_end = chunk_data_end
+            .checked_add(4)
+            .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
         if crc_end > data.len() {
             anyhow::bail!(MALFORMED_PNG_ERROR);
         }
@@ -794,13 +819,16 @@ fn validate_png_structure(data: &[u8]) -> Result<()> {
             if chunk_type != b"IHDR" || length != 13 {
                 anyhow::bail!(MALFORMED_PNG_ERROR);
             }
-            let width_bytes: [u8; 4] = data
-                .get(chunk_data_start..chunk_data_start + 4)
+            let chunk_data = data
+                .get(chunk_data_start..chunk_data_end)
+                .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+            let width_bytes: [u8; 4] = chunk_data
+                .get(..4)
                 .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?
                 .try_into()
                 .map_err(|error| anyhow::anyhow!("{MALFORMED_PNG_ERROR}: {error}"))?;
-            let height_bytes: [u8; 4] = data
-                .get(chunk_data_start + 4..chunk_data_start + 8)
+            let height_bytes: [u8; 4] = chunk_data
+                .get(4..8)
                 .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?
                 .try_into()
                 .map_err(|error| anyhow::anyhow!("{MALFORMED_PNG_ERROR}: {error}"))?;
@@ -1049,7 +1077,9 @@ fn validate_adts_aac_reader(
     let mut offset = 0_u64;
     while offset < length {
         anyhow::ensure!(started.elapsed() < timeout, "AAC validation timed out");
-        let remaining = length - offset;
+        let remaining = length
+            .checked_sub(offset)
+            .ok_or_else(|| anyhow::anyhow!(MALFORMED_AAC_ERROR))?;
         if remaining < 7 {
             anyhow::bail!(MALFORMED_AAC_ERROR);
         }
@@ -1061,14 +1091,14 @@ fn validate_adts_aac_reader(
         if b0 != 0xFF || (b1 & 0xF0) != 0xF0 {
             anyhow::bail!(MALFORMED_AAC_ERROR);
         }
-        let layer = (b1 & 0x06) >> 1;
+        let layer = (b1 & 0x06) >> 1_i32;
         if layer != 0 {
             anyhow::bail!(MALFORMED_AAC_ERROR);
         }
         let protection_absent = (b1 & 0x01) != 0;
-        let profile = (b2 & 0xC0) >> 6;
-        let sampling_frequency_index = (b2 & 0x3C) >> 2;
-        let channel_configuration = ((b2 & 0x01) << 2) | ((b3 & 0xC0) >> 6);
+        let profile = (b2 & 0xC0) >> 6_i32;
+        let sampling_frequency_index = (b2 & 0x3C) >> 2_i32;
+        let channel_configuration = ((b2 & 0x01) << 2_i32) | ((b3 & 0xC0) >> 6_i32);
         if profile == 3 || sampling_frequency_index > 12 || channel_configuration > 7 {
             anyhow::bail!(MALFORMED_AAC_ERROR);
         }
@@ -1078,14 +1108,19 @@ fn validate_adts_aac_reader(
         } else {
             ADTS_HEADER_BYTES_WITH_CRC
         };
-        let frame_len =
-            ((u64::from(b3 & 0x03)) << 11) | (u64::from(b4) << 3) | (u64::from(b5 & 0xE0) >> 5);
+        let frame_len = ((u64::from(b3 & 0x03)) << 11_i32)
+            | (u64::from(b4) << 3_i32)
+            | (u64::from(b5 & 0xE0) >> 5_i32);
         if frame_len < header_len || frame_len > remaining {
             anyhow::bail!(MALFORMED_AAC_ERROR);
         }
 
-        offset += frame_len;
-        reader.seek(std::io::SeekFrom::Start(offset))?;
+        offset = offset
+            .checked_add(frame_len)
+            .ok_or_else(|| anyhow::anyhow!(MALFORMED_AAC_ERROR))?;
+        reader
+            .seek(std::io::SeekFrom::Start(offset))
+            .map(|_completed_value| ())?;
     }
 
     Ok(())
@@ -1156,9 +1191,11 @@ fn write_image_atomic(
                 tmp.path().display()
             )
         })?;
-    tmp.persist(output_path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("failed to atomically replace {}", output_path.display()))?;
+    drop(
+        tmp.persist(output_path)
+            .map_err(|error| error.error)
+            .with_context(|| format!("failed to atomically replace {}", output_path.display()))?,
+    );
     Ok(())
 }
 
@@ -1371,9 +1408,9 @@ mod tests {
             0xFF,
             0xF1,
             0x50,
-            0x80 | u8::try_from((size >> 11) & 0x03).context("frame length high bits")?,
-            u8::try_from((size >> 3) & 0xFF).context("frame length middle bits")?,
-            u8::try_from((size & 0x07) << 5).context("frame length low bits")? | 0x1F,
+            0x80 | u8::try_from((size >> 11_i32) & 0x03).context("frame length high bits")?,
+            u8::try_from((size >> 3_i32) & 0xFF).context("frame length middle bits")?,
+            u8::try_from((size & 0x07) << 5_i32).context("frame length low bits")? | 0x1F,
             0xFC,
         ];
         let mut bytes = Vec::with_capacity(size);

@@ -74,7 +74,9 @@ pub(in crate::server) async fn status(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Response> {
-    updates::authorize(&state, &jar).await?;
+    updates::authorize(&state, &jar)
+        .await
+        .map(|_completed_value| ())?;
     let status = updates::snapshot().await;
     Ok(Json(snapshot(Some(&status)).await).into_response())
 }
@@ -107,7 +109,7 @@ pub(in crate::server) async fn restart(
         let acknowledged_rejection = result.as_ref().is_ok_and(|reply| reply.error.is_some());
         if !acknowledged_rejection {
             let cancel = state.job_queue.cancel.clone();
-            tokio::spawn(async move {
+            drop(tokio::spawn(async move {
                 let _guard = guard;
                 loop {
                     if cancel.is_cancelled() {
@@ -123,7 +125,7 @@ pub(in crate::server) async fn restart(
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
-            });
+            }));
         }
         match result {
             Ok(reply) if reply.error.is_none() => {},
@@ -135,14 +137,14 @@ pub(in crate::server) async fn restart(
             .await
             .map_err(|error| AppError::Internal(error.into()))??;
         let cancel = state.job_queue.cancel.clone();
-        tokio::spawn(async move {
+        drop(tokio::spawn(async move {
             let _guard = guard;
             // Permit the 303 response to reach the browser before closing listeners.
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             cancel.cancel();
             cancel.cancelled().await;
             tokio::time::sleep(crate::restart::SHUTDOWN_TIMEOUT).await;
-        });
+        }));
     } else {
         return Err(AppError::BadRequest(
             "This deployment has no configured restart supervisor.".into(),
@@ -195,10 +197,10 @@ mod tests {
     #[tokio::test]
     async fn enhanced_acknowledgment_preserves_acceptance_and_rejection() -> anyhow::Result<()> {
         let mut headers = HeaderMap::new();
-        headers.insert(
+        drop(headers.insert(
             "accept",
             axum::http::HeaderValue::from_static("application/json"),
-        );
+        ));
         for (accepted, expected) in [
             (Some(true), StatusCode::ACCEPTED),
             (None, StatusCode::ACCEPTED),
@@ -285,11 +287,11 @@ mod tests {
                 session,
             ));
         let mut headers = HeaderMap::new();
-        headers.insert("host", axum::http::HeaderValue::from_static("localhost"));
-        headers.insert(
+        drop(headers.insert("host", axum::http::HeaderValue::from_static("localhost")));
+        drop(headers.insert(
             "origin",
             axum::http::HeaderValue::from_static("http://localhost"),
-        );
+        ));
         let result = restart(
             State(state),
             jar,
