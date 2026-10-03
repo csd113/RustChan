@@ -18,10 +18,6 @@ tests/*
 !tests/fixtures/
 tests/fixtures/*
 !tests/fixtures/media/
-!tests/e2e/
-tests/e2e/*
-!tests/e2e/non-video-media.spec.ts
-!tests/e2e/settings-restart.spec.ts
 
 # Build output, dependency caches, coverage, and profiling output.
 target/
@@ -67,10 +63,15 @@ __pycache__/
 /core.[0-9]*
 /rustchan-cli*.dmp
 
-# Browser infrastructure (tests/e2e, config, npm lockfile, CI) is source.
-# Small intentional fixtures belong in tests/e2e/fixtures, never output/.
-# Disposable audit notes and generated browser evidence remain local.
-/tests/e2e/AUDIT-*.md
+# Local Playwright tooling: keep the complete browser harness on this machine.
+/tests/e2e/
+/playwright*.config.*
+/package.json
+/package-lock.json
+/.github/workflows/e2e.yml
+# End local Playwright tooling.
+
+# Generated browser evidence remains local too.
 /output/
 playwright-report/
 test-results/

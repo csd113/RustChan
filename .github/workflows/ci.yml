@@ -30,7 +30,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
 
-      - name: Keep local AI tooling out of Git
+      - name: Keep local tooling out of Git
         run: python3 tools/check_local_tooling.py
 
       - name: Install Rust toolchain

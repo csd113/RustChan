@@ -78,14 +78,16 @@ cargo test --locked --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 ```
 
-Use the Playwright harness under `tests/e2e/` for public UI, admin UI, media,
-backup and restore, moderation, Tor/proxy, and no-JavaScript changes. The
-maintained harness source is tracked: `playwright.config.ts`, `package.json`,
-`package-lock.json`, and `tests/e2e/**`. Browser validation runs locally.
-Generated evidence is not: keep reports, traces, screenshots, videos, storage state,
+When the local Playwright harness is available, use it under `tests/e2e/` for
+public UI, admin UI, media, backup and restore, moderation, Tor/proxy, and
+no-JavaScript changes. The complete harness, `playwright*.config.*`, `package.json`,
+and `package-lock.json` are intentionally ignored and must remain untracked.
+Do not remove these ignore rules or add exceptions to publish browser tests.
+Browser validation runs locally; no hosted browser CI is required.
+Keep reports, traces, screenshots, videos, storage state,
 runtime databases, preserved fixture roots, audit output, and other browser
 artifacts under the matching `.gitignore` rules and out of commits. See
-`tests/e2e/README.md` for the normal regression and deep audit commands.
+the local `tests/e2e/README.md` for the normal regression and deep audit commands.
 Run focused scenarios first and the available browser matrix for broad changes.
 Some media tests require `ffmpeg` and specific codecs; do not replace
 deterministic fixtures with private uploads from a live site. Permanent Rust
