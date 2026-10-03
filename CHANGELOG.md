@@ -2,6 +2,14 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## RustChan 1.6.5 — 2026-10-03
+
+- Moved image processing, supported audio decoding, media probing and PDF previews into Rust, with optional FFmpeg fallback for video and uncovered audio codecs.
+- Added verified administrator settings restarts, configuration rollback and recovery handling.
+- Improved SQLite connection ownership and measured query performance; CLI startup proceeds once one usable database connection is ready.
+- Fixed media timing, multistream audio, bounded previews, Speex waveform layouts, AV1 WebM conversion and Windows restart builds.
+- Hardened the Rust 1.99 lint policy and consolidated console, request and test utilities.
+
 ## RustChan 1.6.0 — 2026-10-01
 
 This release includes every integrated change since the published v1.5.0 release:

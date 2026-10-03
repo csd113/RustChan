@@ -2,7 +2,7 @@
 
 Current setup and deployment guide for Linux, macOS, and Windows.
 
-Current candidate version: `1.6.0`.
+Current version: `1.6.5`.
 
 This guide reflects the current RustChan architecture:
 
