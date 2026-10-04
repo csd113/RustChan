@@ -343,7 +343,12 @@ impl NativeService {
     fn probe(&self, version: &str, previous: Option<uuid::Uuid>) -> anyhow::Result<()> {
         let layout = Layout::prepare(&self.context.data)?;
         let client = reqwest::blocking::Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
+            // Only fixed loopback readiness is queried. Locally generated and
+            // public-host certificates need not authenticate 127.0.0.1; the
+            // admitted process's private instance/version still bind the reply.
+            .danger_accept_invalid_certs(true)
             .timeout(Duration::from_secs(2))
             .build()?;
         let started = Instant::now();
@@ -356,11 +361,14 @@ impl NativeService {
                     "application is not initialized"
                 );
                 let engine = bootstrap::engine(&layout)?;
+                let configuration = bootstrap::configuration(&layout)?;
+                let (scheme, port) = if configuration.tls.enabled {
+                    ("https", configuration.tls.port)
+                } else {
+                    ("http", engine.config.health_port)
+                };
                 let response = client
-                    .get(format!(
-                        "http://127.0.0.1:{}/readyz",
-                        engine.config.health_port
-                    ))
+                    .get(format!("{scheme}://127.0.0.1:{port}/readyz"))
                     .send()?
                     .error_for_status()?;
                 let instance = response

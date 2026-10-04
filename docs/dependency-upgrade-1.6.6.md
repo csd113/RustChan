@@ -249,3 +249,25 @@ fixtures do not establish real boot or power-loss behavior.
 Local instructions and the complete browser harness remain ignored and
 untracked. Their preserved copies and regression evidence are local artifacts;
 they are not added to release commits or container contexts.
+
+The first PR #120 CI run exposed a Linux guardian admission timeout: the parent
+hashed the complete executable after spawning a guardian with a five-second
+handshake deadline. A copied executable with a large non-runtime tail reproduced
+the failure before database creation; moving verification before spawn admitted
+an executable exceeding 2 GB without changing the deadline or lease checks.
+
+Native CLI validation also exposed an HTTPS-only startup bug: the controller
+probed the disabled plaintext listener. Readiness now follows the resolved TLS
+listener, uses fixed loopback with no proxy or redirects, and retains bounded
+response, running-instance and version checks. Local self-signed/public-host
+certificates are accepted only by that loopback health client. Debug/test hashing
+keeps an optimized SHA-256 backend. Linux black-box CLI fixtures remove debug-only
+sections from their copied executable; the original retains debug information.
+An ELF audit verified all 28 allocated sections remain identical. Test assertions,
+parallel execution and deadlines remain unchanged.
+
+The corrected ordinary-account Linux CLI suite passed all five tests in
+16.28 seconds, including HTTPS-only startup, secure cookies and graceful
+shutdown. Strict all-target/all-feature Linux Clippy passed. The corrected
+executables and test harness are preserved outside the build cache alongside
+the failed-run evidence in `output/merge-release-1.6.6/ci-fix/`.

@@ -28,6 +28,12 @@ codegen-units  = 1
 strip          = true
 panic          = "abort"
 
+# Native startup verifies complete executable copies even in source/debug builds.
+# Keep the hashing backend fast without changing application debug checks or the
+# bounded lifecycle/test deadlines. The test profile inherits this override.
+[profile.dev.package."sha2:0.11.0"]
+opt-level = 3
+
 [[bin]]
 name = "rustchan-cli"
 path = "src/main.rs"

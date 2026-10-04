@@ -157,18 +157,24 @@ pub(super) fn admit_cli(layout: &Layout) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build the fixed same-account layout with the embedded public verification key.
-pub(super) fn engine(layout: &Layout) -> anyhow::Result<Engine> {
+/// Resolve the same settings and environment as the admitted application.
+pub(super) fn configuration(layout: &Layout) -> anyhow::Result<crate::config::Config> {
     let path = layout.data.join("settings.toml");
     let bytes = if path.try_exists()? {
         crate::restart::Store::read(&path, 4 * 1024 * 1024)?
     } else {
         Vec::new()
     };
-    let config = crate::config::admin::resolve_file(
+    crate::config::admin::resolve_file(
         std::str::from_utf8(&bytes)?,
         &crate::config::Environment::Process,
-    )?;
+    )
+}
+
+/// Build the fixed same-account layout with the embedded public verification key.
+pub(super) fn engine(layout: &Layout) -> anyhow::Result<Engine> {
+    let path = layout.data.join("settings.toml");
+    let config = configuration(layout)?;
     Ok(Engine {
         config: Config {
             install_dir: layout.install.clone(),

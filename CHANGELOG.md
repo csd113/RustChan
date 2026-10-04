@@ -8,6 +8,8 @@ All notable changes to RustChan will be documented in this file.
 - Documented the tested offline preparation required for 1.6.0 → the already published 1.6.5 release and stopped manual adoption of earlier source installations.
 - Integrated the Linux controller and process monitor into the application executable, with embedded official release verification, full data rollback and public admission after durable commit. Exceptional loss of writer-exit proof can require a host reboot. New update packages require the 1.6.6 controller generation.
 - Gave the first database connection a bounded 30-second initialization deadline while retaining one-second request checkout waits, asynchronous spare initialization and full SQLite durability.
+- Completed executable verification before starting the Linux guardian handshake, preventing large source/debug builds from timing out during administrator startup.
+- Fixed native readiness checks for direct HTTPS installations so public admission opens after the configured secure listener is ready.
 - Updated all direct Rust dependencies to the latest compatible stable releases, including Arti 0.47, SQLite and Argon2 0.6. Existing Argon2 password hashes remain supported with unchanged cost limits.
 - Updated pinned GitHub Actions and audit tools, and moved container images to Debian 13. Retained Rust 1.99 and the Rust-only TLS provider policy.
 - Removed local agent instructions and the complete Playwright harness from Git tracking, restored their ignore rules and added a CI guard against accidental reintroduction. Local copies remain available for development.

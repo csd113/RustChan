@@ -371,7 +371,24 @@ fn supervise(
         port: crate::config::launcher_port(),
     };
     rustix::process::set_child_subreaper(Some(rustix::process::Pid::INIT))?;
-    let mut command = Command::new(std::env::current_exe()?);
+    let program = std::env::current_exe()?;
+    let owns_admission = admission.is_some();
+    // Hashing a large source/debug executable may take longer than the private
+    // handshake deadline. Finish it before spawning a guardian that must wait
+    // for this main thread to grant its lease.
+    let monitor = if owns_admission {
+        Some(Monitor {
+            format: lifecycle::FORMAT,
+            boot: lifecycle::kernel_boot_id()?,
+            identity: context.monitor,
+            endpoint,
+            version: super::VERSION.to_owned(),
+            program_sha256: super::bootstrap::digest(&program)?,
+        })
+    } else {
+        None
+    };
+    let mut command = Command::new(program);
     let _arguments = command
         .args(std::env::args_os().skip(1))
         .env(INTERNAL, serde_json::to_string(&context)?)
@@ -386,19 +403,8 @@ fn supervise(
         }
     };
     let identity = ProcessIdentity::read(i32::try_from(child.id())?)?;
-    let owns_admission = admission.is_some();
-    if owns_admission {
-        publish_monitor(
-            layout,
-            &Monitor {
-                format: lifecycle::FORMAT,
-                boot: lifecycle::kernel_boot_id()?,
-                identity: context.monitor,
-                endpoint,
-                version: super::VERSION.to_owned(),
-                program_sha256: super::bootstrap::digest(&std::env::current_exe()?)?,
-            },
-        )?;
+    if let Some(monitor) = monitor {
+        publish_monitor(layout, &monitor)?;
     }
     let Signals {
         runtime,
