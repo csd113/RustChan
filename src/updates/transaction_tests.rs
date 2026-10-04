@@ -133,10 +133,11 @@ fn fixture() -> anyhow::Result<Fixture> {
             settings_path,
             health_port: 8080,
             web_uid,
-            public_key,
+            public_key: Some(public_key),
             retention: 2,
         },
         key: vec![0; 32],
+        ownership: Ownership::Separated,
     };
     Ok(Fixture {
         _temp: temp,
@@ -171,6 +172,10 @@ enum Fault {
     Startup,
     /// New application does not become ready.
     Health,
+    /// The candidate full controller cannot initialize before commit.
+    Controller,
+    /// Admission opened after commit, but its acknowledgment was lost.
+    CommitAcknowledgment,
 }
 
 /// Service simulation; no host process or systemd operations occur.
@@ -220,6 +225,29 @@ impl Service for FakeService<'_> {
             !(version == "1.6.0" && matches!(self.fault, Fault::Health)),
             "injected readiness timeout"
         );
+        Ok(())
+    }
+    fn prepare_commit(&self, version: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            version != "1.6.0" || !matches!(self.fault, Fault::Controller),
+            "candidate controller could not initialize"
+        );
+        Ok(())
+    }
+    fn commit(&self) -> anyhow::Result<()> {
+        if matches!(self.fault, Fault::CommitAcknowledgment) {
+            anyhow::ensure!(
+                self.engine.status()?.phase == Phase::Succeeded,
+                "admission preceded durable commit"
+            );
+            let conn = Connection::open(self.engine.config.data_dir.join("chan.db"))?;
+            conn.execute(
+                "INSERT INTO posts(body) VALUES ('acknowledged after commit')",
+                [],
+            )
+            .map(|_affected_rows| ())?;
+            anyhow::bail!("commit acknowledgment lost after accepted write");
+        }
         Ok(())
     }
 }
@@ -307,7 +335,12 @@ fn successful_install_requires_complete_backup_and_health() -> anyhow::Result<()
 /// Exercise every critical activation failure with complete state restoration.
 #[test]
 fn migration_startup_and_health_failures_restore_every_component() -> anyhow::Result<()> {
-    for fault in [Fault::Migration, Fault::Startup, Fault::Health] {
+    for fault in [
+        Fault::Migration,
+        Fault::Startup,
+        Fault::Health,
+        Fault::Controller,
+    ] {
         let f = fixture()?;
         let mut status = job(&f.engine)?;
         let service = FakeService {
@@ -319,6 +352,41 @@ fn migration_startup_and_health_failures_restore_every_component() -> anyhow::Re
             .install_with_source(&mut status, &f.manifest, &service, &Source(&f.archive))?;
         assert_restored(&f, &status)?;
     }
+    Ok(())
+}
+
+/// A lost admission acknowledgment must never restore a snapshot over accepted new writes.
+#[test]
+fn lost_commit_acknowledgment_preserves_committed_software_and_data() -> anyhow::Result<()> {
+    let f = fixture()?;
+    let mut status = job(&f.engine)?;
+    let service = FakeService {
+        engine: &f.engine,
+        fault: Fault::CommitAcknowledgment,
+        running: Cell::new(true),
+    };
+    anyhow::ensure!(
+        f.engine
+            .install_with_source(&mut status, &f.manifest, &service, &Source(&f.archive))
+            .is_err(),
+        "lost acknowledgment must be reported"
+    );
+    anyhow::ensure!(
+        f.engine.status()?.phase == Phase::Succeeded && f.engine.current_version()? == "1.6.0",
+        "committed software must remain selected"
+    );
+    let conn = Connection::open(f.engine.config.data_dir.join("chan.db"))?;
+    let body: String = conn.query_row("SELECT body FROM posts", [], |row| row.get(0))?;
+    anyhow::ensure!(
+        body == "acknowledged after commit",
+        "rollback erased an acknowledged new write"
+    );
+    anyhow::ensure!(verify_database(&f.engine.config.data_dir.join("chan.db"))? == "1.6.0");
+    f.engine.recover(&service)?;
+    anyhow::ensure!(
+        f.engine.status()?.phase == Phase::Succeeded,
+        "cold recovery cannot revert a terminal committed install"
+    );
     Ok(())
 }
 
@@ -675,6 +743,71 @@ fn pending_restart(engine: &Engine) -> anyhow::Result<Uuid> {
     Ok(instance)
 }
 
+/// Delegate initialization while losing the acknowledgment after a terminal settings commit.
+struct LostRestartAcknowledgment<'a>(RestartService<'a>);
+impl Service for LostRestartAcknowledgment<'_> {
+    fn stop(&self) -> anyhow::Result<()> {
+        self.0.stop()
+    }
+    fn start(&self) -> anyhow::Result<()> {
+        self.0.start()
+    }
+    fn health(&self, version: &str, schema: &str) -> anyhow::Result<()> {
+        self.0.health(version, schema)
+    }
+    fn health_instance(&self, version: &str, previous: Uuid) -> anyhow::Result<()> {
+        self.0.health_instance(version, previous)
+    }
+    fn commit(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.0.engine.status()?.phase == Phase::Succeeded,
+            "settings admission preceded durable commit"
+        );
+        let mut settings = fs::OpenOptions::new()
+            .append(true)
+            .open(&self.0.engine.config.settings_path)?;
+        settings.write_all(b"\n# accepted after commit\n")?;
+        settings.sync_all()?;
+        anyhow::bail!("settings commit acknowledgment lost");
+    }
+}
+
+/// Neither live nor cold recovery may revert healthy settings after a lost commit acknowledgment.
+#[test]
+fn lost_settings_commit_acknowledgment_cannot_restore_old_configuration() -> anyhow::Result<()> {
+    let f = fixture()?;
+    let previous = pending_restart(&f.engine)?;
+    let service = LostRestartAcknowledgment(RestartService {
+        engine: &f.engine,
+        starts: Cell::new(0),
+        fail_start: false,
+        fail_health: false,
+        old_instance: None,
+    });
+    let (mut status, update, settings) = f.engine.approve_restart(previous, 1, &service)?;
+    anyhow::ensure!(
+        f.engine.restart_settings(&mut status, &service).is_err(),
+        "lost restart acknowledgment must be reported"
+    );
+    anyhow::ensure!(
+        f.engine.status()?.phase == Phase::Succeeded && service.0.starts.get() == 1,
+        "healthy replacement must not be reverted"
+    );
+    let candidate = fs::read(&f.engine.config.settings_path)?;
+    anyhow::ensure!(
+        std::str::from_utf8(&candidate)?.contains("accepted after commit")
+            && std::str::from_utf8(&candidate)?.contains("12345")
+    );
+    drop(settings);
+    drop(update);
+    f.engine.recover(&service)?;
+    anyhow::ensure!(
+        fs::read(&f.engine.config.settings_path)? == candidate,
+        "cold recovery replaced committed settings"
+    );
+    Ok(())
+}
+
 /// Pending settings survive until replacement readiness; both OS leases exclude all races.
 #[test]
 fn settings_restart_health_commit_and_update_mutual_exclusion() -> anyhow::Result<()> {
@@ -928,5 +1061,35 @@ fn concurrent_settings_restarts_accept_exactly_one_request() -> anyhow::Result<(
         outcomes.0 != outcomes.1 && engine.status()?.phase == Phase::Stopping,
         "exactly one concurrent restart may be durable"
     );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+/// Same-account mode never weakens separated-UID validation or gains root authority.
+#[test]
+fn same_account_ownership_is_explicit_and_cannot_borrow_root_authority() -> anyhow::Result<()> {
+    let mut fixture = fixture()?;
+    let owner = rustix::process::getuid().as_raw();
+    fixture.engine.config.web_uid = owner;
+    fixture.engine.config.public_key = None;
+    anyhow::ensure!(
+        fixture.engine.validate().is_err(),
+        "separated mode cannot accept a web-owned installation"
+    );
+    fixture.engine.ownership = Ownership::SameAccount;
+    fixture.engine.key = crate::updates::trust::official_public_key()?;
+    if owner == 0 {
+        anyhow::ensure!(
+            fixture.engine.validate().is_err(),
+            "source mode must not authorize root operation"
+        );
+    } else {
+        fixture.engine.validate()?;
+        fixture.engine.config.web_uid = owner.checked_add(1).context("fixture UID overflow")?;
+        anyhow::ensure!(
+            fixture.engine.validate().is_err(),
+            "source mode cannot use another account's authority"
+        );
+    }
     Ok(())
 }

@@ -112,6 +112,7 @@ impl Engine {
             self.save(status, Phase::FailedManualIntervention, "RustChan did not stop cleanly. Configuration was not replaced; operator recovery is required.")?;
             return Ok(());
         }
+        let mut committed = false;
         let trial = (|| {
             self.save(
                 status,
@@ -135,14 +136,22 @@ impl Engine {
                 running.instance != previous && running.digest.as_bytes() == expected,
                 "replacement did not initialize the requested settings"
             );
+            service.prepare_commit(&status.installed)?;
             self.save(
                 status,
                 Phase::Succeeded,
                 "RustChan restarted; saved settings passed readiness verification.",
             )?;
-            store.observe(running.instance, &running.digest, true)
+            committed = true;
+            store.observe(running.instance, &running.digest, true)?;
+            service.commit()
         })();
         if let Err(error) = trial {
+            if committed {
+                // Terminal commit selects the healthy replacement. Losing a
+                // final acknowledgment cannot authorize restoration beneath it.
+                return Err(error);
+            }
             tracing::error!(%error, "settings restart failed; recovering known-good configuration");
             self.recover_settings_restart(status, service)?;
         }
@@ -184,6 +193,7 @@ impl Engine {
                 running.digest == expected,
                 "recovery configuration did not initialize"
             );
+            service.prepare_commit(&status.installed)?;
             self.save(
                 status,
                 Phase::RolledBack,
@@ -193,7 +203,8 @@ impl Engine {
         if let Err(error) = recovery {
             tracing::error!(%error, "settings recovery failed");
             self.save(status, Phase::FailedManualIntervention, "Settings restart and recovery failed. Last healthy configuration is retained; operator recovery is required.")?;
+            return Ok(());
         }
-        Ok(())
+        service.commit()
     }
 }

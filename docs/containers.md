@@ -56,7 +56,7 @@ Stop RustChan before taking a filesystem copy of `/data` so the SQLite database 
 
 ```bash
 docker run --rm -v rustchan-data:/data:ro -v "$PWD":/backup \
-  debian:bookworm-slim tar -C /data -czf /backup/rustchan-data.tar.gz .
+  debian:trixie-slim tar -C /data -czf /backup/rustchan-data.tar.gz .
 docker start rustchan
 ```
 

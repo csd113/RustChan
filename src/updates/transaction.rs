@@ -236,7 +236,7 @@ pub(super) mod native {
         /// Only local UID authorized to send web operations.
         pub web_uid: u32,
         /// Root-owned independently trusted `Ed25519` public key file.
-        pub public_key: PathBuf,
+        pub public_key: Option<PathBuf>,
         /// Bounded retained pre-upgrade snapshot count, at least two.
         pub retention: usize,
     }
@@ -248,6 +248,34 @@ pub(super) mod native {
         pub config: Config,
         /// Trusted 32-byte `Ed25519` verification key.
         pub key: Vec<u8>,
+        /// Explicit authority model; same-account operation adds no privilege boundary.
+        pub ownership: Ownership,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    /// Keep protected system installations distinct from cooperative source ownership.
+    pub(in crate::updates) enum Ownership {
+        /// Existing protected installation/state belong to a different account.
+        Separated,
+        /// The ordinary invoking account already owns executable, state and data.
+        #[cfg(target_os = "linux")]
+        SameAccount,
+    }
+
+    /// Same-account mode is Linux-only and cannot acquire another user's authority.
+    #[cfg(target_os = "linux")]
+    fn same_account_path(path: &Path, uid: u32) -> anyhow::Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+        anyhow::ensure!(
+            uid != 0 && rustix::process::getuid().as_raw() == uid,
+            "automatic source updates require the existing ordinary account"
+        );
+        super::super::lifecycle::owned_ancestors(path, uid)?;
+        anyhow::ensure!(
+            fs::symlink_metadata(path)?.uid() == uid,
+            "source installation/state has a different owner"
+        );
+        Ok(())
     }
 
     /// Bounded artifact fetch seam for offline transaction fault tests.
@@ -282,10 +310,20 @@ pub(super) mod native {
         fn health_instance(&self, version: &str, _previous: Uuid) -> anyhow::Result<()> {
             self.health(version, crate::db::baseline_schema_version())
         }
+        /// Initialize the selected full controller before a durable software/data commit.
+        fn prepare_commit(&self, _version: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        /// Open public admission only after the complete terminal journal is durable.
+        /// An error may mean the acknowledgment was lost after admission opened;
+        /// callers must preserve committed state instead of rolling it back.
+        fn commit(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     /// Publish exact bytes via same-filesystem rename after file and directory fsync.
-    pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    pub(in crate::updates) fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         let parent = path.parent().context("missing managed parent directory")?;
         let mut staged = tempfile::NamedTempFile::new_in(parent)?;
         staged.write_all(bytes)?;
@@ -354,13 +392,21 @@ pub(super) mod native {
     impl Engine {
         /// Verify managed layout, permissions and rollback retention constraints.
         pub(in crate::updates) fn validate(&self) -> anyhow::Result<()> {
+            self.validate_layout()?;
+            self.current_version().map(|_operation_summary| ())?;
+            Ok(())
+        }
+        /// Recovery validates authority independently of a possibly broken trial pointer.
+        pub(in crate::updates) fn validate_layout(&self) -> anyhow::Result<()> {
             for path in [
                 &self.config.install_dir,
                 &self.config.state_dir,
                 &self.config.data_dir,
                 &self.config.settings_path,
-                &self.config.public_key,
             ] {
+                no_symlink_ancestors(path)?;
+            }
+            if let Some(path) = self.config.public_key.as_ref() {
                 no_symlink_ancestors(path)?;
             }
             anyhow::ensure!(
@@ -374,16 +420,46 @@ pub(super) mod native {
             {
                 use std::os::unix::fs::MetadataExt as _;
                 for path in [&self.config.install_dir, &self.config.state_dir] {
-                    protected_ancestors(path, self.config.web_uid)?;
                     let metadata = fs::metadata(path)?;
-                    anyhow::ensure!(
-                        metadata.uid() != self.config.web_uid && metadata.mode() & 0o022 == 0,
-                        "web account must not own or write updater installation/state"
-                    );
+                    match self.ownership {
+                        Ownership::Separated => {
+                            protected_ancestors(path, self.config.web_uid)?;
+                            anyhow::ensure!(
+                                metadata.uid() != self.config.web_uid
+                                    && metadata.mode() & 0o022 == 0,
+                                "web account must not own or write updater installation/state"
+                            );
+                            anyhow::ensure!(
+                                self.config.public_key.is_some(),
+                                "separated deployment requires its trusted key file"
+                            );
+                        }
+                        #[cfg(target_os = "linux")]
+                        Ownership::SameAccount => {
+                            same_account_path(path, self.config.web_uid)?;
+                            anyhow::ensure!(
+                                metadata.mode() & 0o022 == 0,
+                                "source update resources must not be writable by other accounts"
+                            );
+                            anyhow::ensure!(self.config.public_key.is_none()
+                                && self.key == super::super::trust::official_public_key()?,
+                                "source updates require the embedded official verification identity");
+                        }
+                    }
                 }
             }
             plain(&self.config.install_dir.join("versions"), true)?;
-            protected_ancestors(&self.config.state_dir.join("backups"), self.config.web_uid)?;
+            match self.ownership {
+                Ownership::Separated => protected_ancestors(
+                    &self.config.state_dir.join("backups"),
+                    self.config.web_uid,
+                )?,
+                #[cfg(target_os = "linux")]
+                Ownership::SameAccount => {
+                    same_account_path(&self.config.state_dir.join("backups"), self.config.web_uid)?;
+                    same_account_path(&self.config.data_dir, self.config.web_uid)?;
+                }
+            }
             anyhow::ensure!(
                 self.config.web_uid != 0,
                 "the RustChan web account must not be root"
@@ -392,7 +468,6 @@ pub(super) mod native {
                 self.config.settings_path == self.config.data_dir.join("settings.toml"),
                 "managed configuration must be data/settings.toml"
             );
-            self.current_version().map(|_operation_summary| ())?;
             Ok(())
         }
         /// Validate the relative active link and immutable executable ownership.
@@ -430,10 +505,17 @@ pub(super) mod native {
                 ] {
                     let metadata = fs::symlink_metadata(path)?;
                     anyhow::ensure!(
-                        metadata.uid() != self.config.web_uid
-                            && (metadata.uid() == 0 || metadata.uid() == owner)
+                        (match self.ownership {
+                            Ownership::Separated => metadata.uid() != self.config.web_uid,
+                            #[cfg(target_os = "linux")]
+                            Ownership::SameAccount => metadata.uid() == self.config.web_uid,
+                        }) && (metadata.uid() == 0 || metadata.uid() == owner)
                             && metadata.mode() & 0o7022 == 0
-                            && metadata.mode() & 0o005 == 0o005
+                            && match self.ownership {
+                                Ownership::Separated => metadata.mode() & 0o005 == 0o005,
+                                #[cfg(target_os = "linux")]
+                                Ownership::SameAccount => metadata.mode() & 0o500 == 0o500,
+                            }
                             && (metadata.is_dir() || metadata.nlink() == 1),
                         "versioned program ownership or access permissions are unsafe"
                     );
@@ -617,8 +699,11 @@ pub(super) mod native {
         ) -> anyhow::Result<()> {
             let settings = crate::config::admin::settings_lease(&self.config.settings_path);
             let coordination = self.coordination_lock();
+            let mut committed = false;
             let outcome = match (&settings, &coordination) {
-                (Ok(_), Ok(_)) => self.install_inner(status, manifest, service, source),
+                (Ok(_), Ok(_)) => {
+                    self.install_inner(status, manifest, service, source, &mut committed)
+                }
                 (Err(error), _) => Err(anyhow::anyhow!(
                     "configuration coordination failed: {error}"
                 )),
@@ -626,6 +711,11 @@ pub(super) mod native {
             };
             if let Err(error) = outcome {
                 tracing::error!(error = %error, "update failed");
+                if committed {
+                    // The terminal journal already commits new software/data.
+                    // A missing IPC acknowledgment cannot undo accepted writes.
+                    return Err(error);
+                }
                 if status.phase.needs_restore() || status.phase == Phase::Succeeded {
                     self.rollback(
                         status,
@@ -660,7 +750,9 @@ pub(super) mod native {
                         return self.save(status, Phase::FailedManualIntervention, "Preparation failed and the previous service could not restart. Operator intervention required.");
                     }
                 }
+                service.prepare_commit(&status.installed)?;
                 self.save(status, Phase::Failed, public_failure(&error))?;
+                service.commit()?;
                 self.retain_terminal(status);
             }
             Ok(())
@@ -672,6 +764,7 @@ pub(super) mod native {
             manifest: &Manifest,
             service: &impl Service,
             source: &impl ArtifactSource,
+            committed: &mut bool,
         ) -> anyhow::Result<()> {
             self.preflight(manifest)?;
             service.preflight()?;
@@ -717,7 +810,7 @@ pub(super) mod native {
                 // A previous failed attempt may already have fully staged the
                 // identical signed program. Reuse only its exact layout/hash,
                 // allowing a normal administrator to retry without host access.
-                verify_staged_install(&version_dir, manifest, self.config.web_uid)?;
+                verify_staged_install(&version_dir, manifest, self.config.web_uid, self.ownership)?;
             } else {
                 let stage_path = stage.keep();
                 fs::rename(&stage_path, &version_dir)?;
@@ -749,17 +842,20 @@ pub(super) mod native {
                 "installed database schema mismatch"
             );
             snapshot::estimated_bytes(&self.config.data_dir).map(|_operation_summary| ())?;
+            service.prepare_commit(&manifest.version)?;
             status.installed.clone_from(&manifest.version);
             self.save(
                 status,
                 Phase::Succeeded,
                 "RustChan updated successfully after health verification.",
             )?;
+            *committed = true;
             let store = self.restart_store();
             if store.directory.join("running.json").try_exists()? {
                 let running = store.running()?;
                 store.observe(running.instance, &running.digest, true)?;
             }
+            service.commit()?;
             self.retain_terminal(status);
             Ok(())
         }
@@ -772,7 +868,7 @@ pub(super) mod native {
                 .join("versions")
                 .join(&manifest.version);
             if existing.exists() {
-                verify_staged_install(&existing, manifest, self.config.web_uid)?;
+                verify_staged_install(&existing, manifest, self.config.web_uid, self.ownership)?;
             }
 
             for path in [
@@ -1039,10 +1135,19 @@ pub(super) mod native {
                     "restored schema mismatch"
                 );
                 status.installed = previous;
+                service.prepare_commit(&status.installed)?;
+                let store = self.restart_store();
+                if store.directory.join("running.json").try_exists()? {
+                    let running = store.running()?;
+                    store.observe(running.instance, &running.digest, true)?;
+                }
                 Ok::<_, anyhow::Error>(())
             })();
             match result {
-                Ok(()) => self.save(status, Phase::RolledBack, message),
+                Ok(()) => {
+                    self.save(status, Phase::RolledBack, message)?;
+                    service.commit()
+                }
                 Err(error) => {
                     tracing::error!(error = %error, "automatic rollback failed");
                     self.save(status, Phase::FailedManualIntervention, "Upgrade and automatic rollback failed. RustChan is stopped or unhealthy; operator intervention required. The rollback backup is retained.")
@@ -1327,6 +1432,7 @@ pub(super) mod native {
         directory: &Path,
         manifest: &Manifest,
         web_uid: u32,
+        ownership: Ownership,
     ) -> anyhow::Result<()> {
         no_symlink_ancestors(directory)?;
         let entries = fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
@@ -1350,8 +1456,11 @@ pub(super) mod native {
             for path in [directory, binary.as_path()] {
                 let metadata = fs::metadata(path)?;
                 anyhow::ensure!(
-                    metadata.uid() != web_uid
-                        && (metadata.uid() == 0 || metadata.uid() == owner)
+                    (match ownership {
+                        Ownership::Separated => metadata.uid() != web_uid,
+                        #[cfg(target_os = "linux")]
+                        Ownership::SameAccount => metadata.uid() == web_uid,
+                    }) && (metadata.uid() == 0 || metadata.uid() == owner)
                         && metadata.mode() & 0o7022 == 0
                         && metadata.mode() & 0o005 == 0o005
                         && (metadata.is_dir() || metadata.nlink() == 1),

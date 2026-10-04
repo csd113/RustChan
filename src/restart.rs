@@ -294,6 +294,7 @@ pub fn startup_digest() -> anyhow::Result<String> {
 /// # Errors
 /// Rejects unavailable control, failed health probes and configuration/generation mismatches.
 pub async fn started(digest: String) -> anyhow::Result<()> {
+    crate::updates::writer_initialized().await?;
     if crate::updates::managed() {
         // Establish a web-owned lock inode before the privileged controller uses it.
         if !crate::config::data_dir()

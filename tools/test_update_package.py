@@ -38,6 +38,8 @@ class PackageTests(unittest.TestCase):
         again, second = self.package()
         self.assertEqual(info, again)
         self.assertEqual(artifact, second)
+        # Earlier controllers lack the same-binary handoff/startup protocol.
+        self.assertEqual(info['minimum_updater'], '1.6.6')
         tool.validate(info, artifact)
 
     def test_signatures_and_both_architectures(self):

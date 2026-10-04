@@ -37,7 +37,7 @@ pub(super) fn render(status: &Status, csrf: &str, managed: bool, container: bool
             crate::templates::append_html(
                 &mut controls,
                 format_args!(
-                    r#"<form method="POST" action="/admin/updates/install" id="admin-update-install" class="admin-settings-group"><h3>Install verified update</h3><p>A verified backup is mandatory. RustChan will briefly restart. Failed upgrades restore the previous software, database, configuration and persistent files.</p><input type="hidden" name="_csrf" value="{}"><input type="hidden" name="approval" value="{}"><label for="update-current-password">Your current password</label><input type="password" name="current_password" id="update-current-password" required maxlength="1024" autocomplete="current-password"><label for="update-confirmation">Type INSTALL to confirm the restart</label><input type="text" name="confirmation" id="update-confirmation" required pattern="INSTALL" maxlength="7" autocomplete="off"><p class="admin-meta-note">Approval expires after 10 minutes and can be used once.</p><button type="submit">Install update</button></form>"#,
+                    r#"<form method="POST" action="/admin/updates/install" id="admin-update-install" class="admin-settings-group"><h3>Install verified update</h3><p>This installs the official prebuilt RustChan release and replaces the running executable, including any local source modifications. Your data and configuration are retained.</p><p>A verified backup is mandatory. RustChan will briefly restart. Failed upgrades restore the previous software, database, configuration and persistent files.</p><input type="hidden" name="_csrf" value="{}"><input type="hidden" name="approval" value="{}"><label for="update-current-password">Your current password</label><input type="password" name="current_password" id="update-current-password" required maxlength="1024" autocomplete="current-password"><label for="update-confirmation">Type INSTALL to confirm the restart</label><input type="text" name="confirmation" id="update-confirmation" required pattern="INSTALL" maxlength="7" autocomplete="off"><p class="admin-meta-note">Approval expires after 10 minutes and can be used once.</p><button type="submit">Install update</button></form>"#,
                     escape_html(csrf),
                     escape_html(approval)
                 ),
@@ -47,7 +47,7 @@ pub(super) fn render(status: &Status, csrf: &str, managed: bool, container: bool
         let note = if container {
             "Container installation is deployment-managed. Pull the chosen image and recreate the container with its persistent data volume."
         } else {
-            "Installation is deployment-managed on this system. Install the official release using your deployment tools. Native self-updates require the supported Linux updater service."
+            "Installation is deployment-managed on this system. Source builds are supported. Eligible Linux installations support built-in updates when the existing account owns the executable and data. For a manual upgrade, stop RustChan, back up the complete data directory, and replace the executable while keeping the same data directory. See the <a href=\"https://github.com/csd113/RustChan/blob/main/docs/software-updates.md#manual-upgrade-of-a-source-install\">upgrade guide</a> for preparation and rollback."
         };
         crate::templates::append_html(
             &mut controls,
@@ -161,5 +161,16 @@ mod tests {
             html.contains("Container installation is deployment-managed"),
             "containers should explain the upgrade procedure"
         );
+    }
+
+    /// A source installation needs an actionable manual route while trust stays explicit.
+    #[test]
+    fn source_install_explains_manual_upgrade_without_enabling_installation() {
+        let status = Status::default();
+        let html = render(&status, "csrf", false, false);
+        assert!(html.contains("Source builds are supported"));
+        assert!(html.contains("back up the complete data directory"));
+        assert!(html.contains("#manual-upgrade-of-a-source-install"));
+        assert!(!html.contains("id=\"admin-update-install\""));
     }
 }

@@ -898,10 +898,21 @@ fn repair_known_legacy_baseline_drift(conn: &rusqlite::Connection) -> Result<()>
 
 /// Return whether a recorded version belongs to a recognized repairable baseline.
 fn is_known_legacy_schema_version(version: Option<&str>) -> bool {
-    if matches!(version, None | Some("1.3.0" | "1.4.0" | "1.4.1"))
-        || version == Some(BASELINE_SCHEMA_VERSION)
-    {
+    if version.is_none() {
         return true;
+    }
+    // Package versions have been the schema stamp since 1.3.0. Earlier
+    // releases in this supported range must reach the same narrowly checked
+    // additive repairs as the current release, including the 1.6.0 indexes.
+    // The complete schema-shape checks still reject unrecognized drift.
+    if let (Some(Ok(recorded)), Ok(current)) = (
+        version.map(semver::Version::parse),
+        semver::Version::parse(BASELINE_SCHEMA_VERSION),
+    ) {
+        return recorded.pre.is_empty()
+            && recorded.build.is_empty()
+            && recorded >= semver::Version::new(1, 3, 0)
+            && recorded <= current;
     }
     match version.and_then(|value| value.parse::<i64>().ok()) {
         Some(1..=41) => true,
@@ -3059,6 +3070,67 @@ mod tests {
             super::is_known_legacy_schema_version(Some("1.4.1")),
             "the previous baseline must remain eligible for recognized repairs"
         );
+        Ok(())
+    }
+
+    /// The published 1.6.0 baseline predates the two post-query indexes.
+    #[test]
+    fn source_160_baseline_receives_missing_indexes_without_losing_posts() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        create_baseline_schema_objects(&conn)?;
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version TEXT NOT NULL PRIMARY KEY);
+             INSERT INTO schema_version VALUES ('1.6.0');
+             DROP INDEX idx_posts_thread_live;
+             DROP INDEX idx_posts_board_ip_created;
+             INSERT INTO boards (id, short_name, name) VALUES (1, 'b', 'Retained');
+             INSERT INTO threads (id, board_id) VALUES (10, 1);
+             INSERT INTO posts (id, thread_id, board_id, body, body_html, deletion_token, is_op)
+             VALUES (100, 10, 1, 'retained', 'retained', 'fixture-token', 1);",
+        )?;
+        install_or_migrate_schema(&conn)?;
+        install_or_migrate_schema(&conn)?;
+        verify_database_schema(&conn)?;
+        let retained: String =
+            conn.query_row("SELECT body FROM posts WHERE id = 100", [], |row| {
+                row.get(0)
+            })?;
+        ensure!(
+            retained == "retained",
+            "upgrade must preserve existing posts"
+        );
+        ensure!(schema_version(&conn)? == baseline_schema_version());
+        Ok(())
+    }
+
+    /// Recognizing an old package stamp must not accept unknown or future schemas.
+    #[test]
+    fn old_package_stamp_does_not_authorize_unrecognized_schema_changes() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        install_or_migrate_schema(&conn)?;
+        conn.execute_batch(
+            "UPDATE schema_version SET version = '1.6.0';
+             DROP INDEX idx_posts_thread_live;
+             ALTER TABLE posts ADD COLUMN unknown_external_change TEXT;",
+        )?;
+        ensure!(install_or_migrate_schema(&conn).is_err());
+        ensure!(
+            schema_version(&conn)? == "1.6.0",
+            "failure must not stamp success"
+        );
+        ensure!(!object_exists(&conn, "index", "idx_posts_thread_live")?);
+        for version in [
+            "1.2.2",
+            "1.6.0-rc.1",
+            "1.6.0+modified",
+            "999.0.0",
+            "invalid",
+        ] {
+            ensure!(
+                !super::is_known_legacy_schema_version(Some(version)),
+                "unsupported version {version} became repairable"
+            );
+        }
         Ok(())
     }
 

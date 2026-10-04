@@ -145,26 +145,43 @@ fn relaunch_in_terminal_if_needed() -> anyhow::Result<bool> {
 // can be tuned via `blocking_threads` in settings.toml or the
 // CHAN_BLOCKING_THREADS environment variable.
 
+/// Print update compatibility without creating runtime state or opening the database.
+///
+/// # Errors
+///
+/// Returns an error if writing the probe response fails.
+fn print_update_info() -> anyhow::Result<()> {
+    writeln!(
+        io::stdout().lock(),
+        "{}",
+        serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"), "target": updates::platform_target(),
+            "schema": db::baseline_schema_version(), "minimum_schema": "1.5.0", "updater_protocol": 2_u32
+        })
+    )?;
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
+    if updates::native_entry()? {
+        return Ok(());
+    }
     if std::env::args_os()
         .nth(1)
         .is_some_and(|arg| arg == "--update-info")
     {
-        writeln!(
-            io::stdout().lock(),
-            "{}",
-            serde_json::json!({
-                "version": env!("CARGO_PKG_VERSION"), "target": updates::platform_target(),
-                "schema": db::baseline_schema_version(), "minimum_schema": "1.5.0", "updater_protocol": 1_u32
-            })
-        )?;
+        print_update_info()?;
         return Ok(());
     }
     // Parse before terminal attachment, filesystem creation, logging, settings
     // generation, or CONFIG access. Clap handles --help and --version here and
     // exits successfully without mutating runtime state.
     let cli = server::cli::Cli::parse();
-    config::configure_data_dir(cli.data_dir.as_deref())?;
+    let startup_data = cli
+        .data_dir
+        .as_deref()
+        .or_else(|| updates::admitted_data_dir());
+    config::configure_data_dir(startup_data)?;
     config::configure_port_override(cli.port)?;
 
     if updates::managed() {
@@ -179,6 +196,13 @@ fn main() -> anyhow::Result<()> {
     // is not a TTY. Re-attach to a terminal so the banner, first-run wizard,
     // and keyboard console are visible to the user.
     if relaunch_in_terminal_if_needed()? {
+        return Ok(());
+    }
+
+    if updates::supervise_native(matches!(
+        &cli.command,
+        Some(server::cli::Command::Admin { action: _ })
+    ))? {
         return Ok(());
     }
 

@@ -58,6 +58,12 @@ static DATA_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 /// Launcher port selected before immutable configuration is initialized.
 static CLI_PORT_OVERRIDE: OnceLock<u16> = OnceLock::new();
 
+/// Preserve only the original launcher port in startup-authenticated internal actors.
+#[cfg(target_os = "linux")]
+pub(crate) fn launcher_port() -> Option<u16> {
+    CLI_PORT_OVERRIDE.get().copied()
+}
+
 /// Absolute path to the directory the running binary lives in.
 fn binary_dir() -> PathBuf {
     env::current_exe()

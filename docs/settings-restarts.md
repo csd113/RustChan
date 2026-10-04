@@ -49,21 +49,16 @@ authoritative at startup. Existing sessions retain their stored expiry when only
 session lifetime changes. Manual database actions and content/moderation operations
 continue to apply immediately.
 
-## Native managed Linux
+## Native Linux
 
-Use the existing `rustchan-updater` deployment in [Software Updates](software-updates.md).
-Install the matching updater build (1.6.0 or newer with settings restart support),
-fixed root-owned configuration, service units and polkit rule. No additional
-privileged daemon, socket or service authority is introduced. The same
-`/run/rustchan-updater/control.sock` accepts only the configured web UID, with
-0660 socket permissions and bounded request/reply sizes and deadlines.
-
-The Restart operation has only the authenticated administrator ID and the running
-process's server-generated identity. It cannot name a command, executable,
-argument, service, environment or filesystem path. The helper still controls only
-`rustchan.service` with fixed systemctl start/stop argv, without a shell. Existing
-software-install password reauthentication, expiring one-use approvals, release
-signatures and archive validation remain required for installation.
+Eligible installations use the same `rustchan-cli` invocation and ordinary account
+for application supervision and the full update controller; see
+[Software Updates](software-updates.md) for adoption and ownership requirements.
+Private local IPC authenticates the exact selected application process. The
+Restart operation contains only the administrator ID and server-generated
+running instance. It cannot name a command, executable, arguments, service,
+environment or filesystem path. Software installation still requires password
+reauthentication, an expiring one-use approval and verified signed release bytes.
 
 The updater's existing `update.lock`, durable status phases and startup/recovery
 admission also own settings restarts. A shared `.settings.lock` file serializes all
@@ -78,11 +73,10 @@ The updater retains the last ready configuration in its own private state direct
 After gracefully stopping the service it starts the same executable, requires the
 fixed loopback `/readyz` to report the expected version, healthy database and a new
 process identity in the nonsecret `X-RustChan-Instance` readiness header, and checks that the replacement loaded the requested settings.
-Startup and health checks are bounded to 60 seconds. Keep `health_port` aligned
-with an HTTP application listener reachable at 127.0.0.1; the supplied unit pins
-CHAN_HOST/CHAN_PORT to that endpoint. Changes that remove that probe path cannot
+Startup and health checks are bounded to 60 seconds. Keep the effective HTTP port reachable at 127.0.0.1. Original launcher port
+overrides continue to apply to replacement processes. Changes that remove that probe path cannot
 commit, including HTTPS-only configurations without a suitable local backend.
-Use the reverse proxy for public TLS with this supplied service model.
+Use a reverse proxy when public TLS would otherwise remove the local probe path.
 
 Failed or interrupted settings startup enters the existing updater recovery
 barrier, stops the application before restoring the verified last healthy file,

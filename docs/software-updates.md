@@ -8,84 +8,162 @@ package version**. It never reports release discovery or update transactions.
 
 ## Boundary and supported deployments
 
-The web process sends only Status, Check, Ready, Started, Restart and Install operations over
-`/run/rustchan-updater/control.sock`. Install contains a one-use opaque approval
-and an authenticated administrator ID; no request supplies a path, URL, command,
-service or environment. Existing session-scoped CSRF and same-origin checks apply
-to POST mutations. Installation additionally requires the current administrator
-password and typing INSTALL. Failures share the existing login lockout. Approvals
-expire 10 minutes after a compatible release check and are durably consumed
-before an installation worker starts.
+Eligible native Linux GNU x86_64 and aarch64 installations use `rustchan-cli`
+for the application, lifecycle guardians and selected full update controller.
+The existing ordinary account must own the replaceable executable, its writable
+installation directory and the private data directory. Paths must be free of
+symlinks, hardlinked files, special permission bits and foreign write access.
+Protected executables, root invocations, macOS, Windows and containers expose
+release checks and use the deployment's manual upgrade procedure.
 
-The updater accepts only the configured web UID, verifies socket/file ownership,
-serializes transactions using OS file locks and persists an atomic fsynced journal.
-Configuration and trust keys are root-owned. The web identity cannot write the
-updater executable, state, backup snapshots, version directories or active link.
-Service actions are fixed argv calls to systemctl for **rustchan.service** start
-and stop, with bounded execution; there is no shell or arbitrary service choice.
+Start with the usual `rustchan-cli --data-dir /absolute/path/to/data serve`.
+The same invocation supervises its children and retains the exact original
+executable before permitting application startup. The data directory's private
+`.software-updates` state holds validated versions, durable journals and rollback
+snapshots. Keep this state with the data directory. The first adoption requires
+all older, uncooperative RustChan processes to be stopped beforehand.
 
-Native installation supports Linux GNU x86_64 and aarch64 under the supplied
-systemd setup. macOS, Windows, custom layouts and containers are deployment-managed
-and expose Check only. Never enable native managed mode inside a container.
-Ordinary manual/scheduled backup and restore controls remain available. Native installation holds RustChan’s existing maintenance gate through the preparation transaction, preventing overlap with backup/restore while ordinary posts continue. If an install reply is lost before approval consumption can be confirmed, maintenance remains paused; inspect updater status/logs before restarting the web service to clear an unconsumed request.
+Local control authenticates the actual account, process ID and kernel start
+identity of each selected child. Closed operations cannot supply a path, URL,
+command, service or environment. Existing session-scoped CSRF and same-origin
+checks apply to administrator POSTs. Installation additionally requires the
+current administrator password and typing INSTALL. Approvals expire after ten
+minutes and are consumed durably before installation starts. OS file locks
+serialize installation, settings restarts and consistent snapshots.
 
-## One-time Linux setup
+The official Ed25519 public verification key is embedded in source builds.
+Installing an official prebuilt release replaces local source modifications;
+application data and configuration are retained. Same-account supervision
+protects against accidental races and ordinary descendant loss. It does not
+create a security boundary against malicious code already running as that
+account and able to modify its installation or data.
 
-Use a disposable staging machine first. Keep an independent full backup before
-converting an existing deployment. Do not perform conversion against a running
-application. Commands below assume the default `/var/lib/rustchan` layout and an
-existing configured instance. Override deployments require conversion to that
-layout before native updates; database/media/runtime paths cannot point elsewhere.
+A durable pre-spawn lifetime record and guardians track every admitted writer.
+Normal updates and recoverable failures restart RustChan. Exceptional loss of
+complete descendant-exit proof can require a **host reboot**. A missing PID,
+free lock, process restart or container recreation cannot substitute for that
+proof. After a real changed kernel boot, the retained committed controller
+recovers the journal before permitting application migrations or public traffic.
+Keep independent backups before recovery and preserve logs for diagnosis.
+Native reboot and power-loss behavior has not yet been validated; that testing
+is being handled separately from the 1.6.6 release.
 
-Create distinct locked service identities `rustchan` and `rustchan-updater` with
-matching primary groups. Build both binaries with `cargo build --locked --release --bins` from the corresponding release source. Install the updater outside the version directories at
-`/usr/local/libexec/rustchan-updater`, root-owned mode 0755. It is operator-managed;
-software updates cannot replace their own trust/transaction engine. A release
-requiring a newer updater is refused until the operator upgrades this executable.
+## Manual upgrade of a source install
 
-Prepare these paths and permissions:
+Compiling from source is supported. The controlled single-binary layout begins
+with 1.6.6; earlier installations require one stopped, manual adoption. New signed
+packages declare minimum updater 1.6.6 rather than accepting controllers whose
+startup and handoff protocol cannot run them. An unexpected source rebuild after
+retention is preserved and refused before data writes; use an explicit stopped
+adoption and retain the matching full backup instead of bypassing its byte check.
 
-| Path | Owner | Mode / access |
-| --- | --- | --- |
-| `/etc/rustchan` | root:root | 0755, no group/other write |
-| `/etc/rustchan/updater.toml` | root:root | 0644 |
-| `/etc/rustchan/update-public-key.hex` | root:root | 0644 |
-| `/opt/rustchan` and `versions` | rustchan-updater:rustchan-updater | 0755, no group/other write |
-| `/opt/rustchan/versions/<version>/rustchan-cli` | rustchan-updater:rustchan-updater | 0755 |
-| `/var/lib/rustchan-updater` and `backups` | rustchan-updater:rustchan-updater | 0700 |
-| `/var/lib/rustchan` and its persistent files | rustchan:rustchan | existing RustChan private permissions |
-| `/run/rustchan-updater` | rustchan-updater:rustchan | 0750 |
-| `control.sock` | rustchan-updater:rustchan | 0660; peer UID must still match |
+For an existing source installation:
 
-Copy the running binary into `versions/<running-version>/rustchan-cli` and create
-a relative `current -> versions/<running-version>` symlink inside `/opt/rustchan`.
-Preserve `chan.db`, `settings.toml`, `boards` and `runtime`; required roots must
-exist and must not contain symlinks, hardlinked files or special files.
-Ensure every ancestor of protected installation/state/key/config paths is owned
-by root or the updater and cannot be written by the web account. Root-owned sticky
-temporary parents are tolerated for isolated tests, not recommended deployment.
+1. Identify the running executable, its **absolute data directory**, service
+   identity, working directory, environment and launch arguments. Without an
+   explicit `--data-dir`, data defaults to `rustchan-data` beside the executable;
+   moving the executable can otherwise look like a fresh installation.
+2. Build the chosen release in a separate checkout with
+   `cargo build --locked --release --bin rustchan-cli`. Keep the running source tree,
+   executable and data untouched during compilation. Alternatively use the
+   matching official platform release and verify it using an independently
+   authenticated signing key. Retain the old executable for rollback.
+3. Stop the application through its existing service manager. Confirm it has
+   exited, then copy the **entire** data directory to a separate private backup,
+   preserving ownership and modes. Include SQLite WAL/SHM files if present,
+   settings, boards/media, runtime, Tor identity, TLS state and any configured
+   external persistent paths. A database-only backup cannot restore an upgrade.
+4. If installing the already published **1.6.5 over 1.6.0**, perform the offline
+   preparation below against the stopped database, after that full backup.
+   Releases with the corrected migration perform this step during startup.
+5. Replace the executable at its existing location, retaining its owner and
+   executable mode. Start with the same identity, environment and arguments;
+   use the same absolute `--data-dir`. Check `/readyz` reports the chosen running
+   version, administrator login works, and existing boards/posts/media remain
+   available. Run `admin db-status` against that same data directory to verify
+   the resulting schema. Inspect startup logs before reopening public access.
+6. If any verification fails, stop the new process. Retain the failed state for
+   diagnosis, restore the **matching complete stopped data backup and old
+   executable together**, and restart the old service. Verify its readiness and
+   administrator login. Never run the old binary on the migrated database or
+   manually lower `schema_version`.
 
-Install the unit files and polkit rule from `deploy/systemd`, all root-owned.
-Set `web_uid` in `/etc/rustchan/updater.toml` to `id -u rustchan`, confirm
-`health_port` matches a working loopback HTTP `/readyz` listener (use the reverse proxy for public TLS), and create the private backups
-directory before starting the updater. Install the trusted public key **through
-an independently authenticated operator channel**. A downloaded key is not trusted
-merely because it appears beside release assets.
+### Preparing 1.6.0 for the published 1.6.5 release
 
-For managed updates, enabled ACME state must remain under the data directory’s `runtime/` tree; external mutable caches are rejected before stopping RustChan.
+The published 1.6.5 executable fails startup on a canonical 1.6.0 database with
+`missing index idx_posts_board_ip_created; missing index idx_posts_thread_live`.
+Its repair allowlist omitted the 1.6.0 package stamp, although both indexes are
+already recognized additive repairs. The release signature and package remain
+valid; this is a database migration compatibility error.
 
-The updater's systemd capability set allows reading owner-only application files
-and restoring their original owner/mode. `ProtectSystem=strict`, `ProtectHome`
-and explicit writable paths confine filesystem mutation to the managed application,
-state and data roots. The web service remains unprivileged with NoNewPrivileges.
-The polkit rule grants only start/stop of rustchan.service to the updater identity.
-Review these privileges against the host's systemd/polkit policies.
+For this **specific** error and baseline, stop the application and take the full
+backup above. An operator with Python 3 can add the two indexes to the stopped
+database using the following command, substituting its actual absolute path:
 
-Validate with `systemd-analyze verify deploy/systemd/*.service`, then install units,
-`systemctl daemon-reload`, and start the updater before the application. Managed
-startup refuses to open/migrate the database or reconcile filesystem operations
-until recovered updater admission matches the active running package version.
-Check `journalctl -u rustchan-updater -u rustchan` and administrator readiness.
+```sh
+python3 - /absolute/path/to/rustchan-data/chan.db <<'PY'
+import sqlite3
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.is_absolute() or not path.is_file():
+    raise SystemExit("Expected the existing stopped database's absolute path")
+with sqlite3.connect(path) as db:
+    db.execute("BEGIN IMMEDIATE")
+    if db.execute("SELECT version FROM schema_version").fetchall() != [("1.6.0",)]:
+        raise SystemExit("This preparation applies only to a 1.6.0 database")
+    if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+        raise SystemExit("Database integrity failed; do not upgrade")
+    if db.execute("PRAGMA foreign_key_check").fetchall():
+        raise SystemExit("Foreign-key validation failed; do not upgrade")
+    for name, sql in (
+        ("idx_posts_thread_live", "CREATE INDEX idx_posts_thread_live ON posts(thread_id, id)"),
+        ("idx_posts_board_ip_created", "CREATE INDEX idx_posts_board_ip_created ON posts(board_id, ip_hash, created_at DESC)"),
+    ):
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (name,)).fetchone():
+            raise SystemExit("Index already exists; inspect the schema instead of applying this preparation")
+        db.execute(sql)
+    # Commit both additive indexes together. Do not change rows or schema_version.
+PY
+```
+
+Keep the application stopped between preparation and replacement with 1.6.5.
+The old executable's exact schema verifier also rejects the newer indexes, so
+returning to 1.6.0 requires the complete pre-preparation backup. If a different
+schema mismatch is reported, restore that backup and investigate; do not add
+arbitrary indexes, drop constraints or edit the version stamp to bypass checks.
+The unchanged official Linux ARM64 1.6.0 and 1.6.5 binaries have been tested on an
+isolated Linux fixture through this route, including administrator authentication,
+post/config/media/private-file preservation and full data-and-binary rollback.
+Adopt the controlled single-binary layout only after the old invocation is stopped.
+
+The published 1.6.5 native manifest also advertises minimum updater 1.6.0, but its
+managed startup requires the newer `Started` control operation, which the 1.6.0
+updater cannot recognize. Keeping an old 1.6.0 updater while replacing only the
+managed application with 1.6.5 is therefore not a supported transition. The
+manual source procedure above uses ordinary unmanaged startup and does not
+exercise that separate control protocol. The 1.6.6 candidate implements the
+single-binary layout, advertises protocol 2 and requires updater 1.6.6 in new
+signed packages. Actual kernel reboot/power-loss validation remains separate
+follow-up work and has not been established by process-loss fixtures.
+
+## Adopting an earlier managed deployment
+
+Take the complete stopped backup described above and retain the old application
+and its matching controller for rollback. Remove the previous deployment's
+managed-controller environment setting before starting the new ordinary-account
+invocation. Keep the same absolute data directory, account, working directory,
+environment and port arguments. An existing service manager may launch this one
+executable; desktop source launches work through the same foreground invocation.
+Protected installations remain deployment-managed until the operator deliberately
+prepares an eligible layout. The application never changes ownership or gains
+privileges to adopt protected files.
+
+The separate updater units and polkit examples under `deploy/systemd` describe
+historical 1.6.0–1.6.5 deployments. They are not the single-binary source setup.
+Do not mix an old controller with a new application merely by changing its
+version link. The old deployment must be fully stopped before adoption.
 
 ## Verification and transactions
 
@@ -117,8 +195,9 @@ is retained after success.
 Activation intent is journaled before atomic current-link replacement. The new
 service performs its usual startup migration/reconciliation. The updater checks
 bounded `/readyz` health and expected running version, then independently checks
-the expected recorded schema and database integrity. Success is persisted only
-after these checks pass. HTTP mutations fail closed during activation/recovery;
+the expected recorded schema and database integrity. The selected newest full controller must initialize before success is persisted.
+Only after the durable terminal journal commits does it become active, publish
+the new executable at the original source path and open public admission. Public requests fail closed during source activation/recovery;
 release discovery and download verification do not block ordinary writes.
 
 After an activation, migration, startup or readiness failure, the updater stops
@@ -146,9 +225,8 @@ openssl pkey -in rustchan-update-key.pem -pubout -outform DER -out rustchan-upda
 ```
 
 Store the private PEM as the repository secret `RUSTCHAN_UPDATE_SIGNING_KEY`.
-Keep an offline recovery copy and never commit it. The trusted key file on the
-installation contains the final 32 Ed25519 public-key bytes as 64 hex characters,
-not the whole DER/PEM. The signing tool validates that the public DER has the
+Keep an offline recovery copy and never commit it. The source build embeds the reviewed final 32 Ed25519 public-key bytes. Public
+release artifacts provide the hex and PEM encodings for independent verification. The signing tool validates that the public DER has the
 Ed25519 prefix and emits `.hex`/`.pem` public artifacts for operator distribution.
 Key rotation is an explicit operator action, never an HTTP configuration change.
 
@@ -167,9 +245,9 @@ artifacts, are explicitly marked prerelease, and cannot advance stable latest.
 Existing GHCR main/latest and version-tag policy remains unchanged.
 
 Run `python3 -m unittest discover -s tools -p test_update_package.py` for offline
-packaging/signing regressions. Native systemd/polkit capabilities, reboot during
-activation, actual migration binaries and service readiness still require a
-disposable Linux/systemd staging deployment before production rollout.
+packaging/signing regressions. Native kernel reboot and power loss during activation still require a disposable
+Linux staging deployment before production rollout. Container process tests do
+not establish those boot guarantees.
 
 ## Troubleshooting
 
@@ -180,11 +258,16 @@ or expired approvals. Resolve insufficient disk space before retrying; snapshots
 include media and can be large. Never relax path ownership to fix an IPC failure.
 
 For failed rollback, keep RustChan stopped and inspect updater logs/journal and
-immutable snapshots as the operator. Correct permissions, space, service/polkit or
-snapshot integrity issues before restarting the updater. No web action can force
+immutable snapshots as the operator. Correct permissions, space or snapshot
+integrity issues before restarting RustChan. If descendant exit remains uncertain,
+restart the host before journal recovery. No web action can force
 an unverified restore or clear failed recovery. Keep independent manual/offsite
 backups; native rollback snapshots protect the local transaction, not disk loss.
 
 ## Settings restarts
 
-[Administrator settings restarts](settings-restarts.md) reuse this same socket, service controller, transaction lock, journal and recovery admission. Their rollback restores configuration only. Install the matching updater build before enabling this UI; newly packaged releases require updater 1.6.0 or newer. Software installation retains its existing password/approval and complete snapshot protections.
+[Administrator settings restarts](settings-restarts.md) reuse the same selected
+controller, transaction lock, durable journal and recovery admission. Their
+rollback restores configuration only. The controller comes from the installed
+1.6.6-or-newer executable. Software installation retains its password, approval
+and persistent-state snapshot protections.

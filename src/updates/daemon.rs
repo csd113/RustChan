@@ -1,5 +1,5 @@
 #[cfg(unix)]
-use super::transaction::native::{Config, Engine, Service};
+use super::transaction::native::{Config, Engine, Ownership, Service};
 #[cfg(unix)]
 use anyhow::Context as _;
 use std::path::Path;
@@ -70,13 +70,17 @@ mod linux {
         );
         let config: Config = toml::from_str(&fs::read_to_string(config_path)?)
             .context("invalid updater configuration")?;
-        super::super::transaction::native::protected_ancestors(&config.public_key, config.web_uid)?;
-        let key_metadata = fs::symlink_metadata(&config.public_key)?;
+        let key_path = config
+            .public_key
+            .as_ref()
+            .context("legacy updater requires its trusted public key path")?;
+        super::super::transaction::native::protected_ancestors(key_path, config.web_uid)?;
+        let key_metadata = fs::symlink_metadata(key_path)?;
         anyhow::ensure!(
             key_metadata.is_file() && key_metadata.uid() == 0 && key_metadata.mode() & 0o022 == 0,
             "release trust key must be root owned and non-writable"
         );
-        let key_text = fs::read_to_string(&config.public_key)?;
+        let key_text = fs::read_to_string(key_path)?;
         let key_text = key_text.trim();
         anyhow::ensure!(
             key_text.len() == 64 && key_text.is_ascii(),
@@ -99,7 +103,11 @@ mod linux {
                 "managed installation/state must belong to the updater identity"
             );
         }
-        let engine = Engine { config, key };
+        let engine = Engine {
+            config,
+            key,
+            ownership: Ownership::Separated,
+        };
         engine.validate()?;
         super::super::transaction::native::protected_ancestors(
             Path::new(SOCKET)
