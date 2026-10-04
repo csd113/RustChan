@@ -20,13 +20,9 @@ pub(super) async fn track_requests(
     {
         return recovery_unavailable();
     }
-    if crate::updates::managed()
-        && !matches!(
-            *req.method(),
-            axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
-        )
-        && !crate::updates::mutations_allowed(Some(std::path::Path::new(crate::updates::SOCKET)))
-            .await
+    if req.uri().path() != "/readyz"
+        && crate::updates::managed()
+        && !crate::updates::requests_allowed().await
     {
         return recovery_unavailable();
     }

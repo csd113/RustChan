@@ -66,6 +66,19 @@ mod tests {
             .context("compiled CLI path has no filename")?;
         let destination = bin_dir.join(file_name);
         let _bytes_copied = std::fs::copy(source, &destination).context("copy rustchan-cli")?;
+        #[cfg(target_os = "linux")]
+        {
+            // Black-box fixtures need runtime sections, not hundreds of MB of
+            // debug metadata hashed repeatedly by native source verification.
+            // The original compiled executable keeps its full debug information.
+            let output =
+                command_output(Command::new("strip").arg("--strip-debug").arg(&destination))?;
+            anyhow::ensure!(
+                output.status.success(),
+                "strip copied CLI debug sections: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         Ok(destination)
     }
 

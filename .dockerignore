@@ -32,5 +32,5 @@ tests
 *.md
 package.json
 package-lock.json
-playwright.config.ts
+playwright*.config.*
 deny.toml

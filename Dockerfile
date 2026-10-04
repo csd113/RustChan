@@ -1,6 +1,6 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1
 
-FROM rust:1.99.0-bookworm AS builder
+FROM rust:1.99.0-trixie AS builder
 WORKDIR /build
 ARG CARGO_BUILD_JOBS=2
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --locked --release --bin rustchan-cli && \
     install -Dm755 target/release/rustchan-cli /out/rustchan-cli
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 LABEL org.opencontainers.image.title="RustChan" \
       org.opencontainers.image.description="Self-hosted imageboard" \
       org.opencontainers.image.source="https://github.com/csd113/RustChan" \

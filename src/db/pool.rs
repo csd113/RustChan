@@ -21,18 +21,26 @@ pub(super) const CONNECTION_PRAGMAS: &str = "
 /// Maximum time callers wait for a pooled connection.
 const POOL_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Bound first connection initialization separately from request checkout waits.
+const POOL_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Require one initialized connection before startup; fill spare capacity asynchronously.
 fn build_pool(manager: SqliteConnectionManager, pool_size: u32) -> Result<DbPool> {
     // r2d2's build() waits for max_size connections by default. That couples
     // first-run startup to every spare initializer's scheduling even when a
     // usable connection is ready. Keep eager refill and the one-second request
-    // deadline, but validate readiness through a real checkout instead.
+    // deadline, but validate readiness through a real checkout instead. The
+    // first connection may need disk initialization and scheduler time under
+    // concurrent startup load, so it gets a separate bounded startup deadline.
     let pool = Pool::builder()
         .max_size(pool_size)
         .event_handler(Box::new(super::diagnostics::PoolEvents::new()))
         .connection_timeout(POOL_CONNECTION_TIMEOUT)
         .build_unchecked(manager);
-    drop(pool.get().context("Failed to initialize database pool")?);
+    drop(
+        pool.get_timeout(POOL_STARTUP_TIMEOUT)
+            .context("Failed to initialize database pool")?,
+    );
     Ok(pool)
 }
 
@@ -189,6 +197,32 @@ mod tests {
             super::build_pool(manager, 4).is_err(),
             "startup accepted an unusable database"
         );
+        Ok(())
+    }
+
+    /// Slow first-run initialization must not inherit the short request deadline.
+    #[test]
+    fn startup_allows_a_slow_first_connection_without_extending_request_waits() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let manager =
+            r2d2_sqlite::SqliteConnectionManager::file(directory.path().join("slow-start.db"))
+                .with_init(|conn| {
+                    std::thread::sleep(
+                        super::POOL_CONNECTION_TIMEOUT + std::time::Duration::from_secs(1),
+                    );
+                    conn.execute_batch(super::CONNECTION_PRAGMAS)
+                });
+        let pool = super::build_pool(manager, 1)?;
+        anyhow::ensure!(pool.connection_timeout() == super::POOL_CONNECTION_TIMEOUT);
+        let connection = pool.get()?;
+        let started = std::time::Instant::now();
+        anyhow::ensure!(pool.get().is_err(), "exhausted pool must remain bounded");
+        anyhow::ensure!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "request checkout inherited the startup deadline"
+        );
+        super::install_or_migrate_schema(&connection)?;
+        crate::db::verify_database_schema(&connection)?;
         Ok(())
     }
 

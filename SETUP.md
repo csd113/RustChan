@@ -2,7 +2,7 @@
 
 Current setup and deployment guide for Linux, macOS, and Windows.
 
-Current version: `1.6.5`.
+Current version: `1.6.6`.
 
 This guide reflects the current RustChan architecture:
 
@@ -704,7 +704,7 @@ Back that directory up if the onion address matters.
 
 ### Optional administrator-controlled software updates
 
-For immutable native Linux version directories, a separate restricted updater service, signing trust setup and automatic backup/rollback, follow [Software Updates](docs/software-updates.md). The existing single-binary service remains deployment-managed until explicitly converted.
+Eligible native Linux installs use the same `rustchan-cli` executable for the application and update controller. Start with the existing account and data directory; see [Software Updates](docs/software-updates.md) for ownership requirements, verified backups, source adoption and exceptional reboot recovery. Protected installations and containers use their deployment's upgrade procedure.
 
 ### Internal media processing
 

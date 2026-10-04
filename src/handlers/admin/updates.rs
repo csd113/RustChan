@@ -59,7 +59,7 @@ pub(super) async fn snapshot() -> Status {
     if updates::managed() {
         return updates::request(&Request::Status).await.map_or_else(|_| Status {
             installed: updates::VERSION.to_owned(),
-            message: "Updater unavailable. Check the native updater service; installation is disabled.".to_owned(),
+            message: "Update controller unavailable. Check RustChan's launch logs; installation is disabled.".to_owned(),
             ..Status::default()
         }, |reply| reply.status);
     }
@@ -114,7 +114,7 @@ pub(in crate::server) async fn check(
         tokio::task::spawn_blocking(|| -> anyhow::Result<()> {
             let status = Status {
                 installed: updates::VERSION.to_owned(),
-                discovery: Some(updates::discover(updates::VERSION, None)),
+                discovery: Some(updates::discover_official(updates::VERSION)),
                 checked_at: Some(chrono::Utc::now().to_rfc3339()),
                 message: "Release check completed. Installation is deployment-managed.".to_owned(),
                 ..Status::default()
