@@ -357,36 +357,37 @@ pub(in crate::server) async fn thread_action(
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
+            let tx = rusqlite::Transaction::new_unchecked(
+                &conn, rusqlite::TransactionBehavior::Immediate,
+            )?;
             let (admin_id, admin_name) =
-                super::require_admin_session_with_name(&conn, session_id.as_deref())?;
+                super::require_admin_session_with_name(&tx, session_id.as_deref())?;
             match action.as_str() {
-                "sticky" => db::set_thread_sticky(&conn, thread_id, true)?,
-                "unsticky" => db::set_thread_sticky(&conn, thread_id, false)?,
-                "lock" => db::set_thread_locked(&conn, thread_id, true)?,
-                "unlock" => db::set_thread_locked(&conn, thread_id, false)?,
-                "archive" => db::set_thread_archived(&conn, thread_id, true)?,
+                "sticky" => db::set_thread_sticky(&tx, thread_id, true)?,
+                "unsticky" => db::set_thread_sticky(&tx, thread_id, false)?,
+                "lock" => db::set_thread_locked(&tx, thread_id, true)?,
+                "unlock" => db::set_thread_locked(&tx, thread_id, false)?,
+                "archive" => db::set_thread_archived(&tx, thread_id, true)?,
                 _ => {}
             }
-            if let Err(error) = db::log_mod_action(
-                &conn,
-                admin_id,
-                &admin_name,
-                &action,
-                "thread",
-                Some(thread_id),
-                &board_for_log,
-                "",
-            ) {
-                tracing::error!(
-                    target: "admin",
-                    admin_id,
-                    action = %action,
-                    thread_id,
-                    board = %board_for_log,
-                    error = %error,
-                    "Privileged thread action completed without audit-log record"
-                );
+            // Resolve the authoritative board ID under the same write lock.
+            let board_id: i64 = tx.query_row(
+                "SELECT board_id FROM threads WHERE id = ?1", [thread_id], |row| row.get(0),
+            )?;
+            if matches!(action.as_str(), "archive" | "unsticky") {
+                let _schedule = db::persist_thread_prune_intent_in_tx(&tx, board_id)?;
             }
+            let logged_board = if action == "archive" {
+                tx.query_row("SELECT short_name FROM boards WHERE id = ?1", [board_id], |row| row.get::<_, String>(0))?
+            } else {
+                board_for_log
+            };
+            // Thread moderation and its audit record must commit together.
+            db::log_mod_action(
+                &tx, admin_id, &admin_name, &action, "thread", Some(thread_id),
+                &logged_board, "",
+            )?;
+            tx.commit()?;
             tracing::info!(target: "admin", action = %action, thread_id = thread_id, "Thread action");
             Ok(())
         }
@@ -999,6 +1000,42 @@ mod tests {
         };
 
         ensure!(error.to_string().contains("Origin/Referer origin mismatch"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn manual_archive_rolls_back_when_audit_logging_fails() -> anyhow::Result<()> {
+        let (state, thread_id, _reply_id, _board_id) = seed_admin_data()?;
+        {
+            let conn = state.db.get()?;
+            conn.execute_batch(
+                "CREATE TRIGGER fail_mod_log BEFORE INSERT ON mod_log
+                BEGIN SELECT RAISE(ABORT, 'injected audit log failure'); END;",
+            )?;
+        }
+        let response = thread_action(
+            State(state.clone()),
+            build_admin_jar(),
+            admin_headers(),
+            crate::test_support::connect_info(),
+            Form(ThreadActionForm {
+                thread_id,
+                board: "test".to_owned(),
+                action: "archive".to_owned(),
+                csrf: Some(admin_signed_csrf()),
+            }),
+        )
+        .await;
+        ensure!(response.is_err());
+        let conn = state.db.get()?;
+        let thread = db::get_thread(&conn, thread_id)?.context("thread")?;
+        ensure!(!thread.archived && !thread.locked);
+        let jobs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM background_jobs WHERE job_type='thread_prune'",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(jobs == 0);
         Ok(())
     }
 

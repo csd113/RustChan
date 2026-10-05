@@ -1213,7 +1213,7 @@ pub(in crate::server) async fn vote_handler(
             let recorded = db::cast_vote(&conn, poll_id, option_id, &ip_hash)?;
             if !recorded {
                 return Err(AppError::BadRequest(
-                    "This poll has closed or you have already voted.".into(),
+                    "This poll is closed, archived, or you have already voted.".into(),
                 ));
             }
             tracing::info!(

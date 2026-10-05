@@ -903,6 +903,7 @@ fn render_board_settings_card(
     <label><input type="checkbox" name="nsfw" value="1"{nsfw_checked}> NSFW</label>
     <label><input type="checkbox" name="allow_archive" value="1"{archive_checked}> Archive overflow threads</label>
   </div>
+  <p class="admin-meta-note">Archive retention keeps the most recently bumped threads, including archived sticky threads. Lowering the archive limit permanently removes overflow threads. The global Archive before prune setting can also archive live overflow when this checkbox is off.</p>
 </div>
 <div class="admin-subsection">
   <div class="admin-card-header">

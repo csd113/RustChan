@@ -1110,7 +1110,7 @@ pub fn get_poll_for_thread(
 ///
 /// This returns false for two distinct cases:
 ///   1. The voter has already voted (UNIQUE constraint fires INSERT OR IGNORE)
-///   2. The option does not belong to the poll, or the poll has expired
+///   2. The option does not belong to the poll, or the poll has expired/archived
 ///
 /// Callers that need to distinguish these cases should call `cast_vote` and, on
 /// false, separately query whether the IP has voted on this poll. A future
@@ -1129,7 +1129,9 @@ pub fn cast_vote(
          SELECT ?1, ?2, ?3
          FROM poll_options AS po
          JOIN polls AS p ON p.id = po.poll_id
-         WHERE po.id = ?2
+         JOIN threads AS t ON t.id = p.thread_id
+         WHERE t.archived = 0
+           AND po.id = ?2
            AND po.poll_id = ?1
            AND p.expires_at > unixepoch()",
         params![poll_id, option_id, ip_hash],
@@ -4109,6 +4111,11 @@ mod tests {
         assert!(
             !cast_vote(&conn, expired_poll, expired_option, "late")?,
             "an expired poll should reject the vote in the write statement"
+        );
+        crate::db::set_thread_archived(&conn, thread_id, true)?;
+        assert!(
+            !cast_vote(&conn, open_poll, open_option, "archived-voter")?,
+            "archival must reject votes in the same write statement"
         );
         Ok(())
     }

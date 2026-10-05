@@ -439,7 +439,7 @@ pub fn thread_page(
     body.push_str(thread_notice);
 
     if let Some(pd) = poll {
-        body.push_str(&render_poll(pd, thread.id, &board.short_name, csrf_token));
+        body.push_str(&render_poll(pd, thread, &board.short_name, csrf_token));
     }
 
     let last_post_id = posts.iter().map(|p| p.id).max().unwrap_or(0);
@@ -602,12 +602,16 @@ fn poll_expiry_label(pd: &crate::models::PollData) -> String {
 /// Renders a poll voting form or its results.
 fn render_poll(
     pd: &crate::models::PollData,
-    thread_id: i64,
+    thread: &Thread,
     board_short: &str,
     csrf_token: &str,
 ) -> String {
-    let expires_str = poll_expiry_label(pd);
-    let show_results = pd.is_expired || pd.user_voted_option.is_some();
+    let expires_str = if thread.archived {
+        "archived".to_owned()
+    } else {
+        poll_expiry_label(pd)
+    };
+    let show_results = thread.archived || pd.is_expired || pd.user_voted_option.is_some();
 
     let mut html = format!(
         r#"<div class="poll-container" id="poll">
@@ -617,7 +621,7 @@ fn render_poll(
   <span class="poll-status {status_class}">[{expires}]</span>
 </div>"#,
         q = escape_html(&pd.poll.question),
-        status_class = if pd.is_expired {
+        status_class = if thread.archived || pd.is_expired {
             "poll-closed"
         } else {
             "poll-open"
@@ -675,7 +679,7 @@ fn render_poll(
 <input type="hidden" name="thread_id" value="{tid}">
 <input type="hidden" name="board"     value="{board}">"#,
                 csrf = escape_html(csrf_token),
-                tid = thread_id,
+                tid = thread.id,
                 board = escape_html(board_short)
             ),
         );
@@ -1665,6 +1669,71 @@ mod tests {
             op_name: Some("anon".into()),
             op_tripcode: None,
             op_id: Some(1),
+        }
+    }
+
+    #[test]
+    fn archived_media_and_markup_use_the_same_safe_post_renderer() {
+        for (media, mime) in [
+            (Some(MediaType::Image), "image/webp"),
+            (Some(MediaType::Video), "video/webm"),
+            (Some(MediaType::Audio), "audio/ogg"),
+            (Some(MediaType::Pdf), "application/pdf"),
+            (Some(MediaType::Other), "application/octet-stream"),
+            (None, "image/webp"),
+        ] {
+            let post = Post {
+                media_type: media,
+                mime_type: Some(mime.to_owned()),
+                // Keep hostile fixtures distinct from served inline-script source.
+                name: concat!("<scr", "ipt>alert(1)</script>").to_owned(),
+                file_name: Some(concat!("unsafe\"<scr", "ipt>.webp").to_owned()),
+                body_html: crate::utils::sanitize::render_post_body(
+                    &crate::utils::sanitize::escape_html(concat!(
+                        ">quote\n>>1 [spoiler]hidden[/spoiler] <scr",
+                        "ipt>alert(1)</script>"
+                    )),
+                    false,
+                ),
+                audio_file_path: Some("test/companion.opus".to_owned()),
+                audio_file_name: Some("companion.opus".to_owned()),
+                audio_mime_type: Some("audio/ogg".to_owned()),
+                ..sample_post()
+            };
+            let render = |archived| {
+                render_post(
+                    &post,
+                    "test",
+                    "csrf",
+                    RenderPostOpts {
+                        show_delete: false,
+                        is_admin: false,
+                        admin_csrf_token: None,
+                        show_media: true,
+                        allow_editing: false,
+                        allow_self_delete: false,
+                        owned_post_controls: None,
+                        show_poster_ids: false,
+                        collapse_greentext: false,
+                        thread_state: Some((false, archived, archived)),
+                        thread_op_id: Some(1),
+                        video_audio_muted: false,
+                    },
+                    0,
+                )
+            };
+            let active = render(false);
+            let archived = render(true);
+            assert_eq!(
+                active, archived,
+                "archive state must preserve reply media and markup"
+            );
+            assert!(
+                !archived.contains("<script>"),
+                "user text must remain escaped"
+            );
+            assert!(archived.contains("data-media-thumb"));
+            assert!(archived.contains("quotelink"));
         }
     }
 

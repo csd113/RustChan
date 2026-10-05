@@ -6756,6 +6756,10 @@ html:not([data-theme]) .thread-nav-btn.active { text-shadow: 0 0 8px rgba(0,255,
   font-size: 0.82rem;
   word-break: break-word;
 }
+.archive-thread-link:focus-visible {
+  outline: 2px solid var(--green-bright, #00c840);
+  outline-offset: 3px;
+}
 .archive-thread-link:hover {
   color: var(--green-bright, #00c840);
 }

@@ -375,7 +375,7 @@ pub(in crate::server) async fn board_archive(
         &state,
         &board_short,
         admin_session_id.clone(),
-        access_cookie,
+        access_cookie.clone(),
         BoardAccessRequirement::View,
         return_to,
     )
@@ -394,24 +394,32 @@ pub(in crate::server) async fn board_archive(
         let csrf_clone = csrf.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            let board = db::get_board_by_short(&conn, &board_short)?
-                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-
-            if !board.allow_archive {
-                return Err(AppError::NotFound(format!(
-                    "/{board_short}/ does not have an archive."
-                )));
+            let tx = conn.unchecked_transaction()?;
+            // Recheck access in the same snapshot as content, so a concurrent
+            // password change cannot expose newly protected archived posts.
+            let access = super::load_board_access_context(
+                &tx,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )?;
+            if !access.can_view {
+                return Err(AppError::Forbidden(
+                    "Board access changed. Unlock this board and retry.".into(),
+                ));
             }
+            let board = access.board;
 
-            let total = db::count_archived_threads_for_board(&conn, board.id)?;
+            let total = db::count_archived_threads_for_board(&tx, board.id)?;
             let pagination = Pagination::new(page, ARCHIVE_PER_PAGE, total);
             let threads = db::get_archived_threads_for_board(
-                &conn,
+                &tx,
                 board.id,
                 ARCHIVE_PER_PAGE,
                 pagination.offset(),
             )?;
 
+            tx.commit()?;
             let all_boards = templates::live_boards();
             Ok(templates::archive_page(
                 &board,

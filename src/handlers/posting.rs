@@ -653,11 +653,11 @@ fn submit_post_with_preparation(
             if thread.board_id != board.id {
                 return Err(AppError::NotFound("Thread not found in this board.".into()));
             }
-            if thread.locked {
-                return Err(AppError::Forbidden("This thread is locked.".into()));
-            }
             if thread.archived {
                 return Err(AppError::Forbidden("This thread is archived.".into()));
+            }
+            if thread.locked {
+                return Err(AppError::Forbidden("This thread is locked.".into()));
             }
 
             Some((*thread_id, *sage))
@@ -3018,7 +3018,12 @@ mod tests {
                     }
                     Ok(())
                 });
-            assert!(matches!(result, Err(AppError::Forbidden(_))));
+            let expected = if archived {
+                "This thread is archived."
+            } else {
+                "This thread is locked."
+            };
+            assert!(matches!(result, Err(AppError::Forbidden(message)) if message == expected));
             let recovered_conn = state.db.get()?;
             assert_eq!(
                 crate::db::get_posts_for_thread(&recovered_conn, thread)?.len(),

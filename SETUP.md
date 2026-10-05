@@ -723,3 +723,42 @@ resource limits and verification.
 ## Applying administrator configuration
 
 Live controls keep applying immediately. Other controls show their active, saved and next-start values. Saving never restarts RustChan; managed Linux and opted-in supervised containers expose **Restart RustChan** for pending settings. See [settings restarts](docs/settings-restarts.md) for the complete classification, supervisor setup, graceful shutdown and failure recovery.
+
+## Thread archives and retention
+
+Threads leave the active index when background maintenance finds more than the
+board's **Max threads** non-sticky active threads. It keeps the newest last-bump
+and thread-ID pairs; locked threads count, sticky active threads do not. New
+thread creation durably schedules maintenance, so overflow can be visible
+briefly. Startup and periodic reconciliation recover outstanding work.
+
+Replies bump until the board's bump limit is reached. Sage replies count toward
+that limit without bumping. The bump limit stops bumps; it does not immediately
+archive the thread. There is no time-based thread expiry.
+
+**Archive overflow threads** controls automatic archival, with the global
+`archive_before_prune` safety net (default `true`) also enabling it. Hard deletion
+of active overflow occurs only when both are off. Existing archives and their
+navigation remain available even when automatic archival is disabled.
+
+**Max archived threads** is a count cap (1–10,000), not permanent retention.
+Maintenance keeps the most recently bumped archived threads, breaking ties by
+ascending thread ID. Archived sticky threads are also subject to the cap;
+sticky is not an archive preservation setting. Lowering the cap permanently
+removes overflow threads. Invalid retention values are rejected rather than
+clamped; omitted retention fields preserve the saved limits.
+
+Archival keeps the same `/{board}/thread/{id}` URL and media references. Archived
+threads are read-only, including polls; users can browse their results, quoting,
+spoilers and attachments. Board search includes archived posts. Board index,
+catalog and unread history show active threads. Administrators can manually
+archive or delete a thread using the existing authenticated, CSRF-protected
+controls. There is no public unarchive/preservation control.
+
+The archive and prune transitions use one SQLite write transaction. Pruned
+media is removed only when no other database references remain, using durable,
+restart-replayable file cleanup. Failed filesystem cleanup stays queued and
+logged. Archive policy is read when maintenance executes, not from stale job
+payloads. Changing the global TOML/environment safety net requires restart;
+board settings are live. Monitor background-job failures if maintenance is
+unable to acquire the database lock or complete cleanup.

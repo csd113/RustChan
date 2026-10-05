@@ -274,8 +274,8 @@ const BASE_SCHEMA_SQL: &str = "
 
 /// Complete baseline secondary-index definitions.
 const INDEX_SCHEMA_SQL: &str = "
-    CREATE INDEX IF NOT EXISTS idx_threads_board_sticky_bumped
-        ON threads(board_id, sticky DESC, bumped_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_threads_active_order
+        ON threads(board_id, sticky DESC, bumped_at DESC, id DESC) WHERE archived = 0;
     CREATE INDEX IF NOT EXISTS idx_posts_thread
         ON posts(thread_id, created_at ASC);
     CREATE INDEX IF NOT EXISTS idx_posts_thread_live
@@ -340,7 +340,8 @@ const INDEX_SCHEMA_SQL: &str = "
 /// Obsolete theme index accepted only during the known legacy repair path.
 const LEGACY_THEME_SORT_INDEX: &str = "idx_themes_enabled_sort";
 /// Additive indexes introduced after the first package-version baseline.
-const ADDITIVE_BASELINE_INDEXES: [&str; 11] = [
+const ADDITIVE_BASELINE_INDEXES: [&str; 12] = [
+    "idx_threads_active_order",
     "idx_posts_thread_live",
     "idx_posts_board_ip_created",
     "idx_posts_file_path",
@@ -354,7 +355,11 @@ const ADDITIVE_BASELINE_INDEXES: [&str; 11] = [
     "idx_ban_appeals_ip_created",
 ];
 /// Redundant indexes removed when the additive index set is installed.
-const REDUNDANT_LEGACY_INDEXES: [&str; 2] = ["idx_file_hashes", "idx_posts_thread_id"];
+const REDUNDANT_LEGACY_INDEXES: [&str; 3] = [
+    "idx_file_hashes",
+    "idx_posts_thread_id",
+    "idx_threads_board_sticky_bumped",
+];
 /// Board columns whose historical default was zero instead of the baseline value.
 const LEGACY_BOARD_ZERO_DEFAULT_COLUMNS: [&str; 4] = [
     "allow_editing",
@@ -978,6 +983,8 @@ fn schema_objects_are_legacy_repairable(expected: &SchemaShape, actual: &SchemaS
 /// Return whether SQL exactly describes a removed redundant index.
 fn is_redundant_legacy_index(name: &str, sql: &str) -> bool {
     let expected = match name {
+        "idx_threads_board_sticky_bumped" =>
+            "CREATE INDEX idx_threads_board_sticky_bumped ON threads(board_id, sticky DESC, bumped_at DESC)",
         "idx_file_hashes" => "CREATE INDEX idx_file_hashes ON file_hashes(sha256)",
         "idx_posts_thread_id" => "CREATE INDEX idx_posts_thread_id ON posts(thread_id)",
         _ => return false,
@@ -1080,6 +1087,7 @@ fn apply_additive_schema_repairs_in_transaction(conn: &rusqlite::Connection) -> 
     conn.execute_batch(
         "DROP INDEX IF EXISTS idx_themes_enabled_sort;
          DROP INDEX IF EXISTS idx_file_hashes;
+         DROP INDEX IF EXISTS idx_threads_board_sticky_bumped;
          DROP INDEX IF EXISTS idx_posts_thread_id;",
     )
     .context("Remove obsolete indexes failed")?;
@@ -2484,7 +2492,8 @@ mod tests {
             conn.execute_batch(&format!("DROP INDEX {index}"))?;
         }
         conn.execute_batch(
-            "CREATE INDEX idx_file_hashes ON file_hashes(sha256);
+            "CREATE INDEX idx_threads_board_sticky_bumped ON threads(board_id, sticky DESC, bumped_at DESC);
+             CREATE INDEX idx_file_hashes ON file_hashes(sha256);
              CREATE INDEX idx_posts_thread_id ON posts(thread_id);
              CREATE TABLE schema_version (version TEXT NOT NULL PRIMARY KEY);",
         )?;

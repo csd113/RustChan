@@ -2132,55 +2132,59 @@ fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
 }
 
 // ThreadPrune
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "archive, prune, and filesystem finalization remain one consistency operation"
-)]
 /// Applies one board's live and archived thread-retention limits.
 async fn prune_threads(board_id: i64, pool: DbPool) -> Result<()> {
     tokio::task::spawn_blocking(move || {
         let conn = pool.get()?;
-        let Some(policy) = load_board_retention_policy(&conn, board_id)? else {
-            warn!(
-                target: "workers",
-                board_id,
-                "thread-prune intent targeted a missing board; resolving safely"
-            );
+        // Policy and both retention transitions share one write lock. A concurrent
+        // board-settings edit cannot change the policy between read and deletion.
+        let tx =
+            rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
+        let Some(policy) = load_board_retention_policy(&tx, board_id)? else {
+            warn!(target: "workers", board_id,
+                "thread-prune intent targeted a missing board; resolving safely");
             return Ok(());
         };
-        // `archive_before_prune` is a global safety net: when true,
-        // overflow threads are always archived rather than hard-deleted, even
-        // on boards where allow_archive = false.  This closes the silent data
-        // loss gap where a thread could disappear simply because a board hit
-        // its thread limit while the admin had not opted into archiving.
         let do_archive = policy.allow_archive || CONFIG.archive_before_prune;
-        if do_archive {
-            let count = crate::db::archive_old_threads(&conn, board_id, policy.max_threads)?;
-            if count > 0 {
-                tracing::info!(target: "workers", count, board = %policy.board_short, board_id, "ThreadArchive: threads archived");
-            }
+        let (count, deleted) = if do_archive {
+            (
+                crate::db::threads::archive_old_threads_in_tx(&tx, board_id, policy.max_threads)?,
+                None,
+            )
         } else {
-            let deleted = crate::db::prune_old_threads(&conn, board_id, policy.max_threads)?;
-            let count = deleted.paths.len();
+            (
+                0,
+                Some(crate::db::threads::prune_old_threads_in_tx(
+                    &tx,
+                    board_id,
+                    policy.max_threads,
+                    false,
+                )?),
+            )
+        };
+        let archived = crate::db::threads::prune_old_threads_in_tx(
+            &tx,
+            board_id,
+            policy.max_archived_threads,
+            true,
+        )?;
+        tx.commit()?;
+        if count > 0 {
+            tracing::info!(target: "workers", count, board = %policy.board_short,
+                board_id, "ThreadArchive: threads archived");
+        }
+        if let Some(deleted) = deleted {
             finalize_thread_prune_cleanup(
                 &conn,
                 &policy,
                 &deleted,
                 "thread prune cleanup did not fully complete",
             );
-            if count > 0 {
-                tracing::info!(target: "workers", count, board = %policy.board_short, board_id, files_removed = deleted.paths.len(), "ThreadPrune: threads deleted");
+            if !deleted.paths.is_empty() {
+                tracing::info!(target: "workers", board = %policy.board_short, board_id,
+                    files_removed = deleted.paths.len(), "ThreadPrune: threads deleted");
             }
         }
-
-        // Archived retention remains authoritative even if archiving has since
-        // been disabled; disabling archive changes live overflow behavior but
-        // does not make already-archived content exempt from its current cap.
-        let archived = crate::db::prune_old_archived_threads(
-            &conn,
-            board_id,
-            policy.max_archived_threads,
-        )?;
         finalize_thread_prune_cleanup(
             &conn,
             &policy,
@@ -2188,7 +2192,9 @@ async fn prune_threads(board_id: i64, pool: DbPool) -> Result<()> {
             "archived prune cleanup did not fully complete",
         );
         if !archived.paths.is_empty() {
-            tracing::info!(target: "workers", archived_cap = policy.max_archived_threads, board = %policy.board_short, board_id, files_removed = archived.paths.len(), "ThreadArchivePrune: archived threads deleted");
+            tracing::info!(target: "workers", archived_cap = policy.max_archived_threads,
+                board = %policy.board_short, board_id, files_removed = archived.paths.len(),
+                "ThreadArchivePrune: archived threads deleted");
         }
 
         let (live_eligible, archived_count) = board_retention_counts(&conn, board_id)?;
@@ -3799,6 +3805,36 @@ mod tests {
         assert!(crate::db::claim_next_job(&conn)
             .expect("claim dirty intent")
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn archive_and_prune_worker_rolls_back_as_one_operation() -> anyhow::Result<()> {
+        let pool = crate::db::init_test_pool()?;
+        let board = seed_retention_board(&pool, "rollback", 1, 1, true)?;
+        seed_threads(&pool, board, 3, 2)?;
+        {
+            let conn = pool.get()?;
+            conn.execute_batch(
+                "CREATE TRIGGER injected_prune_failure BEFORE DELETE ON threads
+                BEGIN SELECT RAISE(ABORT, 'injected prune failure'); END;",
+            )?;
+        }
+        ensure!(prune_threads(board, pool.clone()).await.is_err());
+        let conn = pool.get()?;
+        ensure!(crate::db::count_threads_for_board(&conn, board)? == 3);
+        ensure!(crate::db::count_archived_threads_for_board(&conn, board)? == 2);
+        conn.execute_batch("DROP TRIGGER injected_prune_failure")?;
+        drop(conn);
+        let (first, second) = tokio::join!(
+            prune_threads(board, pool.clone()),
+            prune_threads(board, pool.clone())
+        );
+        first?;
+        second?;
+        let final_conn = pool.get()?;
+        ensure!(crate::db::count_threads_for_board(&final_conn, board)? == 1);
+        ensure!(crate::db::count_archived_threads_for_board(&final_conn, board)? == 1);
+        Ok(())
     }
 
     #[tokio::test]

@@ -267,6 +267,7 @@ fn activity_router(state: crate::middleware::AppState) -> Router {
         .route("/", get(super::index))
         .route("/{board}", get(super::board_index))
         .route("/{board}/catalog", get(super::catalog))
+        .route("/{board}/archive", get(super::board_archive))
         .route(
             "/{board}/thread/{id}",
             get(crate::handlers::thread::view_thread),
@@ -4418,5 +4419,203 @@ async fn submit_appeal_is_rate_limited_to_one_open_window() -> anyhow::Result<()
     )
     .context("second body utf8")?;
     anyhow::ensure!(second_body.contains("already filed an appeal"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn archive_index_remains_accessible_when_overflow_archiving_is_disabled() -> anyhow::Result<()>
+{
+    let state = crate::test_support::app_state();
+    let (board_id, thread_id) = seed_board_with_thread(&state, "history", "archive needle")?;
+    {
+        let conn = state.db.get()?;
+        crate::db::set_thread_archived(&conn, thread_id, true)?;
+        conn.execute("UPDATE boards SET allow_archive=0 WHERE id=?1", [board_id])
+            .map(|_rows| ())?;
+    }
+    let router = activity_router(state);
+    for path in [
+        "/history/archive".to_owned(),
+        format!("/history/thread/{thread_id}"),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())?,
+            )
+            .await?;
+        ensure_eq!(response.status(), StatusCode::OK);
+        let body = response_body_string(response).await?;
+        anyhow::ensure!(body.contains("archive needle"));
+        anyhow::ensure!(!body.contains("post-reply-form"));
+    }
+    for path in [
+        "/missing/archive".to_owned(),
+        "/history/thread/-1".to_owned(),
+        "/history/thread/9223372036854775807".to_owned(),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())?,
+            )
+            .await?;
+        ensure_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn archive_pagination_and_wrong_board_urls_are_consistent() -> anyhow::Result<()> {
+    let state = crate::test_support::app_state();
+    let (board_id, thread_id) = seed_board_with_thread(&state, "paged", "first archive body")?;
+    {
+        let conn = state.db.get()?;
+        crate::db::set_thread_archived(&conn, thread_id, true)?;
+    }
+    for number in 0_i32..20_i32 {
+        let id = create_thread_on_board(&state, board_id, &format!("archive item {number}"))?;
+        let conn = state.db.get()?;
+        crate::db::set_thread_archived(&conn, id, true)?;
+    }
+    let (_other, _thread) = seed_board_with_thread(&state, "other", "other board")?;
+    let router = activity_router(state);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/paged/archive?page=2")
+                .body(Body::empty())?,
+        )
+        .await?;
+    ensure_eq!(response.status(), StatusCode::OK);
+    let body = response_body_string(response).await?;
+    anyhow::ensure!(
+        body.matches("class=\"archive-row archive-thread-link\"")
+            .count()
+            == 1
+    );
+    let wrong_board_response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!("/other/thread/{thread_id}"))
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())?,
+        )
+        .await?;
+    ensure_eq!(wrong_board_response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn archived_poll_is_read_only_in_thread_and_vote_route() -> anyhow::Result<()> {
+    let state = crate::test_support::app_state();
+    let (thread_id, _post_id, option_id) = seed_post_password_board(&state)?;
+    {
+        let conn = state.db.get()?;
+        conn.execute("UPDATE boards SET access_mode='public',access_password_hash='' WHERE short_name='secret'", []).map(|_rows| ())?;
+        crate::db::set_thread_archived(&conn, thread_id, true)?;
+    }
+    let router = activity_router(state.clone()).merge(
+        Router::new()
+            .route("/vote", post(crate::handlers::thread::vote_handler))
+            .with_state(state.clone()),
+    );
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/secret/thread/{thread_id}"))
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())?,
+        )
+        .await?;
+    ensure_eq!(response.status(), StatusCode::OK);
+    let body = response_body_string(response).await?;
+    anyhow::ensure!(body.contains("poll-results") && body.contains("[archived]"));
+    anyhow::ensure!(!body.contains("poll-vote-form"));
+    let vote_response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/vote")
+                .header(header::COOKIE, "csrf_token=archive-csrf")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .extension(crate::test_support::connect_info())
+                .body(Body::from(format!(
+                    "_csrf=archive-csrf&option_id={option_id}"
+                )))?,
+        )
+        .await?;
+    ensure_eq!(vote_response.status(), StatusCode::BAD_REQUEST);
+    let conn = state.db.get()?;
+    let votes: i64 = conn.query_row("SELECT COUNT(*) FROM poll_votes", [], |row| row.get(0))?;
+    anyhow::ensure!(votes == 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn archived_pages_enforce_board_view_passwords() -> anyhow::Result<()> {
+    let state = crate::test_support::app_state();
+    let (board_id, thread_id) =
+        seed_board_with_thread(&state, "private", "private archived needle")?;
+    {
+        let conn = state.db.get()?;
+        crate::db::set_thread_archived(&conn, thread_id, true)?;
+        conn.execute(
+            "UPDATE boards SET access_mode='view_password',access_password_hash=?1 WHERE id=?2",
+            rusqlite::params![crate::utils::crypto::hash_password("swordfish")?, board_id],
+        )
+        .map(|_rows| ())?;
+    }
+    let router = activity_router(state.clone());
+    for uri in [
+        "/private/archive".to_owned(),
+        format!("/private/thread/{thread_id}"),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .header(
+                        header::COOKIE,
+                        format!("{}=forged", super::board_access_cookie_name("private")),
+                    )
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())?,
+            )
+            .await?;
+        ensure_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = response_body_string(response).await?;
+        anyhow::ensure!(!body.contains("private archived needle"));
+        anyhow::ensure!(body.contains("/private/unlock"));
+    }
+    {
+        let conn = state.db.get()?;
+        conn.execute(
+            "UPDATE boards SET access_mode='post_password' WHERE id=?1",
+            [board_id],
+        )
+        .map(|_rows| ())?;
+    }
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/private/archive")
+                .extension(crate::test_support::connect_info())
+                .body(Body::empty())?,
+        )
+        .await?;
+    ensure_eq!(response.status(), StatusCode::OK);
+    anyhow::ensure!(response_body_string(response)
+        .await?
+        .contains("private archived needle"));
     Ok(())
 }

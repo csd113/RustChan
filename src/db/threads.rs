@@ -76,7 +76,7 @@ fn map_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
 /// Collect all file paths (`file_path`, `thumb_path`, `audio_file_path`) for every
 /// post in the given set of thread ids. Returns a flat Vec of non-null paths.
 ///
-/// Uses a single JOIN query instead of one query per thread.
+/// Uses bounded batches instead of one query per thread.
 ///
 /// Call before deleting the thread rows; cascading deletion removes the posts
 /// that supply these paths.
@@ -88,35 +88,37 @@ fn collect_thread_file_paths(
         return Ok(Vec::new());
     }
 
-    // Build WHERE thread_id IN (?, ?, ...) dynamically.
-    let placeholders: String = thread_ids
-        .iter()
-        .enumerate()
-        .map(|(i, _)| format!("?{}", i.saturating_add(1)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT file_path, thumb_path, audio_file_path
-         FROM posts WHERE thread_id IN ({placeholders})"
-    );
-
-    let mut stmt = conn.prepare(&sql)?;
-    let rows: Vec<(Option<String>, Option<String>, Option<String>)> = stmt
-        .query_map(rusqlite::params_from_iter(thread_ids), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-
     let mut paths = Vec::new();
-    for (f, t, a) in rows {
-        if let Some(p) = f {
-            paths.push(p);
-        }
-        if let Some(p) = t {
-            paths.push(p);
-        }
-        if let Some(p) = a {
-            paths.push(p);
+    for batch in thread_ids.chunks(500) {
+        // Bound parameters so restored or backlogged boards cannot exceed SQLite limits.
+        let placeholders: String = batch
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i.saturating_add(1)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT file_path, thumb_path, audio_file_path
+         FROM posts WHERE thread_id IN ({placeholders})"
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows: Vec<(Option<String>, Option<String>, Option<String>)> = stmt
+            .query_map(rusqlite::params_from_iter(batch), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+
+        for (f, t, a) in rows {
+            if let Some(p) = f {
+                paths.push(p);
+            }
+            if let Some(p) = t {
+                paths.push(p);
+            }
+            if let Some(p) = a {
+                paths.push(p);
+            }
         }
     }
     Ok(paths)
@@ -495,11 +497,11 @@ pub(crate) fn create_reply_submission(
                 post.thread_id
             );
         };
-        if locked {
-            return Err(anyhow::Error::new(ThreadClosed::Locked));
-        }
         if archived {
             return Err(anyhow::Error::new(ThreadClosed::Archived));
+        }
+        if locked {
+            return Err(anyhow::Error::new(ThreadClosed::Locked));
         }
 
         let post_id = super::posts::create_post_inner(conn, post)?;
@@ -710,243 +712,125 @@ pub fn delete_thread(
 }
 
 // Archive / prune
-/// Archive oldest non-sticky threads that exceed the board's `max_threads` limit.
+/// Archive overflow non-sticky active threads, keeping the newest bump/ID pairs.
 ///
-/// Archived threads are locked and marked read-only; their content remains
-/// accessible via `/{board}/archive`. Returns the count of threads archived
-/// (no file deletion occurs).
-///
-/// ID selection and the bulk update share a transaction so a concurrent bump
-/// cannot change the ordering between those operations.
-///
-/// Note: LIMIT -1 OFFSET ? is a SQLite-specific idiom for "skip the first
-/// max rows, return everything else". It is not standard SQL. The LIMIT -1
-/// means "no upper bound on the result set after the offset is applied".
+/// Archiving locks threads and preserves all posts and media references.
+/// Sticky active threads do not count against the limit; locked threads do.
 ///
 /// # Errors
-/// Returns an error if the database operation fails.
+/// Returns an error for invalid limits or a failed transaction.
 pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64) -> Result<usize> {
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .context("Failed to begin archive_old_threads transaction")?;
-
-    let result: Result<usize> = (|| {
-        // Collect inside the transaction to prevent races with concurrent bumps.
-        let ids: Vec<i64> = {
-            let mut stmt = conn.prepare_cached(
-                "SELECT id FROM threads
-                 WHERE board_id = ?1 AND sticky = 0 AND archived = 0
-                 ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
-            )?;
-            // Bind `collected` explicitly so `stmt` is dropped before the
-            // block ends — the MappedRows iterator borrows `stmt`, and the
-            // compiler requires the borrow to end before the binding goes out
-            // of scope at the closing `}`.
-            let collected = stmt
-                .query_map(params![board_id, max], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            collected
-        };
-
-        let count = ids.len();
-        if count == 0 {
-            return Ok(0);
-        }
-
-        // Single bulk UPDATE instead of N individual statements.
-        let placeholders: String = ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i.saturating_add(1)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql =
-            format!("UPDATE threads SET archived = 1, locked = 1 WHERE id IN ({placeholders})");
-        conn.execute(&sql, rusqlite::params_from_iter(&ids))
-            .context("Failed to bulk archive threads")
-            .map(|_affected_rows| ())?;
-
-        Ok(count)
-    })();
-
-    match result {
-        Ok(0) => {
-            // Nothing to archive — roll back the (empty) transaction cleanly.
-            drop(conn.execute_batch("ROLLBACK"));
-            Ok(0)
-        }
-        Ok(count) => {
-            super::commit_transaction(conn, "Failed to commit archive_old_threads transaction")?;
-            Ok(count)
-        }
-        Err(e) => {
-            drop(conn.execute_batch("ROLLBACK"));
-            Err(e)
-        }
-    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let count = archive_old_threads_in_tx(&tx, board_id, max)?;
+    tx.commit()?;
+    Ok(count)
 }
 
-/// Hard-delete oldest non-sticky, non-archived threads that exceed `max_threads`.
-/// Used when a board has archiving disabled — threads are permanently removed.
+/// Archive overflow while the caller holds the SQLite write transaction.
+pub(crate) fn archive_old_threads_in_tx(
+    conn: &rusqlite::Transaction<'_>,
+    board_id: i64,
+    max: i64,
+) -> Result<usize> {
+    validate_retention_limit(max, false)?;
+    // A subquery avoids building an unbounded parameter list for backlog recovery.
+    conn.execute(
+        "UPDATE threads SET archived = 1, locked = 1
+         WHERE id IN (
+             SELECT id FROM threads
+             WHERE board_id = ?1 AND sticky = 0 AND archived = 0
+             ORDER BY bumped_at DESC, id DESC LIMIT -1 OFFSET ?2
+         )",
+        params![board_id, max],
+    )
+    .context("Failed to archive overflow threads")
+}
+
+/// Hard-delete overflow non-sticky active threads when archiving is disabled.
 ///
-/// Returns the on-disk paths that are now safe to delete (i.e. no longer
-/// referenced by any remaining post after the prune). The caller is responsible
-/// for actually removing these files from disk.
-///
-/// ID selection, bulk deletion, and the final path-reference check share a
-/// transaction so a concurrent insert cannot make a returned path live again.
-/// File paths are collected with one joined query.
-///
-/// Note: LIMIT -1 OFFSET ? is a SQLite-specific idiom — see `archive_old_threads`.
+/// Returns safe file paths and a durable cleanup intent for filesystem replay.
 ///
 /// # Errors
-/// Returns an error if the database operation fails.
+/// Returns an error for invalid limits or a failed transaction.
 pub fn prune_old_threads(
     conn: &rusqlite::Connection,
     board_id: i64,
     max: i64,
 ) -> Result<crate::db::DeletePathsResult> {
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .context("Failed to begin prune_old_threads transaction")?;
-
-    let result: Result<crate::db::DeletePathsResult> = (|| {
-        // Collect ids inside the transaction to prevent concurrent bumps from
-        // changing the ordering between the SELECT and the DELETE.
-        let ids: Vec<i64> = {
-            let mut stmt = conn.prepare_cached(
-                "SELECT id FROM threads
-                 WHERE board_id = ?1 AND sticky = 0 AND archived = 0
-                 ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
-            )?;
-            let collected = stmt
-                .query_map(params![board_id, max], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            collected
-        };
-
-        if ids.is_empty() {
-            return Ok(crate::db::DeletePathsResult {
-                paths: Vec::new(),
-                pending_fs_op_id: None,
-            });
-        }
-
-        // Collect all file paths in a single query BEFORE the DELETEs.
-        let candidates = collect_thread_file_paths(conn, &ids)?;
-
-        // Single bulk DELETE instead of N individual statements.
-        let placeholders: String = ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i.saturating_add(1)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!("DELETE FROM threads WHERE id IN ({placeholders})");
-        conn.execute(&sql, rusqlite::params_from_iter(&ids))
-            .context("Failed to bulk delete pruned threads")
-            .map(|_affected_rows| ())?;
-
-        // Determine safe paths INSIDE the transaction so the check sees the
-        // post-delete state before any concurrent writer can insert new references.
-        let safe = super::paths_safe_to_delete(conn, candidates)?;
-        let pending_fs_op = super::build_delete_files_pending_op(&safe)?;
-        if let Some(op) = pending_fs_op.as_ref() {
-            super::insert_pending_fs_op(conn, op)?;
-        }
-        Ok(crate::db::DeletePathsResult {
-            paths: safe,
-            pending_fs_op_id: pending_fs_op.map(|op| op.id),
-        })
-    })();
-
-    match result {
-        Ok(result) => {
-            super::commit_transaction(conn, "Failed to commit prune_old_threads transaction")?;
-            Ok(result)
-        }
-        Err(e) => {
-            drop(conn.execute_batch("ROLLBACK"));
-            Err(e)
-        }
-    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let result = prune_old_threads_in_tx(&tx, board_id, max, false)?;
+    tx.commit()?;
+    Ok(result)
 }
 
-/// Hard-delete oldest archived threads that exceed the archive retention cap.
+/// Hard-delete archived overflow, keeping the first entries in archive order.
 ///
-/// Returns the on-disk paths that are now safe to remove. As with live-thread
-/// pruning, the caller is responsible for deleting those files from disk.
-///
-/// The ordering uses `bumped_at DESC`, matching the archive page and ensuring
-/// we keep the most recently-active archived threads.
+/// Retention uses bump time, not time of archival. Archived sticky threads are
+/// subject to this cap too. File cleanup is durably scheduled before commit.
 ///
 /// # Errors
-/// Returns an error if the transaction cannot be opened or committed, if the
-/// candidate threads cannot be queried, or if the bulk delete/safe-path
-/// calculation fails.
+/// Returns an error for invalid limits or a failed transaction.
 pub fn prune_old_archived_threads(
     conn: &rusqlite::Connection,
     board_id: i64,
     max: i64,
 ) -> Result<crate::db::DeletePathsResult> {
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .context("Failed to begin prune_old_archived_threads transaction")?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let result = prune_old_threads_in_tx(&tx, board_id, max, true)?;
+    tx.commit()?;
+    Ok(result)
+}
 
-    let result: Result<crate::db::DeletePathsResult> = (|| {
-        let ids: Vec<i64> = {
-            let mut stmt = conn.prepare_cached(
-                "SELECT id FROM threads
-                 WHERE board_id = ?1 AND archived = 1
-                 ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
-            )?;
-            let collected = stmt
-                .query_map(params![board_id, max], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            collected
-        };
+/// Reject invalid destructive limits even when called outside the worker.
+fn validate_retention_limit(max: i64, archived: bool) -> Result<()> {
+    let upper = if archived { 10_000 } else { 1_000 };
+    anyhow::ensure!(
+        (1..=upper).contains(&max),
+        "invalid retention limit {max}; expected 1..={upper}; preserving content"
+    );
+    Ok(())
+}
 
-        if ids.is_empty() {
-            return Ok(crate::db::DeletePathsResult {
-                paths: Vec::new(),
-                pending_fs_op_id: None,
-            });
-        }
-
-        let candidates = collect_thread_file_paths(conn, &ids)?;
-
-        let placeholders: String = ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i.saturating_add(1)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!("DELETE FROM threads WHERE id IN ({placeholders})");
-        conn.execute(&sql, rusqlite::params_from_iter(&ids))
-            .context("Failed to bulk delete archived threads")
-            .map(|_affected_rows| ())?;
-
-        let safe = super::paths_safe_to_delete(conn, candidates)?;
-        let pending_fs_op = super::build_delete_files_pending_op(&safe)?;
-        if let Some(op) = pending_fs_op.as_ref() {
-            super::insert_pending_fs_op(conn, op)?;
-        }
-        Ok(crate::db::DeletePathsResult {
-            paths: safe,
-            pending_fs_op_id: pending_fs_op.map(|op| op.id),
-        })
-    })();
-
-    match result {
-        Ok(result) => {
-            super::commit_transaction(
-                conn,
-                "Failed to commit prune_old_archived_threads transaction",
-            )?;
-            Ok(result)
-        }
-        Err(e) => {
-            drop(conn.execute_batch("ROLLBACK"));
-            Err(e)
-        }
+/// Select, delete, reference-check and journal files in the caller's transaction.
+pub(crate) fn prune_old_threads_in_tx(
+    conn: &rusqlite::Transaction<'_>,
+    board_id: i64,
+    max: i64,
+    archived: bool,
+) -> Result<crate::db::DeletePathsResult> {
+    validate_retention_limit(max, archived)?;
+    // Archive ties historically ascend by ID. Active ties descend by ID, exactly
+    // matching the board index. Never let query planner choice decide retention.
+    let sql = if archived {
+        "SELECT id FROM threads WHERE board_id = ?1 AND archived = 1
+         ORDER BY bumped_at DESC, id ASC LIMIT -1 OFFSET ?2"
+    } else {
+        "SELECT id FROM threads WHERE board_id = ?1 AND sticky = 0 AND archived = 0
+         ORDER BY bumped_at DESC, id DESC LIMIT -1 OFFSET ?2"
+    };
+    let ids = conn
+        .prepare_cached(sql)?
+        .query_map(params![board_id, max], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let candidates = collect_thread_file_paths(conn, &ids)?;
+    for batch in ids.chunks(500) {
+        let placeholders = vec!["?"; batch.len()].join(", ");
+        conn.execute(
+            &format!("DELETE FROM threads WHERE id IN ({placeholders})"),
+            rusqlite::params_from_iter(batch),
+        )
+        .context("Failed to delete overflow threads")
+        .map(|_affected_rows| ())?;
     }
+    let safe = super::paths_safe_to_delete(conn, candidates)?;
+    let pending_fs_op = super::build_delete_files_pending_op(&safe)?;
+    if let Some(op) = pending_fs_op.as_ref() {
+        super::insert_pending_fs_op(conn, op)?;
+    }
+    Ok(crate::db::DeletePathsResult {
+        paths: safe,
+        pending_fs_op_id: pending_fs_op.map(|op| op.id),
+    })
 }
 
 // Archive listing
@@ -1707,3 +1591,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod archive_tests;

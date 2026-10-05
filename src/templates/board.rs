@@ -588,7 +588,7 @@ fn render_archive_row(board_short: &str, thread: &Thread) -> String {
     });
     let thumb_html = thread.op_thumb.as_ref().map_or_else(String::new, |thumb| {
         format!(
-            r#"<div class="archive-row-media"><img src="/boards/{}" class="archive-thumb" alt="thumb" loading="lazy" decoding="async"></div>"#,
+            r#"<div class="archive-row-media"><img src="/boards/{}" class="archive-thumb" alt="" loading="lazy" decoding="async"></div>"#,
             escape_html(thumb),
         )
     });
@@ -601,7 +601,7 @@ fn render_archive_row(board_short: &str, thread: &Thread) -> String {
     <span class="archive-thread-link-text">
       {subject}<span class="archive-preview">{preview}</span>
     </span>
-    <span class="archive-meta">No.{thread_id}{state_badges} - {replies} replies - {created_at}</span>
+    <span class="archive-meta">No.{thread_id}{state_badges} - {replies} replies - {attachments} attachments - Created {created_at} - Last bump {bumped_at}</span>
   </div>
 </a>"#,
         board = escape_html(board_short),
@@ -612,6 +612,8 @@ fn render_archive_row(board_short: &str, thread: &Thread) -> String {
         state_badges = thread_state_badges,
         replies = thread.reply_count,
         created_at = fmt_ts(thread.created_at),
+        bumped_at = fmt_ts(thread.bumped_at),
+        attachments = thread.image_count,
     )
 }
 
@@ -917,11 +919,8 @@ pub fn board_page<S: std::hash::BuildHasher>(
         let name = escape_html(&board.name);
         let desc = escape_html(&board.description);
         let access_badge = board_access_badge(board);
-        let nav_archive = if board.allow_archive {
-            format!(r#"<a class="board-nav-link" href="/{short}/archive">[Archive]</a>"#)
-        } else {
-            String::new()
-        };
+        let nav_archive =
+            format!(r#"<a class="board-nav-link" href="/{short}/archive">[Archive]</a>"#);
         crate::templates::append_html(
             &mut body,
             format_args!(
@@ -1314,11 +1313,7 @@ pub fn catalog_page<S: std::hash::BuildHasher>(
         );
     }
 
-    let nav_archive = if board.allow_archive {
-        format!(r#"<a class="board-nav-link" href="/{bs}/archive">[Archive]</a>"#)
-    } else {
-        String::new()
-    };
+    let nav_archive = format!(r#"<a class="board-nav-link" href="/{bs}/archive">[Archive]</a>"#);
     let hidden_nav = if hidden_count > 0 {
         let active_class = if hidden_view { " active" } else { "" };
         format!(
@@ -1621,16 +1616,17 @@ pub fn archive_page(
   <a class="board-nav-link active" href="/{bs}/archive">[Archive]</a>
 </div>
 <div class="page-box">
-<p class="archive-subtext">Threads cycled off the board index — read-only, retained up to this board's archive limit.</p>
+<p class="archive-subtext">Read-only threads, ordered by last bump. This board retains up to {archive_limit} archived threads.</p>
 </div>"#,
         bs = bs,
         bn = bn,
         desc = escape_html(&board.description),
+        archive_limit = board.max_archived_threads,
     );
 
     if threads.is_empty() {
         body.push_str(
-            r#"<div class="page-box"><p style="color:var(--text-dim)">no archived threads yet.</p></div>"#,
+            r#"<div class="page-box"><p style="color:var(--text-dim)">No archived threads yet.</p></div>"#,
         );
     } else {
         body.push_str(r#"<div class="archive-list">"#);
