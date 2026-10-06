@@ -3032,7 +3032,7 @@ function clampPopupToViewport(anchor, popup) {
   var autoOn = false;
   var consecutiveUpdateFailures = 0;
 
-  if (!container) return;
+  if (!container || container.dataset.archived === 'true') return;
 
   var board = container.dataset.board;
   var threadId = container.dataset.threadId;
@@ -3100,11 +3100,16 @@ function clampPopupToViewport(anchor, popup) {
   }
 
   function setUpdateButtonsBusy(busy) {
-    setButtonCollectionBusy(updateButtons, busy, {
-      labelKey: 'threadUpdateOriginalLabel',
-      busyLabel: updateButtons[0]
-        ? (updateButtons[0].dataset.busyLabel || '[ Updating… ]')
-        : '[ Updating… ]'
+    // Keep the focused control in the tab order while the shared request guard
+    // blocks both manual and automatic updates. Native disabled blurs buttons
+    // in some browsers and can move the reader's next keyboard action elsewhere.
+    rememberButtonLabels(updateButtons, 'threadUpdateOriginalLabel');
+    updateButtons.forEach(function (button) {
+      button.setAttribute('aria-disabled', String(busy));
+      button.setAttribute('aria-busy', String(busy));
+      button.textContent = busy
+        ? (button.dataset.busyLabel || '[ Updating… ]')
+        : button.dataset.threadUpdateOriginalLabel;
     });
   }
 

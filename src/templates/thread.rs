@@ -200,40 +200,57 @@ pub fn delete_post_page(
 
 /// Renders the top or bottom thread navigation controls.
 fn render_thread_nav(board: &Board, thread: &Thread, is_bottom: bool) -> String {
+    let board_short = escape_html(&board.short_name);
+    let position = if is_bottom { "bottom" } else { "top" };
     let jump_link = if is_bottom { "#top" } else { "#bottom" };
     let jump_label = if is_bottom { "Top" } else { "Bottom" };
+    let return_suffix = if thread.archived { "/archive" } else { "" };
+    let refresh_controls = if thread.archived {
+        String::new()
+    } else {
+        format!(
+            r#"  <div class="thread-nav-group thread-nav-refresh">
+    <noscript><a class="thread-nav-control thread-nav-update" href="/{board_short}/thread/{thread_id}">[ Update now ]</a></noscript>
+    <button class="thread-nav-control thread-nav-btn thread-nav-update" type="button" data-action="fetch-updates" data-busy-label="[ Updating… ]">[ Update now ]</button>
+    <label class="autoupdate-label">
+      <input type="checkbox" data-role="autoupdate-toggle" data-action="autoupdate-toggle">
+      <span>Auto refresh</span>
+    </label>
+  </div>
+"#,
+            thread_id = thread.id,
+        )
+    };
+    let update_status = if thread.archived {
+        ""
+    } else if is_bottom {
+        r#"<span class="autoupdate-status" data-role="autoupdate-status"></span>"#
+    } else {
+        // Announce updates once; the bottom copy is visual feedback only.
+        r#"<span class="autoupdate-status" data-role="autoupdate-status" role="status"></span>"#
+    };
     let nav_class = if is_bottom {
         "board-header thread-nav thread-nav-bottom"
     } else {
         "board-header thread-nav"
     };
     format!(
-        r#"<div class="{nav_class}">
-  <div class="thread-nav-group thread-nav-links">
-    <a href="/{board_short}">[ Return ]</a>
-    <a href="/{board_short}/catalog">[ Catalog ]</a>
-    <a href="{jump_link}">[ {jump_label} ]</a>
-  </div>
-  <div class="thread-nav-group thread-nav-refresh">
-    <noscript><a href="/{board_short}/thread/{thread_id}">[ Update now ]</a></noscript>
-    <button class="thread-nav-btn" type="button" data-action="fetch-updates" data-busy-label="[ Updating… ]">[ Update now ]</button>
-    <label class="autoupdate-label">
-      <input type="checkbox" data-role="autoupdate-toggle" data-action="autoupdate-toggle">
-      <span>Auto refresh</span>
-    </label>
-  </div>
-  <div class="thread-nav-group thread-nav-state">
-    <span class="autoupdate-status" data-role="autoupdate-status" role="status" aria-live="polite"></span>
-    <span class="thread-reply-stat" title="Reply count"><span class="thread-reply-stat-label">Replies</span>: <span data-role="thread-reply-count">{reply_count}</span></span>
+        r#"<div class="{nav_class}" id="{position}" tabindex="-1" role="group" aria-label="Thread controls at {position}">
+  <nav class="thread-nav-group thread-nav-links" aria-label="Thread navigation at {position}">
+    <a class="thread-nav-control" href="/{board_short}{return_suffix}">[ Return ]</a>
+    <a class="thread-nav-control" href="/{board_short}/catalog">[ Catalog ]</a>
+    <a class="thread-nav-control" href="{jump_link}">[ {jump_label} ]</a>
+  </nav>
+{refresh_controls}  <div class="thread-nav-group thread-nav-state">
+    {update_status}
+    <span class="thread-reply-stat" title="Reply count"><span class="thread-reply-stat-label">Replies:</span> <span data-role="thread-reply-count">{reply_count}</span></span>
   </div>
 </div>
 "#,
         nav_class = nav_class,
-        board_short = escape_html(&board.short_name),
         jump_link = jump_link,
         jump_label = jump_label,
         reply_count = thread.reply_count,
-        thread_id = thread.id,
     )
 }
 
@@ -425,8 +442,7 @@ pub fn thread_page(
     crate::templates::append_html(
         &mut body,
         format_args!(
-            r#"<div id="top"></div>
-<div class="thread-board-banner board-thread-header">/{s}/ — {bn}{access_badge}</div>
+            r#"<div class="thread-board-banner board-thread-header">/{s}/ — {bn}{access_badge}</div>
 {admin_toolbar}
 {top_nav}"#,
             s = escape_html(&board.short_name),
@@ -533,7 +549,6 @@ pub fn thread_page(
             "unlock posting",
         ));
     }
-    body.push_str("<div id=\"bottom\"></div>\n");
     body.push_str(&render_thread_nav(board, thread, true));
 
     body.push_str(&compress_modal_script(
@@ -1616,7 +1631,7 @@ fn render_edit_overlay(
 mod tests {
     use super::{
         delete_post_page, display_file_name, edit_post_page, render_post, render_search_post,
-        thread_page, EditOverlayState, OwnedPostControls, RenderPostOpts,
+        render_thread_nav, thread_page, EditOverlayState, OwnedPostControls, RenderPostOpts,
     };
     use crate::models::{BoardAccessMode, MediaType, Post, Thread};
 
@@ -1738,6 +1753,71 @@ mod tests {
     }
 
     #[test]
+    fn thread_nav_preserves_live_and_locked_routes_and_refresh_semantics() {
+        let board = crate::test_fixtures::sample_board();
+        for locked in [false, true] {
+            let thread = Thread {
+                locked,
+                ..sample_thread()
+            };
+            for is_bottom in [false, true] {
+                let html = render_thread_nav(&board, &thread, is_bottom);
+                let position = if is_bottom { "bottom" } else { "top" };
+                let jump = if is_bottom { "top" } else { "bottom" };
+                assert!(html.contains(r#"href="/test">[ Return ]</a>"#));
+                assert!(html.contains(r#"href="/test/catalog">[ Catalog ]</a>"#));
+                assert!(html.contains(&format!(r##"href="#{jump}""##)));
+                assert!(html.contains(&format!(r#"id="{position}" tabindex="-1""#)));
+                assert!(html.contains(r#"<nav class="thread-nav-group thread-nav-links""#));
+                assert!(html.contains(r#"<noscript><a class="thread-nav-control thread-nav-update" href="/test/thread/87">[ Update now ]</a></noscript>"#));
+                assert!(html.contains(r#"type="button" data-action="fetch-updates""#));
+                assert!(html.contains(r#"data-role="autoupdate-toggle""#));
+                assert_eq!(
+                    html.matches(r#"role="status""#).count(),
+                    usize::from(!is_bottom)
+                );
+                assert!(!html.contains("<form"));
+                assert!(!html.contains("&nbsp;"));
+            }
+        }
+    }
+
+    #[test]
+    fn archived_thread_nav_returns_to_archive_without_refresh_actions() {
+        // Rendering relies on the archive state even if restored data is unlocked
+        // or the board has stopped automatically archiving new threads.
+        let board = crate::test_fixtures::sample_board();
+        for locked in [false, true] {
+            let thread = Thread {
+                archived: true,
+                locked,
+                ..sample_thread()
+            };
+            for is_bottom in [false, true] {
+                let html = render_thread_nav(&board, &thread, is_bottom);
+                assert!(html.contains(r#"href="/test/archive">[ Return ]</a>"#));
+                assert!(html.contains(r#"href="/test/catalog">[ Catalog ]</a>"#));
+                assert!(html.contains(r#"data-role="thread-reply-count">12"#));
+                assert!(!html.contains("thread-nav-refresh"));
+                assert!(!html.contains("Update now"));
+                assert!(!html.contains("autoupdate"));
+            }
+        }
+    }
+
+    #[test]
+    fn thread_nav_escapes_board_names_in_all_destinations() {
+        let board = crate::models::Board {
+            short_name: "a\"<>&".into(),
+            ..crate::test_fixtures::sample_board()
+        };
+        let html = render_thread_nav(&board, &sample_thread(), false);
+        assert!(html.contains(r#"href="/a&quot;&lt;&gt;&amp;">[ Return ]"#));
+        assert!(html.contains(r#"href="/a&quot;&lt;&gt;&amp;/catalog""#));
+        assert!(html.contains(r#"href="/a&quot;&lt;&gt;&amp;/thread/87""#));
+    }
+
+    #[test]
     fn thread_page_renders_thread_nav_links_and_reply_open_action() {
         let board = crate::test_fixtures::sample_board();
         let thread = sample_thread();
@@ -1772,6 +1852,16 @@ mod tests {
         assert!(html.contains(r##"href="#top">[ Top ]</a>"##));
         assert!(html.contains(r#"data-activity-page="thread""#));
         assert!(html.contains(r#"data-action="toggle-post-form""#));
+        assert_eq!(html.matches(r#"id="top""#).count(), 1);
+        assert_eq!(html.matches(r#"id="bottom""#).count(), 1);
+        assert_eq!(html.matches(r#"class="thread-nav-control""#).count(), 6);
+        assert_eq!(html.matches(r#"data-action="fetch-updates""#).count(), 2);
+        assert_eq!(
+            html.matches(r#"data-role="autoupdate-status" role="status""#)
+                .count(),
+            1
+        );
+        assert!(html.find(r#"id="bottom""#) > html.find(r#"id="thread-posts""#));
     }
 
     #[test]

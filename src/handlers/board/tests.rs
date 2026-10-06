@@ -2585,6 +2585,101 @@ async fn password_protected_board_does_not_leak_homepage_new_activity_badge() ->
 }
 
 #[tokio::test]
+async fn thread_controls_render_ssr_live_locked_and_archived_states() -> anyhow::Result<()> {
+    let state = crate::test_support::app_state();
+    let (_board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
+    let router = activity_router(state.clone());
+    for (locked, archived) in [(false, false), (true, false), (true, true)] {
+        {
+            let conn = state.db.get().context("db connection")?;
+            conn.execute(
+                "UPDATE threads SET locked = ?1, archived = ?2 WHERE id = ?3",
+                rusqlite::params![locked, archived, thread_id],
+            )
+            .context("update thread state")
+            .map(|_completed_value| ())?;
+        }
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/tech/thread/{thread_id}"))
+                    .extension(crate::test_support::connect_info())
+                    .body(Body::empty())
+                    .context("request")?,
+            )
+            .await
+            .context("response")?;
+        ensure_eq!(response.status(), StatusCode::OK);
+        let body = response_body_string(response).await?;
+        let parent = if archived { "/tech/archive" } else { "/tech" };
+        ensure_eq!(
+            body.matches(&format!(r#"href="{parent}">[ Return ]</a>"#))
+                .count(),
+            2
+        );
+        ensure_eq!(body.matches(r#"id="top""#).count(), 1);
+        ensure_eq!(body.matches(r#"id="bottom""#).count(), 1);
+        ensure_eq!(body.contains("fetch-updates"), !archived);
+        ensure_eq!(
+            body.contains("<noscript><a class=\"thread-nav-control"),
+            !archived
+        );
+        ensure_eq!(body.contains("autoupdate-toggle"), !archived);
+        ensure_eq!(body.contains("id=\"post-form-wrap\""), !locked);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_updates_use_get_without_csrf_and_do_not_create_posts() -> anyhow::Result<()> {
+    let state = crate::test_support::app_state();
+    let (board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
+    create_reply_on_thread(&state, board_id, thread_id, "new reply")?;
+    let router = activity_router(state.clone());
+    for _ in 0_u8..2 {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/tech/thread/{thread_id}/updates?since=0"))
+                    .body(Body::empty())
+                    .context("request")?,
+            )
+            .await
+            .context("response")?;
+        ensure_eq!(response.status(), StatusCode::OK);
+        let data: serde_json::Value =
+            serde_json::from_str(&response_body_string(response).await?).context("updates JSON")?;
+        ensure_eq!(
+            data.get("count").and_then(serde_json::Value::as_u64),
+            Some(2)
+        );
+    }
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/tech/thread/{thread_id}/updates"))
+                .body(Body::empty())
+                .context("request")?,
+        )
+        .await
+        .context("response")?;
+    ensure_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let conn = state.db.get().context("db connection")?;
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM posts WHERE thread_id = ?1",
+        [thread_id],
+        |row| row.get(0),
+    )?;
+    ensure_eq!(count, 2);
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_updates_rejects_thread_id_from_other_board() -> anyhow::Result<()> {
     let state = crate::test_support::app_state();
     let (_public_board_id, _public_thread_id) = seed_board_with_thread(&state, "pub", "public op")?;

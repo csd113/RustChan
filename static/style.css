@@ -3491,36 +3491,20 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
 }
 
 [data-theme="forest"] .post-toggle-btn,
-[data-theme="forest"] .thread-nav-btn,
-[data-theme="forest"] .thread-nav a,
 [data-theme="forest"] .board-nav-link,
 [data-theme="blue-sky"] .post-toggle-btn,
-[data-theme="blue-sky"] .thread-nav-btn,
-[data-theme="blue-sky"] .thread-nav a,
 [data-theme="blue-sky"] .board-nav-link,
 [data-theme="deep-orbit"] .post-toggle-btn,
-[data-theme="deep-orbit"] .thread-nav-btn,
-[data-theme="deep-orbit"] .thread-nav a,
 [data-theme="deep-orbit"] .board-nav-link,
 [data-theme="terminal"] .post-toggle-btn,
-[data-theme="terminal"] .thread-nav-btn,
-[data-theme="terminal"] .thread-nav a,
 [data-theme="terminal"] .board-nav-link,
 [data-theme="aero"] .post-toggle-btn,
-[data-theme="aero"] .thread-nav-btn,
-[data-theme="aero"] .thread-nav a,
 [data-theme="aero"] .board-nav-link,
 [data-theme="neoncubicle"] .post-toggle-btn,
-[data-theme="neoncubicle"] .thread-nav-btn,
-[data-theme="neoncubicle"] .thread-nav a,
 [data-theme="neoncubicle"] .board-nav-link,
 [data-theme="fluorogrid"] .post-toggle-btn,
-[data-theme="fluorogrid"] .thread-nav-btn,
-[data-theme="fluorogrid"] .thread-nav a,
 [data-theme="fluorogrid"] .board-nav-link,
 [data-theme="dorfic"] .post-toggle-btn,
-[data-theme="dorfic"] .thread-nav-btn,
-[data-theme="dorfic"] .thread-nav a,
 [data-theme="dorfic"] .board-nav-link {
   background: transparent;
   border: none;
@@ -3529,50 +3513,34 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
 
 [data-theme="forest"] .post-toggle-btn:hover,
 [data-theme="forest"] .post-toggle-btn.active,
-[data-theme="forest"] .thread-nav-btn:hover,
-[data-theme="forest"] .thread-nav a:hover,
 [data-theme="forest"] .board-nav-link:hover,
 [data-theme="forest"] .board-nav-link.active,
 [data-theme="blue-sky"] .post-toggle-btn:hover,
 [data-theme="blue-sky"] .post-toggle-btn.active,
-[data-theme="blue-sky"] .thread-nav-btn:hover,
-[data-theme="blue-sky"] .thread-nav a:hover,
 [data-theme="blue-sky"] .board-nav-link:hover,
 [data-theme="blue-sky"] .board-nav-link.active,
 [data-theme="deep-orbit"] .post-toggle-btn:hover,
 [data-theme="deep-orbit"] .post-toggle-btn.active,
-[data-theme="deep-orbit"] .thread-nav-btn:hover,
-[data-theme="deep-orbit"] .thread-nav a:hover,
 [data-theme="deep-orbit"] .board-nav-link:hover,
 [data-theme="deep-orbit"] .board-nav-link.active,
 [data-theme="terminal"] .post-toggle-btn:hover,
 [data-theme="terminal"] .post-toggle-btn.active,
-[data-theme="terminal"] .thread-nav-btn:hover,
-[data-theme="terminal"] .thread-nav a:hover,
 [data-theme="terminal"] .board-nav-link:hover,
 [data-theme="terminal"] .board-nav-link.active,
 [data-theme="aero"] .post-toggle-btn:hover,
 [data-theme="aero"] .post-toggle-btn.active,
-[data-theme="aero"] .thread-nav-btn:hover,
-[data-theme="aero"] .thread-nav a:hover,
 [data-theme="aero"] .board-nav-link:hover,
 [data-theme="aero"] .board-nav-link.active,
 [data-theme="neoncubicle"] .post-toggle-btn:hover,
 [data-theme="neoncubicle"] .post-toggle-btn.active,
-[data-theme="neoncubicle"] .thread-nav-btn:hover,
-[data-theme="neoncubicle"] .thread-nav a:hover,
 [data-theme="neoncubicle"] .board-nav-link:hover,
 [data-theme="neoncubicle"] .board-nav-link.active,
 [data-theme="fluorogrid"] .post-toggle-btn:hover,
 [data-theme="fluorogrid"] .post-toggle-btn.active,
-[data-theme="fluorogrid"] .thread-nav-btn:hover,
-[data-theme="fluorogrid"] .thread-nav a:hover,
 [data-theme="fluorogrid"] .board-nav-link:hover,
 [data-theme="fluorogrid"] .board-nav-link.active,
 [data-theme="dorfic"] .post-toggle-btn:hover,
 [data-theme="dorfic"] .post-toggle-btn.active,
-[data-theme="dorfic"] .thread-nav-btn:hover,
-[data-theme="dorfic"] .thread-nav a:hover,
 [data-theme="dorfic"] .board-nav-link:hover,
 [data-theme="dorfic"] .board-nav-link.active {
   background: transparent;
@@ -3584,7 +3552,6 @@ html:not([data-theme]) .error-page h1 { text-shadow: 0 0 14px rgba(255,34,68,0.5
    Theme blocks set the variables so structure stays in one place. */
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .home-btn,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .mobile-board-menu-btn,
-html:is([data-theme="aero"], [data-theme="neoncubicle"]) .thread-nav-btn,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-list a {
   border-radius: var(--glass-nav-radius, 999px);
@@ -3592,7 +3559,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-list a {
 
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .home-btn,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .mobile-board-menu-btn,
-html:is([data-theme="aero"], [data-theme="neoncubicle"]) .thread-nav-btn,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn {
   border-color: var(--glass-nav-control-border);
   background: var(--glass-nav-control-bg);
@@ -3613,18 +3579,13 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn {
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-list a:hover,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .home-btn:hover,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .mobile-board-menu-btn:hover,
-html:is([data-theme="aero"], [data-theme="neoncubicle"]) .thread-nav-btn:hover,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover {
   background: var(--glass-nav-hover-bg);
 }
 
 html:not([data-theme]) .post-toggle-btn,
-html:not([data-theme]) .thread-nav-btn,
-html:not([data-theme]) .thread-nav a,
 html:not([data-theme]) .board-nav-link,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn,
-html:is([data-theme="aero"], [data-theme="neoncubicle"]) .thread-nav-btn,
-html:is([data-theme="aero"], [data-theme="neoncubicle"]) .thread-nav a,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link {
   background: transparent;
   border: none;
@@ -3633,14 +3594,10 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link {
 
 html:not([data-theme]) .post-toggle-btn:hover,
 html:not([data-theme]) .post-toggle-btn.active,
-html:not([data-theme]) .thread-nav-btn:hover,
-html:not([data-theme]) .thread-nav a:hover,
 html:not([data-theme]) .board-nav-link:hover,
 html:not([data-theme]) .board-nav-link.active,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn:hover,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .post-toggle-btn.active,
-html:is([data-theme="aero"], [data-theme="neoncubicle"]) .thread-nav-btn:hover,
-html:is([data-theme="aero"], [data-theme="neoncubicle"]) .thread-nav a:hover,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link:hover,
 html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active {
   background: transparent;
@@ -4107,7 +4064,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 }
 [data-theme="forest"] .home-btn,
 [data-theme="forest"] .mobile-board-menu-btn,
-[data-theme="forest"] .thread-nav-btn,
 [data-theme="forest"] .post-toggle-btn,
 [data-theme="forest"] .board-list a {
   border-color: var(--forest-surface-border);
@@ -4115,7 +4071,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 }
 [data-theme="forest"] .home-btn:hover,
 [data-theme="forest"] .mobile-board-menu-btn:hover,
-[data-theme="forest"] .thread-nav-btn:hover,
 [data-theme="forest"] .post-toggle-btn:hover,
 [data-theme="forest"] .board-list a:hover {
   background: var(--forest-nav-hover-bg);
@@ -4379,7 +4334,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 }
 [data-theme="blue-sky"] .home-btn,
 [data-theme="blue-sky"] .mobile-board-menu-btn,
-[data-theme="blue-sky"] .thread-nav-btn,
 [data-theme="blue-sky"] .post-toggle-btn,
 [data-theme="blue-sky"] .board-list a {
   border-color: var(--blue-sky-surface-border);
@@ -4387,7 +4341,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 }
 [data-theme="blue-sky"] .home-btn:hover,
 [data-theme="blue-sky"] .mobile-board-menu-btn:hover,
-[data-theme="blue-sky"] .thread-nav-btn:hover,
 [data-theme="blue-sky"] .post-toggle-btn:hover,
 [data-theme="blue-sky"] .board-list a:hover {
   background: var(--blue-sky-nav-hover-bg);
@@ -4703,7 +4656,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 }
 [data-theme="deep-orbit"] .home-btn,
 [data-theme="deep-orbit"] .mobile-board-menu-btn,
-[data-theme="deep-orbit"] .thread-nav-btn,
 [data-theme="deep-orbit"] .post-toggle-btn,
 [data-theme="deep-orbit"] .board-list a {
   border-color: var(--deep-orbit-surface-border);
@@ -4711,7 +4663,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 }
 [data-theme="deep-orbit"] .home-btn:hover,
 [data-theme="deep-orbit"] .mobile-board-menu-btn:hover,
-[data-theme="deep-orbit"] .thread-nav-btn:hover,
 [data-theme="deep-orbit"] .post-toggle-btn:hover,
 [data-theme="deep-orbit"] .board-list a:hover {
   background: var(--deep-orbit-nav-hover-bg);
@@ -5086,8 +5037,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
 [data-theme="chanclassic"] .board-list a,
 [data-theme="chanclassic"] .board-nav-link,
 [data-theme="chanclassic"] .home-btn,
-[data-theme="chanclassic"] .thread-nav a,
-[data-theme="chanclassic"] .thread-nav-btn,
 [data-theme="chanclassic"] .post-toggle-btn,
 [data-theme="chanclassic"] .post-num a,
 [data-theme="chanclassic"] .poster-id-btn,
@@ -5096,8 +5045,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   text-decoration: none;
   text-shadow: none;
 }
-[data-theme="chanclassic"] .thread-nav a:hover,
-[data-theme="chanclassic"] .thread-nav-btn:hover,
 [data-theme="chanclassic"] .board-list a:hover,
 [data-theme="chanclassic"] .board-nav-link:hover,
 [data-theme="chanclassic"] .home-btn:hover,
@@ -5155,7 +5102,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   color: #000000;
   border-radius: 2px;
 }
-[data-theme="chanclassic"] .thread-nav-btn,
 [data-theme="chanclassic"] .post-toggle-btn,
 [data-theme="chanclassic"] .site-header button,
 [data-theme="chanclassic"] .board-list a,
@@ -5186,7 +5132,6 @@ html:is([data-theme="aero"], [data-theme="neoncubicle"]) .board-nav-link.active 
   color: #800000;
   box-shadow: none;
 }
-[data-theme="chanclassic"] .thread-nav-btn:hover,
 [data-theme="chanclassic"] .post-toggle-btn:hover,
 [data-theme="chanclassic"] .board-list a:hover,
 [data-theme="chanclassic"] .board-nav-link:hover,
@@ -6528,6 +6473,7 @@ html:not([data-theme]) .compress-do-btn {
 
 /* Thread board banner & nav bar */
 .thread-board-banner {
+  overflow-wrap: anywhere;
   text-align: center;
   font-size: 1.1rem;
   font-weight: bold;
@@ -6538,23 +6484,27 @@ html:not([data-theme]) .compress-do-btn {
 html:not([data-theme]) .thread-board-banner { text-shadow: 0 0 10px rgba(0,255,65,0.35); }
 
 .thread-nav {
+  --thread-control-color: var(--green);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 6px;
+  gap: 6px 12px;
   padding: 4px 0 8px;
+  scroll-margin-top: calc(var(--header-offset, 58px) + 10px);
 }
 
 .thread-nav-group {
   display: inline-flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
 }
 
 .thread-nav-refresh {
-  gap: 5px;
+  gap: 8px;
+  padding-inline-start: 12px;
+  border-inline-start: 1px solid var(--border);
 }
 
 html.no-js .thread-nav-refresh > button,
@@ -6575,74 +6525,131 @@ html.no-js .poll-add-btn {
   padding-top: 10px;
 }
 
-.thread-nav a,
-.thread-nav-btn {
-  color: var(--green-bright);
+.thread-nav .thread-nav-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--thread-control-color);
   font-family: var(--font);
   font-size: 0.88rem;
+  font-weight: normal;
+  line-height: 1.4;
+  letter-spacing: normal;
+  white-space: nowrap;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: min(var(--radius-sm), 3px);
   min-height: 30px;
   padding: 3px 6px;
   cursor: pointer;
   text-decoration: none;
+  text-shadow: none;
+  box-shadow: none;
+  transition: none;
+  touch-action: manipulation;
 }
 
-.thread-reply-stat {
+[data-theme="chanclassic"] .thread-nav {
+  --thread-control-color: var(--green-bright);
+}
+
+.thread-nav .thread-nav-update {
+  /* Reserve the action's width for its busy label as well as its idle label. */
+  min-width: calc(14ch + 16px);
+}
+
+.thread-nav .autoupdate-label {
+  min-height: 30px;
+  padding: 3px 6px;
+  color: var(--text);
+  line-height: 1.4;
+  letter-spacing: normal;
+  white-space: nowrap;
+}
+
+.thread-nav .autoupdate-label input[type="checkbox"] {
+  border-color: var(--thread-control-color);
+  transition: none;
+}
+
+.thread-nav .autoupdate-label input[type="checkbox"]:checked {
+  background: var(--thread-control-color);
+}
+
+.thread-nav .autoupdate-label input[type="checkbox"]:checked::after {
+  border-color: var(--bg);
+}
+
+.thread-nav .thread-reply-stat {
   display: inline-flex;
   align-items: center;
   min-height: 26px;
   padding: 2px 6px;
   border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
   background: color-mix(in srgb, var(--bg-input) 56%, transparent);
-  color: var(--text-dim);
+  color: var(--text);
   font-size: 0.76rem;
   line-height: 1.1;
+  gap: 0.25em;
   border-radius: var(--radius-sm);
 }
 
-.thread-nav a:hover,
-.thread-nav-btn:hover {
-  color: var(--green-bright);
-  border-color: color-mix(in srgb, var(--border) 78%, transparent);
+.thread-nav .thread-nav-control:hover:not([aria-disabled="true"]) {
+  color: var(--thread-control-color);
+  border-color: var(--border);
   background: color-mix(in srgb, var(--green) 8%, transparent);
   text-decoration: underline;
 }
 
-.thread-nav-btn:disabled {
+.thread-nav .thread-nav-control:focus-visible,
+.thread-nav .autoupdate-label input:focus-visible {
+  outline: 2px solid var(--thread-control-color);
+  outline-offset: 2px;
+}
+
+.thread-nav .thread-nav-control:active:not([aria-disabled="true"]) {
+  border-color: var(--thread-control-color);
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+}
+
+.thread-nav .thread-nav-control[aria-disabled="true"] {
   cursor: wait;
-  opacity: 0.7;
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg-input) 70%, transparent);
+  border-color: var(--border);
   text-decoration: none;
 }
 
-.thread-nav-btn.active {
-  color: var(--green-bright);
+.thread-nav .thread-nav-control:visited {
+  color: var(--thread-control-color);
 }
-html:not([data-theme]) .thread-nav-btn.active { text-shadow: 0 0 8px rgba(0,255,65,0.6); }
 
-.autoupdate-status {
-  color: var(--green-bright);
+.thread-nav .autoupdate-status {
+  color: var(--thread-control-color);
   font-size: 0.75rem;
-  opacity: 0.8;
-  margin-left: 4px;
+  overflow-wrap: anywhere;
+  max-width: 100%;
 }
 
-.autoupdate-status[data-state="working"] {
-  color: var(--text-dim);
+.thread-nav .autoupdate-status[data-state="working"] {
+  color: var(--text);
 }
 
-.autoupdate-status[data-state="success"] {
-  color: var(--green-bright);
+.thread-nav .autoupdate-status[data-state="success"] {
+  color: var(--thread-control-color);
 }
 
-.autoupdate-status[data-state="error"] {
-  color: var(--red, #f55);
+.thread-nav .autoupdate-status[data-state="error"] {
+  color: var(--text);
+  border-inline-start: 2px solid var(--red);
+  padding-inline-start: 6px;
 }
 
 @media (max-width: 700px) {
   .thread-nav {
     justify-content: center;
+    max-width: calc(100vw - 16px);
     gap: 7px;
     padding: 6px 0 10px;
   }
@@ -6662,21 +6669,9 @@ html:not([data-theme]) .thread-nav-btn.active { text-shadow: 0 0 8px rgba(0,255,
     margin-left: 0;
   }
 
-  .thread-nav a,
-  .thread-nav-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 40px;
-    padding: 6px 9px;
-  }
-
-  .autoupdate-label {
-    min-height: 40px;
-    padding: 6px 9px;
-    border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
-    background: color-mix(in srgb, var(--bg-input) 54%, transparent);
-    border-radius: var(--radius-sm);
+  .thread-nav-refresh {
+    border-inline-start: none;
+    padding-inline-start: 0;
   }
 
   .thread-reply-stat,
@@ -6688,6 +6683,14 @@ html:not([data-theme]) .thread-nav-btn.active { text-shadow: 0 0 8px rgba(0,255,
 
   .autoupdate-status:empty {
     display: none;
+  }
+}
+
+@media (max-width: 700px), (pointer: coarse) {
+  .thread-nav .thread-nav-control,
+  .thread-nav .autoupdate-label {
+    min-height: 44px;
+    padding: 6px;
   }
 }
 
