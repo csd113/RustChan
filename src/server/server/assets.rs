@@ -181,8 +181,8 @@ mod tests {
     /// Positions mobile menus against the visual viewport.
     fn main_js_positions_mobile_menus_and_popups_against_visual_viewport() {
         for expected in [
-            "function getThreadMenuBounds(gutter)",
-            "window.visualViewport && window.visualViewport.height",
+            "function positionThreadMenu(toggle, menu)",
+            "var viewport = window.visualViewport;",
             "function clampPopupToViewport(anchor, popup)",
             "visualViewport.offsetLeft",
             "visualViewport.offsetTop",

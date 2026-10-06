@@ -221,7 +221,7 @@ pub(in crate::server) async fn view_thread(
         ));
         drop(resp.headers_mut().insert(
             header::CACHE_CONTROL,
-            HeaderValue::from_static(crate::handlers::board::activity_html_cache_control(
+            HeaderValue::from_static(crate::handlers::board::personal_html_cache_control(
                 activity_markers_enabled,
             )),
         ));
@@ -229,10 +229,10 @@ pub(in crate::server) async fn view_thread(
         return Ok((jar, resp).into_response());
     }
 
-    let success_message = if params.reported.as_deref() == Some("1") {
-        Some("Report submitted. Thank you.")
-    } else {
-        None
+    let success_message = match params.reported.as_deref() {
+        Some("1") => Some("Report submitted. Thank you."),
+        Some("duplicate") => Some("A matching report is already open. Thank you."),
+        _ => None,
     };
     // HTML assembly is CPU work on already-owned data; keep it off the async workers.
     let html = tokio::task::spawn_blocking(move || {
@@ -257,7 +257,7 @@ pub(in crate::server) async fn view_thread(
     }
     drop(resp.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static(crate::handlers::board::activity_html_cache_control(
+        HeaderValue::from_static(crate::handlers::board::personal_html_cache_control(
             activity_markers_enabled,
         )),
     ));

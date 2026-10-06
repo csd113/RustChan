@@ -352,16 +352,27 @@ pub(in crate::server) async fn thread_action(
 
     let action = form.action.clone();
     let thread_id = form.thread_id;
-    let board_for_log = form.board.clone();
-    tokio::task::spawn_blocking({
+    let submitted_board = form.board.clone();
+    let board_name = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<()> {
+        move || -> Result<String> {
             let conn = pool.get()?;
             let tx = rusqlite::Transaction::new_unchecked(
                 &conn, rusqlite::TransactionBehavior::Immediate,
             )?;
             let (admin_id, admin_name) =
                 super::require_admin_session_with_name(&tx, session_id.as_deref())?;
+            let target = db::get_thread(&tx, thread_id)?
+                .ok_or_else(|| AppError::NotFound("Thread not found.".into()))?;
+            let logged_board: String = tx.query_row(
+                "SELECT short_name FROM boards WHERE id = ?1", [target.board_id], |row| row.get(0),
+            )?;
+            if submitted_board != logged_board {
+                return Err(AppError::BadRequest("Board mismatch.".into()));
+            }
+            if target.archived && matches!(action.as_str(), "lock" | "unlock" | "sticky") {
+                return Err(AppError::Conflict("This thread is archived.".into()));
+            }
             match action.as_str() {
                 "sticky" => db::set_thread_sticky(&tx, thread_id, true)?,
                 "unsticky" => db::set_thread_sticky(&tx, thread_id, false)?,
@@ -370,18 +381,10 @@ pub(in crate::server) async fn thread_action(
                 "archive" => db::set_thread_archived(&tx, thread_id, true)?,
                 _ => {}
             }
-            // Resolve the authoritative board ID under the same write lock.
-            let board_id: i64 = tx.query_row(
-                "SELECT board_id FROM threads WHERE id = ?1", [thread_id], |row| row.get(0),
-            )?;
+            let board_id = target.board_id;
             if matches!(action.as_str(), "archive" | "unsticky") {
                 let _schedule = db::persist_thread_prune_intent_in_tx(&tx, board_id)?;
             }
-            let logged_board = if action == "archive" {
-                tx.query_row("SELECT short_name FROM boards WHERE id = ?1", [board_id], |row| row.get::<_, String>(0))?
-            } else {
-                board_for_log
-            };
             // Thread moderation and its audit record must commit together.
             db::log_mod_action(
                 &tx, admin_id, &admin_name, &action, "thread", Some(thread_id),
@@ -389,42 +392,17 @@ pub(in crate::server) async fn thread_action(
             )?;
             tx.commit()?;
             tracing::info!(target: "admin", action = %action, thread_id = thread_id, "Thread action");
-            Ok(())
+            Ok(logged_board)
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    // Use the board name from the DB (via the thread's board_id),
-    // not the user-supplied form.board, to prevent path-confusion redirects.
-    let redirect_url = {
-        let pool = state.db.clone();
-        let board_name = tokio::task::spawn_blocking(move || -> Result<String> {
-            let conn = pool.get()?;
-            let thread = db::get_thread(&conn, thread_id)?;
-            let boards = db::get_all_boards(&conn).ok();
-            if let Some(t) = thread {
-                return Ok(resolve_board_short_name(
-                    boards.as_deref(),
-                    t.board_id,
-                    &form.board,
-                ));
-            }
-            // Fallback: sanitize the user-supplied board name to prevent open-redirect.
-            // Only allow alphanumeric characters (matching the board short_name format).
-            Ok(board_short_fragment(&form.board))
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-        // After archiving, send to the board archive; for all other actions
-        // stay on the thread.
-        if form.action == "archive" {
-            format!("/{board_name}/archive")
-        } else {
-            format!("/{board_name}/thread/{}", form.thread_id)
-        }
+    let redirect_url = if form.action == "archive" {
+        format!("/{board_name}/archive")
+    } else {
+        format!("/{board_name}/thread/{thread_id}")
     };
-
     Ok(Redirect::to(&redirect_url).into_response())
 }
 
@@ -1040,7 +1018,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thread_action_uses_fallback_board_when_lookup_breaks() -> anyhow::Result<()> {
+    async fn thread_action_rolls_back_when_board_lookup_breaks() -> anyhow::Result<()> {
         let (state, thread_id, _reply_id, _board_id) = seed_admin_data()?;
         let conn = state.db.get().context("get database connection")?;
         conn.execute_batch("ALTER TABLE boards RENAME COLUMN short_name TO short_name_broken")
@@ -1048,7 +1026,7 @@ mod tests {
         drop(conn);
 
         let response = thread_action(
-            State(state),
+            State(state.clone()),
             build_admin_jar(),
             admin_headers(),
             crate::test_support::connect_info(),
@@ -1059,16 +1037,182 @@ mod tests {
                 csrf: Some(admin_signed_csrf()),
             }),
         )
-        .await
-        .context("run thread action")?;
+        .await;
+        ensure!(response.is_err(), "broken target lookup must fail closed");
+        let verification_conn = state.db.get()?;
+        let locked: bool = verification_conn.query_row(
+            "SELECT locked FROM threads WHERE id = ?1",
+            [thread_id],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            !locked,
+            "moderation must roll back when target validation fails"
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn global_sticky_is_idempotent_and_commits_canonical_audit_context() -> anyhow::Result<()>
+    {
+        let (state, thread_id, _reply_id, _board_id) = seed_admin_data()?;
+        for action in ["sticky", "sticky", "unsticky", "unsticky"] {
+            let response = thread_action(
+                State(state.clone()),
+                build_admin_jar(),
+                admin_headers(),
+                crate::test_support::connect_info(),
+                Form(ThreadActionForm {
+                    thread_id,
+                    board: "test".to_owned(),
+                    action: action.to_owned(),
+                    csrf: Some(admin_signed_csrf()),
+                }),
+            )
+            .await?;
+            ensure!(response.status() == StatusCode::SEE_OTHER);
+            let conn = state.db.get()?;
+            ensure!(
+                db::get_thread(&conn, thread_id)?.context("thread")?.sticky == (action == "sticky")
+            );
+            let logged: String = conn.query_row(
+                "SELECT board_short FROM mod_log ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )?;
+            ensure!(logged == "test");
+        }
+        Ok(())
+    }
 
-        ensure!(response.status() == StatusCode::SEE_OTHER);
-        let location = response
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .context("response omitted location header")?;
-        ensure!(location == format!("/fallback/thread/{thread_id}"));
+    #[tokio::test]
+    async fn global_thread_actions_reject_forged_board_session_and_csrf_without_mutation(
+    ) -> anyhow::Result<()> {
+        let (state, thread_id, _reply_id, _board_id) = seed_admin_data()?;
+        let mismatch = thread_action(
+            State(state.clone()),
+            build_admin_jar(),
+            admin_headers(),
+            crate::test_support::connect_info(),
+            Form(ThreadActionForm {
+                thread_id,
+                board: "other".to_owned(),
+                action: "sticky".to_owned(),
+                csrf: Some(admin_signed_csrf()),
+            }),
+        )
+        .await;
+        ensure!(matches!(mismatch, Err(AppError::BadRequest(_))));
+        for (jar, headers, csrf) in [
+            (CookieJar::new(), admin_headers(), admin_signed_csrf()),
+            (
+                build_admin_jar(),
+                cross_origin_headers(),
+                admin_signed_csrf(),
+            ),
+            (build_admin_jar(), admin_headers(), "csrf123".to_owned()),
+        ] {
+            let response = thread_action(
+                State(state.clone()),
+                jar,
+                headers,
+                crate::test_support::connect_info(),
+                Form(ThreadActionForm {
+                    thread_id,
+                    board: "test".to_owned(),
+                    action: "sticky".to_owned(),
+                    csrf: Some(csrf),
+                }),
+            )
+            .await;
+            ensure!(matches!(response, Err(AppError::Forbidden(_))));
+        }
+        let conn = state.db.get()?;
+        ensure!(!db::get_thread(&conn, thread_id)?.context("thread")?.sticky);
+        let logs: i64 = conn.query_row("SELECT COUNT(*) FROM mod_log", [], |row| row.get(0))?;
+        ensure!(logs == 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn archived_thread_actions_and_missing_targets_fail_without_contradictory_flags(
+    ) -> anyhow::Result<()> {
+        let (state, thread_id, _reply_id, _board_id) = seed_admin_data()?;
+        {
+            let conn = state.db.get()?;
+            db::set_thread_archived(&conn, thread_id, true)?;
+        }
+        for action in ["unlock", "lock", "sticky"] {
+            let response = thread_action(
+                State(state.clone()),
+                build_admin_jar(),
+                admin_headers(),
+                crate::test_support::connect_info(),
+                Form(ThreadActionForm {
+                    thread_id,
+                    board: "test".to_owned(),
+                    action: action.to_owned(),
+                    csrf: Some(admin_signed_csrf()),
+                }),
+            )
+            .await;
+            ensure!(matches!(response, Err(AppError::Conflict(_))));
+        }
+        let conn = state.db.get()?;
+        let target = db::get_thread(&conn, thread_id)?.context("thread")?;
+        ensure!(target.archived && target.locked && !target.sticky);
+        let response = thread_action(
+            State(state),
+            build_admin_jar(),
+            admin_headers(),
+            crate::test_support::connect_info(),
+            Form(ThreadActionForm {
+                thread_id: i64::MAX,
+                board: "test".to_owned(),
+                action: "sticky".to_owned(),
+                csrf: Some(admin_signed_csrf()),
+            }),
+        )
+        .await;
+        ensure!(matches!(response, Err(AppError::NotFound(_))));
+        Ok(())
+    }
+    #[tokio::test]
+    async fn concurrent_global_sticky_changes_match_the_last_committed_audit_action(
+    ) -> anyhow::Result<()> {
+        let (state, thread_id, _reply_id, _board_id) = seed_admin_data()?;
+        let action = |value: &str| ThreadActionForm {
+            thread_id,
+            board: "test".to_owned(),
+            action: value.to_owned(),
+            csrf: Some(admin_signed_csrf()),
+        };
+        let (sticky, unsticky) = tokio::join!(
+            thread_action(
+                State(state.clone()),
+                build_admin_jar(),
+                admin_headers(),
+                crate::test_support::connect_info(),
+                Form(action("sticky"))
+            ),
+            thread_action(
+                State(state.clone()),
+                build_admin_jar(),
+                admin_headers(),
+                crate::test_support::connect_info(),
+                Form(action("unsticky"))
+            ),
+        );
+        ensure!(
+            sticky?.status() == StatusCode::SEE_OTHER
+                && unsticky?.status() == StatusCode::SEE_OTHER
+        );
+        let conn = state.db.get()?;
+        let last: String = conn.query_row(
+            "SELECT action FROM mod_log ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(db::get_thread(&conn, thread_id)?.context("thread")?.sticky == (last == "sticky"));
         Ok(())
     }
 }

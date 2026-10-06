@@ -2428,104 +2428,147 @@ function submitEditModalForm(form) {
   return true;
 }
 
+// One shared controller keeps hundreds of post controls inexpensive. The open
+// menu is temporarily portaled out of clipping/stacking ancestors.
+var _openThreadMenu = null;
+var _threadMenuFrame = 0;
+var _threadMenuObserver = typeof ResizeObserver === 'function'
+  ? new ResizeObserver(function () { repositionOpenThreadMenus(); }) : null;
+
 function closeThreadMenus(options) {
   options = options || {};
-  var focusTarget = null;
-  document.querySelectorAll('.catalog-thread-menu').forEach(function (menu) {
-    var actions = menu.closest('.catalog-card-actions');
-    var toggle = actions && actions.querySelector('.catalog-thread-menu-toggle');
-    var hadFocus = menu.contains(document.activeElement);
-    if (toggle) toggle.setAttribute('aria-expanded', 'false');
-    delete menu.dataset.direction;
-    menu.style.maxHeight = '';
-    menu.style.overflowY = '';
-    menu.hidden = true;
-    setElementAriaHidden(menu, true);
-    setElementInert(menu, true);
-    if (options.restoreFocus && hadFocus && toggle && !focusTarget) {
-      focusTarget = toggle;
-    }
-  });
-  document.querySelectorAll('.catalog-item.catalog-menu-open').forEach(function (card) {
-    card.classList.remove('catalog-menu-open');
-  });
-  if (focusTarget && typeof focusTarget.focus === 'function') {
-    focusTarget.focus();
+  var current = _openThreadMenu;
+  if (!current) return;
+  _openThreadMenu = null;
+  if (_threadMenuFrame) window.cancelAnimationFrame(_threadMenuFrame);
+  _threadMenuFrame = 0;
+  if (_threadMenuObserver) _threadMenuObserver.disconnect();
+  var hadFocus = current.menu.contains(document.activeElement);
+  current.toggle.setAttribute('aria-expanded', 'false');
+  current.menu.hidden = true;
+  setElementAriaHidden(current.menu, true);
+  setElementInert(current.menu, true);
+  current.menu.removeAttribute('style');
+  delete current.menu.dataset.direction;
+  current.parent.insertBefore(current.menu, current.next && current.next.parentNode === current.parent ? current.next : null);
+  if (current.card) current.card.classList.remove('catalog-menu-open');
+  if (options.restoreFocus && (hadFocus || document.activeElement === current.toggle)) {
+    current.toggle.focus();
   }
-}
-
-function getThreadMenuBounds(gutter) {
-  var top = gutter;
-  var viewportHeight = window.visualViewport && window.visualViewport.height
-    ? window.visualViewport.height
-    : window.innerHeight;
-  var bottom = viewportHeight - gutter;
-  var footer = document.querySelector('.site-footer');
-
-  if (footer) {
-    var footerRect = footer.getBoundingClientRect();
-    if (footerRect.top < bottom && footerRect.bottom > top) {
-      bottom = Math.max(top, footerRect.top - gutter);
-    }
-  }
-
-  return { top: top, bottom: bottom };
 }
 
 function positionThreadMenu(toggle, menu) {
   if (!toggle || !menu) return;
-  delete menu.dataset.direction;
-  menu.style.maxHeight = '';
-  menu.style.overflowY = '';
-
-  var toggleRect = toggle.getBoundingClientRect();
-  var menuRect = menu.getBoundingClientRect();
+  var rect = toggle.getBoundingClientRect();
+  var viewport = window.visualViewport;
   var gutter = 12;
   var offset = 6;
-  var bounds = getThreadMenuBounds(gutter);
-  var spaceBelow = Math.max(0, bounds.bottom - toggleRect.bottom - offset);
-  var spaceAbove = Math.max(0, toggleRect.top - bounds.top - offset);
-  var openUp = spaceBelow < menuRect.height && spaceAbove >= spaceBelow;
-  var availableSpace = openUp ? spaceAbove : spaceBelow;
-
-  if (openUp) {
-    menu.dataset.direction = 'up';
+  var leftEdge = (viewport ? viewport.offsetLeft : 0) + gutter;
+  var topEdge = (viewport ? viewport.offsetTop : 0) + gutter;
+  var rightEdge = leftEdge + (viewport ? viewport.width : window.innerWidth) - gutter * 2;
+  var bottomEdge = topEdge + (viewport ? viewport.height : window.innerHeight) - gutter * 2;
+  if (!toggle.isConnected || rect.bottom <= topEdge || rect.top >= bottomEdge ||
+      rect.right <= leftEdge || rect.left >= rightEdge) {
+    closeThreadMenus({ restoreFocus: true });
+    return;
   }
-
-  if (availableSpace > 0 && availableSpace < menuRect.height) {
-    menu.style.maxHeight = availableSpace + 'px';
-    menu.style.overflowY = 'auto';
+  menu.style.maxWidth = Math.max(1, rightEdge - leftEdge) + 'px';
+  menu.style.minWidth = Math.min(150, Math.max(1, rightEdge - leftEdge)) + 'px';
+  // Measure in viewport space before locking the width and anchoring the box.
+  if (!menu.style.left) {
+    menu.style.left = leftEdge + 'px';
+    menu.style.top = topEdge + 'px';
   }
+  var menuRect = menu.getBoundingClientRect();
+  menu.style.width = menuRect.width + 'px';
+  var naturalHeight = menu.scrollHeight + menu.offsetHeight - menu.clientHeight;
+  var below = Math.max(0, bottomEdge - rect.bottom - offset);
+  var above = Math.max(0, rect.top - topEdge - offset);
+  var openUp = below < naturalHeight && above > below;
+  var available = openUp ? above : below;
+  menu.style.maxHeight = Math.max(1, available) + 'px';
+  menu.dataset.direction = openUp ? 'up' : 'down';
+  var height = Math.min(naturalHeight, Math.max(1, available));
+  menu.style.left = Math.max(leftEdge, Math.min(rect.right - menuRect.width, rightEdge - menuRect.width)) + 'px';
+  menu.style.top = (openUp ? rect.top - offset - height : rect.bottom + offset) + 'px';
 }
 
-function toggleThreadMenu(toggle) {
+function toggleThreadMenu(toggle, options) {
+  options = options || {};
   if (!toggle) return;
   var actions = toggle.closest('.catalog-card-actions');
   var menu = actions && actions.querySelector('.catalog-thread-menu');
+  // A second click finds the portaled menu through the controller.
+  if (_openThreadMenu && _openThreadMenu.toggle === toggle) {
+    closeThreadMenus({ restoreFocus: true });
+    return;
+  }
   if (!menu) return;
-  var card = toggle.closest('.catalog-item');
-  var opening = menu.hidden;
   closeThreadMenus();
-  menu.hidden = !opening;
-  setElementAriaHidden(menu, !opening);
-  setElementInert(menu, !opening);
-  toggle.setAttribute('aria-expanded', opening ? 'true' : 'false');
-  if (opening) {
-    if (card) {
-      card.classList.add('catalog-menu-open');
-    }
-    positionThreadMenu(toggle, menu);
+  _openThreadMenu = { toggle: toggle, menu: menu, parent: menu.parentNode,
+    next: menu.nextSibling, card: toggle.closest('.catalog-item') };
+  document.body.appendChild(menu);
+  menu.hidden = false;
+  setElementAriaHidden(menu, false);
+  setElementInert(menu, false);
+  toggle.setAttribute('aria-expanded', 'true');
+  if (_openThreadMenu.card) _openThreadMenu.card.classList.add('catalog-menu-open');
+  positionThreadMenu(toggle, menu);
+  if (_openThreadMenu && _threadMenuObserver) {
+    _threadMenuObserver.observe(document.body);
+    // A fixed header can move content via its offset without resizing the body
+    // or the trigger, especially when enlarged text still fits one screen.
+    var header = document.querySelector('.site-header');
+    if (header) _threadMenuObserver.observe(header);
+    _threadMenuObserver.observe(toggle);
+    _threadMenuObserver.observe(menu);
+  }
+  if (_openThreadMenu && options.focusFirst) {
+    var first = menu.querySelector('[role="menuitem"]');
+    if (first) first.focus();
   }
 }
 
-function repositionOpenThreadMenus() {
-  document.querySelectorAll('.catalog-thread-menu-toggle[aria-expanded="true"]').forEach(function (toggle) {
-    var actions = toggle.closest('.catalog-card-actions');
-    var menu = actions && actions.querySelector('.catalog-thread-menu');
-    if (!menu || menu.hidden) return;
-    positionThreadMenu(toggle, menu);
+function repositionOpenThreadMenus(event) {
+  if (!_openThreadMenu || _threadMenuFrame) return;
+  if (event && event.target && event.target.nodeType && _openThreadMenu.menu.contains(event.target)) return;
+  _threadMenuFrame = window.requestAnimationFrame(function () {
+    _threadMenuFrame = 0;
+    if (_openThreadMenu) positionThreadMenu(_openThreadMenu.toggle, _openThreadMenu.menu);
   });
 }
+
+// Menus follow native focus order when Tab leaves them; arrows stay within the
+// action list. No per-post listener or observer is required.
+document.addEventListener('keydown', function (event) {
+  var toggle = event.target.closest && event.target.closest('.catalog-thread-menu-toggle');
+  if (toggle && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+    event.preventDefault();
+    if (!_openThreadMenu || _openThreadMenu.toggle !== toggle) toggleThreadMenu(toggle);
+  } else if (!_openThreadMenu || !_openThreadMenu.menu.contains(event.target)) {
+    return;
+  }
+  if (!_openThreadMenu) return;
+  var current = _openThreadMenu;
+  if (event.key === 'Tab') {
+    closeThreadMenus({ restoreFocus: true });
+    return;
+  }
+  var items = Array.prototype.slice.call(current.menu.querySelectorAll('[role="menuitem"]:not(:disabled)'));
+  var index = items.indexOf(document.activeElement);
+  if (event.key === 'ArrowDown') index = (index + 1) % items.length;
+  else if (event.key === 'ArrowUp') index = index <= 0 ? items.length - 1 : index - 1;
+  else if (event.key === 'Home') index = 0;
+  else if (event.key === 'End') index = items.length - 1;
+  else return;
+  event.preventDefault();
+  if (items[index]) items[index].focus();
+});
+document.addEventListener('focusin', function (event) {
+  if (_openThreadMenu && event.target !== _openThreadMenu.toggle && !_openThreadMenu.menu.contains(event.target)) closeThreadMenus();
+});
+window.addEventListener('pagehide', function () { closeThreadMenus(); });
+window.addEventListener('pageshow', function () { closeThreadMenus(); });
 
 function clampPopupToViewport(anchor, popup) {
   var rect = anchor.getBoundingClientRect();
@@ -3964,13 +4007,9 @@ function sortCatalog(mode) {
     var as_ = parseInt(a.dataset.sticky) || 0;
     var bs_ = parseInt(b.dataset.sticky) || 0;
     if (as_ !== bs_) return bs_ - as_;
-    if (mode === 'bump') {
-      return parseInt(b.dataset.bumped) - parseInt(a.dataset.bumped);
-    }
-    if (mode === 'replies') return parseInt(b.dataset.replies) - parseInt(a.dataset.replies);
-    if (mode === 'created') return parseInt(b.dataset.created) - parseInt(a.dataset.created);
-    if (mode === 'last_reply') return parseInt(b.dataset.lastReply) - parseInt(a.dataset.lastReply);
-    return 0;
+    var field = { bump: 'bumped', replies: 'replies', created: 'created', last_reply: 'lastReply' }[mode];
+    var difference = field ? (parseInt(b.dataset[field]) || 0) - (parseInt(a.dataset[field]) || 0) : 0;
+    return difference || (parseInt(b.dataset.threadId) || 0) - (parseInt(a.dataset.threadId) || 0);
   });
   var frag = document.createDocumentFragment();
   items.forEach(function (item) { frag.appendChild(item); });
@@ -4079,7 +4118,7 @@ document.addEventListener('click', function (e) {
       case 'toggle-thread-menu':
         e.preventDefault();
         e.stopPropagation();
-        toggleThreadMenu(t);
+        toggleThreadMenu(t, { focusFirst: e.detail === 0 });
         break;
       case 'remove-poll-option':  removePollOption(t); break;
       case 'add-poll-option':     addPollOption(); break;
@@ -4098,7 +4137,7 @@ document.addEventListener('click', function (e) {
       case 'fetch-updates':       window.fetchUpdates && window.fetchUpdates(); break;
       case 'open-report':
         e.preventDefault();
-        var reportTrigger = t;
+        var reportTrigger = _openThreadMenu && _openThreadMenu.menu.contains(t) ? _openThreadMenu.toggle : t;
         var catalogActions = t.closest('.catalog-card-actions');
         if (catalogActions) {
           reportTrigger = catalogActions.querySelector('.catalog-thread-menu-toggle') || t;
@@ -4137,7 +4176,7 @@ document.addEventListener('click', function (e) {
     }
   }
 
-  if (!e.target.closest('.catalog-card-actions')) {
+  if (!e.target.closest('.catalog-card-actions, .catalog-thread-menu')) {
     closeThreadMenus();
   }
 

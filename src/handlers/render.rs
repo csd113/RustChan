@@ -12,6 +12,7 @@ pub(super) struct BoardPageData {
     pub pagination: Pagination,
     pub summaries: Vec<ThreadSummary>,
     pub is_admin: bool,
+    pub thread_preferences: std::collections::HashMap<i64, db::UserThreadPreference>,
 }
 
 pub(super) struct ThreadPageData {
@@ -20,12 +21,19 @@ pub(super) struct ThreadPageData {
     pub posts: Vec<crate::models::Post>,
     pub poll: Option<PollData>,
     pub is_admin: bool,
+    pub thread_preference: db::UserThreadPreference,
     pub owned_post_controls: std::collections::BTreeMap<i64, templates::thread::OwnedPostControls>,
 }
 
 #[must_use]
 pub(super) fn board_page_etag_signature(data: &BoardPageData) -> String {
     let mut hasher = Sha256::new();
+    let mut preferences = data.thread_preferences.iter().collect::<Vec<_>>();
+    preferences.sort_by_key(|(id, _pref)| **id);
+    for (id, pref) in preferences {
+        update_sig_i64(&mut hasher, *id);
+        hasher.update([u8::from(pref.pinned), u8::from(pref.hidden)]);
+    }
     for summary in &data.summaries {
         update_thread_signature(&mut hasher, &summary.thread);
         update_sig_field(&mut hasher, &summary.omitted.to_string());
@@ -36,10 +44,24 @@ pub(super) fn board_page_etag_signature(data: &BoardPageData) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Hash all catalog metadata that changes the rendered cards or actions.
+#[must_use]
+pub(super) fn threads_etag_signature(threads: &[Thread]) -> String {
+    let mut hasher = Sha256::new();
+    for thread in threads {
+        update_thread_signature(&mut hasher, thread);
+    }
+    hex::encode(hasher.finalize())
+}
+
 #[must_use]
 pub(super) fn thread_page_etag_signature(data: &ThreadPageData) -> String {
     let mut hasher = Sha256::new();
     update_thread_signature(&mut hasher, &data.thread);
+    hasher.update([
+        u8::from(data.thread_preference.pinned),
+        u8::from(data.thread_preference.hidden),
+    ]);
     for post in &data.posts {
         update_post_signature(&mut hasher, post);
     }
@@ -63,6 +85,13 @@ fn update_sig_i64(hasher: &mut Sha256, value: i64) {
 fn update_thread_signature(hasher: &mut Sha256, thread: &Thread) {
     update_sig_i64(hasher, thread.id);
     update_sig_i64(hasher, thread.bumped_at);
+    update_sig_i64(hasher, thread.created_at);
+    update_sig_i64(hasher, thread.op_id.unwrap_or(0));
+    update_sig_i64(hasher, thread.last_post_at);
+    update_sig_i64(hasher, thread.image_count);
+    update_sig_field(hasher, thread.subject.as_deref().unwrap_or(""));
+    update_sig_field(hasher, thread.op_body.as_deref().unwrap_or(""));
+    update_sig_field(hasher, thread.op_name.as_deref().unwrap_or(""));
     update_sig_field(hasher, if thread.locked { "1" } else { "0" });
     update_sig_field(hasher, if thread.sticky { "1" } else { "0" });
     update_sig_field(hasher, if thread.archived { "1" } else { "0" });
@@ -109,12 +138,22 @@ pub(super) fn load_board_page_data(
     threads_per_page: i64,
     preview_replies: i64,
     is_admin: bool,
+    viewer_key: &str,
 ) -> Result<BoardPageData> {
-    let total = db::count_threads_for_board(conn, board.id)?;
+    let tx = conn.unchecked_transaction()?;
+    let thread_preferences = db::get_preferences_for_board(&tx, viewer_key, board.id)?;
+    let total = db::count_threads_for_viewer(&tx, board.id, viewer_key, false)?;
     let pagination = Pagination::new(page, threads_per_page, total);
-    let threads = db::get_threads_for_board(conn, board.id, threads_per_page, pagination.offset())?;
+    let threads = db::get_threads_for_viewer(
+        &tx,
+        board.id,
+        viewer_key,
+        false,
+        threads_per_page,
+        pagination.offset(),
+    )?;
     let thread_ids = threads.iter().map(|thread| thread.id).collect::<Vec<_>>();
-    let mut previews = db::get_preview_posts_for_threads(conn, &thread_ids, preview_replies)?;
+    let mut previews = db::get_preview_posts_for_threads(&tx, &thread_ids, preview_replies)?;
     let summaries = threads
         .into_iter()
         .map(|thread| {
@@ -132,11 +171,13 @@ pub(super) fn load_board_page_data(
             }
         })
         .collect();
+    tx.commit()?;
     Ok(BoardPageData {
         board,
         pagination,
         summaries,
         is_admin,
+        thread_preferences,
     })
 }
 
@@ -174,6 +215,7 @@ pub(super) fn render_board_page(
         current_theme,
         data.board.collapse_greentext,
         can_post,
+        &data.thread_preferences,
         user_preferences,
     )
 }
@@ -187,21 +229,26 @@ pub(super) fn load_thread_page_data(
     cookie_secret: &str,
     is_admin: bool,
 ) -> Result<ThreadPageData> {
+    let tx = conn.unchecked_transaction()?;
     let board_id = board.id;
-    let thread = db::get_thread(conn, thread_id)?
+    let thread = db::get_thread(&tx, thread_id)?
         .ok_or_else(|| AppError::NotFound(format!("Thread {thread_id} not found")))?;
     if thread.board_id != board_id {
         return Err(AppError::NotFound("Thread not found in this board.".into()));
     }
-    let posts = db::get_posts_for_thread(conn, thread_id)?;
+    let posts = db::get_posts_for_thread(&tx, thread_id)?;
     let ip_hash = hash_ip(client_ip, cookie_secret);
-    let poll = db::get_poll_for_thread(conn, thread_id, &ip_hash)?;
+    let poll = db::get_poll_for_thread(&tx, thread_id, &ip_hash)?;
+    let thread_preference =
+        db::get_thread_preference(&tx, &ip_hash, thread_id)?.unwrap_or_default();
+    tx.commit()?;
     Ok(ThreadPageData {
         board,
         thread,
         posts,
         poll,
         is_admin,
+        thread_preference,
         owned_post_controls: std::collections::BTreeMap::new(),
     })
 }
@@ -240,6 +287,7 @@ pub(super) fn render_thread_page(
         current_theme,
         data.board.collapse_greentext,
         can_post,
+        data.thread_preference,
         user_preferences,
     )
 }
@@ -249,6 +297,7 @@ mod tests {
     use super::{
         board_page_etag_signature, thread_page_etag_signature, BoardPageData, ThreadPageData,
     };
+    use crate::db;
     use crate::models::{
         Board, Pagination, Poll, PollData, PollOption, Post, Thread, ThreadSummary,
     };
@@ -360,6 +409,7 @@ mod tests {
             posts: vec![sample_post(1), sample_post(2), sample_post(3)],
             poll: None,
             is_admin: false,
+            thread_preference: db::UserThreadPreference::default(),
             owned_post_controls: std::collections::BTreeMap::new(),
         };
         let after = ThreadPageData {
@@ -368,6 +418,7 @@ mod tests {
             posts: vec![sample_post(1), sample_post(3)],
             poll: None,
             is_admin: false,
+            thread_preference: db::UserThreadPreference::default(),
             owned_post_controls: std::collections::BTreeMap::new(),
         };
 
@@ -392,6 +443,7 @@ mod tests {
             posts: vec![sample_post(1), pending_post.clone()],
             poll: None,
             is_admin: false,
+            thread_preference: db::UserThreadPreference::default(),
             owned_post_controls: std::collections::BTreeMap::new(),
         };
 
@@ -405,6 +457,7 @@ mod tests {
             posts: vec![sample_post(1), pending_post],
             poll: None,
             is_admin: false,
+            thread_preference: db::UserThreadPreference::default(),
             owned_post_controls: std::collections::BTreeMap::new(),
         };
 
@@ -423,6 +476,7 @@ mod tests {
             posts: vec![sample_post(1)],
             poll: Some(sample_poll_data(None, [0, 0])),
             is_admin: false,
+            thread_preference: db::UserThreadPreference::default(),
             owned_post_controls: std::collections::BTreeMap::new(),
         };
         let after = ThreadPageData {
@@ -431,6 +485,7 @@ mod tests {
             posts: vec![sample_post(1)],
             poll: Some(sample_poll_data(Some(11), [1, 0])),
             is_admin: false,
+            thread_preference: db::UserThreadPreference::default(),
             owned_post_controls: std::collections::BTreeMap::new(),
         };
 
@@ -449,6 +504,7 @@ mod tests {
             posts: vec![sample_post(1)],
             poll: Some(sample_poll_data(None, [1, 0])),
             is_admin: false,
+            thread_preference: db::UserThreadPreference::default(),
             owned_post_controls: std::collections::BTreeMap::new(),
         };
         let after = ThreadPageData {
@@ -457,6 +513,7 @@ mod tests {
             posts: vec![sample_post(1)],
             poll: Some(sample_poll_data(Some(11), [1, 0])),
             is_admin: false,
+            thread_preference: db::UserThreadPreference::default(),
             owned_post_controls: std::collections::BTreeMap::new(),
         };
 
@@ -478,6 +535,7 @@ mod tests {
                 omitted: 0,
             }],
             is_admin: false,
+            thread_preferences: std::collections::HashMap::new(),
         };
         let after = BoardPageData {
             board,
@@ -488,6 +546,7 @@ mod tests {
                 omitted: 0,
             }],
             is_admin: false,
+            thread_preferences: std::collections::HashMap::new(),
         };
 
         assert_ne!(
@@ -515,6 +574,7 @@ mod tests {
                 omitted: 0,
             }],
             is_admin: false,
+            thread_preferences: std::collections::HashMap::new(),
         };
         let after = BoardPageData {
             board,
@@ -525,6 +585,7 @@ mod tests {
                 omitted: 0,
             }],
             is_admin: false,
+            thread_preferences: std::collections::HashMap::new(),
         };
 
         assert_ne!(

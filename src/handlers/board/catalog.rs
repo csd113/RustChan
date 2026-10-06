@@ -1,13 +1,12 @@
 use super::{
-    activity_html_cache_control, admin_scoped_csrf_token, board_access_cookie_from_jar,
-    board_access_denied_response, board_access_preflight, current_theme_from_jar, db,
-    ensure_csrf_for_request, header, latest_visible_thread_marker_tuple, remember_board_activity,
-    remember_visible_thread_activity, sha256_hex, split_catalog_threads, templates,
-    thread_activity_markers_from_jar, thread_unread_counts, user_preferences_from_jar,
-    viewer_preference_key, AppError, AppState, BoardAccessDecision, BoardAccessRequirement,
-    CatalogRenderData, CookieJar, HashMap, HeaderMap, HeaderValue, Html, Pagination, Path, Query,
-    Response, Result, SearchQuery, SecureCookieContext, State, StatusCode, ADMIN_SESSION_COOKIE,
-    SEARCH_QUERY_MAX_CHARS, THREAD_ACTIVITY_MARKER_LIMIT,
+    admin_scoped_csrf_token, board_access_cookie_from_jar, board_access_denied_response,
+    board_access_preflight, current_theme_from_jar, db, ensure_csrf_for_request, header,
+    latest_visible_thread_marker_tuple, personal_html_cache_control, remember_board_activity,
+    remember_visible_thread_activity, sha256_hex, templates, thread_activity_markers_from_jar,
+    thread_unread_counts, user_preferences_from_jar, viewer_preference_key, AppError, AppState,
+    BoardAccessDecision, BoardAccessRequirement, CatalogRenderData, CookieJar, HashMap, HeaderMap,
+    HeaderValue, Html, Pagination, Path, Query, Response, Result, SearchQuery, SecureCookieContext,
+    State, StatusCode, ADMIN_SESSION_COOKIE, SEARCH_QUERY_MAX_CHARS, THREAD_ACTIVITY_MARKER_LIMIT,
 };
 use axum::response::IntoResponse as _;
 use std::fmt::Write as _;
@@ -45,7 +44,7 @@ pub(in crate::server) async fn catalog(
         &state,
         &board_short,
         admin_session_id.clone(),
-        access_cookie,
+        access_cookie.clone(),
         BoardAccessRequirement::View,
         format!("/{board_short}/catalog"),
     )
@@ -67,27 +66,32 @@ pub(in crate::server) async fn catalog(
     let catalog_data = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        let access_cookie = access_cookie.clone();
         let viewer_key = viewer_key.clone();
         move || -> Result<CatalogLoadResult> {
-            let conn = pool.get()?;
-            let board = db::get_board_by_short(&conn, &board_short)?
-                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-            let all_threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
+            let connection = pool.get()?;
+            let conn = connection.unchecked_transaction()?;
+            let access = super::load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )?;
+            if !access.can_view {
+                return Err(AppError::Forbidden(
+                    "This board requires a password.".into(),
+                ));
+            }
+            let board = access.board;
+            let threads = db::get_threads_for_viewer(&conn, board.id, &viewer_key, false, -1, 0)?;
             let prefs = db::get_preferences_for_board(&conn, &viewer_key, board.id)?;
-            let (threads, hidden_threads, pinned_ids) = split_catalog_threads(all_threads, &prefs);
-            let catalog_sig = threads
+            let hidden_count = db::count_threads_for_viewer(&conn, board.id, &viewer_key, true)?;
+            let pinned_ids = prefs
                 .iter()
-                .map(|thread| {
-                    format!(
-                        "{}:{}:{}:{}",
-                        thread.id,
-                        thread.bumped_at,
-                        i32::from(thread.sticky),
-                        i32::from(thread.archived)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("|");
+                .filter_map(|(id, pref)| pref.pinned.then_some(*id))
+                .collect();
+            let catalog_sig = crate::handlers::render::threads_etag_signature(&threads);
             let mut pref_sig_parts = prefs
                 .iter()
                 .map(|(thread_id, pref)| {
@@ -115,7 +119,7 @@ pub(in crate::server) async fn catalog(
                     board.clone(),
                     threads,
                     pinned_ids,
-                    hidden_threads.len(),
+                    usize::try_from(hidden_count).unwrap_or(0),
                     etag_signature,
                 ),
                 banner_selection,
@@ -223,7 +227,7 @@ pub(in crate::server) async fn catalog(
         ));
         drop(resp.headers_mut().insert(
             header::CACHE_CONTROL,
-            HeaderValue::from_static(activity_html_cache_control(activity_markers_enabled)),
+            HeaderValue::from_static(personal_html_cache_control(activity_markers_enabled)),
         ));
         crate::cache::insert_vary_cookie(resp.headers_mut());
         return Ok((jar, resp).into_response());
@@ -259,7 +263,7 @@ pub(in crate::server) async fn catalog(
     }
     drop(resp.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static(activity_html_cache_control(activity_markers_enabled)),
+        HeaderValue::from_static(personal_html_cache_control(activity_markers_enabled)),
     ));
     crate::cache::insert_vary_cookie(resp.headers_mut());
     Ok((jar, resp).into_response())
@@ -285,7 +289,7 @@ pub(in crate::server) async fn hidden_threads(
         &state,
         &board_short,
         admin_session_id.clone(),
-        access_cookie,
+        access_cookie.clone(),
         BoardAccessRequirement::View,
         format!("/{board_short}/hidden"),
     )
@@ -307,14 +311,31 @@ pub(in crate::server) async fn hidden_threads(
     let html = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
+        let admin_session_id = admin_session_id.clone();
+        let access_cookie = access_cookie.clone();
         let admin_csrf = admin_csrf.clone();
         move || -> Result<String> {
-            let conn = pool.get()?;
-            let board = db::get_board_by_short(&conn, &board_short)?
-                .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-            let all_threads = db::get_threads_for_board(&conn, board.id, 200, 0)?;
+            let connection = pool.get()?;
+            let conn = connection.unchecked_transaction()?;
+            let access = super::load_board_access_context(
+                &conn,
+                &board_short,
+                admin_session_id.as_deref(),
+                access_cookie.as_deref(),
+            )?;
+            if !access.can_view {
+                return Err(AppError::Forbidden(
+                    "This board requires a password.".into(),
+                ));
+            }
+            let board = access.board;
             let prefs = db::get_preferences_for_board(&conn, &viewer_key, board.id)?;
-            let (_visible, hidden_threads, pinned_ids) = split_catalog_threads(all_threads, &prefs);
+            let hidden_threads =
+                db::get_threads_for_viewer(&conn, board.id, &viewer_key, true, -1, 0)?;
+            let pinned_ids = prefs
+                .iter()
+                .filter_map(|(id, pref)| pref.pinned.then_some(*id))
+                .collect();
 
             let all_boards = templates::live_boards();
             Ok(templates::catalog_page(
@@ -340,7 +361,13 @@ pub(in crate::server) async fn hidden_threads(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    Ok((jar, Html(html)).into_response())
+    let mut response = (jar, Html(html)).into_response();
+    drop(response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE),
+    ));
+    crate::cache::insert_vary_cookie(response.headers_mut());
+    Ok(response)
 }
 
 // GET /:board/archive

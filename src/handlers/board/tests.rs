@@ -2810,7 +2810,8 @@ async fn new_activity_pages_keep_private_no_store_cache_headers() -> anyhow::Res
 }
 
 #[tokio::test]
-async fn activity_pages_keep_existing_cache_policy_when_tracking_disabled() -> anyhow::Result<()> {
+async fn personal_action_pages_use_private_cache_even_when_tracking_disabled() -> anyhow::Result<()>
+{
     let state = crate::test_support::app_state();
     set_new_activity_settings(&state, false, false, false)?;
     let (_board_id, thread_id) = seed_board_with_thread(&state, "tech", "op")?;
@@ -2835,8 +2836,12 @@ async fn activity_pages_keep_existing_cache_policy_when_tracking_disabled() -> a
                 .headers()
                 .get(header::CACHE_CONTROL)
                 .and_then(|value| value.to_str().ok()),
-            Some(super::HTML_CACHE_CONTROL),
-            "{uri} should keep no-cache when activity tracking is disabled"
+            Some(if uri == "/" {
+                super::HTML_CACHE_CONTROL
+            } else {
+                crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE
+            }),
+            "{uri} should revalidate personal action state without shared caching"
         );
     }
     Ok(())
@@ -3078,13 +3083,14 @@ async fn duplicate_report_redirects_back_without_500() -> anyhow::Result<()> {
         .route("/report", post(super::file_report))
         .with_state(state.clone());
 
-    for _ in 0_i32..2_i32 {
+    for attempt in 0_i32..2_i32 {
         let response = router
             .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/report")
+                    .header(header::HOST, "localhost")
                     .header(
                         header::CONTENT_TYPE,
                         "application/x-www-form-urlencoded",
@@ -3107,7 +3113,10 @@ async fn duplicate_report_redirects_back_without_500() -> anyhow::Result<()> {
             .context("location header")?;
         ensure_eq!(
             location,
-            format!("/test/thread/{thread_id}?reported=1#p{post_id}")
+            format!(
+                "/test/thread/{thread_id}?reported={}#p{post_id}",
+                if attempt == 0_i32 { "1" } else { "duplicate" }
+            )
         );
     }
 
@@ -3187,6 +3196,7 @@ async fn banned_actor_cannot_file_reports_and_unban_restores_reporting() -> anyh
         Request::builder()
             .method("POST")
             .uri("/report")
+            .header(header::HOST, "localhost")
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::COOKIE, "csrf_token=csrf123")
             .extension(crate::test_support::connect_info())

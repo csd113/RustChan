@@ -334,6 +334,7 @@ pub fn thread_page(
     current_theme: Option<&str>,
     collapse_greentext: bool,
     can_post: bool,
+    thread_preference: crate::db::UserThreadPreference,
     user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let mut body = String::new();
@@ -357,14 +358,14 @@ pub fn thread_page(
 <input type="hidden" name="thread_id" value="{tid}">
 <input type="hidden" name="action" value="{sticky_act}">
 <input type="hidden" name="board" value="{board}">
-<button type="submit" class="admin-toolbar-btn">{sticky_lbl}</button>
+<button type="submit" class="admin-toolbar-btn"{sticky_disabled}>{sticky_lbl}</button>
 </form>
 <form method="POST" action="/admin/thread/action" style="display:inline">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="hidden" name="thread_id" value="{tid}">
 <input type="hidden" name="action" value="{lock_act}">
 <input type="hidden" name="board" value="{board}">
-<button type="submit" class="admin-toolbar-btn">{lock_lbl}</button>
+<button type="submit" class="admin-toolbar-btn"{lock_disabled}>{lock_lbl}</button>
 </form>
 {archive_btn}
 <form method="POST" action="/admin/thread/delete" style="display:inline">
@@ -383,6 +384,12 @@ pub fn thread_page(
             csrf = escape_html(admin_form_csrf),
             tid = thread.id,
             board = escape_html(&board.short_name),
+            sticky_disabled = if thread.archived && !thread.sticky {
+                " disabled"
+            } else {
+                ""
+            },
+            lock_disabled = if thread.archived { " disabled" } else { "" },
             sticky_act = sticky_action.0,
             sticky_lbl = sticky_action.1,
             lock_act = lock_action.0,
@@ -452,6 +459,20 @@ pub fn thread_page(
             top_nav = render_thread_nav(board, thread, false)
         ),
     );
+    {
+        body.push_str(r#"<div class="thread-actions-row">"#);
+        if thread_preference.hidden {
+            body.push_str(r#"<span class="notice">Hidden from your index and catalog. This direct link remains available.</span>"#);
+        }
+        body.push_str(&super::board::render_thread_actions(
+            &board.short_name,
+            thread,
+            csrf_token,
+            thread_preference,
+            &format!("/{}/thread/{}", board.short_name, thread.id),
+        ));
+        body.push_str("</div>");
+    }
     body.push_str(thread_notice);
 
     if let Some(pd) = poll {
@@ -1843,6 +1864,7 @@ mod tests {
             None,
             false,
             true,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 
@@ -1894,6 +1916,7 @@ mod tests {
             None,
             false,
             false,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 
@@ -1932,6 +1955,7 @@ mod tests {
             None,
             false,
             true,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 
@@ -2491,6 +2515,7 @@ mod tests {
             None,
             false,
             true,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 
@@ -2536,6 +2561,7 @@ mod tests {
             None,
             false,
             true,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 
@@ -2567,6 +2593,7 @@ mod tests {
             None,
             false,
             true,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 
@@ -2591,6 +2618,7 @@ mod tests {
             None,
             false,
             true,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 
@@ -2627,6 +2655,7 @@ mod tests {
             None,
             false,
             true,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 
@@ -2702,6 +2731,7 @@ mod tests {
                 None,
                 false,
                 true,
+                crate::db::UserThreadPreference::default(),
                 crate::templates::UserPreferences::default(),
             );
             assert_eq!(html.contains(r#"data-action="open-edit-modal""#), can_edit);
@@ -2789,6 +2819,7 @@ mod tests {
             None,
             false,
             true,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 

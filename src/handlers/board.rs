@@ -35,6 +35,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use time::Duration;
 
 mod access_preferences;
+#[cfg(test)]
+mod action_tests;
 mod catalog;
 mod create_thread;
 mod media;
@@ -142,6 +144,15 @@ pub(super) const fn activity_html_cache_control(activity_markers_enabled: bool) 
         crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE
     } else {
         HTML_CACHE_CONTROL
+    }
+}
+
+/// Personal thread state must never be stored in a shared cache by IP identity.
+pub(super) const fn personal_html_cache_control(activity_markers_enabled: bool) -> &'static str {
+    if activity_markers_enabled {
+        crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE
+    } else {
+        crate::cache::CACHE_CONTROL_PRIVATE_NO_CACHE
     }
 }
 
@@ -339,6 +350,49 @@ pub(super) fn check_csrf_jar(jar: &CookieJar, form_token: Option<&str>) -> Resul
     } else {
         Err(AppError::Forbidden("CSRF token mismatch.".into()))
     }
+}
+
+/// Bind menu actions to the visitor cookie and reject cross-site signed-token replay.
+/// Cookie-disabled browsers may use a signed token only with same-origin evidence.
+pub(super) fn check_menu_action_csrf(
+    jar: &CookieJar,
+    headers: &HeaderMap,
+    peer: SecureCookieContext,
+    form_token: Option<&str>,
+) -> Result<()> {
+    check_csrf_jar(jar, form_token)?;
+    let token = form_token.unwrap_or("");
+    let cookie = jar.get("csrf_token").map(Cookie::value);
+    let raw = token
+        .rsplit_once('.')
+        .map_or(token, |(raw, _signature)| raw);
+    let cookie_bound = cookie.is_some_and(|cookie| cookie == token || cookie == raw);
+    if cookie.is_some() && !cookie_bound {
+        return Err(AppError::Forbidden("CSRF token mismatch.".into()));
+    }
+    let fetch_site = headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok());
+    if fetch_site.is_some_and(|value| value.eq_ignore_ascii_case("cross-site")) {
+        return Err(AppError::Forbidden("Cross-site action denied.".into()));
+    }
+    let null_origin_without_referer = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        == Some("null")
+        && !headers.contains_key(header::REFERER);
+    if null_origin_without_referer {
+        // The site's no-referrer policy makes native form POSTs send Origin:
+        // null in supported browsers. Fetch metadata or a bound Strict cookie
+        // distinguishes these from a cross-site signed-token replay.
+        if cookie_bound || fetch_site.is_some_and(|value| value.eq_ignore_ascii_case("same-origin"))
+        {
+            return Ok(());
+        }
+        return Err(AppError::Forbidden("Cross-site action denied.".into()));
+    }
+    crate::handlers::admin::require_same_origin_or_valid_csrf(headers, peer.peer, cookie_bound)
 }
 
 pub(super) fn admin_scoped_csrf_token(
@@ -727,6 +781,11 @@ fn safe_return_to(path: Option<&str>, fallback: &str) -> String {
     crate::utils::redirect::strict_safe_internal_path_or(path, fallback).to_owned()
 }
 
+/// Accept only a complete board identifier, never a lossily sanitized target.
+pub(super) fn valid_action_board(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 8 && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
 pub(super) fn identity_key(client_ip: &str, jar: &CookieJar) -> String {
     if client_ip.starts_with("tor:") {
         return client_ip.to_owned();
@@ -745,47 +804,6 @@ pub(super) fn identity_key(client_ip: &str, jar: &CookieJar) -> String {
 
 fn viewer_preference_key(client_ip: &str, jar: &CookieJar) -> String {
     hash_ip(&identity_key(client_ip, jar), &CONFIG.cookie_secret)
-}
-
-fn split_catalog_threads(
-    threads: Vec<crate::models::Thread>,
-    prefs: &HashMap<i64, db::UserThreadPreference>,
-) -> (
-    Vec<crate::models::Thread>,
-    Vec<crate::models::Thread>,
-    HashSet<i64>,
-) {
-    let mut visible = Vec::new();
-    let mut hidden = Vec::new();
-    let mut pinned_ids = HashSet::new();
-
-    for thread in threads {
-        if let Some(pref) = prefs.get(&thread.id) {
-            if pref.pinned {
-                let _completed_value = pinned_ids.insert(thread.id);
-            }
-            if pref.hidden {
-                hidden.push(thread);
-                continue;
-            }
-        }
-        visible.push(thread);
-    }
-
-    let sort_threads = |items: &mut Vec<crate::models::Thread>| {
-        items.sort_by(|a, b| {
-            let a_pinned = pinned_ids.contains(&a.id);
-            let b_pinned = pinned_ids.contains(&b.id);
-            b_pinned
-                .cmp(&a_pinned)
-                .then_with(|| b.sticky.cmp(&a.sticky))
-                .then_with(|| b.bumped_at.cmp(&a.bumped_at))
-        });
-    };
-
-    sort_threads(&mut visible);
-    sort_threads(&mut hidden);
-    (visible, hidden, pinned_ids)
 }
 
 // GET / — board list

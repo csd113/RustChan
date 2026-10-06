@@ -397,6 +397,34 @@ fn render_catalog_thumb(thread: &Thread) -> String {
     format!(r#"<div class="catalog-card-media">{media}{badges}</div>"#)
 }
 
+/// Render personal actions using the same authoritative labels on every active view.
+pub(super) fn render_thread_actions(
+    board_short: &str,
+    thread: &Thread,
+    csrf_token: &str,
+    preference: crate::db::UserThreadPreference,
+    return_to: &str,
+) -> String {
+    render_catalog_actions(
+        board_short,
+        thread,
+        csrf_token,
+        if preference.pinned { "unpin" } else { "pin" },
+        if preference.pinned {
+            "Unpin thread"
+        } else {
+            "Pin thread"
+        },
+        if preference.hidden { "unhide" } else { "hide" },
+        if preference.hidden {
+            "Unhide thread"
+        } else {
+            "Hide thread"
+        },
+        return_to,
+    )
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the action menu accepts independent labels and form values for two actions"
@@ -417,16 +445,16 @@ fn render_catalog_actions(
         super::report_fallback_form(board_short, report_post_id, thread.id, csrf_token, "submit");
     format!(
         r#"<div class="catalog-card-actions">
-  <button type="button" class="catalog-thread-menu-toggle" data-action="toggle-thread-menu" aria-haspopup="true" aria-expanded="false" aria-controls="catalog-thread-menu-{thread_id}" aria-label="Thread actions"></button>
-  <div class="catalog-thread-menu" id="catalog-thread-menu-{thread_id}" hidden inert aria-hidden="true">
-    <button type="button" class="catalog-thread-menu-item" data-action="open-report" data-pid="{post_id}" data-tid="{thread_id}" data-board="{board}" data-csrf="{csrf}" data-report-label="Reporting thread No.{thread_id}">Report thread</button>
+  <button type="button" class="catalog-thread-menu-toggle" data-action="toggle-thread-menu" aria-haspopup="menu" aria-expanded="false" aria-controls="catalog-thread-menu-{thread_id}" aria-label="Thread actions"></button>
+  <div class="catalog-thread-menu" id="catalog-thread-menu-{thread_id}" role="menu" aria-label="Thread actions" hidden inert aria-hidden="true">
+    <button type="button" class="catalog-thread-menu-item" role="menuitem" tabindex="-1" data-action="open-report" data-pid="{post_id}" data-tid="{thread_id}" data-board="{board}" data-csrf="{csrf}" data-report-label="Reporting thread No.{thread_id}">Report thread</button>
     <form method="POST" action="/{board}/thread-preference">
       <input type="hidden" name="_csrf" value="{csrf}">
       <input type="hidden" name="thread_id" value="{thread_id}">
       <input type="hidden" name="board" value="{board}">
       <input type="hidden" name="action" value="{pin_action}">
       <input type="hidden" name="return_to" value="{return_to}">
-      <button type="submit" class="catalog-thread-menu-item">{pin_label}</button>
+      <button type="submit" class="catalog-thread-menu-item" role="menuitem" tabindex="-1"{pin_disabled}>{pin_label}</button>
     </form>
     <form method="POST" action="/{board}/thread-preference">
       <input type="hidden" name="_csrf" value="{csrf}">
@@ -434,7 +462,7 @@ fn render_catalog_actions(
       <input type="hidden" name="board" value="{board}">
       <input type="hidden" name="action" value="{hide_action}">
       <input type="hidden" name="return_to" value="{return_to}">
-      <button type="submit" class="catalog-thread-menu-item">{hide_label}</button>
+      <button type="submit" class="catalog-thread-menu-item" role="menuitem" tabindex="-1"{hide_disabled}>{hide_label}</button>
     </form>
   </div>
   <details class="catalog-thread-fallback-actions" aria-label="Thread actions" open>
@@ -447,7 +475,7 @@ fn render_catalog_actions(
         <input type="hidden" name="board" value="{board}">
         <input type="hidden" name="action" value="{pin_action}">
         <input type="hidden" name="return_to" value="{return_to}">
-        <button type="submit" class="catalog-thread-fallback-submit">{pin_label}</button>
+        <button type="submit" class="catalog-thread-fallback-submit"{pin_disabled}>{pin_label}</button>
       </form>
       <form class="catalog-thread-fallback-form" method="POST" action="/{board}/thread-preference">
         <input type="hidden" name="_csrf" value="{csrf}">
@@ -455,7 +483,7 @@ fn render_catalog_actions(
         <input type="hidden" name="board" value="{board}">
         <input type="hidden" name="action" value="{hide_action}">
         <input type="hidden" name="return_to" value="{return_to}">
-        <button type="submit" class="catalog-thread-fallback-submit">{hide_label}</button>
+        <button type="submit" class="catalog-thread-fallback-submit"{hide_disabled}>{hide_label}</button>
       </form>
     </div>
   </details>
@@ -464,6 +492,16 @@ fn render_catalog_actions(
         thread_id = thread.id,
         board = escape_html(board_short),
         csrf = escape_html(csrf_token),
+        pin_disabled = if thread.archived && pin_action == "pin" {
+            " disabled"
+        } else {
+            ""
+        },
+        hide_disabled = if thread.archived && hide_action == "hide" {
+            " disabled"
+        } else {
+            ""
+        },
         pin_action = escape_html(pin_action),
         pin_label = escape_html(pin_label),
         hide_action = escape_html(hide_action),
@@ -536,7 +574,7 @@ fn render_catalog_card(
     };
 
     format!(
-        r#"<div class="catalog-item{sticky}{pinned_class}" data-replies="{replies}" data-created="{created}" data-bumped="{bumped}" data-last-reply="{last_reply}" data-sticky="{is_sticky}" data-pinned="{is_pinned}">
+        r#"<div class="catalog-item{sticky}{pinned_class}" data-thread-id="{thread_id}" data-replies="{replies}" data-created="{created}" data-bumped="{bumped}" data-last-reply="{last_reply}" data-sticky="{is_sticky}" data-pinned="{is_pinned}">
 <a class="catalog-card-link" href="/{board}/thread/{thread_id}">
   {thumb}
 </a>
@@ -865,7 +903,7 @@ pub fn index_page<S: std::hash::BuildHasher>(
     reason = "the board index consumes distinct paging, moderation, activity, and visitor contexts"
 )]
 /// Renders a board's paginated thread index.
-pub fn board_page<S: std::hash::BuildHasher>(
+pub fn board_page<S: std::hash::BuildHasher, P: std::hash::BuildHasher>(
     board: &Board,
     summaries: &[ThreadSummary],
     pagination: &Pagination,
@@ -881,6 +919,7 @@ pub fn board_page<S: std::hash::BuildHasher>(
     current_theme: Option<&str>,
     collapse_greentext: bool,
     can_post: bool,
+    thread_preferences: &HashMap<i64, crate::db::UserThreadPreference, P>,
     user_preferences: crate::templates::UserPreferences,
 ) -> String {
     let mut body = String::new();
@@ -919,6 +958,13 @@ pub fn board_page<S: std::hash::BuildHasher>(
         let name = escape_html(&board.name);
         let desc = escape_html(&board.description);
         let access_badge = board_access_badge(board);
+        let hidden_count = thread_preferences
+            .values()
+            .filter(|pref| pref.hidden)
+            .count();
+        let nav_hidden = format!(
+            r#"<a class="board-nav-link" href="/{short}/hidden">[Hidden ({hidden_count})]</a>"#
+        );
         let nav_archive =
             format!(r#"<a class="board-nav-link" href="/{short}/archive">[Archive]</a>"#);
         crate::templates::append_html(
@@ -926,7 +972,7 @@ pub fn board_page<S: std::hash::BuildHasher>(
             format_args!(
                 r#"<div class="board-header board-index-header" data-activity-page="board-index"><h1>/{short}/  — {name}{access_badge}</h1><p class="board-desc">{desc}</p></div>
 {board_banner_html}
-<div class="board-nav"><a class="board-nav-link active" href="/{short}">[Index]</a><a class="board-nav-link" href="/{short}/catalog">[Catalog]</a>{nav_archive}</div>"#
+<div class="board-nav"><a class="board-nav-link active" href="/{short}">[Index]</a><a class="board-nav-link" href="/{short}/catalog">[Catalog]</a>{nav_archive}{nav_hidden}</div>"#
             ),
         );
     }
@@ -970,7 +1016,24 @@ pub fn board_page<S: std::hash::BuildHasher>(
         ));
     }
 
+    let return_to = if pagination.page > 1 {
+        format!("/{}?page={}", board.short_name, pagination.page)
+    } else {
+        format!("/{}", board.short_name)
+    };
     for summary in summaries {
+        body.push_str(r#"<div class="thread-list-entry">"#);
+        let preference = thread_preferences
+            .get(&summary.thread.id)
+            .copied()
+            .unwrap_or_default();
+        body.push_str(&render_thread_actions(
+            &board.short_name,
+            &summary.thread,
+            csrf_token,
+            preference,
+            &return_to,
+        ));
         body.push_str(&render_thread_summary(
             summary,
             &board.short_name,
@@ -986,6 +1049,7 @@ pub fn board_page<S: std::hash::BuildHasher>(
             },
             user_preferences,
         ));
+        body.push_str("</div>");
     }
 
     // escape_html on board.short_name before embedding in the URL.
@@ -994,6 +1058,7 @@ pub fn board_page<S: std::hash::BuildHasher>(
         &format!("/{}", escape_html(&board.short_name)),
     ));
 
+    body.push_str(report_modal_script());
     body.push_str(&compress_modal_script(
         board.max_image_size_bytes(),
         board.max_video_size_bytes(),
@@ -1254,7 +1319,7 @@ fn render_thread_summary(
         ));
     }
 
-    html.push_str("<hr class=\"thread-sep\">");
+    html.push_str("</div><hr class=\"thread-sep\">");
     html
 }
 
@@ -2231,6 +2296,11 @@ mod tests {
 
         assert!(html.contains("media-expanded-video"));
         assert!(html.contains("controls preload=\"none\" playsinline webkit-playsinline muted"));
+        assert_eq!(
+            html.matches("<div").count(),
+            html.matches("</div>").count(),
+            "a summary must close its container so later thread actions remain siblings"
+        );
     }
 
     #[test]
@@ -2300,6 +2370,7 @@ mod tests {
             None,
             false,
             true,
+            &HashMap::new(),
             crate::templates::UserPreferences::default(),
         );
 

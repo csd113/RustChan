@@ -193,6 +193,7 @@ pub(in crate::server) async fn create_thread(
             let board_short_render = board_short_err.clone();
             let pool = state.db.clone();
             let current_theme = current_theme.clone();
+            let viewer_key = super::viewer_preference_key(&client_ip, &jar);
             let html = tokio::task::spawn_blocking(move || -> Result<String> {
                 let conn = pool.get()?;
                 // Error re-render only: resolve the board for this request.
@@ -208,6 +209,7 @@ pub(in crate::server) async fn create_thread(
                     index_threads_per_page(),
                     index_reply_previews(),
                     is_admin,
+                    &viewer_key,
                 )?;
                 let banner_selection = crate::banner::resolve_board_banner(
                     &conn,

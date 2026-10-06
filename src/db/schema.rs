@@ -304,6 +304,8 @@ const INDEX_SCHEMA_SQL: &str = "
         ON background_jobs(status, priority DESC, created_at ASC);
     CREATE INDEX IF NOT EXISTS idx_reports_status
         ON reports(status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_reports_reporter_created
+        ON reports(reporter_hash, created_at);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_open_unique
         ON reports(post_id, reporter_hash)
         WHERE status = 'open';

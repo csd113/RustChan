@@ -227,6 +227,7 @@ pub(in crate::server) async fn board_index(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     Query(params): Query<HashMap<String, String>>,
+    crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
     req_headers: HeaderMap,
     peer: SecureCookieContext,
@@ -238,6 +239,7 @@ pub(in crate::server) async fn board_index(
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
 
+    let viewer_key = super::viewer_preference_key(&client_ip, &jar);
     let page: i64 = params
         .get("page")
         .and_then(|p| p.parse().ok())
@@ -290,6 +292,7 @@ pub(in crate::server) async fn board_index(
                 index_threads_per_page(),
                 index_reply_previews(),
                 is_admin,
+                &viewer_key,
             )?;
             let banner_selection = crate::banner::resolve_board_banner(
                 &conn,
@@ -422,7 +425,7 @@ pub(in crate::server) async fn board_index(
         ));
         drop(resp.headers_mut().insert(
             header::CACHE_CONTROL,
-            HeaderValue::from_static(activity_html_cache_control(activity_markers_enabled)),
+            HeaderValue::from_static(super::personal_html_cache_control(activity_markers_enabled)),
         ));
         crate::cache::insert_vary_cookie(resp.headers_mut());
         return Ok((jar, resp).into_response());
@@ -457,7 +460,7 @@ pub(in crate::server) async fn board_index(
     }
     drop(resp.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static(activity_html_cache_control(activity_markers_enabled)),
+        HeaderValue::from_static(super::personal_html_cache_control(activity_markers_enabled)),
     ));
     crate::cache::insert_vary_cookie(resp.headers_mut());
     Ok((jar, resp).into_response())

@@ -2480,6 +2480,10 @@ html.no-js .post-controls .report-fallback-form {
   z-index: 5;
 }
 
+.catalog-item.catalog-menu-open .catalog-card-actions {
+  opacity: 1;
+}
+
 .catalog-item.sticky { border-color: var(--amber); }
 .catalog-item.is-pinned {
   border-color: var(--amber);
@@ -2643,26 +2647,45 @@ html.no-js .post-controls .report-fallback-form {
 }
 
 .catalog-thread-menu {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 6px);
-  bottom: auto;
+  position: fixed;
   min-width: 150px;
   max-width: min(18rem, calc(100vw - 24px));
-  background: var(--bg-panel);
+  background: linear-gradient(var(--bg-panel), var(--bg-panel)), var(--bg);
   border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
   padding: 4px;
   text-align: left;
   overflow-x: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
-  z-index: 6;
+  z-index: 1000;
 }
 
-.catalog-thread-menu[data-direction="up"] {
-  top: auto;
-  bottom: calc(100% + 6px);
+/* Index/thread controls share the catalog menu without changing post/media layout. */
+.thread-list-entry { position: relative; }
+.thread-list-entry > .catalog-card-actions { top: 8px; right: 8px; transform: none; opacity: 1; }
+.thread-list-entry > .catalog-card-actions .catalog-thread-menu-toggle,
+.thread-actions-row .catalog-thread-menu-toggle { opacity: 1; transform: none; }
+.thread-list-entry .op > .post-meta { padding-right: 40px; }
+.thread-actions-row { position: relative; min-height: 38px; margin: 6px 0; padding-right: 44px; }
+.thread-actions-row > .catalog-card-actions { opacity: 1; transform: none; top: 0; }
+html.no-js .thread-actions-row,
+html.no-js .thread-list-entry .op > .post-meta { padding-right: 0; }
+.catalog-thread-menu-toggle[aria-expanded="true"] {
+  opacity: 1;
+  color: var(--green-bright);
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--green) 14%, transparent);
 }
+.catalog-thread-menu-toggle:focus-visible,
+.catalog-thread-menu-item:focus-visible {
+  outline: 2px solid var(--green-bright);
+  outline-offset: -2px;
+}
+.catalog-thread-menu-item:not(:disabled):active { background: color-mix(in srgb, var(--green) 24%, transparent); }
+
+.catalog-thread-menu-item:disabled { color: var(--text-dim); cursor: default; }
 
 .catalog-thread-menu form {
   margin: 0;
@@ -2689,8 +2712,10 @@ html.no-js .post-controls .report-fallback-form {
   text-align: left;
 }
 
-.catalog-thread-menu-item:hover,
-.catalog-thread-menu-item:focus-visible {
+.catalog-thread-menu .catalog-thread-menu-item:not(:disabled) { color: var(--text); }
+
+.catalog-thread-menu .catalog-thread-menu-item:not(:disabled):hover,
+.catalog-thread-menu .catalog-thread-menu-item:focus-visible {
   background: color-mix(in srgb, var(--green) 14%, transparent);
   color: var(--green-bright);
 }

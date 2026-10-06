@@ -156,19 +156,44 @@ pub fn get_threads_for_board(
 
 /// Paginate threads before computing reply aggregates; exclude missing OPs first.
 pub(super) fn thread_page_sql(archived: bool) -> String {
+    thread_listing_sql(archived, false)
+}
+
+/// Build the shared page query, applying personal visibility before pagination.
+fn thread_listing_sql(archived: bool, personalized: bool) -> String {
     // Preserve the legacy aggregate's tie order for each listing, including
     // deterministic boundaries when many replies bump in the same second.
-    let order = if archived {
+    let base_order = if archived {
         "t.bumped_at DESC, t.id ASC"
     } else {
         "t.sticky DESC, t.bumped_at DESC, t.id DESC"
     };
+    let order = if personalized && !archived {
+        format!("t.viewer_pinned DESC, {base_order}")
+    } else {
+        base_order.to_owned()
+    };
+    let page_order = if personalized && !archived {
+        format!("COALESCE(pref.pinned, 0) DESC, {base_order}")
+    } else {
+        base_order.to_owned()
+    };
+    let (columns, join, visibility) = if personalized {
+        (
+            ", COALESCE(pref.pinned, 0) AS viewer_pinned",
+            "LEFT JOIN user_thread_preferences pref ON pref.thread_id = t.id AND pref.user_hash = ?5",
+            "AND COALESCE(pref.hidden, 0) = ?6",
+        )
+    } else {
+        ("", "", "")
+    };
     format!(
         "WITH page AS MATERIALIZED (
-             SELECT t.* FROM threads t
+             SELECT t.*{columns} FROM threads t {join}
              WHERE t.board_id = ?1 AND t.archived = ?4
+               {visibility}
                AND EXISTS (SELECT 1 FROM posts op WHERE op.thread_id=t.id AND op.is_op=1)
-             ORDER BY {order} LIMIT ?2 OFFSET ?3
+             ORDER BY {page_order} LIMIT ?2 OFFSET ?3
          )
          SELECT t.id, t.board_id, t.subject, t.created_at, t.bumped_at,
                 t.locked, t.sticky, t.reply_count,
@@ -179,6 +204,52 @@ pub(super) fn thread_page_sql(archived: bool) -> String {
          FROM page t JOIN posts op ON op.thread_id=t.id AND op.is_op=1
          ORDER BY {order}"
     )
+}
+
+/// List a visitor's visible or hidden active threads in canonical personal order.
+///
+/// Personal pins precede sticky threads, then bump time and descending thread ID.
+/// Filtering and sorting occur before LIMIT/OFFSET, so pages never repeat pins.
+///
+/// # Errors
+/// Returns an error if the indexed listing cannot be read.
+pub fn get_threads_for_viewer(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+    user_hash: &str,
+    hidden: bool,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Thread>> {
+    let sql = thread_listing_sql(false, true);
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let threads = stmt
+        .query_map(
+            params![board_id, limit, offset, 0_i32, user_hash, i32::from(hidden)],
+            map_thread,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(threads)
+}
+
+/// Count active, renderable threads with the same visibility filter as listing.
+///
+/// # Errors
+/// Returns an error if the count cannot be read.
+pub fn count_threads_for_viewer(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+    user_hash: &str,
+    hidden: bool,
+) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM threads t
+         LEFT JOIN user_thread_preferences pref ON pref.thread_id = t.id AND pref.user_hash = ?2
+         WHERE t.board_id = ?1 AND t.archived = 0 AND COALESCE(pref.hidden, 0) = ?3
+           AND EXISTS (SELECT 1 FROM posts op WHERE op.thread_id = t.id AND op.is_op = 1)",
+        params![board_id, user_hash, i32::from(hidden)],
+        |row| row.get(0),
+    )?)
 }
 
 /// Execute an indexed page and its bounded per-thread aggregate probes.
