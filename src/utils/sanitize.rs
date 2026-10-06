@@ -30,7 +30,7 @@ use formatting::{apply_dice, apply_emoji};
     reason = "the reply-reference regex is a source literal covered by sanitizer tests"
 )]
 static RE_REPLY: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"&gt;&gt;(\d+)").expect("RE_REPLY is valid"));
+    LazyLock::new(|| Regex::new(r"&gt;&gt;([0-9]+)").expect("RE_REPLY is valid"));
 
 /// Matches escaped cross-board links and optional thread identifiers.
 #[expect(
@@ -38,7 +38,7 @@ static RE_REPLY: LazyLock<Regex> =
     reason = "the cross-board-link regex is a source literal covered by sanitizer tests"
 )]
 static RE_CROSSLINK: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/(\d+)?").expect("RE_CROSSLINK is valid")
+    Regex::new(r"&gt;&gt;&gt;/([a-z0-9]{1,8})/([0-9]+)?").expect("RE_CROSSLINK is valid")
 });
 
 /// Matches HTTP(S) URLs after HTML escaping.
@@ -240,6 +240,15 @@ fn render_inline(text: &str) -> String {
     // Both handled in one pass by RE_CROSSLINK so there is no second-pass corruption.
     result = RE_CROSSLINK
         .replace_all(&result, |caps: &regex::Captures<'_>| {
+            let Some(whole) = caps.get(0) else {
+                return String::new();
+            };
+            let invalid_prefix = result.get(..whole.start()).is_some_and(|prefix| prefix.ends_with("&gt;"));
+            let invalid_suffix = result.get(whole.end()..).and_then(|suffix| suffix.chars().next())
+                .is_some_and(|next| next.is_alphanumeric() || next == '_' || (caps.get(2).is_none() && next == '-'));
+            if invalid_prefix || invalid_suffix {
+                return whole.as_str().to_owned();
+            }
             let Some(board) = caps.get(1).map(|value| value.as_str()) else {
                 return caps
                     .get(0)
@@ -247,8 +256,11 @@ fn render_inline(text: &str) -> String {
             };
             caps.get(2).map_or_else(
                 || format!(r#"<a href="/{board}" class="quotelink crosslink">&gt;&gt;&gt;/{board}/</a>"#),
-                |pid| {
-                    let pid = pid.as_str();
+                |post_match| {
+                    let raw_pid = post_match.as_str();
+                    let Some(pid) = raw_pid.parse::<i64>().ok().filter(|id| *id > 0) else {
+                        return whole.as_str().to_owned();
+                    };
                     format!(
                         r#"<a href="/{board}/post/{pid}" class="quotelink crosslink" data-crossboard="{board}" data-pid="{pid}">&gt;&gt;&gt;/{board}/{pid}</a>"#,
                     )
@@ -265,7 +277,20 @@ fn render_inline(text: &str) -> String {
                     .get(0)
                     .map_or_else(String::new, |value| value.as_str().to_owned());
             };
-            format!(r##"<a href="#p{n}" class="quotelink" data-pid="{n}">&gt;&gt;{n}</a>"##)
+            let Some(whole) = caps.get(0) else {
+                return String::new();
+            };
+            let valid_boundary = !result
+                .get(..whole.start())
+                .is_some_and(|prefix| prefix.ends_with("&gt;"))
+                && !result
+                    .get(whole.end()..)
+                    .and_then(|suffix| suffix.chars().next())
+                    .is_some_and(|next| next.is_alphanumeric() || next == '_');
+            let Some(pid) = n.parse::<i64>().ok().filter(|id| *id > 0 && valid_boundary) else {
+                return whole.as_str().to_owned();
+            };
+            format!(r##"<a href="#p{pid}" class="quotelink" data-pid="{pid}">&gt;&gt;{n}</a>"##)
         })
         .into_owned();
 
@@ -817,10 +842,10 @@ mod tests {
         // Extremely large post IDs should not cause integer overflow
         let escaped = escape_html(">>99999999999999999999");
         let html = render_post_body(&escaped, false);
-        // Must render as a link regardless of numeric size
+        // Invalid IDs remain readable text rather than broken numeric links
         assert!(
-            html.contains("quotelink"),
-            "large post ID should still produce a link"
+            !html.contains("quotelink"),
+            "an overflowing post ID must remain plain text"
         );
     }
 
@@ -881,5 +906,44 @@ mod tests {
         assert!(!stripped.contains("<details"));
         assert!(stripped.contains("class=\"quote\""));
         assert!(stripped.contains("line1"));
+    }
+    #[test]
+    fn malformed_quote_identifiers_remain_safe_plain_text() {
+        for raw in [
+            ">>0",
+            ">>-1",
+            ">>１２３",
+            ">>123abc",
+            ">>>123",
+            ">>9223372036854775808",
+            ">>>/test/99999999999999999999999",
+            ">>>/toolongboard/7",
+            ">>>/test/123abc",
+            ">>>/test/-1",
+            ">>>/test/１２３",
+            ">>>>/test/123",
+        ] {
+            let html = render_post_body(&escape_html(raw), false);
+            assert!(
+                !html.contains("quotelink"),
+                "invalid reference was linkified: {raw}"
+            );
+        }
+        let valid = render_post_body(
+            &escape_html(">>00012 >>>/test/00012 >>9223372036854775807 <script>alert(1)</script>"),
+            false,
+        );
+        assert!(
+            valid.contains("data-pid=\"12\""),
+            "leading zeros must resolve to a canonical post ID"
+        );
+        assert!(
+            valid.contains("data-pid=\"9223372036854775807\""),
+            "largest supported post ID must remain representable"
+        );
+        assert!(
+            !valid.contains("<script>"),
+            "quote parsing must preserve escaping"
+        );
     }
 }

@@ -320,7 +320,7 @@ pub fn get_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<
 /// Result of atomically deciding whether a public post submission is new.
 pub(crate) enum PostCreationOutcome<T> {
     /// The transaction created and committed a new post bundle.
-    Created(T),
+    Created(T, i64),
     /// The token already names a canonical committed post.
     Replayed(super::PostSubmissionRecord),
 }
@@ -336,6 +336,8 @@ pub(crate) struct PostFilesystemCommit<'a, F = fn(&rusqlite::Connection) -> Resu
     schedule_thread_prune: bool,
     /// Posting policy checked after token replay and while holding the write lock.
     validate: F,
+    /// Board name for media work that must persist alongside the new post.
+    media_job_board: Option<&'a str>,
 }
 
 impl<'a> PostFilesystemCommit<'a> {
@@ -363,13 +365,111 @@ impl<'a, F> PostFilesystemCommit<'a, F> {
         schedule_thread_prune: bool,
         validate: F,
     ) -> Self {
+        Self::new_with_media_validation(
+            pending_fs_op,
+            deduplicated_paths,
+            schedule_thread_prune,
+            None,
+            validate,
+        )
+    }
+
+    /// Include required media work in the atomic creation bundle.
+    pub(crate) const fn new_with_media_validation(
+        pending_fs_op: Option<&'a crate::pending_fs::PendingFsOpInsert>,
+        deduplicated_paths: &'a [&'a str],
+        schedule_thread_prune: bool,
+        media_job_board: Option<&'a str>,
+        validate: F,
+    ) -> Self {
         Self {
             pending_fs_op,
             deduplicated_paths,
             schedule_thread_prune,
             validate,
+            media_job_board,
         }
     }
+}
+
+/// Persist media intent before commit; a full queue leaves an explicit failure.
+fn persist_new_post_metadata(
+    conn: &rusqlite::Connection,
+    post: &super::NewPost,
+    post_id: i64,
+    media_board: Option<&str>,
+) -> Result<i64> {
+    if let Some(board_short) = media_board {
+        let source = post
+            .file_path
+            .as_ref()
+            .context("pending media requires a source")?;
+        let (job_type, job_tag) = match post.media_type.as_deref() {
+            Some("video") => ("video_transcode", "VideoTranscode"),
+            Some("audio") => ("audio_waveform", "AudioWaveform"),
+            _ => anyhow::bail!("pending processing requires audio or video"),
+        };
+        let capacity = crate::config::CONFIG.job_queue_capacity;
+        let full = capacity > 0 && u64::try_from(super::pending_job_count(conn)?)? >= capacity;
+        if full {
+            super::set_post_media_processing_state(
+                conn,
+                post_id,
+                Some(super::MEDIA_PROCESSING_FAILED),
+                Some("Background media queue is full; deferred processing was skipped."),
+            )?;
+        } else {
+            let payload = serde_json::json!({
+                "t": job_tag, "d": { "post_id": post_id, "file_path": source, "board_short": board_short }
+            }).to_string();
+            super::enqueue_job(conn, job_type, &payload).map(|_job_id| ())?;
+            super::set_post_media_processing_state(
+                conn,
+                post_id,
+                Some(super::MEDIA_PROCESSING_PENDING),
+                None,
+            )?;
+        }
+    }
+    Ok(conn.query_row(
+        "SELECT created_at FROM posts WHERE id = ?1",
+        [post_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// Reject reuse of a receipt for another operation or reply target.
+pub(crate) fn validate_submission_target(
+    record: super::PostSubmissionRecord,
+    thread_id: Option<i64>,
+) -> Result<()> {
+    if record.is_thread != thread_id.is_none()
+        || thread_id.is_some_and(|target| target != record.thread_id)
+    {
+        return Err(crate::error::AppError::Conflict(
+            "This submission token belongs to a different posting form. Reload the page.".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// A token accepted for another actor/board must never create new content.
+fn reject_conflicting_submission(conn: &rusqlite::Connection, token: &str) -> Result<()> {
+    if !token.is_empty()
+        && conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM post_submissions WHERE submission_token=?1)
+            OR EXISTS(SELECT 1 FROM post_submission_tombstones WHERE submission_token=?1)",
+            [token],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
+        return Err(crate::error::AppError::Conflict(
+            "This submission token has already been used. Reload the posting form.".into(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Create a thread, its OP post, and an optional poll atomically.
@@ -394,7 +494,7 @@ pub fn create_thread_with_optional_poll(
         poll,
         PostFilesystemCommit::new(pending_fs_op, &[], false),
     )? {
-        PostCreationOutcome::Created(ids) => Ok(ids),
+        PostCreationOutcome::Created(ids, _) => Ok(ids),
         PostCreationOutcome::Replayed(existing) => Ok((existing.thread_id, existing.post_id, None)),
     }
 }
@@ -428,10 +528,12 @@ pub(crate) fn create_thread_submission(
             if let Some(existing) =
                 super::posts::get_post_submission(conn, submission_token, ip_hash, board_id)?
             {
+                validate_submission_target(existing, None)?;
                 return Ok(PostCreationOutcome::Replayed(existing));
             }
         }
 
+        reject_conflicting_submission(conn, submission_token)?;
         (filesystem.validate)(conn)?;
         validate_deduplicated_paths(conn, filesystem.deduplicated_paths)?;
 
@@ -479,7 +581,16 @@ pub(crate) fn create_thread_submission(
                 .map(|_operation_summary| ())?;
         }
 
-        Ok(PostCreationOutcome::Created((thread_id, post_id, poll_id)))
+        let created_at = persist_new_post_metadata(
+            conn,
+            &post_with_thread,
+            post_id,
+            filesystem.media_job_board,
+        )?;
+        Ok(PostCreationOutcome::Created(
+            (thread_id, post_id, poll_id),
+            created_at,
+        ))
     })();
 
     match result {
@@ -516,7 +627,7 @@ pub fn create_reply_with_thread_update(
         should_bump,
         PostFilesystemCommit::new(pending_fs_op, &[], false),
     )? {
-        PostCreationOutcome::Created(post_id) => Ok(post_id),
+        PostCreationOutcome::Created(post_id, _) => Ok(post_id),
         PostCreationOutcome::Replayed(existing) => Ok(existing.post_id),
     }
 }
@@ -541,39 +652,22 @@ pub(crate) fn create_reply_submission(
             if let Some(existing) =
                 super::posts::get_post_submission(conn, submission_token, ip_hash, post.board_id)?
             {
+                validate_submission_target(existing, Some(post.thread_id))?;
                 return Ok(PostCreationOutcome::Replayed(existing));
             }
         }
 
+        if post.is_op {
+            return Err(crate::error::AppError::BadRequest(
+                "A reply cannot be a thread starter.".into(),
+            )
+            .into());
+        }
+        reject_conflicting_submission(conn, submission_token)?;
         (filesystem.validate)(conn)?;
         validate_deduplicated_paths(conn, filesystem.deduplicated_paths)?;
 
-        let flags = conn
-            .query_row(
-                "SELECT locked, archived
-                 FROM threads
-                 WHERE id = ?1 AND board_id = ?2",
-                params![post.thread_id, post.board_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i32>(0)? != 0_i32,
-                        row.get::<_, i32>(1)? != 0_i32,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((locked, archived)) = flags else {
-            anyhow::bail!(
-                "Thread id {} not found while creating reply",
-                post.thread_id
-            );
-        };
-        if archived {
-            return Err(anyhow::Error::new(ThreadClosed::Archived));
-        }
-        if locked {
-            return Err(anyhow::Error::new(ThreadClosed::Locked));
-        }
+        ensure_replyable(conn, post.board_id, post.thread_id)?;
 
         let post_id = super::posts::create_post_inner(conn, post)?;
         let updated = if should_bump {
@@ -614,7 +708,9 @@ pub(crate) fn create_reply_submission(
                 false,
             )?;
         }
-        Ok(PostCreationOutcome::Created(post_id))
+        let created_at =
+            persist_new_post_metadata(conn, post, post_id, filesystem.media_job_board)?;
+        Ok(PostCreationOutcome::Created(post_id, created_at))
     })();
 
     match result {
@@ -630,6 +726,38 @@ pub(crate) fn create_reply_submission(
             Err(error)
         }
     }
+}
+
+/// Authoritative current parent-state check, performed under the posting write lock.
+fn ensure_replyable(conn: &rusqlite::Connection, board_id: i64, thread_id: i64) -> Result<()> {
+    let flags = conn
+        .query_row(
+            "SELECT locked, archived
+                 FROM threads
+                 WHERE id = ?1 AND board_id = ?2",
+            params![thread_id, board_id],
+            |row| {
+                Ok((
+                    row.get::<_, i32>(0)? != 0_i32,
+                    row.get::<_, i32>(1)? != 0_i32,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((locked, archived)) = flags else {
+        return Err(crate::error::AppError::NotFound(
+            "Thread not found. It may have been deleted or pruned.".into(),
+        )
+        .into());
+    };
+    if archived {
+        return Err(anyhow::Error::new(ThreadClosed::Archived));
+    }
+    if locked {
+        return Err(anyhow::Error::new(ThreadClosed::Locked));
+    }
+
+    Ok(())
 }
 
 /// Revalidate a prior dedup cache hit after the post transaction owns the write lock.
@@ -1665,3 +1793,7 @@ mod tests {
 
 #[cfg(test)]
 mod archive_tests;
+
+#[cfg(test)]
+/// Full posting state-machine and WAL concurrency regressions.
+mod lifecycle_tests;

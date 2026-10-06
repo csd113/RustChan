@@ -782,6 +782,7 @@ pub(in crate::server) async fn edit_post_post(
     let board_short_for_edit = board_short.clone();
     let outcome = tokio::task::spawn_blocking({
         let pool = state.db.clone();
+        let admin_session_id = admin_session_id.clone();
         let raw_body = raw_body.clone();
         let deletion_token = owned_grant.deletion_token.clone();
         move || -> Result<String> {
@@ -825,14 +826,24 @@ pub(in crate::server) async fn edit_post_post(
             let body_html =
                 crate::utils::sanitize::render_post_body(&escaped, board.collapse_greentext);
 
-            let success = db::edit_post(
-                &conn,
-                post_id,
-                &deletion_token,
-                &body_text,
-                &body_html,
+            let success = db::posts::edit_post_with_validation(
+                &conn, post_id, &deletion_token, &body_text, &body_html,
                 crate::handlers::board::self_action_window_secs(),
-            )?;
+                |validation_conn| {
+                    let current = crate::handlers::board::load_board_access_context(
+                        validation_conn, &board_short_for_edit, admin_session_id.as_deref(), access_cookie.as_deref(),
+                    )?;
+                    if !current.can_post || !current.board.allow_editing || current.board.id != post.board_id {
+                        return Err(AppError::Forbidden("Board editing permission changed. Reload the page.".into()));
+                    }
+                    let current_filters: Vec<_> = db::get_word_filters(validation_conn)?.into_iter()
+                        .map(|filter| (filter.pattern, filter.replacement)).collect();
+                    if current_filters != filters || current.board.collapse_greentext != board.collapse_greentext {
+                        return Err(AppError::Conflict("Board posting settings changed. Reload the page.".into()));
+                    }
+                    Ok(())
+                },
+            ).map_err(posting::post_creation_error)?;
 
             if !success {
                 return Err(AppError::Forbidden(
@@ -1059,11 +1070,28 @@ pub(in crate::server) async fn delete_own_post(
             }
 
             let redirect_thread_id = post.thread_id;
-            let (result, deleted) = db::posts::self_delete_post(
+            let (result, deleted) = db::posts::self_delete_post_with_validation(
                 &conn,
                 post_id,
                 &deletion_token,
                 crate::handlers::board::self_action_window_secs(),
+                |validation_conn| {
+                    let current = crate::handlers::board::load_board_access_context(
+                        validation_conn,
+                        &board_short_for_delete,
+                        admin_session_id.as_deref(),
+                        access_cookie.as_deref(),
+                    )?;
+                    if !current.can_post
+                        || !current.board.allow_self_delete
+                        || current.board.id != post.board_id
+                    {
+                        return Err(AppError::Forbidden(
+                            "Board deletion permission changed. Reload the page.".into(),
+                        ));
+                    }
+                    Ok(())
+                },
             )?;
 
             if let Some(deleted) = deleted.as_ref() {

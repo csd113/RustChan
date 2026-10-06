@@ -365,7 +365,10 @@ pub fn get_post_submission(
     Ok(conn
         .query_row(
             "SELECT thread_id, post_id, is_thread
-             FROM post_submissions
+             FROM (
+                 SELECT * FROM post_submissions
+                 UNION ALL SELECT * FROM post_submission_tombstones
+             )
              WHERE submission_token = ?1
                AND ip_hash = ?2
                AND board_id = ?3
@@ -399,6 +402,14 @@ pub fn record_post_submission(
         return Ok(());
     }
 
+    anyhow::ensure!(
+        !conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM post_submission_tombstones WHERE submission_token = ?1)",
+            [submission_token],
+            |row| row.get::<_, bool>(0),
+        )?,
+        "submission token was already accepted and deleted"
+    );
     conn.execute(
         "INSERT INTO post_submissions
          (submission_token, ip_hash, board_id, thread_id, post_id, is_thread)
@@ -422,6 +433,12 @@ pub fn record_post_submission(
     .context("Failed to prune expired post submission tokens")
     .map(|_affected_rows| ())?;
 
+    conn.execute(
+        "DELETE FROM post_submission_tombstones WHERE created_at < unixepoch() - 604800",
+        [],
+    )
+    .context("Failed to prune expired deleted submission receipts")
+    .map(|_affected_rows| ())?;
     Ok(())
 }
 
@@ -522,7 +539,7 @@ pub fn delete_post(
 }
 
 /// Delete a non-opening post inside the caller's transaction.
-fn delete_post_reply_in_tx(
+pub(crate) fn delete_post_reply_in_tx(
     conn: &rusqlite::Connection,
     post_id: i64,
 ) -> crate::error::Result<crate::db::DeletePathsResult> {
@@ -666,11 +683,23 @@ pub fn self_delete_post(
     token: &str,
     delete_window_secs: i64,
 ) -> crate::error::Result<(SelfDeleteOutcome, Option<crate::db::DeletePathsResult>)> {
+    self_delete_post_with_validation(conn, post_id, token, delete_window_secs, |_| Ok(()))
+}
+
+/// Recheck mutable request policy under the same write lock as deletion.
+pub(crate) fn self_delete_post_with_validation(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+    token: &str,
+    delete_window_secs: i64,
+    validate: impl FnOnce(&rusqlite::Connection) -> crate::error::Result<()>,
+) -> crate::error::Result<(SelfDeleteOutcome, Option<crate::db::DeletePathsResult>)> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin self_delete_post transaction")?;
 
     let result: crate::error::Result<(SelfDeleteOutcome, Option<crate::db::DeletePathsResult>)> =
         (|| {
+            validate(conn)?;
             let row: Option<(i64, bool, String, i64, bool, bool)> = conn
                 .query_row(
                     "SELECT p.thread_id, p.is_op, p.deletion_token, p.created_at,
@@ -762,6 +791,27 @@ pub fn edit_post(
     new_body_html: &str,
     edit_window_secs: i64,
 ) -> Result<bool> {
+    edit_post_with_validation(
+        conn,
+        post_id,
+        token,
+        new_body,
+        new_body_html,
+        edit_window_secs,
+        |_| Ok(()),
+    )
+}
+
+/// Recheck mutable request policy under the same write lock as editing.
+pub(crate) fn edit_post_with_validation(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+    token: &str,
+    new_body: &str,
+    new_body_html: &str,
+    edit_window_secs: i64,
+    validate: impl FnOnce(&rusqlite::Connection) -> crate::error::Result<()>,
+) -> Result<bool> {
     let window = if edit_window_secs <= 0 {
         60
     } else {
@@ -774,6 +824,7 @@ pub fn edit_post(
         .context("Failed to begin IMMEDIATE transaction for edit_post")?;
 
     let result: Result<bool> = (|| {
+        validate(conn)?;
         let row: Option<(String, i64, bool, bool)> = conn
             .query_row(
                 "SELECT p.deletion_token, p.created_at, t.locked, t.archived
@@ -1615,6 +1666,16 @@ pub fn claim_next_job(conn: &rusqlite::Connection) -> Result<Option<(i64, String
          WHERE id = (
              SELECT candidate.id FROM background_jobs AS candidate
              WHERE candidate.status = 'pending' AND candidate.attempts < ?1
+               AND (candidate.job_type NOT IN ('video_transcode', 'audio_waveform')
+                    OR NOT EXISTS (
+                        SELECT 1 FROM pending_fs_ops fs,
+                            json_each(CASE WHEN json_valid(fs.payload_json)
+                                           THEN fs.payload_json ELSE '{}' END, '$.relative_paths') artifact
+                        WHERE fs.kind = 'upload_finalize'
+                          AND artifact.value = json_extract(
+                              CASE WHEN json_valid(candidate.payload)
+                                   THEN candidate.payload ELSE '{}' END, '$.d.file_path')
+                    ))
                AND (
                    candidate.job_type != 'thread_prune'
                    OR NOT EXISTS (

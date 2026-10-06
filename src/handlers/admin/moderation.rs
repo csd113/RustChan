@@ -136,14 +136,6 @@ pub(in crate::server) struct BanDeleteForm {
     csrf: Option<String>,
 }
 
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "ban-and-delete keeps its authorization, mutation, cleanup, and audit steps together"
-)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "authorization, ban creation, post deletion, media cleanup, and audit logging are one action"
-)]
 pub(in crate::server) async fn admin_ban_and_delete(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -167,147 +159,46 @@ pub(in crate::server) async fn admin_ban_and_delete(
             .saturating_add(h.min(87_600).saturating_mul(3600))
     });
 
-    let ip_hash_log = form.ip_hash.chars().take(8).collect::<String>();
-    let post_id = form.post_id;
-    let board_short = form.board.clone();
-    let thread_id = form.thread_id;
-    let is_op = form.is_op.as_deref() == Some("1");
-
-    tokio::task::spawn_blocking({
+    let redirect = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<()> {
+        move || -> Result<String> {
             let conn = pool.get()?;
-            let (admin_id, admin_name) =
-                super::require_admin_session_with_name(&conn, session_id.as_deref())?;
-
-            let post = db::get_post(&conn, post_id)?
+            let tx = rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
+            let (admin_id, admin_name) = super::require_admin_session_with_name(&tx, session_id.as_deref())?;
+            let post = db::get_post(&tx, form.post_id)?
                 .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
-            if post.thread_id != thread_id {
-                return Err(AppError::NotFound("Post not found.".into()));
+            let board_short: String = tx.query_row("SELECT short_name FROM boards WHERE id = ?1", [post.board_id], |row| row.get(0))?;
+            if post.thread_id != form.thread_id || board_short != form.board
+                || post.is_op != (form.is_op.as_deref() == Some("1")) {
+                return Err(AppError::BadRequest("The moderation target changed. Reload the page.".into()));
             }
-
-            // Validate ip_hash: must be a well-formed SHA-256 hex string (64 hex
-            // chars).  The value comes from a form field in the post toolbar; a
-            // confused or tampered submission should be rejected cleanly.
-            if form.ip_hash.len() != 64 || !form.ip_hash.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(AppError::BadRequest("Invalid IP hash format.".into()));
+            let ip_hash = post.ip_hash.as_deref().filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .ok_or_else(|| AppError::BadRequest("This post has no valid posting identity to ban.".into()))?;
+            if ip_hash != form.ip_hash {
+                return Err(AppError::BadRequest("Posting identity mismatch. Reload the page.".into()));
             }
-
-            // Ban first so the IP cannot re-post before the delete lands
-            db::add_ban(&conn, &form.ip_hash, &reason, expires_at).map(|_completed_value| ())?;
-            if let Err(error) = db::log_mod_action(
-                &conn,
-                admin_id,
-                &admin_name,
-                "ban",
-                "ban",
-                None,
-                &board_short,
-                &format!("inline ban — ip_hash={ip_hash_log}… reason={reason}"),
-            ) {
-                tracing::error!(
-                    target: "admin",
-                    admin_id,
-                    board = %board_short,
-                    ip_hash_prefix = %ip_hash_log,
-                    error = %error,
-                    "Inline ban completed without audit-log record"
-                );
-            }
-
-            // Delete post (or whole thread if OP)
-            if is_op {
-                let deleted = db::delete_thread(&conn, thread_id)?;
-                if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
-                    &conn,
-                    &crate::config::CONFIG.upload_dir,
-                    deleted.pending_fs_op_id.as_deref(),
-                    &deleted.paths,
-                ) {
-                    tracing::warn!(
-                        target: "admin",
-                        thread_id = thread_id,
-                        error = %error,
-                        "ban-delete thread cleanup did not fully complete"
-                    );
-                }
-                if let Err(error) = db::log_mod_action(
-                    &conn,
-                    admin_id,
-                    &admin_name,
-                    "delete_thread",
-                    "thread",
-                    Some(thread_id),
-                    &board_short,
-                    "",
-                ) {
-                    tracing::error!(
-                        target: "admin",
-                        admin_id,
-                        thread_id,
-                        board = %board_short,
-                        error = %error,
-                        "Ban-delete thread action completed without audit-log record"
-                    );
-                }
+            db::add_ban(&tx, ip_hash, &reason, expires_at).map(|_ban_id| ())?;
+            db::log_mod_action(&tx, admin_id, &admin_name, "ban", "ban", None, &board_short,
+                &format!("inline ban — ip_hash={}… reason={reason}", ip_hash.chars().take(8).collect::<String>()))?;
+            let deleted = if post.is_op {
+                db::delete_thread_verified(&tx, post.thread_id)?
             } else {
-                let deleted = db::delete_post(&conn, post_id)?;
-                if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
-                    &conn,
-                    &crate::config::CONFIG.upload_dir,
-                    deleted.pending_fs_op_id.as_deref(),
-                    &deleted.paths,
-                ) {
-                    tracing::warn!(
-                        target: "admin",
-                        post_id = post_id,
-                        error = %error,
-                        "ban-delete post cleanup did not fully complete"
-                    );
-                }
-                if let Err(error) = db::log_mod_action(
-                    &conn,
-                    admin_id,
-                    &admin_name,
-                    "delete_post",
-                    "post",
-                    Some(post_id),
-                    &board_short,
-                    "",
-                ) {
-                    tracing::error!(
-                        target: "admin",
-                        admin_id,
-                        post_id,
-                        board = %board_short,
-                        error = %error,
-                        "Ban-delete post action completed without audit-log record"
-                    );
-                }
+                db::posts::delete_post_reply_in_tx(&tx, post.id)?
+            };
+            db::log_mod_action(&tx, admin_id, &admin_name,
+                if post.is_op { "delete_thread" } else { "delete_post" },
+                if post.is_op { "thread" } else { "post" },
+                Some(if post.is_op { post.thread_id } else { post.id }), &board_short, "")?;
+            tx.commit()?;
+            if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
+                &conn, &crate::config::CONFIG.upload_dir, deleted.pending_fs_op_id.as_deref(), &deleted.paths,
+            ) {
+                tracing::warn!(target: "admin", post_id = post.id, %error, "ban-delete committed; file cleanup remains pending");
             }
-
-            tracing::info!(target: "admin", post_id = post_id, board = %board_short, "Ban and delete");
-            Ok(())
+            tracing::info!(target: "admin", post_id = post.id, board = %board_short, "Ban and delete");
+            Ok(if post.is_op { format!("/{board_short}") } else { format!("/{board_short}/thread/{}#p{}", post.thread_id, post.id) })
         }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    // form.board is user-supplied; sanitise to alphanumeric only before
-    // embedding in the redirect URL to prevent open-redirect via "
-    // " prefixes.
-    let safe_board: String = form
-        .board
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(8)
-        .collect();
-    // If OP was deleted, the thread is gone — send to board index
-    let redirect = if is_op {
-        format!("/{safe_board}")
-    } else {
-        format!("/{safe_board}/thread/{thread_id}#p{post_id}")
-    };
+    }).await.map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
     Ok(Redirect::to(&redirect).into_response())
 }
 

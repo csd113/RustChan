@@ -1029,6 +1029,7 @@ pub(crate) async fn parse_post_multipart(
     let mut captcha_answer = String::new();
     let mut budget = PublicMultipartBudget::default();
     let mut seen_upload_slots = HashSet::new();
+    let mut seen_scalar_fields = HashSet::new();
     let mut media_upload_guard = None;
 
     loop {
@@ -1040,6 +1041,29 @@ pub(crate) async fn parse_post_multipart(
             break;
         };
         budget.note_field()?;
+        if let Some(field_name) = field.name().filter(|control_name| {
+            matches!(
+                *control_name,
+                "_csrf"
+                    | "submission_token"
+                    | "name"
+                    | "subject"
+                    | "body"
+                    | "deletion_token"
+                    | "sage"
+                    | "captcha_id"
+                    | "captcha_answer"
+                    | "poll_question"
+                    | "poll_duration_value"
+                    | "poll_duration_unit"
+            )
+        }) {
+            if !seen_scalar_fields.insert(field_name.to_owned()) {
+                return Err(AppError::BadRequest(format!(
+                    "Duplicate posting field '{field_name}'."
+                )));
+            }
+        }
         match field.name() {
             Some("_csrf") => {
                 let v = read_text_field(field, &mut budget).await?;
@@ -2820,6 +2844,42 @@ mod tests {
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")));
         ensure!(save_root.path().join(&uploaded.thumb_path).exists());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn multipart_parser_rejects_ambiguous_scalar_fields() -> anyhow::Result<()> {
+        for field in [
+            "_csrf",
+            "body",
+            "sage",
+            "submission_token",
+            "captcha_id",
+            "poll_duration_unit",
+        ] {
+            let fields = [(field, "first"), (field, "second")];
+            let (boundary, bytes) = crate::test_support::multipart_body(&fields, None);
+            let multipart = multipart_from_bytes(&boundary, bytes).await?;
+            let gate = crate::middleware::MediaUploadGate::new();
+            let mut draft = crate::templates::forms::PostFormState::default();
+            let result = parse_post_multipart(
+                multipart,
+                Some("csrf123"),
+                1024,
+                1024,
+                1024,
+                1024,
+                super::PostMultipartContext {
+                    media_upload_gate: &gate,
+                    draft: &mut draft,
+                },
+            )
+            .await;
+            ensure!(
+                matches!(result, Err(crate::error::AppError::BadRequest(_))),
+                "duplicate {field} must be rejected"
+            );
+            drop(result);
+        }
         Ok(())
     }
 }
