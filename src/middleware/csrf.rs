@@ -22,6 +22,9 @@ pub fn validate_csrf(cookie_token: Option<&str>, form_token: &str) -> bool {
     if raw.is_empty() || sig.is_empty() {
         return false;
     }
+    if cookie_token.is_some_and(|cookie| !constant_time_eq(cookie.as_bytes(), raw.as_bytes())) {
+        return false;
+    }
 
     let expected = sign_csrf_token(raw, &CONFIG.cookie_secret);
     constant_time_eq(expected.as_bytes(), sig.as_bytes())
@@ -155,6 +158,19 @@ mod tests {
         assert!(
             constant_time_eq(b"hello", b"hello"),
             "identical byte slices should compare equal"
+        );
+    }
+    #[test]
+    fn signed_public_token_cannot_override_a_different_browser_cookie() {
+        let token = crate::utils::crypto::make_csrf_form_token(
+            "attacker",
+            &crate::config::CONFIG.cookie_secret,
+        );
+        assert!(!validate_csrf(Some("victim"), &token));
+        assert!(validate_csrf(Some("attacker"), &token));
+        assert!(
+            validate_csrf(None, &token),
+            "cookie-disabled same-origin forms retain signed tokens"
         );
     }
 }

@@ -5,12 +5,50 @@ use crate::utils::{
     files::format_file_size, redirect::encode_query_component, sanitize::escape_html,
 };
 use sha2::{Digest as _, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use super::{
     admin_ban_delete_modal_script, base_layout, base_layout_with_preferences,
     compress_modal_script, fmt_ts, fmt_ts_short, report_modal_script, thread_autoupdate_script,
 };
+
+/// Navigation metadata for bounded thread pages.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ThreadWindow {
+    /// Exclusive upper post ID for the next older page.
+    pub(crate) older_before: Option<i64>,
+    /// Historical pages retain their selected range rather than polling forward.
+    pub(crate) historical: bool,
+}
+
+/// Render links that also work when JavaScript is disabled.
+fn render_window_nav(board: &Board, thread: &Thread, window: ThreadWindow) -> String {
+    let mut nav = String::new();
+    let short = escape_html(&board.short_name);
+    if let Some(before) = window.older_before {
+        super::append_html(
+            &mut nav,
+            format_args!(
+                r#"<a href="/{short}/thread/{}?before={before}">[ Older replies ]</a> "#,
+                thread.id
+            ),
+        );
+    }
+    if window.historical {
+        super::append_html(
+            &mut nav,
+            format_args!(
+                r#"<a href="/{short}/thread/{}">[ Latest replies ]</a>"#,
+                thread.id
+            ),
+        );
+    }
+    if nav.is_empty() {
+        nav
+    } else {
+        format!(r#"<nav class="thread-window-nav" aria-label="Reply pages">{nav}</nav>"#)
+    }
+}
 
 /// Number of seconds during which a poster may edit or delete a new post.
 const SELF_ACTION_WINDOW_SECS: i64 = 60;
@@ -309,10 +347,6 @@ pub fn render_archive_state_badges(sticky: bool) -> String {
 // Thread page
 #[must_use]
 #[expect(
-    clippy::too_many_lines,
-    reason = "the thread document keeps navigation, posts, poll, forms, and modals together"
-)]
-#[expect(
     clippy::too_many_arguments,
     reason = "thread rendering consumes distinct moderation, poll, form, theme, and visitor contexts"
 )]
@@ -336,6 +370,60 @@ pub fn thread_page(
     can_post: bool,
     thread_preference: crate::db::UserThreadPreference,
     user_preferences: crate::templates::UserPreferences,
+) -> String {
+    thread_page_window(
+        board,
+        thread,
+        posts,
+        owned_post_controls,
+        csrf_token,
+        boards,
+        is_admin,
+        admin_csrf_token,
+        poll,
+        error,
+        success,
+        reply_prefill,
+        edit_overlay_state,
+        current_theme,
+        collapse_greentext,
+        can_post,
+        thread_preference,
+        user_preferences,
+        ThreadWindow::default(),
+    )
+}
+
+/// Render a bounded thread window while preserving the normal document hooks.
+#[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the thread document keeps navigation, posts, poll, forms, and modals together"
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "thread rendering consumes distinct moderation, poll, form, theme, and visitor contexts"
+)]
+pub(crate) fn thread_page_window(
+    board: &Board,
+    thread: &Thread,
+    posts: &[Post],
+    owned_post_controls: &BTreeMap<i64, OwnedPostControls>,
+    csrf_token: &str,
+    boards: &[Board],
+    is_admin: bool,
+    admin_csrf_token: Option<&str>,
+    poll: Option<&crate::models::PollData>,
+    error: Option<&str>,
+    success: Option<&str>,
+    reply_prefill: Option<&super::forms::PostFormState>,
+    edit_overlay_state: Option<&EditOverlayState>,
+    current_theme: Option<&str>,
+    collapse_greentext: bool,
+    can_post: bool,
+    thread_preference: crate::db::UserThreadPreference,
+    user_preferences: crate::templates::UserPreferences,
+    window: ThreadWindow,
 ) -> String {
     let mut body = String::new();
     let admin_form_csrf = admin_csrf_token.unwrap_or(csrf_token);
@@ -479,21 +567,24 @@ pub fn thread_page(
         body.push_str(&render_poll(pd, thread, &board.short_name, csrf_token));
     }
 
+    body.push_str(&render_window_nav(board, thread, window));
+    let visible_ids = posts.iter().map(|post| post.id).collect::<HashSet<_>>();
     let last_post_id = posts.iter().map(|p| p.id).max().unwrap_or(0);
     crate::templates::append_html(
         &mut body,
         format_args!(
-            r#"<div id="thread-posts" data-activity-page="thread" data-thread-id="{tid}" data-board="{board}" data-last-id="{last}" data-locked="{locked}" data-sticky="{sticky}" data-archived="{archived}">"#,
+            r#"<div id="thread-posts" data-activity-page="thread" data-thread-id="{tid}" data-board="{board}" data-last-id="{last}" data-history-page="{history}" data-locked="{locked}" data-sticky="{sticky}" data-archived="{archived}">"#,
             tid = thread.id,
             board = escape_html(&board.short_name),
             last = last_post_id,
+            history = window.historical,
             locked = thread.locked,
             sticky = thread.sticky,
             archived = thread.archived,
         ),
     );
     for post in posts {
-        body.push_str(&render_post(
+        let post_html = render_post(
             post,
             &board.short_name,
             csrf_token,
@@ -517,10 +608,16 @@ pub fn thread_page(
                 video_audio_muted: user_preferences.video_audio_muted,
             },
             SELF_ACTION_WINDOW_SECS,
+        );
+        body.push_str(&crate::utils::sanitize::route_missing_quote_links(
+            &post_html,
+            &board.short_name,
+            &visible_ids,
         ));
     }
 
     body.push_str("</div>\n");
+    body.push_str(&render_window_nav(board, thread, window));
     body.push_str(&render_edit_overlay(
         board,
         thread.id,
@@ -1434,8 +1531,11 @@ fn render_post_with_context(
     }
 
     // Post body (pre-rendered, sanitised HTML)
-    let body_html =
-        crate::utils::sanitize::normalize_greentext_blocks(&post.body_html, collapse_greentext);
+    let body_html = crate::utils::sanitize::safe_stored_post_html(
+        &post.body,
+        &post.body_html,
+        collapse_greentext,
+    );
     let body_html = annotate_op_quotelinks(&body_html, thread_op_id);
     let body_html = match link_context {
         PostLinkContext::Inline => body_html,

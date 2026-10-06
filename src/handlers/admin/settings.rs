@@ -75,11 +75,66 @@ pub(super) fn checkbox_is_on(value: Option<&str>) -> bool {
         || value.is_some_and(|item| item.eq_ignore_ascii_case("true"))
 }
 
-async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<String> {
-    field
-        .text()
-        .await
-        .map_err(|e| AppError::BadRequest(e.to_string()))
+/// Authenticate before multipart headers or file bytes are consumed.
+async fn preflight_asset_upload(state: &AppState, session_id: Option<String>) -> Result<()> {
+    tokio::task::spawn_blocking({
+        let pool = state.db.clone();
+        move || {
+            let conn = pool.get()?;
+            require_admin_session_sid(&conn, session_id.as_deref()).map(|_admin_id| ())
+        }
+    })
+    .await
+    .map_err(|error| AppError::Internal(error.into()))?
+}
+
+#[derive(Default)]
+/// Bound all admin asset parts and reject duplicate scalar/file fields.
+struct AssetMultipartBudget {
+    /// Every named part counts, including unknown controls.
+    names: std::collections::HashSet<String>,
+    /// Includes unnamed parts, which must also be bounded.
+    parts: usize,
+}
+
+impl AssetMultipartBudget {
+    /// Reject excessive parts or ambiguous metadata before reading the field.
+    fn note(&mut self, field: &axum::extract::multipart::Field<'_>) -> Result<()> {
+        self.parts = self.parts.saturating_add(1);
+        if self.parts > 64 {
+            return Err(AppError::BadRequest("Too many multipart fields.".into()));
+        }
+        if let Some(name) = field.name() {
+            if name.len() > 128 || !self.names.insert(name.to_owned()) {
+                return Err(AppError::BadRequest(
+                    "Invalid or duplicate multipart field.".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Bound scalar bytes incrementally and reject invalid UTF-8.
+async fn read_text_field(mut field: axum::extract::multipart::Field<'_>) -> Result<String> {
+    let mut bytes = Vec::new();
+    loop {
+        let next_chunk = field
+            .chunk()
+            .await
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+        let Some(chunk) = next_chunk else {
+            break;
+        };
+        if bytes.len().saturating_add(chunk.len()) > 64 * 1024 {
+            return Err(AppError::UploadTooLarge(
+                "Multipart text field is too large.".into(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes)
+        .map_err(|_error| AppError::BadRequest("Multipart text must be valid UTF-8.".into()))
 }
 
 async fn read_checkbox_field(field: axum::extract::multipart::Field<'_>) -> Result<bool> {

@@ -462,7 +462,7 @@ pub(in crate::server) async fn redirect_to_post(
     .await;
 
     if let Ok(Ok((Some(thread_id), _))) = result {
-        let url = format!("/{board_short_for_url}/thread/{thread_id}#p{post_id}");
+        let url = format!("/{board_short_for_url}/thread/{thread_id}?post={post_id}#p{post_id}");
         Redirect::to(&url).into_response()
     } else if matches!(result, Ok(Ok((None, true)))) {
         Redirect::to(&unlock_redirect_url(

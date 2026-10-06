@@ -2,7 +2,7 @@
 const LOG_TARGET: &str = concat!(env!("CARGO_CRATE_NAME"), "::handlers::thread");
 
 // Routes:
-//   GET  /:board/thread/:id   — view thread with all posts
+//   GET  /:board/thread/:id   — view a bounded thread window
 //   POST /:board/thread/:id   — post a reply
 //   POST /vote                — cast a poll vote
 
@@ -52,6 +52,14 @@ pub(in crate::server) async fn view_thread(
     req_headers: HeaderMap,
     peer: crate::middleware::SecureCookieContext,
 ) -> Result<Response> {
+    if params.before.is_some_and(|id| id <= 0) || params.post.is_some_and(|id| id <= 0) {
+        return Err(AppError::BadRequest(
+            "Thread cursors must be positive post IDs.".into(),
+        ));
+    }
+    // The largest SQLite ID is already in the latest window; it cannot have
+    // an exclusive successor cursor. Preserve post focus at that boundary.
+    let before = params.post.map_or(params.before, |id| id.checked_add(1));
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let user_preferences = crate::handlers::board::user_preferences_from_jar(&jar);
     let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
@@ -93,13 +101,14 @@ pub(in crate::server) async fn view_thread(
         let pool = state.db.clone();
         move || -> Result<ThreadViewLoadResult> {
             let conn = pool.get()?;
-            let page_data = render::load_thread_page_data(
+            let page_data = render::load_thread_page_data_before(
                 &conn,
                 board,
                 thread_id,
                 &identity_key,
                 &CONFIG.cookie_secret,
                 is_admin,
+                before,
             )?;
             let effective_is_admin = page_data.is_admin;
             let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
@@ -519,6 +528,8 @@ pub(in crate::server) async fn post_reply(
 #[derive(Deserialize, Default)]
 pub(in crate::server) struct ThreadPageQuery {
     pub reported: Option<String>,
+    pub before: Option<i64>,
+    pub post: Option<i64>,
 }
 
 struct SelfActionPostContext {

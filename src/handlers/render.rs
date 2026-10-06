@@ -16,6 +16,7 @@ pub(super) struct BoardPageData {
 }
 
 pub(super) struct ThreadPageData {
+    pub window: templates::thread::ThreadWindow,
     pub board: Board,
     pub thread: Thread,
     pub posts: Vec<crate::models::Post>,
@@ -58,6 +59,8 @@ pub(super) fn threads_etag_signature(threads: &[Thread]) -> String {
 pub(super) fn thread_page_etag_signature(data: &ThreadPageData) -> String {
     let mut hasher = Sha256::new();
     update_thread_signature(&mut hasher, &data.thread);
+    hasher.update([u8::from(data.window.historical)]);
+    update_sig_i64(&mut hasher, data.window.older_before.unwrap_or(0));
     hasher.update([
         u8::from(data.thread_preference.pinned),
         u8::from(data.thread_preference.hidden),
@@ -229,6 +232,27 @@ pub(super) fn load_thread_page_data(
     cookie_secret: &str,
     is_admin: bool,
 ) -> Result<ThreadPageData> {
+    load_thread_page_data_before(
+        conn,
+        board,
+        thread_id,
+        client_ip,
+        cookie_secret,
+        is_admin,
+        None,
+    )
+}
+
+/// Load a bounded historical or current thread window.
+pub(super) fn load_thread_page_data_before(
+    conn: &rusqlite::Connection,
+    board: Board,
+    thread_id: i64,
+    client_ip: &str,
+    cookie_secret: &str,
+    is_admin: bool,
+    before: Option<i64>,
+) -> Result<ThreadPageData> {
     let tx = conn.unchecked_transaction()?;
     let board_id = board.id;
     let thread = db::get_thread(&tx, thread_id)?
@@ -236,13 +260,17 @@ pub(super) fn load_thread_page_data(
     if thread.board_id != board_id {
         return Err(AppError::NotFound("Thread not found in this board.".into()));
     }
-    let posts = db::get_posts_for_thread(&tx, thread_id)?;
+    let (posts, older_before) = db::get_thread_post_window(&tx, thread_id, before)?;
     let ip_hash = hash_ip(client_ip, cookie_secret);
     let poll = db::get_poll_for_thread(&tx, thread_id, &ip_hash)?;
     let thread_preference =
         db::get_thread_preference(&tx, &ip_hash, thread_id)?.unwrap_or_default();
     tx.commit()?;
     Ok(ThreadPageData {
+        window: templates::thread::ThreadWindow {
+            older_before,
+            historical: before.is_some(),
+        },
         board,
         thread,
         posts,
@@ -270,7 +298,7 @@ pub(super) fn render_thread_page(
     user_preferences: templates::UserPreferences,
 ) -> String {
     let boards = templates::live_boards();
-    templates::thread_page(
+    templates::thread::thread_page_window(
         &data.board,
         &data.thread,
         &data.posts,
@@ -289,6 +317,7 @@ pub(super) fn render_thread_page(
         can_post,
         data.thread_preference,
         user_preferences,
+        data.window,
     )
 }
 
@@ -404,6 +433,7 @@ mod tests {
     fn thread_page_etag_changes_when_reply_is_removed() {
         let board = sample_board();
         let before = ThreadPageData {
+            window: crate::templates::thread::ThreadWindow::default(),
             board: board.clone(),
             thread: sample_thread(2),
             posts: vec![sample_post(1), sample_post(2), sample_post(3)],
@@ -413,6 +443,7 @@ mod tests {
             owned_post_controls: std::collections::BTreeMap::new(),
         };
         let after = ThreadPageData {
+            window: crate::templates::thread::ThreadWindow::default(),
             board,
             thread: sample_thread(1),
             posts: vec![sample_post(1), sample_post(3)],
@@ -438,6 +469,7 @@ mod tests {
         pending_post.media_processing_state = Some("pending".into());
 
         let before = ThreadPageData {
+            window: crate::templates::thread::ThreadWindow::default(),
             board: board.clone(),
             thread: sample_thread(1),
             posts: vec![sample_post(1), pending_post.clone()],
@@ -452,6 +484,7 @@ mod tests {
         pending_post.media_processing_state = None;
 
         let after = ThreadPageData {
+            window: crate::templates::thread::ThreadWindow::default(),
             board,
             thread: sample_thread(1),
             posts: vec![sample_post(1), pending_post],
@@ -471,6 +504,7 @@ mod tests {
     fn thread_page_etag_changes_when_poll_vote_count_changes() {
         let board = sample_board();
         let before = ThreadPageData {
+            window: crate::templates::thread::ThreadWindow::default(),
             board: board.clone(),
             thread: sample_thread(0),
             posts: vec![sample_post(1)],
@@ -480,6 +514,7 @@ mod tests {
             owned_post_controls: std::collections::BTreeMap::new(),
         };
         let after = ThreadPageData {
+            window: crate::templates::thread::ThreadWindow::default(),
             board,
             thread: sample_thread(0),
             posts: vec![sample_post(1)],
@@ -499,6 +534,7 @@ mod tests {
     fn thread_page_etag_changes_when_poll_viewer_vote_state_changes() {
         let board = sample_board();
         let before = ThreadPageData {
+            window: crate::templates::thread::ThreadWindow::default(),
             board: board.clone(),
             thread: sample_thread(0),
             posts: vec![sample_post(1)],
@@ -508,6 +544,7 @@ mod tests {
             owned_post_controls: std::collections::BTreeMap::new(),
         };
         let after = ThreadPageData {
+            window: crate::templates::thread::ThreadWindow::default(),
             board,
             thread: sample_thread(0),
             posts: vec![sample_post(1)],

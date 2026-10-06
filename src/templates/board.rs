@@ -725,7 +725,16 @@ pub fn index_page<S: std::hash::BuildHasher>(
     } else {
         format!(
             "<div class=\"index-section\"><h2 class=\"index-section-title\">// Boards</h2><div class=\"board-cards\">{}</div></div>",
-            board_cards(&sfw, board_badges, board_reply_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin, user_preferences)
+            board_cards(
+                &sfw,
+                board_badges,
+                board_reply_badges,
+                nsfw_consent,
+                csrf_token,
+                admin_csrf_token,
+                is_admin,
+                user_preferences
+            )
         )
     };
 
@@ -734,7 +743,16 @@ pub fn index_page<S: std::hash::BuildHasher>(
     } else {
         format!(
             "<div class=\"index-section\" data-board-nsfw=\"1\"><h2 class=\"index-section-title\">// Adult Boards <span class=\"nsfw-badge\">NSFW</span></h2><div class=\"board-cards\">{}</div></div>",
-            board_cards(&nsfw, board_badges, board_reply_badges, nsfw_consent, csrf_token, admin_csrf_token, is_admin, user_preferences)
+            board_cards(
+                &nsfw,
+                board_badges,
+                board_reply_badges,
+                nsfw_consent,
+                csrf_token,
+                admin_csrf_token,
+                is_admin,
+                user_preferences
+            )
         )
     };
 
@@ -1573,7 +1591,9 @@ pub fn search_page(
     collapse_greentext: bool,
     user_preferences: crate::templates::UserPreferences,
 ) -> String {
-    let result_label = if pagination.total == 1 {
+    let result_label = if pagination.total >= 10_000 {
+        "10,000+ results (refine your query to see more)".to_owned()
+    } else if pagination.total == 1 {
         "1 result".to_owned()
     } else {
         format!("{} results", pagination.total)

@@ -1,0 +1,260 @@
+{
+  "scope": {
+    "date": "2026-10-06",
+    "network": "Only 127.0.0.1 local test listener",
+    "data": "Isolated temporary fixture; no production data",
+    "identity_note": "Trusted proxy fixture identities used for independent mixed-load budgets; direct-mode XFF spoof test separate"
+  },
+  "direct_forwarded_spoof": {
+    "case": "direct clients cannot rotate XFF to bypass posting limits",
+    "statuses": [
+      400,
+      400,
+      400,
+      400,
+      400,
+      400,
+      429,
+      429
+    ]
+  },
+  "http": [
+    {
+      "case": "normal board",
+      "status": 200
+    },
+    {
+      "case": "bad Host",
+      "status": 400
+    },
+    {
+      "case": "huge URI",
+      "status": 414
+    },
+    {
+      "case": "oversized declared form",
+      "status": 413
+    },
+    {
+      "case": "cross-site mutation",
+      "status": 403
+    },
+    {
+      "case": "numeric overflow",
+      "status": 400
+    },
+    {
+      "case": "SQL syntax as search data",
+      "status": 200
+    },
+    {
+      "case": "encoded media traversal",
+      "status": 400
+    },
+    {
+      "case": "unauthenticated admin upload",
+      "status": 403
+    },
+    {
+      "case": "cross-site fetch metadata",
+      "status": 403
+    },
+    {
+      "case": "missing boundary",
+      "status": 400
+    },
+    {
+      "case": "truncated multipart",
+      "status": 400
+    },
+    {
+      "case": "duplicate body",
+      "status": 400
+    },
+    {
+      "case": "unknown oversized field",
+      "status": 413
+    },
+    {
+      "case": "invalid UTF8",
+      "status": 400
+    },
+    {
+      "case": "identical-post burst",
+      "statuses": {
+        "303": 6,
+        "429": 4
+      }
+    },
+    {
+      "case": "concurrent search burst",
+      "statuses": {
+        "200": 7,
+        "503": 13,
+        "429": 20
+      },
+      "elapsed_seconds": 0.013
+    },
+    {
+      "case": "TE+CL",
+      "status": 400
+    },
+    {
+      "case": "duplicate Host",
+      "status": 400
+    },
+    {
+      "case": "stalled request head",
+      "elapsed_seconds": 15.003,
+      "closed": true
+    },
+    {
+      "case": "database consistency",
+      "integrity": "ok",
+      "posts": 13,
+      "threads": 13
+    }
+  ],
+  "mixed_load": {
+    "reply_burst": {
+      "303": 30,
+      "429": 5
+    },
+    "reply_latency_median_ms": 3.328,
+    "valid_png_traversal_filename_status": 303,
+    "corrupt_image_statuses": [
+      415,
+      415,
+      415,
+      415
+    ],
+    "mixed_requests": 160,
+    "mixed_statuses": {
+      "200": 88,
+      "503": 12,
+      "429": 30,
+      "400": 30
+    },
+    "mixed_elapsed_seconds": 0.13,
+    "normal_read_median_ms": 8.293,
+    "normal_read_max_ms": 22.204,
+    "database_integrity": "ok",
+    "authoritative_reply_count": 63,
+    "resources_before": {
+      "rss_kib": 40144,
+      "file_count": 11,
+      "disk_bytes": 4590154,
+      "temporary_files": []
+    },
+    "resources_after": {
+      "rss_kib": 53152,
+      "file_count": 11,
+      "disk_bytes": 4593370,
+      "temporary_files": []
+    },
+    "resource_note": "Snapshot RSS, not a sampled peak; SQLite/WAL and accepted post/media growth included."
+  },
+  "browser_sage_reply": {
+    "url": "/audit/thread/1",
+    "posts": 2,
+    "quoteHref": "#p1",
+    "bodyText": "Browser audit\nAnonymous\nID: 2JQIV2O9\n10/06/26(Tue)09:35:22\nNo.1\n>>14\nBenign <img src=x onerror=alert(1)> \" & é 😀 https://example.invalid/safe\nreport\nAnonymous\nID: 2JQIV2O9\n10/06/26(Tue)09:45:05\nNo.14\n(You)\n>>1(OP) Normal reply é 😀 [b]bold[/b]\nreport",
+    "injectedHandlers": 0
+  },
+  "browser_no_javascript_history": {
+    "initial": {
+      "posts": 201,
+      "quoteHref": "/audit/post/77",
+      "injectedHandlers": 0
+    },
+    "javaScriptDisabled": true,
+    "historyPages": 3,
+    "historyPagePostCounts": [
+      201,
+      201,
+      65
+    ],
+    "uniqueReplies": 464,
+    "quoteFocus": true,
+    "latestNavigation": true
+  },
+  "validation": {
+    "status": "passed",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "commands": [
+      {
+        "command": "cargo fmt --all --check",
+        "exit_code": 0,
+        "elapsed_seconds": 2.081,
+        "log": "/tmp/rustchan-release-validation-0.log"
+      },
+      {
+        "command": "cargo check --workspace --all-targets --all-features",
+        "exit_code": 0,
+        "elapsed_seconds": 7.379,
+        "log": "/tmp/rustchan-release-validation-1.log"
+      },
+      {
+        "command": "cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo",
+        "exit_code": 0,
+        "elapsed_seconds": 12.071,
+        "log": "/tmp/rustchan-release-validation-2.log"
+      },
+      {
+        "command": "cargo test --workspace --all-features",
+        "exit_code": 0,
+        "elapsed_seconds": 118.838,
+        "log": "/tmp/rustchan-release-validation-3.log"
+      },
+      {
+        "command": "git diff --check",
+        "exit_code": 0,
+        "elapsed_seconds": 0.024,
+        "log": "/tmp/rustchan-release-validation-4.log"
+      }
+    ],
+    "suites": [
+      {
+        "suite": "library",
+        "passed": 1439,
+        "failed": 0,
+        "ignored": 7
+      },
+      {
+        "suite": "CLI binary",
+        "passed": 1439,
+        "failed": 0,
+        "ignored": 7
+      },
+      {
+        "suite": "integration",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "native-update fixture",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "doctest",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      }
+    ],
+    "additional_targeted_checks": [
+      "maximum SQLite post-ID focus",
+      "incremental restore Unicode/NUL/invalid UTF-8/empty-body bounds",
+      "board restore rejection before filesystem/database mutation"
+    ],
+    "local_fixture_cleanup": "Named browser and test server closed; isolated data directory removed."
+  },
+  "notes": [
+    "Latencies are local fixture observations, not capacity benchmarks.",
+    "RSS measurements are snapshots, not sampled peaks.",
+    "HTTP/browser tests ran the built audit binary; later restore/authentication/metadata regressions are verified in the final full Rust suite."
+  ]
+}

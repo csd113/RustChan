@@ -43,7 +43,11 @@ fn hex_digit(nibble: u8) -> char {
 #[must_use]
 /// Return whether `path` has the minimum shape required for an internal URL.
 pub fn is_basic_safe_internal_path(path: &str) -> bool {
-    path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\")
+    path.len() <= 8192
+        && path.starts_with('/')
+        && !path.starts_with("//")
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
 }
 
 #[must_use]
@@ -68,4 +72,44 @@ pub fn safe_internal_path_or<'a>(path: Option<&'a str>, fallback: &'a str) -> &'
 pub fn strict_safe_internal_path_or<'a>(path: Option<&'a str>, fallback: &'a str) -> &'a str {
     path.filter(|value| is_strict_safe_internal_path(value))
         .unwrap_or(fallback)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_normalization_and_header_control_bypasses_are_rejected() {
+        for path in [
+            "https://attacker.invalid/",
+            "//attacker.invalid/",
+            "/\\attacker.invalid/",
+            "/\t/attacker.invalid/",
+            "/\n/attacker.invalid/",
+            "/\r/attacker.invalid/",
+            "/path\u{007f}",
+            "/path?next=\\attacker",
+        ] {
+            assert!(
+                !is_basic_safe_internal_path(path),
+                "unsafe return path: {path:?}"
+            );
+            assert_eq!(safe_internal_path_or(Some(path), "/fallback"), "/fallback");
+        }
+        for path in [
+            "/b",
+            "/b/thread/1#p2",
+            "/b/search?q=%2F%2Fattacker.invalid",
+            "/?q=emoji%F0%9F%98%80",
+        ] {
+            assert!(
+                is_strict_safe_internal_path(path),
+                "valid internal path: {path:?}"
+            );
+        }
+        assert!(!is_basic_safe_internal_path(&format!(
+            "/{}",
+            "x".repeat(8192)
+        )));
+    }
 }

@@ -180,6 +180,48 @@ pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Resu
     Ok(posts)
 }
 
+/// Load at most 200 replies and the opening post, with a cursor for older replies.
+/// Numeric cursors use the thread/id index, without deep OFFSET scans.
+///
+/// # Errors
+/// Returns an error if the database query fails.
+pub fn get_thread_post_window(
+    conn: &rusqlite::Connection,
+    thread_id: i64,
+    before: Option<i64>,
+) -> Result<(Vec<Post>, Option<i64>)> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {POST_SELECT_COLUMNS} FROM posts
+         WHERE thread_id = ?1 AND is_op = 0 AND id <= ?2
+         ORDER BY id DESC LIMIT 201"
+    ))?;
+    let mut posts = stmt
+        .query_map(
+            params![
+                thread_id,
+                before.map_or(i64::MAX, |id| id.saturating_sub(1))
+            ],
+            map_post,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let has_older = posts.len() > 200;
+    posts.truncate(200);
+    let older_before = has_older
+        .then(|| posts.last().map(|post| post.id))
+        .flatten();
+    let op = conn
+        .prepare_cached(&format!(
+            "SELECT {POST_SELECT_COLUMNS} FROM posts WHERE thread_id = ?1 AND is_op = 1 LIMIT 1"
+        ))?
+        .query_row(params![thread_id], map_post)
+        .optional()?;
+    if let Some(op) = op {
+        posts.push(op);
+    }
+    posts.reverse();
+    Ok((posts, older_before))
+}
+
 /// Fetch posts in `thread_id` whose id is strictly greater than `since_id`.
 /// Returns them oldest-first. Used by the thread auto-update polling endpoint.
 ///
@@ -909,7 +951,7 @@ fn search_terms(query: &str) -> Vec<String> {
     let mut terms = Vec::new();
     let mut current = String::new();
 
-    for ch in query.chars() {
+    for ch in query.chars().take(crate::models::SEARCH_QUERY_MAX_CHARS) {
         if ch.is_alphanumeric() {
             for lower in ch.to_lowercase() {
                 current.push(lower);
@@ -957,6 +999,8 @@ pub fn search_posts(
     offset: i64,
 ) -> Result<Vec<Post>> {
     let _timing = super::diagnostics::QueryTiming::start("search_posts");
+    let limit = limit.clamp(1, 100);
+    let offset = offset.clamp(0, 9_999);
     let Some(fts_query) = to_fts_query(query) else {
         return Ok(Vec::new());
     };
@@ -973,11 +1017,14 @@ pub fn search_posts(
          WHERE posts.board_id = ?1 AND posts_fts MATCH ?2
          ORDER BY posts.created_at DESC, posts.id DESC
          LIMIT ?3 OFFSET ?4";
-    let mut stmt = conn.prepare_cached(sql)?;
-    let posts = stmt
-        .query_map(params![board_id, fts_query, limit, offset], map_post)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(posts)
+    super::search_budget::with_search_budget(conn, || {
+        let mut stmt = conn.prepare_cached(sql)?;
+        let posts = stmt
+            .query_map(params![board_id, fts_query, limit, offset], map_post)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(posts)
+    })
+    .map_err(anyhow::Error::from)
 }
 
 /// # Errors
@@ -991,13 +1038,17 @@ pub fn count_search_results(
     let Some(fts_query) = to_fts_query(query) else {
         return Ok(0);
     };
-    Ok(conn
-        .prepare_cached(
-            "SELECT COUNT(*)
-             FROM posts_fts CROSS JOIN posts ON posts.id = posts_fts.rowid
-             WHERE posts.board_id = ?1 AND posts_fts MATCH ?2",
-        )?
-        .query_row(params![board_id, fts_query], |r| r.get(0))?)
+    super::search_budget::with_search_budget(conn, || {
+        Ok(conn
+            .prepare_cached(
+                "SELECT COUNT(*) FROM (
+                 SELECT 1 FROM posts_fts CROSS JOIN posts ON posts.id = posts_fts.rowid
+                 WHERE posts.board_id = ?1 AND posts_fts MATCH ?2 LIMIT 10000
+             )",
+            )?
+            .query_row(params![board_id, fts_query], |r| r.get(0))?)
+    })
+    .map_err(anyhow::Error::from)
 }
 
 // File deduplication
@@ -2849,6 +2900,44 @@ mod tests {
             rusqlite::params![id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?)
+    }
+
+    #[test]
+    fn thread_windows_are_bounded_and_keep_every_reply_reachable() -> Result<()> {
+        let conn = test_conn()?;
+        let op_id = seed_search_post(&conn, "window", "opening post")?;
+        let op = get_post(&conn, op_id)?.context("opening post exists")?;
+        conn.execute(
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<450)
+            INSERT INTO posts(thread_id,board_id,body,body_html,deletion_token,created_at)
+            SELECT ?1,?2,'reply','reply','delete',1700000000+x FROM n",
+            params![op.thread_id, op.board_id],
+        )
+        .map(|_count| ())?;
+        let mut before = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let (posts, older) = super::get_thread_post_window(&conn, op.thread_id, before)?;
+            anyhow::ensure!(
+                posts.len() <= 201 && posts.first().is_some_and(|post| post.id == op_id)
+            );
+            for post in posts.iter().filter(|post| !post.is_op) {
+                anyhow::ensure!(seen.insert(post.id), "reply appeared twice across pages");
+            }
+            if older.is_none() {
+                break;
+            }
+            before = older;
+        }
+        anyhow::ensure!(seen.len() == 450);
+        let plan = conn.prepare("EXPLAIN QUERY PLAN SELECT id FROM posts WHERE thread_id=?1 AND is_op=0 AND id<?2 ORDER BY id DESC LIMIT 201")?
+            .query_map(params![op.thread_id,i64::MAX], |row| row.get::<_,String>(3))?
+            .collect::<rusqlite::Result<Vec<_>>>()?.join(" ");
+        anyhow::ensure!(
+            plan.contains("idx_posts_thread_live") && !plan.contains("TEMP B-TREE"),
+            "window must use keyset index: {plan}"
+        );
+        Ok(())
     }
 
     #[test]

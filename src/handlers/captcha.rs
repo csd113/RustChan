@@ -1,6 +1,6 @@
 use crate::error::{AppError, Result};
 use axum::{
-    extract::{Path, Query},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse as _, Response},
 };
@@ -12,20 +12,26 @@ pub(in crate::server) struct CaptchaImageQuery {
 }
 
 pub(in crate::server) async fn serve_captcha_image(
+    State(state): State<crate::middleware::AppState>,
     Path(captcha_id): Path<String>,
     Query(query): Query<CaptchaImageQuery>,
 ) -> Result<Response> {
-    let png =
-        crate::captcha::generate_captcha_image(&query.board, &captcha_id).map_err(
-            |err| match err {
-                crate::captcha::CaptchaImageError::InvalidRequest => {
-                    AppError::BadRequest("Invalid CAPTCHA request.".to_owned())
-                }
-                crate::captcha::CaptchaImageError::GenerationFailed => {
-                    AppError::Internal(anyhow::anyhow!("failed to generate captcha image"))
-                }
-            },
-        )?;
+    let permit = state.captcha_work_gate.try_begin()?;
+    let png = tokio::task::spawn_blocking(move || {
+        let _captcha_permit = permit;
+        crate::captcha::generate_captcha_image(&query.board, &captcha_id)
+    })
+    .await
+    .map_err(|error| AppError::Internal(error.into()))?
+    .map_err(|error| match error {
+        crate::captcha::CaptchaImageError::InvalidRequest => {
+            AppError::BadRequest("Invalid CAPTCHA request.".to_owned())
+        }
+        crate::captcha::CaptchaImageError::GenerationFailed => {
+            AppError::Internal(anyhow::anyhow!("failed to generate captcha image"))
+        }
+        crate::captcha::CaptchaImageError::Busy => AppError::DbBusy,
+    })?;
 
     let mut headers = HeaderMap::new();
     let _previous_value =
@@ -57,7 +63,9 @@ mod tests {
         const CAPTCHA_ROUTE: &str = concat!("/captcha/", "{id}");
 
         let id = "00000000000000000000000000000006";
-        let app = Router::new().route(CAPTCHA_ROUTE, get(serve_captcha_image));
+        let app = Router::new()
+            .route(CAPTCHA_ROUTE, get(serve_captcha_image))
+            .with_state(crate::test_support::app_state());
 
         let response = app
             .oneshot(

@@ -84,7 +84,8 @@ pub(in crate::server) async fn catalog(
                 ));
             }
             let board = access.board;
-            let threads = db::get_threads_for_viewer(&conn, board.id, &viewer_key, false, -1, 0)?;
+            let threads =
+                db::get_threads_for_viewer(&conn, board.id, &viewer_key, false, 1_000, 0)?;
             let prefs = db::get_preferences_for_board(&conn, &viewer_key, board.id)?;
             let hidden_count = db::count_threads_for_viewer(&conn, board.id, &viewer_key, true)?;
             let pinned_ids = prefs
@@ -331,7 +332,7 @@ pub(in crate::server) async fn hidden_threads(
             let board = access.board;
             let prefs = db::get_preferences_for_board(&conn, &viewer_key, board.id)?;
             let hidden_threads =
-                db::get_threads_for_viewer(&conn, board.id, &viewer_key, true, -1, 0)?;
+                db::get_threads_for_viewer(&conn, board.id, &viewer_key, true, 1_000, 0)?;
             let pinned_ids = prefs
                 .iter()
                 .filter_map(|(id, pref)| pref.pinned.then_some(*id))
@@ -477,6 +478,17 @@ pub(in crate::server) async fn search(
     peer: SecureCookieContext,
 ) -> Result<Response> {
     const SEARCH_PER_PAGE: i64 = 20;
+    let search_permit = state.search_work_gate.try_begin()?;
+    if q.page > 500 {
+        return Err(AppError::BadRequest(
+            "Search is limited to 500 pages. Please refine the query.".into(),
+        ));
+    }
+    if q.q.chars().count() > SEARCH_QUERY_MAX_CHARS {
+        return Err(AppError::BadRequest(
+            "Search queries must be 256 characters or fewer.".into(),
+        ));
+    }
     let current_theme = current_theme_from_jar(&jar);
     let user_preferences = user_preferences_from_jar(&jar);
     let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
@@ -485,8 +497,8 @@ pub(in crate::server) async fn search(
         .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
 
-    // Cap query length to prevent excessively large LIKE pattern scans.
-    let query_str: String = q.q.trim().chars().take(SEARCH_QUERY_MAX_CHARS).collect();
+    // The validated scalar bound also bounds UTF-8 bytes and FTS term parsing.
+    let query_str = q.q.trim().to_owned();
     let page = q.page.max(1);
     let mut return_to = format!(
         "/{board_short}/search?q={}",
@@ -519,6 +531,7 @@ pub(in crate::server) async fn search(
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
         move || -> Result<String> {
+            let _search_permit = search_permit;
             let conn = pool.get()?;
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;

@@ -27,10 +27,9 @@ use axum::{
     response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::{atomic::AtomicU64, LazyLock};
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use time::Duration;
 
@@ -102,8 +101,9 @@ const HTML_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_DYNAMIC_PUBLIC;
 /// X rustchan redirect header used by this handler.
 const X_RUSTCHAN_REDIRECT_HEADER: &str = "x-rustchan-redirect";
 
-static BOARD_UNLOCK_FAILS: LazyLock<DashMap<String, (u32, u64)>> = LazyLock::new(DashMap::new);
-static BOARD_UNLOCK_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
+/// Bounded board-password failure state, independent of public visitor cookies.
+static BOARD_UNLOCK_FAILS: LazyLock<crate::middleware::RateTable> =
+    LazyLock::new(crate::middleware::RateTable::default);
 
 pub(super) struct BoardAccessContext {
     pub board: Board,
@@ -650,60 +650,27 @@ fn board_unlock_attempt_key(board_short: &str, client_ip: &str) -> String {
     sha256_hex(format!("{board_short}:{client_ip}").as_bytes())
 }
 
-fn prune_board_unlock_failures(now_secs: u64) {
-    let last_cleanup = BOARD_UNLOCK_CLEANUP_SECS.load(std::sync::atomic::Ordering::Relaxed);
-    if now_secs.saturating_sub(last_cleanup) < 60 {
-        return;
-    }
-    if BOARD_UNLOCK_CLEANUP_SECS
-        .compare_exchange(
-            last_cleanup,
-            now_secs,
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-        )
-        .is_err()
-    {
-        return;
-    }
-    BOARD_UNLOCK_FAILS.retain(|_, (_, window_start)| {
-        now_secs.saturating_sub(*window_start) <= board_password_fail_window_secs()
-    });
-}
-
+/// Return the remaining lockout or saturation interval.
 fn board_unlock_retry_after_secs(attempt_key: &str) -> Option<u64> {
-    let now_secs = board_unlock_now_secs();
-    prune_board_unlock_failures(now_secs);
-    let (count, window_start) = *BOARD_UNLOCK_FAILS.get(attempt_key)?;
-    let elapsed = now_secs.saturating_sub(window_start);
-    if elapsed > board_password_fail_window_secs() {
-        let _previous_value = BOARD_UNLOCK_FAILS.remove(attempt_key);
-        return None;
-    }
-    if count < board_password_fail_limit() {
-        return None;
-    }
-    Some((board_password_fail_window_secs().saturating_sub(elapsed)).max(1))
+    BOARD_UNLOCK_FAILS.retry_after(
+        attempt_key,
+        board_unlock_now_secs(),
+        board_password_fail_limit(),
+    )
 }
 
-fn record_board_unlock_failure(attempt_key: &str) {
-    let now_secs = board_unlock_now_secs();
-    prune_board_unlock_failures(now_secs);
-    let mut entry = BOARD_UNLOCK_FAILS
-        .entry(attempt_key.to_owned())
-        .or_insert((0, now_secs));
-    let (count, window_start) = entry.value_mut();
-    if now_secs.saturating_sub(*window_start) > board_password_fail_window_secs() {
-        *count = 1;
-        *window_start = now_secs;
-    } else {
-        *count = count.saturating_add(1);
-    }
-    drop(entry);
+/// Record one failed password attempt without unbounded retained identity growth.
+fn record_board_unlock_failure(attempt_key: &str) -> u32 {
+    BOARD_UNLOCK_FAILS.record(
+        attempt_key,
+        board_unlock_now_secs(),
+        board_password_fail_window_secs(),
+    )
 }
 
+/// Remove an authenticated client's failure counter.
 fn clear_board_unlock_failures(attempt_key: &str) {
-    let _previous_value = BOARD_UNLOCK_FAILS.remove(attempt_key);
+    BOARD_UNLOCK_FAILS.remove(attempt_key);
 }
 
 fn board_unlock_rate_limit_message(retry_after_secs: u64) -> String {

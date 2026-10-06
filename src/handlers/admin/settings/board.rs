@@ -173,9 +173,11 @@ pub(in crate::server) async fn update_board_settings(
         BoardBannerMode::from_db_str(form.banner_mode.as_deref().unwrap_or("inherit"))
             .ok_or_else(|| AppError::BadRequest("Invalid board banner mode.".into()))?;
 
+    let password_permit = state.password_work_gate.try_begin()?;
     let board_short = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
+            let _password_permit = password_permit;
             let mut conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let board_short: String = conn.query_row(

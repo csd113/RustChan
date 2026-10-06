@@ -11,6 +11,10 @@ use std::net::{IpAddr, SocketAddr};
 pub(super) const HTTP_MAX_HEADER_BYTES: usize = 64 * 1024;
 /// Maximum bytes accepted in one request-header value.
 pub(super) const HTTP_MAX_HEADER_VALUE_BYTES: usize = 32 * 1024;
+/// Maximum request-target bytes, before query decoding or diagnostic logging.
+pub(super) const HTTP_MAX_URI_BYTES: usize = 8 * 1024;
+/// Default form/body cap; explicit multipart routes retain their larger limits.
+pub(super) const HTTP_FORM_MAX_BYTES: usize = 64 * 1024;
 
 /// Content Security Policy applied to HTML responses.
 pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
@@ -32,6 +36,15 @@ pub(super) async fn request_boundary_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    let uri_bytes = req
+        .uri()
+        .path_and_query()
+        .map_or(0, |part| part.as_str().len())
+        .saturating_add(req.uri().authority().map_or(0, |part| part.as_str().len()))
+        .saturating_add(req.uri().scheme_str().map_or(0, str::len));
+    if uri_bytes > HTTP_MAX_URI_BYTES {
+        return boundary_error_response(http::StatusCode::URI_TOO_LONG, "Request URL is too long");
+    }
     if request_headers_exceed_limits(req.headers()) {
         return boundary_error_response(
             http::StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
@@ -51,7 +64,111 @@ pub(super) async fn request_boundary_middleware(
         );
     }
 
+    if !valid_request_host(req.headers()) {
+        return boundary_error_response(http::StatusCode::BAD_REQUEST, "Invalid Host header");
+    }
+    let limit = request_body_limit(req.method(), req.uri().path());
+    if req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > limit)
+    {
+        return boundary_error_response(
+            http::StatusCode::PAYLOAD_TOO_LARGE,
+            "Request body is too large",
+        );
+    }
+
     next.run(req).await
+}
+
+/// Reject explicit cross-site evidence before any mutation body is consumed.
+pub(super) async fn mutation_origin_middleware(
+    context: crate::middleware::SecureCookieContext,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if !matches!(
+        *req.method(),
+        http::Method::GET | http::Method::HEAD | http::Method::OPTIONS
+    ) {
+        if req
+            .headers()
+            .get("sec-fetch-site")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("cross-site"))
+        {
+            return (http::StatusCode::FORBIDDEN, "Cross-site action denied").into_response();
+        }
+        if req.headers().contains_key(header::ORIGIN) || req.headers().contains_key(header::REFERER)
+        {
+            let jar = axum_extra::extract::CookieJar::from_headers(req.headers());
+            // A Strict public CSRF cookie is unavailable to cross-site forms;
+            // preserve supported same-origin browsers that send Origin: null.
+            let null_with_cookie = req
+                .headers()
+                .get(header::ORIGIN)
+                .and_then(|value| value.to_str().ok())
+                == Some("null")
+                && jar.get("csrf_token").is_some()
+                && !req.headers().contains_key(header::REFERER);
+            if !null_with_cookie {
+                if let Err(error) =
+                    crate::handlers::admin::require_same_origin_request(req.headers(), context.peer)
+                {
+                    return error.into_response();
+                }
+            }
+        }
+    }
+    next.run(req).await
+}
+
+/// Match the explicit multipart overrides without trusting the submitted MIME type.
+fn request_body_limit(method: &http::Method, path: &str) -> u64 {
+    if *method == http::Method::POST {
+        if is_post_upload_path(path) {
+            return u64::try_from(crate::handlers::PUBLIC_MULTIPART_REQUEST_MAX_BYTES)
+                .unwrap_or(u64::MAX);
+        }
+        return match path {
+            "/admin/restore" | "/admin/board/restore" => 8 * 1024 * 1024 * 1024,
+            "/admin/site/favicon" | "/admin/board/favicon" => 5 * 1024 * 1024,
+            "/admin/site/banner" | "/admin/home/banner" | "/admin/board/banner" => 8 * 1024 * 1024,
+            _ => u64::try_from(HTTP_FORM_MAX_BYTES).unwrap_or(u64::MAX),
+        };
+    }
+    u64::try_from(HTTP_FORM_MAX_BYTES).unwrap_or(u64::MAX)
+}
+
+/// Reject duplicate authorities and parser-ambiguous Host values.
+fn valid_request_host(headers: &http::HeaderMap) -> bool {
+    let mut hosts = headers.get_all(header::HOST).iter();
+    let Some(host) = hosts.next() else {
+        return true;
+    };
+    if hosts.next().is_some() {
+        return false;
+    }
+    let Ok(host) = host.to_str() else {
+        return false;
+    };
+    !host.is_empty()
+        && !host.bytes().any(|byte| {
+            byte.is_ascii_whitespace()
+                || matches!(byte, b'@' | b'\\' | b',' | b'%' | b'/' | b'#' | b'?')
+        })
+        && host.parse::<http::uri::Authority>().is_ok_and(|authority| {
+            !authority.host().is_empty()
+                && host.strip_prefix(authority.host()).is_some_and(|suffix| {
+                    suffix.is_empty()
+                        || suffix
+                            .strip_prefix(':')
+                            .is_some_and(|port| port.parse::<u16>().is_ok())
+                })
+        })
 }
 
 /// Render application notices with request preferences before response compression.
@@ -380,6 +497,21 @@ fn is_post_upload_path(path: &str) -> bool {
         return false;
     }
 
+    if matches!(
+        path.trim_end_matches('/'),
+        "/vote"
+            | "/report"
+            | "/appeal"
+            | "/preferences"
+            | "/admin"
+            | "/setup"
+            | "/banned"
+            | "/healthz"
+            | "/readyz"
+            | "/metrics"
+    ) {
+        return false;
+    }
     let mut segments = trimmed.split('/');
     matches!(
         (

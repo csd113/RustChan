@@ -3075,7 +3075,7 @@ function clampPopupToViewport(anchor, popup) {
   var autoOn = false;
   var consecutiveUpdateFailures = 0;
 
-  if (!container || container.dataset.archived === 'true') return;
+  if (!container || container.dataset.archived === 'true' || container.dataset.historyPage === 'true') return;
 
   var board = container.dataset.board;
   var threadId = container.dataset.threadId;
@@ -3629,6 +3629,7 @@ function clampPopupToViewport(anchor, popup) {
         if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
         var target = document.getElementById('p' + pid);
         if (!target) {
+          if (link.getAttribute('href').charAt(0) !== '#') return;
           e.preventDefault();
           e.stopPropagation();
           showMissingPostPopup(link, pid);
@@ -3740,7 +3741,7 @@ function clampPopupToViewport(anchor, popup) {
         _cbCache[key] = { html: data.html || '', thread_id: data.thread_id || 0 };
         delete _cbInFlight[key];
         if (_cbCache[key].thread_id) {
-          var directHref = '/' + board + '/thread/' + _cbCache[key].thread_id + '#p' + pid;
+          var directHref = '/' + board + '/thread/' + _cbCache[key].thread_id + '?post=' + pid + '#p' + pid;
           document.querySelectorAll('a.crosslink[data-crossboard="' + board + '"][data-pid="' + pid + '"]')
             .forEach(function (a) { a.href = directHref; });
         }
@@ -3794,7 +3795,7 @@ function clampPopupToViewport(anchor, popup) {
         e.preventDefault();
         var key = board + ':' + pid;
         function navigate(threadId) {
-          window.location.href = '/' + board + '/thread/' + threadId + '#p' + pid;
+          window.location.href = '/' + board + '/thread/' + threadId + '?post=' + pid + '#p' + pid;
         }
         function showCbError(missing) {
           var cbPopup = getCbPopup();

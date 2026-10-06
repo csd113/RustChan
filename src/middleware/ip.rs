@@ -8,14 +8,20 @@ use ipnet::IpNet;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 
-/// Returns the first non-empty address in a forwarded-for header.
-fn forwarded_client_ip(value: &str) -> Option<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .find(|ip| !ip.is_empty())
-        .and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
-        .map(|ip| ip.to_string())
+/// Walk an appended proxy chain from the trusted peer toward the first untrusted hop.
+fn forwarded_client_ip(
+    value: &str,
+    peer: SocketAddr,
+    trusted_proxy_cidrs: &[String],
+) -> Option<String> {
+    let mut client = peer.ip();
+    for forwarded in value.rsplit(',') {
+        if !trusted_proxy_peer_with(Some(SocketAddr::new(client, 0)), trusted_proxy_cidrs) {
+            break;
+        }
+        client = forwarded.trim().parse::<std::net::IpAddr>().ok()?;
+    }
+    Some(client.to_string())
 }
 
 /// Returns whether the peer belongs to a configured trusted proxy network.
@@ -48,7 +54,7 @@ pub(super) fn forwarded_proto_is_https(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| {
             value
-                .split(',')
+                .rsplit(',')
                 .next()
                 .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https"))
         })
@@ -65,6 +71,17 @@ fn forwarded_ip_from_headers_with(
         return None;
     }
 
+    // An appending proxy preserves attacker-supplied left-hand values. Prefer
+    // its authoritative chain over X-Real-IP and stop at the first untrusted hop.
+    if headers.contains_key("x-forwarded-for") {
+        let mut values = headers.get_all("x-forwarded-for").iter();
+        let value = values.next()?.to_str().ok()?;
+        if values.next().is_some() {
+            return None;
+        }
+        return forwarded_client_ip(value, peer?, trusted_proxy_cidrs);
+    }
+
     if let Some(value) = headers
         .get("x-real-ip")
         .and_then(|header_value| header_value.to_str().ok())
@@ -74,10 +91,7 @@ fn forwarded_ip_from_headers_with(
         return Some(value.to_string());
     }
 
-    headers
-        .get("x-forwarded-for")
-        .and_then(|header_value| header_value.to_str().ok())
-        .and_then(forwarded_client_ip)
+    None
 }
 
 /// Resolves the effective client identity from Tor, proxy, or peer metadata.
@@ -176,18 +190,20 @@ mod tests {
     }
 
     #[test]
-    fn forwarded_ip_prefers_leftmost_hop() {
+    fn forwarded_ip_ignores_spoofed_leftmost_hops() {
+        let peer = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let trusted = vec!["127.0.0.1/32".to_owned(), "10.0.0.0/8".to_owned()];
         assert_eq!(
-            forwarded_client_ip("198.51.100.10, 203.0.113.7, 10.0.0.1").as_deref(),
+            forwarded_client_ip("198.51.100.10, 203.0.113.7, 10.0.0.1", peer, &trusted).as_deref(),
+            Some("203.0.113.7")
+        );
+        assert_eq!(
+            forwarded_client_ip(" , 198.51.100.10", peer, &trusted).as_deref(),
             Some("198.51.100.10")
         );
-    }
-
-    #[test]
-    fn forwarded_ip_skips_empty_entries() {
         assert_eq!(
-            forwarded_client_ip(" , 198.51.100.10").as_deref(),
-            Some("198.51.100.10")
+            forwarded_client_ip("198.51.100.10, invalid", peer, &trusted),
+            None
         );
     }
 
@@ -297,9 +313,10 @@ mod tests {
         let trusted = vec!["127.0.0.1/32".to_owned()];
         assert_eq!(
             resolved_client_ip(&headers, Some(peer), true, &trusted, false),
-            "127.0.0.1",
-            "malformed proxy identities must not create arbitrary counters"
+            "203.0.113.1",
+            "spoofed left-hand values must not replace the first untrusted hop"
         );
+        drop(headers.remove("x-forwarded-for"));
         drop(headers.insert(
             "x-real-ip",
             HeaderValue::from_static("2001:0db8:0:0:0:0:0:1"),

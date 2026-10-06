@@ -14,8 +14,8 @@ pub(in crate::server) async fn backup_request_logging_middleware(
     next: Next,
 ) -> Response {
     let method = req.method().clone();
-    let uri = req.uri().clone();
-    if uri.path() == "/admin/backup/progress" {
+    let path = req.uri().path().to_owned();
+    if path == "/admin/backup/progress" {
         return next.run(req).await;
     }
     let headers = req.headers().clone();
@@ -31,10 +31,10 @@ pub(in crate::server) async fn backup_request_logging_middleware(
     tracing::info!(
         target: "admin",
         method = %method,
-        uri = %uri,
+        path = %path,
         status = status.as_u16(),
-        content_type = content_type.unwrap_or(""),
-        content_length = content_length.unwrap_or(""),
+        content_type = %content_type.unwrap_or("").chars().take(128).collect::<String>(),
+        content_length = %content_length.unwrap_or("").chars().take(32).collect::<String>(),
         "Admin backup request completed"
     );
 
@@ -78,8 +78,14 @@ pub(super) fn admin_xhr_error_response(error: &AppError) -> Response {
     }
 
     let (status, message) = match error {
-        AppError::Internal(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
-        AppError::Tls(message) => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
+        AppError::Internal(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "An internal error occurred.".to_owned(),
+        ),
+        AppError::Tls(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "A TLS configuration error occurred.".to_owned(),
+        ),
         AppError::NotFound(_)
         | AppError::BadRequest(_)
         | AppError::Forbidden(_)
@@ -335,8 +341,8 @@ pub(super) fn log_restore_upload_started(kind: RestoreKind, headers: &HeaderMap,
     tracing::info!(
         target: "admin",
         route = kind.route(),
-        content_type = content_type.unwrap_or(""),
-        content_length = content_length.unwrap_or(""),
+        content_type = %content_type.unwrap_or("").chars().take(128).collect::<String>(),
+        content_length = %content_length.unwrap_or("").chars().take(32).collect::<String>(),
         has_session_cookie = jar.get(SESSION_COOKIE).is_some(),
         has_csrf_cookie = jar.get("csrf_token").is_some(),
         "{} upload started",

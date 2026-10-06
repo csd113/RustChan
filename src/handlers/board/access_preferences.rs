@@ -994,11 +994,17 @@ pub(in crate::server) async fn unlock_board_access(
         return Ok(board_access_required_response(jar, html));
     }
 
+    let permit = state.password_work_gate.try_begin()?;
+    if record_board_unlock_failure(&attempt_key) > super::board_password_fail_limit() {
+        return Err(AppError::DbBusy);
+    }
     let password_hash = access_context.board.access_password_hash.clone();
-    let password_valid_result =
-        tokio::task::spawn_blocking(move || verify_password(&password, &password_hash))
-            .await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+    let password_valid_result = tokio::task::spawn_blocking(move || {
+        let _password_permit = permit;
+        verify_password(&password, &password_hash)
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
     let password_valid = match password_valid_result {
         Ok(valid) => valid,
         Err(error) => {
@@ -1020,7 +1026,6 @@ pub(in crate::server) async fn unlock_board_access(
     };
 
     if !password_valid {
-        record_board_unlock_failure(&attempt_key);
         if let Some(retry_after_secs) = board_unlock_retry_after_secs(&attempt_key) {
             let html = render_board_unlock_html(
                 &access_context.board,

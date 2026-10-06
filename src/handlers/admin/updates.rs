@@ -163,21 +163,29 @@ pub(in crate::server) async fn install(
     let password = form.current_password;
     let confirmation = form.confirmation;
     let approval_valid = uuid::Uuid::parse_str(&approval).is_ok();
+    let password_permit = state.password_work_gate.try_begin()?;
     let administrator = tokio::task::spawn_blocking(move || -> Result<i64> {
+        let _password_permit = password_permit;
         let conn = state.db.get()?;
         let actor = require_admin_session_sid(&conn, session.as_deref())?;
         let name = db::get_admin_name_by_id(&conn, actor)?
             .ok_or_else(|| AppError::Forbidden("Administrator missing.".to_owned()))?;
         let user = db::get_admin_by_username(&conn, &name)?
             .ok_or_else(|| AppError::Forbidden("Administrator missing.".to_owned()))?;
+        drop(conn);
+        if super::auth::record_login_fail(&key)
+            > crate::config::CONFIG.operator.admin_login_fail_limit
+        {
+            return Err(AppError::DbBusy);
+        }
         if password.len() > 1024
             || !crate::utils::crypto::verify_password(&password, &user.password_hash)?
         {
-            let _failure_count = super::auth::record_login_fail(&key);
             return Err(AppError::Forbidden(
                 "Current password did not verify. No update started.".to_owned(),
             ));
         }
+        super::auth::clear_login_fails(&key);
         if !updates::managed() || confirmation != "INSTALL" || !approval_valid {
             return Err(AppError::BadRequest(
                 "Native installation is unavailable or confirmation is invalid.".to_owned(),
