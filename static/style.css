@@ -7326,3 +7326,105 @@ html[data-theme="blue-sky"] .locked-notice {
     scroll-behavior: auto !important;
   }
 }
+
+/* Terminal refinements use the explicit active theme, leaving the unmarked
+   fallback and other themes' shared rules intact. */
+html[data-active-theme="terminal"] {
+  --terminal-danger: #ff6680;
+  --red: var(--terminal-danger);
+  --red-bright: var(--terminal-danger);
+}
+html[data-active-theme="terminal"] a:visited {
+  color: var(--green-pale);
+}
+html[data-active-theme="terminal"] .post-body a:hover {
+  text-decoration: underline;
+}
+html[data-active-theme="terminal"] :is(.catalog-thread-menu-toggle, .catalog-thread-menu, .mobile-board-menu-panel, .board-reorder-controls, .user-preferences-mobile-close, .compress-modal-box, .edit-modal-box, .poster-id-btn, .admin-section-index a),
+html[data-active-theme="terminal"] .user-preferences-panel[open] .user-preferences-form {
+  border-radius: 0;
+}
+html[data-active-theme="terminal"] :is(.catalog-thread-menu-toggle, .search-form button, .post-controls .edit-btn, .post-controls .report-btn) {
+  border-color: var(--green-dim);
+}
+html[data-active-theme="terminal"] :is(.post-form, .search-form, .header-search, .user-preferences-form, .board-access-form, .admin-section) :is(input, select, textarea) {
+  border-color: var(--green-dim);
+  caret-color: var(--green-bright);
+}
+html[data-active-theme="terminal"] input::placeholder,
+html[data-active-theme="terminal"] textarea::placeholder {
+  color: var(--text-dim);
+  opacity: 1;
+}
+html[data-active-theme="terminal"] input::file-selector-button {
+  background: var(--bg-input);
+  color: var(--green-pale);
+  border: 1px solid var(--green-dim);
+  border-radius: 0;
+  padding: 3px 6px;
+  font: inherit;
+  cursor: pointer;
+}
+html[data-active-theme="terminal"] input::file-selector-button:hover {
+  border-color: var(--green-bright);
+}
+html[data-active-theme="terminal"] .post-form button[type="submit"],
+html[data-active-theme="terminal"] :is(.compress-do-btn, .btn-success, .poll-vote-submit) {
+  background: #133019;
+  color: var(--text);
+  border-color: var(--green);
+}
+html[data-active-theme="terminal"] .post-form button[type="submit"]:hover,
+html[data-active-theme="terminal"] :is(.compress-do-btn, .btn-success, .poll-vote-submit):hover {
+  background: #1f4a27;
+  color: var(--text);
+  border-color: var(--green-bright);
+}
+html[data-active-theme="terminal"] form[action="/admin/thread/action"] .admin-del-btn {
+  background: var(--bg-input);
+  color: var(--green-pale);
+  border-color: var(--green-dim);
+}
+html[data-active-theme="terminal"] form[action="/admin/thread/action"] .admin-del-btn:hover {
+  color: var(--green-bright);
+  border-color: var(--green-bright);
+}
+html[data-active-theme="terminal"] :is(.btn-danger, .admin-del-btn[data-confirm], .post-controls .del-btn),
+html[data-active-theme="terminal"] .compress-do-btn.btn-danger {
+  background: color-mix(in srgb, var(--terminal-danger) 8%, var(--bg-input));
+  color: var(--terminal-danger);
+  border-color: var(--terminal-danger);
+}
+html[data-active-theme="terminal"] :is(.btn-danger, .admin-del-btn[data-confirm], .post-controls .del-btn):hover,
+html[data-active-theme="terminal"] .compress-do-btn.btn-danger:hover {
+  background: color-mix(in srgb, var(--terminal-danger) 14%, var(--bg-input));
+  color: var(--terminal-danger);
+  border-color: var(--terminal-danger);
+  box-shadow: none;
+}
+html[data-active-theme="terminal"] .thread-nav .thread-nav-control:hover:not([aria-disabled="true"]):not(:disabled) {
+  background: transparent;
+  color: var(--green-bright);
+  border-color: transparent;
+  text-shadow: 0 0 6px var(--green-bright);
+}
+html[data-active-theme="terminal"] .thread-nav .thread-nav-control:active:not([aria-disabled="true"]):not(:disabled) {
+  background: transparent;
+  color: var(--green-pale);
+  border-color: var(--green-dim);
+  text-shadow: 0 0 3px var(--green-pale);
+}
+html[data-active-theme="terminal"] :is(a, button, summary, input, select, textarea, .btn):focus-visible {
+  outline: 2px solid var(--green-bright);
+  outline-offset: 2px;
+}
+html[data-active-theme="terminal"] :is(button, input, select, textarea):disabled,
+html[data-active-theme="terminal"] [aria-disabled="true"] {
+  color: var(--text-dim);
+  background: var(--bg-input);
+  border-color: var(--green-dim);
+  border-style: dashed;
+  box-shadow: none;
+  opacity: 1;
+  cursor: not-allowed;
+}
