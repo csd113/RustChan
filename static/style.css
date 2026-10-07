@@ -4257,16 +4257,16 @@ html[data-theme="aero"] .site-footer { background: linear-gradient(#f8fdff, #d9e
   --bg-input:     #221810;
   --border:       #5c3d1e;
   --border-glow:  #7a5230;
-  --green:        #6fa84a;
-  --green-dim:    #4e7a35;
+  --green:        #7ab84e;
+  --green-dim:    #8cb571;
   --green-bright: #93cc65;
   --green-pale:   #7ab84e;
   --amber:        #e8d8b0;
-  --red:          #d07852;
+  --red:          #e39672;
   --gray:         #3f2b14;
   --gray-light:   #4a3728;
   --text:         #d4c4a0;
-  --text-dim:     #b09a7a;
+  --text-dim:     #b9a586;
   --font:         Georgia, 'Palatino Linotype', 'Book Antiqua', serif;
   --font-display: Georgia, 'Palatino Linotype', 'Book Antiqua', serif;
   --forest-header-bg: #111a0e;
@@ -4275,8 +4275,8 @@ html[data-theme="aero"] .site-footer { background: linear-gradient(#f8fdff, #d9e
   --forest-panel-shadow: 0 2px 8px rgba(0,0,0,0.5);
   --forest-surface-border: #5c3d1e;
   --forest-surface-hover-border: #7a5230;
-  --forest-link: #6fa84a;
-  --forest-link-visited: #4e7a35;
+  --forest-link: var(--green);
+  --forest-link-visited: var(--green-dim);
   --forest-link-hover: #93cc65;
   --forest-nav-text: #d4c4a0;
   --forest-nav-hover-bg: rgba(122, 82, 48, 0.16);
@@ -4288,12 +4288,12 @@ html[data-theme="aero"] .site-footer { background: linear-gradient(#f8fdff, #d9e
   --forest-success-hover-bg: #4b7333;
   --forest-success-hover-border: #93cc65;
   --forest-danger-bg: #4a2210;
-  --forest-danger-border: #7a3b20;
+  --forest-danger-border: #b9704f;
   --forest-danger-hover-bg: #5e2b14;
-  --forest-danger-hover-border: #9b5232;
-  --forest-input-border: #3f2b14;
+  --forest-danger-hover-border: #e39672;
+  --forest-input-border: #ac875f;
   --forest-pinned-border: #5f7c45;
-  --forest-muted: #b09a7a;
+  --forest-muted: var(--text-dim);
   --post-highlight-outline: #93cc65;
   --post-highlight-bg: rgba(111, 168, 74, 0.14);
   --accept-btn-bg: #3a5c28;
@@ -4405,24 +4405,25 @@ html[data-theme="aero"] .site-footer { background: linear-gradient(#f8fdff, #d9e
 [data-theme="forest"] .post-toggle-btn:hover,
 [data-theme="forest"] .board-list a:hover {
   background: var(--forest-nav-hover-bg);
-  color: var(--forest-nav-hover-text) !important;
+  color: var(--forest-nav-hover-text);
 }
 [data-theme="forest"] button,
 [data-theme="forest"] .btn,
 [data-theme="forest"] input[type="submit"] {
   background: var(--forest-button-bg);
-  border-color: var(--forest-surface-border);
+  border-color: var(--forest-input-border);
   color: #e8d8b0;
 }
 [data-theme="forest"] button:hover,
 [data-theme="forest"] .btn:hover,
 [data-theme="forest"] input[type="submit"]:hover {
   background: var(--forest-button-hover-bg);
-  border-color: var(--forest-surface-hover-border);
+  border-color: var(--forest-link-hover);
   color: #f1e6c8;
   box-shadow: none;
 }
 [data-theme="forest"] .post-form button[type="submit"],
+[data-theme="forest"] .btn-success,
 [data-theme="forest"] .compress-do-btn,
 [data-theme="forest"] .poll-vote-submit {
   background: var(--forest-success-bg);
@@ -4430,6 +4431,7 @@ html[data-theme="aero"] .site-footer { background: linear-gradient(#f8fdff, #d9e
   color: #d4e8c0;
 }
 [data-theme="forest"] .post-form button[type="submit"]:hover,
+[data-theme="forest"] .btn-success:hover,
 [data-theme="forest"] .compress-do-btn:hover,
 [data-theme="forest"] .poll-vote-submit:hover {
   background: var(--forest-success-hover-bg);
@@ -4437,35 +4439,86 @@ html[data-theme="aero"] .site-footer { background: linear-gradient(#f8fdff, #d9e
   color: #eff8e3;
 }
 [data-theme="forest"] .btn-danger,
-[data-theme="forest"] .compress-cancel-btn {
+[data-theme="forest"] .compress-do-btn.btn-danger,
+[data-theme="forest"] .post-controls .del-btn,
+[data-theme="forest"] .admin-del-btn[data-confirm] {
   background: var(--forest-danger-bg);
   border-color: var(--forest-danger-border);
   color: #e8c0b0;
 }
 [data-theme="forest"] .btn-danger:hover,
-[data-theme="forest"] .compress-cancel-btn:hover {
+[data-theme="forest"] .compress-do-btn.btn-danger:hover,
+[data-theme="forest"] .post-controls .del-btn:hover,
+[data-theme="forest"] .admin-del-btn[data-confirm]:hover {
   background: var(--forest-danger-hover-bg);
   border-color: var(--forest-danger-hover-border);
   color: #f0d3c7;
 }
 [data-theme="forest"] .header-search input,
+[data-theme="forest"] .search-form input,
 [data-theme="forest"] .post-form input[type="text"],
+[data-theme="forest"] .post-form input[type="password"],
+[data-theme="forest"] .post-form input[type="file"],
 [data-theme="forest"] .post-form textarea,
+[data-theme="forest"] select,
 [data-theme="forest"] .board-settings-grid input,
 [data-theme="forest"] .poll-creator-row input,
 [data-theme="forest"] .poll-option-row input {
-  background: #221810;
-  color: #d4c4a0;
+  background: var(--bg-input);
+  color: var(--text);
   border-color: var(--forest-input-border);
   box-shadow: inset 0 1px 2px rgba(0,0,0,0.45);
 }
 [data-theme="forest"] .header-search input:focus,
+[data-theme="forest"] .search-form input:focus,
 [data-theme="forest"] .post-form input[type="text"]:focus,
+[data-theme="forest"] .post-form input[type="password"]:focus,
+[data-theme="forest"] .post-form input[type="file"]:focus,
 [data-theme="forest"] .post-form textarea:focus,
+[data-theme="forest"] select:focus,
 [data-theme="forest"] .board-settings-grid input:focus,
 [data-theme="forest"] .poll-creator-row input:focus,
 [data-theme="forest"] .poll-option-row input:focus {
-  border-color: var(--forest-surface-hover-border);
+  border-color: var(--forest-link-hover);
+}
+[data-theme="forest"] input::placeholder,
+[data-theme="forest"] textarea::placeholder {
+  color: var(--forest-muted);
+  opacity: 1;
+}
+[data-theme="forest"] input::file-selector-button {
+  background: var(--forest-button-bg);
+  color: var(--forest-nav-text);
+  border: 1px solid var(--forest-input-border);
+  border-radius: var(--radius-sm);
+  padding: 3px 6px;
+  font: inherit;
+  cursor: pointer;
+}
+[data-theme="forest"] input::file-selector-button:hover {
+  background: var(--forest-button-hover-bg);
+}
+[data-theme="forest"] input:is([type="checkbox"], [type="radio"]) {
+  accent-color: var(--green);
+}
+html[data-theme="forest"] :is(a, button, summary, input, select, textarea, .btn):focus-visible {
+  outline: 2px solid var(--forest-link-hover);
+  outline-offset: 2px;
+}
+/* Keep pressed and disabled controls distinct without dimming their labels. */
+html[data-theme="forest"] :is(button, .btn, input[type="submit"]):not(:disabled):active {
+  border-color: var(--forest-link-hover);
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.5);
+}
+html[data-theme="forest"] :is(button, input, select, textarea):disabled,
+html[data-theme="forest"] [aria-disabled="true"] {
+  color: var(--forest-muted);
+  background: var(--bg-input);
+  border-color: var(--forest-input-border);
+  border-style: dashed;
+  box-shadow: none;
+  opacity: 1;
+  cursor: not-allowed;
 }
 [data-theme="forest"] .name {
   color: #e8d8b0;
@@ -4514,6 +4567,16 @@ html[data-theme="aero"] .site-footer { background: linear-gradient(#f8fdff, #d9e
 [data-theme="forest"] .locked-notice,
 [data-theme="forest"] .error {
   background: rgba(122, 34, 16, 0.16);
+}
+[data-theme="forest"] .post-controls :is(.edit-btn, .report-btn) {
+  border-color: var(--forest-input-border);
+}
+[data-theme="forest"] .post-controls :is(.edit-btn, .report-btn):hover {
+  border-color: var(--forest-link-hover);
+}
+[data-theme="forest"] :is(.compress-modal-box, .edit-modal-box) {
+  background: var(--forest-elevated-bg);
+  box-shadow: var(--forest-panel-shadow);
 }
 
 /* Blue Sky */
