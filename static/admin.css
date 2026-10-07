@@ -3761,11 +3761,83 @@ html:not([data-theme]) .admin-login h1 {
   }
 }
 
-[data-theme="aero"] .admin-section {
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border-radius: 10px;
-  box-shadow: 0 2px 12px rgba(80,150,210,0.12), inset 0 1px 0 rgba(255,255,255,0.75);
+/* Frutiger Aero administration uses the same opaque glass and sky tabs. */
+html[data-theme="aero"] .admin-section {
+  background: var(--aero-surface);
+  border-color: var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-soft);
+}
+html[data-theme="aero"] .admin-section-index,
+html[data-theme="aero"] .admin-panel-header {
+  background: linear-gradient(#f7fdff, #dfeff6);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-soft);
+}
+html[data-theme="aero"] .admin-panel-header { padding: 12px; }
+html[data-theme="aero"] .admin-section-index a { border-radius: var(--radius-sm); }
+html[data-theme="aero"] .admin-panel .admin-section-index a[aria-current="location"] {
+  background: var(--aero-positive);
+  border-color: #699343;
+  color: #244b17;
+  text-decoration: underline;
+}
+html[data-theme="aero"] .admin-section h2 { color: #145b78; }
+html[data-theme="aero"] .admin-table th { background: #dfeff6; color: #244b60; }
+html[data-theme="aero"] .admin-table td { background: #f7fcfe; }
+html[data-theme="aero"] .admin-table tbody tr:hover td { background: #e7f4fa; }
+html[data-theme="aero"] .admin-flash.flash-ok { background: #e7f4d6; color: #30591d; border-color: #759c50; }
+html[data-theme="aero"] .admin-flash.flash-error { background: #fff0f1; color: #942337; border-color: #bd7d88; }
+html[data-theme="aero"] .admin-section input:not([type="checkbox"]):not([type="radio"]):disabled,
+html[data-theme="aero"] .admin-section select:disabled,
+html[data-theme="aero"] .admin-section textarea:disabled {
+  color: #4b6270;
+  background: #e3ebef;
+  border-color: #a4b4bd;
+}
+html[data-theme="aero"] .admin-section input:focus-visible,
+html[data-theme="aero"] .admin-section select:focus-visible,
+html[data-theme="aero"] .admin-section textarea:focus-visible {
+  outline: 2px solid #005d91;
+  outline-offset: 2px;
+}
+
+html[data-theme="aero"] .admin-panel :is(button, input[type="submit"], .admin-button-link, .admin-link-button, .admin-control-action) {
+  background: var(--aero-control);
+  color: var(--green);
+  border-color: #7daec4;
+  box-shadow: var(--glass-nav-control-shadow);
+}
+html[data-theme="aero"] .admin-panel :is(button, .admin-button-link, .admin-link-button):hover:not(:disabled) {
+  background: var(--aero-control-hover);
+  box-shadow: var(--glass-nav-control-shadow);
+}
+html[data-theme="aero"] .admin-panel :is(.admin-settings-save > button, .board-settings-actions button[type="submit"]:not(.btn-danger), #accounts form > button) {
+  background: var(--aero-positive);
+  color: #244b17;
+  border-color: #65923f;
+}
+html[data-theme="aero"] .admin-panel :is(.btn-danger, .backup-restore-upload-form button, .backup-primary-actions button[data-confirm], .backup-extract-actions button[data-confirm]):not(.btn-success) {
+  background: linear-gradient(#fff9f9 48%, #f8e5e7 49%, #efd1d5);
+  color: #942337;
+  border-color: #bd7d88;
+}
+html[data-theme="aero"] .admin-panel :is(.btn-danger, .backup-restore-upload-form button, .backup-primary-actions button[data-confirm], .backup-extract-actions button[data-confirm]):hover:not(:disabled) {
+  background: linear-gradient(#fff, #f0c4cb);
+  color: #7d1628;
+}
+html[data-theme="aero"] .admin-panel :is(.admin-settings-save > button, .board-settings-actions button[type="submit"], #accounts form > button, .btn-danger):disabled,
+html[data-theme="aero"] .admin-panel button:disabled {
+  background: #e3ebef;
+  color: #4b6270;
+  border-color: #a4b4bd;
+  box-shadow: none;
+}
+html[data-theme="aero"] .admin-panel input::file-selector-button { background: var(--aero-control); color: var(--green); }
+html[data-theme="aero"] .admin-panel :is(input, select, textarea, button, a, summary):focus-visible {
+  outline: 2px solid #005d91;
+  outline-offset: 2px;
 }
 
 [data-theme="dorfic"] .admin-section {
